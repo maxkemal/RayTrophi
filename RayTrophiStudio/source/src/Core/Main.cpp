@@ -668,9 +668,9 @@ std::string g_seq_save_dir;
 bool        g_seq_save_denoise = false;
 
 // True while the active viewport is an interactive raster shading mode, i.e.
-// NOT Rendered. Material Preview is distinguished because it has a native
-// NanoVDB SurfaceSDF pass; Solid/Matcap still use the compatibility sphere proxy.
+// NOT Rendered. All raster modes share the native NanoVDB SurfaceSDF buffer.
 bool g_solid_viewport_active = false;
+bool g_native_surface_sdf_viewport_available = false;
 bool g_material_preview_viewport_active = false;
 bool g_dense_gas_host_mirror_needed = false;
 bool g_sim_timeline_mode = true;  // true = timeline-driven (bake/scrub, idle when stopped); false = live free-run preview
@@ -3471,93 +3471,48 @@ int main(int argc, char* argv[]) try {
                         ProjectManager::getInstance().markModified();
                     };
 
-                    // Snap to a standard axis-aligned view (orthographic)
+                    // Snap to a standard axis-aligned view (orthographic).
+                    // ★ Snaps around the NAVIGATION pivot, not around `lookat`:
+                    //   with a selection lock the standard views must re-centre
+                    //   on the locked object, which is the whole point of the lock.
                     auto snap_view = [&](Camera::StandardView sv, const char* label) {
-                        Vec3 pivot = cam.lookat;
-                        float dist = (cam.lookfrom - pivot).length();
-                        if (dist < 1e-3f) dist = 10.0f;
-                        cam.setStandardView(sv, pivot, dist, true);
+                        rtapi::refreshPivotFromSelection();
+                        cam.setStandardView(sv, cam.effectivePivot(), cam.navDistance(), true);
                         refreshNumpadView();
                         ui.addViewportMessage(label, 1.2f, ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
                     };
 
-                    // Orbit around lookat by world-Y yaw and cam.u pitch (degrees)
+                    // Orbit around the navigation pivot (world-Y yaw, cam.u pitch, degrees).
+                    // ★ The Rodrigues body moved into Camera::orbitAroundPivot so the
+                    //   numpad, the ViewCube, the mouse and camera.orbit are ONE code
+                    //   path. Two orbit implementations is how the ViewCube and the
+                    //   numpad drifted apart before.
                     auto orbit_cam = [&](float dyaw_deg, float dpitch_deg) {
-                        Vec3 pivot = cam.lookat;
-                        Vec3 rel   = cam.lookfrom - pivot;
-                        auto rodrigues = [](Vec3 p, Vec3 axis, float ang) {
-                            axis = axis.normalize();
-                            const float c = cosf(ang), s = sinf(ang);
-                            return p * c + Vec3::cross(axis, p) * s + axis * (Vec3::dot(axis, p) * (1.0f - c));
-                        };
-                        const float to_rad = 3.14159265f / 180.0f;
-                        rel = rodrigues(rel, Vec3(0, 1, 0), dyaw_deg  * to_rad);
-                        rel = rodrigues(rel, cam.u,         dpitch_deg * to_rad);
-                        cam.lookfrom = pivot + rel;
-                        cam.update_camera_vectors();
-                        cam.markDirty();
+                        rtapi::refreshPivotFromSelection();
+                        cam.orbitAroundPivot(dyaw_deg, dpitch_deg);
                         refreshNumpadView();
                     };
 
-                    // Blender-style Frame Selected (Numpad .). Rebuild both the
-                    // orbit pivot and navigation distance from real world bounds;
-                    // this also repairs the near-zero wheel zoom caused by a stale
-                    // lookat point sitting almost on the camera.
+                    // Blender-style Frame Selected (Numpad .).
+                    // ★★★ The body moved to rtapi::frameSelected so the keyboard and
+                    //   `camera.frame_selected` are the SAME code. It also arms the
+                    //   selection pivot lock, which is what stops the next
+                    //   middle-click from silently re-anchoring the view somewhere
+                    //   else -- the failure that made framing feel like it "didn't
+                    //   stick".
                     auto frame_selected = [&]() {
-                        if (!scene_selection.selected.is_valid()) {
+                        rtapi::Result r = rtapi::frameSelected(true);
+                        if (!r.ok) {
                             ui.addViewportMessage("Nothing selected", 1.2f,
                                 ImVec4(1.0f, 0.65f, 0.35f, 1.0f));
                             return;
                         }
-
-                        const SelectableItem& item = scene_selection.selected;
-                        AABB bounds;
-                        bool hasBounds = false;
-                        if (item.type == SelectableType::Object) {
-                            if (item.mesh_object) {
-                                hasBounds = item.mesh_object->bounding_box(0.0f, 0.0f, bounds);
-                            } else if (item.object) {
-                                hasBounds = item.object->bounding_box(0.0f, 0.0f, bounds);
-                            }
-                        } else if (item.type == SelectableType::VDBVolume && item.vdb_volume) {
-                            bounds = item.vdb_volume->getWorldBounds();
-                            hasBounds = true;
-                        } else if (item.type == SelectableType::GasVolume && item.gas_volume) {
-                            Vec3 bmin, bmax;
-                            item.gas_volume->getWorldBounds(bmin, bmax);
-                            bounds = AABB(bmin, bmax);
-                            hasBounds = true;
-                        }
-
-                        Vec3 center = item.position;
-                        float radius = 1.0f;
-                        if (hasBounds) {
-                            center = (bounds.min + bounds.max) * 0.5f;
-                            radius = std::max(0.001f, (bounds.max - bounds.min).length() * 0.5f);
-                        }
-
-                        Vec3 forward = (cam.lookat - cam.lookfrom).normalize();
-                        if (forward.length_squared() < 1e-8f) forward = Vec3(0.0f, 0.0f, -1.0f);
-                        const float halfV = std::max(1.0f, cam.vfov) * 0.5f *
-                            3.14159265f / 180.0f;
-                        const float halfH = std::atan(std::tan(halfV) *
-                            std::max(cam.aspect_ratio, 0.01f));
-                        const float limitingHalfFov = std::max(
-                            0.01f, std::min(halfV, halfH));
-                        const float framedDistance = std::clamp(
-                            (radius * 1.25f) / std::sin(limitingHalfFov),
-                            0.01f, 10000000.0f);
-
-                        cam.lookat = center;
-                        cam.lookfrom = center - forward * framedDistance;
-                        cam.focus_dist = framedDistance;
-                        if (cam.orthographic) {
-                            cam.ortho_height = std::max(0.01f, radius * 2.5f);
-                        }
-                        cam.update_camera_vectors();
-                        cam.markDirty();
-                        current_nav_depth = framedDistance;
+                        current_nav_depth = cam.navDistance();
                         refreshNumpadView();
+                        // ★ Refocusing is a SEPARATE act from framing: AF re-reads the
+                        //   centre of the newly framed view and writes focus_dist. It
+                        //   is a no-op unless the user chose AF-C, which is the point
+                        //   -- framing no longer drags the focal plane with it.
                         ui.updateAutofocus(ui_ctx);
                         ui.addViewportMessage("Frame Selected", 1.2f,
                             ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
@@ -3625,7 +3580,18 @@ int main(int argc, char* argv[]) try {
                     float u = (float)e.button.x / (float)win_w;
                     float v = (float)(win_h - e.button.y) / (float)win_h;
                     
-                    Ray r = scene.camera->get_ray(u, v);
+                    // ★★★★★ get_viewport_ray, NOT get_ray. `get_ray` is the RENDER
+                    //   ray: it applies lens distortion and SAMPLES THE APERTURE
+                    //   DISK AT RANDOM. With depth of field on, every middle-click
+                    //   fired from a randomly offset origin and hit a different
+                    //   surface, so the navigation anchor jumped somewhere
+                    //   unrelated -- intermittently, which is why it read as "the
+                    //   camera is being weird" rather than as a bug.
+                    //   ★★ Every other picker in the repo already uses the
+                    //   deterministic ray (scene_ui.cpp x2, scene_ui_selection.cpp,
+                    //   RtApi.cpp), and scene_ui_selection.cpp:746 spells out the
+                    //   hazard. The navigation raycast simply never inherited it.
+                    Ray r = scene.camera->get_viewport_ray(u, v);
                     HitRecord rec;
 
                     // FIX: Always sync current yaw/pitch from camera direction to prevent "one-time snap" 
@@ -3642,27 +3608,53 @@ int main(int argc, char* argv[]) try {
                     // from the pole, so non-pole behaviour is unchanged.
                     yaw = atan2f(scene.camera->u.z, scene.camera->u.x) * 180.0f / 3.1415926535f - 90.0f;
 
-                    if (scene.bvh->hit(r, 0.001f, 10000.0f, rec)) {
-                        const float safe_focus_dist = std::max(rec.t, 0.05f);
-                        // Panning uses the TRUE (uncapped) hit distance so a camera far from
-                        // the scene pans at the right speed (the 500 cap made it crawl).
-                        current_nav_depth = safe_focus_dist;
+                    // ★★ A gesture starts here, so re-derive the locked pivot. In
+                    //   selection mode the anchor is a DERIVED value recomputed per
+                    //   gesture, never stored state — that is what makes it
+                    //   impossible for it to go stale (see RtApiCameraNav.cpp).
+                    rtapi::refreshPivotFromSelection();
+                    const bool pivot_locked = scene.camera->pivot_valid;
 
-                        // If not in Manual Focus mode (mode 0), sync pivot and focus_dist
+                    if (scene.bvh->hit(r, 0.001f, 10000.0f, rec)) {
+                        const float hit_dist = std::max(rec.t, 0.05f);
+
+                        // ★★★★★ AUTOFOCUS AND NAVIGATION SPLIT HERE (2026-09-23).
+                        //   This block used to write `focus_dist` AND `lookat` from
+                        //   one raycast, under one `focus_mode` gate. That welded the
+                        //   lens focal plane to the orbit radius: clicking on
+                        //   something close pulled the navigation anchor onto it, and
+                        //   from then on pan and dolly — both proportional to that
+                        //   radius — crawled. The gate belongs to the LENS only.
                         if (ui.viewport_settings.focus_mode != 0) {
-                            scene.camera->focus_dist = safe_focus_dist;
-                            // FIXED: Use current forward direction instead of ray 'r' to prevent camera "turn snap"
-                            scene.camera->lookat = scene.camera->lookfrom + dir * safe_focus_dist;
+                            scene.camera->focus_dist = hit_dist;
+                            scene.camera->update_camera_vectors();
+                            g_camera_dirty = true;
+                        }
+
+                        if (pivot_locked) {
+                            // Locked: the anchor is the object, so pan speed is the
+                            // framing distance and stays put no matter what the
+                            // cursor happens to be over. This is the property that
+                            // makes panning predictable.
+                            current_nav_depth = scene.camera->navDistance();
+                        } else {
+                            // Free: screen-correct panning anchors on whatever is
+                            // under the cursor, using the TRUE (uncapped) hit
+                            // distance so a far camera pans briskly. The anchor is
+                            // placed along the VIEW direction, not along the cursor
+                            // ray, or the next dolly would rotate the view.
+                            current_nav_depth = hit_dist;
+                            scene.camera->lookat = scene.camera->lookfrom + dir * hit_dist;
                             scene.camera->update_camera_vectors();
                             g_camera_dirty = true;
                         }
                     } else {
-                        // Fallback to existing focus distance if hitting background
-                        // For panning over empty space, use whichever is larger: the focus
-                        // distance or the distance to the framed pivot — keeps a far camera
-                        // panning briskly instead of at the (possibly tiny) focus_dist.
-                        current_nav_depth = std::max(scene.camera->focus_dist,
-                            (float)(scene.camera->lookfrom - scene.camera->lookat).length());
+                        // Background: there is nothing to anchor on, so fall back to
+                        // the navigation radius. ★ It is no longer max(focus_dist, …):
+                        // the focal plane has no business setting pan speed, and
+                        // navDistance() already reports a sane default when the
+                        // anchor has collapsed onto the camera.
+                        current_nav_depth = scene.camera->navDistance();
                     }
                 }
             }
@@ -3721,22 +3713,34 @@ int main(int argc, char* argv[]) try {
 
                         Vec3 offset = scene.camera->u * -(float)safe_dx * pan_per_pixel
                                     + scene.camera->v *  (float)safe_dy * pan_per_pixel;
-                        scene.camera->lookfrom += offset;
-                        scene.camera->lookat += offset;
-                        scene.camera->update_camera_vectors();
+                        // ★ panWorld carries the pivot along, so the lock survives the
+                        //   pan and the navigation radius cannot drift mid-drag (a
+                        //   drifting radius makes pan speed change under the hand).
+                        scene.camera->panWorld(offset);
                     }
                     else {
                         bool is_ctrl_pressed = state[SDL_SCANCODE_LCTRL] || state[SDL_SCANCODE_RCTRL];
                         if (is_ctrl_pressed) {
-                            Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
-                            const float current_distance = std::max(
-                                (float)(scene.camera->lookat - scene.camera->lookfrom).length(), 0.01f);
                             const float zoom_scale = render_settings.navigation_scale * render_settings.zoom_sensitivity;
                             const float exponent = std::clamp((float)dy * 0.005f * zoom_scale, -4.0f, 4.0f);
-                            const float new_distance = std::clamp(current_distance * std::exp(exponent), 0.01f, 10000000.0f);
-                            scene.camera->lookfrom = scene.camera->lookat - forward * new_distance;
-                            scene.camera->focus_dist = new_distance;
-                            scene.camera->update_camera_vectors();
+                            // ★ Dollies toward the PIVOT and no longer writes focus_dist.
+                            //   Zooming used to drag the depth-of-field plane with it,
+                            //   which is why a careful focus pull never survived a
+                            //   navigation nudge.
+                            scene.camera->dollyToPivot(exponent);
+                        }
+                        else if (scene.camera->pivot_valid) {
+                            // ★★★ LOCKED: rotation ORBITS the object instead of turning
+                            //   the camera in place. Turning in place is what made
+                            //   Frame Selected feel like it did nothing — the object
+                            //   was centred, and the first drag swung it off screen.
+                            float rot_speed = 0.1f + (render_settings.mouse_sensitivity * 0.05f);
+                            scene.camera->orbitAroundPivot(-dx * rot_speed, dy * rot_speed);
+                            // Keep the fly-look angles in step, so releasing the lock
+                            // does not snap the view on the next free rotation.
+                            Vec3 d2 = (scene.camera->lookat - scene.camera->lookfrom).normalize();
+                            pitch = asinf(std::clamp(d2.y, -0.999f, 0.999f)) * 180.0f / 3.1415926535f;
+                            yaw = atan2f(scene.camera->u.z, scene.camera->u.x) * 180.0f / 3.1415926535f - 90.0f;
                         }
                         else {
                             // Rotation: Pan/Zoom can be fast, but rotation speed is strictly dampened
@@ -3777,23 +3781,12 @@ int main(int argc, char* argv[]) try {
                     const float wheel_boost = is_shift ? 3.0f : 1.0f;
                     const float zoom_scale = render_settings.navigation_scale * render_settings.zoom_sensitivity;
                     const float exponent = std::clamp(-scroll_amount * 0.10f * wheel_boost * zoom_scale, -4.0f, 4.0f);
-                    if (scene.camera->orthographic) {
-                        // Parallel projection zooms by changing its visible extent.
-                        const float zoom_factor = std::exp(exponent);
-                        scene.camera->ortho_height = std::clamp(
-                            scene.camera->ortho_height * zoom_factor, 0.01f, 100000.0f);
-                        scene.camera->update_camera_vectors();
-                    } else {
-                        Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
-                        // Exponential dolly gives the same perceptual response from centimetre
-                        // detail to kilometre terrain and cannot cross the orbit pivot.
-                        const float current_distance = std::max(
-                            (float)(scene.camera->lookat - scene.camera->lookfrom).length(), 0.01f);
-                        const float new_distance = std::clamp(current_distance * std::exp(exponent), 0.01f, 10000000.0f);
-                        scene.camera->lookfrom = scene.camera->lookat - forward * new_distance;
-                        scene.camera->focus_dist = new_distance;
-                        scene.camera->update_camera_vectors();
-                    }
+                    // ★★★ One dolly body for wheel, Ctrl-drag and camera.dolly. It
+                    //   handles the orthographic case (extent, not distance) and it
+                    //   does NOT write focus_dist. Zooming is not refocusing — AF
+                    //   below still gets the last word when the user asked for it.
+                    rtapi::refreshPivotFromSelection();
+                    scene.camera->dollyToPivot(exponent);
                     ui.updateAutofocus(ui_ctx);
                     last_camera_move_time = std::chrono::steady_clock::now();
                     camera_moved = true;
@@ -4436,9 +4429,8 @@ int main(int argc, char* argv[]) try {
                 s_lastViewportModeSyncedBackend = ui_ctx.backend_ptr;
             }
         }
-        // All non-Rendered modes use the interactive raster backend. Material
-        // Preview has a native SurfaceSDF pass, while Solid/Matcap currently
-        // retain the compatibility sphere proxy.
+        // All non-Rendered modes use the interactive raster backend and share
+        // its native SurfaceSDF volume table.
         g_solid_viewport_active = isInteractiveViewportShadingMode(ui.viewport_settings.shading_mode);
         g_material_preview_viewport_active = ui.viewport_settings.shading_mode == 1;
         // ★ A dedicated raster viewport backend is a SECOND VkDevice, and the
@@ -4485,6 +4477,13 @@ int main(int argc, char* argv[]) try {
             Backend::IBackend* rasterWakeBackend =
                 getActiveViewportBackendForShading(ui.viewport_settings.shading_mode);
             if (rasterWakeBackend && rasterWakeBackend->needsViewportRender()) {
+                start_render = true;
+            }
+            // SurfaceSDF animation changes the volume packet without touching
+            // raster mesh instances. Wake the viewport before the render block;
+            // that block uploads the packet and clears the dirty flag.
+            if (g_native_surface_sdf_viewport_available &&
+                g_gas_volumes_dirty) {
                 start_render = true;
             }
         }
@@ -4548,7 +4547,44 @@ int main(int argc, char* argv[]) try {
                         ui_ctx.renderer.syncCameraToBackend(*scene.camera);
                     }
                  ray_renderer.resetCPUAccumulation();
-                 g_camera_dirty = false;
+                 // ★★★★★ DO NOT CLEAR g_camera_dirty HERE (2026-09-24).
+                 //   This block consumed a DIFFERENT flag — `Camera::is_dirty`,
+                 //   via checkDirty() above — and it syncs only the RENDER
+                 //   backend (Renderer::syncCameraToBackend -> m_backend).
+                 //   The interactive RASTER viewport lives on its own device and
+                 //   is synced much later, at the `g_camera_dirty` block further
+                 //   down. Clearing the flag here starved that consumer: the
+                 //   raster viewport kept drawing with a stale camera.
+                 //
+                 //   ★★★ The symptom was maddening precisely because it was
+                 //   SELECTIVE. Gestures that call Camera::markDirty()
+                 //   (panWorld, dollyToPivot, orbitAroundPivot) opened this
+                 //   block and lost the flag, so pan and dolly froze the raster;
+                 //   free-look rotation goes through setLookDirection(), which
+                 //   does NOT markDirty, so it sailed past and kept working.
+                 //   "Only rotate works" was the whole diagnosis, and it pointed
+                 //   here rather than at anything in the camera itself.
+                 //
+                 //   ★★ The rule this violated: a consumer may only clear the
+                 //   flag it actually serviced. Clearing someone else's flag is
+                 //   indistinguishable from doing the work, and fails silently.
+                 //
+                 // ★★★★★ AND IT MUST RAISE IT, because this block is the ONLY
+                 //   place that learns about a camera edit signalled through
+                 //   `Camera::markDirty()` alone. The camera panel does exactly
+                 //   that: the FOV slider (and ~17 sibling controls) call
+                 //   cam.markDirty() and never touch g_camera_dirty, so the
+                 //   render backend was updated here and the raster viewport was
+                 //   never told — "the FOV slider does nothing in Solid mode but
+                 //   works in Rendered mode", a long-standing complaint that
+                 //   predates the orbit-pivot work.
+                 //   Handing the signal on here fixes all of those call sites at
+                 //   once, instead of pasting a flag write into each one — which
+                 //   is the copy that would be forgotten in the eighteenth.
+                 //   ★ Not wasteful: checkDirty() self-clears, so this fires once
+                 //   per real change. Under camera shake / AF-C it fires every
+                 //   frame, and there the camera really does change every frame.
+                 g_camera_dirty = true;
 
                  start_render = true;
             }
@@ -5231,14 +5267,14 @@ int main(int argc, char* argv[]) try {
                         }
 
                         if (g_gas_volumes_dirty) {
-                            // Rendered consumes volumes through g_backend. Material
-                            // Preview owns a separate Vulkan device but now also
-                            // consumes the NanoVDB table through its native SDF
-                            // pass. Solid/Matcap still use particle proxies, so do
-                            // not pay a volume upload there.
+                            // Rendered consumes volumes through g_backend. Every
+                            // interactive raster mode consumes the NanoVDB table
+                            // through the shared native SurfaceSDF pass.
                             const bool nativeSdfRasterActive =
                                 activeViewportBackend &&
-                                ui.viewport_settings.shading_mode == 1;
+                                isInteractiveViewportShadingMode(
+                                    ui.viewport_settings.shading_mode) &&
+                                g_native_surface_sdf_viewport_available;
                             if (activeViewportBackend &&
                                 (activeViewportBackend == g_backend.get() ||
                                  nativeSdfRasterActive)) {

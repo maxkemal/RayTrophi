@@ -4130,6 +4130,70 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             requireResult(rtapi::setCameraEvCompensation(py::cast<float>(kwargs["ev_compensation"])));
     });
 
+    // ── Viewport navigation / pivot lock ─────────────────────────────────
+    // ★★★ `get_pivot` returns nav_distance and focus_distance TOGETHER on
+    //   purpose: they were one number until 2026-09-23, and that is precisely
+    //   why pulling focus near made panning and dollying crawl. Reading both
+    //   is the test that they stayed apart.
+    // ★★★★★ `active_is_orphan`: the active camera is not in scene.cameras, i.e.
+    //   the view is driven through an object the registry never heard of.
+    camera.def("list", [] {
+        rtapi::CameraListState s;
+        requireResult(rtapi::listCameras(s));
+        py::list arr;
+        for (const auto& c : s.cameras) {
+            py::dict d;
+            d["index"]    = c.index;
+            d["name"]     = c.name;
+            d["position"] = vec3ToPython(c.position);
+            d["target"]   = vec3ToPython(c.target);
+            d["fov"]      = c.fov;
+            d["active"]   = c.active;
+            arr.append(d);
+        }
+        py::dict out;
+        out["count"]                    = s.count;
+        out["active_index"]             = s.active_index;
+        out["has_active_camera"]        = s.has_active_camera;
+        out["active_is_orphan"]         = s.active_is_orphan;
+        out["active_index_out_of_range"]= s.active_index_out_of_range;
+        out["cameras"]                  = arr;
+        return out;
+    }, "Camera registry: count, active index, and whether the active camera is registered at all.");
+    camera.def("get_pivot", [] {
+        rtapi::CameraPivotState s;
+        requireResult(rtapi::getCameraPivot(s));
+        py::dict d;
+        d["mode"]           = s.mode;
+        d["locked"]         = s.locked;
+        d["pivot"]          = vec3ToPython(s.pivot);
+        d["nav_distance"]   = s.nav_distance;
+        d["focus_distance"] = s.focus_distance;
+        d["orthographic"]   = s.orthographic;
+        d["ortho_height"]   = s.ortho_height;
+        d["selection_name"] = s.selection_name;
+        return d;
+    }, "Pivot mode, anchor point, navigation radius and the (separate) lens focal plane.");
+    camera.def("set_pivot_mode", [](const std::string& mode) {
+        requireResult(rtapi::setCameraPivotMode(mode));
+    }, py::arg("mode"), "'free' or 'selection' (lock the orbit anchor to the selection).");
+    camera.def("orbit", [](float yaw, float pitch) {
+        requireResult(rtapi::orbitCamera(yaw, pitch));
+    }, py::arg("yaw"), py::arg("pitch") = 0.0f,
+       "Orbit around the pivot: world-Y yaw and camera-right pitch, in degrees.");
+    camera.def("dolly", [](float factor) {
+        requireResult(rtapi::dollyCamera(factor));
+    }, py::arg("factor"),
+       "Distance multiplier toward the pivot (0.5 = half as far). Does not refocus.");
+    camera.def("pan", [](float right, float up) {
+        requireResult(rtapi::panCamera(right, up));
+    }, py::arg("right"), py::arg("up"),
+       "Slide the camera in world units along its own right/up axes.");
+    camera.def("frame_selected", [](bool lock_pivot) {
+        requireResult(rtapi::frameSelected(lock_pivot));
+    }, py::arg("lock_pivot") = true,
+       "Frame the selection (numpad '.'); also locks the pivot to it by default.");
+
     py::module_ world = module.def_submodule("world", "World/environment: background + Nishita sun (Faz 5.1c)");
     world.def("get", [] {
         rtapi::WorldState s;

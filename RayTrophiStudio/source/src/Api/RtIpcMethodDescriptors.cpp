@@ -702,6 +702,38 @@ static const MethodDescriptor desc_batch = {
 };
 static const MethodRegistration reg_batch(desc_batch);
 
+static const MethodParam params_camera_dolly[] = {
+    {"factor", "float", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_camera_dolly = {
+    "camera.dolly", "camera",
+    "Move the camera toward or away from the pivot by a distance multiplier (0.5 = half as far)",
+    "Takes a MULTIPLIER, not an exponent: 'half as far' is a thing a caller can reason about. DOES NOT WRITE focus_distance - dollying is not refocusing. It used to, which is why a careful focus pull never survived a navigation nudge. In an orthographic camera there is no distance to travel, so this scales ortho_height instead; read camera.get_pivot 'orthographic' before expecting the position to change.",
+    "write", "SceneWrite", false, "any",
+    "camera|dolly|zoom|navigation",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_camera_dolly, 1,
+    true
+};
+static const MethodRegistration reg_camera_dolly(desc_camera_dolly);
+
+static const MethodParam params_camera_frame_selected[] = {
+    {"lock_pivot", "bool", false, "", "true", nullptr},
+};
+static const MethodDescriptor desc_camera_frame_selected = {
+    "camera.frame_selected", "camera",
+    "Frame the selection's bounding sphere (the numpad '.' gesture) and lock the pivot to it",
+    "Fits the bounding sphere to the LIMITING half-angle, so a wide object on a wide viewport is not under-framed. 'lock_pivot' defaults to true: without it the next middle-click re-anchors navigation somewhere else and the framing appears not to have stuck. DOES NOT set focus_distance - framing an object and focusing the lens on it are separate acts; use camera.set_focus_distance or AF. Fails when nothing is selected. Uses the FLAT SoA mesh bounds, not the facade triangle's: asking the facade would frame one triangle of a million-triangle mesh. The lock it arms survives orbit and dolly but NOT a pan - camera.pan deliberately releases it, so re-call this after panning if you want the object back as the anchor.",
+    "write", "SceneWrite", false, "any",
+    "camera|frame|selected|selection|navigation|pivot",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_camera_frame_selected, 1,
+    true
+};
+static const MethodRegistration reg_camera_frame_selected(desc_camera_frame_selected);
+
 static const MethodDescriptor desc_camera_get = {
     "camera.get", "camera",
     "Return camera position, target, up vector, field of view, focus distance, aperture and the physical exposure state",
@@ -714,6 +746,66 @@ static const MethodDescriptor desc_camera_get = {
     true
 };
 static const MethodRegistration reg_camera_get(desc_camera_get);
+
+static const MethodDescriptor desc_camera_get_pivot = {
+    "camera.get_pivot", "camera",
+    "Return the viewport navigation pivot: mode, anchor point, navigation radius and the SEPARATE lens focus distance",
+    "THIS IS THE MEASUREMENT THAT PROVES THE TWO DISTANCES ARE APART. Until 2026-09-23 the orbit pivot and the lens focal plane were the same number: Camera::setLookDirection placed 'lookat' at 'focus_dist', so every mouse rotation re-anchored navigation at the focal plane. Pulling focus to 0.5 m collapsed the orbit radius to 0.5 m, and since pan speed and dolly step are both proportional to that radius, the viewport stopped responding - with no error, no log and nothing a screenshot could show. 'nav_distance' is the orbit radius; 'focus_distance' is the depth of field plane. Set camera.set_focus_distance and read this back: nav_distance MUST NOT move. 'mode' is 'free' or 'selection'. 'locked' is whether an anchor is actually armed - in selection mode with nothing selected it reads false, which is the honest answer, not an error. IN SELECTION MODE THE PIVOT IS DERIVED, NOT STORED: it is recomputed from the current selection on every gesture, so it cannot go stale and it follows an animated object for free.",
+    "read", "Read", false, "any",
+    "camera|get|pivot|orbit|navigation|focus",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_camera_get_pivot(desc_camera_get_pivot);
+
+static const MethodDescriptor desc_camera_list = {
+    "camera.list", "camera",
+    "Camera registry: how many cameras the scene holds, which index is active, and whether the active camera is registered at all",
+    "READ 'active_is_orphan' FIRST. It is true when SceneData::camera points at a camera that is NOT in SceneData::cameras - the scene is being driven through an object the registry never heard of. Any consumer that resolves the view through the LIST rather than through the active pointer then follows a different camera, and the symptom is 'the viewport does not follow my camera' with no error anywhere. Registration happens in exactly three places (ProjectManager::newProject, ProjectManager::openProject, Renderer::create_scene), all via SceneData::setActiveCamera; a camera created outside them is an orphan. 'active' on each entry is POINTER identity, not an index or a value match: two cameras can carry identical numbers and still be different objects, which is precisely the failure this call exists to catch. 'active_index_out_of_range' is reported separately from the orphan flag on purpose - an empty registry and a stale index are different faults, and merging them would hide whichever one is not being looked for. This method is an INSTRUMENT added before the bug it measures was found: three different root causes had been guessed for an unmeasurable question, and all three were wrong.",
+    "read", "Read", false, "any",
+    "camera|list|registry|binding|diagnostic",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_camera_list(desc_camera_list);
+
+static const MethodParam params_camera_orbit[] = {
+    {"pitch", "float", true, "", nullptr, nullptr},
+    {"yaw", "float", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_camera_orbit = {
+    "camera.orbit", "camera",
+    "Orbit the camera around the pivot by a world-Y yaw and a camera-right pitch, in degrees",
+    "Same body the numpad 4/6/8/2 keys and the mouse drag use. The camera is re-aimed at the pivot: an orbit that does not look at what it turns around is a fly-look wearing an orbit's name. Orbiting leaves an aligned standard view but KEEPS the current projection - orbiting in orthographic stays orthographic.",
+    "write", "SceneWrite", false, "any",
+    "camera|orbit|navigation|view",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_camera_orbit, 2,
+    true
+};
+static const MethodRegistration reg_camera_orbit(desc_camera_orbit);
+
+static const MethodParam params_camera_pan[] = {
+    {"right", "float", true, "", nullptr, nullptr},
+    {"up", "float", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_camera_pan = {
+    "camera.pan", "camera",
+    "Slide the camera in world units along its own right and up axes",
+    "World METRES, not pixels - screen-correct pixel panning lives in the mouse handler. PANNING RELEASES THE SELECTION LOCK and drops the mode back to 'free', which is the DCC convention: panning AWAY from an object and staying locked TO it are contradictory intentions. The anchor is not lost - effectivePivot() falls back to 'lookat', which travelled with the pan, so orbit and dolly keep working around the point you panned to. Call camera.frame_selected to re-arm the lock. Keeping the lock through a pan was tried first and produced a teleport: the pivot is DERIVED in selection mode, so the next gesture recomputed it back onto the object and the following orbit snapped the view there.",
+    "write", "SceneWrite", false, "any",
+    "camera|pan|navigation|view",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_camera_pan, 2,
+    true
+};
+static const MethodRegistration reg_camera_pan(desc_camera_pan);
 
 static const MethodParam params_camera_set_aperture[] = {
     {"aperture", "float", true, "", nullptr, nullptr},
@@ -842,6 +934,22 @@ static const MethodDescriptor desc_camera_set_iso_preset = {
     true
 };
 static const MethodRegistration reg_camera_set_iso_preset(desc_camera_set_iso_preset);
+
+static const MethodParam params_camera_set_pivot_mode[] = {
+    {"mode", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_camera_set_pivot_mode = {
+    "camera.set_pivot_mode", "camera",
+    "Lock the orbit pivot to the selection, or let it follow the cursor",
+    "'selection' locks orbit, dolly and pan speed to the selected object's bounds centre; 'free' restores cursor-anchored navigation. Setting 'selection' with nothing selected SUCCEEDS and leaves the pivot unarmed - the mode is remembered, so selecting something later arms it without a second call. Read camera.get_pivot 'locked' to tell the two apart.",
+    "write", "SceneWrite", false, "any",
+    "camera|set|pivot|mode|orbit|lock",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_camera_set_pivot_mode, 1,
+    true
+};
+static const MethodRegistration reg_camera_set_pivot_mode(desc_camera_set_pivot_mode);
 
 static const MethodParam params_camera_set_position[] = {
     {"position", "vec3", true, "", nullptr, nullptr},

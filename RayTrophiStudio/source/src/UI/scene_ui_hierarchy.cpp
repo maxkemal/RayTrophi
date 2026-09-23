@@ -25,6 +25,8 @@
 #include <unordered_set>
 #include "TerrainManager.h"
 #include "ProjectManager.h"
+#include "Camera.h"
+#include "Api/RtApi.h"  // pivot lock: panel ve script AYNI govdeyi cagirir
 #include "scene_ui_animgraph.hpp"
 #include "Backend/IViewportBackend.h"
 #include "UI/HierarchyLiveObjectView.h"
@@ -2529,6 +2531,49 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 SceneUI::DrawSmartFloat("pansens", "Pan", &ctx.render_settings.pan_sensitivity, 0.1f, 4.0f, "%.2fx", false, nullptr, 12);
                 SceneUI::DrawSmartFloat("zoomsens", "Zoom", &ctx.render_settings.zoom_sensitivity, 0.1f, 4.0f, "%.2fx", false, nullptr, 12);
                 SceneUI::DrawSmartFloat("flysens", "Fly", &ctx.render_settings.fly_speed_multiplier, 0.1f, 4.0f, "%.2fx", false, nullptr, 12);
+
+                // ── Orbit pivot lock ───────────────────────────────────────
+                // ★ Panel parity for camera.set_pivot_mode / camera.get_pivot.
+                //   A field only script can write is as untestable as one only
+                //   the panel can — the simulation node panel shipped without an
+                //   inspector exactly once, and that cost a session.
+                if (ctx.scene.camera) {
+                    ImGui::Spacing();
+                    int pivot_idx = (ctx.scene.camera->pivot_mode == Camera::PivotMode::Selection) ? 1 : 0;
+                    if (ImGui::Combo("Orbit Pivot", &pivot_idx, "Free\0Lock to selection\0")) {
+                        // ★ No markModified: the pivot mode is a per-session
+                        //   viewport preference and is NOT serialised into the
+                        //   project. Marking the project dirty here would claim a
+                        //   persistence that does not exist — the instrument must
+                        //   report what is applied, not what sounds right.
+                        rtapi::setCameraPivotMode(pivot_idx == 1 ? "selection" : "free");
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Free: orbit and pan anchor on whatever the cursor is over.\n"
+                                          "Lock to selection: orbit, dolly and pan speed all use the\n"
+                                          "selected object's centre. Numpad '.' arms this lock.");
+
+                    // ★★★ THE INSTRUMENT MUST SHOW THE TWO NUMBERS APART. The
+                    //   navigation radius and the lens focal plane were the SAME
+                    //   field until 2026-09-23, which is why pulling focus near
+                    //   made panning and dollying seize up. Printing them side by
+                    //   side is how a user — or an agent reading camera.get_pivot —
+                    //   can see they stayed separate.
+                    rtapi::CameraPivotState pv;
+                    if (rtapi::getCameraPivot(pv).ok) {
+                        ImGui::TextDisabled("Nav radius %.2fm  |  Focus %.2fm",
+                                            pv.nav_distance, pv.focus_distance);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Navigation radius drives orbit, dolly step and pan speed.\n"
+                                              "Focus is the depth-of-field plane. They are independent:\n"
+                                              "pulling focus near must NOT slow panning down.");
+                        if (pv.locked && !pv.selection_name.empty())
+                            ImGui::TextDisabled("Locked to: %s", pv.selection_name.c_str());
+                        else if (pivot_idx == 1)
+                            ImGui::TextColored(ImVec4(0.98f, 0.78f, 0.35f, 1.0f),
+                                               "Nothing selected - pivot is unarmed.");
+                    }
+                }
 
                 // ═══════════════════════════════════════════════════════════════════════════
                 // EXPOSURE SETTINGS - Professional camera exposure controls

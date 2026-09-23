@@ -1901,6 +1901,72 @@ json dispatchMethod(const std::string& method, const json& params) {
         return enqueueResult([v](UIContext&) { return rtapi::setCameraDepthOfField(v); });
     }
 
+    // ── Viewport navigation / pivot lock ────────────────────────────────
+    // ★★★ `camera.get_pivot` is the measurement the rest of this block exists
+    //   for: it returns nav_distance and focus_distance side by side. They were
+    //   the SAME number until 2026-09-23, and that is why focusing near froze
+    //   panning. A test that only orbits cannot see the difference; a test that
+    //   reads both can.
+    // ★★★★★ Which camera is the scene actually bound to. `active_is_orphan` is
+    //   the field this method was written for: an active camera that is NOT in
+    //   the registry means the view is being driven through an object nothing
+    //   else knows about.
+    if (method == "camera.list") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::CameraListState s;
+            rtapi::Result r = rtapi::listCameras(s);
+            if (!r.ok) return json{{"__error", r.error}};
+            json arr = json::array();
+            for (const auto& c : s.cameras) {
+                arr.push_back(json{{"index", c.index}, {"name", c.name},
+                                   {"position", vec3ToJson(c.position)},
+                                   {"target", vec3ToJson(c.target)},
+                                   {"fov", c.fov}, {"active", c.active}});
+            }
+            return json{{"count", s.count}, {"active_index", s.active_index},
+                        {"has_active_camera", s.has_active_camera},
+                        {"active_is_orphan", s.active_is_orphan},
+                        {"active_index_out_of_range", s.active_index_out_of_range},
+                        {"cameras", arr}};
+        });
+    }
+    if (method == "camera.get_pivot") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::CameraPivotState s;
+            rtapi::Result r = rtapi::getCameraPivot(s);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"mode", s.mode}, {"locked", s.locked},
+                        {"pivot", vec3ToJson(s.pivot)},
+                        {"nav_distance", s.nav_distance},
+                        {"focus_distance", s.focus_distance},
+                        {"orthographic", s.orthographic},
+                        {"ortho_height", s.ortho_height},
+                        {"selection_name", s.selection_name}};
+        });
+    }
+    if (method == "camera.set_pivot_mode") {
+        std::string m = requireString(params, "mode");
+        return enqueueResult([m](UIContext&) { return rtapi::setCameraPivotMode(m); });
+    }
+    if (method == "camera.orbit") {
+        float yaw   = requireFloat(params, "yaw");
+        float pitch = requireFloat(params, "pitch");
+        return enqueueResult([yaw, pitch](UIContext&) { return rtapi::orbitCamera(yaw, pitch); });
+    }
+    if (method == "camera.dolly") {
+        float f = requireFloat(params, "factor");
+        return enqueueResult([f](UIContext&) { return rtapi::dollyCamera(f); });
+    }
+    if (method == "camera.pan") {
+        float right = requireFloat(params, "right");
+        float up    = requireFloat(params, "up");
+        return enqueueResult([right, up](UIContext&) { return rtapi::panCamera(right, up); });
+    }
+    if (method == "camera.frame_selected") {
+        bool lock = optionalBool(params, "lock_pivot", true);
+        return enqueueResult([lock](UIContext&) { return rtapi::frameSelected(lock); });
+    }
+
     // ── World / environment (Faz 5.1c) ──────────────────────────────────
     if (method == "world.get") {
         return enqueueQuery([](UIContext&) {

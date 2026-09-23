@@ -5702,5 +5702,40 @@
     "tags": "perf|gpu|timing|profile|simulation|compute|toggle",
     "related": "perf.gpu_kernel_timings|perf.get_gpu_memory",
     "notes": "Writes a timestamp pair around every compute dispatch and reads the query pool back after each submission, so it is a diagnostic rather than a permanent tax. Fails when the compute queue reports no timestamp support. Toggling closes the open command buffer first so the query pool and its label list cannot fall out of step."
+  },
+  "camera.get_pivot": {
+    "summary": "Return the viewport navigation pivot: mode, anchor point, navigation radius and the SEPARATE lens focus distance",
+    "tags": "pivot|orbit|navigation|focus",
+    "notes": "THIS IS THE MEASUREMENT THAT PROVES THE TWO DISTANCES ARE APART. Until 2026-09-23 the orbit pivot and the lens focal plane were the same number: Camera::setLookDirection placed 'lookat' at 'focus_dist', so every mouse rotation re-anchored navigation at the focal plane. Pulling focus to 0.5 m collapsed the orbit radius to 0.5 m, and since pan speed and dolly step are both proportional to that radius, the viewport stopped responding - with no error, no log and nothing a screenshot could show. 'nav_distance' is the orbit radius; 'focus_distance' is the depth of field plane. Set camera.set_focus_distance and read this back: nav_distance MUST NOT move. 'mode' is 'free' or 'selection'. 'locked' is whether an anchor is actually armed - in selection mode with nothing selected it reads false, which is the honest answer, not an error. IN SELECTION MODE THE PIVOT IS DERIVED, NOT STORED: it is recomputed from the current selection on every gesture, so it cannot go stale and it follows an animated object for free."
+  },
+  "camera.set_pivot_mode": {
+    "summary": "Lock the orbit pivot to the selection, or let it follow the cursor",
+    "tags": "pivot|orbit|lock",
+    "notes": "'selection' locks orbit, dolly and pan speed to the selected object's bounds centre; 'free' restores cursor-anchored navigation. Setting 'selection' with nothing selected SUCCEEDS and leaves the pivot unarmed - the mode is remembered, so selecting something later arms it without a second call. Read camera.get_pivot 'locked' to tell the two apart."
+  },
+  "camera.orbit": {
+    "summary": "Orbit the camera around the pivot by a world-Y yaw and a camera-right pitch, in degrees",
+    "tags": "orbit|navigation|view",
+    "notes": "Same body the numpad 4/6/8/2 keys and the mouse drag use. The camera is re-aimed at the pivot: an orbit that does not look at what it turns around is a fly-look wearing an orbit's name. Orbiting leaves an aligned standard view but KEEPS the current projection - orbiting in orthographic stays orthographic."
+  },
+  "camera.dolly": {
+    "summary": "Move the camera toward or away from the pivot by a distance multiplier (0.5 = half as far)",
+    "tags": "dolly|zoom|navigation",
+    "notes": "Takes a MULTIPLIER, not an exponent: 'half as far' is a thing a caller can reason about. DOES NOT WRITE focus_distance - dollying is not refocusing. It used to, which is why a careful focus pull never survived a navigation nudge. In an orthographic camera there is no distance to travel, so this scales ortho_height instead; read camera.get_pivot 'orthographic' before expecting the position to change."
+  },
+  "camera.pan": {
+    "summary": "Slide the camera in world units along its own right and up axes",
+    "tags": "pan|navigation|view",
+    "notes": "World METRES, not pixels - screen-correct pixel panning lives in the mouse handler. PANNING RELEASES THE SELECTION LOCK and drops the mode back to 'free', which is the DCC convention: panning AWAY from an object and staying locked TO it are contradictory intentions. The anchor is not lost - effectivePivot() falls back to 'lookat', which travelled with the pan, so orbit and dolly keep working around the point you panned to. Call camera.frame_selected to re-arm the lock. Keeping the lock through a pan was tried first and produced a teleport: the pivot is DERIVED in selection mode, so the next gesture recomputed it back onto the object and the following orbit snapped the view there."
+  },
+  "camera.frame_selected": {
+    "summary": "Frame the selection's bounding sphere (the numpad '.' gesture) and lock the pivot to it",
+    "tags": "frame|selection|navigation|pivot",
+    "notes": "Fits the bounding sphere to the LIMITING half-angle, so a wide object on a wide viewport is not under-framed. 'lock_pivot' defaults to true: without it the next middle-click re-anchors navigation somewhere else and the framing appears not to have stuck. DOES NOT set focus_distance - framing an object and focusing the lens on it are separate acts; use camera.set_focus_distance or AF. Fails when nothing is selected. Uses the FLAT SoA mesh bounds, not the facade triangle's: asking the facade would frame one triangle of a million-triangle mesh. The lock it arms survives orbit and dolly but NOT a pan - camera.pan deliberately releases it, so re-call this after panning if you want the object back as the anchor."
+  },
+  "camera.list": {
+    "summary": "Camera registry: how many cameras the scene holds, which index is active, and whether the active camera is registered at all",
+    "tags": "camera|registry|binding|diagnostic",
+    "notes": "READ 'active_is_orphan' FIRST. It is true when SceneData::camera points at a camera that is NOT in SceneData::cameras - the scene is being driven through an object the registry never heard of. Any consumer that resolves the view through the LIST rather than through the active pointer then follows a different camera, and the symptom is 'the viewport does not follow my camera' with no error anywhere. Registration happens in exactly three places (ProjectManager::newProject, ProjectManager::openProject, Renderer::create_scene), all via SceneData::setActiveCamera; a camera created outside them is an orphan. 'active' on each entry is POINTER identity, not an index or a value match: two cameras can carry identical numbers and still be different objects, which is precisely the failure this call exists to catch. 'active_index_out_of_range' is reported separately from the orphan flag on purpose - an empty registry and a stale index are different faults, and merging them would hide whichever one is not being looked for. This method is an INSTRUMENT added before the bug it measures was found: three different root causes had been guessed for an unmeasurable question, and all three were wrong."
   }
 }

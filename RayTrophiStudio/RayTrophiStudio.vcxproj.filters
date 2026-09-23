@@ -295,6 +295,9 @@
     <ClInclude Include="source\include\Fluid\FluidGpuParticleUpload.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidGpuFlipSnapshot.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Fluid\APICFluidSolver.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
@@ -750,6 +753,9 @@
     <None Include="source\shaders\water_v3.glsl">
       <Filter>Kaynak Dosyalar\shader</Filter>
     </None>
+    <None Include="source\shaders\surface_sdf_shadow_query.glsl">
+      <Filter>Kaynak Dosyalar\shader</Filter>
+    </None>
     <None Include="source\shaders\miss.rmiss">
       <Filter>Kaynak Dosyalar\shader</Filter>
     </None>
@@ -1150,6 +1156,9 @@
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiAnim.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiCameraNav.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiTerrain.cpp">

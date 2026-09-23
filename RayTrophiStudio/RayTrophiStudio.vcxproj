@@ -192,7 +192,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>$(RayTrophiPythonLib);libssl.lib;libcrypto.lib;Ws2_32.lib;Crypt32.lib;openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;vulkan-1.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;embree4.lib;tbb12.lib;cuda.lib;cudart.lib;cufft.lib;DirectXTex.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)..\vcpkg\installed\x64-windows\debug\lib;$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(OIDN_ROOT)\lib;$(ASSIMP_ROOT)\lib\x64;$(EMBREE_ROOT)\lib;$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <DelayLoadDLLs>nvcuda.dll;cudart64_12.dll;cudart64_11.dll;cufft64_11.dll;vulkan-1.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <DelayLoadDLLs>nvcuda.dll;cudart64_12.dll;cufft64_11.dll;vulkan-1.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
     <CudaCompile>
       <Include>$(ProjectDir)source\include;%(Include)</Include>
@@ -251,7 +251,7 @@
       <AdditionalDependencies>$(RayTrophiPythonLib);libssl.lib;libcrypto.lib;Ws2_32.lib;Crypt32.lib;openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;vulkan-1.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;embree4.lib;tbb12.lib;cuda.lib;cudart.lib;cufft.lib;DirectXTex.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(OIDN_ROOT)\lib;$(ASSIMP_ROOT)\lib\x64;$(EMBREE_ROOT)\lib;$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
-      <DelayLoadDLLs>nvcuda.dll;cudart64_12.dll;cudart64_11.dll;cufft64_11.dll;vulkan-1.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <DelayLoadDLLs>nvcuda.dll;cudart64_12.dll;cufft64_11.dll;vulkan-1.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
     <CudaCompile>
       <Include>$(ProjectDir)source\include;%(Include)</Include>
@@ -535,6 +535,7 @@
     <ClInclude Include="source\include\GridFluidSolver.h" />
     <ClInclude Include="source\include\Fluid\FluidParticles.h" />
     <ClInclude Include="source\include\Fluid\FluidGpuParticleUpload.h" />
+    <ClInclude Include="source\include\Fluid\FluidGpuFlipSnapshot.h" />
     <ClInclude Include="source\include\Fluid\APICFluidSolver.h" />
     <ClInclude Include="source\include\Fluid\FluidParticleSolidRecovery.h" />
     <ClInclude Include="source\include\Fluid\FluidObject.h" />
@@ -1503,6 +1504,7 @@
     <ClCompile Include="source\src\Viewport\RayFusionBounce.cpp" />
     <ClInclude Include="source\include\RayFusion\ProbeBounce.h" />
     <None Include="source\shaders\rayfusion_probe_bounce.glsl" />
+    <None Include="source\shaders\surface_sdf_shadow_query.glsl" />
     <None Include="source\shaders\rayfusion_probe_trace_beta.comp" />
     <ClCompile Include="source\src\Viewport\SelectionOutlineUpload.cpp" />
     <ClCompile Include="source\src\RayFusion\ProbeField.cpp">
@@ -1610,6 +1612,7 @@
     <ClCompile Include="source\src\Api\RtApiForceField.cpp" />
     <ClCompile Include="source\src\Api\RtApiParticle.cpp" />
     <ClCompile Include="source\src\Api\RtApiAnim.cpp" />
+    <ClCompile Include="source\src\Api\RtApiCameraNav.cpp" />
     <ClCompile Include="source\src\Api\RtApiTerrain.cpp" />
     <ClCompile Include="source\src\Api\RtApiPerf.cpp" />
     <ClCompile Include="source\src\Api\RtApiGpuMemory.cpp" />

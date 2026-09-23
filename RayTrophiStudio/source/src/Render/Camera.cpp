@@ -1,4 +1,5 @@
 #include "Camera.h"
+#include <algorithm>   // std::clamp (pivot dolly)
 #include <cmath>
 #include <stdlib.h>
 #include "Matrix4x4.h"
@@ -170,10 +171,126 @@ void Camera::moveToTargetLocked(const Vec3& new_position) {
     lookat = new_position + view_dir; // yön sabit kalır
     update_camera_vectors();
 }
-// Bu metodu da ekleyebilirsin
+// Free-look: turn the camera in place, keeping the navigation radius.
+// ★★★★★ This line used to read `lookfrom + direction * focus_dist`, and that
+//   was the single most expensive coupling in the viewport. focus_dist is the
+//   LENS focal plane -- autofocus and the focus ring write it. Multiplying the
+//   view direction by it meant every mouse rotation silently re-anchored the
+//   navigation target at the focal plane, so focusing on something 0.5 m away
+//   collapsed the orbit radius to 0.5 m. Pan speed and dolly step are both
+//   proportional to that radius, so the viewport froze in place with no error,
+//   no log and no visible cause. navDistance() is the radius; focus_dist is
+//   now read by the lens alone.
 void Camera::setLookDirection(const Vec3& direction_normalized) {
-    lookat = lookfrom + direction_normalized * focus_dist;
+    lookat = lookfrom + direction_normalized * navDistance();
     update_camera_vectors();
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Orbit pivot / navigation (see the contract block in Camera.h)
+// ───────────────────────────────────────────────────────────────────────────
+
+float Camera::navDistance() const {
+    // Measured to the ARMED pivot when there is one. With a selection lock this
+    // is the framing distance, which is stable no matter what the cursor last
+    // happened to be over -- the property that makes panning predictable.
+    const float d = (lookfrom - effectivePivot()).length();
+    // A degenerate radius is not a measurement: it means the anchor collapsed
+    // onto the camera. Report the default framing distance rather than a number
+    // that would multiply pan and dolly down to nothing.
+    return (d > 1e-3f) ? d : 10.0f;
+}
+
+void Camera::orbitAroundPivot(float dyaw_deg, float dpitch_deg) {
+    const Vec3 pivot = effectivePivot();
+    Vec3 rel = lookfrom - pivot;
+    if (rel.length_squared() < 1e-8f) rel = Vec3(0.0f, 0.0f, 1.0f) * navDistance();
+
+    auto rodrigues = [](Vec3 p, Vec3 axis, float ang) {
+        axis = axis.normalize();
+        const float c = cosf(ang), s = sinf(ang);
+        return p * c + Vec3::cross(axis, p) * s + axis * (Vec3::dot(axis, p) * (1.0f - c));
+    };
+    const float to_rad = 3.14159265f / 180.0f;
+    rel = rodrigues(rel, Vec3(0, 1, 0), dyaw_deg * to_rad);
+    rel = rodrigues(rel, u, dpitch_deg * to_rad);
+
+    lookfrom = pivot + rel;
+    // Re-aim at the pivot. Free-orbiting leaves an ALIGNED standard view (the
+    // grid plane falls back to the ground) but keeps the current PROJECTION:
+    // orbiting in ortho stays ortho, matching the numpad/ViewCube contract.
+    lookat = pivot;
+    vup = Vec3(0.0f, 1.0f, 0.0f);
+    standard_view = StandardView::Perspective;
+    update_camera_vectors();
+    markDirty();
+}
+
+void Camera::dollyToPivot(float exponent) {
+    const Vec3 pivot = effectivePivot();
+    if (orthographic) {
+        // Parallel projection has no distance to travel: it zooms by changing
+        // the visible extent. Moving lookfrom instead would look like a no-op.
+        ortho_height = std::clamp(ortho_height * std::exp(exponent), 0.01f, 100000.0f);
+        update_camera_vectors();
+        markDirty();
+        return;
+    }
+    Vec3 forward = pivot - lookfrom;
+    const float current = navDistance();
+    if (forward.length_squared() < 1e-8f) forward = (lookat - lookfrom);
+    if (forward.length_squared() < 1e-8f) forward = Vec3(0.0f, 0.0f, -1.0f);
+    forward = forward.normalize();
+
+    const float next = std::clamp(current * std::exp(exponent), 0.01f, 10000000.0f);
+    lookfrom = pivot - forward * next;
+    // ★ focus_dist deliberately untouched: dollying is not refocusing. It used
+    //   to be written here, which is why zooming quietly dragged the depth of
+    //   field plane along with it.
+    lookat = lookfrom + forward * next;
+    update_camera_vectors();
+    markDirty();
+}
+
+void Camera::panWorld(const Vec3& offset) {
+    lookfrom += offset;
+    lookat += offset;
+    // ★ No `orbit_pivot += offset` here: the anchor is disarmed a few lines
+    //   below, so carrying it would be a value nothing ever reads. The
+    //   navigation radius still cannot drift mid-drag, because `lookat` (the
+    //   fallback anchor) moved with the camera by the same offset.
+
+    // ★★★★ PANNING RELEASES THE SELECTION LOCK (2026-09-23, DCC convention).
+    //   The first design kept the lock through a pan, and it produced a bug
+    //   that felt like a teleport: the pivot is DERIVED in selection mode, so
+    //   the next gesture recomputed it back onto the object and the following
+    //   orbit snapped the view there. Carrying the pivot through the pan could
+    //   not survive that recompute -- the offset was thrown away every time.
+    //
+    //   ★★★ The real lesson is not the offset bookkeeping. It is that panning
+    //   AWAY FROM an object and staying locked TO it are contradictory
+    //   intentions. Blender resolves it the same way: the pan moves the view
+    //   pivot, which is another way of saying the old lock is gone. Encoding
+    //   that directly removes the whole class of "where did my pivot go"
+    //   questions instead of bookkeeping around it.
+    //
+    //   ★★ The anchor is disarmed too, and that is NOT the same as losing it:
+    //   effectivePivot() falls back to `lookat`, which just travelled with the
+    //   pan, so orbit and dolly keep working around the point the user panned
+    //   to -- the arithmetic is identical. What disarming buys is that "Free"
+    //   means free EVERYWHERE again: the next middle-click re-anchors on the
+    //   cursor, as free navigation in this app always has.
+    //
+    //   ★★★ Leaving the pivot armed under a Free mode was tried and rejected:
+    //   it makes the panel read "Free" while the cursor anchoring is silently
+    //   dead, with no way back short of another mode toggle. A panel that
+    //   reports a state the engine is not in is the single most expensive bug
+    //   class in this repo -- do not reintroduce it for a small convenience.
+    pivot_mode = PivotMode::Free;
+    clearOrbitPivot();
+
+    update_camera_vectors();
+    markDirty();
 }
 
 void Camera::setStandardView(StandardView view, bool setOrtho) {
