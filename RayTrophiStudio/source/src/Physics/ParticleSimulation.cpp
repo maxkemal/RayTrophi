@@ -4,6 +4,7 @@
 #include "Fluid/SubstanceTag.h"
 #include "Fluid/GranularGpuDispatch.h"
 #include "Fluid/FluidGpuParticleUpload.h"
+#include "Fluid/FluidGpuFlipSnapshot.h"
 
 #include "GridFluidSolver.h"
 #include "globals.h"
@@ -3988,7 +3989,9 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
                     SimulationComputeContext* compute,
                     SimulationGridDomainComputeBuffers& gpu_buffers,
                     bool has_flip_snapshot,
-                    bool download_granular_state = true) {
+                    bool download_granular_state = true,
+                    bool reuse_particle_velocity = false,
+                    bool reuse_projected_grid_velocity = false) {
     auto& grid      = state.grid;
     auto& particles = state.particles;
     const std::size_t n = particles.size();
@@ -4006,32 +4009,51 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
         return false;
     }
 
-    // Upload post-projection velocities (may already be up-to-date after
-    // runGpuFluidFreeSurfacePressure, but we re-upload to be safe when the
-    // caller has modified the CPU copy via boundary enforcement).
-    compute->beginTransferBatch();
-    bool ok = compute->uploadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
-              compute->uploadBuffer(gpu_buffers.vel_y, grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
-              compute->uploadBuffer(gpu_buffers.vel_z, grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
+    // The pressure solve leaves its projected MAC velocities on the device.
+    // A solid-face clamp changes the host copy, so reuse is restricted to a
+    // Vulkan projection with no solid cells.
+    const bool grid_velocity_is_current =
+        reuse_projected_grid_velocity &&
+        compute->backendType() == ComputeBackendType::VulkanCompute &&
+        !grid.hasAnySolid();
+    bool ok = true;
 
-    // FLIP snapshot: upload pre-projection velocities to scratch buffers.
+    // FLIP snapshot was prepared in scratch before pressure, either by a
+    // device copy or by the host-upload fallback.
     if (has_flip_snapshot &&
         gpu_buffers.scratch_vel_x.valid() &&
         gpu_buffers.scratch_vel_y.valid() &&
         gpu_buffers.scratch_vel_z.valid()) {
-        // The caller has already stored the pre-projection copy in
-        // gpu_buffers.scratch_vel_x/y/z via uploadBuffer before calling
-        // runGpuFluidFreeSurfacePressure. No re-upload needed here.
+        // No additional transfer is needed here.
     } else {
         has_flip_snapshot = false;
     }
 
-    // Positions must be current (uploaded during forces/P2G stage).
-    // Velocities: upload old particle velocities (needed for FLIP v_old term).
-    ok = ok && compute->uploadBuffer(gpu_buffers.fluid_velocities,
-                                     particles.velocity.data(),
-                                     n * sizeof(Vec3));
-    ok = compute->endTransferBatch() && ok;
+    // P2G only reads particle velocity. If its full particle upload is still
+    // current, G2P can use that device copy for the FLIP v_old term.
+    const bool velocity_is_current =
+        reuse_particle_velocity &&
+        FluidGpuParticleUpload::canReuse(gpu_buffers, *compute, n);
+    if (!grid_velocity_is_current || !velocity_is_current) {
+        compute->beginTransferBatch();
+        if (!grid_velocity_is_current) {
+            ok = compute->uploadBuffer(
+                     gpu_buffers.vel_x, grid.vel_x.data(),
+                     grid.vel_x.size() * sizeof(float)) &&
+                 compute->uploadBuffer(
+                     gpu_buffers.vel_y, grid.vel_y.data(),
+                     grid.vel_y.size() * sizeof(float)) &&
+                 compute->uploadBuffer(
+                     gpu_buffers.vel_z, grid.vel_z.data(),
+                     grid.vel_z.size() * sizeof(float));
+        }
+        if (!velocity_is_current) {
+            ok = ok && compute->uploadBuffer(gpu_buffers.fluid_velocities,
+                                             particles.velocity.data(),
+                                             n * sizeof(Vec3));
+        }
+        ok = compute->endTransferBatch() && ok;
+    }
     if (!ok) return false;
 
     FluidG2PGpuConstants c;
@@ -10502,15 +10524,39 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                         Fluid::hasLastFlipPreSnapshot();
                     bool upload_ok = true;
                     if (has_flip) {
-                        context.compute->beginTransferBatch();
-                        upload_ok =
-                            context.compute->uploadBuffer(gpu_buffers.scratch_vel_x,
-                                Fluid::getLastFlipPreSnapshotX(), state.grid.vel_x.size() * sizeof(float)) &&
-                            context.compute->uploadBuffer(gpu_buffers.scratch_vel_y,
-                                Fluid::getLastFlipPreSnapshotY(), state.grid.vel_y.size() * sizeof(float)) &&
-                            context.compute->uploadBuffer(gpu_buffers.scratch_vel_z,
-                                Fluid::getLastFlipPreSnapshotZ(), state.grid.vel_z.size() * sizeof(float));
-                        upload_ok = context.compute->endTransferBatch() && upload_ok;
+                        const std::array<ComputeBufferHandle, 3> flip_sources = {
+                            gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z
+                        };
+                        const std::array<ComputeBufferHandle, 3> flip_targets = {
+                            gpu_buffers.scratch_vel_x, gpu_buffers.scratch_vel_y,
+                            gpu_buffers.scratch_vel_z
+                        };
+                        const std::array<std::size_t, 3> face_counts = {
+                            state.grid.vel_x.size(), state.grid.vel_y.size(),
+                            state.grid.vel_z.size()
+                        };
+                        const bool copied_on_gpu =
+                            step_params.p2g_precomputed &&
+                            FluidGpuFlipSnapshot::copyFaceFields(
+                                *context.compute, flip_sources, flip_targets,
+                                face_counts);
+                        if (!copied_on_gpu) {
+                            context.compute->beginTransferBatch();
+                            upload_ok =
+                                context.compute->uploadBuffer(
+                                    gpu_buffers.scratch_vel_x,
+                                    Fluid::getLastFlipPreSnapshotX(),
+                                    face_counts[0] * sizeof(float)) &&
+                                context.compute->uploadBuffer(
+                                    gpu_buffers.scratch_vel_y,
+                                    Fluid::getLastFlipPreSnapshotY(),
+                                    face_counts[1] * sizeof(float)) &&
+                                context.compute->uploadBuffer(
+                                    gpu_buffers.scratch_vel_z,
+                                    Fluid::getLastFlipPreSnapshotZ(),
+                                    face_counts[2] * sizeof(float));
+                            upload_ok = context.compute->endTransferBatch() && upload_ok;
+                        }
                     }
 
                     // Fluid mask (cell occupancy) — the viscous stencil and the
@@ -10638,7 +10684,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                             state, fluid_params, dt,
                             context.compute, gpu_buffers, has_flip,
                             !granular_state_can_stay_resident ||
-                                granular_substep + 1 == granular_solver_substeps);
+                                granular_substep + 1 == granular_solver_substeps,
+                            step_params.p2g_precomputed,
+                            !fluid_params.granular_enabled &&
+                                !state.grid.hasAnySolid());
                         if (g2p_on_gpu) {
                             gpu_g2p_ms = elapsedMilliseconds(gpu_g2p_begin, SimulationClock::now());
                             for (std::size_t n = 0; n < s_solid_idx.size(); ++n) {
