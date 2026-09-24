@@ -26,6 +26,7 @@
 #include "MeshEdit/SplineObject.h"
 #include "MeshEdit/ProfileSplineOverlay.h"
 #include "MeshEdit/ProfileSplinePointGizmo.h"
+#include "UI/ParticleEmitterGizmo.h"
 #include "Backend/IViewportBackend.h"
 #include <Backend/VulkanBackend.h>
 #include <Backend/OptixBackend.h>
@@ -124,15 +125,19 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
 
     const Camera& cam = *ctx.scene.camera;
     ImGuiIO& io = ImGui::GetIO();
-    const float screen_w = io.DisplaySize.x;
-    const float screen_h = io.DisplaySize.y;
+    // The renderer owns the complete SDL surface. Docked/floating ImGui panels
+    // cover that surface; they do not resize or offset the camera projection.
+    // Keeping panel geometry out of this calculation also matches the light,
+    // force-field and selection gizmo coordinate convention.
+    const ImVec2 viewport_min(0.0f, 0.0f);
+    const ImVec2 viewport_max = io.DisplaySize;
+    const float screen_w = std::max(1.0f, io.DisplaySize.x);
+    const float screen_h = std::max(1.0f, io.DisplaySize.y);
     const float aspect_ratio = (image_height > 0)
         ? (static_cast<float>(image_width) / static_cast<float>(image_height))
         : (screen_w / std::max(1.0f, screen_h));
 
     const Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
-    const Vec3 cam_right = cam_forward.cross(cam.vup).normalize();
-    const Vec3 cam_up = cam_right.cross(cam_forward).normalize();
     const float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
     const float tan_half_fov = tanf(fov_rad * 0.5f);
     const bool gizmoOrtho = cam.orthographic && viewport_settings.shading_mode != 2;
@@ -143,23 +148,17 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
         if (!gizmoOrtho && depth <= 0.01f) {
             return false;
         }
-
-        const float local_x = to_pt.dot(cam_right);
-        const float local_y = to_pt.dot(cam_up);
-        const float half_h = gizmoOrtho ? (((cam.ortho_height > 1e-4f) ? cam.ortho_height : 10.0f) * 0.5f)
-                                        : (depth * tan_half_fov);
-        const float half_w = half_h * aspect_ratio;
-        if (fabsf(half_w) <= 1e-6f || fabsf(half_h) <= 1e-6f) {
+        if (!projectGizmoWorldPoint(cam, gizmoOrtho, aspect_ratio,
+                                    screen_w, screen_h, point, out)) {
             return false;
         }
-
-        out.x = ((local_x / half_w) * 0.5f + 0.5f) * screen_w;
-        out.y = (0.5f - (local_y / half_h) * 0.5f) * screen_h;
         return out.x >= -32.0f && out.x <= screen_w + 32.0f &&
                out.y >= -32.0f && out.y <= screen_h + 32.0f;
     };
 
     ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
+    ParticleEmitterGizmo::ScopedViewportClip viewport_clip(
+        draw_list, nullptr, viewport_min, viewport_max);
 
     auto selectedSourceName = [&]() -> std::string {
         if (ctx.selection.selected.type == SelectableType::Object &&
@@ -379,7 +378,7 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
             continue;
         }
 
-        ImDrawList* fluid_draw_list = ImGui::GetForegroundDrawList();
+        ImDrawList* fluid_draw_list = draw_list;
         const std::size_t count = fluid.particles.size();
         const std::size_t stride = count > 6000 ? (count / 6000 + 1) : 1;
         const float focal_px = screen_h / (2.0f * std::max(tan_half_fov, 1e-4f));
@@ -559,7 +558,7 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
     // OFF — the Particles render mode draws real RT instances now, so the
     // overlay would double-paint on top of them). The Seed AABB outline is
     // separate and always drawn for authoring feedback.
-    ImDrawList* fluid_draw_list = ImGui::GetForegroundDrawList();
+    ImDrawList* fluid_draw_list = draw_list;
     for (std::size_t domain_index = 0; domain_index < grid_domain_states.size(); ++domain_index) {
         const auto& state = grid_domain_states[domain_index];
 
@@ -645,27 +644,23 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
                 overlay_system.runtime->resolveParticleEmitterFrame(
                     emitter, timeline.getCurrentFrame());
             if (emitter_frame.parent_missing) continue;
-            ImVec2 screen_pos;
-            float depth = 0.0f;
-            if (projectPoint(emitter_frame.position, screen_pos, depth)) {
-                const ImU32 color = emitter.enabled
-                    ? (point_selected
-                        ? IM_COL32(255, 205, 75, 255)
-                        : IM_COL32(255, 145, 45, 210))
-                    : IM_COL32(130, 95, 60, 100);
-                const float radius = point_selected ? 8.0f : 5.5f;
-                fluid_draw_list->AddCircle(
-                    screen_pos, radius, color, 16,
-                    point_selected ? 2.5f : 1.5f);
-                fluid_draw_list->AddLine(
-                    ImVec2(screen_pos.x - radius - 3.0f, screen_pos.y),
-                    ImVec2(screen_pos.x + radius + 3.0f, screen_pos.y),
-                    color, 1.4f);
-                fluid_draw_list->AddLine(
-                    ImVec2(screen_pos.x, screen_pos.y - radius - 3.0f),
-                    ImVec2(screen_pos.x, screen_pos.y + radius + 3.0f),
-                    color, 1.4f);
-            }
+            const ImU32 color = emitter.enabled
+                ? (point_selected
+                    ? IM_COL32(255, 205, 75, 255)
+                    : IM_COL32(255, 145, 45, 210))
+                : IM_COL32(130, 95, 60, 100);
+            ParticleEmitterGizmo::drawDirectionalEmitter(
+                fluid_draw_list,
+                [&](const Vec3& point, ImVec2& screen) {
+                    float depth = 0.0f;
+                    return projectPoint(point, screen, depth);
+                },
+                emitter_frame.position,
+                emitter_frame.direction,
+                emitter.speed,
+                emitter.spread,
+                color,
+                point_selected);
             continue;
         }
         if ((emitter.spawn_mode != RayTrophiSim::ParticleEmitterSpawnMode::ObjectAABBSurface &&
@@ -972,16 +967,14 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
 
     // Particle dots only in Debug display mode. Solid/Render render the particles
     // for real via the Vulkan billboard pass (uploadParticleBillboards). These
-    // ImGui foreground dots draw on top of everything (including UI panels), so
-    // they are an opt-in debug aid, not the default.
+    // Keep these on the background SDL-surface layer so ImGui windows naturally
+    // cover debug particles without changing their projection coordinates.
     if (ctx.particle_display_mode != 1) {
         return;
     }
     if (particles->aliveCount() == 0) {
         return;
     }
-    draw_list = ImGui::GetForegroundDrawList();
-
     const auto& buffers = particles->buffers();
     const std::size_t capacity = particles->capacity();
     const std::size_t stride = capacity > 4000 ? (capacity / 4000 + 1) : 1;
@@ -3118,6 +3111,9 @@ mesh_edit_changed_confirmed:
     auto* selected_domain = static_cast<RayTrophiSim::SimulationGridDomainDesc*>(nullptr);
     auto* selected_particle_emitter =
         static_cast<RayTrophiSim::ParticleEmitterDesc*>(nullptr);
+    Vec3 selected_emitter_world_position(0.0f);
+    Vec3 selected_emitter_world_direction(0.0f, 1.0f, 0.0f);
+    const int selected_emitter_frame = timeline.getCurrentFrame();
     if (sel.selected.type == SelectableType::SimulationDomain &&
         sel.selected.particle_system_index >= 0 &&
         sel.selected.particle_system_index < static_cast<int>(ctx.scene.particle_systems.size())) {
@@ -3145,7 +3141,12 @@ mesh_edit_changed_confirmed:
             selected_particle_emitter =
                 &system.runtime->emitters()[static_cast<std::size_t>(
                     sel.selected.particle_emitter_index)];
-            sel.selected.position = selected_particle_emitter->point;
+            const RayTrophiSim::ParticleEmitterFrame emitter_frame =
+                system.runtime->resolveParticleEmitterFrame(
+                    *selected_particle_emitter, selected_emitter_frame);
+            selected_emitter_world_position = emitter_frame.position;
+            selected_emitter_world_direction = emitter_frame.direction;
+            sel.selected.position = selected_emitter_world_position;
             sel.selected.rotation = Vec3(0.0f);
             sel.selected.scale = Vec3(1.0f);
         }
@@ -3172,9 +3173,24 @@ mesh_edit_changed_confirmed:
         startMat.m[1][1] = extent.y;
         startMat.m[2][2] = extent.z;
     } else if (selected_particle_emitter) {
-        startMat.m[0][3] = selected_particle_emitter->point.x;
-        startMat.m[1][3] = selected_particle_emitter->point.y;
-        startMat.m[2][3] = selected_particle_emitter->point.z;
+        const auto emitter_geometry =
+            ParticleEmitterGizmo::makeDirectionalEmitterGeometry(
+                selected_emitter_world_position,
+                selected_emitter_world_direction,
+                selected_particle_emitter->speed,
+                selected_particle_emitter->spread);
+        startMat.m[0][0] = emitter_geometry.right.x;
+        startMat.m[1][0] = emitter_geometry.right.y;
+        startMat.m[2][0] = emitter_geometry.right.z;
+        startMat.m[0][1] = emitter_geometry.forward.x;
+        startMat.m[1][1] = emitter_geometry.forward.y;
+        startMat.m[2][1] = emitter_geometry.forward.z;
+        startMat.m[0][2] = emitter_geometry.up.x;
+        startMat.m[1][2] = emitter_geometry.up.y;
+        startMat.m[2][2] = emitter_geometry.up.z;
+        startMat.m[0][3] = selected_emitter_world_position.x;
+        startMat.m[1][3] = selected_emitter_world_position.y;
+        startMat.m[2][3] = selected_emitter_world_position.z;
     }
 
     // Handle Light Rotation (Directional/Spot)
@@ -4303,32 +4319,88 @@ mesh_edit_changed_confirmed:
             // Runtime descriptor is authoritative. Preset emitters are no longer
             // anonymous panel rows: hierarchy selection and viewport gizmo edit
             // the exact emitter consumed by the simulation.
-            const Vec3 old_position = selected_particle_emitter->point;
-            const Vec3 emitter_delta = newPos - old_position;
-            selected_particle_emitter->source_mode =
-                RayTrophiSim::ParticleEmitterSourceMode::Point;
-            selected_particle_emitter->source_name.clear();
-            selected_particle_emitter->point = newPos;
-            // Hybrid fire presets pair the visible particle emitter with a gas
-            // flow source at the same authored origin. Preserve that pairing
-            // when the emitter is moved, without dragging unrelated sources.
-            auto& owner_system = ctx.scene.particle_systems[
-                static_cast<std::size_t>(sel.selected.particle_system_index)];
-            for (auto& flow : owner_system.runtime->flowSources()) {
-                // A parented source stores a parent-LOCAL offset, so it is
-                // neither comparable to a world position nor movable by a world
-                // delta — and it already follows its own object anyway.
-                if (!flow.parent_object.empty()) continue;
-                if ((flow.position - old_position).length_squared() <= 1e-8f) {
-                    flow.position = flow.position + emitter_delta;
+            bool emitter_changed = false;
+            if (operation == ImGuizmo::TRANSLATE) {
+                const Vec3 old_authored_point = selected_particle_emitter->point;
+                const Vec3 emitter_delta =
+                    newPos - selected_emitter_world_position;
+                Vec3 authored_point =
+                    newPos - selected_particle_emitter->local_offset;
+                if (!selected_particle_emitter->parent_object.empty()) {
+                    Matrix4x4 parent_to_world;
+                    if (ctx.scene.resolveObjectTransformForSimulation(
+                            selected_particle_emitter->parent_object,
+                            parent_to_world)) {
+                        authored_point =
+                            parent_to_world.inverse().transform_point(newPos) -
+                            selected_particle_emitter->local_offset;
+                    }
+                }
+                selected_particle_emitter->source_mode =
+                    RayTrophiSim::ParticleEmitterSourceMode::Point;
+                selected_particle_emitter->source_name.clear();
+                selected_particle_emitter->point = authored_point;
+                auto point_key_it = selected_particle_emitter->keyframes.find(
+                    selected_emitter_frame);
+                if (point_key_it != selected_particle_emitter->keyframes.end() &&
+                    point_key_it->second.has_point) {
+                    point_key_it->second.point = authored_point;
+                }
+                // Hybrid presets pair an unparented emitter and flow source at
+                // the same authored origin. Move only that exact partner.
+                auto& owner_system = ctx.scene.particle_systems[
+                    static_cast<std::size_t>(
+                        sel.selected.particle_system_index)];
+                for (auto& flow : owner_system.runtime->flowSources()) {
+                    // Parented sources already follow their own object.
+                    if (!selected_particle_emitter->parent_object.empty() ||
+                        !flow.parent_object.empty()) {
+                        continue;
+                    }
+                    if ((flow.position - old_authored_point).length_squared() <=
+                        1e-8f) {
+                        flow.position = flow.position + emitter_delta;
+                    }
+                }
+                sel.selected.position = newPos;
+                emitter_changed = true;
+            } else if (operation == ImGuizmo::ROTATE) {
+                Vec3 world_direction(
+                    objectMatrix[4], objectMatrix[5], objectMatrix[6]);
+                if (world_direction.length_squared() > 1.0e-10f) {
+                    world_direction = world_direction.normalize();
+                    Vec3 authored_direction = world_direction;
+                    if (!selected_particle_emitter->parent_object.empty() &&
+                        selected_particle_emitter->velocity_space ==
+                            RayTrophiSim::SimulationEmissionVelocitySpace::Local) {
+                        Matrix4x4 parent_to_world;
+                        if (ctx.scene.resolveObjectTransformForSimulation(
+                                selected_particle_emitter->parent_object,
+                                parent_to_world)) {
+                            authored_direction = parent_to_world.inverse()
+                                .transform_vector(world_direction)
+                                .normalize();
+                        }
+                    }
+                    selected_particle_emitter->direction = authored_direction;
+                    auto direction_key_it =
+                        selected_particle_emitter->keyframes.find(
+                            selected_emitter_frame);
+                    if (direction_key_it !=
+                            selected_particle_emitter->keyframes.end() &&
+                        direction_key_it->second.has_direction) {
+                        direction_key_it->second.direction = authored_direction;
+                    }
+                    emitter_changed = true;
                 }
             }
-            sel.selected.position = newPos;
-            ctx.scene.clearSimFrameCache();
-            ctx.scene.requestSimulationTimelineRenderResync();
-            if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
-            ctx.renderer.resetCPUAccumulation();
-            ProjectManager::getInstance().markModified();
+            if (emitter_changed) {
+                ctx.scene.clearSimFrameCache();
+                ctx.scene.requestSimulationTimelineRenderResync();
+                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                ctx.renderer.resetCPUAccumulation();
+                ProjectManager::getInstance().markModified();
+            }
         }
         else if (sel.selected.type == SelectableType::Camera && sel.selected.camera) {
             // Skip active camera - moving it would affect viewport directly

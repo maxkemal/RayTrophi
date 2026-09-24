@@ -34,6 +34,7 @@
 #include "scene_ui_material_mass.hpp"
 #include "scene_ui_molten_transfer.hpp"
 #include "scene_ui_particle_usage.hpp"
+#include "UI/ParticleSystemAuthoringUI.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -413,6 +414,11 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                             alive, capacity, emitter_count, collider_count, domain_count);
         ImGui::Separator();
 
+        ParticleSystemAuthoringUI::drawCreationBar(
+            ui_ctx, selected_emitter_index, selected_collider_index,
+            selected_domain_index);
+        ImGui::Spacing();
+
         const char* display_modes[] = { "Solid (Billboards)", "Debug (Overlay)", "Render (Preview)" };
         const float controls_width = ImGui::GetContentRegionAvail().x;
         const bool compact_particle_header = controls_width < 460.0f;
@@ -528,12 +534,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
 
         particles = scene.getParticleSimulationSystem();
         if (scene.particle_systems.empty()) {
-            if (ImGui::Button("Add Particle System##PartAddSys", ImVec2(-1, 30))) {
-                scene.addParticleSystemObject();
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Creates and registers a new empty particle system container in the scene.");
-            }
+            ImGui::TextDisabled("Create an empty system or add a point emitter to begin.");
             return;
         }
 

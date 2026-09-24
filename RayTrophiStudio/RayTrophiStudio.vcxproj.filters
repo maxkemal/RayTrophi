@@ -187,6 +187,12 @@
     <ClInclude Include="source\include\ParticleSimulation.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\UI\ParticleEmitterGizmo.h">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\ParticleSystemAuthoringUI.h">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\SimCache.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
@@ -1321,6 +1327,12 @@
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\UI\scene_ui_gizmos.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\ParticleEmitterGizmo.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\ParticleSystemAuthoringUI.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\UI\scene_ui_hierarchy.cpp">

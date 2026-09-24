@@ -408,6 +408,23 @@ Result listParticleSystems(std::vector<ParticleSystemInfo>& out) {
     return Result::success();
 }
 
+Result addParticleSystem(const std::string& name, ParticleSystemInfo& out) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+
+    SceneData::ParticleSystemObject& system =
+        g_ctx->scene.addParticleSystemObject(name);
+    out = ParticleSystemInfo{};
+    out.index = static_cast<int>(g_ctx->scene.particle_systems.size()) - 1;
+    out.id = system.id;
+    out.name = system.name;
+    out.active = true;
+    out.emitter_only = system.render.emitter_only;
+    out.render_in_raytrace = system.render.render_in_raytrace;
+    invalidateScriptSimulation();
+    return Result::success();
+}
+
 // Slug -> authored preset recipe. The slugs are the panel's list in lowercase
 // snake_case; keeping them as data rather than an if-chain means adding a
 // preset is one line here and the error message below stays complete.

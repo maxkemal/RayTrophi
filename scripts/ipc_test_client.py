@@ -480,6 +480,14 @@ def main():
 
     # Particle systems (Faz 5.6b)
     run_test("particle.emitters", {}, "particle.emitters")
+    systems_before_response = run_test(
+        "particle.list_systems", {}, "particle.list_systems(before add)")
+    systems_before = ((systems_before_response or {}).get("result") or {}).get(
+        "systems", [])
+    created_empty_particle_system = not systems_before
+    if created_empty_particle_system:
+        run_test("particle.add_system", {"name": "IPC Empty Particle System"},
+                 "particle.add_system(empty)")
     run_test("particle.add_emitter", {"name": "IpcEmitter", "rate_per_second": 48.0,
                                        "speed": 3.0, "point": [0.0, 2.0, 0.0]},
              "particle.add_emitter")
@@ -529,6 +537,8 @@ def main():
     run_test("particle.clear", {}, "particle.clear")
     run_test("particle.set_physics", {"gravity_scale": 1.0}, "particle.set_physics(restore)")
     run_test("particle.remove_emitter", {"emitter": "IpcEmitter"}, "particle.remove_emitter")
+    if created_empty_particle_system:
+        run_test("particle.clear_systems", {}, "particle.clear_systems(test cleanup)")
     run_test("particle.get_emitter", {"emitter": "IpcEmitter"},
              "particle.get_emitter(removed) → error", expect_error=True)
 

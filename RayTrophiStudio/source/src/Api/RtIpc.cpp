@@ -5523,6 +5523,18 @@ json dispatchMethod(const std::string& method, const json& params) {
             return rtapi::setParticleSystemEmitterOnly(system, emitter_only);
         });
     }
+    if (method == "particle.add_system") {
+        std::string name = params.value("name", "Particle System");
+        return enqueueQuery([name](UIContext&) {
+            rtapi::ParticleSystemInfo info;
+            rtapi::Result r = rtapi::addParticleSystem(name, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"index", info.index}, {"id", info.id},
+                        {"name", info.name}, {"active", info.active},
+                        {"emitter_only", info.emitter_only},
+                        {"render_in_raytrace", info.render_in_raytrace}};
+        });
+    }
     if (method == "particle.add_preset") {
         std::string preset = requireString(params, "preset");
         return enqueueQuery([preset](UIContext&) {

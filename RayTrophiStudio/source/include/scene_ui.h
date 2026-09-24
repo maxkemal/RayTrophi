@@ -113,7 +113,8 @@ struct UIContext {
     SDL_Texture* animation_preview_texture = nullptr;
     bool show_animation_preview = false;
     // Particle viewport display mode: 0=Solid (Vulkan billboards), 1=Debug (ImGui
-    // overlay dots, drawn on top), 2=Render (path-traced; previews as Solid for now).
+    // dots clipped to the viewport background layer), 2=Render (path-traced;
+    // previews as Solid for now).
     int particle_display_mode = 0;
     bool is_animation_mode = false; // NEW: For Unified Render Window
     struct SDL_Texture* ray_texture; // Forward decl or void* if header dependency issues, but SDL.h is included in Renderer.h

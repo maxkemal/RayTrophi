@@ -4255,6 +4255,22 @@ static const MethodDescriptor desc_particle_add_preset = {
 };
 static const MethodRegistration reg_particle_add_preset(desc_particle_add_preset);
 
+static const MethodParam params_particle_add_system[] = {
+    {"name", "string", false, "", "Particle System", nullptr},
+};
+static const MethodDescriptor desc_particle_add_system = {
+    "particle.add_system", "particle",
+    "Create an empty independent particle system without applying a preset",
+    "The new system becomes active. Add emitters, domains and colliders through the same core operations used by the UI; no preset recipe is installed.",
+    "write", "SceneWrite", false, "any",
+    "particle|add|system|particles|empty|authoring|create",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_add_system, 1,
+    true
+};
+static const MethodRegistration reg_particle_add_system(desc_particle_add_system);
+
 static const MethodDescriptor desc_particle_clear = {
     "particle.clear", "particle",
     "Delete the live particles without touching the emitters",

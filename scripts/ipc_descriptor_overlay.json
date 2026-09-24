@@ -5672,6 +5672,11 @@
     "tags": "particles|gas|preset|authoring|create",
     "notes": "A preset that can only be created from the panel cannot be calibrated by a script. Pair with gas.measure_plume to close the loop: create, step, measure."
   },
+  "particle.add_system": {
+    "summary": "Create an empty independent particle system without applying a preset",
+    "tags": "particles|system|empty|authoring|create",
+    "notes": "The new system becomes active. Add emitters, domains and colliders through the same core operations used by the UI; no preset recipe is installed."
+  },
   "gas.measure_plume": {
     "summary": "Measure a live gas field: plume extent, cap height above the domain floor, widest slice, peak/mean heat, lid clipping",
     "tags": "gas|measure|verify|volume",

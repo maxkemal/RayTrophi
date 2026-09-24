@@ -1,5 +1,34 @@
 # Sıradaki derlemede kontrol edilecekler
 
+## Particle authoring ve viewport gizmo (2026-09-24)
+
+1. Simulation > Particles panelinde, sahnede sistem varken de **New Empty
+   System** görünmeli. Tıklayınca preset/domain/collider eklemeden yeni ve aktif
+   bir sistem oluşturmalı.
+2. **Add Point Emitter** aktif sisteme doğrudan emitter eklemeli; sistem yoksa
+   önce boş sistem oluşturmalı. Hierarchy altında emitter görünmeli ve Emitters
+   sekmesindeki rate/speed/spread/lifetime/appearance alanları çalışmalı.
+3. Point emitter viewport'ta tek nokta/cross olarak değil, yönü ve spread'i
+   okunan telli bir koni/nozzle olarak görünmeli. `Spit Direction`, `Initial
+   Speed` ve `Velocity Spread` değişince şekil anında değişmeli.
+4. Sol Properties panelini ve alt Timeline/Console panelini açıp kapat. Emitter
+   gizmosunun ekrandaki konumu değişmemeli; projeksiyon tam SDL viewport yüzeyini
+   kullanmalı. Paneller arka katmandaki particle/fluid noktaları ve emitter
+   çizgilerini doğal olarak örtmeli. Docking açık ve kapalı düzeni ayrı kontrol et.
+5. Koni/nozzle gövdesinin farklı yerlerine tıklayınca emitter viewport'tan
+   seçilmeli. Translate modunda dünya konumu taşınmalı; parent'lı emitter'da
+   yazılan değer parent-local kalmalı ve `local_offset` korunmalı.
+6. Rotate modunda halkaları sürükleyince koninin yönü ve `Spit Direction`
+   birlikte değişmeli. Parent + Local velocity space için yön parent-local,
+   World velocity space için world-space yazılmalı. Aktif point/direction key'i
+   varsa aynı frame'deki key de güncellenmeli.
+7. Script/IPC eşliği: `rt.particle.add_system("Empty")` ve
+   `particle.add_system {"name":"Empty"}` boş sistem döndürmeli; ardından
+   `add_emitter` aynı aktif sisteme yazmalı. `python scripts/rt_api_smoke_test.py`
+   ve `python scripts/ipc_test_client.py` içinde yeni yaşam döngüsü kapsanıyor.
+
+---
+
 ## ★ SSS partisi (2026-09-24) — domain maddelerinden BAĞIMSIZ, önce bunlar
 
 Shader'lar değişti: `bsdf_scatter.glsl`, `shadow_anyhit.rahit`,

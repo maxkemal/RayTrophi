@@ -3429,6 +3429,7 @@ struct ParticleSystemInfo {
     int collider_count = 0;
 };
 Result listParticleSystems(std::vector<ParticleSystemInfo>& out);
+Result addParticleSystem(const std::string& name, ParticleSystemInfo& out);
 Result setParticleSystemEmitterOnly(const std::string& index_or_name,
                                     bool emitter_only);
 Result clearParticleSystems();

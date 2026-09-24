@@ -442,6 +442,8 @@
     <ClInclude Include="source\include\Paint\PaintTextureSet.h" />
     <ClInclude Include="source\include\Paint\TerrainPaintAdapter.h" />
     <ClInclude Include="source\include\ParticleSimulation.h" />
+    <ClInclude Include="source\include\UI\ParticleEmitterGizmo.h" />
+    <ClInclude Include="source\include\UI\ParticleSystemAuthoringUI.h" />
     <ClInclude Include="source\include\SimCache.h" />
     <ClInclude Include="source\include\SimFrameCompress.h" />
     <ClInclude Include="source\include\SimFrameCacheMemory.h" />
@@ -1663,6 +1665,8 @@
     <ClCompile Include="source\src\UI\scene_ui_animation.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_camera.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_gizmos.cpp" />
+    <ClCompile Include="source\src\UI\ParticleEmitterGizmo.cpp" />
+    <ClCompile Include="source\src\UI\ParticleSystemAuthoringUI.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_hierarchy.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_lights.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_materials.cpp" />
