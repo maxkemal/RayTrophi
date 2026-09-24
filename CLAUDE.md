@@ -165,11 +165,23 @@ Bu kod tabanında aynı hata sınıfları dönüp duruyor. Yeni bir arıza arark
 - **"Yok" ≠ "silinmiş".** Kaydediciler bulamadıklarını silinmiş sanabilir.
 - **Tripwire'ın susması yokluğu kanıtlamaz.** Enstrümanın anahtarı, ölçtüğü
   şeyle çakışmamalı.
-- **★ İNDEKS TAMPONU YOK, ve bu bir tercih.** `DNA::GeometryDetail` bir
-  **attribute sistemi**: köşe başına vertex tutar, üçgenler ardışık üçlülerdir.
-  `get_indices()` / `get_index_count()` diye bir şey yok — indeksli model
-  geçmişte kaldı. Weld/unique eşlemesi gerekiyorsa ayrı bir önbellek olarak
-  kurulur (bkz. erime yolundaki `flat_soa_to_unique`), geometriye gömülmez.
+- **★ Üçgenleri HER ZAMAN `indices` üzerinden oku — ama indekse bağlantı
+  gözüyle bakma.** `DNA::GeometryDetail` bir **attribute sistemi** ve düz bir
+  indeks tamponu taşır: `geometry->indices` (public alan; `get_indices()`
+  getter'ı yok). Üçgen `f` = `indices[3f..3f+2]`. İki tür mesh bir arada yaşar:
+  - **Gerçek indeksli** — glTF/Assimp import, yol şeridi, profil mesh'leri
+    köşeleri paylaşır.
+  - **Ardışık üçlü** (`indices[i] == i`) — modifier çıktısı ve bazı üreticiler.
+
+  O yüzden iki varsayım da yanlıştır: `P[3f]` diye köşeye doğrudan gitmek
+  (indeksli mesh'te **hatasız yanlış üçgen** okur) ve paylaşılan indeksi
+  **weld edilmiş bağlantı** sanmak (ardışık mesh'te hiç paylaşım yok, indeksli
+  mesh'te UV/normal dikişleri köşeyi zaten böler). Konum bazlı weld/unique
+  eşlemesi gerekiyorsa ayrı bir önbellek olarak kurulur (bkz. erime yolundaki
+  `flat_soa_to_unique`), geometriye gömülmez.
+  ★ Bu madde 2026-09-24'e kadar "İNDEKS TAMPONU YOK" diyordu; kod hiçbir zaman
+  öyle olmadı (glTF okuyucusu indeksi doğrudan yazıyor). Eski metni alıntılayan
+  notlara güvenme.
 - **★ Geometri her zaman FLAT SoA'dır** (`TriangleMesh` + `DNA::GeometryDetail`).
   `Triangle` facade eski yol; hâlâ karşına çıkar ama **yeni kod flat SoA'yı esas
   almalı**. Sahnede nesne sayan/arayan kod yalnızca facade tararsa flat mesh'leri

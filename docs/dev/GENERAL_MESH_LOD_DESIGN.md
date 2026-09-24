@@ -40,7 +40,10 @@ flat SoA  ->  [1] weld  ->  [2] baglantili parcalar  ->  [3] siniflandir
                                               [5] kademe mesh'i (ucgen hedefi)
 ```
 
-**[1] Weld.** Flat SoA'da bağlantı yoktur (indeks tamponu yok — bu bir tercih).
+**[1] Weld.** Flat SoA'da bağlantıya güvenilmez: `indices` vardır, ama bir mesh
+ardışık üçlü (`indices[i] == i`, hiç paylaşım yok) ya da gerçek indeksli
+olabilir (glTF/Assimp; UV/normal dikişleri köşeyi yine böler). Bu notun ilk
+halindeki "indeks tamponu yok" ifadesi yanlıştı (düzeltme 2026-09-24).
 Konum bazlı weld ayrı bir önbellek olarak kurulur; depoda örneği var:
 `scene_data.h:772` `flat_soa_to_unique` (erime yolu). Geometriye gömülmez.
 
