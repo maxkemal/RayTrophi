@@ -702,7 +702,9 @@ texel başına veriler bugün paralel diziler hâlinde duruyor: `temperature`,
 `mass_fraction`, `substance_tag`, `granular_softening`, `granular_bond_scale`,
 MSF'te `melt`/`moisture`/char. Bu zaten bir attribute sistemi; eksik olan tek
 şey **isimlendirme katmanı**. Depo bu modele zaten karar vermiş durumda:
-`DNA::GeometryDetail` açıkça bir attribute sistemidir (indeks tamponu yok).
+`DNA::GeometryDetail` açıkça bir attribute sistemidir (düz bir `indices`
+tamponu taşır ama bağlantı garantisi vermez — bkz. CLAUDE.md, "Üçgenleri HER
+ZAMAN `indices` üzerinden oku").
 
 Karar: **yeni depolama YOK, isimlendirme VAR.** Var olan dizilerin üstüne ortak
 bir sözleşme — `ad + tip + tanım kümesi` (per-particle / per-texel / per-vertex
