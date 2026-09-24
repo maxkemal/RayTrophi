@@ -1551,6 +1551,20 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "Use the system only as a gas/fluid emitter source, hiding carrier "
        "particles from RayFusion, Solid and ray-traced renders.");
 
+    particle.def("add_system", [](const std::string& name) -> py::dict {
+        rtapi::ParticleSystemInfo info;
+        requireResult(rtapi::addParticleSystem(name, info));
+        py::dict d;
+        d["index"] = info.index;
+        d["id"] = info.id;
+        d["name"] = info.name;
+        d["active"] = info.active;
+        d["emitter_only"] = info.emitter_only;
+        d["render_in_raytrace"] = info.render_in_raytrace;
+        return d;
+    }, py::arg("name") = "Particle System",
+       "Create an empty independent particle system without applying a preset.");
+
     particle.def("add_preset", [](const std::string& preset) -> py::dict {
         rtapi::ParticleSystemInfo info;
         requireResult(rtapi::addParticleSystemPreset(preset, info));

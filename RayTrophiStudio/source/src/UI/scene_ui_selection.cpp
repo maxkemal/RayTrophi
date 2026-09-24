@@ -12,6 +12,7 @@
 #include "MeshEdit/ProfileSplineOverlay.h"
 #include "MeshEdit/SplineObject.h"
 #include "MeshEdit/SplineObjectLifecycle.h"
+#include "UI/ParticleEmitterGizmo.h"
 #include "globals.h"
 #include "Backend/VulkanBackend.h"
 #include "Backend/OptixBackend.h"
@@ -868,6 +869,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             int closest_emitter_system_index = -1;
             int closest_emitter_index = -1;
             float closest_emitter_t = closest_force_field_t;
+            Vec3 closest_emitter_position(0.0f);
 
             for (int system_i = 0;
                  system_i < static_cast<int>(ctx.scene.particle_systems.size());
@@ -881,26 +883,31 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                      ++emitter_i) {
                     const auto& emitter =
                         emitters[static_cast<std::size_t>(emitter_i)];
-                    if (!emitter.enabled ||
-                        emitter.source_mode !=
+                    if (emitter.source_mode !=
                             RayTrophiSim::ParticleEmitterSourceMode::Point) {
                         continue;
                     }
-                    const Vec3 oc = r.origin - emitter.point;
-                    const float radius =
-                        std::max(0.18f, emitter.start_size * 3.0f);
-                    const float a = r.direction.dot(r.direction);
-                    const float half_b = oc.dot(r.direction);
-                    const float c = oc.dot(oc) - radius * radius;
-                    const float discriminant = half_b * half_b - a * c;
-                    if (discriminant <= 0.0f) continue;
-                    const float candidate =
-                        (-half_b - std::sqrt(discriminant)) / a;
-                    if (candidate > 0.001f &&
+                    const RayTrophiSim::ParticleEmitterFrame emitter_frame =
+                        system.runtime->resolveParticleEmitterFrame(
+                            emitter, timeline.getCurrentFrame());
+                    if (emitter_frame.parent_missing) continue;
+                    const auto geometry =
+                        ParticleEmitterGizmo::makeDirectionalEmitterGeometry(
+                            emitter_frame.position,
+                            emitter_frame.direction,
+                            emitter.speed,
+                            emitter.spread);
+                    float candidate = 0.0f;
+                    const float pick_padding =
+                        std::max(0.08f, emitter.start_size * 2.0f);
+                    if (ParticleEmitterGizmo::intersectDirectionalEmitter(
+                            r.origin, r.direction, geometry, pick_padding,
+                            candidate) &&
                         candidate < closest_emitter_t) {
                         closest_emitter_t = candidate;
                         closest_emitter_system_index = system_i;
                         closest_emitter_index = emitter_i;
+                        closest_emitter_position = emitter_frame.position;
                     }
                 }
             }
@@ -1208,7 +1215,12 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             }
 
             // Priority Selection: ForceField > Camera > Light > Object (by distance)
-            if (closest_force_field && closest_force_field_t < closest_so_far && closest_force_field_t < closest_camera_t && closest_force_field_t < closest_t) {
+            if (closest_force_field &&
+                closest_force_field_t < closest_so_far &&
+                closest_force_field_t < closest_camera_t &&
+                closest_force_field_t < closest_t &&
+                (closest_emitter_index < 0 ||
+                 closest_force_field_t < closest_emitter_t)) {
                 if (ctrl_held) {
                     SelectableItem item;
                     item.type = SelectableType::ForceField;
@@ -1272,7 +1284,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 item.particle_system_index = closest_emitter_system_index;
                 item.particle_emitter_index = closest_emitter_index;
                 item.name = emitter.name;
-                item.position = emitter.point;
+                item.position = closest_emitter_position;
                 ctx.scene.setActiveParticleSystemObject(
                     static_cast<std::size_t>(closest_emitter_system_index));
                 if (ctrl_held) {
@@ -1286,7 +1298,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                         closest_emitter_system_index,
                         closest_emitter_index,
                         emitter.name);
-                    ctx.selection.selected.position = emitter.point;
+                    ctx.selection.selected.position = closest_emitter_position;
                 }
                 show_forcefield_tab = true;
                 tab_to_focus = "Simulation";

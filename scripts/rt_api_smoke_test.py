@@ -787,6 +787,14 @@ print("[rt-smoke] rt.forcefield lifecycle + patch + evaluate: OK")
 # 5.6b - rt.particle: emitters, solver settings, stats, direct spawn
 assert hasattr(rt, "particle"), "rt.particle submodule must exist"
 pt_emitters_before = len(rt.particle.emitters())
+pt_systems_before = rt.particle.list_systems()
+pt_created_empty_system = False
+if not pt_systems_before:
+    empty_system = rt.particle.add_system("Smoke Empty Particle System")
+    assert empty_system["name"] == "Smoke Empty Particle System"
+    assert empty_system["active"] is True
+    assert rt.particle.list_systems()[-1]["emitter_count"] == 0
+    pt_created_empty_system = True
 
 em = rt.particle.add_emitter(name="SmokeEmitter", rate_per_second=64.0,
                              speed=3.0, lifetime_seconds=2.0,
@@ -918,6 +926,9 @@ if pt_emitters_before == 0:
     rt.particle.add_emitter(name="SmokeEmitterClear")
     rt.particle.clear_emitters()
     assert len(rt.particle.emitters()) == 0
+if pt_created_empty_system:
+    rt.particle.clear_systems()
+    assert not rt.particle.list_systems()
 print("[rt-smoke] rt.particle emitter-only + emitters + physics + stats + spawn: OK")
 
 # 5.6c - rt.anim skeletal playback (transport + graph parameters only)
