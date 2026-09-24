@@ -135,8 +135,9 @@ struct VK_GPU_ALIGN(16) VkGpuMaterial {
     float volume_multi_scatter;
     float volume_light_steps;
     float volume_shadow_strength;
-    float _volume_pad0;
-    float _volume_pad1;
+    // Block 25 tail: SSS walk controls (were _volume_pad0/1 — size unchanged)
+    float sss_method = 0.0f;        // 0 = random walk, 1 = fast (Lambert, no walk)
+    float sss_walk_max_steps = 64.0f; // walk hard cap, [8, 256]; a `{}` default must not mean 8
 };
 
 // AUTHORING struct only — VkGpuMaterial is what the CPU fill code writes, but it
@@ -204,7 +205,7 @@ struct VK_GPU_ALIGN(16) VkGpuMaterialExt {
     // Block 11-13: iridescence tail + interior dust
     float clearcoat_film_thickness, dust_color_a_r, dust_color_a_g, dust_color_a_b;
     float dust_style, dust_color_b_r, dust_color_b_g, dust_color_b_b;
-    float shard_shape, _ext_pad0, _ext_pad1, _ext_pad2;
+    float shard_shape, sss_method, sss_walk_max_steps, _ext_pad2;
     // Block 14-16: closed-mesh volume
     float volume_density, volume_absorption, volume_scattering, volume_anisotropy;
     float volume_step_size, volume_max_steps, volume_noise_scale, volume_multi_scatter;
@@ -239,7 +240,7 @@ inline void splitGpuMaterial(const VkGpuMaterial& m, VkGpuMaterialCore& c, VkGpu
     e.resin_dirt_color_r = m.resin_dirt_color_r; e.resin_dirt_color_g = m.resin_dirt_color_g; e.resin_dirt_color_b = m.resin_dirt_color_b; e.clearcoat_iridescence = m.clearcoat_iridescence;
     e.clearcoat_film_thickness = m.clearcoat_film_thickness; e.dust_color_a_r = m.dust_color_a_r; e.dust_color_a_g = m.dust_color_a_g; e.dust_color_a_b = m.dust_color_a_b;
     e.dust_style = m.dust_style; e.dust_color_b_r = m.dust_color_b_r; e.dust_color_b_g = m.dust_color_b_g; e.dust_color_b_b = m.dust_color_b_b;
-    e.shard_shape = m.shard_shape; e._ext_pad0 = 0.0f; e._ext_pad1 = 0.0f; e._ext_pad2 = 0.0f;
+    e.shard_shape = m.shard_shape; e.sss_method = m.sss_method; e.sss_walk_max_steps = m.sss_walk_max_steps; e._ext_pad2 = 0.0f;
     e.volume_density = m.volume_density; e.volume_absorption = m.volume_absorption;
     e.volume_scattering = m.volume_scattering; e.volume_anisotropy = m.volume_anisotropy;
     e.volume_step_size = m.volume_step_size; e.volume_max_steps = m.volume_max_steps;

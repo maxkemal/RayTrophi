@@ -578,7 +578,7 @@ once viewport'u drain eder; RT descriptor duzeni ve binding 23 degistirilmedi.
 Bu **tum materyaller tamdir** iddiasi degildir. `viewport.quality` ve Q paneli
 parite durumunu deger olarak raporlar: opaque core `rt_aligned`; graph surface
 `bounded` (pointiness, named attribute, traced AO ve time girdileri henuz neutral);
-clearcoat `iridescent_lobe`; subsurface `radius_profile_approx`;
+clearcoat `iridescent_lobe`; subsurface `curvature_wrap_rt_albedo` (2026-09-24, RT albedo parity + per-channel curvature wrap);
 translucency `thin_surface_approx`; surface anisotropy
 `unsupported_abi_conflict`; transparency `unsorted_alpha`;
 transmission `screen_space_thickness`; resin interior

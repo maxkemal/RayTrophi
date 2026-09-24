@@ -438,6 +438,12 @@ uint32_t requiredCapabilities(const std::string& method) {
         // Emitters. `flow_source.list`/`.get` fall through to Read above via the
         // substring heuristics; create/update/remove land here as SceneWrite.
         "flow_source.",
+        // ★ Domain-level simulation verbs that belong to NEITHER gas nor fluid,
+        //   because both share one grid-domain descriptor. `sim.control_state`
+        //   falls through to Read above; `sim.move_domain` lands here as
+        //   SceneWrite. Without this prefix authorize() fails closed and the
+        //   method is rejected with no diagnostic at all.
+        "sim.",
         // Editor view state. `editor.get_state` falls through to Read above via
         // the `.get` heuristic; set_bottom_editor/set_node_domain land here.
         // ★ Named `editor.` and NOT `ui.` on purpose: rt.ui draws your own panel

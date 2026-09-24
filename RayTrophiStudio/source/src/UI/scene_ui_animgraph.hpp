@@ -258,7 +258,7 @@ inline void drawAnimGraphToolbarLabel(const char* title) {
 }
 
 inline void drawAnimGraphSettingsAndStatus(UIContext& ctx, const std::string& characterName, AnimationGraph::AnimationNodeGraph* assetGraph) {
-    if (ImGui::CollapsingHeader("Animator Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::CollapsingHeader("Animator Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
         const bool runtimeStale = !characterName.empty() && isAnimGraphRuntimeStale(ctx.scene, characterName);
         const auto* runtimeGraph = getRuntimeGraphForCharacter(ctx.scene, characterName);
         
@@ -527,7 +527,7 @@ inline void drawAnimationParametersPanel(UIContext& ctx,
     
     // Float parameters
     if (!evalCtx.floatParams.empty()) {
-        if (ImGui::CollapsingHeader("Float Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (UIWidgets::CollapsingHeader("Float Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
             for (auto& [name, value] : evalCtx.floatParams) {
                 SceneUI::DrawSmartFloat(name.c_str(), name.c_str(), &value, -10.0f, 10.0f, "%.3f", false, nullptr, 16);
             }
@@ -536,7 +536,7 @@ inline void drawAnimationParametersPanel(UIContext& ctx,
     
     // Bool parameters
     if (!evalCtx.boolParams.empty()) {
-        if (ImGui::CollapsingHeader("Bool Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (UIWidgets::CollapsingHeader("Bool Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
             for (auto& [name, value] : evalCtx.boolParams) {
                 ImGui::Checkbox(name.c_str(), &value);
             }
@@ -544,7 +544,7 @@ inline void drawAnimationParametersPanel(UIContext& ctx,
     }
 
     if (!evalCtx.intParams.empty()) {
-        if (ImGui::CollapsingHeader("Int Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (UIWidgets::CollapsingHeader("Int Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
             for (auto& [name, value] : evalCtx.intParams) {
                 ImGui::InputInt(name.c_str(), &value);
             }
@@ -570,7 +570,7 @@ inline void drawAnimationParametersPanel(UIContext& ctx,
         newParamName[0] = '\0';
     }
     
-    if (ImGui::CollapsingHeader("Triggers", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::CollapsingHeader("Triggers", ImGuiTreeNodeFlags_DefaultOpen)) {
         static char triggerName[64] = "";
         ImGui::InputText("Trigger Name", triggerName, sizeof(triggerName));
         if (ImGui::Button("Fire Trigger") && strlen(triggerName) > 0) {
@@ -1243,7 +1243,7 @@ inline void drawRuntimeFlowPanel(AnimationGraph::AnimationNodeGraph* graph, floa
     ImGui::Text("Evaluated Nodes: %zu", trace.evaluatedNodeOrder.size());
     ImGui::Text("Active Links: %zu", trace.activeLinkIds.size());
 
-    if (ImGui::CollapsingHeader("Execution Order", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::CollapsingHeader("Execution Order", ImGuiTreeNodeFlags_DefaultOpen)) {
         for (size_t i = 0; i < trace.evaluatedNodeOrder.size(); ++i) {
             auto* node = graph->findNodeById(trace.evaluatedNodeOrder[i]);
             if (!node) continue;
@@ -1254,7 +1254,7 @@ inline void drawRuntimeFlowPanel(AnimationGraph::AnimationNodeGraph* graph, floa
         }
     }
 
-    if (ImGui::CollapsingHeader("Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::CollapsingHeader("Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
         for (const auto& [name, value] : trace.floatParamsSnapshot) {
             ImGui::BulletText("%s = %.3f", name.c_str(), value);
         }
@@ -1273,7 +1273,7 @@ inline void drawRuntimeFlowPanel(AnimationGraph::AnimationNodeGraph* graph, floa
         }
     }
 
-    if (ImGui::CollapsingHeader("State Machines", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::CollapsingHeader("State Machines", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (trace.stateMachines.empty()) {
             ImGui::TextDisabled("No state machine activity.");
         } else {
@@ -1294,7 +1294,7 @@ inline void drawRuntimeFlowPanel(AnimationGraph::AnimationNodeGraph* graph, floa
         }
     }
 
-    if (ImGui::CollapsingHeader("Event Log", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::CollapsingHeader("Event Log", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (trace.eventLog.empty()) {
             ImGui::TextDisabled("No runtime events.");
         } else {
@@ -2725,7 +2725,7 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
             ImGui::Separator();
             ImGui::Spacing();
 
-            if (ImGui::CollapsingHeader("Clip Summary", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (UIWidgets::CollapsingHeader("Clip Summary", ImGuiTreeNodeFlags_DefaultOpen)) {
                 drawAnimationClipsPanel(ctx, 0.0f, false);
             }
         } else if (g_animGraphUI.leftPanelTab == 1) {
@@ -2894,7 +2894,7 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
             drawAnimGraphSectionLabel("Runtime", "Execution flow and live graph diagnostics");
             ImGui::Separator();
             drawRuntimeFlowPanel(runtimeGraphForActiveCharacter ? runtimeGraphForActiveCharacter : currentGraph.get(), 0.0f, false);
-            if (ImGui::CollapsingHeader("State Machine Details", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (UIWidgets::CollapsingHeader("State Machine Details", ImGuiTreeNodeFlags_DefaultOpen)) {
                 if (smNodeToDisplay) {
                     drawStateMachinePanel(ctx, runtimeGraphForActiveCharacter ? runtimeGraphForActiveCharacter : currentGraph.get(), g_animGraphUI.activeCharacter, 0.0f, false);
                 } else {

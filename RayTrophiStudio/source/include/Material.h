@@ -235,10 +235,16 @@ public:
     virtual void setSubsurfaceAnisotropy(float val) {}
     virtual float getSubsurfaceIOR() const { return 1.4f; }
     virtual void setSubsurfaceIOR(float val) {}
-    virtual bool getUseRandomWalkSSS() const { return true; }
-    virtual void setUseRandomWalkSSS(bool val) {}
-    virtual int getSssMaxSteps() const { return 6; }
-    virtual void setSssMaxSteps(int val) {}
+    // SSS method: 0 = random walk (geometry-aware), 1 = fast (Lambert with
+    // subsurface_color, no probes). Walk max steps: hard cap on the walk,
+    // clamped to [8, 256]. Renamed from useRandomWalkSSS / sssMaxSteps when
+    // the walk moved to the Cycles remap: the old default of 6 steps kills
+    // most of the energy of a high-albedo walk, so the old value must not be
+    // read with the new meaning.
+    virtual int getSssMethod() const { return 0; }
+    virtual void setSssMethod(int val) {}
+    virtual int getSssWalkMaxSteps() const { return 64; }
+    virtual void setSssWalkMaxSteps(int val) {}
 
     virtual float getTransmissionDensity() const { return 0.0f; }
     virtual void setTransmissionDensity(float val) {}

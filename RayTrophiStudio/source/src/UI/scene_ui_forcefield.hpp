@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -753,7 +753,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
             }
 
             ImGui::Spacing();
-            if (ImGui::CollapsingHeader("Gas Coupling (particles feed the grid)")) {
+            if (UIWidgets::CollapsingHeader("Gas Coupling (particles feed the grid)")) {
                 ImGui::TextDisabled("Per-second deposit into any Gas domain a particle flies through.");
                 ImGui::DragFloat("Smoke Deposit", &physics.grid_density_deposit,
                                  0.05f, 0.0f, 50.0f, "%.2f /s");
@@ -1190,7 +1190,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 }
                 ImGui::DragFloat3("Local Pivot Offset", &emitter.local_offset.x, 0.05f, -1000.0f, 1000.0f, "%.2f");
 
-                if (ImGui::CollapsingHeader("Spawning Appearance Dynamics")) {
+                if (UIWidgets::CollapsingHeader("Spawning Appearance Dynamics")) {
                     ImGui::DragFloat("Start Size", &emitter.start_size, 0.005f, 0.0f, 100.0f, "%.3f");
                     ImGui::DragFloat("End Size", &emitter.end_size, 0.005f, 0.0f, 100.0f, "%.3f");
                     ImGui::SliderFloat("Size Jitter", &emitter.size_jitter, 0.0f, 1.0f, "%.2f");
@@ -1516,7 +1516,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
 
         ImGui::Separator();
         ImGui::Text("Particles: %zu", fluid->particles.size());
-        if (ImGui::CollapsingHeader("Fluid Stats", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (UIWidgets::CollapsingHeader("Fluid Stats", ImGuiTreeNodeFlags_DefaultOpen)) {
             const auto& stats = fluid->stats;
             ImGui::TextDisabled("Step: %.3f ms  Threads: %d  Substeps: %d",
                                 stats.total_ms,
@@ -1764,7 +1764,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
 
         // ── Destruction: convex Voronoi pre-fracture (Faz 1, geometry only) ──
         ImGui::Spacing();
-        if (ImGui::CollapsingHeader("Fracture (Destruction)")) {
+        if (UIWidgets::CollapsingHeader("Fracture (Destruction)")) {
             ImGui::TextDisabled(ui.fracture_exact_surface
                 ? "Splits the selected MESH into Voronoi shards (keeps UVs/cavities)."
                 : "Splits the selected mesh's CONVEX HULL into Voronoi shards.");

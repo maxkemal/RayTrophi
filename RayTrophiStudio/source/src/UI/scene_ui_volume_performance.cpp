@@ -161,7 +161,7 @@ void DrawVolumePerformancePanel(UIContext& ctx) {
     ImGui::Text("Last path: %s",instancePath);
     ImGui::Text("Instances: %u",instanceStats.instanceCount);
     ImGui::Text("CPU prepare: %.3f ms",instanceStats.cpuPrepareMs);
-    if (ImGui::CollapsingHeader("Instance Diagnostics")) {
+    if (UIWidgets::CollapsingHeader("Instance Diagnostics")) {
         ImGui::Text("Dirty groups: %u",instanceStats.dirtyGroupCount);
         ImGui::Text("Source upload: %.2f MB",double(instanceStats.uploadBytes)/(1024.0*1024.0));
         ImGui::Text("GPU dispatches: %llu",static_cast<unsigned long long>(instanceStats.gpuDispatches));
@@ -234,7 +234,7 @@ void DrawVolumePerformancePanel(UIContext& ctx) {
     UIWidgets::ColoredHeader("Foliage VRAM Estimate", ImVec4(0.60f,0.88f,1.0f,1.0f));
     ImGui::Text("Logical instances: %llu", static_cast<unsigned long long>(foliageLogical));
     ImGui::Text("Combined active estimate: %.2f MiB", double(rtBytes + rasterBytes) / (1024.0 * 1024.0));
-    if (ImGui::CollapsingHeader("Foliage Memory Details")) {
+    if (UIWidgets::CollapsingHeader("Foliage Memory Details")) {
         ImGui::Text("GPU records (material parts): %llu", static_cast<unsigned long long>(foliageRecords));
         ImGui::Text("Vulkan RT records: %.2f MiB", double(rtBytes) / (1024.0 * 1024.0));
         ImGui::Text("Solid matrix records: %.2f MiB", double(rasterBytes) / (1024.0 * 1024.0));
@@ -255,7 +255,7 @@ void DrawVolumePerformancePanel(UIContext& ctx) {
         ImGui::Text("Last scatter: %s / %.2f ms", terrainScatter.gpuPathUsed ? "GPU" : "CPU",
             terrainScatter.gpuMs + terrainScatter.cpuCompactMs);
 
-    if (ImGui::CollapsingHeader("Developer Tests")) {
+    if (UIWidgets::CollapsingHeader("Developer Tests")) {
     UIWidgets::ColoredHeader("GPU Foliage Scatter Parity",ImVec4(0.83f,0.72f,1.0f,1.0f));
     if(ImGui::Button("Run 1M Scatter Parity Test")) {
         FoliageGPU::runParityTest(1000000u);

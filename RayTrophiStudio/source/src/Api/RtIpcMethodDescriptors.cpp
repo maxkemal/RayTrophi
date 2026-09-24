@@ -2905,7 +2905,7 @@ static const MethodDescriptor desc_material_of_object = {
 static const MethodRegistration reg_material_of_object(desc_material_of_object);
 
 static const MethodParam params_material_set[] = {
-    {"param", "string", true, "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission and opacity are clamped to [0,1]; ior to [1,10].", nullptr, "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y"},
+    {"param", "string", true, "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color, subsurface_color, subsurface_radius) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission, opacity and subsurface are clamped to [0,1]; ior to [1,10]; subsurface_ior to [1,3]; subsurface_anisotropy to [-0.99,0.99]; subsurface_scale must be positive; subsurface_method 0=random walk 1=fast; subsurface_max_steps integer [8,256] (too low darkens).", nullptr, "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|subsurface|subsurface_anisotropy|subsurface_color|subsurface_ior|subsurface_max_steps|subsurface_method|subsurface_radius|subsurface_scale|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y"},
     {"object_name", "string", true, "", nullptr, nullptr},
     {"value", "any", false, "", nullptr, nullptr},
 };
@@ -2923,7 +2923,7 @@ static const MethodDescriptor desc_material_set = {
 static const MethodRegistration reg_material_set(desc_material_set);
 
 static const MethodParam params_material_set_param[] = {
-    {"param", "string", true, "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission and opacity are clamped to [0,1]; ior to [1,10].", nullptr, "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y"},
+    {"param", "string", true, "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color, subsurface_color, subsurface_radius) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission, opacity and subsurface are clamped to [0,1]; ior to [1,10]; subsurface_ior to [1,3]; subsurface_anisotropy to [-0.99,0.99]; subsurface_scale must be positive; subsurface_method 0=random walk 1=fast; subsurface_max_steps integer [8,256] (too low darkens).", nullptr, "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|subsurface|subsurface_anisotropy|subsurface_color|subsurface_ior|subsurface_max_steps|subsurface_method|subsurface_radius|subsurface_scale|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y"},
     {"material_name", "string", true, "", nullptr, nullptr},
     {"value", "any", false, "", nullptr, nullptr},
 };
@@ -7860,6 +7860,23 @@ static const MethodDescriptor desc_sim_control_state = {
     true
 };
 static const MethodRegistration reg_sim_control_state(desc_sim_control_state);
+
+static const MethodParam params_sim_move_domain[] = {
+    {"delta", "vec3", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_sim_move_domain = {
+    "sim.move_domain", "sim",
+    "Translate a gas or fluid grid domain and carry its unparented flow sources with it",
+    "READ 'sources_carried'. Moving a domain used to move only the box: its emitters stayed at their old world positions, so the re-simulated smoke reappeared where it always had been -- which reads as a STALE CACHE rather than as stale emitters. Two symptoms, one cause, and the wrong story is the easier one to believe. A move that reports sources_carried = 0 on a domain that visibly owns emitters means those emitters are PARENTED: a parented source follows its parent object, not the domain, because one position cannot have two authorities. Keyframed source positions are translated too - moving only the live position looks correct until the next timeline evaluation writes the old keyed world position straight back. One method covers BOTH domain types because gas and fluid share SimulationGridDomainDesc; separate gas/fluid movers would be two bodies that must not diverge. The call also republishes the domain state (the solver and the RT volume read that, not the descriptor, and while the timeline is parked no step runs to publish it) and drops the frame cache, whose baked frames belong to the old box.",
+    "write", "SceneWrite", false, "any",
+    "sim|move|domain|gas|fluid|emitter",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_sim_move_domain, 2,
+    true
+};
+static const MethodRegistration reg_sim_move_domain(desc_sim_move_domain);
 
 static const MethodParam params_sim_cache_bake[] = {
     {"cache_dir", "string", true, "", nullptr, nullptr},

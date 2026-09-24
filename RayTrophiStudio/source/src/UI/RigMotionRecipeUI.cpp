@@ -5,7 +5,7 @@
 
 namespace RigUI {
 void drawRigMotionRecipes(UIContext &ctx, const std::string &character, uint64_t revision) {
-    if (!ImGui::CollapsingHeader("Quick Motion")) {
+    if (!UIWidgets::CollapsingHeader("Quick Motion")) {
         return;
     }
     static char name[129] = "Walk_Loop";

@@ -727,7 +727,7 @@ public:
         // The old Refresh button shared the collapsing-header row and could
         // overlap its arrow/icon at narrow inspector widths. Preview is now
         // revision-driven, so that second control is unnecessary.
-        if (ImGui::CollapsingHeader("Field Preview", ImGuiTreeNodeFlags_None)) {
+        if (UIWidgets::CollapsingHeader("Field Preview", ImGuiTreeNodeFlags_None)) {
             const bool revisionChanged = lastPreviewedRevision != maskPreviewRevision;
             const bool debounceElapsed =
                 (ImGui::GetTime() - pendingAutoPreviewSince) >= 0.08;

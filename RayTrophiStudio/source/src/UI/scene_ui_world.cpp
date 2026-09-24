@@ -1,4 +1,4 @@
-﻿// scene_ui_world.cpp
+// scene_ui_world.cpp
 // World/Environment settings UI implementation
 // Part of SceneUI - extracted for maintainability
 
@@ -831,7 +831,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         }
         
         // Advanced Physics (Collapsible)
-        if (ImGui::CollapsingHeader("Advanced Physics")) {
+        if (UIWidgets::CollapsingHeader("Advanced Physics")) {
             ImGui::Indent();
             
             // Mie Anisotropy
@@ -1403,7 +1403,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             // Show detailed controls in a collapsible section or when Custom is selected
             bool show_details = (weather_preset_index == 7); // Custom mode
             
-            if (show_details || ImGui::CollapsingHeader("Cloud Details")) {
+            if (show_details || UIWidgets::CollapsingHeader("Cloud Details")) {
                 // Coverage
                 bool covKeyed = isWorldKeyed(WorldProp::CloudCoverage);
                 if (SceneUI::DrawSmartFloat("clcov", "Coverage", &cloudParams.cloud_coverage, 0.0f, 0.6f, "%.2f", covKeyed, [&]{ insertWorldKey("Cloud Cov", WorldProp::CloudCoverage); }, 16)) {
@@ -1473,7 +1473,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             // ═══════════════════════════════════════════════════════════
             // CLOUD LIGHTING SETTINGS
             // ═══════════════════════════════════════════════════════════
-            if (ImGui::CollapsingHeader("Cloud Lighting")) {
+            if (UIWidgets::CollapsingHeader("Cloud Lighting")) {
                 bool lightKeyed = isWorldKeyed(WorldProp::CloudLighting);
                 ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Self-Shadowing:");
                 

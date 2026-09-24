@@ -7,7 +7,7 @@
 #include <vector>
 namespace RigUI {
 void drawRigAnatomy(UIContext& ctx,const std::string& character) {
-    if(character.empty()||!ImGui::CollapsingHeader("Rig anatomy"))return;
+    if(character.empty()||!UIWidgets::CollapsingHeader("Rig anatomy"))return;
     ImGui::PushID("RigAnatomy");
     static std::string owner,rightBone,message;static int load=-1,roleIndex=-1,pairIndex=-1,chainIndex=-1;
     static bool editMetadata=false;static char roleName[129]="left_arm.upper",chainName[129]="left_arm";
@@ -30,7 +30,7 @@ void drawRigAnatomy(UIContext& ctx,const std::string& character) {
         if(ImGui::BeginCombo("Family",family.c_str())){for(const char* option:families)if(ImGui::Selectable(option,family==option)){edited["family"]=option;apply=true;}ImGui::EndCombo();}
         ImGui::TextWrapped("Selected bone: %s",selected.empty()?"Choose a bone":shortName(selected).c_str());
     }
-    if(ImGui::CollapsingHeader("Roles")) {
+    if(UIWidgets::CollapsingHeader("Roles")) {
         const auto& roles=value["roles"];if(roleIndex>=static_cast<int>(roles.size()))roleIndex=-1;
         if(ImGui::BeginListBox("##Roles",ImVec2(-1,125))) {
             for(size_t i=0;i<roles.size();++i){const auto label=roles[i]["role"].get<std::string>()+" = "+shortName(roles[i]["bone"].get<std::string>());if(ImGui::Selectable(label.c_str(),roleIndex==static_cast<int>(i)))roleIndex=static_cast<int>(i);}
@@ -45,7 +45,7 @@ void drawRigAnatomy(UIContext& ctx,const std::string& character) {
             }
         }
     }
-    if(ImGui::CollapsingHeader("Symmetry pairs")) {
+    if(UIWidgets::CollapsingHeader("Symmetry pairs")) {
         const auto& pairs=value["symmetry"];if(pairIndex>=static_cast<int>(pairs.size()))pairIndex=-1;
         if(ImGui::BeginListBox("##Pairs",ImVec2(-1,125))) {
             for(size_t i=0;i<pairs.size();++i){const auto label=shortName(pairs[i]["left"].get<std::string>())+" <-> "+shortName(pairs[i]["right"].get<std::string>());if(ImGui::Selectable(label.c_str(),pairIndex==static_cast<int>(i)))pairIndex=static_cast<int>(i);}
@@ -59,7 +59,7 @@ void drawRigAnatomy(UIContext& ctx,const std::string& character) {
             }
         }
     }
-    if(ImGui::CollapsingHeader("Limb chains")) {
+    if(UIWidgets::CollapsingHeader("Limb chains")) {
         const auto& chains=value["chains"];if(chainIndex>=static_cast<int>(chains.size()))chainIndex=-1;
         if(ImGui::BeginListBox("##Chains",ImVec2(-1,125))) {
             for(size_t i=0;i<chains.size();++i){const auto label=chains[i]["name"].get<std::string>()+" ("+std::to_string(chains[i]["bones"].size())+" joints)";if(ImGui::Selectable(label.c_str(),chainIndex==static_cast<int>(i)))chainIndex=static_cast<int>(i);}

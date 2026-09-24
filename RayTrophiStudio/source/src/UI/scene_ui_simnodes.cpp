@@ -458,7 +458,7 @@ void SceneUI::drawSimulationNodeProperties(NodeSystem::Sim::SimulationNodeGraph&
     // that already exists. Saying that only in a comment left the user to
     // discover it by the absence of anything happening, which is the worst
     // possible teacher.
-    if (ImGui::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (domain_names.empty()) {
             ImGui::TextColored(kWarn, "No simulation domains in this scene.");
             helpText("A Domain node NAMES a domain; it does not create one, and "
@@ -543,7 +543,7 @@ void SceneUI::drawSimulationNodeProperties(NodeSystem::Sim::SimulationNodeGraph&
     // whether it is satisfied. An unconnected required input is not an error the
     // graph reports — the node simply produces nothing — so it has to be shown.
     ImGui::Spacing();
-    if (ImGui::CollapsingHeader("Wiring", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::CollapsingHeader("Wiring", ImGuiTreeNodeFlags_DefaultOpen)) {
         auto pinConnected = [&graph](uint32_t pin_id) {
             for (const auto& link : graph.links)
                 if (link.startPinId == pin_id || link.endPinId == pin_id) return true;

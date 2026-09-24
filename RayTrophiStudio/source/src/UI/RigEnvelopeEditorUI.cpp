@@ -134,40 +134,41 @@ void drawRigEnvelopeEditor(UIContext &ctx) {
         ImGui::End();
         return;
     }
-    ImGui::SeparatorText(editor.bone.c_str());
-    drawCanvas();
-    ImGui::SetNextItemWidth(180.f);
-    ImGui::DragFloat("Start radius", &editor.profile.startRadius, .001f, .005f, .5f, "%.3f H");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(180.f);
-    ImGui::DragFloat("End radius", &editor.profile.endRadius, .001f, .005f, .5f, "%.3f H");
-    ImGui::SetNextItemWidth(180.f);
-    ImGui::DragFloat("Start extension", &editor.profile.startExtension, .005f, 0.f, .75f,
-                     "%.3f bone");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(180.f);
-    ImGui::DragFloat("End extension", &editor.profile.endExtension, .005f, 0.f, .75f,
-                     "%.3f bone");
-    ImGui::SetNextItemWidth(180.f);
-    ImGui::DragFloat("Falloff", &editor.profile.falloff, .05f, .5f, 8.f, "%.2f");
-    if (ImGui::Button("Apply profile and rebuild weights")) {
-        const auto result =
-            rtapi::applyRigBoneEnvelope(editor.character, editor.profile, editor.revision);
-        if (result.ok) {
-            editor.message = "Profile applied; weights rebuilt in one undo step.";
-            rtapi::setRigWeightMapVisible(true);
-            nlohmann::json binding;
-            if (rtapi::getRigMeshBinding(editor.character, binding).ok)
-                editor.revision = binding["rig_revision"].get<uint64_t>();
-        } else {
-            editor.message = result.error;
+    if (UIWidgets::CollapsingHeader(editor.bone.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+        drawCanvas();
+        ImGui::SetNextItemWidth(180.f);
+        ImGui::DragFloat("Start radius", &editor.profile.startRadius, .001f, .005f, .5f, "%.3f H");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(180.f);
+        ImGui::DragFloat("End radius", &editor.profile.endRadius, .001f, .005f, .5f, "%.3f H");
+        ImGui::SetNextItemWidth(180.f);
+        ImGui::DragFloat("Start extension", &editor.profile.startExtension, .005f, 0.f, .75f,
+                         "%.3f bone");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(180.f);
+        ImGui::DragFloat("End extension", &editor.profile.endExtension, .005f, 0.f, .75f,
+                         "%.3f bone");
+        ImGui::SetNextItemWidth(180.f);
+        ImGui::DragFloat("Falloff", &editor.profile.falloff, .05f, .5f, 8.f, "%.2f");
+        if (ImGui::Button("Apply profile and rebuild weights")) {
+            const auto result =
+                rtapi::applyRigBoneEnvelope(editor.character, editor.profile, editor.revision);
+            if (result.ok) {
+                editor.message = "Profile applied; weights rebuilt in one undo step.";
+                rtapi::setRigWeightMapVisible(true);
+                nlohmann::json binding;
+                if (rtapi::getRigMeshBinding(editor.character, binding).ok)
+                    editor.revision = binding["rig_revision"].get<uint64_t>();
+            } else {
+                editor.message = result.error;
+            }
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Reload"))
+            loadProfile(ctx, editor.bone);
+        if (!editor.message.empty())
+            ImGui::TextWrapped("%s", editor.message.c_str());
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Reload"))
-        loadProfile(ctx, editor.bone);
-    if (!editor.message.empty())
-        ImGui::TextWrapped("%s", editor.message.c_str());
     ImGui::End();
 }
 } // namespace RigUI

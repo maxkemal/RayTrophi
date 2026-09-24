@@ -77,7 +77,7 @@ struct alignas(16) GpuMaterial {
     // Subsurface control flags + tile-break (fills the implicit 4-byte gap before 8-byte-aligned fft_height_tex)
     int flags;                        // 4 bytes - bitfield flags
     int sss_use_random_walk = 1;      // 4 bytes
-    int sss_max_steps = 6;            // 4 bytes - bounded random-walk depth
+    int sss_max_steps = 64;            // 4 bytes - bounded random-walk depth
     float tile_break_strength = 0.0f; // 4 bytes - UV tile-break strength (0=off, 0.1–0.3 typical)
 
     // Block 8: Water FFT Textures (16 bytes)

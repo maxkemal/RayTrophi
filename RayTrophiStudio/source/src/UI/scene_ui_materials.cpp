@@ -2061,53 +2061,69 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
             changed = true;
         }
 
-        // Random-walk controls: enable and max steps
-        bool sss_rw = pbsdf->getUseRandomWalkSSS();
-        if (ImGui::Checkbox("Enable Random-Walk", &sss_rw)) {
-            pbsdf->setUseRandomWalkSSS(sss_rw);
+        // Method + walk cap. Both reach every backend (Vulkan RT via the
+        // material ext record, OptiX via its legacy fields).
+        int sss_method = pbsdf->getSssMethod();
+        const char* sss_methods[] = { "Random Walk", "Fast" };
+        if (ImGui::Combo("SSS Method", &sss_method, sss_methods, 2)) {
+            pbsdf->setSssMethod(sss_method);
             changed = true;
         }
-        int sss_steps = pbsdf->getSssMaxSteps();
-        if (ImGui::SliderInt("Max Steps", &sss_steps, 1, 32)) {
-            pbsdf->setSssMaxSteps(sss_steps);
+        UIWidgets::HelpMarker("Random Walk: geometry-aware, light bleeds through thin parts. "
+                              "Fast: same colour, no bleed, near-zero cost (use on heavy scenes / TDR).");
+        ImGui::BeginDisabled(sss_method != 0);
+        int sss_steps = pbsdf->getSssWalkMaxSteps();
+        if (ImGui::SliderInt("Walk Max Steps", &sss_steps, 8, 256)) {
+            pbsdf->setSssWalkMaxSteps(sss_steps);
             changed = true;
         }
+        ImGui::EndDisabled();
+        UIWidgets::HelpMarker("Hard cap on scatter events per walk. Too low DARKENS the result "
+                              "(cut walks lose their energy); 64 is enough for most materials.");
         
         ImGui::Separator();
         ImGui::Text("Presets:");
+        // Calibrated for the random-walk remap (2026-09-24): SSS Color is the
+        // colour the surface SETTLES to (multi-scatter albedo), no longer a
+        // per-event albedo that compounds darker with every scatter. Radius is
+        // the per-channel mean free path in scene units, times Scale.
         if (ImGui::SmallButton("Skin")) {
-            pbsdf->setSubsurface(0.3f);
-            pbsdf->setSubsurfaceColor(Vec3(1.0f, 0.8f, 0.6f));
+            pbsdf->setSubsurface(1.0f);
+            pbsdf->setSubsurfaceColor(Vec3(0.80f, 0.52f, 0.42f));
             pbsdf->setSubsurfaceRadius(Vec3(1.0f, 0.2f, 0.1f));
             pbsdf->setSubsurfaceScale(0.05f);
             pbsdf->setSubsurfaceAnisotropy(0.0f);
+            pbsdf->setSubsurfaceIOR(1.4f);
             changed = true;
         }
         ImGui::SameLine();
         if (ImGui::SmallButton("Wax")) {
-            pbsdf->setSubsurface(0.5f);
-            pbsdf->setSubsurfaceColor(Vec3(1.0f, 0.9f, 0.6f));
-            pbsdf->setSubsurfaceRadius(Vec3(0.3f, 0.3f, 0.2f));
-            pbsdf->setSubsurfaceScale(0.1f);
+            pbsdf->setSubsurface(1.0f);
+            pbsdf->setSubsurfaceColor(Vec3(0.85f, 0.72f, 0.45f));
+            pbsdf->setSubsurfaceRadius(Vec3(1.0f, 0.8f, 0.5f));
+            pbsdf->setSubsurfaceScale(0.03f);
             pbsdf->setSubsurfaceAnisotropy(0.0f);
+            pbsdf->setSubsurfaceIOR(1.45f);
             changed = true;
         }
         ImGui::SameLine();
         if (ImGui::SmallButton("Milk")) {
-            pbsdf->setSubsurface(0.8f);
-            pbsdf->setSubsurfaceColor(Vec3(1.0f, 1.0f, 1.0f));
-            pbsdf->setSubsurfaceRadius(Vec3(0.5f, 0.5f, 0.5f));
-            pbsdf->setSubsurfaceScale(0.2f);
-            pbsdf->setSubsurfaceAnisotropy(0.8f);
+            pbsdf->setSubsurface(1.0f);
+            pbsdf->setSubsurfaceColor(Vec3(0.92f, 0.90f, 0.85f));
+            pbsdf->setSubsurfaceRadius(Vec3(1.0f, 1.0f, 0.9f));
+            pbsdf->setSubsurfaceScale(0.1f);
+            pbsdf->setSubsurfaceAnisotropy(0.3f);
+            pbsdf->setSubsurfaceIOR(1.35f);
             changed = true;
         }
         ImGui::SameLine();
         if (ImGui::SmallButton("Jade")) {
-            pbsdf->setSubsurface(0.4f);
-            pbsdf->setSubsurfaceColor(Vec3(0.3f, 0.8f, 0.4f));
-            pbsdf->setSubsurfaceRadius(Vec3(0.2f, 0.5f, 0.2f));
-            pbsdf->setSubsurfaceScale(0.05f);
+            pbsdf->setSubsurface(1.0f);
+            pbsdf->setSubsurfaceColor(Vec3(0.35f, 0.65f, 0.40f));
+            pbsdf->setSubsurfaceRadius(Vec3(0.3f, 1.0f, 0.4f));
+            pbsdf->setSubsurfaceScale(0.02f);
             pbsdf->setSubsurfaceAnisotropy(0.3f);
+            pbsdf->setSubsurfaceIOR(1.6f);
             changed = true;
         }
         

@@ -256,10 +256,10 @@ public:
     void setSubsurfaceAnisotropy(float val) override;
     float getSubsurfaceIOR() const override;
     void setSubsurfaceIOR(float val) override;
-    bool getUseRandomWalkSSS() const override;
-    void setUseRandomWalkSSS(bool val) override;
-    int getSssMaxSteps() const override;
-    void setSssMaxSteps(int val) override;
+    int getSssMethod() const override;
+    void setSssMethod(int val) override;
+    int getSssWalkMaxSteps() const override;
+    void setSssWalkMaxSteps(int val) override;
 
     float getTransmissionDensity() const override;
     void setTransmissionDensity(float val) override;
@@ -307,8 +307,8 @@ public:
         float subsurfaceAnisotropy = 0.0f;                  // Scatter direction bias
         float subsurfaceIOR = 1.4f;                         // Internal SSS IOR
         float subsurface = 0.0f;                            // SSS amount (0-1)
-        bool useRandomWalkSSS = true;                       // Enable bounded SSS
-        int sssMaxSteps = 6;                                // Max internal scattering steps
+        int sssMethod = 0;                                  // 0 = random walk, 1 = fast (no walk)
+        int sssWalkMaxSteps = 64;                           // Walk hard cap, [8, 256]
     };
     
     struct ClearcoatExtension {

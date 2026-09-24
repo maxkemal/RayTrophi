@@ -2579,7 +2579,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 // EXPOSURE SETTINGS - Professional camera exposure controls
                 // ═══════════════════════════════════════════════════════════════════════════
                 ImGui::Separator();
-                if (ImGui::CollapsingHeader("Exposure", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (UIWidgets::CollapsingHeader("Exposure", ImGuiTreeNodeFlags_DefaultOpen)) {
                     bool exposure_changed = false;
 
                     // ═══════════════════════════════════════════════════════════
@@ -2927,7 +2927,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 // OUTPUT ASPECT RATIO - Syncs with Final Render
                 // ═══════════════════════════════════════════════════════════════════════════
                 ImGui::Separator();
-                if (ImGui::CollapsingHeader("Output Aspect Ratio")) {
+                if (UIWidgets::CollapsingHeader("Output Aspect Ratio")) {
                     ImGui::PushItemWidth(200);
                     if (ImGui::BeginCombo("Aspect##CamOutput",
                         CameraPresets::ASPECT_RATIOS[cam.output_aspect_index].name))
@@ -3001,7 +3001,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 // VIEWPORT GUIDES (Safe Areas, Letterbox, Grids)
                 // ═══════════════════════════════════════════════════════════════════════════
                 ImGui::Separator();
-                if (ImGui::CollapsingHeader("Viewport Guides")) {
+                if (UIWidgets::CollapsingHeader("Viewport Guides")) {
                     // Safe Areas
                     ImGui::Checkbox("Safe Areas", &guide_settings.show_safe_areas);
                     if (guide_settings.show_safe_areas) {

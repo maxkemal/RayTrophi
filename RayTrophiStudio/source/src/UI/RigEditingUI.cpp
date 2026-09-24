@@ -37,7 +37,9 @@ void drawRigEditing(UIContext& ctx) {
     static bool automaticName=true,automaticRigName=true;
     static char rigSeed[129]="Rig";
     static int preset=0;static float height=1.8f;
-    static std::string character,message,editingKey;
+    static std::string character,message,editingKey,targetMesh;
+    static nlohmann::json preflight;
+    static int preflightLoad=-1;
     static uint64_t editingRevision=0;
     static Vec3 addPosition(0,.3f,0),position,rotation;
     for(const auto& model:ctx.scene.importedModelContexts)
@@ -60,7 +62,7 @@ void drawRigEditing(UIContext& ctx) {
         ImGui::TextDisabled(editing?"Drag edits selected bone rest pose.":"Drag moves/rotates/scales the entire selected rig (G/R/S).");
         ImGui::TextDisabled("Escape cancels; one undo step on release.");
     }
-    ImGui::SeparatorText("Rig setup");
+    if (UIWidgets::CollapsingHeader("Rig Setup", ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::TextWrapped("Create a meshless rig, then add joints and edit local rest position/rotation.");
     bool overlay=ctx.scene.rigView.visible;
     if(ImGui::Checkbox("Skeleton overlay",&overlay))rtapi::setRigOverlayVisible(overlay);
@@ -90,8 +92,9 @@ void drawRigEditing(UIContext& ctx) {
         if(r.ok){character=rigName;ctx.selection.clearSelection();ctx.selection.transform_mode=TransformMode::Translate;}
     }
     ImGui::EndDisabled();
-    ImGui::SeparatorText("Mesh preparation");
-    static std::string targetMesh;static nlohmann::json preflight;static int preflightLoad=-1;
+    }
+    if (UIWidgets::CollapsingHeader("Mesh Preparation", ImGuiTreeNodeFlags_DefaultOpen)) {
+
     if(preflightLoad!=ctx.scene.load_counter){targetMesh.clear();preflight=nullptr;preflightLoad=ctx.scene.load_counter;}
     if(ImGui::BeginCombo("Target mesh",targetMesh.empty()?"Choose mesh":targetMesh.c_str())) {
         nlohmann::json targets;auto listed=rtapi::listRigFitTargets(targets);
@@ -118,7 +121,7 @@ void drawRigEditing(UIContext& ctx) {
         if(preflight.contains("blockers"))for(const auto& reason:preflight["blockers"])ImGui::TextWrapped("Needs attention: %s",reason.get<std::string>().c_str());
         ImGui::TextDisabled("Snapshot report; inspect again after changing mesh. Fitting/binding is pending.");
     }
-    if(ImGui::CollapsingHeader("Skin weight diagnostics")) {
+    if(UIWidgets::CollapsingHeader("Skin weight diagnostics")) {
         static nlohmann::json stats,vertexReport;static int weightVertex=0;static std::string inspected;static int weightLoad=-1;
         if(inspected!=targetMesh || weightLoad!=ctx.scene.load_counter){stats=nullptr;vertexReport=nullptr;weightVertex=0;inspected=targetMesh;weightLoad=ctx.scene.load_counter;}
         ImGui::TextDisabled("Choose an individual mesh; character groups are for fitting.");
@@ -157,7 +160,8 @@ void drawRigEditing(UIContext& ctx) {
         }
         ImGui::TextDisabled("Read-only snapshots. Inspect again after mesh or rig edits.");
     }
-    ImGui::SeparatorText("Skeleton source and topology");
+    }
+    if (UIWidgets::CollapsingHeader("Skeleton Source & Topology", ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::TextDisabled("Create from a template above or copy an eligible imported skeleton.");
     ImGui::BeginDisabled(editing || ImGuizmo::IsUsing());
     if(copySource.empty())for(const auto& model:ctx.scene.importedModelContexts)
@@ -222,7 +226,7 @@ void drawRigEditing(UIContext& ctx) {
                         Vec3 scale;selected.scene_transform.decompose(scenePosition,sceneRotation,scale);sceneScale=scale.x;
                         placementKey=character;placementRevision=selected.rig_revision;
                     }
-                    ImGui::SeparatorText("Whole rig scene placement");
+                    if (UIWidgets::CollapsingHeader("Whole Rig Scene Placement", ImGuiTreeNodeFlags_DefaultOpen)) {
                     ImGui::InputFloat3("Scene position",&scenePosition.x);
                     ImGui::InputFloat3("Scene rotation (degrees)",&sceneRotation.x);
                     ImGui::InputFloat("Uniform rig scale",&sceneScale,.05f,.5f,"%.4f");
@@ -233,9 +237,10 @@ void drawRigEditing(UIContext& ctx) {
                     }
                     ImGui::EndDisabled();
                     ImGui::TextDisabled("Select any joint to place its whole rig. Enter Rig Edit for bone edits.");
+                    }
                 }
                 ImGui::BeginDisabled(!editing);
-                ImGui::SeparatorText("Bone topology");
+                if (UIWidgets::CollapsingHeader("Bone Topology & Editing", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::BeginDisabled(ImGuizmo::IsUsing());
                 ImGui::InputText("Authored bone name",renameName,sizeof(renameName));
                 if(ImGui::Button("Rename bone")) {
@@ -290,12 +295,14 @@ void drawRigEditing(UIContext& ctx) {
                     Vec3 scale;selected.local_rest.decompose(position,rotation,scale);
                     editingKey=key;editingRevision=selected.rig_revision;
                 }
-                ImGui::SeparatorText("Local rest transform");
+                if (UIWidgets::CollapsingHeader("Local Rest Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::InputFloat3("Position",&position.x);ImGui::InputFloat3("Rotation (degrees)",&rotation.x);
                 if(ImGui::Button("Apply rest transform")) {
                     const auto rest=Matrix4x4::composeTRS(position,rotation,Vec3(1,1,1));
                     const auto r=rtapi::setRigRestTransform(character,selected.name,rest);
                     message=r.ok?"Rest pose updated":r.error;
+                }
+                }
                 }
                 ImGui::EndDisabled();
             }
@@ -304,10 +311,12 @@ void drawRigEditing(UIContext& ctx) {
     if(!character.empty())drawRigPoseViewControls(ctx,character);
     drawRigJointProfile(ctx,character);
     drawRigAnatomy(ctx,character);
-    ImGui::SeparatorText("Alignment and deformation");
-    drawRigMirror(ctx,character);
-    drawRigFitting(ctx,character,targetMesh);
-    drawRigBinding(ctx,character,targetMesh);
+    } // end Skeleton Source & Topology
+    if (UIWidgets::CollapsingHeader("Alignment & Deformation", ImGuiTreeNodeFlags_DefaultOpen)) {
+        drawRigMirror(ctx,character);
+        drawRigFitting(ctx,character,targetMesh);
+        drawRigBinding(ctx,character,targetMesh);
+    }
     ImGui::TextDisabled("Owned, unskinned rigs without bound clips; rigid rest transforms and leaf deletion.");
     if(!message.empty())ImGui::TextWrapped("%s",message.c_str());
 }

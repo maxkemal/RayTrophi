@@ -17,6 +17,7 @@
  */
 
 #include "imgui.h"
+#include "ui_section_style.h"
 #include <string>
 #include <vector>
 #include <functional>
@@ -110,6 +111,9 @@ public:
     IconSettings& getIconSettings() { return iconSettings_; }
     const IconSettings& getIconSettings() const { return iconSettings_; }
 
+    SectionSettings& getSectionSettings() { return SectionStyleManager::instance().settings(); }
+    const SectionSettings& getSectionSettings() const { return SectionStyleManager::instance().settings(); }
+
     ImVec4 getCategoryColor(const std::string& categoryName, const ImVec4& defaultColor) const;
 
 private:
@@ -149,6 +153,11 @@ namespace UIWidgets {
     bool BeginColoredSection(const char* title,
         const ImVec4& titleColor,
         bool defaultOpen = true);
+
+    // CollapsingHeader wrapper (Flat monochrome / tema kontrollü)
+    bool CollapsingHeader(const char* label,
+        ImGuiTreeNodeFlags flags = 0,
+        const ImVec4& accentColor = ImVec4(0.4f, 0.6f, 1.0f, 1.0f));
 
     // -------- BUTONLAR --------
 

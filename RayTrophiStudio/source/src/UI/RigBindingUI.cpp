@@ -19,7 +19,7 @@ struct Draft {
 void drawRigBinding(UIContext &ctx, const std::string &character, const std::string &mesh,
                     bool defaultOpen) {
     const auto flags = defaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None;
-    if (character.empty() || !ImGui::CollapsingHeader("Skin binding and weights", flags))
+    if (character.empty() || !UIWidgets::CollapsingHeader("Skin binding and weights", flags))
         return;
     if (draft.character != character || draft.mesh != mesh ||
         draft.load != ctx.scene.load_counter) {
@@ -69,7 +69,7 @@ void drawRigBinding(UIContext &ctx, const std::string &character, const std::str
                 "Remove skin weights and detach mesh parts. The skeleton, controls,\n"
                 "authored clips and rest placement remain. Undo restores the binding.");
         }
-        if (ImGui::CollapsingHeader("Automatic influence envelopes",
+        if (UIWidgets::CollapsingHeader("Automatic influence envelopes",
                                     ImGuiTreeNodeFlags_DefaultOpen)) {
             nlohmann::json overlayState;
             const auto overlayResult = rtapi::getRigEnvelopeOverlay(overlayState);

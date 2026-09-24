@@ -521,6 +521,18 @@ void main() {
         }
     }
 
+    // SSS colour parity with Vulkan RT (bsdf_scatter.glsl::scatterSSS): the
+    // subsurface share of the diffuse layer settles to subsurface_color, not to
+    // base colour. Without this a milk/honey body bound to an SSS material read
+    // as its base colour here and as its SSS colour in Rendered. Light bleed is
+    // NOT approximated on this path: screen-space curvature is unsafe inside
+    // the march's divergent branches, and a guessed wrap would be a claim.
+    float sssAmt = hasMaterial ? clamp(mat.subsurface_amount, 0.0, 1.0) : 0.0;
+    vec3 diffuseAlbedo = hasMaterial
+        ? mix(albedo, clamp(vec3(matx.subsurface_r, matx.subsurface_g, matx.subsurface_b),
+                            vec3(0.0), vec3(1.0)), sssAmt)
+        : albedo;
+
     vec3 n = normalize(nearestN);
     vec3 v = normalize(-rd);
     float ndv = max(dot(n, v), 1e-4);
@@ -545,7 +557,7 @@ void main() {
         int lightType = int(sourceLight.position.w + 0.5);
         float shadow = evaluateShadow(li, lightType, sourceLight.position.xyz,
                                       p, n, l);
-        direct += (kd * albedo / PI + spec) * radiance * ndl * shadow;
+        direct += (kd * diffuseAlbedo / PI + spec) * radiance * ndl * shadow;
     }
 
     // Physical Sky's sun is not duplicated in the scene-light SSBO. It owns
@@ -561,7 +573,7 @@ void main() {
                         max(4.0 * ndv * ndl, 1e-5);
             vec3 kd = (vec3(1.0) - f) * (1.0 - metallic) * (1.0 - transmission);
             float shadow = evaluateShadow(PREVIEW_MAX_LIGHTS, 1, vec3(0.0), p, n, l);
-            direct += (kd * albedo / PI + spec) *
+            direct += (kd * diffuseAlbedo / PI + spec) *
                       vec3(1.0, 0.95, 0.86) * worldSun.w * ndl * shadow;
         }
     }
@@ -612,7 +624,7 @@ void main() {
                               (vec3(1.0) - fresnel) * (1.0 - metallic);
     vec3 env = envReflection * fresnel;
     if (!sceneRefractionValid) env += envTransmission * transmissionWeight;
-    vec3 diffuseAmbient = previewEnvironment(n, 1.0) * albedo *
+    vec3 diffuseAmbient = previewEnvironment(n, 1.0) * diffuseAlbedo *
                           (1.0 - metallic) * (1.0 - transmission) * 0.35;
     vec3 emission = hasMaterial
         ? vec3(mat.emission_r, mat.emission_g, mat.emission_b) * mat.emission_strength

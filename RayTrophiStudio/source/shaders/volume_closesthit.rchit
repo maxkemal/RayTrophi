@@ -311,6 +311,9 @@ layout(set = 0, binding = 24, scalar) readonly buffer VolMaterialExtBuffer { Mat
 // reading a different channel than the mesh for the very same texture.
 #include "pbr_texture_policy.glsl"
 
+// The isosurface is an SSS boundary the triangle probe cannot see; see
+// sssCustomExit below and the hook comment in bsdf_scatter.glsl.
+#define SSS_CUSTOM_EXIT
 #include "bsdf_scatter.glsl"
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2120,6 +2123,74 @@ float nearestSurfaceSDFCrossing(vec3 rayOrigin,
     return nearestHit <= rangeFar ? nearestHit : -1.0;
 }
 
+// ── SSS exit through the liquid isosurface ──────────────────────────────────
+// Set by the isosurface block right around its scatterPrincipled call; every
+// other scatter in this shader leaves it off, so a walk started from a
+// triangle is never clipped by an unrelated field.
+bool g_sssIsoEnabled = false;
+uint g_sssIsoVolume = 0u;
+
+bool sssCustomExit(vec3 origin, vec3 dir, float tMax, out float tHit, out vec3 exitN) {
+    tHit = 0.0;
+    exitN = vec3(0.0, 1.0, 0.0);
+    if (!g_sssIsoEnabled || !(tMax > 0.0)) return false;
+    VkVolumeInstance sv = volumes.v[g_sssIsoVolume];
+
+    pnanovdb_buf_t sBuf;
+    sBuf.address = sv.vdb_grid_address;
+    pnanovdb_grid_handle_t gridH;
+    gridH.address.byte_offset = 0u;
+    pnanovdb_map_handle_t mapH;
+    pnanovdb_readaccessor_t acc;
+    if (sv.volume_type == 2 && sv.vdb_grid_address != 0) {
+        pnanovdb_tree_handle_t treeH = pnanovdb_grid_get_tree(sBuf, gridH);
+        pnanovdb_root_handle_t rootH = pnanovdb_tree_get_root(sBuf, treeH);
+        mapH = pnanovdb_grid_get_map(sBuf, gridH);
+        pnanovdb_readaccessor_init(acc, rootH);
+    }
+
+    // Same iso, step and bisection as nearestSurfaceSDFCrossing, but only the
+    // INSIDE -> OUTSIDE transition counts, and only after the segment has
+    // actually been inside: the walk's first origin sits a few ULPs under the
+    // entry hit, possibly still in the band's outer half, and treating that as
+    // an instant exit would hand the ray straight back where it came in.
+    const float ISO = 0.5;
+    const int SSS_ISO_CAP = 128;
+    float fineStep = clamp(sv.step_size, sv.voxel_size * 0.1, sv.voxel_size * 0.5);
+    float stepLen = max(0.0005, max(fineStep, tMax / float(SSS_ISO_CAP)));
+    int steps = min(int(ceil(tMax / stepLen)), SSS_ISO_CAP);
+    float t0 = 0.0;
+    float d0 = sampleIsoField(sv, origin, sBuf, mapH, acc);
+    bool wasInside = d0 >= ISO;
+    for (int s = 0; s < steps; ++s) {
+        float t1 = min(t0 + stepLen, tMax);
+        float d1 = sampleIsoField(sv, origin + dir * t1, sBuf, mapH, acc);
+        if (wasInside && d1 < ISO) {
+            float a = t0;
+            float b = t1;
+            for (int r = 0; r < 5; ++r) {
+                float m = 0.5 * (a + b);
+                if (sampleIsoField(sv, origin + dir * m, sBuf, mapH, acc) >= ISO) a = m;
+                else b = m;
+            }
+            tHit = 0.5 * (a + b);
+            vec3 p = origin + dir * tHit;
+            float h = max(0.001, sv.voxel_size);
+            vec3 grad = vec3(
+                sampleIsoField(sv, p + vec3(h, 0.0, 0.0), sBuf, mapH, acc) - sampleIsoField(sv, p - vec3(h, 0.0, 0.0), sBuf, mapH, acc),
+                sampleIsoField(sv, p + vec3(0.0, h, 0.0), sBuf, mapH, acc) - sampleIsoField(sv, p - vec3(0.0, h, 0.0), sBuf, mapH, acc),
+                sampleIsoField(sv, p + vec3(0.0, 0.0, h), sBuf, mapH, acc) - sampleIsoField(sv, p - vec3(0.0, 0.0, h), sBuf, mapH, acc));
+            // The field grows INTO the liquid, so outward is -grad.
+            exitN = length(grad) > 1e-8 ? -normalize(grad) : dir;
+            return true;
+        }
+        wasInside = wasInside || d1 >= ISO;
+        t0 = t1;
+        if (t0 >= tMax) break;
+    }
+    return false;
+}
+
 #include "volume_overlap_selection.glsl"
 
 void main() {
@@ -2858,6 +2929,9 @@ void main() {
             ss.subsurfaceRadius   = max(vec3(imx.subsurface_radius_r, imx.subsurface_radius_g, imx.subsurface_radius_b), vec3(0.001));
             ss.subsurfaceScale    = max(imx.subsurface_scale, 0.001);
             ss.subsurfaceAnisotropy = clamp(imx.subsurface_anisotropy, -0.99, 0.99);
+            ss.subsurfaceIor        = max(imx.subsurface_ior, 1.001);
+            ss.subsurfaceMethod     = (imx.sss_method > 0.5) ? 1u : 0u;
+            ss.subsurfaceMaxSteps   = int(imx.sss_walk_max_steps + 0.5);
 
             // ── Tri-planar textures ──────────────────────────────────────────
             // This is what lets a texture reach the liquid at all. Before it,
@@ -3352,7 +3426,10 @@ void main() {
                 }
             }
 
+            g_sssIsoEnabled = true;
+            g_sssIsoVolume = volIdx;
             scatterPrincipled(ss, payload.seed);
+            g_sssIsoEnabled = false;
 
             // ★ Re-seat the scattered ray OUTSIDE the level-set band.
             //
@@ -3384,9 +3461,13 @@ void main() {
             // translucent and subsurface lobes can also leave INTO the body, and
             // there the blind push has the same thin-wall problem. Reflections
             // cost nothing extra — the helper returns immediately for them.
+            // A subsurface walk LEFT the body somewhere else: seat there, with
+            // the exit's own normal. Seating at hitPos (the old code) kept the
+            // exit direction but teleported it back to the entry point.
             bool pHandOff = false;
-            payload.scatterOrigin =
-                seatOutsideBand(hitPos, payload.scatterDir, Ng, exitPush, pHandOff);
+            payload.scatterOrigin = g_sssExited
+                ? seatOutsideBand(g_sssExitPos, payload.scatterDir, g_sssExitN, exitPush, pHandOff)
+                : seatOutsideBand(hitPos, payload.scatterDir, Ng, exitPush, pHandOff);
             payload.skipVolumeAABBs = pHandOff;
 
             payload.primaryARG = packHalf2x16(ss.albedo.rg);

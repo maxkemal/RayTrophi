@@ -1,4 +1,4 @@
-﻿#include "TimelineWidget.h"
+#include "TimelineWidget.h"
 #include "scene_ui.h"
 #include "scene_data.h"
 #include "Triangle.h"
@@ -1339,7 +1339,7 @@ void TimelineWidget::drawSelectedAnimGraphInspector(UIContext& ctx) {
     }
     if (!selectedKey || !selectedKey->has_anim_graph) return;
 
-    if (!ImGui::CollapsingHeader("AnimGraph Inspector", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!UIWidgets::CollapsingHeader("AnimGraph Inspector", ImGuiTreeNodeFlags_DefaultOpen)) return;
 
     ImGui::TextDisabled("Track: %s", selected_track.c_str());
     ImGui::SameLine();

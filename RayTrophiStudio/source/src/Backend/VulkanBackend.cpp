@@ -13058,7 +13058,8 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         gm.subsurface_scale = m.subsurfaceScale;
         gm.subsurface_ior = m.subsurfaceIOR;
         gm.normal_strength = m.normalStrength;
-        // SSS control flags (match VkGpuMaterial layout Block 12)
+        gm.sss_method = static_cast<float>(m.sssMethod);
+        gm.sss_walk_max_steps = static_cast<float>(m.sssWalkMaxSteps);
        
         gm.clearcoat = m.clearcoat;
         gm.clearcoat_roughness = m.clearcoatRoughness;
@@ -13555,6 +13556,8 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
     gm.subsurface_radius_b = m.subsurfaceRadius.z;
     gm.subsurface_scale = m.subsurfaceScale;
     gm.subsurface_ior = m.subsurfaceIOR;
+    gm.sss_method = static_cast<float>(m.sssMethod);
+    gm.sss_walk_max_steps = static_cast<float>(m.sssWalkMaxSteps);
     gm.normal_strength = m.normalStrength;
     gm.clearcoat = m.clearcoat;
     gm.clearcoat_roughness = m.clearcoatRoughness;

@@ -1,4 +1,4 @@
-﻿// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - SCATTER BRUSH MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
 // Brush-based instance painting for foliage, rocks, debris etc.
@@ -562,7 +562,7 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
             // Instances node: one pass places instances honoring Placement Rules below AND
             // the Density/Scale masks above, instead of dragging the brush over the surface.
             ImGui::Spacing();
-            if (ImGui::CollapsingHeader("Scatter (Fill)")) {
+            if (UIWidgets::CollapsingHeader("Scatter (Fill)")) {
                 auto& bs2 = active_group->brush_settings;
                 ImGui::SetNextItemWidth(160);
                 ImGui::DragInt("Target Count", &bs2.target_count, 10, 0, 1000000);
@@ -594,7 +594,7 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
         ImGui::Spacing();
 
         // Randomization
-        if (ImGui::CollapsingHeader("Randomization")) {
+        if (UIWidgets::CollapsingHeader("Randomization")) {
             auto& bs = active_group->brush_settings;
 
             ImGui::Text("Scale:");

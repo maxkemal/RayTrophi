@@ -235,6 +235,59 @@ void main() {
         return;
     }
 
+    // ---- SSS subsurface random-walk exit probe ----------------------------
+    // scatterSSS (bsdf_scatter.glsl) initializes w with this sentinel when
+    // probing for surface exit during the internal random walk. Returns:
+    //   .x = distance to the NEAREST exit surface
+    //   .y = packed normal of that surface: packSnorm2x16(octahedral(N))
+    //   .z = 1.0 once any surface was found (0 = still inside the medium)
+    //   .w = sentinel, kept intact so every candidate re-enters this branch
+    // Any-hit order is NOT distance order, so the old TerminateOnFirstHit probe
+    // returned an arbitrary surface along the segment, not the exit. Every
+    // candidate is ignored here and only the closest one is kept.
+    const uint SSS_SUBSURFACE_PROBE = 0x555B0DEDu;
+    if (floatBitsToUint(shadowPayload.w) == SSS_SUBSURFACE_PROBE) {
+        if (shadowPayload.z > 0.5 && gl_HitTEXT >= shadowPayload.x) {
+            ignoreIntersectionEXT;
+        }
+        shadowPayload.x = gl_HitTEXT;
+        shadowPayload.z = 1.0;
+        // Interpolate shading normal at the exit point
+        vec3 exitN = vec3(0.0, 1.0, 0.0);
+        if (geo.normalAddr != 0) {
+            NormalBuffer2 nBuf = NormalBuffer2(geo.normalAddr);
+            uint pi0, pi1, pi2;
+            if (geo.indexAddr != 0) {
+                IndexBuffer2 iBuf = IndexBuffer2(geo.indexAddr);
+                pi0 = iBuf.i[gl_PrimitiveID * 3 + 0];
+                pi1 = iBuf.i[gl_PrimitiveID * 3 + 1];
+                pi2 = iBuf.i[gl_PrimitiveID * 3 + 2];
+            } else {
+                pi0 = gl_PrimitiveID * 3 + 0;
+                pi1 = gl_PrimitiveID * 3 + 1;
+                pi2 = gl_PrimitiveID * 3 + 2;
+            }
+            vec3 bary3 = vec3(
+                1.0 - baryCoord.x - baryCoord.y,
+                baryCoord.x,
+                baryCoord.y);
+            exitN = normalize(
+                nBuf.n[pi0] * bary3.x +
+                nBuf.n[pi1] * bary3.y +
+                nBuf.n[pi2] * bary3.z);
+        }
+        // Octahedral pack into one uint, stored as float in .y
+        float l = abs(exitN.x) + abs(exitN.y) + abs(exitN.z);
+        vec2 op = (l > 1e-8) ? exitN.xy / l : vec2(0.0);
+        if (exitN.z < 0.0) {
+            op = (1.0 - abs(op.yx)) * vec2(
+                op.x >= 0.0 ? 1.0 : -1.0,
+                op.y >= 0.0 ? 1.0 : -1.0);
+        }
+        shadowPayload.y = uintBitsToFloat(packSnorm2x16(op));
+        ignoreIntersectionEXT;
+    }
+
     // ---- Bevel probe mode (see the payload comment above) -----------------
     // Runs BEFORE any material work: the probe wants raw geometry. Alpha cutouts are
     // deliberately treated as solid here — beveling the edge of an alpha-card leaf is
