@@ -145,18 +145,32 @@ void ThemeManager::applyCurrentTheme(float panelAlpha) {
     c[ImGuiCol_ButtonHovered]     = UIWidgets::ScaleColor(t.colors.primary, 1.2f);
     c[ImGuiCol_ButtonActive]      = UIWidgets::ScaleColor(t.colors.primary, 0.8f);
     
-    c[ImGuiCol_Header]            = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.22f);
-    c[ImGuiCol_HeaderHovered]     = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.48f);
-    c[ImGuiCol_HeaderActive]      = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.70f);
+    const auto& secSettings = SectionStyleManager::instance().settings();
+    if (secSettings.style == SectionHeaderStyle::FlatMonochrome || secSettings.overrideSectionAccentsWithTheme) {
+        float hBg = secSettings.headerBgAlpha;
+        c[ImGuiCol_Header]               = ImVec4(t.colors.border.x, t.colors.border.y, t.colors.border.z, hBg);
+        c[ImGuiCol_HeaderHovered]        = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.12f);
+        c[ImGuiCol_HeaderActive]         = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.18f);
+
+        c[ImGuiCol_Tab]                  = ImVec4(t.colors.surface.x * 0.60f, t.colors.surface.y * 0.60f, t.colors.surface.z * 0.60f, 0.60f);
+        c[ImGuiCol_TabHovered]           = ImVec4(t.colors.accent.x * 0.45f + t.colors.surface.x * 0.55f, t.colors.accent.y * 0.45f + t.colors.surface.y * 0.55f, t.colors.accent.z * 0.45f + t.colors.surface.z * 0.55f, 0.45f);
+        c[ImGuiCol_TabActive]            = ImVec4(t.colors.accent.x * 0.50f + t.colors.surface.x * 0.50f, t.colors.accent.y * 0.50f + t.colors.surface.y * 0.50f, t.colors.accent.z * 0.50f + t.colors.surface.z * 0.50f, 0.95f);
+        c[ImGuiCol_TabUnfocused]         = ImVec4(t.colors.surface.x * 0.50f, t.colors.surface.y * 0.50f, t.colors.surface.z * 0.50f, 0.40f);
+        c[ImGuiCol_TabUnfocusedActive]   = ImVec4(t.colors.accent.x * 0.35f + t.colors.surface.x * 0.65f, t.colors.accent.y * 0.35f + t.colors.surface.y * 0.65f, t.colors.accent.z * 0.35f + t.colors.surface.z * 0.65f, 0.85f);
+    } else {
+        c[ImGuiCol_Header]               = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.22f);
+        c[ImGuiCol_HeaderHovered]        = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.48f);
+        c[ImGuiCol_HeaderActive]         = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.70f);
+
+        c[ImGuiCol_Tab]                  = UIWidgets::ScaleColor(t.colors.secondary, 0.8f);
+        c[ImGuiCol_TabHovered]           = UIWidgets::ScaleColor(t.colors.secondary, 1.3f);
+        c[ImGuiCol_TabActive]            = t.colors.secondary;
+    }
     
     c[ImGuiCol_SliderGrab]        = t.colors.accent;
     c[ImGuiCol_SliderGrabActive]  = UIWidgets::ScaleColor(t.colors.accent, 1.2f);
     
     c[ImGuiCol_Border]            = t.colors.border;
-    
-    c[ImGuiCol_Tab]               = UIWidgets::ScaleColor(t.colors.secondary, 0.8f);
-    c[ImGuiCol_TabHovered]        = UIWidgets::ScaleColor(t.colors.secondary, 1.3f);
-    c[ImGuiCol_TabActive]         = t.colors.secondary;
     
     c[ImGuiCol_TitleBg]           = t.colors.secondary;
     c[ImGuiCol_TitleBgActive]     = UIWidgets::ScaleColor(t.colors.secondary, 1.15f);
@@ -263,6 +277,9 @@ void ThemeManager::saveThemeSettings(const std::string& filepath, float panelAlp
          
     file << iconSettings_.matcapColor.x << " " << iconSettings_.matcapColor.y << " "
          << iconSettings_.matcapColor.z << " " << iconSettings_.matcapColor.w << "\n";
+         
+    // Save section style settings
+    SectionStyleManager::instance().saveSettings(file);
 }
 
 bool ThemeManager::loadThemeSettings(const std::string& filepath, float& panelAlpha) {
@@ -301,6 +318,9 @@ bool ThemeManager::loadThemeSettings(const std::string& filepath, float& panelAl
 
             file >> iconSettings_.matcapColor.x >> iconSettings_.matcapColor.y 
                  >> iconSettings_.matcapColor.z >> iconSettings_.matcapColor.w;
+                 
+            // Load section style settings if present
+            SectionStyleManager::instance().loadSettings(file);
         }
         applyCurrentTheme(panelAlpha);
         return true;
@@ -446,96 +466,31 @@ ImGuiTreeNodeFlags GetSectionFlags(bool defaultOpen) {
     return flags;
 }
 
-// Helper for the border rect
-struct SectionState {
-    ImVec2 startPos;
-    float width;
-    ImU32 borderColor;
-    bool isOpen;
-};
-static std::vector<SectionState> s_SectionStack;
-
 bool BeginSection(const char* title, const ImVec4& accentColor, bool defaultOpen) {
-    ImGui::PushID(title);
-    
-    ImDrawList* drawList = ImGui::GetWindowDrawList();
-    ImVec2 cursorPos = ImGui::GetCursorScreenPos();
-    float width = ImGui::GetContentRegionAvail().x;
-    
-    // Set frame padding before querying height to ensure exact, slim header height
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 5.0f));
-    float height = ImGui::GetFrameHeight();
-    
-    // Convert accent color
-    ImU32 accentU32 = ImGui::ColorConvertFloat4ToU32(accentColor);
-    ImU32 headerBg = ImGui::ColorConvertFloat4ToU32(ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.16f));
-    ImU32 borderColor = ImGui::ColorConvertFloat4ToU32(ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.40f));
-
-    // Draw Header Background (Sleek, rounded corners top if open, all if closed)
-    drawList->AddRectFilled(cursorPos, ImVec2(cursorPos.x + width, cursorPos.y + height), headerBg, 4.0f, defaultOpen ? ImDrawFlags_RoundCornersTop : ImDrawFlags_RoundCornersAll);
-    
-    // Draw Top Accent Line (Thin, distinct)
-    drawList->AddLine(
-        ImVec2(cursorPos.x, cursorPos.y), 
-        ImVec2(cursorPos.x + width, cursorPos.y), 
-        accentU32, 2.0f
+    const auto& theme = ThemeManager::instance().current();
+    return SectionStyleManager::instance().beginSection(
+        title, accentColor, defaultOpen,
+        theme.colors.accent, theme.colors.border, theme.colors.text
     );
-    
-    // Override TreeNode style colors so ImGui doesn't render built-in chunky frame background
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.14f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.24f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.95f)); 
-    
-    bool opened = ImGui::TreeNodeEx(title, GetSectionFlags(defaultOpen));
-    
-    ImGui::PopStyleColor(4);
-    ImGui::PopStyleVar();
-
-    if (opened) {
-        // Push state for EndSection to draw the surrounding border
-        s_SectionStack.push_back({cursorPos, width, borderColor, opened});
-        
-        // Add indent and vertical spacing for content
-        ImGui::Indent(6.0f);
-        ImGui::Spacing();
-    } else {
-        ImGui::PopID();
-    }
-    
-    return opened;
 }
 
 void EndSection() {
-    if (s_SectionStack.empty()) return;
-    
-    SectionState state = s_SectionStack.back();
-    s_SectionStack.pop_back();
-    
-    if (state.isOpen) {
-        ImGui::Spacing();
-        ImGui::Unindent(6.0f);
-        
-        // Draw the Border around the whole open section
-        ImDrawList* drawList = ImGui::GetWindowDrawList();
-        ImVec2 endPos = ImGui::GetCursorScreenPos();
-        
-        drawList->AddRect(
-            state.startPos,
-            ImVec2(state.startPos.x + state.width, endPos.y),
-            state.borderColor,
-            4.0f
-        );
-
-        ImGui::PopID();
-    }
+    SectionStyleManager::instance().endSection();
 }
 
 bool BeginColoredSection(const char* title, const ImVec4& titleColor, bool defaultOpen) {
-    ImGui::PushStyleColor(ImGuiCol_Text, titleColor);
-    bool opened = ImGui::TreeNodeEx(title, GetSectionFlags(defaultOpen));
-    ImGui::PopStyleColor();
-    return opened;
+    const auto& theme = ThemeManager::instance().current();
+    return SectionStyleManager::instance().beginColoredSection(
+        title, titleColor, defaultOpen, theme.colors.text
+    );
+}
+
+bool CollapsingHeader(const char* label, ImGuiTreeNodeFlags flags, const ImVec4& accentColor) {
+    const auto& theme = ThemeManager::instance().current();
+    return SectionStyleManager::instance().beginCollapsingHeader(
+        label, flags, accentColor,
+        theme.colors.accent, theme.colors.border, theme.colors.text
+    );
 }
 
 bool StateButton(const char* label, bool isActive, 
@@ -1090,6 +1045,9 @@ void DrawThemeSelector(float& panel_alpha) {
             themeManager.saveThemeSettings("theme.cfg", panel_alpha);
         }
         ImGui::Unindent();
+
+        // Section & Sub-Panel Settings UI
+        SectionStyleManager::instance().drawSectionSettingsUI(panel_alpha);
 
         EndSection();
     }

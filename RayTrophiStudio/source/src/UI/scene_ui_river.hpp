@@ -26,24 +26,12 @@
 
 namespace {
 bool BeginRiverSection(const char* title, const ImVec4& accent, bool defaultOpen = true) {
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(accent.x * 0.24f, accent.y * 0.24f, accent.z * 0.24f, 0.92f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(accent.x * 0.32f, accent.y * 0.32f, accent.z * 0.32f, 0.98f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(accent.x * 0.38f, accent.y * 0.38f, accent.z * 0.38f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.94f, 0.96f, 0.99f, 1.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 7.0f));
-    
-    float fr = 10.0f;
-    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
-        fr = ThemeManager::instance().current().style.frameRounding;
-    }
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, fr);
-    
-    const bool open = ImGui::CollapsingHeader(
-        title,
-        (defaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0) | ImGuiTreeNodeFlags_SpanAvailWidth);
-    ImGui::PopStyleVar(2);
-    ImGui::PopStyleColor(4);
-    return open;
+    const auto& theme = ThemeManager::instance().current();
+    ImGuiTreeNodeFlags flags = defaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0;
+    return SectionStyleManager::instance().beginCollapsingHeader(
+        title, flags, accent,
+        theme.colors.accent, theme.colors.border, theme.colors.text
+    );
 }
 
 void EndRiverSection() {}

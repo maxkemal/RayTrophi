@@ -3654,6 +3654,22 @@ struct SceneData {
         msf_frame_cache_.clear();    // burn/heat surface damage, same lockstep
     }
 
+    // Adopt the CURRENT simulation setup as the one the existing bake belongs
+    // to, without dropping a single cached frame.
+    //
+    // ★★★★ The frame loop auto-invalidates whenever computeSimConfigSignature()
+    // changes, and that is right for almost every edit. A pure domain
+    // TRANSLATION is the exception: the cached cells are still valid, they just
+    // live somewhere else now, and rebaseRestoredGridDomainStates() puts them
+    // there on restore. The signature cannot express "moved but equivalent" --
+    // it is a hash -- so the mover states it here instead. Call this ONLY after
+    // the cache has actually been reconciled with the edit; calling it after a
+    // real change is how a stale bake gets replayed forever with no symptom.
+    void acceptSimConfigAsBaked() {
+        last_sim_config_sig_ = computeSimConfigSignature();
+        last_fluid_coupling_sig_ = computeFluidCouplingSignature();
+    }
+
     // Remove damage history without throwing away costly gas/fluid/rigid frame
     // caches. An empty object key means every MSF snapshot. Disk snapshots cannot
     // be edited safely in place, so detach the bake binding; otherwise a later RAM

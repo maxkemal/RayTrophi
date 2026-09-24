@@ -1,114 +1,164 @@
 # Sıradaki derlemede kontrol edilecekler
 
-> **Durum:** CANLI — 2026-09-24. Bu parti **ölçü aleti + bir kesin düzeltme**.
->
-> **1. `camera.list` eklendi (ÖLÇÜ ALETİ).** Açılıştaki default sahnenin
-> kamerasının `scene.cameras`'a kayıtlı olup olmadığını söyler. `active_is_orphan`
-> alanı bu partinin tek sebebi.
-> **2. C DÜZELTİLDİ:** navigasyon ışını `get_ray` → `get_viewport_ray`
-> (Main.cpp ~3583). Kökü kesindi: `get_ray` diyafram diskini rastgele örnekler.
-> **3. A hâlâ DENENMEDİ:** pan artık seçim kilidini bırakıyor.
->
-> **B. ✔ ÇÖZÜLDÜ ve ÖLÇÜLEREK DOĞRULANDI.** `Main.cpp` ~4550'deki
-> `g_camera_dirty = false` kaldırıldı. O blok `Camera::is_dirty`'yi tüketip
-> yalnızca **render** backend'ini senkronluyor, ama **viewport** senkronunun
-> (~5197) bayrağını temizliyordu — raster bayat kamerayla çiziyordu.
-> ★★★ **REGRESYONDU, sebebi bu partide yazdığım koddu:** `panWorld` /
-> `dollyToPivot` / `orbitAroundPivot` `markDirty()` çağırıyor; eski pan/dolly
-> çağırmıyordu. `setLookDirection` (serbest rotate) hâlâ çağırmıyor —
-> "yalnızca rotate çalışıyor" tam olarak bu yüzdendi.
-> **Doğrulama (düzeltmeden ÖNCEKİ binary'de):** kullanıcı fareyle pan yaptı,
-> sonra kameranın KENDİ konumu kendisine yazıldı (değer değişmedi, `markDirty`
-> yok) → **GPU karesi değişti**, yani bayat kare vardı ve `markDirty`'siz
-> senkron onu düzeltti.
-> `markDirty()` çağrıları yerinde: yanlış olan bildirim değil, yutan taraftı.
-> Ayrıntı: `docs/dev/KAMERA_ODAK_KILIDI.md`.
->
-> Yeni `.cpp` **yok** (RtApiCameraNav.cpp geçen partide eklendi). Yeni shader yok.
-> Test script'leri iki yere de kopyalandı.
+## ★ SSS partisi (2026-09-24) — domain maddelerinden BAĞIMSIZ, önce bunlar
+
+Shader'lar değişti: `bsdf_scatter.glsl`, `shadow_anyhit.rahit`,
+`hair_shadow_anyhit.rahit`. **`.spv`'ler yeniden üretilmeli** — üretilmezse
+aşağıdaki her madde "hiçbir şey değişmedi" diye FAIL eder ve bu eski shader'dır,
+yeni kodun hatası değil.
+
+1. **API round-trip** (render gerekmez) — `Probe-SssResponse.ps1 -Object <mesh>`
+   ilk satırı `PASS roundtrip`. FAIL → `parseMaterialParam`/`writeMaterialValue`
+   eşlemesi yanlış ya da eski exe.
+2. **Enerji** — `energy sss/diffuse` ≈ 0,7–1,1. ~0,3 → çift kararma sürüyor
+   (eski spv?). >1,3 → ağırlık pdf'e bölünmüyor, firefly beklenir.
+3. **Radius tonu** — `R/G red-radius > neutral`. FAIL = radius hâlâ ton
+   üretmiyor: kanal ağırlıkları çalışmıyor.
+4. **IOR** — `IOR delta` > 0,5. ★ Sinsi olanı: küçük ama sıfır olmayan bir
+   fark gürültüdür; iki render'ı gözle de karşılaştır.
+5. **Görsel** — ince bölgeler (kulak/burun) arkadan ışıkta kırmızımsı
+   geçirgen olmalı; yüzeyde **siyah benek** veya **parlak lekeler** olmamalı.
+   Siyah benek → çıkış normali / nearest-hit any-hit hatası; parlak leke →
+   rulet veya pdf bölmesi.
+6. **Preset'ler** — Skin/Wax/Milk/Jade yeniden kalibre edildi (amount=1, SSS
+   Color = yerleşik renk, IOR da ayarlanıyor). Rendered'da Skin ten rengi,
+   Jade yeşil yarı saydam okunmalı. Aşırı açık/soluk → remap veya preset.
+7. **RayFusion rengi** (`material_preview_frag.spv` yeniden üretilmeli) —
+   Skin preset'inde realtime ve Rendered aynı genel tonda olmalı. Eskiden
+   raster SSS Color'ı ~%5 gösteriyordu. Hâlâ base color görünüyorsa → eski spv.
+8. **RayFusion eğrilik sarması** — kulak/burun/parmak gibi kıvrımlı yerlerde
+   terminatörde kırmızımsı geçiş; **düz duvarda HİÇ** olmamalı (radius dünya
+   biriminde). ★ Sinsi olanı: düz-shade (flat normal) mesh'te üçgen içinde
+   eğrilik 0 → SSS görünmez ve bu "SSS kapalı" gibi okunur, hata değildir.
+   Üçgen kenarlarında parlak çizgi → fwidth(normal) kenar sıçraması; bildir.
+9. **SSS Method + Walk Max Steps** (Vulkan'a açıldı; eski `useRandomWalkSSS`
+   / `sssMaxSteps` adları söküldü) — probe'un 5. ve 6. satırları:
+   `64 vs 256 gap` < %3 ve `fast/walk` ≈ 0,8–1,2. Panelde Method=Fast iken
+   slider gri olmalı. ★ Sinsi olanı: Max Steps'i 8'e çekmek hata vermez,
+   SSS'i **sessizce karartır** — bu tasarım gereği (kesilen yürüyüş enerjisini
+   kaybeder) ve yardım metni bunu söylüyor. Kaydet → aç sonrası iki değer
+   korunmalı (`sssMethod`, `sssWalkMaxSteps` JSON anahtarları yeni).
+   OptiX de artık aynı alanı okuyor: varsayılan tavanı 6 → 64 (daha yavaş,
+   daha açık) — OptiX'te SSS farklı görünürse sebep bu.
+10. **SDF/sıvı yüzeyde SSS** (yeni: `volume_closesthit` çıkış kancası) — süt
+    veya bal sıvısına SSS'li materyal bağla (`material.set_param` materyal
+    adıyla aynı SSS anahtarlarını alır). Rendered'da sıvı `subsurface_color`
+    tonunda, ince uçlarda/dalga tepelerinde arkadan ışıkta parlamalı.
+    **Kapkara / ölü mat yüzey** → çıkış kancası çalışmıyor (yürüyüşler rulete
+    kadar gidip ölüyor, düzeltmeden önceki durum). **Işık giriş noktasında
+    toplanıyor, yayılma yok** → `g_sssExited` ile yeniden oturtma devreye
+    girmiyor. Method=Fast ile karşılaştır: renk aynı ailede, Fast'ta sızma yok.
+    RayFusion'da SDF yüzey artık SSS rengini gösteriyor ama **ışık sızması yok**
+    (bilerek; notta yazıyor) — bu bir hata değil.
+    ★ Sinsi olanı: sıvı içinde duran bir kaşık/cisim — yürüyüş hangisi yakınsa
+    oradan çıkar; kaşığın yüzeyinden çıkan ışık doğru, bu bir sızıntı değil.
+11. **Performans** — SSS'li sahnede kare süresi eskisinden çok uzunsa: probe
+   artık her adayı gezip en yakını tutuyor (TerminateOnFirstHit yok) ve
+   adım tavanı 32→64. TDR varsa önce `MAX_STEPS`'i düşür.
 
 ---
 
-## 0. ★★★★★ B düzeldi mi — solid modda pan ve zoom
-
-Realtime **solid** modda, arızanın göründüğü default sahnede:
-
-1. Orta tuş sürükle (rotate) → dönmeli. *(Zaten çalışıyordu — regresyon kapısı.)*
-2. **Shift + orta tuş (pan)** → kaymalı.
-3. **Tekerlek (zoom)** → yakınlaşmalı.
-
-- **Bozuksa ne demek:** hâlâ donuksa `g_camera_dirty`'yi temizleyen ikinci bir
-  yer daha vardır — kalanlar 2292, 5208, 5782, 5822, 6653. Her birine sor:
-  bu blok o bayrağı gerçekten **servis ediyor mu**? Etmiyorsa temizlememeli.
-- **★★★ EN SİNSİ HÂLİ:** pan'ın çalışıp zoom'un çalışmaması (ya da tersi). İkisi
-  de `markDirty()` çağırıyor, yani ayrışmaları **başka** bir kapı demektir —
-  "biri düzeldi" diye kapatma.
-- ★ RT/Rendered modda da dene: orada zaten çalışıyordu, bozulmamalı.
-
----
-
-## 0a. ★★★★ Panel FOV slider'ı raster'ı güncelliyor mu (ESKİ sorun)
-
-Solid modda kamera panelinden **FOV slider'ını** oynat.
-
-- **Ne görmen gerek:** viewport anında değişmeli. RT modda da bozulmamalı.
-- **Bozuksa ne demek:** 4535 bloğu `g_camera_dirty = true` yazmıyordur, ya da
-  panel `markDirty()` bile çağırmıyordur (o zaman hiçbir backend duymaz).
-- ★ Aynı kapıyı paylaşan diğer panel kadranlarını da dene: odak mesafesi,
-  diyafram, sensör/lens. Hepsi `cam.markDirty()` deseninde.
-- **★★★ EN SİNSİ HÂLİ:** FOV'un düzelip odak mesafesinin düzelmemesi. İkisi de
-  aynı desende, ayrışıyorlarsa o kadran `markDirty()` çağırmıyordur.
+> **Durum:** CANLI — 2026-09-24. Bu parti: **domain taşıma artık bake'i
+> öldürmüyor.**
+>
+> Önceki partinin kamera maddeleri kullanıcı tarafından doğrulandı ve
+> kapatıldı (`KAMERA_ODAK_KILIDI.md` arşiv notu). Bu liste yalnızca yeni
+> davranışı kovalar.
+>
+> **Ne değişti:**
+> 1. `rebaseRestoredGridDomainStates()` — cache'ten geri kurulan kare, domain'in
+>    **canlı** kutusuna yeniden oturtuluyor. RAM cache'i ve disk bake'i aynı
+>    çağrıdan (`setGridDomainStates`) geçtiği için tek yerde.
+> 2. `acceptSimConfigAsBaked()` — taşıma yeni kurulumu "bake'in ait olduğu
+>    kurulum" ilan ediyor, böylece kare döngüsünün auto-invalidate'i bir tik
+>    sonra cache'i düşürmüyor.
+> 3. Üç taşıma yolu da (gizmo / panel / `sim.move_domain`) artık **saf
+>    ötelemede** cache'i koruyor, **yeniden boyutlandırmada** eskisi gibi
+>    düşürüyor.
+>
+> Yeni `.cpp` **yok**, yeni IPC metodu **yok**, yeni shader yok.
+> Probe script'i iki yere de kopyalandı.
 
 ---
 
-## 0c. `camera.list` — kayıt sorusunu kapattı (ARŞİV: orphan=false, count=1)
+## 0. ★★★★★ ASIL KAPI: taşıma bake'i öldürmüyor mu
 
-Bu partide eklendi. Mod geçişi gözlemi kamera bağlanma hipotezini zayıflattı,
-ama soruyu kesin kapatmak ucuz:
+Bu partinin tek sebebi bu. **Önce bir bake olmalı** — boş cache ile bu madde
+hiçbir şey ölçmez.
+
+1. Gaz domain'ini bir süre oynat (RAM cache dolsun).
+2. `Invoke-RtIpc sim_cache.status @{}` → `ram_frames` sıfırdan büyük olmalı.
+3. Sonra:
 
 ```powershell
-Invoke-RtIpc camera.list @{} | ConvertTo-Json -Depth 3
+.\scripts\ipc\Probe-DomainMoveCarriesSources.ps1
 ```
 
-- **`active_is_orphan = true` veya `count = 0`:** aktif kamera kayıt defterinde
-  yok. Düzeltme: default kamerayı yaratan yer de `SceneData::setActiveCamera`'dan
-  geçmeli (kaydı yapan üç yol: `newProject` 1192-1200, `openProject` 2877/2883,
-  `create_scene` 4493-4526 — kullanıcının "çalışıyor" dediği üç durum da bunlar).
-- **Hepsi false:** kamera düzgün bağlı, hipotez kapandı. Madde 0'a dön.
-
-⚠ **Önceki IPC ölçüm tablosu şüpheli:** alınırken uygulamanın hangi shading
-modunda olduğu kaydedilmedi. RT modundaysa raster hakkında hiçbir şey söylemez.
-Tekrarlarken **önce `viewport.shading` oku** ve sonuca modu da yaz.
+- **Ne görmen gerek:** `TUM KAPILAR GECTI`. Kapı 3 iki şey söyler: RAM kare
+  sayısı **bir tik sonra da** aynı, ve baked imza yeni kutuya göre tazelenmiş.
+- **`[ATLANDI] cache bostu`:** bu bir geçiş değil. Önce oynat, sonra tekrar
+  çalıştır — yoksa partinin asıl kapısı hiç ölçülmemiş olur.
+- **Bozuksa ne demek:** `ram_frames` sıfırlanıyorsa taşıma yolu hâlâ
+  `clearSimFrameCache()` çağırıyordur (üç yer: `RtApiFluid.cpp`,
+  `scene_ui_gizmos.cpp`, `scene_ui_simulation_domains.cpp`).
+- **★★★ EN SİNSİ HÂLİ:** kare sayısının **hemen sonra** durup **bir saniye
+  sonra** sıfırlanması. Cache'i düşüren şey taşıma kodu değil, kare döngüsünün
+  kendi auto-invalidate'i — ve o bir sonraki tikte koşar. Probe bu yüzden
+  ölçmeden önce bekliyor; elle bakarken sen de bekle.
 
 ---
 
-## 0d. ★★★★ C düzeltildi mi — orta tuş artık sıçramamalı
+## 1. ★★★★★ Gözle: taşınan domain eski yerine ZIPLAMIYOR mu
 
-`get_ray` → `get_viewport_ray` yapıldı. **Kapalı anahtarla test etme:** diyafram
-kapalıyken `lens_r == 0` olduğu için sapma zaten sıfırdır, ve o test ölçmediği
-şeyi doğruladı sanır.
+Asıl şikâyet buydu, ve script bunu göremez (ImGui overlay'i ekran görüntüsüne
+girmiyor).
 
-```powershell
-Invoke-RtIpc camera.set_depth_of_field @{ enabled = $true }
-Invoke-RtIpc camera.set_aperture @{ aperture = 0.5 }
-Invoke-RtIpc camera.set_pivot_mode @{ mode = 'free' }
-```
+1. Bake'li bir gaz domain'ini gizmo ile kaydır.
+2. Timeline'ı **cache'li aralığın içine** sürükle (scrub).
 
-Sonra **aynı piksele** arka arkaya 5 kez orta tıkla, her seferinde:
-
-```powershell
-(Invoke-RtIpc camera.get_pivot @{}).nav_distance
-```
-
-- **Ne görmen gerek:** beş sayı da **aynı**.
-- **Farklı çıkıyorsa:** düzeltme uygulanmamış ya da ikinci bir `get_ray`
-  çağrısı daha var — `grep -n "get_ray(" Main.cpp` ile bak.
+- **Ne görmen gerek:** Kutu, hacim ve duman **yeni** konumda. Tek bir mavi kutu
+  var; geride kalan ikinci bir kutu **yok**.
+- **Bozuksa ne demek:** Scrub'da eski yere zıplıyorsa `rebaseRestoredGridDomainStates()`
+  ya çağrılmıyor ya da saf-öteleme kapısından düşüyor (extent 1e-3'ten fazla
+  değişmiş olabilir — gizmo sürüklemesi aynı anda ölçeklemiş olabilir).
+- **★★★ EN SİNSİ HÂLİ:** kutunun taşınıp **dumanın** taşınmaması. O zaman
+  `bounds`/`origin` kaydırılmış ama `particles.position` kaydırılmamıştır —
+  yani sıvı kolu eksiktir. Gaz domain'inde görünmez (gaz indeks uzayında),
+  **sıvı domain'de dene.**
 
 ---
 
-## 1. Derleme ve yetki aynası — bağımsız, saniyeler
+## 2. ★★★★ Yeniden boyutlandırma HÂLÂ cache'i düşürüyor mu — regresyon kapısı
 
-Yeni dosya derlenmeli, yeni metotlar dispatch'e ulaşmalı.
+Bu kapı olmadan madde 0 tehlikelidir: taşımayı korurken boyutlandırmayı da
+korumak, bayat bir bake'i hiçbir belirti vermeden sonsuza kadar oynatır.
+
+Bake'li bir domain'in gizmo tutamağından **ölçeğini** değiştir (taşıma değil).
+
+- **Ne görmen gerek:** `sim_cache.status` → `ram_frames` **0'a düşmeli**.
+- **Bozuksa ne demek:** `pure_translation` testi yanlış tarafa düşüyor. Eşik
+  1e-4; gizmo ölçek matrisinden gelen extent gürültüsü bundan büyük olmalı.
+- **★★★ EN SİNSİ HÂLİ:** cache'in durup **eski çözünürlükte** oynamaya devam
+  etmesi. Duman makul görünür, sadece artık o kutuya ait değildir.
+
+---
+
+## 3. ★★★ Panel ve gizmo aynı şeyi yapıyor mu
+
+Aynı domain'i bir kez gizmo ile, bir kez panelden `Domain Minimum/Maximum
+Bounds` yazarak taşı.
+
+- **Ne görmen gerek:** İki yolda da emitterler geliyor **ve** cache duruyor.
+- **Bozuksa ne demek:** İkisi ayrışıyorsa panel yolunda `acceptSimConfigAsBaked()`
+  çağrılmıyordur (`scene_ui_simulation_domains.cpp`, bounds_settled bloğu).
+- ★ Panelde bounds'u **asimetrik** yaz (yalnızca `bounds_min`) — bu bir taşıma
+  değil boyutlandırmadır, cache düşmeli. Panel bunu ayırt edebilmeli.
+
+---
+
+## 4. Yetki aynası ve descriptor tablosu — bağımsız, saniyeler
+
+Bu partide yeni IPC metodu yok, yani bu bir **regresyon** kapısı.
 
 ```powershell
 python scripts/audit_ipc_capabilities.py
@@ -116,125 +166,34 @@ python scripts/audit_ipc_capabilities.py
 
 - **Ne görmen gerek:** `OK - every dispatched method is classified, mirror
   agrees with RtIpcSecurity.cpp, no dead prefixes, descriptors current.`
-  (Yazarken 583 metot, 564 belgeli geçti.)
-- **Bozuksa ne demek:** `camera.*` namespace'i `RtIpcSecurity.cpp`'de zaten
-  vardı, yani burada patlarsa sorun descriptor tablosunun bayatlığıdır —
-  `python scripts/gen_ipc_descriptors.py` çalıştır.
+- **Bozuksa ne demek:** `sim.` namespace'i geçen partide eklendi; burada
+  patlarsa tablo bayattır → `python scripts/gen_ipc_descriptors.py`.
 
 ---
 
-## 2. ★★★★★ ASIL KAPI: odak navigasyonu sürüklemiyor
+## 5. Sıvı domain'i taşı — en son, çünkü en pahalısı
 
-Bu partinin tek sebebi bu. Uygulamayı aç, bir obje seç.
+Sıvı kolu gaz kolundan **ayrı kod**: partikül, foam ve UVW dizileri elle
+kaydırılıyor.
 
-```powershell
-.\scripts\ipc\Start-RayTrophi.ps1
-Import-Module .\scripts\ipc\RtIpc.psm1 -Force
-.\scripts\ipc\Probe-CameraPivotLock.ps1
-```
-
-- **Ne görmen gerek:** `TUM KAPILAR GECTI` — özellikle kapı 2:
-  `camera.set_focus_distance 0.5` yazıldıktan sonra `nav_distance`
-  **kımıldamamalı**.
-- **Bozuksa ne demek:** `focus_dist` navigasyon yarıçapına yeniden bağlanmış.
-  İlk bakılacak yer `Camera::setLookDirection` — orada `focus_dist` görürsen
-  kök odur.
-- **★ Sahnede obje yoksa betik `exit 2` verir**, bu bir başarısızlık değil;
-  önce bir obje yükle.
-
----
-
-## 3. Panel ile çekirdek aynı şeyi söylüyor mu — hızlı, göz kontrolü
-
-Kamera panelinde (hierarchy paneli, Nav Scale'in altı) yeni satır:
-`Nav radius X.XXm  |  Focus Y.YYm`.
-
-- **Ne görmen gerek:** Odak halkasını viewport'ta sürükle. **Focus değişmeli,
-  Nav radius sabit kalmalı.** Tekerlekle zoom yap: **Nav radius değişmeli,
-  Focus sabit kalmalı.**
-- **Bozuksa ne demek:** İkisi birlikte hareket ediyorsa madde 2 zaten kalmıştır;
-  ikisi de kımıldamıyorsa panel `rtapi::getCameraPivot`'u çağırmıyor olabilir.
-- **★★★ EN SİNSİ HÂLİ:** iki sayı da **makul görünüp** birlikte hareket etmek.
-  Kimse bunu bug diye raporlamaz — tam olarak bir yıl boyunca olan buydu.
-
----
-
-## 4. Frame Selected "tutuyor" mu — el ile, 10 saniye
-
-Bir obje seç → Numpad `.` → sonra orta-tık ile sürükle.
-
-- **Ne görmen gerek:** Obje **ekranın ortasında kalmalı**; kamera onun etrafında
-  dönmeli. Panelde `Locked to: <obje adı>` yazmalı.
-- **Bozuksa ne demek:** Obje kayıyorsa rotasyon hâlâ fly-look yolundan geçiyor —
-  `Main.cpp`'de `else if (scene.camera->pivot_valid)` dalına girilmiyordur.
-- Sonra Numpad 4/6/8/2 ile de dene: aynı merkez etrafında dönmeli.
-
----
-
-## 5. Pan gerçekten rahatladı mı — el ile, asıl şikâyet
-
-Kilitli modda, kameradan çok uzakta ve çok yakında birer obje ile dene.
-Shift + orta-tık sürükle.
-
-- **Ne görmen gerek:** Pan hızı objenin mesafesiyle orantılı ve **sürükleme
-  boyunca sabit**. Önce odağı 0,5 m'ye çekip tekrar dene — pan **aynı hızda**
-  olmalı.
-- **Bozuksa ne demek:** Odak çekince pan yavaşlıyorsa madde 2 kalmıştır.
-
----
-
-## 5b. Pan kilidi BIRAKIYOR mu — yeni davranış, ilk kez deneniyor
-
-Obje seç → Numpad `.` (panelde `Locked to: …`) → Shift + orta tuşla pan.
-
-- **Ne görmen gerek:** Panelde `Orbit Pivot` artık **Free**, `Locked to:` satırı
-  kaybolmuş. Sonraki orta tuş rotasyonu objeye **geri ışınlanmamalı** (A arızası).
-- **⚠ Bilinçli yan etki:** kilit bırakıldığı için pan'dan sonra rotasyon
-  **fly-look** oluyor. Blender'da pan'dan sonra da orbit edilir. His yanlış
-  gelirse: `panWorld`'deki `clearOrbitPivot()`'u kaldır — çapa armed kalır,
-  rotasyon orbit'te kalır. **Ama o zaman panel "Free" derken imleç çapalaması
-  ölü kalır**; takası bilerek yap, gerekçesi `KAMERA_ODAK_KILIDI.md`'de.
-
----
-
-## 6. Kilitli orbit'in YÖNÜ — zevk meselesi, karar senin
-
-`Main.cpp`'de kilitli rotasyon `orbitAroundPivot(-dx * rot_speed, dy * rot_speed)`
-diyor. İşaretleri serbest fly-look hissine göre seçtim ama **elde denenmedi**.
-
-- **Ne görmen gerek:** Fareyi sağa çekince kameranın sağa dönmesi (objenin sola
-  kayması) — Blender alışkanlığı.
-- **Ters geliyorsa:** `-dx` → `dx` ve/veya `dy` → `-dy`. Bu bir arıza değil,
-  ayar; not olarak `KAMERA_ODAK_KILIDI.md`'nin "Açık kalan" bölümünde duruyor.
-
----
-
-## 7. Serbest mod eski davranışı koruyor mu — regresyon kapısı
-
-`camera.set_pivot_mode {mode='free'}` ya da panelden "Free".
-
-- **Ne görmen gerek:** Orta-tık sürükleme yine **fly-look** (kamera yerinde
-  dönüyor), pan imlecin altındaki yüzeye göre ekran-doğru.
-- **Bozuksa ne demek:** Serbest modda da orbit ediyorsa `pivot_valid` serbest
-  modda temizlenmiyordur (`setCameraPivotMode("free")` → `clearOrbitPivot`).
-
----
-
-## 8. Ortografik dolly — en son, çünkü diğerlerini maskeler
-
-Numpad 5 ile ortografiğe geç, tekerlekle zoom.
-
-- **Ne görmen gerek:** Görüntü ölçeği değişmeli (`ortho_height`), kamera
-  pozisyonu **değişmemeli**.
-- **Bozuksa ne demek:** Kamera ilerliyorsa `dollyToPivot`'un ortografik erken
-  dönüşü atlanıyordur. ★ Ortografikte hiçbir şey olmuyormuş gibi görünmesi de
-  aynı arızanın diğer yüzü — `camera.get_pivot` `orthographic` alanını bu yüzden
-  döndürüyor.
+- **Ne görmen gerek:** Taşınan sıvı domain'inde partiküller kutuyla birlikte
+  gelmeli, yüzey dokusu **kaymamalı**.
+- **★★★ EN SİNSİ HÂLİ:** partiküllerin gelip **dokunun kayması.** O zaman
+  `uvw`/`uvw_b` kaydırılmamıştır. Malzeme koordinatı dünya çerçevesinde
+  adreslenir (`uvw == position` dinlenen maddede); geride kalırsa doku sıvının
+  üzerinde taşıma mesafesi kadar kayar — hata gibi değil, **sanat yönü gibi**
+  görünür.
 
 ---
 
 ## Devralınan, bu partide DOĞRULANMADI
 
-Bir önceki listedeki gaz/fluid maddeleri bu partide **çalıştırılmadı** —
-dokunulan kod ayrı (kamera navigasyonu), ama doğrulanmamış olmaları bu yüzden
-ortadan kalkmıyor. Bkz. git geçmişinde bir önceki `NEXT_BUILD_CHECKS.md`.
+- **Izgara hacmin önünde** (`IZGARA_HACMIN_ONUNDE.md`) — ertelendi, dokunulmadı.
+- **Domain döndürme/ölçekleme çapaları taşımıyor** — yalnızca öteleme ele
+  alındı, bilerek.
+- **Domain'e özgü cache invalidasyonu** — açık iş, gerekçesi
+  `DOMAIN_TASIMA_EMITTERLERI_TASIMIYORDU.md` sonunda.
+- 5 audit script'i içerik kaymasından kalıyor (`audit_material_coverage`,
+  `audit_raster_material_visibility`, `audit_rayfusion_bounce`,
+  `audit_rayfusion_probe_grid`, `audit_screen_gi`) — hepsi bu partiden önce de
+  kalıyordu; en az biri yanlış alarm çıktı, kalanı da şüpheli.

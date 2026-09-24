@@ -2062,6 +2062,35 @@ public:
     /// OPENVDB_ENABLED a raw binary fallback is written instead.
     bool exportGridDomainToVDB(std::size_t domain_index, const std::string& filepath) const;
 
+    // ★★★★ Move a grid domain AND everything anchored to it.
+    //
+    // Moving the box alone is what the gizmo and the panel used to do, and the
+    // result looked like a stale cache: the domain slid across the viewport, the
+    // emitters stayed behind, and the re-simulated smoke reappeared at the OLD
+    // place. Nothing was stale -- the sources were simply still emitting where
+    // they had always been. Two symptoms, one cause, and the wrong one is the
+    // easier story to believe.
+    //
+    // ★★★ A PARENTED source is NOT carried. It already has an owner
+    // (`parent_object`) and follows it; letting the domain move it too would
+    // give one position two authorities, and they disagree the moment either
+    // one moves. Same reasoning that keeps force fields out of domain scope.
+    //
+    // ★★ Keyframed positions are translated as well. Moving only the live
+    // `position` would look correct until the next timeline evaluation wrote the
+    // old keyed value back -- a fix that survives exactly until you press play.
+    //
+    // Returns the number of flow sources carried (0 is a legitimate answer, not
+    // a failure: a domain may own none, or own only parented ones).
+    int translateGridDomain(std::size_t domain_index, const Vec3& delta);
+
+    // Carry a domain's anchored sources WITHOUT touching its bounds. The gizmo
+    // needs this split because one drag can move and resize at once: it writes
+    // the new box itself (from the manipulated matrix) and then asks for the
+    // translation part to be carried. Callers that only move should prefer
+    // translateGridDomain, which does both and cannot forget the second half.
+    int carryGridDomainAnchors(std::size_t domain_index, const Vec3& delta);
+
     std::vector<SimulationFlowSourceDesc>& flowSources();
     const std::vector<SimulationFlowSourceDesc>& flowSources() const;
     SimulationFlowSourceDesc& addFlowSource(const SimulationFlowSourceDesc& desc);
@@ -2174,6 +2203,34 @@ private:
     std::vector<uint8_t> prev_collider_center_valid_;
     std::vector<Matrix4x4> prev_collider_transforms_;
     std::vector<uint8_t> prev_collider_transform_valid_;
+    // Re-seat a restored cache frame onto the domain's CURRENT authored place.
+    //
+    // ★★★★★ A cached frame carries `bounds_min/max` and `grid.origin`, but that
+    // is NOT information -- it is a stale duplicate of the authored descriptor,
+    // which is the only authority for where a domain is. Restoring it verbatim
+    // is what made a moved domain snap back to where it was baked: the box, the
+    // volume and the smoke all jumped to the old spot while the pickable
+    // descriptor sat at the new one. So the cache's copy is overwritten by the
+    // live one and everything world-space inside the frame is shifted to match.
+    //
+    // ★★★ This is why a MOVE no longer has to throw the bake away. Gas fields
+    // are stored per CELL (index space) and are invariant under translation;
+    // only four things in a frame are world-space, and all four are shifted
+    // here. Called from setGridDomainStates -- the one choke point BOTH the RAM
+    // cache and the on-disk bake restore through, so neither path can miss it.
+    //
+    // ★★ The guard is a PURE-TRANSLATION test (same extent, same voxel size),
+    // not a distance test: a resize really does invalidate the bake, and that
+    // case is left to the config-signature drop exactly as before.
+    //
+    // ★ Known limit, deliberately not gated: a translated bake is physically
+    // exact only if the domain's contents never interacted with anything
+    // world-anchored (collider, force field, terrain, another domain). If they
+    // did, the replay is the OLD interaction carried to a new place -- it will
+    // look plausible rather than wrong, so it is recorded here rather than
+    // discovered later.
+    void rebaseRestoredGridDomainStates();
+
     std::vector<SimulationGridDomainDesc> grid_domains_;
     std::vector<SimulationGridDomainState> grid_domain_states_;
     std::vector<SimulationGridDomainComputeBuffers> grid_domain_compute_buffers_;

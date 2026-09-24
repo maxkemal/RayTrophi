@@ -24,8 +24,8 @@ struct PBRMaterialSnapshot {
     float subsurfaceScale = 1.0f;
     float subsurfaceAnisotropy = 0.0f;
     float subsurfaceIOR = 1.33f;
-    bool useRandomWalkSSS = true;
-    int sssMaxSteps = 6;
+    int sssMethod = 0;
+    int sssWalkMaxSteps = 64;
 
     float clearcoat = 0.0f;
     float clearcoatRoughness = 0.0f;
@@ -92,8 +92,8 @@ inline PBRMaterialSnapshot capturePBRMaterialSnapshot(const PrincipledBSDF& pbsd
     s.subsurfaceScale = pbsdf.getSubsurfaceScale();
     s.subsurfaceAnisotropy = pbsdf.getSubsurfaceAnisotropy();
     s.subsurfaceIOR = pbsdf.getSubsurfaceIOR();
-    s.useRandomWalkSSS = pbsdf.getUseRandomWalkSSS();
-    s.sssMaxSteps = pbsdf.getSssMaxSteps();
+    s.sssMethod = pbsdf.getSssMethod();
+    s.sssWalkMaxSteps = pbsdf.getSssWalkMaxSteps();
 
     s.clearcoat = pbsdf.getClearcoat();
     s.clearcoatRoughness = pbsdf.getClearcoatRoughness();
@@ -164,8 +164,10 @@ inline void applyPBRMaterialSnapshotToGpuMaterial(const PBRMaterialSnapshot& s, 
     gpu.subsurface_scale = s.subsurfaceScale;
     gpu.subsurface_anisotropy = s.subsurfaceAnisotropy;
     gpu.subsurface_ior = s.subsurfaceIOR;
-    gpu.sss_use_random_walk = s.useRandomWalkSSS ? 1 : 0;
-    gpu.sss_max_steps = s.sssMaxSteps;
+    // OptiX (frozen) keeps its own field names; it now reads the same single
+    // authority, so its walk cap follows the new default (64, was 6).
+    gpu.sss_use_random_walk = s.sssMethod == 0 ? 1 : 0;
+    gpu.sss_max_steps = s.sssWalkMaxSteps;
 
     gpu.clearcoat = s.clearcoat;
     gpu.clearcoat_roughness = s.clearcoatRoughness;
@@ -231,8 +233,8 @@ inline Backend::IBackend::MaterialData makeBackendMaterialDataFromSnapshot(const
     data.subsurfaceScale = s.subsurfaceScale;
     data.subsurfaceAnisotropy = s.subsurfaceAnisotropy;
     data.subsurfaceIOR = s.subsurfaceIOR;
-    data.useRandomWalkSSS = s.useRandomWalkSSS;
-    data.sssMaxSteps = s.sssMaxSteps;
+    data.sssMethod = s.sssMethod;
+    data.sssWalkMaxSteps = s.sssWalkMaxSteps;
 
     data.clearcoat = s.clearcoat;
     data.clearcoatRoughness = s.clearcoatRoughness;

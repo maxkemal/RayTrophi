@@ -5337,6 +5337,22 @@ json dispatchMethod(const std::string& method, const json& params) {
             return flowSourceToJson(info);
         });
     }
+    // ★★★★ Moving a domain carries its emitters. Read `sources_carried`: a move
+    //   reporting 0 on a domain that visibly owns emitters means they are
+    //   PARENTED, and those follow their parent object by design.
+    if (method == "sim.move_domain") {
+        std::string name = requireString(params, "domain");
+        Vec3 d = requireVec3(params, "delta");
+        return enqueueQuery([name, d](UIContext&) {
+            rtapi::SimulationDomainMoveResult r;
+            rtapi::Result res = rtapi::moveSimulationDomain(name, d, r);
+            if (!res.ok) return json{{"__error", res.error}};
+            return json{{"sources_carried", r.sources_carried},
+                        {"center", vec3ToJson(r.center)},
+                        {"bounds_min", vec3ToJson(r.bounds_min)},
+                        {"bounds_max", vec3ToJson(r.bounds_max)}};
+        });
+    }
     if (method == "flow_source.create") {
         // Defaults come from the struct, so a caller names a domain and gets a
         // working emitter; every other field is optional.

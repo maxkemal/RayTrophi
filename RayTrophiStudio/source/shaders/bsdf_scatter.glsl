@@ -1267,67 +1267,221 @@ vec3 sampleHG(vec3 forward, float g, inout uint seed) {
 }
 
 // ============================================================
-// Subsurface Scattering — Random Walk (OptiX parity)
+// Subsurface Scattering — Geometry-Aware Random Walk
 // ============================================================
-void scatterSSS(vec3 hitPos, vec3 normal, vec3 albedo,
-                vec3 sssColor, float sssAmount, float sssScale,
-                vec3 sssRadius, float sssAnisotropy,
-                inout uint seed) {
-    // Multiscatter random-walk SSS (bounded)
-    float safeScale = max(sssScale, 0.001);
-    vec3 scaledRadius = sssRadius * safeScale;
-    vec3 sigma_t = vec3(
-        scaledRadius.x > 0.0001 ? 1.0 / scaledRadius.x : 10000.0,
-        scaledRadius.y > 0.0001 ? 1.0 / scaledRadius.y : 10000.0,
-        scaledRadius.z > 0.0001 ? 1.0 / scaledRadius.z : 10000.0
-    );
+//
+// WHY THIS REWRITE
+// The previous scatterSSS marched a fixed 6 steps through a BLIND
+// medium — no traceRayEXT, no geometry queries. The exit point had
+// no relation to the actual mesh, so:
+//   • thin features (ears, nose tips) showed no translucency
+//   • exit normals were the ENTRY normal, lighting the exit wrong
+//   • energy conservation was absent (no σ_s/σ_t split)
+//
+// This version is a geometry-aware random walk modelled on the
+// Blender Cycles / Christensen-Burley approach:
+//   1. Compute per-channel σ_s and σ_a from the artist-facing
+//      subsurface radius and colour (diffusion profile).
+//   2. At each step, sample a free-path distance from the
+//      exponential distribution, then TRACE that segment against
+//      the mesh (shadowPayload, nearest hit via any-hit, depth 1).
+//   3. If the trace HITS geometry before the free path ends:
+//        → the ray exits the surface. Use the hit distance to
+//          reconstruct the exit point and continue with the
+//          outward direction from that point.
+//   4. If the trace MISSES (no geometry closer than the free path):
+//        → the photon scattered inside. Pick a new direction (HG)
+//          and repeat.
+//   5. Russian Roulette for adaptive termination after the first
+//      few steps (min 4, max 32).
+//
+// RECURSION DEPTH
+// The pipeline has maxPipelineRayRecursionDepth = 2. This function
+// runs inside closesthit (depth 1). Its probes use shadowPayload
+// (location 1) with SkipClosestHitShaderEXT — only any-hit and miss
+// run, staying at depth 1. No recursion increase needed.
+//
+// σ DERIVATION (Christensen-Burley / Cycles random-walk remap)
+// The artist picks subsurface_color as the MULTI-scatter albedo — the colour
+// the surface should end up with. Using it directly as the per-event albedo
+// (the old code) compounds it over every scatter event, which is why SSS read
+// far darker and more saturated than the swatch. It is inverted to the
+// single-scatter albedo α, and the radius is rescaled by the matching fit:
+//   α   = 1 - exp(A·(-5.09406 + A·(2.61188 - A·4.31805)))
+//   σ_t = 1 / (radius·scale · (1.9 - A + 3.5·(A-0.8)²)) / (1 - g)
+//   σ_s = σ_t·α
+//
+// SPECTRAL WEIGHTING (hero channel + one-sample MIS)
+// One channel is picked (∝ throughput) and its σ_t drives the free-path
+// sample; all three channels are then weighted by their own transmittance
+// over the balance-heuristic pdf. Without this the RGB radius could NOT tint
+// anything: every channel got the same weight A, whichever σ was sampled.
+//   exit    : w_c = T_c(d)        / Σ_k p_k T_k(d)
+//   scatter : w_c = σ_s,c T_c(t)  / Σ_k p_k σ_t,k T_k(t)
+// No extra Beer-Lambert and no extra colour multiply on exit — both are
+// already inside these weights.
+// ============================================================
+// ── Non-triangle SSS boundaries ─────────────────────────────
+// The walk's exit probe sees TRIANGLES only (mask 0x01, triangle any-hit). A
+// body bounded by something else — volume_closesthit's liquid isosurface —
+// was never found from inside: every walk ran to roulette and was killed, so
+// SSS on milk/honey read as a dark, dead surface with no error anywhere.
+// A shader shading such a boundary defines SSS_CUSTOM_EXIT before including
+// this file and implements sssCustomExit (the nearest inside->outside crossing
+// of ITS field along the segment, and the outward normal there). The walk
+// takes whichever boundary is nearer, so a spoon inside honey still works.
+#ifdef SSS_CUSTOM_EXIT
+bool sssCustomExit(vec3 origin, vec3 dir, float tMax, out float tHit, out vec3 exitN);
+#endif
 
-    const int maxSteps = 6;
+// Where the last scatterSSS walk left the body. A caller that re-seats the
+// scattered ray afterwards (the isosurface does, outside its band) must seat
+// it HERE — seating at the entry hit throws the whole walk away.
+bool g_sssExited = false;
+vec3 g_sssExitPos = vec3(0.0);
+vec3 g_sssExitN = vec3(0.0, 1.0, 0.0);
+
+void scatterSSS(vec3 hitPos, vec3 normal, vec3 rayDir,
+                vec3 sssColor, float sssScale, vec3 sssRadius,
+                float sssAnisotropy, float sssIor,
+                uint sssMethod, int sssMaxSteps,
+                inout uint seed) {
+    // ── Fast method: the SSS share of the diffuse sub-layer shaded as Lambert
+    // with subsurface_color — no probes, no walk. It is exactly what the walk
+    // converges to on a thick, flat surface and what RayFusion draws, so the
+    // two methods agree on colour and differ only in light bleed.
+    g_sssExited = false;
+    if (sssMethod == 1u) {
+        payload.attenuation *= clamp(sssColor, vec3(0.0), vec3(1.0));
+        payload.scatterOrigin = offset_ray(hitPos, normal);
+        payload.scatterDir = cosineSampleHemisphere(normal, seed);
+        payload.scattered = true;
+        payload.bounceType = BOUNCE_DIFFUSE;
+        return;
+    }
+
+    float g = clamp(sssAnisotropy, -0.9, 0.9);
+    vec3 A = clamp(sssColor, vec3(0.0), vec3(0.999));
+    vec3 alpha = vec3(1.0) - exp(A * (vec3(-5.09406) + A * (vec3(2.61188) - A * 4.31805)));
+    vec3 radiusFit = vec3(1.9) - A + 3.5 * (A - 0.8) * (A - 0.8);
+    vec3 d = max(sssRadius * max(sssScale, 0.001), vec3(1e-5));
+    vec3 sigma_t = 1.0 / (d * radiusFit) / (1.0 - g);
+    vec3 sigma_s = sigma_t * alpha;
+
+    // ── Entry direction: the INCIDENT ray refracted by the SSS IOR ─────
+    // (the old code refracted -N through N, which is -N again for every IOR,
+    // so the IOR slider had no effect).
+    vec3 dir = refract(normalize(rayDir), normal, 1.0 / max(sssIor, 1.001));
+    if (dot(dir, dir) < 1e-8 || dot(dir, normal) >= 0.0) dir = -normal;
+    dir = normalize(dir);
+
+    int maxSteps = clamp(sssMaxSteps, 8, 256);
+    const int MIN_STEPS_BEFORE_RR = 4;
+    vec3 pos = offset_ray(hitPos, -normal);
     vec3 throughput = vec3(1.0);
-    vec3 pos = hitPos - normal * 0.001; // start slightly inside
-    vec3 dir = sampleHG(-normal, sssAnisotropy, seed);
+
+    // SSS probe sentinel — shadow_anyhit keeps the NEAREST candidate in .x/.y,
+    // flags .z, and leaves the sentinel in .w (see its SSS branch).
+    const uint SSS_SUBSURFACE_PROBE = 0x555B0DEDu;
+    // NoOpaque forces the any-hit to run on opaque BLASes; SkipClosestHit
+    // keeps the probe at recursion depth 1. No TerminateOnFirstHit: any-hit
+    // order is not distance order.
+    const uint SSS_PROBE_FLAGS =
+        gl_RayFlagsNoOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT;
+    // Authored solids only — no volumes, splats, or SDF.
+    const uint SSS_PROBE_MASK = 0x01u;
 
     for (int step = 0; step < maxSteps; ++step) {
-        float randCh = rnd(seed);
-        float sigmaSample = (randCh < 0.333) ? sigma_t.x : (randCh < 0.666) ? sigma_t.y : sigma_t.z;
-        float scatterDist = -log(max(rnd(seed), 1e-6)) / max(sigmaSample, 1e-6);
-        float maxRadius = max(max(scaledRadius.x, scaledRadius.y), scaledRadius.z);
-        scatterDist = min(scatterDist, maxRadius * 3.0);
+        float tsum = throughput.x + throughput.y + throughput.z;
+        if (!(tsum > 0.0)) break;
+        vec3 chanP = throughput / tsum;
+        float xi = rnd(seed);
+        float sigmaHero = (xi < chanP.x) ? sigma_t.x
+                        : (xi < chanP.x + chanP.y) ? sigma_t.y : sigma_t.z;
+        float t = -log(max(1.0 - rnd(seed), 1e-7)) / sigmaHero;
 
-        pos += dir * scatterDist;
+        shadowPayload = vec4(3.0e38, 0.0, 0.0,
+                             uintBitsToFloat(SSS_SUBSURFACE_PROBE));
+        traceRayEXT(topLevelAS, SSS_PROBE_FLAGS, SSS_PROBE_MASK,
+                    0, 1, 1, pos, 0.0, dir, t, 1);
 
-        vec3 absorb = vec3(
-            exp(-sigma_t.x * scatterDist),
-            exp(-sigma_t.y * scatterDist),
-            exp(-sigma_t.z * scatterDist)
-        );
-        throughput *= absorb;
+        bool exitFound = shadowPayload.z > 0.5;
+        float hitDist = exitFound ? max(shadowPayload.x, 0.0) : t;
+        bool customExit = false;
+        vec3 customN = vec3(0.0);
+#ifdef SSS_CUSTOM_EXIT
+        {
+            float cT;
+            vec3 cN;
+            if (sssCustomExit(pos, dir, hitDist, cT, cN)) {
+                exitFound = true;
+                customExit = true;
+                hitDist = cT;
+                customN = cN;
+            }
+        }
+#endif
 
-        float survive = clamp((throughput.x + throughput.y + throughput.z) / 3.0, 0.01, 0.99);
-        if (rnd(seed) > survive) break;
+        if (exitFound) {
+            // ── Surface exit ───────────────────────────────────────
+            vec3 Tr = exp(-sigma_t * hitDist);
+            throughput *= Tr / max(dot(chanP, Tr), 1e-12);
 
-        if (dot(dir, normal) > 0.0) {
-            // Exiting to surface: apply accumulated SSS tint and exit
-            payload.attenuation *= sssColor * throughput;
-            payload.scatterOrigin = pos + normal * RAY_OFFSET;
-            payload.scatterDir = normalize(dir);
+            vec3 exitPos = pos + dir * hitDist;
+            vec3 exitNormal = dir;  // hair / no normal: leave along the walk
+            uint packedNrm = floatBitsToUint(shadowPayload.y);
+            if (customExit) {
+                exitNormal = customN;
+            } else if (packedNrm != 0u) {
+                vec2 e = unpackSnorm2x16(packedNrm);
+                vec3 n = vec3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+                if (n.z < 0.0) {
+                    n.xy = (1.0 - abs(n.yx)) * vec2(
+                        n.x >= 0.0 ? 1.0 : -1.0,
+                        n.y >= 0.0 ? 1.0 : -1.0);
+                }
+                float len = length(n);
+                if (len > 1e-6) exitNormal = n / len;
+            }
+            // OUTWARD = the side the walk is leaving towards. The old code
+            // flipped the other way, so the exit lobe pointed back INSIDE.
+            if (dot(exitNormal, dir) < 0.0) exitNormal = -exitNormal;
+
+            g_sssExited = true;
+            g_sssExitPos = exitPos;
+            g_sssExitN = exitNormal;
+            payload.attenuation *= throughput;
+            payload.scatterOrigin = offset_ray(exitPos, exitNormal);
+            payload.scatterDir = cosineSampleHemisphere(exitNormal, seed);
             payload.scattered = true;
             payload.bounceType = BOUNCE_DIFFUSE;
             return;
         }
 
-        // Scatter internally
-        dir = sampleHG(dir, sssAnisotropy, seed);
+        // ── Scatter event inside the medium ─────────────────────────
+        vec3 Tr = exp(-sigma_t * t);
+        throughput *= sigma_s * Tr / max(dot(chanP, sigma_t * Tr), 1e-12);
+        pos += dir * t;
+
+        if (step >= MIN_STEPS_BEFORE_RR) {
+            float surviveP = clamp(max(max(throughput.x, throughput.y),
+                                       throughput.z), 0.05, 0.95);
+            if (rnd(seed) > surviveP) break;
+            throughput /= surviveP;
+        }
+
+        dir = sampleHG(dir, g, seed);
     }
 
-    // Fallback exit: cosine hemisphere outward
-    vec3 outDir = cosineSampleHemisphere(normal, seed);
-    payload.attenuation *= sssColor * throughput;
-    payload.scatterOrigin = pos + normal * RAY_OFFSET;
-    payload.scatterDir = outDir;
-    payload.scattered = true;
-    payload.bounceType = BOUNCE_DIFFUSE;
+    // Walk absorbed (roulette or step cap). ★ The cap is a BIAS, not a
+    // cost knob only: a walk cut at the cap loses its energy, so a low
+    // Max Steps reads as "darker SSS", never as an error. The old code re-emitted from the
+    // interior point with the ENTRY normal — light leaking out of nowhere.
+    payload.attenuation = vec3(0.0);
+    payload.scattered = false;
 }
+
+
 
 // ============================================================
 // Clearcoat — Second GGX Specular Lobe (IOR=1.5, lacquer layer)
@@ -1894,6 +2048,9 @@ struct SurfaceSample {
     vec3  subsurfaceRadius;
     float subsurfaceScale;
     float subsurfaceAnisotropy;
+    float subsurfaceIor;
+    uint  subsurfaceMethod;     // 0 = random walk, 1 = fast (Lambert, no probes)
+    int   subsurfaceMaxSteps;   // walk hard cap, [8, 256]
 };
 
 // Zero state, so a caller only fills what it actually has.
@@ -1907,6 +2064,9 @@ SurfaceSample defaultSurfaceSample() {
     s.subsurfaceAmount = 0.0; s.subsurfaceColor = vec3(1.0);
     s.subsurfaceRadius = vec3(1.0); s.subsurfaceScale = 1.0;
     s.subsurfaceAnisotropy = 0.0;
+    s.subsurfaceIor = 1.4;
+    s.subsurfaceMethod = 0u;
+    s.subsurfaceMaxSteps = 64;
     return s;
 }
 
@@ -1982,9 +2142,11 @@ void scatterPrincipled(SurfaceSample s, inout uint seed) {
                 payload.attenuation *= (1.0 / max(pTrans, 0.01));
             }
             else if (pSSS > 0.01 && r < pTrans + pSSS) {
-                scatterSSS(s.P, s.N, s.albedo,
-                           s.subsurfaceColor, s.subsurfaceAmount, s.subsurfaceScale,
-                           s.subsurfaceRadius, s.subsurfaceAnisotropy, seed);
+                scatterSSS(s.P, s.N, s.rayDir,
+                           s.subsurfaceColor, s.subsurfaceScale,
+                           s.subsurfaceRadius, s.subsurfaceAnisotropy,
+                           s.subsurfaceIor, s.subsurfaceMethod,
+                           s.subsurfaceMaxSteps, seed);
                 payload.attenuation *= (1.0 / max(pSSS, 0.01));
             }
             else {

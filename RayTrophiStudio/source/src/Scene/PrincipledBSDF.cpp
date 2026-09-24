@@ -1,6 +1,7 @@
 #include "PrincipledBSDF.h"
 #include "PBRTextureChannelPolicy.h"
 #include <cmath>
+#include <algorithm>
 #include "Matrix4x4.h"
 #include "HittableList.h"
 #include <globals.h>
@@ -1043,7 +1044,7 @@ bool PrincipledBSDF::sss_random_walk_scatter(const Ray& r_in, const HitRecord& r
     Vec3 sigma_t = compute_sigma_t(sss_radius, sss_scale);
 
     // If random-walk is disabled, perform a single-step SSS exit (GPU parity)
-    if (!getUseRandomWalkSSS()) {
+    if (getSssMethod() != 0) {
         float rand_channel = Vec3::random_float();
         float sigma_sample;
         if (rand_channel < 0.333f) sigma_sample = sigma_t.x;
@@ -1068,7 +1069,7 @@ bool PrincipledBSDF::sss_random_walk_scatter(const Ray& r_in, const HitRecord& r
     }
 
     // Multi-scatter random walk (bounded)
-    int maxSteps = getSssMaxSteps();
+    int maxSteps = getSssWalkMaxSteps();
     if (maxSteps <= 0) maxSteps = 1;
     Vec3 throughput = Vec3(1.0f, 1.0f, 1.0f);
     Vec3 pos = rec.point - N * 0.001f;
@@ -1208,19 +1209,19 @@ void PrincipledBSDF::setSubsurfaceIOR(float val) {
     if (!sss_ext) sss_ext = std::make_unique<SubsurfaceExtension>();
     sss_ext->subsurfaceIOR = val;
 }
-bool PrincipledBSDF::getUseRandomWalkSSS() const {
-    return sss_ext ? sss_ext->useRandomWalkSSS : true;
+int PrincipledBSDF::getSssMethod() const {
+    return sss_ext ? sss_ext->sssMethod : 0;
 }
-void PrincipledBSDF::setUseRandomWalkSSS(bool val) {
+void PrincipledBSDF::setSssMethod(int val) {
     if (!sss_ext) sss_ext = std::make_unique<SubsurfaceExtension>();
-    sss_ext->useRandomWalkSSS = val;
+    sss_ext->sssMethod = (val == 1) ? 1 : 0;
 }
-int PrincipledBSDF::getSssMaxSteps() const {
-    return sss_ext ? sss_ext->sssMaxSteps : 6;
+int PrincipledBSDF::getSssWalkMaxSteps() const {
+    return sss_ext ? sss_ext->sssWalkMaxSteps : 64;
 }
-void PrincipledBSDF::setSssMaxSteps(int val) {
+void PrincipledBSDF::setSssWalkMaxSteps(int val) {
     if (!sss_ext) sss_ext = std::make_unique<SubsurfaceExtension>();
-    sss_ext->sssMaxSteps = val;
+    sss_ext->sssWalkMaxSteps = std::clamp(val, 8, 256);
 }
 
 // Resin

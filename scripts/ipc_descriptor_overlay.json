@@ -1410,8 +1410,8 @@
     "related": "material.get|material.info",
     "params": {
       "param": {
-        "enum": "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y",
-        "description": "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission and opacity are clamped to [0,1]; ior to [1,10]."
+        "enum": "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|subsurface|subsurface_anisotropy|subsurface_color|subsurface_ior|subsurface_max_steps|subsurface_method|subsurface_radius|subsurface_scale|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y",
+        "description": "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color, subsurface_color, subsurface_radius) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission, opacity and subsurface are clamped to [0,1]; ior to [1,10]; subsurface_ior to [1,3]; subsurface_anisotropy to [-0.99,0.99]; subsurface_scale must be positive; subsurface_method 0=random walk 1=fast; subsurface_max_steps integer [8,256] (too low darkens)."
       }
     }
   },
@@ -1428,8 +1428,8 @@
     "related": "material.get_param|material.set|material.set_texture",
     "params": {
       "param": {
-        "enum": "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y",
-        "description": "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission and opacity are clamped to [0,1]; ior to [1,10]."
+        "enum": "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|subsurface|subsurface_anisotropy|subsurface_color|subsurface_ior|subsurface_max_steps|subsurface_method|subsurface_radius|subsurface_scale|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y",
+        "description": "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color, subsurface_color, subsurface_radius) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission, opacity and subsurface are clamped to [0,1]; ior to [1,10]; subsurface_ior to [1,3]; subsurface_anisotropy to [-0.99,0.99]; subsurface_scale must be positive; subsurface_method 0=random walk 1=fast; subsurface_max_steps integer [8,256] (too low darkens)."
       }
     }
   },
@@ -5737,5 +5737,10 @@
     "summary": "Camera registry: how many cameras the scene holds, which index is active, and whether the active camera is registered at all",
     "tags": "camera|registry|binding|diagnostic",
     "notes": "READ 'active_is_orphan' FIRST. It is true when SceneData::camera points at a camera that is NOT in SceneData::cameras - the scene is being driven through an object the registry never heard of. Any consumer that resolves the view through the LIST rather than through the active pointer then follows a different camera, and the symptom is 'the viewport does not follow my camera' with no error anywhere. Registration happens in exactly three places (ProjectManager::newProject, ProjectManager::openProject, Renderer::create_scene), all via SceneData::setActiveCamera; a camera created outside them is an orphan. 'active' on each entry is POINTER identity, not an index or a value match: two cameras can carry identical numbers and still be different objects, which is precisely the failure this call exists to catch. 'active_index_out_of_range' is reported separately from the orphan flag on purpose - an empty registry and a stale index are different faults, and merging them would hide whichever one is not being looked for. This method is an INSTRUMENT added before the bug it measures was found: three different root causes had been guessed for an unmeasurable question, and all three were wrong."
+  },
+  "sim.move_domain": {
+    "summary": "Translate a gas or fluid grid domain and carry its unparented flow sources with it",
+    "tags": "domain|move|gas|fluid|emitter",
+    "notes": "READ 'sources_carried'. Moving a domain used to move only the box: its emitters stayed at their old world positions, so the re-simulated smoke reappeared where it always had been -- which reads as a STALE CACHE rather than as stale emitters. Two symptoms, one cause, and the wrong story is the easier one to believe. A move that reports sources_carried = 0 on a domain that visibly owns emitters means those emitters are PARENTED: a parented source follows its parent object, not the domain, because one position cannot have two authorities. Keyframed source positions are translated too - moving only the live position looks correct until the next timeline evaluation writes the old keyed world position straight back. One method covers BOTH domain types because gas and fluid share SimulationGridDomainDesc; separate gas/fluid movers would be two bodies that must not diverge. The call also republishes the domain state (the solver and the RT volume read that, not the descriptor, and while the timeline is parked no step runs to publish it) and drops the frame cache, whose baked frames belong to the old box."
   }
 }

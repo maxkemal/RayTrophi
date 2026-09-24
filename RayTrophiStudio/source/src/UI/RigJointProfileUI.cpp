@@ -6,7 +6,7 @@
 #include "ImGuizmo.h"
 namespace RigUI {
 void drawRigJointProfile(UIContext& ctx,const std::string& character){
- if(character.empty()||!ImGui::CollapsingHeader("Joint Motion"))return;
+ if(character.empty()||!UIWidgets::CollapsingHeader("Joint Motion"))return;
  static std::string owner,bone,message;static int load=-1;static uint64_t revision=0;static RigAuthoring::JointRule draft;
  nlohmann::json state;const auto result=rtapi::getRigJointProfile(character,state);if(!result.ok){ImGui::TextWrapped("%s",result.error.c_str());return;}
  bool owned=false;for(const auto& m:ctx.scene.importedModelContexts)if(m.importName==character)owned=m.authoringOwned;

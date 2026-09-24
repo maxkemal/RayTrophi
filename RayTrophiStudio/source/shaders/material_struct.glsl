@@ -80,7 +80,7 @@ struct MaterialExt {
     // Block 11-13: Iridescence tail + interior dust
     float clearcoat_film_thickness, dust_color_a_r, dust_color_a_g, dust_color_a_b;
     float dust_style, dust_color_b_r, dust_color_b_g, dust_color_b_b;
-    float shard_shape, _ext_pad0, _ext_pad1, _ext_pad2;
+    float shard_shape, sss_method, sss_walk_max_steps, _ext_pad2;
     // Block 14-16: closed-mesh volume medium
     float volume_density, volume_absorption, volume_scattering, volume_anisotropy;
     float volume_step_size, volume_max_steps, volume_noise_scale, volume_multi_scatter;

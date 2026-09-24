@@ -1030,7 +1030,37 @@ static void yieldViewportVramToRenderBackend(const char* reason) {
     auto* vp = dedicatedVulkanViewportBackend();
     if (!vp || vp->isRayFusionSceneASYielded()) return;
     const std::string before = vramReadingForLog();
+    // ★★★★★ The simulation compute context is bound to THIS (viewport) device,
+    //   and while the timeline is playing it dispatches on it every frame. The
+    //   live-volume bridge hands the RT consumer raw VkDeviceAddresses borrowed
+    //   from those dispatches. Yielding the AS underneath in-flight compute --
+    //   and leaving the borrowed addresses published while an Adaptive domain
+    //   reallocates its dense grids -- is a TDR, and the TDR resets the whole
+    //   Vulkan driver, so it surfaces as VK_ERROR_DEVICE_LOST on the FIRST
+    //   trace submit of the backend we just switched TO. That is why the log
+    //   blames Vulkan RT for something the viewport device did.
+    //
+    // ★★★ shutdownAndResetBackendSafe() already does exactly this, and its own
+    //   comment names the hazard ("a later Vulkan RT activation cannot traverse
+    //   stale addresses"). This path reaches that same activation WITHOUT going
+    //   through the teardown, so it needs the same two guarantees: drain the
+    //   compute work, then invalidate the addresses while the buffers it points
+    //   at are still alive. Order matters -- invalidating first would leave the
+    //   in-flight dispatch writing to fields nothing is allowed to read.
+    try {
+        scene.simulation_world.compute().synchronize();
+    } catch (const std::exception& e) {
+        SCENE_LOG_WARN(std::string("[Viewport] simulation compute synchronize failed before yield (") +
+                       reason + "): " + e.what());
+    } catch (...) {
+        SCENE_LOG_WARN(std::string("[Viewport] simulation compute synchronize failed before yield (") +
+                       reason + ").");
+    }
     vp->waitForCompletion();
+    // The consumer on the other device would suppress these addresses anyway
+    // (simDeviceIsMine=0 -> NanoVDB fallback); clearing them here is what makes
+    // that fallback start from a grid nobody is still writing to.
+    scene.invalidateSimulationDenseGpuAddresses();
     vp->yieldRayFusionSceneAS();
     SCENE_LOG_INFO(std::string("[Viewport] VRAM yielded to render backend (") + reason +
                    "): " + before + " -> " + vramReadingForLog());

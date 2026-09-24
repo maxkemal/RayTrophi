@@ -58,7 +58,9 @@ enum class MaterialParamKind {
     ResinDensity, ResinColor, ResinRoughness, ResinInclusion, ResinDirt,
     ResinDirtColor, ResinInclusionScale, ResinShard, ResinShardHue, ResinObjectSpace,
     DustStyle, DustColorA, DustColorB, ShardShape,
-    UvScaleX, UvScaleY, UvOffsetX, UvOffsetY
+    UvScaleX, UvScaleY, UvOffsetX, UvOffsetY,
+    Subsurface, SubsurfaceColor, SubsurfaceRadius, SubsurfaceScale,
+    SubsurfaceAnisotropy, SubsurfaceIor, SubsurfaceMethod, SubsurfaceMaxSteps
 };
 
 struct MaterialValue {

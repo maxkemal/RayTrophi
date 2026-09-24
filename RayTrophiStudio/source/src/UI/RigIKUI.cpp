@@ -4,7 +4,7 @@
 #include "imgui.h"
 namespace RigUI {
 void drawRigIKControls(UIContext& ctx, const std::string& character) {
-    if (!ImGui::CollapsingHeader("IK Controls / Contacts", ImGuiTreeNodeFlags_DefaultOpen))
+    if (!UIWidgets::CollapsingHeader("IK Controls / Contacts", ImGuiTreeNodeFlags_DefaultOpen))
         return;
     static std::string message;
     auto report = [&](const rtapi::Result& r) { message = r.ok ? "" : r.error; };

@@ -176,6 +176,16 @@ bool parseMaterialParam(const std::string& name, MaterialParamKind& out, bool& i
     if (name == "uv_scale_y") { out = MaterialParamKind::UvScaleY; return true; }
     if (name == "uv_offset_x") { out = MaterialParamKind::UvOffsetX; return true; }
     if (name == "uv_offset_y") { out = MaterialParamKind::UvOffsetY; return true; }
+    // Subsurface scattering (random walk). Panel-only until now, so none of the
+    // SSS plan's claims could be measured from a script.
+    if (name == "subsurface") { out = MaterialParamKind::Subsurface; return true; }
+    if (name == "subsurface_color") { out = MaterialParamKind::SubsurfaceColor; is_color = true; return true; }
+    if (name == "subsurface_radius") { out = MaterialParamKind::SubsurfaceRadius; is_color = true; return true; }
+    if (name == "subsurface_scale") { out = MaterialParamKind::SubsurfaceScale; return true; }
+    if (name == "subsurface_anisotropy") { out = MaterialParamKind::SubsurfaceAnisotropy; return true; }
+    if (name == "subsurface_ior") { out = MaterialParamKind::SubsurfaceIor; return true; }
+    if (name == "subsurface_method") { out = MaterialParamKind::SubsurfaceMethod; return true; }
+    if (name == "subsurface_max_steps") { out = MaterialParamKind::SubsurfaceMaxSteps; return true; }
     return false;
 }
 
@@ -216,6 +226,14 @@ MaterialValue readMaterialValue(const PrincipledBSDF& material, MaterialParamKin
         case MaterialParamKind::UvScaleY:            value.scalar = material.textureTransform.scale.v; break;
         case MaterialParamKind::UvOffsetX:           value.scalar = material.textureTransform.translation.u; break;
         case MaterialParamKind::UvOffsetY:           value.scalar = material.textureTransform.translation.v; break;
+        case MaterialParamKind::Subsurface:           value.scalar = material.getSubsurface(); break;
+        case MaterialParamKind::SubsurfaceColor:      value.color  = material.getSubsurfaceColor(); break;
+        case MaterialParamKind::SubsurfaceRadius:     value.color  = material.getSubsurfaceRadius(); break;
+        case MaterialParamKind::SubsurfaceScale:      value.scalar = material.getSubsurfaceScale(); break;
+        case MaterialParamKind::SubsurfaceAnisotropy: value.scalar = material.getSubsurfaceAnisotropy(); break;
+        case MaterialParamKind::SubsurfaceIor:        value.scalar = material.getSubsurfaceIOR(); break;
+        case MaterialParamKind::SubsurfaceMethod:     value.scalar = static_cast<float>(material.getSssMethod()); break;
+        case MaterialParamKind::SubsurfaceMaxSteps:   value.scalar = static_cast<float>(material.getSssWalkMaxSteps()); break;
     }
     return value;
 }
@@ -256,6 +274,14 @@ void writeMaterialValue(PrincipledBSDF& material, MaterialParamKind kind, const 
         case MaterialParamKind::UvScaleY:            material.textureTransform.scale.v = value.scalar; break;
         case MaterialParamKind::UvOffsetX:           material.textureTransform.translation.u = value.scalar; break;
         case MaterialParamKind::UvOffsetY:           material.textureTransform.translation.v = value.scalar; break;
+        case MaterialParamKind::Subsurface:           material.setSubsurface(value.scalar); break;
+        case MaterialParamKind::SubsurfaceColor:      material.setSubsurfaceColor(value.color); break;
+        case MaterialParamKind::SubsurfaceRadius:     material.setSubsurfaceRadius(value.color); break;
+        case MaterialParamKind::SubsurfaceScale:      material.setSubsurfaceScale(value.scalar); break;
+        case MaterialParamKind::SubsurfaceAnisotropy: material.setSubsurfaceAnisotropy(value.scalar); break;
+        case MaterialParamKind::SubsurfaceIor:        material.setSubsurfaceIOR(value.scalar); break;
+        case MaterialParamKind::SubsurfaceMethod:     material.setSssMethod(static_cast<int>(value.scalar)); break;
+        case MaterialParamKind::SubsurfaceMaxSteps:   material.setSssWalkMaxSteps(static_cast<int>(value.scalar)); break;
     }
     if (!material.gpuMaterial) material.gpuMaterial = std::make_shared<GpuMaterial>();
     applyPBRMaterialSnapshotToGpuMaterial(capturePBRMaterialSnapshot(material), *material.gpuMaterial);
@@ -276,7 +302,8 @@ Result validateMaterialParamValue(MaterialParamKind kind, bool is_color, const M
                             kind == MaterialParamKind::Metallic ||
                             kind == MaterialParamKind::Specular ||
                             kind == MaterialParamKind::Transmission ||
-                            kind == MaterialParamKind::Opacity;
+                            kind == MaterialParamKind::Opacity ||
+                            kind == MaterialParamKind::Subsurface;
     if (unit_range && (value.scalar < 0.0f || value.scalar > 1.0f)) {
         return Result::fail("value must be in the range [0, 1]");
     }
@@ -285,6 +312,22 @@ Result validateMaterialParamValue(MaterialParamKind kind, bool is_color, const M
     }
     if (kind == MaterialParamKind::Ior && (value.scalar < 1.0f || value.scalar > 10.0f)) {
         return Result::fail("ior must be in the range [1, 10]");
+    }
+    if (kind == MaterialParamKind::SubsurfaceIor && (value.scalar < 1.0f || value.scalar > 3.0f)) {
+        return Result::fail("subsurface_ior must be in the range [1, 3]");
+    }
+    if (kind == MaterialParamKind::SubsurfaceScale && value.scalar <= 0.0f) {
+        return Result::fail("subsurface_scale must be positive");
+    }
+    if (kind == MaterialParamKind::SubsurfaceAnisotropy && (value.scalar < -0.99f || value.scalar > 0.99f)) {
+        return Result::fail("subsurface_anisotropy must be in the range [-0.99, 0.99]");
+    }
+    if (kind == MaterialParamKind::SubsurfaceMethod && value.scalar != 0.0f && value.scalar != 1.0f) {
+        return Result::fail("subsurface_method must be 0 (random walk) or 1 (fast)");
+    }
+    if (kind == MaterialParamKind::SubsurfaceMaxSteps &&
+        (value.scalar != std::floor(value.scalar) || value.scalar < 8.0f || value.scalar > 256.0f)) {
+        return Result::fail("subsurface_max_steps must be an integer in [8, 256]");
     }
     return Result::success();
 }

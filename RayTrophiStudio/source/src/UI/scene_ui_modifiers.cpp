@@ -1,4 +1,4 @@
-﻿#include "scene_ui.h"
+#include "scene_ui.h"
 #include "Api/RtApi.h"
 #include "MeshEdit/ProfileSplineEditor.h"
 #include "ui_modern.h"
@@ -795,26 +795,12 @@ bool beginBrushDockSection(const char* label, bool default_open = true) {
     else if (section_label.find("Behavior") != std::string::npos) accent = ImVec4(0.96f, 0.76f, 0.36f, 1.0f);
     else if (section_label.find("Alpha") != std::string::npos) accent = ImVec4(0.86f, 0.68f, 1.0f, 1.0f);
 
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 7.0f));
-    
-    float fr = 10.0f;
-    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
-        fr = ThemeManager::instance().current().style.frameRounding;
-    }
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, fr);
-    
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(accent.x * 0.22f, accent.y * 0.22f, accent.z * 0.22f, 0.92f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(accent.x * 0.30f, accent.y * 0.30f, accent.z * 0.30f, 0.98f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(accent.x * 0.34f, accent.y * 0.34f, accent.z * 0.34f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.x, accent.y, accent.z, 0.24f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.95f, 0.98f, 1.0f));
-    const bool open = ImGui::CollapsingHeader(
-        label,
-        (default_open ? ImGuiTreeNodeFlags_DefaultOpen : 0) |
-        ImGuiTreeNodeFlags_SpanAvailWidth);
-    ImGui::PopStyleColor(5);
-    ImGui::PopStyleVar(2);
-    return open;
+    const auto& theme = ThemeManager::instance().current();
+    ImGuiTreeNodeFlags flags = default_open ? ImGuiTreeNodeFlags_DefaultOpen : 0;
+    return SectionStyleManager::instance().beginCollapsingHeader(
+        label, flags, accent,
+        theme.colors.accent, theme.colors.border, theme.colors.text
+    );
 }
 
 std::shared_ptr<Material> clonePaintableMaterial(const std::shared_ptr<Material>& src, const std::string& new_name) {

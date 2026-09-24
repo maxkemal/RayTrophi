@@ -1,4 +1,4 @@
-#include "UI/RigPoseAuthoringUI.h"
+﻿#include "UI/RigPoseAuthoringUI.h"
 #include "Animation/RigPoseAuthoring.h"
 #include "Animation/RigSelection.h"
 #include "Api/RtApi.h"
@@ -13,7 +13,7 @@ void drawRigPoseAuthoring(UIContext &ctx) {
     static char name[129] = "PoseClip";
     const auto &session = ctx.scene.rigView.pose;
     const auto character = session.active ? session.character : ctx.scene.rigView.character;
-    if (!ImGui::CollapsingHeader("Pose / Bone Keys",
+    if (!UIWidgets::CollapsingHeader("Pose / Bone Keys",
                                  session.active ? ImGuiTreeNodeFlags_DefaultOpen : 0))
         return;
     std::string error;
@@ -91,7 +91,7 @@ void drawRigPoseAuthoring(UIContext &ctx) {
     }
     if (!ctx.scene.rigView.bone.empty() &&
         state["local_transforms"].contains(ctx.scene.rigView.bone)) {
-        ImGui::SeparatorText("Selected bone FK");
+        if (UIWidgets::CollapsingHeader("Selected Bone FK", ImGuiTreeNodeFlags_DefaultOpen)) {
         const auto bone = ctx.scene.rigView.bone;
         const auto values = state["local_transforms"][bone];
         Matrix4x4 local;
@@ -122,7 +122,9 @@ void drawRigPoseAuthoring(UIContext &ctx) {
         if ((moveDone || rotateDone) && ctx.scene.rigView.pose.hasPreview)
             report(rtapi::applyRigPosePreview(character));
     }
-    ImGui::SeparatorText("Bone keys");
+        }
+    
+    if (UIWidgets::CollapsingHeader("Bone Keys", ImGuiTreeNodeFlags_DefaultOpen)) {
     size_t keyedSelected = 0;
     for (const auto& bone : selected)
         for (const auto& keyed : state["keyed_bones_at_frame"])
@@ -150,8 +152,9 @@ void drawRigPoseAuthoring(UIContext &ctx) {
     }
     ImGui::EndDisabled();
     ImGui::TextDisabled("Keys store local position and quaternion rotation at this frame.");
+    }
     drawRigMotionRecipes(ctx, character, state["rig_revision"].get<uint64_t>());
-    if (ImGui::CollapsingHeader("Deformation diagnostics")) {
+    if (UIWidgets::CollapsingHeader("Deformation diagnostics")) {
         if (ImGui::Button("Inspect bind coverage")) {
             nlohmann::json coverage;
             const auto r = rtapi::getRigPoseCoverage(character, coverage);

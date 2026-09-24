@@ -65,6 +65,23 @@ void main() {
         return;
     }
 
+    // ---- SSS subsurface random-walk exit probe ----------------------------
+    // Hair is irrelevant for SSS, but the sentinel must be recognized so a
+    // stray SSS probe hitting a hair strand doesn't fall through to the
+    // shadow transmittance logic and corrupt the walk.
+    const uint SSS_SUBSURFACE_PROBE = 0x555B0DEDu;
+    if (floatBitsToUint(shadowPayload.w) == SSS_SUBSURFACE_PROBE) {
+        // Same nearest-hit contract as shadow_anyhit: keep the closest
+        // candidate, ignore every intersection, leave the sentinel in .w.
+        if (shadowPayload.z > 0.5 && gl_HitTEXT >= shadowPayload.x) {
+            ignoreIntersectionEXT;
+        }
+        shadowPayload.x = gl_HitTEXT;
+        shadowPayload.y = 0.0;  // no meaningful normal for hair
+        shadowPayload.z = 1.0;
+        ignoreIntersectionEXT;
+    }
+
     // ---- CAMERA / BOUNCE / PHOTON RAYS -------------------------------------
     // Since camera rays dropped gl_RayFlagsOpaqueEXT (alpha cutout moved into
     // the triangle any-hit), this shader runs for them too. The shadow logic

@@ -2507,4 +2507,62 @@ Result stepFluidSimulation(float dt) {
     return Result::success();
 }
 
+// ---------------------------------------------------------------------------
+// Moving a domain (gas OR fluid) -- and everything anchored to it.
+//
+// ★★★★★ This capability did not exist over IPC at all. A domain could only be
+//   moved by dragging its gizmo or typing into the panel, which is exactly why
+//   the bug it fixes was never caught: moving the box left its emitters behind,
+//   the re-simulated smoke reappeared at the old place, and that reads as a
+//   STALE CACHE rather than as stale emitters. Two symptoms, one cause, and the
+//   wrong story is the easier one to believe.
+//
+// ★★ One method for both domain types on purpose. Gas and fluid share
+//   SimulationGridDomainDesc; giving them `gas.move_domain` and
+//   `fluid.move_domain` would be two bodies that must not diverge, and in this
+//   repo they always do.
+// ---------------------------------------------------------------------------
+Result moveSimulationDomain(const std::string& domain_name, const Vec3& delta,
+                            SimulationDomainMoveResult& out) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (!std::isfinite(delta.x) || !std::isfinite(delta.y) || !std::isfinite(delta.z))
+        return Result::fail("delta must be finite");
+
+    auto& p_sys = g_ctx->scene.ensureParticleSimulationSystem();
+    auto& domains = p_sys.gridDomains();
+    std::size_t index = domains.size();
+    for (std::size_t i = 0; i < domains.size(); ++i) {
+        if (domains[i].name == domain_name) { index = i; break; }
+    }
+    if (index >= domains.size())
+        return Result::fail("no simulation domain named '" + domain_name + "'");
+
+    out.sources_carried = p_sys.translateGridDomain(index, delta);
+    const Vec3 mn = Vec3::min(domains[index].bounds_min, domains[index].bounds_max);
+    const Vec3 mx = Vec3::max(domains[index].bounds_min, domains[index].bounds_max);
+    out.bounds_min = mn;
+    out.bounds_max = mx;
+    out.center = (mn + mx) * 0.5f;
+
+    // ★★★ The descriptor is not what gets simulated or drawn: the solver and the
+    //   RT volume read the published domain STATE, written only by a sim step.
+    //   While the timeline is parked -- the normal authoring case -- no step
+    //   runs, so without this the box would move in the outliner and stay put on
+    //   screen. Same reason the gizmo path calls it.
+    p_sys.synchronizeGridDomainsNow();
+
+    // ★★★★ The bake is KEPT. translateGridDomain only ever translates, and a
+    //   translated domain's cached cells are still the same cells -- the restore
+    //   re-seats them onto the new box (rebaseRestoredGridDomainStates). Telling
+    //   the frame loop to adopt the new signature is what stops its own
+    //   auto-invalidate from deleting the bake a tick later.
+    g_ctx->scene.acceptSimConfigAsBaked();
+    g_ctx->scene.requestSimulationTimelineRenderResync();
+    resetAccumulation();
+    g_ctx->start_render = true;
+    ProjectManager::getInstance().markModified();
+    return Result::success();
+}
+
 } // namespace rtapi

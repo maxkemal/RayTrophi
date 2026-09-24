@@ -4235,6 +4235,26 @@ mesh_edit_changed_confirmed:
                 std::max(0.001f, Vec3(objectMatrix[4], objectMatrix[5], objectMatrix[6]).length()),
                 std::max(0.001f, Vec3(objectMatrix[8], objectMatrix[9], objectMatrix[10]).length()));
             const Vec3 half_extent = extent * 0.5f;
+            // ★★★★ The translation part of this drag, captured BEFORE the box is
+            //   rewritten. One drag can move and resize at once, so the domain's
+            //   own bounds are written here and only the MOVE is carried to the
+            //   things anchored to it. Emitters used to stay behind, and the
+            //   re-simulated smoke reappearing at the old spot read as a stale
+            //   cache -- it was stale EMITTERS.
+            const Vec3 old_min = Vec3::min(selected_domain->bounds_min, selected_domain->bounds_max);
+            const Vec3 old_max = Vec3::max(selected_domain->bounds_min, selected_domain->bounds_max);
+            const Vec3 old_center = (old_min + old_max) * 0.5f;
+            const Vec3 old_extent = old_max - old_min;
+            const Vec3 move_delta = newPos - old_center;
+            // A drag that only MOVED the box leaves every cached cell valid --
+            // they simply belong somewhere else now, and the cache restore
+            // re-seats them there. A drag that RESIZED it changes the grid
+            // layout, and that bake is genuinely dead.
+            const Vec3 extent_change = extent - old_extent;
+            const bool pure_translation =
+                std::abs(extent_change.x) < 1e-4f &&
+                std::abs(extent_change.y) < 1e-4f &&
+                std::abs(extent_change.z) < 1e-4f;
             selected_domain->source_mode = RayTrophiSim::SimulationGridDomainSourceMode::ManualBox;
             selected_domain->source_name.clear();
             selected_domain->bounds_min = newPos - half_extent;
@@ -4253,14 +4273,25 @@ mesh_edit_changed_confirmed:
             auto& owner_system = ctx.scene.particle_systems[
                 static_cast<std::size_t>(sel.selected.particle_system_index)];
             if (owner_system.runtime) {
+                // ★ Carry the emitters BEFORE synchronising: the sync publishes
+                //   the domain state the solver and the RT volume read, and a
+                //   source left at its old world position would be baked into
+                //   that first published frame.
+                owner_system.runtime->carryGridDomainAnchors(
+                    static_cast<std::size_t>(sel.selected.simulation_domain_index), move_delta);
                 owner_system.runtime->synchronizeGridDomainsNow();
             }
 
-            // Bounds drive both the solver allocation and the generated RT
-            // volume. Invalidate them together; otherwise Vulkan keeps drawing
-            // the previous domain-state bounds while the hierarchy proxy has
-            // already moved to the edited descriptor bounds.
-            ctx.scene.clearSimFrameCache();
+            // ★★★★ Moving a domain used to throw the whole simulation cache
+            // away -- every frame, every domain, every system -- because the
+            // bounds are part of the config signature. They no longer are
+            // treated that way for a pure move: the bake travels with the box.
+            // A resize still drops it, since the cells themselves changed.
+            if (pure_translation) {
+                ctx.scene.acceptSimConfigAsBaked();
+            } else {
+                ctx.scene.clearSimFrameCache();
+            }
             ctx.scene.requestSimulationTimelineRenderResync();
             if (ctx.backend_ptr) {
                 ctx.backend_ptr->resetAccumulation();

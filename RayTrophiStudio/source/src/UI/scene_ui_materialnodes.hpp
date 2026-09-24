@@ -566,7 +566,7 @@ private:
             // with PushID so labels never collide in the ImGui ID stack.
             ImGui::PushID(catIdx++);
             ImGui::PushStyleColor(ImGuiCol_Header, category.color);
-            const bool categoryOpen = ImGui::CollapsingHeader(category.name, ImGuiTreeNodeFlags_DefaultOpen);
+            const bool categoryOpen = UIWidgets::CollapsingHeader(category.name, ImGuiTreeNodeFlags_DefaultOpen);
             ImGui::PopStyleColor();
             if (!categoryOpen) { ImGui::PopID(); continue; }
 

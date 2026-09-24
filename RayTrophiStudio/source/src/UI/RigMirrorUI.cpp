@@ -7,7 +7,7 @@
 #include "ImGuizmo.h"
 namespace RigUI {
 void drawRigMirror(UIContext& ctx,const std::string& character) {
-    if(character.empty() || !ImGui::CollapsingHeader("Mirror rest / creation"))return;
+    if(character.empty() || !UIWidgets::CollapsingHeader("Mirror rest / creation"))return;
     static std::string owner,message;static int load=-1,axis=0,side=0;static float offset=0;static char name[129]="MirroredJoint";
     if(owner!=character || load!=ctx.scene.load_counter){owner=character;load=ctx.scene.load_counter;axis=side=0;offset=0;message.clear();}
     const char* axes[]={"x","y","z"};ImGui::SetNextItemWidth(80);ImGui::Combo("Rig axis",&axis,axes,3);

@@ -217,7 +217,7 @@ void preview() {
 }
 void drawRigFitting(UIContext& ctx,const std::string& character,const std::string& mesh) {
     if(character.empty()||mesh.empty())return;
-    if(!ImGui::CollapsingHeader("Fit skeleton to mesh"))return;
+    if(!UIWidgets::CollapsingHeader("Fit skeleton to mesh"))return;
     ImGui::TextWrapped("Edit manual landmarks in the Alignment panel.");
     ImGui::BeginDisabled(ImGuizmo::IsUsing());
     if(ImGui::Button("Open Alignment")) {

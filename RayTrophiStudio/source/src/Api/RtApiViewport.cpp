@@ -674,7 +674,7 @@ ViewportQualityInfo viewportQuality() {
     out.opaque_core_parity = "rt_aligned";
     out.material_graph_surface = "bounded";
     out.clearcoat = "iridescent_lobe";
-    out.subsurface = "radius_profile_approx";
+    out.subsurface = "curvature_wrap_rt_albedo";
     out.translucency = "thin_surface_approx";
     out.surface_anisotropy = "unsupported_abi_conflict";
     out.transparency = "unsorted_alpha";

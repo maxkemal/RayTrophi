@@ -2765,6 +2765,9 @@ if (emissionTexID > 0 && (mpWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
     ss.subsurfaceRadius   = max(vec3(matx.subsurface_radius_r, matx.subsurface_radius_g, matx.subsurface_radius_b), vec3(0.001));
     ss.subsurfaceScale    = max(matx.subsurface_scale, 0.001);
     ss.subsurfaceAnisotropy = clamp(matx.subsurface_anisotropy, -0.99, 0.99);
+    ss.subsurfaceIor        = max(matx.subsurface_ior, 1.001);
+    ss.subsurfaceMethod     = (matx.sss_method > 0.5) ? 1u : 0u;
+    ss.subsurfaceMaxSteps   = int(matx.sss_walk_max_steps + 0.5);
     scatterPrincipled(ss, payload.seed);
 
     // Resin base scattered as a normal diffuse lobe above (which set BOUNCE_DIFFUSE).

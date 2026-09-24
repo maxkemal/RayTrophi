@@ -8293,6 +8293,9 @@ void ParticleSimulationSystem::setGridDomainStates(const std::vector<SimulationG
     // still in flight belongs to a future that has just been undone.
     discardMoltenMassTransferState();
     grid_domain_states_ = states;
+    // A cached frame remembers where the domain WAS. The descriptor is where it
+    // IS. Re-seat the frame before anyone reads it (see the header note).
+    rebaseRestoredGridDomainStates();
     // Frame-cache restore is CPU-side. Invalidate the published device view so
     // the render bridge uploads the restored snapshot through its NanoVDB
     // fallback instead of displaying the last Vulkan-compute frame. The next
@@ -8312,6 +8315,114 @@ void ParticleSimulationSystem::setGridDomainStates(const std::vector<SimulationG
 void ParticleSimulationSystem::setGridDomainBoundsResolver(
     std::function<bool(const SimulationGridDomainDesc&, Vec3&, Vec3&)> resolver) {
     grid_domain_bounds_resolver_ = std::move(resolver);
+}
+
+void ParticleSimulationSystem::rebaseRestoredGridDomainStates() {
+    const std::size_t count = std::min(grid_domain_states_.size(), grid_domains_.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        const SimulationGridDomainDesc& domain = grid_domains_[i];
+        SimulationGridDomainState& state = grid_domain_states_[i];
+        if (!state.valid) continue;
+        // ★★★ ManualBox ONLY, and the reason is a timing one. For ObjectBounds /
+        // Adaptive the descriptor bounds are DERIVED: synchronizeGridDomains()
+        // rewrites them from the resolver, and applySimSourceObjectPosesForFrame()
+        // does not run until AFTER this restore. So at this instant the desc
+        // still describes some other frame's pose, and rebasing onto it would
+        // slide the whole bake a little on every scrub -- a drift that looks
+        // like motion rather than like a bug. Those modes keep the verbatim
+        // restore they always had; their bounds follow their object anyway.
+        if (domain.source_mode != SimulationGridDomainSourceMode::ManualBox) continue;
+
+        // Same expression synchronizeGridDomains() uses to derive state bounds,
+        // so a domain that has NOT moved produces an exactly zero delta and
+        // falls out below instead of drifting by a rounding step every scrub.
+        const float padding = std::max(0.0f, domain.padding);
+        const Vec3 live_min = Vec3::min(domain.bounds_min, domain.bounds_max) - Vec3(padding);
+        const Vec3 live_max = Vec3::max(domain.bounds_min, domain.bounds_max) + Vec3(padding);
+
+        const Vec3 delta = live_min - state.bounds_min;
+        if (std::abs(delta.x) < 1e-6f && std::abs(delta.y) < 1e-6f && std::abs(delta.z) < 1e-6f) {
+            continue;
+        }
+
+        // Pure-translation gate. A changed extent or voxel size means the grid
+        // layout itself differs, so the cached cells do not correspond to the
+        // live ones and shifting them would be a lie with the right shape.
+        const Vec3 live_extent = live_max - live_min;
+        const Vec3 cached_extent = state.bounds_max - state.bounds_min;
+        const Vec3 extent_error = live_extent - cached_extent;
+        if (std::abs(extent_error.x) > 1e-3f ||
+            std::abs(extent_error.y) > 1e-3f ||
+            std::abs(extent_error.z) > 1e-3f) {
+            continue;
+        }
+        if (std::abs(state.grid.voxel_size - domain.voxel_size) > 1e-6f) continue;
+
+        state.bounds_min += delta;
+        state.bounds_max += delta;
+        state.grid.origin += delta;
+
+        // Fluid particles are world-space and must come along. Velocity is a
+        // DIRECTION and is left alone; translating it would inject a phantom
+        // drift on the first replayed step.
+        for (Vec3& position : state.particles.position) position += delta;
+        // ★ Material coordinates start life as a copy of the world position
+        // (uvw == position for resting material) and are addressed in the same
+        // world frame, so they translate with it. Leaving them behind shifts
+        // every UVW-projected texture on the surface by the move distance --
+        // visible as the material sliding across the liquid, not as an error.
+        for (Vec3& uvw : state.particles.uvw)   uvw += delta;
+        for (Vec3& uvw : state.particles.uvw_b) uvw += delta;
+        for (Vec3& position : state.foam.position) position += delta;
+
+        // The published snapshot genuinely changed; consumers key off this.
+        ++state.version;
+    }
+}
+
+int ParticleSimulationSystem::translateGridDomain(std::size_t domain_index, const Vec3& delta) {
+    if (domain_index >= grid_domains_.size()) return 0;
+    // A zero move is a no-op, not an error: the panel calls this on every edit
+    // settle, and most of those settle on an unchanged value.
+    if (std::abs(delta.x) < 1e-6f && std::abs(delta.y) < 1e-6f && std::abs(delta.z) < 1e-6f)
+        return 0;
+
+    SimulationGridDomainDesc& domain = grid_domains_[domain_index];
+    domain.bounds_min += delta;
+    domain.bounds_max += delta;
+    return carryGridDomainAnchors(domain_index, delta);
+}
+
+int ParticleSimulationSystem::carryGridDomainAnchors(std::size_t domain_index, const Vec3& delta) {
+    if (domain_index >= grid_domains_.size()) return 0;
+    if (std::abs(delta.x) < 1e-6f && std::abs(delta.y) < 1e-6f && std::abs(delta.z) < 1e-6f)
+        return 0;
+
+    const int owner = static_cast<int>(domain_index);
+    int carried = 0;
+    for (SimulationFlowSourceDesc& src : flow_sources_) {
+        if (src.domain_index != owner) continue;
+        // ★★★ Parented sources keep their own owner. Carrying them here would
+        //   give one position two authorities; the next parent move would fight
+        //   this one and the loser would be whichever wrote last.
+        if (!src.parent_object.empty()) continue;
+
+        src.position += delta;
+        // ★★ The keys too, or the move survives only until playback re-evaluates
+        //   the track and writes the old world position straight back -- a fix
+        //   that lasts exactly until you press play.
+        for (auto& keyed : src.keyframes) {
+            if (keyed.second.has_position) keyed.second.position += delta;
+        }
+        // ★ The cached parent pose is a MEASUREMENT of where the parent was, not
+        //   an authored value -- but it is compared against a world position we
+        //   just moved. Left stale it would manufacture one frame of enormous
+        //   inherited velocity. Unparented sources carry the sentinel, so this
+        //   only matters for a source that was parented and then released.
+        if (src.parent_prev_position.x > -1.0e9f) src.parent_prev_position += delta;
+        ++carried;
+    }
+    return carried;
 }
 
 std::vector<SimulationFlowSourceDesc>& ParticleSimulationSystem::flowSources() {

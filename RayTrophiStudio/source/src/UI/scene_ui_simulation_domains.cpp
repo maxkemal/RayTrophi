@@ -1,4 +1,5 @@
-﻿#include "scene_ui_forcefield.hpp"
+#include "scene_ui_forcefield.hpp"
+#include "ui_modern.h"
 
 #include "Api/RtApi.h"
 #include "Fluid/FluidSplatMaterialAuthoring.h"
@@ -43,28 +44,7 @@ void drawSimulationDomainControls(
             }
             ui_ctx.start_render = true;
         };
-        if (ImGui::Button("Reset Simulation (Free-run)##SimResetTop", ImVec2(-1, 0))) {
-            resetSimulationNow();
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "Clear the bake cache and return to live free-run preview.\n"
-                "Play the timeline to bake each frame; scrub to replay cached frames.\n\n"
-                "Editing a PHYSICS parameter (viscosity, gravity, boundary, seed\n"
-                "density, per-substance physics) already invalidates the bake on its\n"
-                "own and rewinds to the start. Look parameters (material, drawn-as,\n"
-                "porosity, IOR) repaint the current frame and never re-simulate.");
-        }
-        ImGui::Separator();
-
-        // With no object selected, spawn the domain centred on the world origin
-        // (a predictable, reproducible spot) rather than wherever the camera
-        // happens to be looking — camera->lookat drifts as the user orbits, so
-        // a "default" domain would otherwise land at an arbitrary off-centre
-        // coordinate. Y stays slightly above the origin so the box straddles
-        // the ground plane the same way it always has.
         Vec3 center(0.0f, 1.0f, 0.0f);
-
         const bool has_object_selection =
             ui_ctx.selection.selected.type == SelectableType::Object &&
             ui_ctx.selection.selected.object != nullptr &&
@@ -77,19 +57,30 @@ void drawSimulationDomainControls(
             }
         }
 
-        if (ImGui::Button("Add Grid Domain##SimulationPanel", ImVec2(-1, 0))) {
+        const float avail_w = ImGui::GetContentRegionAvail().x;
+        const float btn3_w = std::max(60.0f, (avail_w - 10.0f) / 3.0f);
+
+        // --- Row 1: Primary Simulation & Creation Actions ---
+        const auto& cur_theme = ThemeManager::instance().current();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(cur_theme.colors.accent.x * 0.40f + cur_theme.colors.surface.x * 0.60f,
+                                                      cur_theme.colors.accent.y * 0.40f + cur_theme.colors.surface.y * 0.60f,
+                                                      cur_theme.colors.accent.z * 0.40f + cur_theme.colors.surface.z * 0.60f, 0.85f));
+        if (ImGui::Button("Reset Sim##SimResetTop", ImVec2(btn3_w, 24))) {
+            resetSimulationNow();
+        }
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Clear the bake cache and return to live free-run preview.");
+        }
+        ImGui::SameLine();
+
+        if (ImGui::Button("+ Add Grid##SimulationPanel", ImVec2(btn3_w, 24))) {
             RayTrophiSim::SimulationGridDomainDesc desc;
-            // Unique default name so the list is distinguishable at a glance
-            // (the [Gas]/[Fluid] tag in the list is derived from .type, not the
-            // name, so it stays correct after a type switch).
             const std::size_t domain_count = particles ? particles->gridDomains().size() : 0;
             desc.name = "Grid Domain " + std::to_string(domain_count + 1);
             desc.source_mode = RayTrophiSim::SimulationGridDomainSourceMode::ManualBox;
             desc.bounds_min = center + Vec3(-2.5f, -2.5f, -2.5f);
             desc.bounds_max = center + Vec3(2.5f, 2.5f, 2.5f);
-            // Use the fastest solver the machine actually has. The descriptor
-            // default stays CPU for project-file compatibility; the choice is made
-            // here, where the runtime capabilities are known.
             desc.backend = RayTrophiSim::defaultSimulationDomainBackend();
             scene.addSimulationGridDomain(desc);
             particles = scene.getParticleSimulationSystem();
@@ -104,11 +95,15 @@ void drawSimulationDomainControls(
                 ui_ctx.selection.selected.scale = mx - mn;
             }
         }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Add a new empty 3D Simulation Grid Domain.");
+        }
+        ImGui::SameLine();
 
         if (!has_object_selection) {
             ImGui::BeginDisabled();
         }
-        if (ImGui::Button("Add Domain From Selection##SimulationPanel", ImVec2(-1, 0))) {
+        if (ImGui::Button("+ From Select##SimulationPanel", ImVec2(btn3_w, 24))) {
             const std::string source_name = ui_ctx.selection.selected.object->getNodeName();
             scene.addSimulationGridDomainFromObject(source_name);
             particles = scene.getParticleSimulationSystem();
@@ -123,11 +118,26 @@ void drawSimulationDomainControls(
                 ui_ctx.selection.selected.scale = mx - mn;
             }
         }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Create a domain fitted around selected object bounds.");
+        }
         if (!has_object_selection) {
             ImGui::EndDisabled();
         }
 
-        if (ImGui::Button("Clear Domains##SimulationPanel", ImVec2(-1, 0))) {
+        // --- Row 2: Cleanup Actions Toolbar ---
+        auto p_sim_check = scene.getParticleSimulationSystem();
+        const std::size_t legacy_fluid_n = scene.fluid_objects.size();
+        const std::size_t soa_emitters_n = p_sim_check ? p_sim_check->emitters().size() : 0u;
+        const std::size_t flow_sources_n = p_sim_check ? p_sim_check->flowSources().size() : 0u;
+
+        int active_clear_count = 1;
+        if (soa_emitters_n > 0) active_clear_count++;
+        if (flow_sources_n > 0) active_clear_count++;
+        if (legacy_fluid_n > 0) active_clear_count++;
+        const float clear_btn_w = std::max(60.0f, (avail_w - (active_clear_count - 1) * 4.0f) / active_clear_count);
+
+        if (ImGui::Button("Clear Domains##SimulationPanel", ImVec2(clear_btn_w, 22))) {
             scene.clearSimulationGridDomains();
             if (ui_ctx.selection.selected.type == SelectableType::SimulationDomain &&
                 ui_ctx.selection.selected.particle_system_index == scene.active_particle_system_index) {
@@ -135,48 +145,39 @@ void drawSimulationDomainControls(
             }
             selected_domain_index = -1;
         }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Clear all domains from scene.");
+        }
 
-        // Diagnostic + cleanup for "stuck default emitter" complaints. Shows
-        // counts of all stale sources that could be spawning particles or
-        // drawing gizmos, with one-click clear buttons. Once the user
-        // identifies which list is non-empty, the corresponding button wipes
-        // it. Faz 2 will consolidate these paths.
-        {
-            auto p_sim = scene.getParticleSimulationSystem();
-            const std::size_t legacy_fluid_n = scene.fluid_objects.size();
-            const std::size_t soa_emitters_n = p_sim ? p_sim->emitters().size() : 0u;
-            const std::size_t flow_sources_n = p_sim ? p_sim->flowSources().size() : 0u;
-            if (legacy_fluid_n + soa_emitters_n + flow_sources_n > 0) {
-                ImGui::TextDisabled("Sim sources — LegacyFluid:%zu  ParticleEmitters:%zu  FlowSources:%zu",
-                                     legacy_fluid_n, soa_emitters_n, flow_sources_n);
+        if (soa_emitters_n > 0 && p_sim_check) {
+            ImGui::SameLine();
+            if (ImGui::Button("Clear Emitters##SimulationPanel", ImVec2(clear_btn_w, 22))) {
+                p_sim_check->clearEmitters();
+                ui_ctx.start_render = true;
             }
-            if (legacy_fluid_n > 0) {
-                if (ImGui::Button("Remove Legacy Fluid Objects##SimulationPanel", ImVec2(-1, 0))) {
-                    scene.fluid_objects.clear();
-                    if (scene.fluid_simulation_system) {
-                        scene.fluid_simulation_system->setObjects(&scene.fluid_objects);
-                    }
-                    scene.active_fluid_object_index = -1;
-                    ui_ctx.start_render = true;
-                }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Wipes legacy SoA particle emitters.");
             }
-            if (soa_emitters_n > 0 && p_sim) {
-                if (ImGui::Button("Clear Particle Emitters##SimulationPanel", ImVec2(-1, 0))) {
-                    p_sim->clearEmitters();
-                    ui_ctx.start_render = true;
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Wipes legacy SoA particle emitters (Spark/Smoke/Fire presets).\nFluid grid-domain sources are unaffected.");
-                }
+        }
+        if (flow_sources_n > 0 && p_sim_check) {
+            ImGui::SameLine();
+            if (ImGui::Button("Clear Sources##SimulationPanel", ImVec2(clear_btn_w, 22))) {
+                p_sim_check->clearFlowSources();
+                ui_ctx.start_render = true;
             }
-            if (flow_sources_n > 0 && p_sim) {
-                if (ImGui::Button("Clear Flow Sources##SimulationPanel", ImVec2(-1, 0))) {
-                    p_sim->clearFlowSources();
-                    ui_ctx.start_render = true;
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Wipes all flow sources.");
+            }
+        }
+        if (legacy_fluid_n > 0) {
+            ImGui::SameLine();
+            if (ImGui::Button("Remove Fluid Objs##SimulationPanel", ImVec2(clear_btn_w, 22))) {
+                scene.fluid_objects.clear();
+                if (scene.fluid_simulation_system) {
+                    scene.fluid_simulation_system->setObjects(&scene.fluid_objects);
                 }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Wipes all flow sources (gas inject + fluid emit). Re-add per domain.");
-                }
+                scene.active_fluid_object_index = -1;
+                ui_ctx.start_render = true;
             }
         }
 
@@ -246,8 +247,8 @@ void drawSimulationDomainControls(
             ImGui::Text("Domain Solver Type:");
             ImGui::Spacing();
             
-            const float button_width = 140.0f;
-            const ImVec4 active_color = ImVec4(0.08f, 0.48f, 0.88f, 1.00f); // Sleek modern royal blue
+            const float button_width = std::max(100.0f, (ImGui::GetContentRegionAvail().x - 6.0f) * 0.5f);
+            const ImVec4 active_color = ImVec4(cur_theme.colors.accent.x, cur_theme.colors.accent.y, cur_theme.colors.accent.z, 0.90f);
             const ImVec4 inactive_color = ImGui::GetStyleColorVec4(ImGuiCol_Button);
             
             const bool is_gas = (domain.type == RayTrophiSim::SimulationDomainType::Gas);
@@ -324,7 +325,7 @@ void drawSimulationDomainControls(
                 ImGui::Spacing();
 
                 // Group 1: Compute & Backend
-                if (ImGui::CollapsingHeader("Compute Device & Backend", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (UIWidgets::CollapsingHeader("Compute Device & Backend", ImGuiTreeNodeFlags_DefaultOpen)) {
                     ImGui::Spacing();
 
                 // The CPU Sparse OpenVDB backend was removed from the UI: for
@@ -480,7 +481,7 @@ void drawSimulationDomainControls(
                 }
 
                 // Group 2: Grid Resolution & Scaling
-                if (ImGui::CollapsingHeader("Grid Resolution & Scaling", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (UIWidgets::CollapsingHeader("Grid Resolution & Scaling", ImGuiTreeNodeFlags_DefaultOpen)) {
                     ImGui::Spacing();
 
                 int res[3] = { domain.resolution_x, domain.resolution_y, domain.resolution_z };
@@ -700,7 +701,7 @@ void drawSimulationDomainControls(
                 }
 
                 // Group 3: Bounds & Boundary Mode
-                if (ImGui::CollapsingHeader("Domain Bounds & Behaviors", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (UIWidgets::CollapsingHeader("Domain Bounds & Behaviors", ImGuiTreeNodeFlags_DefaultOpen)) {
                     ImGui::Spacing();
 
                     // Source Mode Selector
@@ -750,15 +751,56 @@ void drawSimulationDomainControls(
                         ImGui::TextDisabled("Dynamic Bounds Min: %.2f, %.2f, %.2f", domain.bounds_min.x, domain.bounds_min.y, domain.bounds_min.z);
                         ImGui::TextDisabled("Dynamic Bounds Max: %.2f, %.2f, %.2f", domain.bounds_max.x, domain.bounds_max.y, domain.bounds_max.z);
                     } else {
+                        // ★★★★ The centre BEFORE the two drags. Typing new bounds can
+                        //   move the box, resize it, or both; only the translation
+                        //   part is carried to the emitters anchored to this domain.
+                        //   Without this the panel reproduces exactly the bug the
+                        //   gizmo path had -- the box moves, the emitters stay, and
+                        //   the smoke reappearing at the old spot looks like a stale
+                        //   cache. Panel and gizmo must not disagree about what
+                        //   "moving a domain" means.
+                        const Vec3 bounds_center_before =
+                            (Vec3::min(domain.bounds_min, domain.bounds_max) +
+                             Vec3::max(domain.bounds_min, domain.bounds_max)) * 0.5f;
+                        const Vec3 bounds_extent_before =
+                            Vec3::max(domain.bounds_min, domain.bounds_max) -
+                            Vec3::min(domain.bounds_min, domain.bounds_max);
+                        bool bounds_settled = false;
                         ImGui::DragFloat3("Domain Minimum Bounds", &domain.bounds_min.x, 0.05f, -10000.0f, 10000.0f, "%.2f");
+                        bounds_settled |= ImGui::IsItemDeactivatedAfterEdit();
                         seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Minimum coordinates of the domain bounding box in world space (X, Y, Z).");
                         }
                         ImGui::DragFloat3("Domain Maximum Bounds", &domain.bounds_max.x, 0.05f, -10000.0f, 10000.0f, "%.2f");
+                        bounds_settled |= ImGui::IsItemDeactivatedAfterEdit();
                         seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Maximum coordinates of the domain bounding box in world space (X, Y, Z).");
+                        }
+                        if (bounds_settled && particles) {
+                            const Vec3 bounds_center_after =
+                                (Vec3::min(domain.bounds_min, domain.bounds_max) +
+                                 Vec3::max(domain.bounds_min, domain.bounds_max)) * 0.5f;
+                            // ★ carry, not translate: the bounds are already written
+                            //   by the widgets above, so only the anchors are owed
+                            //   the move.
+                            particles->carryGridDomainAnchors(
+                                static_cast<std::size_t>(selected_domain_index),
+                                bounds_center_after - bounds_center_before);
+                            // ★ Same deal the gizmo path makes: a pure MOVE keeps
+                            //   the bake (the restore re-seats it), a RESIZE lets
+                            //   the config signature drop it as before. The panel
+                            //   and the gizmo must not disagree about this either.
+                            const Vec3 bounds_extent_after =
+                                Vec3::max(domain.bounds_min, domain.bounds_max) -
+                                Vec3::min(domain.bounds_min, domain.bounds_max);
+                            const Vec3 extent_change = bounds_extent_after - bounds_extent_before;
+                            if (std::abs(extent_change.x) < 1e-4f &&
+                                std::abs(extent_change.y) < 1e-4f &&
+                                std::abs(extent_change.z) < 1e-4f) {
+                                scene.acceptSimConfigAsBaked();
+                            }
                         }
                     }
 
@@ -777,7 +819,7 @@ void drawSimulationDomainControls(
                 }
 
                 // Group 4: Statistics Summary
-                if (ImGui::CollapsingHeader("Simulation & Collision Statistics", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (UIWidgets::CollapsingHeader("Simulation & Collision Statistics", ImGuiTreeNodeFlags_DefaultOpen)) {
                     ImGui::Spacing();
 
                 int intersect_n = 0;
@@ -847,7 +889,7 @@ void drawSimulationDomainControls(
 
                 if (is_gas_domain) {
                     // Gas Channel Flags
-                    if (ImGui::CollapsingHeader("Simulation Solver Channels (Grids)", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    if (UIWidgets::CollapsingHeader("Simulation Solver Channels (Grids)", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
 
                     bool channel_density = (domain.channels & static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Density)) != 0u;
@@ -888,7 +930,7 @@ void drawSimulationDomainControls(
                     }
                     }
 
-                    if (ImGui::CollapsingHeader("Buoyancy & Gas Motion", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    if (UIWidgets::CollapsingHeader("Buoyancy & Gas Motion", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
                         ImGui::DragFloat("Heat Lift", &domain.gas_buoyancy_heat,
                                          0.02f, -20.0f, 20.0f, "%.3f");
@@ -1056,7 +1098,7 @@ void drawSimulationDomainControls(
                     }
 
                     // Combustion / fire
-                    if (ImGui::CollapsingHeader("Combustion & Fire Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    if (UIWidgets::CollapsingHeader("Combustion & Fire Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
 
                     if (ImGui::Checkbox("Enable Combustion Physics (Fire & Flames)##EnableFire", &domain.fire_enabled) && domain.fire_enabled) {
@@ -1150,7 +1192,7 @@ void drawSimulationDomainControls(
                     // The world defines ambient everywhere; a domain may override
                     // it inside its own bounds. Off by default, so a domain that
                     // says nothing simply inherits the world.
-                    if (ImGui::CollapsingHeader("Thermal Override (Material State Field)")) {
+                    if (UIWidgets::CollapsingHeader("Thermal Override (Material State Field)")) {
                         ImGui::Spacing();
                         ImGui::Checkbox("Override World Ambient Inside This Domain##DomThermal",
                                         &domain.thermal_override_enabled);
@@ -1188,7 +1230,7 @@ void drawSimulationDomainControls(
                     }
 
                     // Procedural turbulence (divergence-free curl-noise detail).
-                    if (ImGui::CollapsingHeader("Turbulence (Procedural Detail)")) {
+                    if (UIWidgets::CollapsingHeader("Turbulence (Procedural Detail)")) {
                         ImGui::Spacing();
                         ImGui::DragFloat("Turbulence Strength", &domain.turbulence_strength, 0.01f, 0.0f, 50.0f, "%.3f");
                         if (ImGui::IsItemHovered()) {
@@ -1211,7 +1253,7 @@ void drawSimulationDomainControls(
                 } else {
                     auto& fp = domain.fluid_params;
                     // Fluid Seeding & Limits
-                    if (ImGui::CollapsingHeader("Fluid Seeding & Capacity", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    if (UIWidgets::CollapsingHeader("Fluid Seeding & Capacity", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
 
                     // Auto-reseed toggle (the accumulator + the actual reseed live
@@ -1382,7 +1424,7 @@ void drawSimulationDomainControls(
                     }
 
                     // APIC Solver Params
-                    if (ImGui::CollapsingHeader("APIC / FLIP Liquid Solver Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    if (UIWidgets::CollapsingHeader("APIC / FLIP Liquid Solver Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
                     ImGui::TextDisabled("Material Preset");
                     if (drawFluidPresetCombo("##GridFluidSolverPreset", fp)) {
@@ -1593,7 +1635,7 @@ void drawSimulationDomainControls(
                     }
                     }
 
-                    if (ImGui::CollapsingHeader("Granular Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    if (UIWidgets::CollapsingHeader("Granular Material", ImGuiTreeNodeFlags_DefaultOpen)) {
                         bool granular_edited = false;
                         granular_edited |= ImGui::Checkbox("Enable Granular MPM", &fp.granular_enabled);
                         if (ImGui::IsItemHovered())
@@ -1703,7 +1745,7 @@ void drawSimulationDomainControls(
                             "Material edits rewind to frame 0 and drop the bake automatically.");
                     }
 
-                    if (ImGui::CollapsingHeader(
+                    if (UIWidgets::CollapsingHeader(
                             "Combustible Liquid / Gas Coupling",
                             ImGuiTreeNodeFlags_DefaultOpen)) {
                         using ChemistryPreset = RayTrophiSim::Fluid::FluidChemistryPreset;
@@ -1805,7 +1847,7 @@ void drawSimulationDomainControls(
                     }
 
                     // Redistribution / Reseed settings
-                    if (ImGui::CollapsingHeader("Dynamic Particle Reseeding (Reseed)", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    if (UIWidgets::CollapsingHeader("Dynamic Particle Reseeding (Reseed)", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
 
                     if (fp.granular_enabled) ImGui::BeginDisabled();
@@ -1843,7 +1885,7 @@ void drawSimulationDomainControls(
                 ImGui::Spacing();
 
                 // Group 1: Flow Sources
-                if (ImGui::CollapsingHeader("Flow Sources Registry", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (UIWidgets::CollapsingHeader("Flow Sources Registry", ImGuiTreeNodeFlags_DefaultOpen)) {
                     ImGui::Spacing();
 
                 const bool can_add_object_flow =
@@ -2445,7 +2487,7 @@ void drawSimulationDomainControls(
                     }
 
                     ImGui::Spacing();
-                    if (ImGui::CollapsingHeader("Flow Control & Emission Limits##LimitsHeader")) {
+                    if (UIWidgets::CollapsingHeader("Flow Control & Emission Limits##LimitsHeader")) {
                         ImGui::Indent();
                         
                         // Time Limits
@@ -2521,7 +2563,7 @@ void drawSimulationDomainControls(
                     if (!domain.shader) {
                         domain.shader = VolumeShader::createSmokePreset();
                     }
-                    if (ImGui::CollapsingHeader("Unified Volume Shader Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    if (UIWidgets::CollapsingHeader("Unified Volume Shader Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
                     
                     if (SceneUI::drawVolumeShaderUI(ui_ctx, domain.shader, nullptr, nullptr)) {
@@ -2531,7 +2573,7 @@ void drawSimulationDomainControls(
                     }
                 } else {
                     // Fluid Render settings group
-                    if (ImGui::CollapsingHeader("Liquid Display", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    if (UIWidgets::CollapsingHeader("Liquid Display", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
                     ImGui::TextDisabled("Domain default; Substance Overrides can replace it per liquid type.");
 
@@ -2621,7 +2663,7 @@ void drawSimulationDomainControls(
 
                         const std::string substance_header = "Substance Overrides (" +
                             std::to_string(domain.fluid_substance_materials.size()) + ")";
-                        if (ImGui::CollapsingHeader(substance_header.c_str(),
+                        if (UIWidgets::CollapsingHeader(substance_header.c_str(),
                                 domain.fluid_substance_materials.empty() ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) {
                             ImGui::TextDisabled("Emitter identity -> representation + scene material");
 
@@ -2967,7 +3009,7 @@ void drawSimulationDomainControls(
                         domain.fluid_substance_materials.begin(), domain.fluid_substance_materials.end(),
                         [](const auto& b) { return b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::Splat; });
                     if ((current_mode_idx == 0 || has_splat_override) &&
-                        ImGui::CollapsingHeader("Splat Geometry & Preview",
+                        UIWidgets::CollapsingHeader("Splat Geometry & Preview",
                             current_mode_idx == 0 ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
                         const char* geometry_modes[] = { "Built-in Icosphere", "Scene Object / Mesh Group" };
                         int geometry_mode = domain.fluid_particle_geometry_mode == 1 ? 1 : 0;
@@ -3091,7 +3133,7 @@ void drawSimulationDomainControls(
                         domain.fluid_substance_materials.begin(), domain.fluid_substance_materials.end(),
                         [](const auto& b) { return b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF; });
                     if ((current_mode_idx == 1 || has_sdf_override) &&
-                        ImGui::CollapsingHeader("Surface SDF Settings",
+                        UIWidgets::CollapsingHeader("Surface SDF Settings",
                             current_mode_idx == 1 ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {   // see the note above: display, not enum
                         bool sdf_changed = false;
                         // ★ PURE SHADER STATE, as opposed to sdf_changed. Nothing
@@ -3403,7 +3445,7 @@ void drawSimulationDomainControls(
                     }
 
                     // ── Whitewater (Foam / Spray / Bubbles) — Ihmsen 2012 ────
-                    if (ImGui::CollapsingHeader("Whitewater (Foam / Spray / Bubbles)")) {
+                    if (UIWidgets::CollapsingHeader("Whitewater (Foam / Spray / Bubbles)")) {
                         ImGui::Spacing();
                         auto& fo = domain.fluid_foam_params;
                         bool foam_changed = false;
@@ -3560,7 +3602,7 @@ void drawSimulationDomainControls(
                                     PrincipledBSDF* p = dynamic_cast<PrincipledBSDF*>(m);
                                     if (!p) return;
                                     ImGui::PushID(mat_id ^ 0x6F0A);
-                                    if (ImGui::CollapsingHeader(title)) {
+                                    if (UIWidgets::CollapsingHeader(title)) {
                                         ImGui::Indent();
                                         ui.drawPrincipledBSDFEditor(p, static_cast<uint16_t>(mat_id), ui_ctx);
                                         ImGui::Unindent();
@@ -3689,7 +3731,7 @@ void drawSimulationDomainControls(
                             domain.shader->scattering.coefficient = 1.1f;
                             domain.shader->absorption.coefficient = 0.04f;
                         }
-                        if (ImGui::CollapsingHeader("Volumetric Absorption & Density", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        if (UIWidgets::CollapsingHeader("Volumetric Absorption & Density", ImGuiTreeNodeFlags_DefaultOpen)) {
                             ImGui::Spacing();
                             const bool has_surface_sdf =
                                 domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF ||
@@ -3727,7 +3769,7 @@ void drawSimulationDomainControls(
 
         // Detailed live solver step stats drawn beautifully at the bottom
         {
-            if (!is_fluid_domain && ImGui::CollapsingHeader(
+            if (!is_fluid_domain && UIWidgets::CollapsingHeader(
                     "Gas Step Stats##DomainGasComputeStats",
                     ImGuiTreeNodeFlags_DefaultOpen)) {
                 const auto& states = particles->gridDomainStates();
@@ -3892,7 +3934,7 @@ void drawSimulationDomainControls(
                     }
                 }
             }
-            if (is_fluid_domain && ImGui::CollapsingHeader("Fluid Step Stats##DomainFluidStats", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (is_fluid_domain && UIWidgets::CollapsingHeader("Fluid Step Stats##DomainFluidStats", ImGuiTreeNodeFlags_DefaultOpen)) {
                 const auto& states = particles->gridDomainStates();
                 if (selected_domain_index < static_cast<int>(states.size())) {
                     const auto& st = states[static_cast<std::size_t>(selected_domain_index)];
@@ -4089,7 +4131,7 @@ void drawSimulationDomainControls(
         }
 
         {
-            if (ImGui::CollapsingHeader("VDB Export##DomainVDBExport", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (UIWidgets::CollapsingHeader("VDB Export##DomainVDBExport", ImGuiTreeNodeFlags_DefaultOpen)) {
                 static char vdb_dir[2048] = "";
                 static char vdb_base[128] = "vdb_export";
                 static int vdb_start = 0;
@@ -4167,7 +4209,7 @@ void drawSimulationDomainControls(
         // users never see it.
         if (false && is_fluid_domain && !scene.fluid_objects.empty()) {
             ImGui::Spacing();
-            if (ImGui::CollapsingHeader("Fluid VDB Cache & Threaded Baking##FluidCacheBakeHeader", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (UIWidgets::CollapsingHeader("Fluid VDB Cache & Threaded Baking##FluidCacheBakeHeader", ImGuiTreeNodeFlags_DefaultOpen)) {
                 if (scene.active_fluid_object_index < 0 ||
                     scene.active_fluid_object_index >= static_cast<int>(scene.fluid_objects.size())) {
                     scene.active_fluid_object_index = 0;

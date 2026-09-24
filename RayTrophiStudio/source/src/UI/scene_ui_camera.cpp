@@ -109,7 +109,7 @@ extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
     // SECTION 1: TRANSFORM (Position & Target)
     // ===========================================================================
     static bool targetLock = true;
-    if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent(8.0f);
 
         // Position
@@ -179,7 +179,7 @@ extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
     // ===========================================================================
     // SECTION 2: PHYSICAL CAMERA (Body + Lens)
     // ===========================================================================
-    if (ImGui::CollapsingHeader("Physical Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::CollapsingHeader("Physical Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent(8.0f);
 
         // State for physical camera selections
@@ -440,7 +440,7 @@ extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
     // ===========================================================================
     // SECTION 2.5: CAMERA MODE (Auto / Pro / Cinema)
     // ===========================================================================
-    if (ImGui::CollapsingHeader("Camera Mode", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::CollapsingHeader("Camera Mode", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent(8.0f);
         
         // Mode Selection
@@ -613,7 +613,7 @@ extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
     // ===========================================================================
     // SECTION 3: DEPTH OF FIELD
     // ===========================================================================
-    if (ImGui::CollapsingHeader("Depth of Field", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::CollapsingHeader("Depth of Field", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent(8.0f);
 
         // DOF Enable
@@ -889,7 +889,7 @@ extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
     // ===========================================================================
     // SECTION 4: CONTROLS & ACTIONS
     // ===========================================================================
-    if (ImGui::CollapsingHeader("Controls", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::CollapsingHeader("Controls", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent(8.0f);
 
         // Mouse Control
@@ -990,7 +990,7 @@ extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
     // ===========================================================================
     // SECTION 5: CAMERA HUD (Viewport Overlay Controls)
     // ===========================================================================
-    if (ImGui::CollapsingHeader("Camera HUD")) {
+    if (UIWidgets::CollapsingHeader("Camera HUD")) {
         ImGui::Indent(8.0f);
 
         // Master toggle

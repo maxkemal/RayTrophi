@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM">
@@ -355,6 +355,7 @@
     <ClInclude Include="source\include\Viewport\ViewportSceneSync.h" />
     <ClInclude Include="source\include\stb_image_write.h" />
     <ClInclude Include="source\include\ui_modern.h" />
+    <ClInclude Include="source\include\ui_section_style.h" />
     <ClInclude Include="external\imgui\imconfig.h" />
     <ClInclude Include="external\imgui\imgui.h" />
     <ClInclude Include="external\imgui\imgui_impl_sdl2.h" />
@@ -1840,6 +1841,7 @@
     <ClCompile Include="source\src\UI\TimelineWidget.cpp" />
     <ClCompile Include="source\src\Scene\Triangle.cpp" />
     <ClCompile Include="source\src\UI\ui_modern.cpp" />
+    <ClCompile Include="source\src\UI\ui_section_style.cpp" />
     <ClCompile Include="source\src\Physics\VDBVolume.cpp" />
     <ClCompile Include="source\src\Physics\VDBVolumeManager.cpp" />
     <ClCompile Include="source\src\Math\Vec2.cpp" />

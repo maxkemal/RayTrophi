@@ -535,22 +535,13 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
 
                     // Use a plain collapsing header here because the embedded material
                     // editor already manages its own section stack and styling.
-                    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(layerColor.x * 0.22f, layerColor.y * 0.22f, layerColor.z * 0.22f, 0.92f));
-                    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(layerColor.x * 0.30f, layerColor.y * 0.30f, layerColor.z * 0.30f, 0.98f));
-                    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(layerColor.x * 0.36f, layerColor.y * 0.36f, layerColor.z * 0.36f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(layerColor.x, layerColor.y, layerColor.z, 0.22f));
-                    float layer_fr = 10.0f;
-                    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
-                        layer_fr = ThemeManager::instance().current().style.frameRounding;
-                    }
-                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layer_fr);
-                    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 7.0f));
                     ImGui::SetNextItemOpen(this->terrain_layer_open[i], ImGuiCond_Always);
-                    bool opened = ImGui::CollapsingHeader(layerName.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
+                    const auto& theme = ThemeManager::instance().current();
+                    bool opened = SectionStyleManager::instance().beginCollapsingHeader(
+                        layerName.c_str(), ImGuiTreeNodeFlags_DefaultOpen, layerColor,
+                        theme.colors.accent, theme.colors.border, theme.colors.text
+                    );
                     this->terrain_layer_open[i] = opened;
-                    ImGui::PopStyleVar(3);
-                    ImGui::PopStyleColor(4);
 
                     if (opened) {
 

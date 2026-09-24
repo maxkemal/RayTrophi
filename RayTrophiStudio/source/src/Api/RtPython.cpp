@@ -1218,6 +1218,25 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     "exactly the same. 'dropped_seeds' names any fluid domain whose one-shot "
     "seed the most recent auto-reset wiped without refilling.");
 
+    // ★★★ One mover for gas AND fluid: they share SimulationGridDomainDesc, so
+    //   two per-type functions would be two bodies that must not diverge. It
+    //   lives on the EXISTING `sim` submodule rather than a second one of the
+    //   same name -- `sim.` is already the namespace for grid-domain verbs that
+    //   belong to neither solver, which is exactly what this is.
+    sim.def("move_domain", [](const std::string& domain, const py::object& delta) {
+        rtapi::SimulationDomainMoveResult r;
+        requireResult(rtapi::moveSimulationDomain(domain, vec3FromPython(delta), r));
+        py::dict d;
+        d["sources_carried"] = r.sources_carried;
+        d["center"]          = vec3ToPython(r.center);
+        d["bounds_min"]      = vec3ToPython(r.bounds_min);
+        d["bounds_max"]      = vec3ToPython(r.bounds_max);
+        return d;
+    }, py::arg("domain"), py::arg("delta"),
+       "Translate a gas/fluid domain and carry its unparented flow sources with "
+       "it. Read 'sources_carried': 0 on a domain that visibly owns emitters "
+       "means they are PARENTED, and those follow their parent object.");
+
     physics.def("set_gravity", [](const py::handle& gravity) {
         requireResult(rtapi::setPhysicsGravity(vec3FromPython(gravity)));
     }, py::arg("gravity") = py::make_tuple(0.0f, -9.81f, 0.0f));

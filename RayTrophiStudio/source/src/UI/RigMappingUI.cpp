@@ -78,19 +78,20 @@ void drawMapping(UIContext& ctx) {
     if(ImGui::Button("Clear all overrides")) {state.nodeMap.clear();state.previewed=false;state.message.clear();}
     // List fallback handles overlapping joints/helpers in orthographic projections.
     for(int side=0;side<2;++side) {
-        ImGui::SeparatorText(side==0?"Source nodes":"Target nodes");
-        const auto& character=side==0?state.source:v.target;
-        for(const auto& model:ctx.scene.importedModelContexts) if(model.importName==character)
-            for(const auto& node:model.nodeHierarchy.nodes) {
-                if(v.filter[0] && node.uniqueName.find(v.filter)==std::string::npos) continue;
-                if(side==0 && v.unresolvedOnly && !issue(state.report,node.uniqueName)) continue;
-                ImGui::PushID(side);
-                if(ImGui::Selectable(node.uniqueName.c_str(),(side==0?v.sourceNode:v.targetNode)==node.uniqueName)) {
-                    if(side==0) selectSource(v,state,node.uniqueName);
-                    else if(!v.sourceNode.empty()) {v.targetNode=node.uniqueName;state.nodeMap[v.sourceNode]=node.uniqueName;rtapi::selectRigBone(v.target,node.uniqueName);state.previewed=false;state.message.clear();}
+        if (UIWidgets::CollapsingHeader(side==0?"Source nodes":"Target nodes", ImGuiTreeNodeFlags_DefaultOpen)) {
+            const auto& character=side==0?state.source:v.target;
+            for(const auto& model:ctx.scene.importedModelContexts) if(model.importName==character)
+                for(const auto& node:model.nodeHierarchy.nodes) {
+                    if(v.filter[0] && node.uniqueName.find(v.filter)==std::string::npos) continue;
+                    if(side==0 && v.unresolvedOnly && !issue(state.report,node.uniqueName)) continue;
+                    ImGui::PushID(side);
+                    if(ImGui::Selectable(node.uniqueName.c_str(),(side==0?v.sourceNode:v.targetNode)==node.uniqueName)) {
+                        if(side==0) selectSource(v,state,node.uniqueName);
+                        else if(!v.sourceNode.empty()) {v.targetNode=node.uniqueName;state.nodeMap[v.sourceNode]=node.uniqueName;rtapi::selectRigBone(v.target,node.uniqueName);state.previewed=false;state.message.clear();}
+                    }
+                    ImGui::PopID();
                 }
-                ImGui::PopID();
-            }
+        }
     }
     ImGui::EndChild();
 

@@ -1037,12 +1037,29 @@ void main() {
                                     matx.subsurface_radius_b), vec3(0.001));
     float sssScale       = max(matx.subsurface_scale, 0.001);
     float translucency   = clamp(mat.translucent, 0.0, 1.0);
-    vec3  sssProfile     = vec3(1.0) - exp(-sssRadius * sssScale);
-    vec3  profileTint    = mix(vec3(1.0), max(sssColor, vec3(0.0)),
-                               sssProfile);
-    vec3  boundedScatterTint = mix(vec3(1.0), profileTint, sssAmount);
-    float profileTravel  = dot(sssProfile, vec3(0.2126, 0.7152, 0.0722));
-    float sssWrap        = sssAmount * mix(0.25, 1.0, profileTravel);
+    // ★★★ RT parity (bsdf_scatter.glsl::scatterSSS). In RT the SSS lobe takes
+    //   a share `sssAmount` of the diffuse sub-layer and its random walk
+    //   converges to subsurface_color — the MULTI-scatter albedo — not to base
+    //   colour. The old raster path tinted base colour by 1-exp(-radius*scale),
+    //   which at the presets' scale (0.05) is ~5%: the swatch the artist picked
+    //   was nearly invisible here while RT showed it in full.
+    vec3  diffuseSurface    = diffuseColor * (1.0 - sssAmount);
+    vec3  diffuseSubsurface = clamp(sssColor, vec3(0.0), vec3(1.0)) *
+                              (1.0 - metallic) * (1.0 - transmission) * sssAmount;
+    diffuseColor = diffuseSurface + diffuseSubsurface;
+    // Light travel vs local curvature (pre-integrated-skin style). Mean free
+    // path is in WORLD units, like RT's radius*scale, so the same dial means
+    // the same thing on both paths: a 1 cm radius bleeds on a nose, not on a
+    // wall. Curvature from screen derivatives of the geometric normal.
+    vec3  sssMfp       = sssRadius * sssScale;
+    float sssCurvature = length(fwidth(normalize(vWorldNormal))) /
+                         max(length(fwidth(vWorldPos)), 1e-6);
+    vec3  sssWrap      = clamp(sssMfp * sssCurvature, vec3(0.0), vec3(1.0));
+    // Thin-feature back-lighting: the osculating diameter 2/curvature is the
+    // thickness proxy. Per channel, so a long red radius glows red (ears).
+    vec3  sssBackTransmit = sssCurvature > 1e-4
+        ? exp(-(2.0 / sssCurvature) / max(sssMfp, vec3(1e-5)))
+        : vec3(0.0);
 
     vec3 diffuseLit  = vec3(0.0);
     vec3 specularLit = vec3(0.0);
@@ -1087,11 +1104,11 @@ void main() {
 
         // ── Subsurface scattering: wrapped diffuse (Jensen 2001 approximation) ──
         // Shifts the NdotL threshold so light bleeds around the terminator.
-        // sssAmount=0 → standard Lambertian; sssAmount=1 → full wrap.
-        float wrapNdotL = (dot(N, L) + sssWrap) / (1.0 + sssWrap);
-        float NdotL = max(wrapNdotL, 0.0);
-        // SSS tints the sub-surface contribution toward the sssColor.
-        vec3 diffuseAlbedo = diffuseColor * boundedScatterTint;
+        // Per-channel wrap on the SSS share only; the surface share and the
+        // specular lobe keep the true cosine.
+        float rawNdotL = dot(N, L);
+        float NdotL = max(rawNdotL, 0.0);
+        vec3 sssNdotL = max((vec3(rawNdotL) + sssWrap) / (vec3(1.0) + sssWrap), vec3(0.0));
         // ★★★★ 1/PI Lambert BRDF'in PARCASI, bir kadran degil. Yillarca eksikti
         //   ve yerine asagida `diffuseWeight = 0.35` sihirli katsayisi vardi --
         //   ama YALNIZCA dusuk kalite dalinda. Yani kalite preset'i degistirmek
@@ -1101,7 +1118,7 @@ void main() {
         // reference (bsdf_scatter.glsl::evaluate_brdf_gl). Diffuse only uses
         // energy not assigned to the reflection lobe.
         vec3 Favg = F0 + (vec3(1.0) - F0) * (1.0 / 21.0);
-        vec3 diffuseBrdf = diffuseAlbedo * (vec3(1.0) - Favg) * (1.0 / PI);
+        vec3 diffuseBrdf = (vec3(1.0) - Favg) * (1.0 / PI);
 
         // Clearcoat is a top layer, not an additive glow: coat Fresnel removes
         // energy from the base lobes before its own GGX reflection is added.
@@ -1114,14 +1131,16 @@ void main() {
             VdotH, matx.clearcoat_iridescence,
             matx.clearcoat_film_thickness);
         float baseLayerWeight = 1.0 - coatFresnel;
-        diffuseLit += diffuseBrdf * radiance * NdotL * baseLayerWeight *
+        diffuseLit += diffuseBrdf * radiance * baseLayerWeight *
+                      (diffuseSurface * NdotL + diffuseSubsurface *
+                       (sssNdotL + sssBackTransmit * max(-rawNdotL, 0.0))) *
                       (1.0 - translucency);
         // Thin-surface transmission is a bounded back-lighting lobe. It does
         // not claim refraction/thickness parity; those belong to the forward
         // transmission pass. The probability split mirrors RT's principled
         // diffuse sub-layer so translucency does not add energy to the front.
         float backNdotL = max(dot(-N, L), 0.0);
-        diffuseLit += diffuseColor * boundedScatterTint * radiance * backNdotL *
+        diffuseLit += diffuseColor * radiance * backNdotL *
                       translucency * (1.0 / PI) * baseLayerWeight;
 
         // Scene is the path-traced comparison surface and always uses GGX.
@@ -1373,13 +1392,12 @@ void main() {
     // Keep the diffuse sub-layer energy split consistent outside direct
     // lights too. Environment back-lighting is deliberately a bounded lookup,
     // not screen refraction or a claim of thick-transmission parity.
-    ambient = ambient * boundedScatterTint *
-              (1.0 - translucency);
+    ambient = ambient * (1.0 - translucency);
     if (translucency > 0.0 && any(notEqual(diffuseColor, vec3(0.0)))) {
         vec3 backEnvironment = lightingPreset == 3u
             ? sampleCanonicalWorld(-N)
             : samplePreviewEnvironment(-N, lightingPreset);
-        ambient += backEnvironment * diffuseColor * boundedScatterTint * translucency *
+        ambient += backEnvironment * diffuseColor * translucency *
                    (1.0 / PI) * ambientBaseWeight;
     }
 

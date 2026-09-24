@@ -1628,7 +1628,7 @@ struct ViewportQualityInfo {
     std::string opaque_core_parity = "rt_aligned";
     std::string material_graph_surface = "bounded";
     std::string clearcoat = "iridescent_lobe";
-    std::string subsurface = "radius_profile_approx";
+    std::string subsurface = "curvature_wrap_rt_albedo";
     std::string translucency = "thin_surface_approx";
     std::string surface_anisotropy = "unsupported_abi_conflict";
     std::string transparency = "unsorted_alpha";
@@ -3837,6 +3837,26 @@ struct CombustibleFluidSettings {
     float smoke_yield = 0.45f;
     float surface_cooling = 0.35f;
 };
+
+// ★★★★ Moving a simulation domain carries everything anchored to it.
+//   Until 2026-09-24 there was no way to move a domain from a script at all,
+//   which is why this failure went uncaught: the box moved, its emitters stayed
+//   where they were, and the re-simulated smoke reappearing at the old spot read
+//   as a stale cache instead of as stale emitters.
+//   ★ `sources_carried` is the measurement that tells the two apart. A move that
+//   reports 0 on a domain that visibly owns emitters means they are PARENTED --
+//   those follow their parent object, not the domain, on purpose.
+struct SimulationDomainMoveResult {
+    int sources_carried = 0;
+    Vec3 center;
+    Vec3 bounds_min;
+    Vec3 bounds_max;
+};
+
+// Works for gas AND fluid domains: they share one descriptor, so they share one
+// mover. Fails when no domain carries that name.
+Result moveSimulationDomain(const std::string& domain_name, const Vec3& delta,
+                            SimulationDomainMoveResult& out);
 
 struct SimulationFlowSourceInfo {
     std::string name;

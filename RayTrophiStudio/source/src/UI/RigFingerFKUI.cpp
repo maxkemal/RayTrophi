@@ -24,7 +24,7 @@ void drawRigFingerFKControls(UIContext& context, const std::string& character,
                              uint64_t revision) {
     if (requestedSide >= 0)
         ImGui::SetNextItemOpen(true);
-    if (!ImGui::CollapsingHeader("Grouped Finger FK"))
+    if (!UIWidgets::CollapsingHeader("Grouped Finger FK"))
         return;
 
     static int sideIndex = 2;

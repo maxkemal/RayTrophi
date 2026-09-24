@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -273,7 +273,7 @@ inline void drawAllGuides(ImDrawList* draw_list, ImVec2 viewport_min, ImVec2 vie
 // UI DRAWING FUNCTION (Call from Selection Properties when camera is selected)
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 inline void drawGuideSettingsUI(GuideSettings& settings) {
-    if (ImGui::CollapsingHeader("Viewport Guides")) {
+    if (UIWidgets::CollapsingHeader("Viewport Guides")) {
         
         // Safe Areas
         ImGui::Checkbox("Safe Areas", &settings.show_safe_areas);

@@ -541,6 +541,8 @@ json MaterialManager::serialize(const std::string& sceneDir) const {
                 matJson["subsurfaceScale"] = pbsdf->getSubsurfaceScale();
                 matJson["subsurfaceAnisotropy"] = pbsdf->getSubsurfaceAnisotropy();
                 matJson["subsurfaceIOR"] = pbsdf->getSubsurfaceIOR();
+                matJson["sssMethod"] = pbsdf->getSssMethod();
+                matJson["sssWalkMaxSteps"] = pbsdf->getSssWalkMaxSteps();
                 
                 // Translucent
                 matJson["translucent"] = pbsdf->translucent;
@@ -721,6 +723,8 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
             pbsdf->setSubsurfaceScale(matJson.value("subsurfaceScale", 0.05f));
             pbsdf->setSubsurfaceAnisotropy(matJson.value("subsurfaceAnisotropy", 0.0f));
             pbsdf->setSubsurfaceIOR(matJson.value("subsurfaceIOR", 1.4f));
+            pbsdf->setSssMethod(matJson.value("sssMethod", 0));
+            pbsdf->setSssWalkMaxSteps(matJson.value("sssWalkMaxSteps", 64));
             pbsdf->selected_uv_set = std::max(0, matJson.value("selectedUvSet", 0));
             
             // Translucent
