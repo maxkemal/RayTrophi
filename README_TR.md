@@ -30,7 +30,7 @@ Bu bir render-farm eklentisi ya da kütüphane değil. Modern dock'lu bir arayü
 ### Tasarım hedefleri
 
 - **Tek uygulama, tam pipeline.** Geometri oluşturma, look-dev, FX, animasyon ve final render aynı sahnede, aynı `.rtp`/`.rts` projesinde, aynı geri-al yığınında yaşar.
-- **Üç render backend'i, tek özellik seti.** CPU (Embree), OptiX ve Vulkan RT arasında sahneyi değiştirmeden geçiş yap. Vulkan, önerilen interaktif backend; OptiX ve CPU birinci sınıf kalır.
+- **Tek sahne, yetenek-duyarlı render yolları.** Render modunda sahneyi değiştirmeden CPU (Embree), OptiX ve Vulkan RT arasında geçiş yapılır. Vulkan RT önerilen üretim yoludur; OptiX olgun NVIDIA alternatifi, CPU/Embree ise referans, headless ve fallback yoludur. Vulkan-öncelikli özellikler sessizce eksilmek yerine kullanılabilirliklerini açıkça bildirir.
 - **Fiziksel temelli ama sanat-yönetilebilir.** Principled BSDF + spektral saç + volumetrik + DCC seviyesi sıvılar; üstüne, fiziği bozmadan görüntüyü yağlıboya/mürekkep/toon görünümlere boyayan bir Stylize katmanı.
 - **Durumu konusunda dürüst.** Bu aktif, tek kişilik bir proje. Bir alt sistem deneyselse veya geliştirme aşamasındaysa, bunu açıkça belirtir.
 
@@ -42,13 +42,14 @@ Bu bir render-farm eklentisi ya da kütüphane değil. Modern dock'lu bir arayü
 <!-- STATS_START -->
 | Metrik | Değer |
 | :--- | :--- |
-| **Proje kod / shader satırı** | ~259.000 |
-| **Proje kod / shader dosyası** | 360+ |
-| **GPU çekirdek & shader dosyası** | 56 (CUDA, OptiX PTX, Vulkan GLSL/RT, compute) |
-| **UI kontrol noktası** | 1.278+ |
+| **Proje kod / shader satırı** | ~561.000 |
+| **Proje kod / shader dosyası** | 1.170+ |
+| **GPU çekirdek & shader dosyası** | 251 (CUDA, OptiX PTX, Vulkan GLSL/RT, compute) |
+| **UI kontrol çağrı noktası** | 3.500+ |
+| **IPC yüzeyi** | 594 yönlendirilen metot |
 | **Render backendleri** | CPU (Embree) · NVIDIA OptiX · Vulkan RT |
-| **Düğüm sistemleri** | Arazi (66), Animasyon (14+), Materyal (11+) |
-| **Son doğrulama** | 2026-07-30 — Vulkan GPU gas/fluid/particle force alanları, hareketli collider, cache replay ve backend geçiş testleri |
+| **Düğüm sistemleri** | Arazi (78), Animasyon (14+), Materyal (11+) |
+| **Son kaynak/denetim yenilemesi** | 2026-09-25 — termal sıvı, granüler ve çoklu-substance authoring; IPC descriptor/güvenlik denetimi |
 <!-- STATS_END -->
 
 Sayımlar `RayTrophiStudio/source` kapsamındadır ve tek dosyalık dış kütüphaneleri (`simdjson`, `stb`, `json.hpp`, `tinyexr`) hariç tutar.
@@ -78,7 +79,20 @@ RayTrophi Studio, hepsi aynı canlı sahne üzerinde çalışan, göreve odaklı
 
 ## 🖥️ Render & backendler
 
-Tek bir fiziksel temelli path tracer, üç hızlandırma backend'ini besler. Sahne, materyaller ve ışıklar üçünde de aynıdır — ana göre uygun olanı seçersin (başsız/GPU'suz için CPU, NVIDIA eğri donanımı için OptiX, hızlı interaktif look-dev için Vulkan RT).
+Tek bir fiziksel temelli path tracer, üç hızlandırma backend'ini besler. Sahne, materyaller ve ışıklar üçünde ortak bir authoring modelini kullanır — ana göre uygun olanı seçersin (referans, headless veya fallback render için CPU/Embree; yetenekli NVIDIA GPU alternatifi olarak OptiX; önerilen yol ve yeni render özelliklerinin ilk hedefi olarak Vulkan RT).
+
+### Viewport modları ve render backendleri
+
+Viewport gölgelemesi ile final render aygıtı bilinçli olarak ayrı seçimlerdir:
+
+| Viewport modu | Yürütme yolu | Kullanım amacı |
+|---|---|---|
+| **Solid** | Vulkan raster | Varsayılan hızlı yerleşim, modelleme, sculpt, paint, animasyon ve simülasyon düzenleme |
+| **Matcap** | Vulkan raster | Seçilebilir stüdyo matcap'leriyle biçim, siluet ve yüzey inceleme |
+| **RayFusion** | Vulkan raster + seçili Vulkan RT/ray-query özellikleri | Gerçek zamanlı PBR sahne görünümü. Varsayılan **Scene** aydınlatmasıdır; **3 Point**, aynı mod içindeki izole Material Preview rig'ini sağlar |
+| **Render** | Seçilen path tracer: Vulkan RT, OptiX veya CPU | Aşamalı referans/final render ve backend karşılaştırması |
+
+Render aygıtı seçimi Solid, Matcap veya RayFusion etkinken interaktif viewport yolunun yerini almaz; Render moduna geçildiğinde kullanılacak path tracer'ı kaydeder. Vulkan RT önerilir, OptiX desteklenen ikincil GPU yolu olarak kalır ve CPU yolu varsayılan olarak Intel Embree kullanır.
 
 ### Materyaller & gölgeleme
 - **Principled BSDF** (Disney tarzı uber-shader): albedo, roughness, metallic, specular, clearcoat, sheen, anisotropy, transmission/IOR
@@ -162,7 +176,7 @@ Aynı sahne, aynı ayarlar, aynı donanım, kamera hareket halinde. Bunlar inter
 
 ## 🌀 Fizik & simülasyon paketi
 
-CUDA ve CPU backend'li, çok iş parçacıklı grid ve parçacık tabanlı bir FX paketi; doğrudan path-traced render pipeline'ına entegre. Birden çok simülasyon domaini, emitter, collider, rigid body ve kuvvet alanı tek çalışma alanında bir arada bulunur ve projeyle birlikte kaydedilir.
+CPU, CUDA ve Vulkan Compute yürütme yollarına sahip, çok iş parçacıklı grid ve parçacık tabanlı bir FX paketi; doğrudan path-traced render pipeline'ına entegre. Birden çok simülasyon domaini, emitter, collider, rigid body ve kuvvet alanı tek çalışma alanında bir arada bulunur ve projeyle birlikte kaydedilir.
 
 ### Sıvı — APIC / FLIP çözücü
 - Açısal momentumu koruyan, sayısal dağılımı en aza indiren ayarlanabilir karışımlı **APIC/FLIP** çözücü
@@ -170,7 +184,14 @@ CUDA ve CPU backend'li, çok iş parçacıklı grid ve parçacık tabanlı bir F
 - **Varyasyonel (cut-cell) katı eşleşmesi** (Batty/Bridson): kesirli MAC-yüzey ağırlıkları analitik primitiflere karşı alt-ızgara doğruluğunda çarpışma sağlar; hareketli collider'lar basınç çözümü üzerinden gerçek momentum/sıçrama aktarır
 - **Ghost-fluid 2. derece serbest yüzey** (Gibou/Enright): alt-hücre level set, sıvı yüzeyindeki voksel "merdivenleşmesini" giderir
 - Keyframe ile animasyonlu collider'lar her alt-adımda yeniden konumlanır, böylece sıvı hareketli geometriyi takip eder
-- Adaptif çözünürlük, açık/kapalı sınır modları, sızıntıyı önleyen dinamik parçacık yeniden tohumlama, sıvı materyal preset'leri (Su, Yağ, Özel)
+- Fiziksel viskozite çözümü, adaptif çözünürlük, açık/kapalı sınır modları, sızıntıyı önleyen dinamik parçacık yeniden tohumlama ve sıvı materyal preset'leri (Su, Yağ, Özel)
+
+### Termal sıvılar, substance'lar & granüler materyaller
+- **Kelvin tabanlı termal sıvılar** — kaynak doğum sıcaklığı, dünya/domain ortam sıcaklığı, kararlı üstel hava/temas soğuması, parçacık iletimi, log-uzayında viskozite rampası, desteğe duyarlı donma ve erime histerezisi
+- **Faza duyarlı katılaşma** — donan parçacıklar mevcut katı-faz overlay'ine girer ve biriken katmanlar oluşturabilir; minimum/ortalama/maksimum sıcaklık, katılaşan/eriyen/desteksiz parçacık sayıları ve viskozite aralığı panel, Python ve IPC üzerinden izlenir
+- **Çoklu-substance taşınımı** — parçacık substance kimliği advection ve reseeding boyunca korunur; substance başına materyal, temsil, viskozite, karışabilirlik ve faz kontrolleri bulunur
+- **Granüler/kohezif materyal modu** — sürtünme açısı, kohezyon, dilatancy, elastisite, çekme kesimi, hardening, compaction, fracture/damage, healing/rebonding ve termal yumuşama; kararlılık ve adaptif alt-adım telemetrisiyle birlikte
+- Authoring arayüzü etkin ortam/doğum sıcaklığını, hızların zaman sabitlerini, faz eşiklerini, tahmini eşik geçiş sürelerini ve anında-donma ya da hiç-donmama uyarılarını gösterir
 
 ### Sıvı yüzey gölgeleme — izoyüzey artık bir materyal yüzeyi
 Yeniden kurulan SDF sıvı sınırı, **bir üçgenin aldığı BSDF'in aynısıyla**
@@ -183,9 +204,11 @@ domain'e bağla; eriyik cam, lav, çamur, çikolata veya donmuş resin artık sh
 - **Resin kaplama**, opak taban üzerinde — toz, kir zerreleri ve renkli şardları marşeden prosedürel iç hacim dahil; domain uzayına çapalı
 - **Emission**, emission dokusu dahil
 - **Tri-planar dokular** (albedo, roughness, metallic, emission). Raymarch edilen izoyüzeyin UV'si yoktur ve olamaz — açılacak mesh yok, yüzey her karede alandan yeniden kuruluyor — bu yüzden materyalin kendi UV ölçek/offset'i dünya uzayında tiling anlamına geliyor. Roughness/metallic, mesh yolunun kullandığı paketlenmiş ORM kanal politikasının **aynısını** paylaşıyor
+- **Akışla taşınan materyal koordinatları** — iki-nesilli residual UVW alanı advection ve reseeding boyunca sıvıyı izler, SimCache/serileştirmede korunur ve `uvw_drift` değerini Python ile IPC üzerinden raporlar; bilinçli olarak sabit projeksiyon için Domain ve World çapaları da kullanılabilir
+- **İzoyüzey normal haritaları** — tri-planar normal örnekleme düzlem başına tanjant çerçevesi kullanır ve diğer materyal dokularıyla aynı koordinat modunu izler
 - **Prosedürel gözeneklilik**: mayalanmış hamur, havalandırılmış kek harcı, ponza ve donmuş köpük. Hücresel bir alan, yüzey bulunmadan **önce** yoğunluktan oyuluyor; böylece gözenekler gerçek geometri. Kenarları doğru normali, kırılmayı ve öz-gölgeyi alan gradyanından alıyor — alpha kesme kenarsız delik açardı. Kabarcık boyutu dünya biriminde yazılıyor, yani domain çözünürlüğünü değiştirmek aynı içi yeniden render eder, boyutunu değiştirmez
 
-> Bilinen sınırlar — eksiklikten değil, kuruluştan: tri-planar projeksiyon ve resin iç yapısı **dünya uzayına** çapalı, dolayısıyla hızlı akan sıvı sabit bir desenin içinden kayar (durgun havuz, hamur veya donmuş resin doğrudur). Bunları sıvıyla birlikte taşımak advected UVW niteliği ister. Normal haritaları izoyüzeyde henüz bağlı değil: tri-planar normal mapping düzlem başına tanjant çerçevesi ve whiteout harmanı ister; yarım yapılırsa eksik özellik gibi değil, aydınlatma hatası gibi görünür.
+> Bilinen sınır: Material-coordinate UVW tasarım gereği sıvıyla deforme olur; iki-nesilli yenileme uzun süreli gerilmeyi sınırlar. Kalan görsel sınırlama eğik yüzeylerde tri-planar ayrışmadır; bi-planar veya stokastik projeksiyon gelecek çalışmadır.
 
 ### Gaz, duman & ateş
 - Sıcaklık, is ve yakıt yoğunluğu için CPU referans yolunu koruyan **Vulkan Compute yoğun-ızgara çözücü**
@@ -221,7 +244,7 @@ Hapsolmuş hava ve dalga tepesi potansiyellerinden üretilen ikincil **sprey** (
 - **SimCache disk pişirme** — ağır sıvı/köpük/gaz karelerini proje yanına ikili `.simcache` dosyalarına pişir, yeniden simüle etmeden zaman çizelgesini gerçek zamanlı tara
 - Simülasyon durumu, domain ayarları, özel materyaller, timeline önbellekleri ve preset'lerin `.rtp` / `.rts` içine tam serileştirilmesi
 
-> GPU MGPCG basınç yolu canlı; varyasyonel katılar + ghost-fluid'in GPU portu (Faz 2) geliştirme aşamasında — tam DCC eşitliği için yüzey gerilimi, örtük viskozite ve dar-bant/seyrek performans çalışmaları da öyle.
+> GPU MGPCG basınç yolu ve fiziksel viskozite çözümü canlıdır. Varyasyonel katılar + ghost-fluid'in GPU portu (Faz 2), yüzey gerilimi ve dar-bant/seyrek performans çalışmaları tam DCC eşitliği için devam ediyor.
 
 ---
 
@@ -506,6 +529,7 @@ RayTrophi/
 - ✅ GPU MGPCG sıvı basınç çözümü (CUDA)
 - ✅ Varyasyonel cut-cell katı eşleşmesi + ghost-fluid 2. derece serbest yüzey (CPU)
 - ✅ Çok-materyalli whitewater PBR yönlendirme + Newton-Raphson dalga oturtma
+- ✅ Termal sıvı soğuma/donma, çoklu-substance taşınımı, granüler/kohezif materyaller ve akışla taşınan materyal koordinatları
 - ✅ SimCache disk kare pişirme + tam simülasyon serileştirme
 - ✅ CPU / Vulkan / OptiX eşitlikli Stylize katmanı
 - ✅ Sculpt modu (mesh + arazi) ve katmanlı mesh boyama
@@ -514,7 +538,8 @@ RayTrophi/
 **Planlanan / devam eden**
 - [ ] OptiX / CPU'da caustic; huzmeler için anizotropik faz ve gerçek yoğunluk alanları (VDB)
 - [ ] Varyasyonel katılar + ghost-fluid yüzeyin GPU portu (Faz 2)
-- [ ] Sıvı yüzey gerilimi, örtük viskozite, dar-bant/seyrek performans
+- [ ] Kemiklere bağlı karakter ve animasyonlu-gövde proxy'leri için kinematic collider kaynakları
+- [ ] Sıvı yüzey gerilimi, GPU varyasyonel/ghost-fluid eşitliği, dar-bant/seyrek performans
 - [ ] Binned SAH / index tabanlı BVH / SBVH uzamsal bölme
 - [ ] USD format desteği
 - [ ] Ağ / dağıtık render

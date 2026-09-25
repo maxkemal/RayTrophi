@@ -30,7 +30,7 @@ It is not a render farm plugin or a library. It is an interactive editor with a 
 ### Design goals
 
 - **One application, full pipeline.** Geometry authoring, look-dev, FX, animation, and final-frame rendering live in the same scene, the same `.rtp`/`.rts` project, the same undo stack.
-- **Three render backends, one feature set.** Switch between CPU (Embree), OptiX, and Vulkan RT without changing the scene. The Vulkan path is the recommended interactive backend; OptiX and CPU remain first-class.
+- **One scene, capability-aware render paths.** Rendered mode switches between CPU (Embree), OptiX, and Vulkan RT without changing the scene. Vulkan RT is the recommended production path; OptiX is the mature NVIDIA alternative, while CPU/Embree is the reference, headless, and fallback path. Vulkan-first features advertise their availability instead of silently degrading.
 - **Physically-based, but art-directable.** Principled BSDF + spectral hair + volumetrics + DCC-grade fluids, with a Stylize layer that can repaint the result into oil/ink/toon looks without touching the underlying physics.
 - **Honest about its state.** This is an active solo project. Where a subsystem is experimental or in progress, it says so.
 
@@ -42,13 +42,14 @@ It is not a render farm plugin or a library. It is an interactive editor with a 
 <!-- STATS_START -->
 | Metric | Value |
 | :--- | :--- |
-| **Project code / shader lines** | ~259,000 |
-| **Project code / shader files** | 360+ |
-| **GPU kernel & shader files** | 56 (CUDA, OptiX PTX, Vulkan GLSL/RT, compute) |
-| **UI control points** | 1,278+ |
+| **Project code / shader lines** | ~561,000 |
+| **Project code / shader files** | 1,170+ |
+| **GPU kernel & shader files** | 251 (CUDA, OptiX PTX, Vulkan GLSL/RT, compute) |
+| **UI control call sites** | 3,500+ |
+| **IPC surface** | 594 dispatched methods |
 | **Render backends** | CPU (Embree) · NVIDIA OptiX · Vulkan RT |
 | **Node systems** | Terrain (78), Animation (14+), Material (11+) |
-| **Last verified** | 2026-07-30 — Vulkan GPU gas/fluid/particle force fields, moving colliders, cache replay, and backend switching |
+| **Last source/audit refresh** | 2026-09-25 — thermal liquid, granular and multi-substance authoring; IPC descriptor/security audit |
 <!-- STATS_END -->
 
 Counts cover `RayTrophiStudio/source` and exclude vendored single-file libraries (`simdjson`, `stb`, `json.hpp`, `tinyexr`).
@@ -78,7 +79,20 @@ RayTrophi Studio is organized into task-focused workspaces that all operate on t
 
 ## 🎛️ Rendering & backends
 
-A single physically-based path tracer feeds three acceleration backends. The scene, materials, and lights are identical across all three — you choose the backend that fits the moment (CPU for headless/no-GPU, OptiX for NVIDIA curve hardware, Vulkan RT for fast interactive look-dev).
+A single physically-based path tracer feeds three acceleration backends. The scene, materials, and lights share one authoring model across all three — you choose the backend that fits the moment (CPU/Embree for reference, headless, or fallback rendering; OptiX as a capable NVIDIA GPU alternative; Vulkan RT as the recommended path and the first target for new rendering features).
+
+### Viewport modes vs render backends
+
+Viewport shading and the final render device are deliberately separate choices:
+
+| Viewport mode | Execution path | Intended use |
+|---|---|---|
+| **Solid** | Vulkan raster | Default fast layout, modeling, sculpting, painting, animation, and simulation editing |
+| **Matcap** | Vulkan raster | Shape, silhouette, and surface inspection with selectable studio matcaps |
+| **RayFusion** | Vulkan raster + selective Vulkan RT/ray-query features | Real-time PBR scene view. **Scene** lighting is the default; **3 Point** provides the isolated Material Preview rig from the same mode |
+| **Render** | Selected path tracer: Vulkan RT, OptiX, or CPU | Progressive reference/final rendering and backend comparison |
+
+The Render-device selector does not replace the interactive viewport path while Solid, Matcap, or RayFusion is active; it records which path tracer will be used when switching to Render. Vulkan RT is recommended, OptiX remains a supported secondary GPU path, and the CPU path uses Intel Embree by default.
 
 ### Materials & shading
 - **Principled BSDF** (Disney-style uber-shader): albedo, roughness, metallic, specular, clearcoat, sheen, anisotropy, transmission/IOR
@@ -162,7 +176,7 @@ Same scene, same settings, same hardware, camera in motion. These are interactiv
 
 ## 🌀 Physics & simulation suite
 
-A multi-threaded grid- and particle-based FX suite with CUDA and CPU backends, integrated directly into the path-traced render pipeline. Multiple simulation domains, emitters, colliders, rigid bodies, and force fields coexist in one workspace and are saved with the project.
+A multi-threaded grid- and particle-based FX suite with CPU, CUDA, and Vulkan Compute execution paths, integrated directly into the path-traced render pipeline. Multiple simulation domains, emitters, colliders, rigid bodies, and force fields coexist in one workspace and are saved with the project.
 
 ### Liquid — APIC / FLIP solver
 - Hybrid **APIC/FLIP** solver with adjustable blending, preserving angular momentum and minimizing numerical dissipation
@@ -170,7 +184,14 @@ A multi-threaded grid- and particle-based FX suite with CUDA and CPU backends, i
 - **Variational (cut-cell) solid coupling** (Batty/Bridson): fractional MAC-face weights give sub-grid-accurate collisions against analytic primitives, and moving colliders impart real momentum/splash through the pressure solve
 - **Ghost-fluid 2nd-order free surface** (Gibou/Enright): sub-cell level set removes the voxel "staircase" on the liquid surface
 - Keyframe-animated colliders are re-posed per sub-step so the fluid tracks moving geometry
-- Adaptive resolution, open/closed boundary modes, dynamic particle reseeding to prevent leaks, fluid material presets (Water, Oil, Custom)
+- Physical viscosity solve, adaptive resolution, open/closed boundary modes, dynamic particle reseeding to prevent leaks, and fluid material presets (Water, Oil, Custom)
+
+### Thermal liquids, substances & granular materials
+- **Kelvin-authored thermal liquids** — source birth temperature, world/domain ambient temperature, stable exponential air/contact cooling, particle conduction, a log-space viscosity ramp, support-aware freezing, and melt hysteresis
+- **Phase-aware solidification** — frozen parcels enter the existing solid-phase overlay so deposited layers can accumulate; live minimum/mean/maximum temperature, set/melt/unsupported counts, and viscosity range are exposed through the panel, Python, and IPC
+- **Multi-substance transport** — per-particle substance identity survives advection and reseeding, with per-substance material, representation, viscosity, miscibility, and phase controls
+- **Granular/cohesive material mode** — friction angle, cohesion, dilatancy, elasticity, tensile cutoff, hardening, compaction, fracture/damage, healing/rebonding, and thermal softening, with stability and adaptive-substep telemetry
+- The authoring UI shows effective ambient/birth temperature, rate time constants, phase thresholds, estimated crossing times, and warnings for immediate-freeze or never-freeze setups
 
 ### Liquid surface shading — the isosurface *is* a material surface
 The reconstructed SDF liquid boundary is shaded by the **same BSDF a triangle
@@ -183,9 +204,11 @@ material work instead of shader special cases (Vulkan RT):
 - **Resin coat** over an opaque base, including the procedural interior march — dust, dirt specks and colored shards — anchored in domain space
 - **Emission**, including emission textures
 - **Tri-planar textures** (albedo, roughness, metallic, emission). A raymarched isosurface has no UVs and cannot have them — there is no mesh to unwrap and the surface is rebuilt from the field every frame — so the material's own UV scale/offset become world-space tiling. Roughness/metallic share the exact packed-ORM channel policy the mesh path uses
+- **Advected material coordinates** — a two-generation residual UVW field follows the liquid through advection and reseeding, is preserved by SimCache/serialization, and reports `uvw_drift` through Python and IPC; Domain and World anchoring remain available for deliberately stationary projection
+- **Isosurface normal maps** — tri-planar normal sampling uses a per-plane tangent frame and the same coordinate mode as the other material textures
 - **Procedural porosity** for fermented dough, aerated batter, pumice and set foam: a cellular field is carved out of the density *before* the surface is found, so the pores are real geometry. Their rims pick up correct normals, refraction and self-shadowing from the field gradient — an alpha cutout would punch rimless holes. Bubble size is authored in world units, so changing the domain resolution re-renders the same crumb instead of resizing it
 
-> Known limits, by construction rather than by omission: the tri-planar projection and the resin interior are anchored in **world space**, so a fast-flowing liquid slides through a stationary pattern (a still pool, dough, or set resin is correct). Carrying them with the fluid needs an advected UVW attribute. Normal maps are not wired on the isosurface yet — tri-planar normal mapping needs a per-plane tangent frame and a whiteout blend, and doing it half-way reads as a lighting bug rather than a missing feature.
+> Known limit: Material-coordinate UVW deforms with the liquid by design, while the two-generation refresh bounds long-lived stretch. The remaining visual limitation is tri-planar separation on oblique surfaces; bi-planar or stochastic projection is future work.
 
 ### Gas, smoke & fire
 - A **Vulkan Compute dense-grid solver** for temperature, soot, and fuel density, with the CPU reference path retained
@@ -221,7 +244,7 @@ Secondary **spray** (airborne), **foam** (surface), and **bubbles** (submerged) 
 - **SimCache disk baking** — bake heavy liquid/foam/gas frames to binary `.simcache` files next to the project and scrub the timeline in real time without re-simulating
 - Full serialization of simulation state, domain settings, custom materials, timeline caches, and presets into `.rtp` / `.rts`
 
-> The GPU MGPCG pressure path is live; the GPU port of variational solids + ghost-fluid (Stage 2) is in progress, as are surface tension, implicit viscosity, and narrow-band/sparse performance work for full DCC parity.
+> The GPU MGPCG pressure path and physical viscosity solve are live. The GPU port of variational solids + ghost-fluid (Stage 2), surface tension, and narrow-band/sparse performance work remain in progress for full DCC parity.
 
 ---
 
@@ -506,6 +529,7 @@ RayTrophi/
 - ✅ GPU MGPCG fluid pressure solve (CUDA)
 - ✅ Variational cut-cell solid coupling + ghost-fluid 2nd-order free surface (CPU)
 - ✅ Multi-material whitewater PBR routing + Newton-Raphson wave snapping
+- ✅ Thermal liquid cooling/freezing, multi-substance transport, granular/cohesive materials, and advected material coordinates
 - ✅ SimCache on-disk frame baking + full simulation serialization
 - ✅ Stylize layer with CPU / Vulkan / OptiX parity
 - ✅ Sculpt mode (mesh + terrain) and layered mesh paint
@@ -514,7 +538,8 @@ RayTrophi/
 **Planned / in progress**
 - [ ] Caustics on OptiX / CPU; anisotropic phase & real density fields (VDB) for the light shafts
 - [ ] GPU port of variational solids + ghost-fluid surface (Stage 2)
-- [ ] Fluid surface tension, implicit viscosity, narrow-band/sparse performance
+- [ ] Kinematic collider sources for bone-attached character and animated-body proxies
+- [ ] Fluid surface tension, GPU variational/ghost-fluid parity, narrow-band/sparse performance
 - [ ] Binned SAH / index-based BVH / SBVH spatial splits
 - [ ] USD format support
 - [ ] Network / distributed rendering
