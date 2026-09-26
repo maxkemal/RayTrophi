@@ -57,6 +57,7 @@ class TriangleMesh;
 #include "Viewport/RasterGpuTimers.h"
 #include "Viewport/RasterStageTimings.h"
 #include "Viewport/RasterMaterialVisibility.h"
+#include "Viewport/ParticleBillboardData.h"
 #include <array>
 #include <chrono>
 
@@ -1770,11 +1771,14 @@ public:
     bool hairGpuActive() const { return m_hairGpuActive; }
     // Upload flat LINE_LIST vertex data {x,y,z,v_coord} x vertexCount for the raster viewport hair overlay
     void uploadHairViewportLines(const std::vector<float>& vertexData, uint32_t vertexCount);
-    // Upload camera-facing particle billboards for the raster viewport overlay.
-    // Vertex layout: {pos.xyz, uv.xy, rgba} = 9 floats; TRIANGLE_LIST (6 verts/quad).
-    // Two groups by blend mode: additive and alpha.
-    void uploadParticleBillboards(const std::vector<float>& addData, uint32_t addVertexCount,
-                                  const std::vector<float>& alphaData, uint32_t alphaVertexCount);
+    // Upload camera-facing particle billboards for the raster viewport overlay
+    // (VulkanViewportParticles.cpp). Vertices carry particle centres; the
+    // shader expands quads and reads the appearance LUT. Two groups by the
+    // profile's blend: additive and alpha.
+    void uploadParticleBillboards(const ParticleBillboardUpload& data);
+    // Points the billboard descriptor set at the LUT buffer when stale. Safe
+    // only while no frame using the set is in flight.
+    void writeParticleLutDescriptor();
     // Edit-mesh overlay (raster viewport GPU wireframe/vertex/face passes).
     // Buffers are split by update frequency so each piece re-uploads only
     // when its source actually changes:
@@ -2463,10 +2467,18 @@ protected:
         uint32_t hairLineVertexCount = 0;
 
         // Particle billboard overlay (Solid/Matcap viewport). Two pipelines share
-        // the same shaders/layout and differ only in blend state; particles are
-        // grouped into the matching vertex buffer by their system's blend mode.
+        // the same shaders and their own layout (set 0 = appearance LUT) and
+        // differ only in blend state; particles are grouped into the matching
+        // vertex buffer by their appearance profile's blend.
         VkPipeline particleAddPipeline = VK_NULL_HANDLE;    // additive (fire/spark)
         VkPipeline particleAlphaPipeline = VK_NULL_HANDLE;  // alpha (smoke/dust)
+        VkPipelineLayout particlePipelineLayout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout particleDescLayout = VK_NULL_HANDLE;
+        VkDescriptorPool particleDescPool = VK_NULL_HANDLE;
+        VkDescriptorSet particleDescSet = VK_NULL_HANDLE;
+        VulkanRT::BufferHandle particleLutBuffer;
+        std::vector<float> particleLutUploaded;  // content of particleLutBuffer
+        bool particleLutDescriptorStale = true;
         VulkanRT::BufferHandle particleAddVertexBuffer;
         uint32_t particleAddVertexCount = 0;
         VulkanRT::BufferHandle particleAlphaVertexBuffer;

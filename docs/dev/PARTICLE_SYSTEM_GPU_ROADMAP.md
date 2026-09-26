@@ -252,8 +252,8 @@ Load-time conversion only (CLAUDE.md rule 5 — no second live code path):
 - start/end RGB become a two-stop generic color ramp;
 - the legacy fields are **read by the loader only**. They are never written,
   the runtime never reads them, and the start/end authoring UI is removed in
-  the same phase that introduces profiles (Phase 2), not at the end of the
-  roadmap;
+  the same batch that introduces profiles (pulled forward to Phase 1.5
+  Batch A, 2026-09-26), not at the end of the roadmap;
 - the new fields carry new names, so an old reader can never misread new data
   as the old meaning;
 - migration is idempotent and covered by save-load-save tests.
@@ -775,6 +775,45 @@ not without updating this section first.
 > descriptor set**, so there is no channel for a LUT. The Campfire preset hides
 > its carrier particles (`emitter_only`), so the slice is a particle-only
 > campfire (flame / smoke / spark layers, no domain).
+>
+> **Batch A status 2026-09-26: written, NOT built.** What landed and what the
+> slice changed in the contract:
+> - `ParticleAppearanceProfile` (`ParticleAppearanceProfile.h/.cpp`): colour
+>   ramp + opacity / size / emission curves over normalized age, piecewise
+>   linear, ≤ 16 keys, baked to a 64-sample LUT (two vec4 per sample). Owned
+>   by the runtime next to the emitters, writable only through
+>   `add/update/removeAppearanceProfile` so the LUT cannot go stale. Removal
+>   is refused while an emitter references the profile.
+> - **One evaluator for every consumer:** `sampleParticleAppearanceLut` on the
+>   CPU (gas-deposit opacity weight, RT instance size, debug dots, emitter
+>   pick padding) interpolates exactly like the raster vertex shader. The SoA
+>   lost 13 per-particle visual floats (current + start/end); it keeps
+>   `appearance_profile` (id) and `size_scale` (jitter). The per-step CPU lerp
+>   is gone.
+> - Raster: own pipeline layout + descriptor set (`VulkanViewportParticles.cpp`),
+>   LUT in a storage buffer re-uploaded only when its bytes change; the vertex
+>   shader expands the quad from the particle centre. Fluid-domain particle
+>   billboards go through the same path with one constant LUT row per domain
+>   (`scene_ui_fluid_billboards.hpp` removed).
+> - **Contract amendments (Phase 1 frozen table):** billboard **blend moved
+>   from the system to the profile** (`blend`: additive | alpha) — a campfire
+>   needs additive flame and alpha smoke in ONE system, which the per-system
+>   `blend_mode` could not express; `ParticleSystemObject::blend_mode` is
+>   removed. **`shading_model` is NOT in Batch A:** nothing reads it yet
+>   (no-consumer rule); it enters with lighting (Phase 2 / 8). IPC spelling is
+>   `particle.list_appearances / get_appearance / add_appearance /
+>   set_appearance / remove_appearance` with `profile_id` (flat like the other
+>   particle.* methods, not `particle.appearance.*`). Emitters carry
+>   `appearance_profile_id`; 0 on add creates a default profile of its own.
+> - **Legacy migration (load only):** an emitter JSON without
+>   `appearance_profile_id` becomes a two-key profile (old defaults for
+>   missing keys, old system `blend_mode` → profile blend). Particle block
+>   version 2 → 3; the legacy "active system duplicated at top level" write
+>   is removed. The legacy keys are refused with an error by IPC and Python
+>   (never silently ignored).
+> - Sim cache: only an **opacity** curve change invalidates it (the gas
+>   deposit is weighted by opacity); colour / size / emission / blend are read
+>   at draw time.
 >
 > - **Batch A — appearance profile + GPU LUT.** `ParticleAppearanceProfile`
 >   (shading model, colour ramp, opacity / size / emission curves → 64-sample

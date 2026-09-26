@@ -232,10 +232,6 @@ Result resolveRuntime(const ParticleSystemRef& ref,
     return Result::success();
 }
 
-const char* blendModeName(SceneData::ParticleBlendMode mode) {
-    return mode == SceneData::ParticleBlendMode::Alpha ? "alpha" : "additive";
-}
-
 ParticleSystemInfo infoFromSystem(const SceneData::ParticleSystemObject& sys, std::size_t index) {
     ParticleSystemInfo info;
     info.index = static_cast<int>(index);
@@ -244,7 +240,6 @@ ParticleSystemInfo infoFromSystem(const SceneData::ParticleSystemObject& sys, st
     info.active = (static_cast<int>(index) == g_ctx->scene.active_particle_system_index);
     info.enabled = sys.enabled;
     info.visible = sys.visible;
-    info.blend_mode = blendModeName(sys.blend_mode);
     info.emitter_only = sys.render.emitter_only;
     info.render_in_raytrace = sys.render.render_in_raytrace;
     if (sys.runtime) {
@@ -252,6 +247,8 @@ ParticleSystemInfo infoFromSystem(const SceneData::ParticleSystemObject& sys, st
         info.flow_source_count = static_cast<int>(sys.runtime->flowSources().size());
         info.emitter_count = static_cast<int>(sys.runtime->emitters().size());
         info.collider_count = static_cast<int>(sys.runtime->colliders().size());
+        info.appearance_profile_count =
+            static_cast<int>(sys.runtime->appearanceProfiles().size());
     }
     return info;
 }
@@ -298,13 +295,8 @@ ParticleEmitterInfo infoFromEmitter(const ParticleEmitterDesc& desc, int index) 
     info.spread = desc.spread;
     info.lifetime_seconds = desc.lifetime_seconds;
     info.mass = desc.mass;
-    info.start_size = desc.start_size;
-    info.end_size = desc.end_size;
+    info.appearance_profile_id = desc.appearance_profile_id;
     info.size_jitter = desc.size_jitter;
-    info.start_opacity = desc.start_opacity;
-    info.end_opacity = desc.end_opacity;
-    info.start_color = desc.start_color;
-    info.end_color = desc.end_color;
     info.angular_velocity = desc.angular_velocity;
     info.angular_jitter = desc.angular_jitter;
     info.seed = desc.seed;
@@ -324,7 +316,8 @@ ParticleEmitterInfo infoFromEmitter(const ParticleEmitterDesc& desc, int index) 
 // update leaves the emitter exactly as it was instead of half-applied.
 // `accumulator` and `burst_consumed` are runtime bookkeeping and are never
 // touched here — see the burst note in the file header.
-Result applyInfoToEmitter(const ParticleEmitterInfo& info, ParticleEmitterDesc& desc) {
+Result applyInfoToEmitter(const ParticleEmitterInfo& info, ParticleEmitterDesc& desc,
+                          const RayTrophiSim::ParticleSimulationSystem& runtime) {
     ParticleEmitterSourceMode source = desc.source_mode;
     if (!info.source_mode.empty() && !parseMode(kSourceModes, info.source_mode, source))
         return Result::fail("unknown emitter source mode: " + info.source_mode +
@@ -360,6 +353,14 @@ Result applyInfoToEmitter(const ParticleEmitterInfo& info, ParticleEmitterDesc& 
         return Result::fail("lifetime_seconds must be positive");
     if (info.mass <= 0.0f)
         return Result::fail("mass must be positive");
+    // 0 is only meaningful on add (addEmitter then creates a default profile);
+    // an update must keep pointing at a real profile of THIS system.
+    if (info.appearance_profile_id != 0 &&
+        runtime.findAppearanceProfile(info.appearance_profile_id) == nullptr)
+        return Result::fail("appearance profile " + std::to_string(info.appearance_profile_id) +
+                            " does not exist in this particle system");
+    if (info.appearance_profile_id == 0 && desc.appearance_profile_id != 0)
+        return Result::fail("appearance_profile_id must name a profile of this system");
 
     desc.source_mode = source;
     desc.spawn_mode = spawn;
@@ -376,13 +377,8 @@ Result applyInfoToEmitter(const ParticleEmitterInfo& info, ParticleEmitterDesc& 
     desc.spread = info.spread;
     desc.lifetime_seconds = info.lifetime_seconds;
     desc.mass = info.mass;
-    desc.start_size = info.start_size;
-    desc.end_size = info.end_size;
+    desc.appearance_profile_id = info.appearance_profile_id;
     desc.size_jitter = info.size_jitter;
-    desc.start_opacity = info.start_opacity;
-    desc.end_opacity = info.end_opacity;
-    desc.start_color = info.start_color;
-    desc.end_color = info.end_color;
     desc.angular_velocity = info.angular_velocity;
     desc.angular_jitter = info.angular_jitter;
     desc.seed = info.seed;
@@ -450,13 +446,13 @@ Result addParticleEmitter(const ParticleEmitterInfo& info, ParticleEmitterInfo& 
                           const ParticleSystemRef& system) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
-    ParticleEmitterDesc desc;
-    if (Result r = applyInfoToEmitter(info, desc); !r) return r;
     // The default ref creates the active system when the scene has none, so
     // runtime->addEmitter() here is what scene.addParticleEmitter() used to do.
     RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
     uint32_t system_id = 0;
     if (Result r = resolveRuntime(system, runtime, &system_id); !r) return r;
+    ParticleEmitterDesc desc;
+    if (Result r = applyInfoToEmitter(info, desc, *runtime); !r) return r;
     ParticleEmitterDesc& created = runtime->addEmitter(desc);
     out = infoFromEmitter(created, static_cast<int>(runtime->emitters().size()) - 1);
     out.system_id = system_id;
@@ -485,7 +481,7 @@ Result updateParticleEmitter(const std::string& index_or_name, const ParticleEmi
     if (Result r = resolveRuntime(system, runtime); !r) return r;
     std::size_t index = 0;
     if (Result r = resolveEmitterIndex(*runtime, index_or_name, index); !r) return r;
-    if (Result r = applyInfoToEmitter(info, runtime->emitters()[index]); !r)
+    if (Result r = applyInfoToEmitter(info, runtime->emitters()[index], *runtime); !r)
         return r;
     invalidateScriptSimulation();
     return Result::success();
@@ -580,17 +576,9 @@ Result updateParticleSystem(const ParticleSystemRef& system, const ParticleSyste
         if (i != index && systems[i].name == info.name)
             return Result::fail("particle system name already in use: " + info.name);
     }
-    SceneData::ParticleBlendMode blend = systems[index].blend_mode;
-    const std::string blend_key = canonical(info.blend_mode);
-    if (blend_key == "additive") blend = SceneData::ParticleBlendMode::Additive;
-    else if (blend_key == "alpha") blend = SceneData::ParticleBlendMode::Alpha;
-    else if (!info.blend_mode.empty())
-        return Result::fail("unknown particle blend_mode: " + info.blend_mode + " (additive|alpha)");
-
     auto& target = systems[index];
     target.name = info.name;
     target.visible = info.visible;
-    target.blend_mode = blend;
     SceneData::applyParticleSystemEnabledState(target);
     g_ctx->renderer.resetCPUAccumulation();
     ProjectManager::getInstance().markModified();
@@ -793,6 +781,153 @@ Result clearParticleSystems() {
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     g_ctx->scene.clearParticleSystemObjects();
     invalidateScriptSimulation();
+    return Result::success();
+}
+
+// ── Appearance profiles ─────────────────────────────────────────────────────
+
+namespace {
+
+ParticleAppearanceInfo infoFromAppearance(const RayTrophiSim::ParticleAppearanceProfile& p,
+                                          const RayTrophiSim::ParticleSimulationSystem& runtime,
+                                          uint32_t system_id) {
+    ParticleAppearanceInfo info;
+    info.id = p.id;
+    info.system_id = system_id;
+    info.name = p.name;
+    info.blend = RayTrophiSim::particleAppearanceBlendName(p.blend);
+    for (const auto& stop : p.color_ramp) info.color_ramp.push_back({stop.t, stop.color});
+    for (const auto& k : p.opacity_curve) info.opacity_curve.push_back({k.t, k.value});
+    for (const auto& k : p.size_curve) info.size_curve.push_back({k.t, k.value});
+    for (const auto& k : p.emission_curve) info.emission_curve.push_back({k.t, k.value});
+    for (const auto& emitter : runtime.emitters()) {
+        if (emitter.appearance_profile_id == p.id) {
+            info.used_by_emitter_uids.push_back(emitter.timeline_uid);
+        }
+    }
+    return info;
+}
+
+Result appearanceFromInfo(const ParticleAppearanceInfo& info,
+                          RayTrophiSim::ParticleAppearanceProfile& out) {
+    out.name = info.name;
+    if (!RayTrophiSim::parseParticleAppearanceBlend(canonical(info.blend), out.blend))
+        return Result::fail("unknown appearance blend: " + info.blend + " (additive|alpha)");
+    out.color_ramp.clear();
+    for (const auto& stop : info.color_ramp) out.color_ramp.push_back({stop.t, stop.color});
+    auto copyCurve = [](const std::vector<ParticleCurveKeyInfo>& in,
+                        std::vector<RayTrophiSim::ParticleCurveKey>& dst) {
+        dst.clear();
+        for (const auto& k : in) dst.push_back({k.t, k.value});
+    };
+    copyCurve(info.opacity_curve, out.opacity_curve);
+    copyCurve(info.size_curve, out.size_curve);
+    copyCurve(info.emission_curve, out.emission_curve);
+    // Validate here too, so the error text is identical for IPC and Python and
+    // nothing is written when it fails.
+    RayTrophiSim::ParticleAppearanceProfile check = out;
+    const std::string problem = RayTrophiSim::normalizeParticleAppearanceProfile(check);
+    if (!problem.empty()) return Result::fail(problem);
+    return Result::success();
+}
+
+// Appearance is read at draw time, so a look edit does NOT invalidate the
+// simulation cache (dragging a colour must not throw the sim away every
+// frame). The one exception is `opacity_changed`: the particle -> gas deposit
+// is weighted by the opacity curve, so cached gas frames would be stale.
+void appearanceChanged(bool opacity_changed) {
+    g_ctx->renderer.resetCPUAccumulation();
+    ProjectManager::getInstance().markModified();
+    if (opacity_changed) invalidateScriptSimulation();
+}
+
+bool sameCurve(const std::vector<RayTrophiSim::ParticleCurveKey>& a,
+               const std::vector<RayTrophiSim::ParticleCurveKey>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (a[i].t != b[i].t || a[i].value != b[i].value) return false;
+    }
+    return true;
+}
+
+} // namespace
+
+Result listParticleAppearances(const ParticleSystemRef& system,
+                               std::vector<ParticleAppearanceInfo>& out) {
+    out.clear();
+    if (!g_ctx) return notBound();
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    uint32_t system_id = 0;
+    if (Result r = resolveRuntime(system, runtime, &system_id); !r) return r;
+    for (const auto& profile : runtime->appearanceProfiles()) {
+        out.push_back(infoFromAppearance(profile, *runtime, system_id));
+    }
+    return Result::success();
+}
+
+Result getParticleAppearance(uint32_t profile_id, ParticleAppearanceInfo& out,
+                             const ParticleSystemRef& system) {
+    if (!g_ctx) return notBound();
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    uint32_t system_id = 0;
+    if (Result r = resolveRuntime(system, runtime, &system_id); !r) return r;
+    const auto* profile = runtime->findAppearanceProfile(profile_id);
+    if (!profile)
+        return Result::fail("appearance profile " + std::to_string(profile_id) +
+                            " does not exist in this particle system");
+    out = infoFromAppearance(*profile, *runtime, system_id);
+    return Result::success();
+}
+
+Result addParticleAppearance(const ParticleAppearanceInfo& info, ParticleAppearanceInfo& out,
+                             const ParticleSystemRef& system) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    uint32_t system_id = 0;
+    if (Result r = resolveRuntime(system, runtime, &system_id); !r) return r;
+    RayTrophiSim::ParticleAppearanceProfile profile;
+    if (Result r = appearanceFromInfo(info, profile); !r) return r;
+    profile.id = 0;  // always a fresh id
+    std::string error;
+    const uint32_t id = runtime->addAppearanceProfile(profile, &error);
+    if (id == 0) return Result::fail(error);
+    out = infoFromAppearance(*runtime->findAppearanceProfile(id), *runtime, system_id);
+    appearanceChanged(false);  // a new profile is referenced by nothing yet
+    return Result::success();
+}
+
+Result updateParticleAppearance(uint32_t profile_id, const ParticleAppearanceInfo& info,
+                                const ParticleSystemRef& system) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    if (Result r = resolveRuntime(system, runtime); !r) return r;
+    const auto* existing = runtime->findAppearanceProfile(profile_id);
+    if (!existing)
+        return Result::fail("appearance profile " + std::to_string(profile_id) +
+                            " does not exist in this particle system");
+    RayTrophiSim::ParticleAppearanceProfile profile;
+    if (Result r = appearanceFromInfo(info, profile); !r) return r;
+    profile.id = profile_id;
+    // Compare in the stored (sorted) form, so reordering keys is not a change.
+    RayTrophiSim::ParticleAppearanceProfile normalized = profile;
+    (void)RayTrophiSim::normalizeParticleAppearanceProfile(normalized);
+    const bool opacity_changed = !sameCurve(existing->opacity_curve, normalized.opacity_curve);
+    std::string error;
+    if (!runtime->updateAppearanceProfile(profile, &error)) return Result::fail(error);
+    appearanceChanged(opacity_changed);
+    return Result::success();
+}
+
+Result removeParticleAppearance(uint32_t profile_id, const ParticleSystemRef& system) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    if (Result r = resolveRuntime(system, runtime); !r) return r;
+    std::string error;
+    if (!runtime->removeAppearanceProfile(profile_id, &error)) return Result::fail(error);
+    appearanceChanged(false);  // only unreferenced profiles can be removed
     return Result::success();
 }
 
@@ -1165,8 +1300,9 @@ Result spawnParticle(Vec3 position, Vec3 velocity, float lifetime_seconds, float
     desc.velocity = velocity;
     desc.lifetime_seconds = lifetime_seconds;
     desc.mass = mass;
-    desc.start_size = size;
-    desc.end_size = size;
+    // No profile: the fallback look (white, opacity 1 -> 0, unit size curve),
+    // so size_scale is the width in metres — what `size` always meant here.
+    desc.size_scale = size;
     out_index = static_cast<int>(runtime->spawn(desc));
     invalidateScriptSimulation();
     return Result::success();

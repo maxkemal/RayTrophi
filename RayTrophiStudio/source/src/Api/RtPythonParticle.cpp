@@ -26,6 +26,7 @@
 
 #include <pybind11/stl.h>
 
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -75,13 +76,8 @@ py::dict emitterToDict(const rtapi::ParticleEmitterInfo& info) {
     d["spread"] = info.spread;
     d["lifetime_seconds"] = info.lifetime_seconds;
     d["mass"] = info.mass;
-    d["start_size"] = info.start_size;
-    d["end_size"] = info.end_size;
+    d["appearance_profile_id"] = info.appearance_profile_id;
     d["size_jitter"] = info.size_jitter;
-    d["start_opacity"] = info.start_opacity;
-    d["end_opacity"] = info.end_opacity;
-    d["start_color"] = vec3ToPython(info.start_color);
-    d["end_color"] = vec3ToPython(info.end_color);
     d["angular_velocity"] = info.angular_velocity;
     d["angular_jitter"] = info.angular_jitter;
     d["seed"] = info.seed;
@@ -120,10 +116,9 @@ void patchEmitter(const py::kwargs& kwargs, rtapi::ParticleEmitterInfo& info) {
     if (kwargs.contains("burst_count")) info.burst_count = py::cast<int>(kwargs["burst_count"]);
     flt("speed", info.speed); flt("spread", info.spread);
     flt("lifetime_seconds", info.lifetime_seconds); flt("mass", info.mass);
-    flt("start_size", info.start_size); flt("end_size", info.end_size);
+    if (kwargs.contains("appearance_profile_id"))
+        info.appearance_profile_id = py::cast<uint32_t>(kwargs["appearance_profile_id"]);
     flt("size_jitter", info.size_jitter);
-    flt("start_opacity", info.start_opacity); flt("end_opacity", info.end_opacity);
-    vector("start_color", info.start_color); vector("end_color", info.end_color);
     flt("angular_velocity", info.angular_velocity);
     flt("angular_jitter", info.angular_jitter);
     if (kwargs.contains("seed"))
@@ -145,14 +140,83 @@ py::dict systemToDict(const rtapi::ParticleSystemInfo& s) {
     d["active"] = s.active;
     d["enabled"] = s.enabled;
     d["visible"] = s.visible;
-    d["blend_mode"] = s.blend_mode;
     d["emitter_only"] = s.emitter_only;
     d["render_in_raytrace"] = s.render_in_raytrace;
     d["domain_count"] = s.domain_count;
     d["flow_source_count"] = s.flow_source_count;
     d["emitter_count"] = s.emitter_count;
     d["collider_count"] = s.collider_count;
+    d["appearance_profile_count"] = s.appearance_profile_count;
     return d;
+}
+
+// Keys that Phase 1.5 moved to appearance profiles. Accepting and ignoring
+// them would turn an old script into a silent no-op, so they are refused
+// (same text as the IPC side).
+void rejectMovedAppearanceKeys(const py::kwargs& kwargs) {
+    static const char* kMoved[] = {"start_size", "end_size", "start_opacity",
+                                   "end_opacity", "start_color", "end_color", "blend_mode"};
+    for (const char* key : kMoved) {
+        if (kwargs.contains(key)) {
+            throw std::runtime_error(
+                std::string(key) + " moved to appearance profiles: set it with "
+                "particle.set_appearance (the emitter's appearance_profile_id)");
+        }
+    }
+}
+
+py::list curveToPython(const std::vector<rtapi::ParticleCurveKeyInfo>& keys) {
+    py::list out;
+    for (const auto& k : keys) out.append(py::make_tuple(k.t, k.value));
+    return out;
+}
+
+void curveFromPython(const py::kwargs& kwargs, const char* key,
+                     std::vector<rtapi::ParticleCurveKeyInfo>& out) {
+    if (!kwargs.contains(key)) return;
+    out.clear();
+    for (const auto& item : py::cast<py::sequence>(kwargs[key])) {
+        const auto pair = py::cast<py::sequence>(item);
+        if (pair.size() != 2)
+            throw std::runtime_error(std::string(key) + " must be [(t, value), ...]");
+        out.push_back({py::cast<float>(pair[0]), py::cast<float>(pair[1])});
+    }
+}
+
+py::dict appearanceToDict(const rtapi::ParticleAppearanceInfo& a) {
+    py::dict d;
+    d["id"] = a.id;
+    d["system_id"] = a.system_id;
+    d["name"] = a.name;
+    d["blend"] = a.blend;
+    py::list ramp;
+    for (const auto& stop : a.color_ramp)
+        ramp.append(py::make_tuple(stop.t, stop.color.x, stop.color.y, stop.color.z));
+    d["color_ramp"] = ramp;
+    d["opacity_curve"] = curveToPython(a.opacity_curve);
+    d["size_curve"] = curveToPython(a.size_curve);
+    d["emission_curve"] = curveToPython(a.emission_curve);
+    d["used_by_emitter_uids"] = a.used_by_emitter_uids;
+    return d;
+}
+
+void patchAppearance(const py::kwargs& kwargs, rtapi::ParticleAppearanceInfo& info) {
+    if (kwargs.contains("name")) info.name = py::cast<std::string>(kwargs["name"]);
+    if (kwargs.contains("blend")) info.blend = py::cast<std::string>(kwargs["blend"]);
+    if (kwargs.contains("color_ramp")) {
+        info.color_ramp.clear();
+        for (const auto& item : py::cast<py::sequence>(kwargs["color_ramp"])) {
+            const auto stop = py::cast<py::sequence>(item);
+            if (stop.size() != 4)
+                throw std::runtime_error("color_ramp must be [(t, r, g, b), ...]");
+            info.color_ramp.push_back({py::cast<float>(stop[0]),
+                                       Vec3(py::cast<float>(stop[1]), py::cast<float>(stop[2]),
+                                            py::cast<float>(stop[3]))});
+        }
+    }
+    curveFromPython(kwargs, "opacity_curve", info.opacity_curve);
+    curveFromPython(kwargs, "size_curve", info.size_curve);
+    curveFromPython(kwargs, "emission_curve", info.emission_curve);
 }
 
 py::dict renderToDict(const rtapi::ParticleRenderInfo& r) {
@@ -206,6 +270,7 @@ void registerParticleBindings(py::module_& module) {
     }, py::arg("emitter"), py::arg("system") = py::none(), py::arg("system_id") = -1);
 
     particle.def("add_emitter", [](const py::kwargs& kwargs) {
+        rejectMovedAppearanceKeys(kwargs);
         rtapi::ParticleEmitterInfo info;   // facade defaults
         patchEmitter(kwargs, info);
         rtapi::ParticleEmitterInfo created;
@@ -214,6 +279,7 @@ void registerParticleBindings(py::module_& module) {
     });
 
     particle.def("set_emitter", [](const std::string& emitter, const py::kwargs& kwargs) {
+        rejectMovedAppearanceKeys(kwargs);
         const rtapi::ParticleSystemRef ref = systemRefFromKwargs(kwargs);
         rtapi::ParticleEmitterInfo info;
         requireResult(rtapi::getParticleEmitter(emitter, info, ref));
@@ -265,16 +331,52 @@ void registerParticleBindings(py::module_& module) {
         return systemToDict(info);
     }, py::arg("system") = py::none(), py::arg("system_id") = -1);
 
-    // Patches name / visible / blend_mode (enabled is read-only, see RtApi.h).
+    // Patches name / visible (enabled is read-only, see RtApi.h).
     particle.def("set_system", [](const py::kwargs& kwargs) {
+        rejectMovedAppearanceKeys(kwargs);
         const rtapi::ParticleSystemRef ref = systemRefFromKwargs(kwargs);
         rtapi::ParticleSystemInfo info;
         requireResult(rtapi::getParticleSystem(ref, info));
         if (kwargs.contains("name")) info.name = py::cast<std::string>(kwargs["name"]);
         if (kwargs.contains("visible")) info.visible = py::cast<bool>(kwargs["visible"]);
-        if (kwargs.contains("blend_mode")) info.blend_mode = py::cast<std::string>(kwargs["blend_mode"]);
         requireResult(rtapi::updateParticleSystem(ref, info));
     });
+
+    // -- Appearance profiles (Phase 1.5) ------------------------------------
+    // Curves are [(t, value), ...] over normalized age; color_ramp is
+    // [(t, r, g, b), ...]; blend is "additive" | "alpha". Same keys as IPC.
+    particle.def("list_appearances", [](const py::object& system, int system_id) -> py::list {
+        std::vector<rtapi::ParticleAppearanceInfo> list;
+        requireResult(rtapi::listParticleAppearances(systemRef(system, system_id), list));
+        py::list out;
+        for (const auto& a : list) out.append(appearanceToDict(a));
+        return out;
+    }, py::arg("system") = py::none(), py::arg("system_id") = -1);
+    particle.def("get_appearance", [](uint32_t profile_id, const py::object& system,
+                                      int system_id) -> py::dict {
+        rtapi::ParticleAppearanceInfo info;
+        requireResult(rtapi::getParticleAppearance(profile_id, info,
+                                                   systemRef(system, system_id)));
+        return appearanceToDict(info);
+    }, py::arg("profile_id"), py::arg("system") = py::none(), py::arg("system_id") = -1);
+    particle.def("add_appearance", [](const py::kwargs& kwargs) -> py::dict {
+        rtapi::ParticleAppearanceInfo info;
+        patchAppearance(kwargs, info);
+        rtapi::ParticleAppearanceInfo created;
+        requireResult(rtapi::addParticleAppearance(info, created, systemRefFromKwargs(kwargs)));
+        return appearanceToDict(created);
+    });
+    particle.def("set_appearance", [](uint32_t profile_id, const py::kwargs& kwargs) {
+        const rtapi::ParticleSystemRef ref = systemRefFromKwargs(kwargs);
+        rtapi::ParticleAppearanceInfo info;
+        requireResult(rtapi::getParticleAppearance(profile_id, info, ref));
+        patchAppearance(kwargs, info);
+        requireResult(rtapi::updateParticleAppearance(profile_id, info, ref));
+    }, py::arg("profile_id"));
+    particle.def("remove_appearance", [](uint32_t profile_id, const py::object& system,
+                                         int system_id) {
+        requireResult(rtapi::removeParticleAppearance(profile_id, systemRef(system, system_id)));
+    }, py::arg("profile_id"), py::arg("system") = py::none(), py::arg("system_id") = -1);
 
     particle.def("remove_system", [](const py::object& system, int system_id) {
         requireResult(rtapi::removeParticleSystem(systemRef(system, system_id)));

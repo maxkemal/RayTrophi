@@ -123,11 +123,8 @@ json particleEmitterToJson(const rtapi::ParticleEmitterInfo& info) {
         {"rate_per_second", info.rate_per_second}, {"burst_count", info.burst_count},
         {"speed", info.speed}, {"spread", info.spread},
         {"lifetime_seconds", info.lifetime_seconds}, {"mass", info.mass},
-        {"start_size", info.start_size}, {"end_size", info.end_size},
+        {"appearance_profile_id", info.appearance_profile_id},
         {"size_jitter", info.size_jitter},
-        {"start_opacity", info.start_opacity}, {"end_opacity", info.end_opacity},
-        {"start_color", vec3ToJson(info.start_color)},
-        {"end_color", vec3ToJson(info.end_color)},
         {"angular_velocity", info.angular_velocity},
         {"angular_jitter", info.angular_jitter}, {"seed", info.seed},
         // These five were Python-only until Phase 1: an IPC client could not
@@ -164,10 +161,9 @@ void applyParticleEmitterPatch(const json& patch, rtapi::ParticleEmitterInfo& in
     if (patch.contains("burst_count")) info.burst_count = patch["burst_count"].get<int>();
     flt("speed", info.speed); flt("spread", info.spread);
     flt("lifetime_seconds", info.lifetime_seconds); flt("mass", info.mass);
-    flt("start_size", info.start_size); flt("end_size", info.end_size);
+    if (patch.contains("appearance_profile_id"))
+        info.appearance_profile_id = patch["appearance_profile_id"].get<uint32_t>();
     flt("size_jitter", info.size_jitter);
-    flt("start_opacity", info.start_opacity); flt("end_opacity", info.end_opacity);
-    vector("start_color", info.start_color); vector("end_color", info.end_color);
     flt("angular_velocity", info.angular_velocity);
     flt("angular_jitter", info.angular_jitter);
     if (patch.contains("seed")) info.seed = patch["seed"].get<unsigned int>();
@@ -184,19 +180,91 @@ json particleSystemToJson(const rtapi::ParticleSystemInfo& s) {
     return json{
         {"index", s.index}, {"id", s.id}, {"name", s.name},
         {"active", s.active}, {"enabled", s.enabled}, {"visible", s.visible},
-        {"blend_mode", s.blend_mode},
         {"emitter_only", s.emitter_only},
         {"render_in_raytrace", s.render_in_raytrace},
         {"domain_count", s.domain_count},
         {"flow_source_count", s.flow_source_count},
         {"emitter_count", s.emitter_count},
-        {"collider_count", s.collider_count}};
+        {"collider_count", s.collider_count},
+        {"appearance_profile_count", s.appearance_profile_count}};
 }
 
 void applyParticleSystemPatch(const json& patch, rtapi::ParticleSystemInfo& info) {
     if (patch.contains("name")) info.name = patch["name"].get<std::string>();
     if (patch.contains("visible")) info.visible = patch["visible"].get<bool>();
-    if (patch.contains("blend_mode")) info.blend_mode = patch["blend_mode"].get<std::string>();
+}
+
+// Keys that Phase 1.5 moved to appearance profiles. Accepting and ignoring
+// them would turn an old script into a silent no-op, so they are refused.
+void rejectMovedAppearanceKeys(const json& params) {
+    static const char* kMoved[] = {"start_size", "end_size", "start_opacity",
+                                   "end_opacity", "start_color", "end_color", "blend_mode"};
+    for (const char* key : kMoved) {
+        if (params.contains(key)) {
+            throw std::runtime_error(
+                std::string(key) + " moved to appearance profiles: set it with "
+                "particle.set_appearance (the emitter's appearance_profile_id)");
+        }
+    }
+}
+
+json curveToJson(const std::vector<rtapi::ParticleCurveKeyInfo>& keys) {
+    json out = json::array();
+    for (const auto& k : keys) out.push_back(json::array({k.t, k.value}));
+    return out;
+}
+
+json particleAppearanceToJson(const rtapi::ParticleAppearanceInfo& a) {
+    json ramp = json::array();
+    for (const auto& stop : a.color_ramp)
+        ramp.push_back(json::array({stop.t, stop.color.x, stop.color.y, stop.color.z}));
+    return json{
+        {"id", a.id}, {"system_id", a.system_id}, {"name", a.name}, {"blend", a.blend},
+        {"color_ramp", ramp},
+        {"opacity_curve", curveToJson(a.opacity_curve)},
+        {"size_curve", curveToJson(a.size_curve)},
+        {"emission_curve", curveToJson(a.emission_curve)},
+        {"used_by_emitter_uids", a.used_by_emitter_uids}};
+}
+
+// Validates the SHAPE before anything is enqueued; ranges are checked by rtapi.
+void applyParticleAppearancePatch(const json& patch, rtapi::ParticleAppearanceInfo& info) {
+    if (patch.contains("name")) info.name = patch["name"].get<std::string>();
+    if (patch.contains("blend")) info.blend = patch["blend"].get<std::string>();
+    if (patch.contains("color_ramp")) {
+        const json& arr = patch["color_ramp"];
+        if (!arr.is_array()) throw std::runtime_error("color_ramp must be [[t, r, g, b], ...]");
+        info.color_ramp.clear();
+        for (const auto& item : arr) {
+            if (!item.is_array() || item.size() != 4)
+                throw std::runtime_error("color_ramp must be [[t, r, g, b], ...]");
+            info.color_ramp.push_back({item[0].get<float>(),
+                                       Vec3(item[1].get<float>(), item[2].get<float>(),
+                                            item[3].get<float>())});
+        }
+    }
+    auto curve = [&](const char* key, std::vector<rtapi::ParticleCurveKeyInfo>& target) {
+        if (!patch.contains(key)) return;
+        const json& arr = patch[key];
+        if (!arr.is_array())
+            throw std::runtime_error(std::string(key) + " must be [[t, value], ...]");
+        target.clear();
+        for (const auto& item : arr) {
+            if (!item.is_array() || item.size() != 2)
+                throw std::runtime_error(std::string(key) + " must be [[t, value], ...]");
+            target.push_back({item[0].get<float>(), item[1].get<float>()});
+        }
+    };
+    curve("opacity_curve", info.opacity_curve);
+    curve("size_curve", info.size_curve);
+    curve("emission_curve", info.emission_curve);
+}
+
+uint32_t requireProfileId(const json& params) {
+    if (!params.contains("profile_id") || !params["profile_id"].is_number_integer() ||
+        params["profile_id"].get<int64_t>() <= 0)
+        throw std::runtime_error("missing or invalid int param: profile_id");
+    return params["profile_id"].get<uint32_t>();
 }
 
 json particleRenderToJson(const rtapi::ParticleRenderInfo& r) {
@@ -367,6 +435,7 @@ bool dispatchParticleIpc(const std::string& method, const json& params,
         return true;
     }
     if (method == "particle.add_emitter") {
+        rejectMovedAppearanceKeys(params);
         const rtapi::ParticleSystemRef ref = readSystemRef(params);
         const json patch = params;
         out_result = enqueue([patch, ref](UIContext&) {
@@ -380,6 +449,7 @@ bool dispatchParticleIpc(const std::string& method, const json& params,
         return true;
     }
     if (method == "particle.set_emitter") {
+        rejectMovedAppearanceKeys(params);
         const std::string emitter = readEmitterRef(params);
         const rtapi::ParticleSystemRef ref = readSystemRef(params);
         json patch = params;
@@ -437,6 +507,66 @@ bool dispatchParticleIpc(const std::string& method, const json& params,
     }
 
     // ── Systems ──────────────────────────────────────────────────────────
+    // -- Appearance profiles (Phase 1.5) ------------------------------------
+    if (method == "particle.list_appearances") {
+        const rtapi::ParticleSystemRef ref = readSystemRef(params);
+        out_result = enqueue([ref](UIContext&) {
+            std::vector<rtapi::ParticleAppearanceInfo> list;
+            const rtapi::Result r = rtapi::listParticleAppearances(ref, list);
+            if (!r.ok) return json{{"__error", r.error}};
+            json arr = json::array();
+            for (const auto& a : list) arr.push_back(particleAppearanceToJson(a));
+            return json{{"appearances", arr}};
+        });
+        return true;
+    }
+    if (method == "particle.get_appearance") {
+        const uint32_t id = requireProfileId(params);
+        const rtapi::ParticleSystemRef ref = readSystemRef(params);
+        out_result = enqueue([id, ref](UIContext&) {
+            rtapi::ParticleAppearanceInfo info;
+            const rtapi::Result r = rtapi::getParticleAppearance(id, info, ref);
+            if (!r.ok) return json{{"__error", r.error}};
+            return particleAppearanceToJson(info);
+        });
+        return true;
+    }
+    if (method == "particle.add_appearance") {
+        const rtapi::ParticleSystemRef ref = readSystemRef(params);
+        rtapi::ParticleAppearanceInfo info;
+        applyParticleAppearancePatch(params, info);
+        out_result = enqueue([info, ref](UIContext&) {
+            rtapi::ParticleAppearanceInfo created;
+            const rtapi::Result r = rtapi::addParticleAppearance(info, created, ref);
+            if (!r.ok) return json{{"__error", r.error}};
+            return particleAppearanceToJson(created);
+        });
+        return true;
+    }
+    // Read-modify-write: keys not given keep their current value.
+    if (method == "particle.set_appearance") {
+        const uint32_t id = requireProfileId(params);
+        const rtapi::ParticleSystemRef ref = readSystemRef(params);
+        rtapi::ParticleAppearanceInfo shape_check;
+        applyParticleAppearancePatch(params, shape_check);
+        const json patch = params;
+        out_result = enqueue([id, ref, patch](UIContext&) {
+            rtapi::ParticleAppearanceInfo info;
+            const rtapi::Result read = rtapi::getParticleAppearance(id, info, ref);
+            if (!read.ok) return resultToJson(read);
+            applyParticleAppearancePatch(patch, info);
+            return resultToJson(rtapi::updateParticleAppearance(id, info, ref));
+        });
+        return true;
+    }
+    if (method == "particle.remove_appearance") {
+        const uint32_t id = requireProfileId(params);
+        const rtapi::ParticleSystemRef ref = readSystemRef(params);
+        out_result = enqueue([id, ref](UIContext&) {
+            return resultToJson(rtapi::removeParticleAppearance(id, ref));
+        });
+        return true;
+    }
     // ".list" / ".get" in the name is what classifies these as Read in
     // RtIpcSecurity.
     if (method == "particle.list_systems") {
@@ -460,8 +590,9 @@ bool dispatchParticleIpc(const std::string& method, const json& params,
         });
         return true;
     }
-    // Patches name / visible / blend_mode (enabled is read-only, see RtApi.h).
+    // Patches name / visible (enabled is read-only, see RtApi.h).
     if (method == "particle.set_system") {
+        rejectMovedAppearanceKeys(params);
         const rtapi::ParticleSystemRef ref = readSystemRef(params);
         const json patch = params;
         out_result = enqueue([ref, patch](UIContext&) {

@@ -25,6 +25,11 @@ public:
 private:
     std::shared_ptr<RayFusion::ProbeOverlay> m_probeOverlay;
     void recordRayFusionProbeOverlay(VkCommandBuffer cmd, const Matrix4x4& viewProj);
+    // Particle billboards (VulkanViewportParticles.cpp).
+    void ensureParticleBillboardPipelines(const std::string& shaderDir);
+    void recordParticleBillboards(VkCommandBuffer cmd, const float viewProjGL[16],
+                                  const float viewGL[16]);
+    void destroyParticleBillboardResources(bool keepPipeline);
     std::unique_ptr<RasterViewportFrameRing> m_rasterFrameRing;
     // A failed ring uses synchronous presentation only for a bounded recovery
     // window. A transient queue/fence collision must not penalize the session

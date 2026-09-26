@@ -4412,15 +4412,36 @@ static const MethodDescriptor desc_paint_update_layer = {
 };
 static const MethodRegistration reg_paint_update_layer(desc_paint_update_layer);
 
+static const MethodParam params_particle_add_appearance[] = {
+    {"blend", "any", false, "", nullptr, nullptr},
+    {"color_ramp", "any", false, "", nullptr, nullptr},
+    {"emission_curve", "any", false, "", nullptr, nullptr},
+    {"name", "any", false, "", nullptr, nullptr},
+    {"opacity_curve", "any", false, "", nullptr, nullptr},
+    {"size_curve", "any", false, "", nullptr, nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
+static const MethodDescriptor desc_particle_add_appearance = {
+    "particle.add_appearance", "particle",
+    "Add an appearance profile to a particle system and return it with its new id",
+    "blend is additive (fire, sparks) or alpha (smoke, dust); it picks the raster billboard group. Ranges: opacity 0..1, size and emission >= 0, colour >= 0 (HDR allowed), at most 16 keys per curve. Point an emitter at it with particle.set_emitter appearance_profile_id.",
+    "write", "SceneWrite", false, "any",
+    "particle|add|appearance|particles|profile|create|look",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_add_appearance, 8,
+    true
+};
+static const MethodRegistration reg_particle_add_appearance(desc_particle_add_appearance);
+
 static const MethodParam params_particle_add_emitter[] = {
     {"angular_jitter", "float", false, "", nullptr, nullptr},
     {"angular_velocity", "float", false, "", nullptr, nullptr},
+    {"appearance_profile_id", "any", false, "", nullptr, nullptr},
     {"burst_count", "any", false, "", nullptr, nullptr},
     {"direction", "vec3", false, "", nullptr, nullptr},
     {"enabled", "bool", false, "", nullptr, nullptr},
-    {"end_color", "vec3", false, "", nullptr, nullptr},
-    {"end_opacity", "float", false, "", nullptr, nullptr},
-    {"end_size", "float", false, "", nullptr, nullptr},
     {"grid_density_deposit", "float", false, "", nullptr, nullptr},
     {"grid_fuel_deposit", "float", false, "", nullptr, nullptr},
     {"grid_temperature_deposit", "float", false, "", nullptr, nullptr},
@@ -4440,9 +4461,6 @@ static const MethodParam params_particle_add_emitter[] = {
     {"spawn_mode", "string", false, "", nullptr, nullptr},
     {"speed", "float", false, "", nullptr, nullptr},
     {"spread", "float", false, "", nullptr, nullptr},
-    {"start_color", "vec3", false, "", nullptr, nullptr},
-    {"start_opacity", "float", false, "", nullptr, nullptr},
-    {"start_size", "float", false, "", nullptr, nullptr},
     {"surface_offset", "float", false, "", nullptr, nullptr},
     {"system", "string", false, "", "", nullptr},
     {"system_id", "int", false, "", "-1", nullptr},
@@ -4451,12 +4469,12 @@ static const MethodParam params_particle_add_emitter[] = {
 static const MethodDescriptor desc_particle_add_emitter = {
     "particle.add_emitter", "particle",
     "Add a particle emitter and return it",
-    nullptr,
+    "The look over life is an appearance profile: pass appearance_profile_id, or omit it and the emitter gets a default profile of its own. start_size/end_size/start_opacity/end_opacity/start_color/end_color were removed in Phase 1.5 and are refused with an error, not ignored.",
     "write", "SceneWrite", false, "any",
     "particle|add|emitter|particles|create|spawn|emit",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_particle_add_emitter, 34,
+    params_particle_add_emitter, 29,
     true
 };
 static const MethodRegistration reg_particle_add_emitter(desc_particle_add_emitter);
@@ -4577,6 +4595,24 @@ static const MethodDescriptor desc_particle_emitters = {
 };
 static const MethodRegistration reg_particle_emitters(desc_particle_emitters);
 
+static const MethodParam params_particle_get_appearance[] = {
+    {"profile_id", "any", false, "", nullptr, nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
+static const MethodDescriptor desc_particle_get_appearance = {
+    "particle.get_appearance", "particle",
+    "Return one appearance profile by profile_id",
+    nullptr,
+    "read", "Read", false, "any",
+    "particle|get|appearance|particles|profile|inspect",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_get_appearance, 3,
+    true
+};
+static const MethodRegistration reg_particle_get_appearance(desc_particle_get_appearance);
+
 static const MethodParam params_particle_get_emitter[] = {
     {"emitter", "string", true, "", nullptr, nullptr},
     {"emitter_uid", "any", false, "", nullptr, nullptr},
@@ -4656,7 +4692,7 @@ static const MethodParam params_particle_get_system[] = {
 };
 static const MethodDescriptor desc_particle_get_system = {
     "particle.get_system", "particle",
-    "Return one particle system's id, name, enabled/visible state, blend mode and counts",
+    "Return one particle system's id, name, enabled/visible state and counts",
     "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system. A read never creates a system: with no system_id/system and no active system it fails.",
     "read", "Read", false, "any",
     "particle|get|system|particles|inspect",
@@ -4693,6 +4729,23 @@ static const MethodDescriptor desc_particle_key_emitter = {
 };
 static const MethodRegistration reg_particle_key_emitter(desc_particle_key_emitter);
 
+static const MethodParam params_particle_list_appearances[] = {
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
+static const MethodDescriptor desc_particle_list_appearances = {
+    "particle.list_appearances", "particle",
+    "List a particle system's appearance profiles (colour ramp, opacity/size/emission curves, blend)",
+    "Curves are [[t, value], ...] and color_ramp is [[t, r, g, b], ...] over normalized age (0 = birth, 1 = death), piecewise linear, stored sorted by t. size is the billboard width in metres; emission multiplies the colour. used_by_emitter_uids names the emitters that reference each profile.",
+    "read", "Read", false, "any",
+    "particle|list|appearances|particles|appearance|profile|look|inspect",
+    "particle.get_appearance|particle.add_appearance|particle.set_appearance|particle.set_emitter",
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_list_appearances, 2,
+    true
+};
+static const MethodRegistration reg_particle_list_appearances(desc_particle_list_appearances);
+
 static const MethodDescriptor desc_particle_list_systems = {
     "particle.list_systems", "particle",
     "List the particle systems with their emitter, domain and collider counts",
@@ -4705,6 +4758,24 @@ static const MethodDescriptor desc_particle_list_systems = {
     true
 };
 static const MethodRegistration reg_particle_list_systems(desc_particle_list_systems);
+
+static const MethodParam params_particle_remove_appearance[] = {
+    {"profile_id", "any", false, "", nullptr, nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
+static const MethodDescriptor desc_particle_remove_appearance = {
+    "particle.remove_appearance", "particle",
+    "Remove an appearance profile no emitter references",
+    "Refused while any emitter still references the profile; re-point those emitters first.",
+    "write", "SceneWrite", false, "any",
+    "particle|remove|appearance|particles|profile|delete",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_remove_appearance, 3,
+    true
+};
+static const MethodRegistration reg_particle_remove_appearance(desc_particle_remove_appearance);
 
 static const MethodParam params_particle_remove_emitter[] = {
     {"emitter", "string", true, "", nullptr, nullptr},
@@ -4759,17 +4830,39 @@ static const MethodDescriptor desc_particle_set_active_system = {
 };
 static const MethodRegistration reg_particle_set_active_system(desc_particle_set_active_system);
 
+static const MethodParam params_particle_set_appearance[] = {
+    {"blend", "any", false, "", nullptr, nullptr},
+    {"color_ramp", "any", false, "", nullptr, nullptr},
+    {"emission_curve", "any", false, "", nullptr, nullptr},
+    {"name", "any", false, "", nullptr, nullptr},
+    {"opacity_curve", "any", false, "", nullptr, nullptr},
+    {"profile_id", "any", false, "", nullptr, nullptr},
+    {"size_curve", "any", false, "", nullptr, nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
+static const MethodDescriptor desc_particle_set_appearance = {
+    "particle.set_appearance", "particle",
+    "Update fields of an appearance profile, keeping what you do not send",
+    "A curve you send replaces that whole curve. Every emitter referencing the profile changes look. Only an opacity_curve change clears the simulation frame cache (the particle -> gas deposit is weighted by opacity); colour, size, emission and blend are read at draw time.",
+    "write", "SceneWrite", false, "any",
+    "particle|set|appearance|particles|profile|configure|look",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_set_appearance, 9,
+    true
+};
+static const MethodRegistration reg_particle_set_appearance(desc_particle_set_appearance);
+
 static const MethodParam params_particle_set_emitter[] = {
     {"emitter", "string", true, "", nullptr, nullptr},
     {"angular_jitter", "float", false, "", nullptr, nullptr},
     {"angular_velocity", "float", false, "", nullptr, nullptr},
+    {"appearance_profile_id", "any", false, "", nullptr, nullptr},
     {"burst_count", "any", false, "", nullptr, nullptr},
     {"direction", "vec3", false, "", nullptr, nullptr},
     {"emitter_uid", "any", false, "", nullptr, nullptr},
     {"enabled", "bool", false, "", nullptr, nullptr},
-    {"end_color", "vec3", false, "", nullptr, nullptr},
-    {"end_opacity", "float", false, "", nullptr, nullptr},
-    {"end_size", "float", false, "", nullptr, nullptr},
     {"grid_density_deposit", "float", false, "", nullptr, nullptr},
     {"grid_fuel_deposit", "float", false, "", nullptr, nullptr},
     {"grid_temperature_deposit", "float", false, "", nullptr, nullptr},
@@ -4789,9 +4882,6 @@ static const MethodParam params_particle_set_emitter[] = {
     {"spawn_mode", "string", false, "", nullptr, nullptr},
     {"speed", "float", false, "", nullptr, nullptr},
     {"spread", "float", false, "", nullptr, nullptr},
-    {"start_color", "vec3", false, "", nullptr, nullptr},
-    {"start_opacity", "float", false, "", nullptr, nullptr},
-    {"start_size", "float", false, "", nullptr, nullptr},
     {"surface_offset", "float", false, "", nullptr, nullptr},
     {"system", "string", false, "", "", nullptr},
     {"system_id", "int", false, "", "-1", nullptr},
@@ -4800,12 +4890,12 @@ static const MethodParam params_particle_set_emitter[] = {
 static const MethodDescriptor desc_particle_set_emitter = {
     "particle.set_emitter", "particle",
     "Update fields of a particle emitter, keeping what you do not send",
-    nullptr,
+    "appearance_profile_id must name a profile of the same system (particle.list_appearances). The legacy start/end appearance keys are refused: edit the profile with particle.set_appearance.",
     "write", "SceneWrite", false, "any",
     "particle|set|emitter|particles|configure",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_particle_set_emitter, 36,
+    params_particle_set_emitter, 31,
     true
 };
 static const MethodRegistration reg_particle_set_emitter(desc_particle_set_emitter);
@@ -4874,7 +4964,6 @@ static const MethodDescriptor desc_particle_set_render = {
 static const MethodRegistration reg_particle_set_render(desc_particle_set_render);
 
 static const MethodParam params_particle_set_system[] = {
-    {"blend_mode", "any", false, "", nullptr, nullptr},
     {"name", "any", false, "", nullptr, nullptr},
     {"system", "string", false, "", "", nullptr},
     {"system_id", "int", false, "", "-1", nullptr},
@@ -4882,13 +4971,13 @@ static const MethodParam params_particle_set_system[] = {
 };
 static const MethodDescriptor desc_particle_set_system = {
     "particle.set_system", "particle",
-    "Rename a particle system or set its visible flag and blend_mode (additive|alpha)",
-    "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system. Duplicate names are refused. enabled is read-only: the runtime simulates only while enabled AND visible, and the panel edits visible.",
+    "Rename a particle system or set its visible flag",
+    "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system. Duplicate names are refused. enabled is read-only: the runtime simulates only while enabled AND visible, and the panel edits visible. blend_mode moved to appearance profiles (particle.set_appearance blend) and is refused here.",
     "write", "SceneWrite", false, "any",
     "particle|set|system|particles|configure|rename",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_particle_set_system, 5,
+    params_particle_set_system, 4,
     true
 };
 static const MethodRegistration reg_particle_set_system(desc_particle_set_system);
@@ -5188,6 +5277,7 @@ static const MethodRegistration reg_physics_collider_proxy_set(desc_physics_coll
 
 static const MethodParam params_physics_collider_proxy_set_auto_fit[] = {
     {"set_id", "int", true, "", nullptr, nullptr},
+    {"include_detail_bones", "any", false, "", nullptr, nullptr},
     {"maximum_proxies", "any", false, "", nullptr, nullptr},
     {"maximum_radius", "float", false, "", nullptr, nullptr},
     {"minimum_bone_length", "float", false, "", nullptr, nullptr},
@@ -5199,7 +5289,7 @@ static const MethodParam params_physics_collider_proxy_set_auto_fit[] = {
 static const MethodDescriptor desc_physics_collider_proxy_set_auto_fit = {
     "physics.collider.proxy_set.auto_fit", "physics",
     "Generate capsule, sphere and foot-box proxies from a character skeleton",
-    "Auto-fit writes ordinary editable proxies. It is not a second runtime representation. Weighted bones are used by default and maximum_proxies bounds authoring and runtime cost.",
+    "Auto-fit writes ordinary editable proxies. It is not a second runtime representation. Weighted body bones are used by default; finger, eye, skirt, twist and end/detail bones require include_detail_bones=true. Body bones are ordered before details so maximum_proxies cannot silently remove a foot while keeping fingers.",
     "write", "SceneWrite", false, "any",
     "physics|collider|proxy|set|auto|fit|rig|kinematic|autofit",
     "physics.collider.proxy.set|physics.collider.proxy_set.sample",
@@ -5218,6 +5308,7 @@ static const MethodParam params_physics_collider_proxy_set_create[] = {
     {"restitution", "any", false, "", nullptr, nullptr},
     {"target_node_id", "any", false, "", nullptr, nullptr},
     {"thickness", "any", false, "", nullptr, nullptr},
+    {"viewport_visible", "any", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_physics_collider_proxy_set_create = {
     "physics.collider.proxy_set.create", "physics",
@@ -5304,6 +5395,7 @@ static const MethodParam params_physics_collider_proxy_set_set[] = {
     {"target_character", "any", false, "", nullptr, nullptr},
     {"target_node_id", "any", false, "", nullptr, nullptr},
     {"thickness", "any", false, "", nullptr, nullptr},
+    {"viewport_visible", "any", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_physics_collider_proxy_set_set = {
     "physics.collider.proxy_set.set", "physics",

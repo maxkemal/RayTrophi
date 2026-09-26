@@ -1930,11 +1930,38 @@
   },
   "particle.add_emitter": {
     "summary": "Add a particle emitter and return it",
-    "tags": "particles|create|spawn|emit"
+    "tags": "particles|create|spawn|emit",
+    "notes": "The look over life is an appearance profile: pass appearance_profile_id, or omit it and the emitter gets a default profile of its own. start_size/end_size/start_opacity/end_opacity/start_color/end_color were removed in Phase 1.5 and are refused with an error, not ignored."
   },
   "particle.set_emitter": {
     "summary": "Update fields of a particle emitter, keeping what you do not send",
-    "tags": "particles|configure"
+    "tags": "particles|configure",
+    "notes": "appearance_profile_id must name a profile of the same system (particle.list_appearances). The legacy start/end appearance keys are refused: edit the profile with particle.set_appearance."
+  },
+  "particle.list_appearances": {
+    "summary": "List a particle system's appearance profiles (colour ramp, opacity/size/emission curves, blend)",
+    "tags": "particles|appearance|profile|look|inspect",
+    "notes": "Curves are [[t, value], ...] and color_ramp is [[t, r, g, b], ...] over normalized age (0 = birth, 1 = death), piecewise linear, stored sorted by t. size is the billboard width in metres; emission multiplies the colour. used_by_emitter_uids names the emitters that reference each profile.",
+    "related": "particle.get_appearance|particle.add_appearance|particle.set_appearance|particle.set_emitter"
+  },
+  "particle.get_appearance": {
+    "summary": "Return one appearance profile by profile_id",
+    "tags": "particles|appearance|profile|inspect"
+  },
+  "particle.add_appearance": {
+    "summary": "Add an appearance profile to a particle system and return it with its new id",
+    "tags": "particles|appearance|profile|create|look",
+    "notes": "blend is additive (fire, sparks) or alpha (smoke, dust); it picks the raster billboard group. Ranges: opacity 0..1, size and emission >= 0, colour >= 0 (HDR allowed), at most 16 keys per curve. Point an emitter at it with particle.set_emitter appearance_profile_id."
+  },
+  "particle.set_appearance": {
+    "summary": "Update fields of an appearance profile, keeping what you do not send",
+    "tags": "particles|appearance|profile|configure|look",
+    "notes": "A curve you send replaces that whole curve. Every emitter referencing the profile changes look. Only an opacity_curve change clears the simulation frame cache (the particle -> gas deposit is weighted by opacity); colour, size, emission and blend are read at draw time."
+  },
+  "particle.remove_appearance": {
+    "summary": "Remove an appearance profile no emitter references",
+    "tags": "particles|appearance|profile|remove|delete",
+    "notes": "Refused while any emitter still references the profile; re-point those emitters first."
   },
   "particle.remove_emitter": {
     "summary": "Remove a particle emitter",
@@ -1976,14 +2003,14 @@
     "tags": "particles|advance"
   },
   "particle.get_system": {
-    "summary": "Return one particle system's id, name, enabled/visible state, blend mode and counts",
+    "summary": "Return one particle system's id, name, enabled/visible state and counts",
     "tags": "particles|system|inspect",
     "notes": "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system. A read never creates a system: with no system_id/system and no active system it fails."
   },
   "particle.set_system": {
-    "summary": "Rename a particle system or set its visible flag and blend_mode (additive|alpha)",
+    "summary": "Rename a particle system or set its visible flag",
     "tags": "particles|system|configure|rename",
-    "notes": "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system. Duplicate names are refused. enabled is read-only: the runtime simulates only while enabled AND visible, and the panel edits visible."
+    "notes": "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system. Duplicate names are refused. enabled is read-only: the runtime simulates only while enabled AND visible, and the panel edits visible. blend_mode moved to appearance profiles (particle.set_appearance blend) and is refused here."
   },
   "particle.remove_system": {
     "summary": "Remove one particle system with its emitters, colliders, domains and render state",
@@ -5875,7 +5902,7 @@
   "physics.collider.proxy_set.auto_fit": {
     "summary": "Generate capsule, sphere and foot-box proxies from a character skeleton",
     "tags": "physics|collider|rig|kinematic|autofit",
-    "notes": "Auto-fit writes ordinary editable proxies. It is not a second runtime representation. Weighted bones are used by default and maximum_proxies bounds authoring and runtime cost.",
+    "notes": "Auto-fit writes ordinary editable proxies. It is not a second runtime representation. Weighted body bones are used by default; finger, eye, skirt, twist and end/detail bones require include_detail_bones=true. Body bones are ordered before details so maximum_proxies cannot silently remove a foot while keeping fingers.",
     "related": "physics.collider.proxy.set|physics.collider.proxy_set.sample"
   },
   "physics.collider.proxy.set": {

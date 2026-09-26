@@ -187,13 +187,8 @@ json emitterToJson(const RayTrophiSim::ParticleEmitterDesc& e) {
     j["spread"] = e.spread;
     j["lifetime_seconds"] = e.lifetime_seconds;
     j["mass"] = e.mass;
-    j["start_size"] = e.start_size;
-    j["end_size"] = e.end_size;
+    RayTrophiSim::serializeEmitterAppearance(e, j);
     j["size_jitter"] = e.size_jitter;
-    j["start_opacity"] = e.start_opacity;
-    j["end_opacity"] = e.end_opacity;
-    j["start_color"] = vec3ToJson(e.start_color);
-    j["end_color"] = vec3ToJson(e.end_color);
     j["angular_velocity"] = e.angular_velocity;
     j["angular_jitter"] = e.angular_jitter;
     j["enabled"] = e.enabled;
@@ -224,13 +219,8 @@ RayTrophiSim::ParticleEmitterDesc jsonToEmitter(const json& j) {
     if (j.contains("spread")) e.spread = j["spread"];
     if (j.contains("lifetime_seconds")) e.lifetime_seconds = j["lifetime_seconds"];
     if (j.contains("mass")) e.mass = j["mass"];
-    if (j.contains("start_size")) e.start_size = j["start_size"];
-    if (j.contains("end_size")) e.end_size = j["end_size"];
+    // appearance_profile_id is read by the caller (readEmitterAppearance).
     if (j.contains("size_jitter")) e.size_jitter = j["size_jitter"];
-    if (j.contains("start_opacity")) e.start_opacity = j["start_opacity"];
-    if (j.contains("end_opacity")) e.end_opacity = j["end_opacity"];
-    if (j.contains("start_color")) e.start_color = jsonToVec3(j["start_color"]);
-    if (j.contains("end_color")) e.end_color = jsonToVec3(j["end_color"]);
     if (j.contains("angular_velocity")) e.angular_velocity = j["angular_velocity"];
     if (j.contains("angular_jitter")) e.angular_jitter = j["angular_jitter"];
     if (j.contains("enabled")) e.enabled = j["enabled"];
@@ -1019,7 +1009,6 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
         sj["name"] = system.name;
         sj["visible"] = system.visible;
         sj["enabled"] = system.enabled;
-        sj["blend_mode"] = (int)system.blend_mode;
 
         // Render Settings
         sj["render"]["emitter_only"] = system.render.emitter_only;
@@ -1074,7 +1063,8 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
             sj["runtime"]["world_thermal"]["convection_coefficient"] = wt.convection_coefficient;
             sj["runtime"]["world_thermal"]["oxygen_availability"] = wt.oxygen_availability;
 
-            // Emitters
+            // Appearance profiles, then the emitters that reference them.
+            RayTrophiSim::serializeParticleAppearanceProfiles(*system.runtime, sj["runtime"]);
             sj["runtime"]["emitters"] = json::array();
             for (const auto& em : system.runtime->emitters()) {
                 sj["runtime"]["emitters"].push_back(emitterToJson(em));
@@ -1513,7 +1503,8 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
             if (sj.contains("name")) system.name = sj["name"];
             if (sj.contains("visible")) system.visible = sj["visible"];
             if (sj.contains("enabled")) system.enabled = sj["enabled"];
-            if (sj.contains("blend_mode")) system.blend_mode = (SceneData::ParticleBlendMode)sj["blend_mode"];
+            // Pre-profile scenes: only feeds the emitter migration below.
+            const int legacy_blend = sj.value("blend_mode", 0);
             // A scene with no render block predates emitter-only mode.
             system.render.emitter_only = false;
 
@@ -1592,10 +1583,14 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                 }
 
                 // Emitters
+                RayTrophiSim::deserializeParticleAppearanceProfiles(rtj, *system.runtime);
                 if (rtj.contains("emitters")) {
                     system.runtime->clearEmitters();
                     for (const auto& ej : rtj["emitters"]) {
-                        system.runtime->addEmitter(jsonToEmitter(ej));
+                        RayTrophiSim::ParticleEmitterDesc emitter = jsonToEmitter(ej);
+                        RayTrophiSim::readEmitterAppearance(ej, legacy_blend,
+                                                            *system.runtime, emitter);
+                        system.runtime->addEmitter(emitter);
                     }
                 }
 

@@ -2033,8 +2033,8 @@ struct SceneData {
     // =========================================================================
     // Particle Simulation (shared simulation world testbed)
     // =========================================================================
-    // Viewport render blend look for a particle system's billboards.
-    enum class ParticleBlendMode { Additive = 0, Alpha = 1 };
+    // Billboard blend is per APPEARANCE PROFILE (ParticleAppearanceProfile.h),
+    // not per system: a campfire needs additive flame and alpha smoke at once.
 
     // What geometry each alive particle is instanced as in the real RT render
     // paths. Built-in primitives are cheap, view-independent meshes generated
@@ -2083,7 +2083,6 @@ struct SceneData {
         std::string name = "Particle System";
         bool visible = true;
         bool enabled = true;
-        ParticleBlendMode blend_mode = ParticleBlendMode::Additive;
         // How the particles are drawn in the real RT render paths (OptiX +
         // Vulkan). Serialized; the live instance group it drives is not.
         ParticleRenderSettings render;

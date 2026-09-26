@@ -5526,12 +5526,12 @@ void ProjectManager::deserializeRigidBodies(const json& j, SceneData& scene) {
 
 json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
     json root;
-    root["version"] = 2;
+    // 3: appearance profiles per system; emitters reference them by id and
+    //    carry no start/end appearance fields (those are migrated on load).
+    root["version"] = 3;
     root["active_system_index"] = scene.active_particle_system_index;
     root["next_system_id"] = scene.next_particle_system_id;
     root["systems"] = json::array();
-    root["emitters"] = json::array();
-    root["colliders"] = json::array();
     root["ash_debris"] = RayTrophiSim::serializeAshDebris(scene.ashDebrisSystem());
 
     auto serializeEmitter = [](const RayTrophiSim::ParticleEmitterDesc& emitter) {
@@ -5549,13 +5549,8 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         e["spread"] = emitter.spread;
         e["lifetime_seconds"] = emitter.lifetime_seconds;
         e["mass"] = emitter.mass;
-        e["start_size"] = emitter.start_size;
-        e["end_size"] = emitter.end_size;
+        RayTrophiSim::serializeEmitterAppearance(emitter, e);
         e["size_jitter"] = emitter.size_jitter;
-        e["start_opacity"] = emitter.start_opacity;
-        e["end_opacity"] = emitter.end_opacity;
-        e["start_color"] = vec3ToJson(emitter.start_color);
-        e["end_color"] = vec3ToJson(emitter.end_color);
         e["angular_velocity"] = emitter.angular_velocity;
         e["angular_jitter"] = emitter.angular_jitter;
         e["enabled"] = emitter.enabled;
@@ -6031,7 +6026,6 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         s["name"] = system.name;
         s["visible"] = system.visible;
         s["enabled"] = system.enabled;
-        s["blend_mode"] = static_cast<int>(system.blend_mode);
         s["emitter_only"] = system.render.emitter_only;
         s["emitters"] = json::array();
         s["colliders"] = json::array();
@@ -6039,6 +6033,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         s["flow_sources"] = json::array();
         if (system.runtime) {
             s["settings"] = serializeRuntimeSettings(*system.runtime);
+            RayTrophiSim::serializeParticleAppearanceProfiles(*system.runtime, s);
             for (const auto& emitter : system.runtime->emitters()) {
                 s["emitters"].push_back(serializeEmitter(emitter));
             }
@@ -6053,25 +6048,6 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             }
         }
         root["systems"].push_back(std::move(s));
-    }
-
-    // Legacy top-level duplicate (active system) for backward-compatible readers.
-    if (auto active_runtime = scene.activeParticleRuntime()) {
-        root["settings"] = serializeRuntimeSettings(*active_runtime);
-        for (const auto& emitter : active_runtime->emitters()) {
-            root["emitters"].push_back(serializeEmitter(emitter));
-        }
-        for (const auto& collider : active_runtime->colliders()) {
-            root["colliders"].push_back(serializeCollider(collider));
-        }
-        root["domains"] = json::array();
-        for (const auto& domain : active_runtime->gridDomains()) {
-            root["domains"].push_back(serializeDomain(domain));
-        }
-        root["flow_sources"] = json::array();
-        for (const auto& source : active_runtime->flowSources()) {
-            root["flow_sources"].push_back(serializeFlowSource(source));
-        }
     }
 
     return root;
@@ -6101,13 +6077,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         emitter.spread = item.value("spread", emitter.spread);
         emitter.lifetime_seconds = item.value("lifetime_seconds", emitter.lifetime_seconds);
         emitter.mass = item.value("mass", emitter.mass);
-        emitter.start_size = item.value("start_size", emitter.start_size);
-        emitter.end_size = item.value("end_size", emitter.end_size);
+        // appearance_profile_id is read in adoptSystem (it may need migration).
         emitter.size_jitter = item.value("size_jitter", emitter.size_jitter);
-        emitter.start_opacity = item.value("start_opacity", emitter.start_opacity);
-        emitter.end_opacity = item.value("end_opacity", emitter.end_opacity);
-        if (item.contains("start_color")) emitter.start_color = jsonToVec3(item["start_color"]);
-        if (item.contains("end_color")) emitter.end_color = jsonToVec3(item["end_color"]);
         emitter.angular_velocity = item.value("angular_velocity", emitter.angular_velocity);
         emitter.angular_jitter = item.value("angular_jitter", emitter.angular_jitter);
         emitter.enabled = item.value("enabled", emitter.enabled);
@@ -6723,8 +6694,11 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
 
     // Build one ParticleSystemObject with its own registered runtime, populated
     // straight from JSON (runtime is the source of truth — no descriptor staging).
+    // `legacy_blend` is the pre-profile per-system blend_mode (0 additive,
+    // 1 alpha); it only feeds the migration of emitters saved before profiles.
     auto adoptSystem = [&](uint32_t id, const std::string& name, bool visible,
-                           bool enabled, int blend_mode, bool emitter_only,
+                           bool enabled, int legacy_blend, bool emitter_only,
+                           const json* system_json,
                            const json* settings, const json* emitters,
                            const json* colliders, const json* domains,
                            const json* flow_sources) {
@@ -6733,13 +6707,19 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         system.name = name;
         system.visible = visible;
         system.enabled = enabled;
-        system.blend_mode = static_cast<SceneData::ParticleBlendMode>(blend_mode == 1 ? 1 : 0);
         system.render.emitter_only = emitter_only;
         system.runtime = scene.createParticleRuntime();
         if (settings) parseSettingsInto(*settings, *system.runtime);
+        if (system_json) {
+            RayTrophiSim::deserializeParticleAppearanceProfiles(*system_json, *system.runtime);
+        }
         if (emitters && emitters->is_array()) {
             for (const auto& emitter_item : *emitters) {
-                if (emitter_item.is_object()) system.runtime->addEmitter(parseEmitter(emitter_item));
+                if (!emitter_item.is_object()) continue;
+                RayTrophiSim::ParticleEmitterDesc emitter = parseEmitter(emitter_item);
+                RayTrophiSim::readEmitterAppearance(emitter_item, legacy_blend,
+                                                    *system.runtime, emitter);
+                system.runtime->addEmitter(emitter);
             }
         }
         if (colliders && colliders->is_array()) {
@@ -6793,7 +6773,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             const std::string name = item.value("name", defaults.name);
             const bool visible = item.value("visible", defaults.visible);
             const bool enabled = item.value("enabled", defaults.enabled);
-            const int blend_mode = item.value("blend_mode", static_cast<int>(defaults.blend_mode));
+            // Read only for migrating pre-profile emitters; never written.
+            const int legacy_blend = item.value("blend_mode", 0);
             // Systems saved before this setting existed displayed particles.
             const bool emitter_only = item.value("emitter_only", false);
             const json* settings = item.contains("settings") ? &item["settings"] : nullptr;
@@ -6801,8 +6782,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             const json* colliders = item.contains("colliders") ? &item["colliders"] : nullptr;
             const json* domains = item.contains("domains") ? &item["domains"] : nullptr;
             const json* flow_sources = item.contains("flow_sources") ? &item["flow_sources"] : nullptr;
-            adoptSystem(id, name, visible, enabled, blend_mode, emitter_only,
-                        settings, emitters, colliders, domains, flow_sources);
+            adoptSystem(id, name, visible, enabled, legacy_blend, emitter_only,
+                        &item, settings, emitters, colliders, domains, flow_sources);
             max_id = std::max(max_id, id);
         }
 
@@ -6820,7 +6801,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         const json* domains = j.contains("domains") ? &j["domains"] : nullptr;
         const json* flow_sources = j.contains("flow_sources") ? &j["flow_sources"] : nullptr;
         adoptSystem(1u, "Particle System 1", true, true, 0, false,
-                    settings, emitters, colliders, domains, flow_sources);
+                    nullptr, settings, emitters, colliders, domains, flow_sources);
         scene.next_particle_system_id = 2u;
         scene.active_particle_system_index = scene.particle_systems.empty() ? -1 : 0;
     }

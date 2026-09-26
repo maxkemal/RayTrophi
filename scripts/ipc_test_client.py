@@ -664,13 +664,88 @@ def main():
     # System settings.
     run_test("particle.set_system", {"system_id": b_id, "name": "IpcPhase1 A"},
              "phase1: set_system(duplicate name) → error", expect_error=True)
-    run_test("particle.set_system", {"system_id": b_id, "name": "IpcPhase1 B2",
-                                     "blend_mode": "alpha"},
-             "phase1: set_system(rename + blend)")
+    run_test("particle.set_system", {"system_id": b_id, "name": "IpcPhase1 B2"},
+             "phase1: set_system(rename)")
     renamed = result_of(run_test("particle.get_system", {"system": "IpcPhase1 B2"},
                                  "phase1: get_system by new name")) or {}
-    phase1_check(renamed.get("id") == b_id and renamed.get("blend_mode") == "alpha",
-                 "phase1: rename/blend landed", f"got {renamed}")
+    phase1_check(renamed.get("id") == b_id and "blend_mode" not in renamed,
+                 "phase1: rename landed, no per-system blend", f"got {renamed}")
+
+    # Particle roadmap Phase 1.5 Batch A: appearance profiles. Still system B,
+    # which is not active, so a fallback to the active system shows up.
+    run_test("particle.set_system", {"system_id": b_id, "blend_mode": "alpha"},
+             "phase1.5: set_system(blend_mode) → error (moved to profiles)", expect_error=True)
+    run_test("particle.set_emitter", {"system_id": b_id, "emitter_uid": second_uid,
+                                      "start_size": 0.2},
+             "phase1.5: set_emitter(start_size) → error (moved to profiles)", expect_error=True)
+    auto_profile = patched.get("appearance_profile_id", 0)
+    phase1_check(auto_profile > 0, "phase1.5: new emitter got its own profile",
+                 f"appearance_profile_id={auto_profile}")
+    smoke = result_of(run_test("particle.add_appearance", {
+        "system_id": b_id, "name": "IpcSmoke", "blend": "alpha",
+        "color_ramp": [[0.0, 0.2, 0.2, 0.2], [1.0, 0.5, 0.5, 0.5]],
+        # Deliberately unsorted: the service stores keys sorted by t.
+        "opacity_curve": [[1.0, 0.0], [0.0, 0.0], [0.2, 0.6]],
+        "size_curve": [[0.0, 0.1], [1.0, 0.6]]},
+        "phase1.5: add_appearance(smoke)")) or {}
+    smoke_id = smoke.get("id", 0)
+    phase1_check(smoke_id > 0 and smoke_id != auto_profile and smoke.get("system_id") == b_id,
+                 "phase1.5: profile id issued in system B", f"got {smoke}")
+    stored_t = [k[0] for k in smoke.get("opacity_curve", [])]
+    phase1_check(len(stored_t) == 3 and all(abs(a - b) < 1e-6
+                                            for a, b in zip(stored_t, [0.0, 0.2, 1.0])),
+                 "phase1.5: curve keys stored sorted", f"got {smoke.get('opacity_curve')}")
+    run_test("particle.add_appearance", {"system_id": b_id, "name": "Bad",
+                                         "opacity_curve": [[0.0, 2.0]]},
+             "phase1.5: opacity > 1 → error", expect_error=True)
+    run_test("particle.add_appearance", {"system_id": b_id, "name": "Bad", "blend": "__nope__"},
+             "phase1.5: unknown blend → error", expect_error=True)
+    run_test("particle.add_appearance", {"system_id": b_id, "name": "Bad",
+                                         "color_ramp": [[0.0, 1.0]]},
+             "phase1.5: malformed color_ramp → error", expect_error=True)
+    run_test("particle.set_emitter", {"system_id": b_id, "emitter_uid": second_uid,
+                                      "appearance_profile_id": 987654},
+             "phase1.5: set_emitter(unknown profile) → error", expect_error=True)
+    run_test("particle.set_emitter", {"system_id": b_id, "emitter_uid": second_uid,
+                                      "appearance_profile_id": smoke_id},
+             "phase1.5: point emitter at smoke profile")
+    repointed = result_of(run_test("particle.get_emitter",
+                                   {"system_id": b_id, "emitter_uid": second_uid},
+                                   "phase1.5: get_emitter after re-point")) or {}
+    phase1_check(repointed.get("appearance_profile_id") == smoke_id,
+                 "phase1.5: emitter references smoke", f"got {repointed.get('appearance_profile_id')}")
+    used = result_of(run_test("particle.get_appearance", {"system_id": b_id,
+                                                          "profile_id": smoke_id},
+                              "phase1.5: get_appearance(smoke)")) or {}
+    phase1_check(second_uid in used.get("used_by_emitter_uids", []),
+                 "phase1.5: used_by_emitter_uids lists the emitter", f"got {used}")
+    run_test("particle.remove_appearance", {"system_id": b_id, "profile_id": smoke_id},
+             "phase1.5: remove used profile → error", expect_error=True)
+    run_test("particle.set_appearance", {"system_id": b_id, "profile_id": smoke_id,
+                                         "emission_curve": [[0.0, 3.0]]},
+             "phase1.5: set_appearance(emission only)")
+    edited = result_of(run_test("particle.get_appearance", {"system_id": b_id,
+                                                            "profile_id": smoke_id},
+                                "phase1.5: get_appearance after set")) or {}
+    phase1_check(edited.get("emission_curve") == [[0.0, 3.0]] and edited.get("blend") == "alpha"
+                 and len(edited.get("size_curve", [])) == 2,
+                 "phase1.5: set_appearance patched only emission", f"got {edited}")
+    # The emitter's former auto profile is now unused, so it can be removed.
+    run_test("particle.remove_appearance", {"system_id": b_id, "profile_id": auto_profile},
+             "phase1.5: remove unused profile")
+    run_test("particle.get_appearance", {"system_id": b_id, "profile_id": auto_profile},
+             "phase1.5: get_appearance(removed) → error", expect_error=True)
+    listed = (result_of(run_test("particle.list_appearances", {"system_id": b_id},
+                                 "phase1.5: list_appearances(B)")) or {}).get("appearances", [])
+    b_info = result_of(run_test("particle.get_system", {"system_id": b_id},
+                                "phase1.5: get_system(B) profile count")) or {}
+    phase1_check(len(listed) == b_info.get("appearance_profile_count", -1) and
+                 any(p.get("id") == smoke_id for p in listed),
+                 "phase1.5: list/count agree", f"list={len(listed)} count={b_info.get('appearance_profile_count')}")
+    a_profiles = (result_of(run_test("particle.list_appearances", {"system_id": a_id},
+                                     "phase1.5: list_appearances(A)")) or {}).get("appearances", [])
+    phase1_check(len(a_profiles) == 0, "phase1.5: profiles landed in B only",
+                 f"A has {len(a_profiles)}")
     run_test("particle.spawn", {"system_id": b_id, "position": [0.0, 1.0, 0.0]},
              "phase1: spawn into B")
     run_test("particle.step", {"system_id": b_id, "dt": 0.016}, "phase1: step B")

@@ -6,6 +6,98 @@
 > ★ En üstteki (kayıt 122 s: doku yeniden kullanımı) YENİ. Altındakiler
 > önceki derlemelere girdi; doğrulanan maddeleri ✔ işaretli, kalanlar açık.
 
+## Particle Faz 1.5 Batch A: görünüm profili + GPU LUT, eski start/end yolu söküldü (2026-09-26)
+
+> Parçacık ajanının partisi; kinematic collider bölümü (dosyanın sonunda)
+> diğer ajanın, ikisi aynı derlemeye girer ve birbirinden bağımsızdır.
+> Plan ve sözleşme değişiklikleri: `PARTICLE_SYSTEM_GPU_ROADMAP.md` → Phase 1.5.
+
+**Ne değişti:** parçacık başına renk/boyut/opaklık artık SoA'da tutulmuyor ve
+CPU her adımda lerp yapmıyor. Emitter bir `appearance_profile_id` taşıyor.
+Profil 64 örneklik bir LUT'a pişiriliyor ve raster shader, RT instance boyutu,
+gaz deposit ağırlığı ile debug noktaları AYNI LUT'u okuyor. Billboard blend'i
+sistemden profile taşındı. Eski projeler yüklenirken iki anahtarlı profile
+çevriliyor.
+Yeni dosyalar (vcxproj'a eklendi): `ParticleAppearanceProfile.h/.cpp`,
+`ParticleSimulationAppearance.cpp`, `UI/ParticleBillboardBuilder.h/.cpp`,
+`UI/ParticleAppearanceUI.h/.cpp`, `Viewport/ParticleBillboardData.h`,
+`Backend/VulkanViewportParticles.cpp`. Silinen: `scene_ui_fluid_billboards.hpp`.
+Shader: `particle_viewport.vert` yeniden yazıldı (frag aynı).
+
+> ✔ 2026-09-26 (11:06 exe + 11:08 spv, canlı IPC ve viewport ekran görüntüsü):
+> - **1 ✔**
+> - **2 ✔:** 277/277 PASS, 26 `phase1.5:` satırının hepsi OK.
+> - **3 ✔:** varsayılan profil sarı→kırmızı, küçülüyor.
+> - **4 ✔ (IPC ile):** additive alev ve alpha duman aynı sistemde. Duman profili
+>   canlı olarak maviye + emisyon 1→3 çevrildi; LUT yeniden yüklendi ve ekrana yansıdı.
+> - **5 ✔:** kaydet→aç→kaydet'te id'ler aynı ve profil çoğalmıyor; dosyada legacy
+>   anahtar 0. Sentetik v2 projesinde açık değerler birebir geçti, anahtarsız
+>   emitter eski varsayılanları aldı, sistem `blend_mode=1` → iki profil alpha.
+> - **Not:** `render_in_raytrace` açıkken RT küreleri viewport'ta opak çizilip
+>   billboard'ları örtüyor. Bu eskiden de böyleydi, bu partinin hatası değil.
+> - **Kalan:** 4'ün panel tarafı (Duplicate/önizleme şeridi), 6, 7, 8, 10.
+
+1. **Önce shader'ları derle** (`compile_shaders.bat`), sonra exe.
+   `particle_viewport.spv` eski kalırsa ne olur: pipeline 8 float'lık vertex +
+   128 baytlık push constant bekler, eski shader ise 9 float + 144 bayt bekler.
+   Parçacıklar hiç görünmez ya da dev ve anlamsız üçgenler olarak çizilir.
+   **Bozuksa:** önce `x64/Release/shaders/particle_viewport.spv`'nin zaman
+   damgasına bak.
+2. **IPC testi** — `python scripts/ipc_test_client.py`. Bütün `phase1.5:`
+   satırları OK olmalı. Asıl sinyaller:
+   - `set_emitter(start_size) → error` ve `set_system(blend_mode) → error`.
+     *Bozuksa:* anahtarlar sessizce yutuluyor; eski bir script görünümü
+     değiştirdiğini sanıp hiçbir şey yapmaz.
+   - `profiles landed in B only`. *Bozuksa:* `system_id` etkin sisteme
+     düşüyor demektir.
+   Python tarafı: `rt_api_smoke_test.py` →
+   `[rt-smoke] rt.particle phase-1.5 appearance profiles: OK`.
+3. **Görsel eşdeğerlik (en hızlı göz testi).** Boş bir sisteme "Add Point
+   Emitter" ekle, render ayarlarında emitter_only'yi kapat, oynat. Görünüm eski
+   varsayılanın aynısı olmalı: sarımsı başlar, kırmızıya döner, küçülür ve söner.
+   Explosion presetini de dene: çekirdek büyük ve parlak, kıvılcımlar küçük.
+   **Bozuksa:**
+   - Her şey beyazsa ve boyutu 1 m ise parçacıklar fallback satırına (satır 0)
+     düşüyor, yani `lut_row` eşleşmiyor.
+   - Boyut doğru ama renk sabitse shader LUT'u yanlış indeksliyor.
+4. **Tek sistemde iki blend** (bu partinin gerekçesi). Aynı sisteme ikinci bir
+   emitter ekle. Emitter > Spawning Appearance Dynamics > **Duplicate** bas,
+   Blend'i Alpha yap, rengi koyu gri ver. Parlak (additive) ve koyu (alpha)
+   parçacıklar aynı anda görünmeli. Profil önizleme şeridi viewport'la aynı
+   renkleri göstermeli.
+5. **Eski proje migrasyonu.** Bu partiden önce kaydedilmiş, parçacık emitter'lı
+   bir `.rtp` aç. Görünüm aynı olmalı. Panelde her emitter için
+   "<ad> Appearance" profili görünmeli. Eski projede sistem Alpha idiyse
+   profiller de alpha olmalı. Sonra kaydet (yeni ada), yeniden aç: aynı
+   görünüm, aynı profil id'leri. Kaydedilen `.rtp`'de `start_size` geçmemeli
+   (`findstr /c:"start_size" dosya.rtp` boş dönmeli).
+   *Bozuksa* (ikinci açılışta profiller çoğaldıysa): migrasyon idempotent
+   değil demektir, yani emitter `appearance_profile_id` olmadan yazılmış.
+6. **Viewport boyutunu değiştir** (paneli sürükle). Parçacıklar kaybolmamalı.
+   Boyut değişince LUT tamponu atılıp yeniden yükleniyor. **Bozuksa:**
+   descriptor stale kalmış; `writeParticleLutDescriptor` çağrılmıyor.
+7. **Fluid domain, Particles render modu** (bir sıvı domain'inde
+   `fluid_render_mode = Particles`). Billboard'lar domain renginde, eski
+   boyutta ve alpha ile çizilmeli. Bu yol da artık aynı LUT'tan geçiyor.
+8. **RT render (Vulkan RT) parçacık instance'ları.** Parçacıklar ömürleri
+   boyunca küçülmeli (boyut LUT'tan geliyor). "Inherit color" açıkken malzeme
+   rengi = ilk emitter profilinin doğum rengi. Profilin rengini değiştirince
+   RT malzemesi yeniden kurulmalı.
+9. **Bilerek yapılan davranış değişiklikleri:**
+   - Ash debris artık kendi "Ash Debris" profiliyle ve **alpha** ile çiziliyor.
+     Eskiden hedef sistemin blend'ini alıyordu; koyu kül additive'de
+     görünmezdi.
+   - Profil düzenlemesi sim cache'ini **yalnızca opaklık eğrisi değişince**
+     temizler. Renk sürüklerken sim sıfırlanmamalı.
+10. **★ SİNSİ OLAN — gaz kuplajı.** Kamp ateşi / ignited fuel jet sahnesinde
+    oynat; `particle.stats` → `grid_deposit_landed` ve duman sütunu önceki
+    derlemeyle aynı büyüklükte olmalı. Deposit ağırlığı artık opaklığı
+    lerp'lenmiş SoA'dan değil LUT'tan okuyor. İki anahtarlı doğrusal profilde
+    sonuç birebir aynı olmalı. Duman hafifçe zayıflamışsa kimse bunu bug diye
+    raporlamaz, "kalibrasyon" sanılır. Zayıflama varsa ilk şüpheli
+    `sampleAppearance`'ın gördüğü profil id'si: 0 ise fallback'in 1→0
+    opaklığı kullanılıyor demektir.
+
 ## Particle Faz 0 düzeltmesi + Faz 1 ilk parti: sistem adresleme, render IPC (2026-09-25)
 
 > Parçacık ajanının partisi. Aşağıdaki "donma/autosave" bölümü diğer ajanın,

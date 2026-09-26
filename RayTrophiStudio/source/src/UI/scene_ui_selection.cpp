@@ -909,8 +909,10 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                             emitter.speed,
                             emitter.spread);
                     float candidate = 0.0f;
-                    const float pick_padding =
-                        std::max(0.08f, emitter.start_size * 2.0f);
+                    const float birth_size = RayTrophiSim::sampleParticleAppearanceLut(
+                        system.runtime->appearanceLutRow(emitter.appearance_profile_id),
+                        0.0f).size;
+                    const float pick_padding = std::max(0.08f, birth_size * 2.0f);
                     if (ParticleEmitterGizmo::intersectDirectionalEmitter(
                             r.origin, r.direction, geometry, pick_padding,
                             candidate) &&
