@@ -1015,6 +1015,183 @@ static const MethodDescriptor desc_camera_set_use_physical_exposure = {
 };
 static const MethodRegistration reg_camera_set_use_physical_exposure(desc_camera_set_use_physical_exposure);
 
+static const MethodParam params_collider_create[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+    {"bounds_max", "vec3", false, "", nullptr, nullptr},
+    {"bounds_min", "vec3", false, "", nullptr, nullptr},
+    {"capsule_end", "vec3", false, "", nullptr, nullptr},
+    {"capsule_radius", "float", false, "", nullptr, nullptr},
+    {"capsule_start", "vec3", false, "", nullptr, nullptr},
+    {"enabled", "bool", false, "", nullptr, nullptr},
+    {"fluid_collision_enabled", "bool", false, "", nullptr, nullptr},
+    {"friction", "float", false, "", nullptr, nullptr},
+    {"gas_density_rate", "float", false, "", nullptr, nullptr},
+    {"gas_flame_rate", "float", false, "", nullptr, nullptr},
+    {"gas_fuel_rate", "float", false, "", nullptr, nullptr},
+    {"gas_ignite_on_contact", "bool", false, "", nullptr, nullptr},
+    {"gas_interaction_enabled", "bool", false, "", nullptr, nullptr},
+    {"gas_temperature_rate", "float", false, "", nullptr, nullptr},
+    {"msf_auto_transfer", "bool", false, "", nullptr, nullptr},
+    {"msf_burn_rate_scale", "float", false, "", nullptr, nullptr},
+    {"msf_fuel_capacity_scale", "float", false, "", nullptr, nullptr},
+    {"msf_generate_char_mask", "bool", false, "", nullptr, nullptr},
+    {"msf_ignition_kelvin", "float", false, "", nullptr, nullptr},
+    {"msf_mask_resolution", "int", false, "", nullptr, nullptr},
+    {"msf_melt_flow_enabled", "bool", false, "", nullptr, nullptr},
+    {"msf_melt_height_loss", "float", false, "", nullptr, nullptr},
+    {"msf_melt_sdf_change_threshold", "float", false, "", nullptr, nullptr},
+    {"msf_melt_sdf_refresh", "bool", false, "", nullptr, nullptr},
+    {"msf_melt_sdf_revision_interval", "int", false, "", nullptr, nullptr},
+    {"msf_melt_spread", "float", false, "", nullptr, nullptr},
+    {"msf_override_ignition", "bool", false, "", nullptr, nullptr},
+    {"msf_substance", "string", false, "", nullptr, nullptr},
+    {"msf_transfer_domain", "string", false, "", nullptr, nullptr},
+    {"msf_transfer_max_batch_particles", "int", false, "", nullptr, nullptr},
+    {"msf_transfer_min_mass_kg", "float", false, "", nullptr, nullptr},
+    {"msf_transfer_particles_per_kg", "float", false, "", nullptr, nullptr},
+    {"msf_transfer_rate_kg_s", "float", false, "", nullptr, nullptr},
+    {"msf_transfer_velocity", "vec3", false, "", nullptr, nullptr},
+    {"plane_y", "float", false, "", nullptr, nullptr},
+    {"restitution", "float", false, "", nullptr, nullptr},
+    {"sdf_resolution_mode", "int", false, "", nullptr, nullptr},
+    {"source_mode", "string", false, "", nullptr, nullptr},
+    {"source_object", "string", false, "", nullptr, nullptr},
+    {"sphere_center", "vec3", false, "", nullptr, nullptr},
+    {"sphere_radius", "float", false, "", nullptr, nullptr},
+    {"thickness", "float", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_collider_create = {
+    "collider.create", "collider",
+    "Create a shared simulation collider (plane, sphere, capsule, box, SDF, convex or mesh BVH) for particles, fluid and gas",
+    "Keys match rt.collider in Python one-to-one. source_mode: plane|sphere|capsule|aabb|obb|mesh_sdf|convex|mesh_bvh. One collider is shared by particles, APIC fluid (fluid_collision_enabled) and gas (gas_*). Object-bound modes need source_object; mesh_sdf cooks asynchronously, poll collider.get sdf_ready before relying on it.",
+    "write", "SceneWrite", false, "any",
+    "collider|create|simulation|particles|fluid|gas|collision",
+    "collider.update|collider.remove|collider.rebuild_sdf|particle.step",
+    nullptr, nullptr, nullptr, nullptr,
+    params_collider_create, 43,
+    true
+};
+static const MethodRegistration reg_collider_create(desc_collider_create);
+
+static const MethodParam params_collider_get[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_collider_get = {
+    "collider.get", "collider",
+    "Read one shared simulation collider by name",
+    "Keys match rt.collider in Python one-to-one. source_mode: plane|sphere|capsule|aabb|obb|mesh_sdf|convex|mesh_bvh. One collider is shared by particles, APIC fluid (fluid_collision_enabled) and gas (gas_*). sdf_ready/sdf_resolution are read-only cook status.",
+    "read", "Read", false, "any",
+    "collider|get|simulation|read",
+    "collider.list|collider.update",
+    nullptr, nullptr, nullptr, nullptr,
+    params_collider_get, 1,
+    true
+};
+static const MethodRegistration reg_collider_get(desc_collider_get);
+
+static const MethodDescriptor desc_collider_list = {
+    "collider.list", "collider",
+    "List the shared simulation colliders used by particles, fluid and gas",
+    nullptr,
+    "read", "Read", false, "colliders: array of collider objects (same keys as collider.get)",
+    "collider|list|simulation|particles|fluid|gas",
+    "collider.get|collider.create|particle.stats",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_collider_list(desc_collider_list);
+
+static const MethodParam params_collider_rebuild_sdf[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_collider_rebuild_sdf = {
+    "collider.rebuild_sdf", "collider",
+    "Force an asynchronous re-cook of a mesh_sdf collider",
+    "Returns immediately; poll collider.get until sdf_ready is true.",
+    "write", "SceneWrite", false, "any",
+    "collider|rebuild|sdf",
+    "collider.get|collider.create",
+    nullptr, nullptr, nullptr, nullptr,
+    params_collider_rebuild_sdf, 1,
+    true
+};
+static const MethodRegistration reg_collider_rebuild_sdf(desc_collider_rebuild_sdf);
+
+static const MethodParam params_collider_remove[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_collider_remove = {
+    "collider.remove", "collider",
+    "Remove a shared simulation collider",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "collider|remove|simulation",
+    "collider.list|collider.create",
+    nullptr, nullptr, nullptr, nullptr,
+    params_collider_remove, 1,
+    true
+};
+static const MethodRegistration reg_collider_remove(desc_collider_remove);
+
+static const MethodParam params_collider_update[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+    {"bounds_max", "vec3", false, "", nullptr, nullptr},
+    {"bounds_min", "vec3", false, "", nullptr, nullptr},
+    {"capsule_end", "vec3", false, "", nullptr, nullptr},
+    {"capsule_radius", "float", false, "", nullptr, nullptr},
+    {"capsule_start", "vec3", false, "", nullptr, nullptr},
+    {"enabled", "bool", false, "", nullptr, nullptr},
+    {"fluid_collision_enabled", "bool", false, "", nullptr, nullptr},
+    {"friction", "float", false, "", nullptr, nullptr},
+    {"gas_density_rate", "float", false, "", nullptr, nullptr},
+    {"gas_flame_rate", "float", false, "", nullptr, nullptr},
+    {"gas_fuel_rate", "float", false, "", nullptr, nullptr},
+    {"gas_ignite_on_contact", "bool", false, "", nullptr, nullptr},
+    {"gas_interaction_enabled", "bool", false, "", nullptr, nullptr},
+    {"gas_temperature_rate", "float", false, "", nullptr, nullptr},
+    {"msf_auto_transfer", "bool", false, "", nullptr, nullptr},
+    {"msf_burn_rate_scale", "float", false, "", nullptr, nullptr},
+    {"msf_fuel_capacity_scale", "float", false, "", nullptr, nullptr},
+    {"msf_generate_char_mask", "bool", false, "", nullptr, nullptr},
+    {"msf_ignition_kelvin", "float", false, "", nullptr, nullptr},
+    {"msf_mask_resolution", "int", false, "", nullptr, nullptr},
+    {"msf_melt_flow_enabled", "bool", false, "", nullptr, nullptr},
+    {"msf_melt_height_loss", "float", false, "", nullptr, nullptr},
+    {"msf_melt_sdf_change_threshold", "float", false, "", nullptr, nullptr},
+    {"msf_melt_sdf_refresh", "bool", false, "", nullptr, nullptr},
+    {"msf_melt_sdf_revision_interval", "int", false, "", nullptr, nullptr},
+    {"msf_melt_spread", "float", false, "", nullptr, nullptr},
+    {"msf_override_ignition", "bool", false, "", nullptr, nullptr},
+    {"msf_substance", "string", false, "", nullptr, nullptr},
+    {"msf_transfer_domain", "string", false, "", nullptr, nullptr},
+    {"msf_transfer_max_batch_particles", "int", false, "", nullptr, nullptr},
+    {"msf_transfer_min_mass_kg", "float", false, "", nullptr, nullptr},
+    {"msf_transfer_particles_per_kg", "float", false, "", nullptr, nullptr},
+    {"msf_transfer_rate_kg_s", "float", false, "", nullptr, nullptr},
+    {"msf_transfer_velocity", "vec3", false, "", nullptr, nullptr},
+    {"plane_y", "float", false, "", nullptr, nullptr},
+    {"restitution", "float", false, "", nullptr, nullptr},
+    {"sdf_resolution_mode", "int", false, "", nullptr, nullptr},
+    {"source_mode", "string", false, "", nullptr, nullptr},
+    {"source_object", "string", false, "", nullptr, nullptr},
+    {"sphere_center", "vec3", false, "", nullptr, nullptr},
+    {"sphere_radius", "float", false, "", nullptr, nullptr},
+    {"thickness", "float", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_collider_update = {
+    "collider.update", "collider",
+    "Patch fields of an existing shared simulation collider",
+    "Keys match rt.collider in Python one-to-one. source_mode: plane|sphere|capsule|aabb|obb|mesh_sdf|convex|mesh_bvh. One collider is shared by particles, APIC fluid (fluid_collision_enabled) and gas (gas_*). Only keys present in the request change; name selects the collider and is not renamed.",
+    "write", "SceneWrite", false, "any",
+    "collider|update|simulation|configure",
+    "collider.get|collider.create",
+    nullptr, nullptr, nullptr, nullptr,
+    params_collider_update, 43,
+    true
+};
+static const MethodRegistration reg_collider_update(desc_collider_update);
+
 static const MethodParam params_debris_configure[] = {
     {"enabled", "bool", false, "", "true", nullptr},
 };
@@ -1143,6 +1320,8 @@ static const MethodParam params_flow_source_create[] = {
     {"end_time", "any", false, "", nullptr, nullptr},
     {"falloff", "any", false, "", nullptr, nullptr},
     {"fluid_emit_along_normal", "any", false, "", nullptr, nullptr},
+    {"fluid_temperature_kelvin", "any", false, "", nullptr, nullptr},
+    {"fluid_temperature_override", "any", false, "", nullptr, nullptr},
     {"fluid_velocity_spread", "any", false, "", nullptr, nullptr},
     {"inherit_velocity", "any", false, "", nullptr, nullptr},
     {"max_emitted_particles", "any", false, "", nullptr, nullptr},
@@ -1159,7 +1338,7 @@ static const MethodDescriptor desc_flow_source_create = {
     "flow_source|flow|source|create|simulation|emitter|inject|pour|jet|flame|inflow",
     "flow_source.update|flow_source.list|fluid.create_domain|gas.set_settings",
     nullptr, nullptr, nullptr, nullptr,
-    params_flow_source_create, 25,
+    params_flow_source_create, 27,
     true
 };
 static const MethodRegistration reg_flow_source_create(desc_flow_source_create);
@@ -1219,6 +1398,8 @@ static const MethodParam params_flow_source_update[] = {
     {"fluid_emit_along_normal", "any", false, "", nullptr, nullptr},
     {"fluid_particles_per_second", "any", false, "", nullptr, nullptr},
     {"fluid_substance", "any", false, "", nullptr, nullptr},
+    {"fluid_temperature_kelvin", "any", false, "", nullptr, nullptr},
+    {"fluid_temperature_override", "any", false, "", nullptr, nullptr},
     {"fluid_velocity_spread", "any", false, "", nullptr, nullptr},
     {"fuel", "any", false, "", nullptr, nullptr},
     {"inherit_velocity", "any", false, "", nullptr, nullptr},
@@ -1244,7 +1425,7 @@ static const MethodDescriptor desc_flow_source_update = {
     "flow_source|flow|source|update|simulation|emitter|configure",
     "flow_source.create|flow_source.get",
     nullptr, nullptr, nullptr, nullptr,
-    params_flow_source_update, 25,
+    params_flow_source_update, 27,
     true
 };
 static const MethodRegistration reg_flow_source_update(desc_flow_source_update);
@@ -1408,6 +1589,10 @@ static const MethodRegistration reg_fluid_set_combustion(desc_fluid_set_combusti
 
 static const MethodParam params_fluid_set_param[] = {
     {"domain", "string", true, "", nullptr, nullptr},
+    {"anisotropy_enabled", "any", false, "", nullptr, nullptr},
+    {"anisotropy_max_stretch", "any", false, "", nullptr, nullptr},
+    {"anisotropy_neighbor_min", "any", false, "", nullptr, nullptr},
+    {"anisotropy_radius_voxels", "any", false, "", nullptr, nullptr},
     {"backend", "any", false, "", nullptr, nullptr},
     {"boundary", "any", false, "", nullptr, nullptr},
     {"coord_space", "any", false, "", nullptr, nullptr},
@@ -1433,16 +1618,28 @@ static const MethodParam params_fluid_set_param[] = {
     {"granular_tensile_cutoff", "any", false, "", nullptr, nullptr},
     {"granular_thermal_conductivity", "any", false, "", nullptr, nullptr},
     {"granular_young_modulus", "any", false, "", nullptr, nullptr},
+    {"kernel_radius_voxels", "any", false, "", nullptr, nullptr},
     {"kinematic_viscosity", "any", false, "", nullptr, nullptr},
+    {"narrow_band_voxels", "any", false, "", nullptr, nullptr},
+    {"particle_radius_voxels", "any", false, "", nullptr, nullptr},
     {"pore_amount", "any", false, "", nullptr, nullptr},
     {"pore_detail", "any", false, "", nullptr, nullptr},
     {"pore_scale", "any", false, "", nullptr, nullptr},
+    {"position_smoothing", "any", false, "", nullptr, nullptr},
     {"preset", "any", false, "", nullptr, nullptr},
     {"render_mode", "any", false, "", nullptr, nullptr},
+    {"smoothing_iterations", "any", false, "", nullptr, nullptr},
     {"solid_phase", "any", false, "", nullptr, nullptr},
     {"solid_phase_fill", "any", false, "", nullptr, nullptr},
     {"surface_material", "any", false, "", nullptr, nullptr},
     {"surface_offset_voxels", "any", false, "", nullptr, nullptr},
+    {"surface_resolution_multiplier", "any", false, "", nullptr, nullptr},
+    {"thermal_air_cooling_rate", "any", false, "", nullptr, nullptr},
+    {"thermal_cold_viscosity", "any", false, "", nullptr, nullptr},
+    {"thermal_contact_cooling_rate", "any", false, "", nullptr, nullptr},
+    {"thermal_freeze_kelvin", "any", false, "", nullptr, nullptr},
+    {"thermal_liquid_enabled", "any", false, "", nullptr, nullptr},
+    {"thermal_viscosity_range", "any", false, "", nullptr, nullptr},
     {"uvw_refresh_period", "any", false, "", nullptr, nullptr},
     {"viscosity", "any", false, "", nullptr, nullptr},
     {"viscosity_sweeps", "any", false, "", nullptr, nullptr},
@@ -1452,13 +1649,13 @@ static const MethodParam params_fluid_set_param[] = {
 };
 static const MethodDescriptor desc_fluid_set_param = {
     "fluid.set_param", "fluid",
-    "Update any field of a fluid or gas domain: bounds, voxel size, solver backend, viscosity, granular constitutive settings, render mode and surface material",
-    "Overlay semantics - fields you do not send keep their value. Changing voxel_size or the bounds invalidates the bake for that domain.",
+    "Update any field of a fluid or gas domain: bounds, voxel size, solver backend, viscosity, granular constitutive settings, thermal liquid (cooling/freezing), surface reconstruction detail, render mode and surface material",
+    "Overlay semantics - fields you do not send keep their value. Changing voxel_size or the bounds invalidates the bake for that domain. Surface keys (surface_resolution_multiplier 1..4, kernel/particle radius, smoothing, anisotropy_*) refine the RENDERED surface without touching the simulation and are rejected out of range, not clamped. thermal_* keys drive the wax chain (preset 'wax' sets them all); read the result back as fluid.get thermal_frozen_particles / thermal_min_kelvin, and thermal_cold_unsupported > 0 with nothing frozen means the liquid is cold but touches no collider or closed wall. Thermal and surface keys are applied after preset, so a preset in the same call cannot undo them.",
     "write", "SceneWrite", false, "any",
     "fluid|set|param|simulation|configure|viscosity|granular|render-mode|backend",
     "fluid.get|fluid.set_substance_material",
     "fluid.create_domain", "timeline.set_frame", "fluid.get|render.probe", "simulation_cache",
-    params_fluid_set_param, 42,
+    params_fluid_set_param, 58,
     true
 };
 static const MethodRegistration reg_fluid_set_param(desc_fluid_set_param);
@@ -1849,6 +2046,10 @@ static const MethodRegistration reg_gas_reset(desc_gas_reset);
 
 static const MethodParam params_gas_set_param[] = {
     {"domain", "string", true, "", nullptr, nullptr},
+    {"anisotropy_enabled", "any", false, "", nullptr, nullptr},
+    {"anisotropy_max_stretch", "any", false, "", nullptr, nullptr},
+    {"anisotropy_neighbor_min", "any", false, "", nullptr, nullptr},
+    {"anisotropy_radius_voxels", "any", false, "", nullptr, nullptr},
     {"backend", "any", false, "", nullptr, nullptr},
     {"boundary", "any", false, "", nullptr, nullptr},
     {"coord_space", "any", false, "", nullptr, nullptr},
@@ -1874,16 +2075,28 @@ static const MethodParam params_gas_set_param[] = {
     {"granular_tensile_cutoff", "any", false, "", nullptr, nullptr},
     {"granular_thermal_conductivity", "any", false, "", nullptr, nullptr},
     {"granular_young_modulus", "any", false, "", nullptr, nullptr},
+    {"kernel_radius_voxels", "any", false, "", nullptr, nullptr},
     {"kinematic_viscosity", "any", false, "", nullptr, nullptr},
+    {"narrow_band_voxels", "any", false, "", nullptr, nullptr},
+    {"particle_radius_voxels", "any", false, "", nullptr, nullptr},
     {"pore_amount", "any", false, "", nullptr, nullptr},
     {"pore_detail", "any", false, "", nullptr, nullptr},
     {"pore_scale", "any", false, "", nullptr, nullptr},
+    {"position_smoothing", "any", false, "", nullptr, nullptr},
     {"preset", "any", false, "", nullptr, nullptr},
     {"render_mode", "any", false, "", nullptr, nullptr},
+    {"smoothing_iterations", "any", false, "", nullptr, nullptr},
     {"solid_phase", "any", false, "", nullptr, nullptr},
     {"solid_phase_fill", "any", false, "", nullptr, nullptr},
     {"surface_material", "any", false, "", nullptr, nullptr},
     {"surface_offset_voxels", "any", false, "", nullptr, nullptr},
+    {"surface_resolution_multiplier", "any", false, "", nullptr, nullptr},
+    {"thermal_air_cooling_rate", "any", false, "", nullptr, nullptr},
+    {"thermal_cold_viscosity", "any", false, "", nullptr, nullptr},
+    {"thermal_contact_cooling_rate", "any", false, "", nullptr, nullptr},
+    {"thermal_freeze_kelvin", "any", false, "", nullptr, nullptr},
+    {"thermal_liquid_enabled", "any", false, "", nullptr, nullptr},
+    {"thermal_viscosity_range", "any", false, "", nullptr, nullptr},
     {"uvw_refresh_period", "any", false, "", nullptr, nullptr},
     {"viscosity", "any", false, "", nullptr, nullptr},
     {"viscosity_sweeps", "any", false, "", nullptr, nullptr},
@@ -1899,7 +2112,7 @@ static const MethodDescriptor desc_gas_set_param = {
     "gas|set|param|simulation|configure",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_gas_set_param, 42,
+    params_gas_set_param, 58,
     true
 };
 static const MethodRegistration reg_gas_set_param(desc_gas_set_param);
@@ -4204,14 +4417,20 @@ static const MethodParam params_particle_add_emitter[] = {
     {"angular_velocity", "float", false, "", nullptr, nullptr},
     {"burst_count", "any", false, "", nullptr, nullptr},
     {"direction", "vec3", false, "", nullptr, nullptr},
-    {"enabled", "any", false, "", nullptr, nullptr},
+    {"enabled", "bool", false, "", nullptr, nullptr},
     {"end_color", "vec3", false, "", nullptr, nullptr},
     {"end_opacity", "float", false, "", nullptr, nullptr},
     {"end_size", "float", false, "", nullptr, nullptr},
+    {"grid_density_deposit", "float", false, "", nullptr, nullptr},
+    {"grid_fuel_deposit", "float", false, "", nullptr, nullptr},
+    {"grid_temperature_deposit", "float", false, "", nullptr, nullptr},
+    {"inherit_velocity", "float", false, "", nullptr, nullptr},
     {"lifetime_seconds", "float", false, "", nullptr, nullptr},
     {"local_offset", "vec3", false, "", nullptr, nullptr},
     {"mass", "float", false, "", nullptr, nullptr},
     {"name", "string", false, "", nullptr, nullptr},
+    {"override_grid_deposit", "bool", false, "", nullptr, nullptr},
+    {"parent_object", "string", false, "", nullptr, nullptr},
     {"point", "vec3", false, "", nullptr, nullptr},
     {"rate_per_second", "float", false, "", nullptr, nullptr},
     {"seed", "any", false, "", nullptr, nullptr},
@@ -4225,6 +4444,9 @@ static const MethodParam params_particle_add_emitter[] = {
     {"start_opacity", "float", false, "", nullptr, nullptr},
     {"start_size", "float", false, "", nullptr, nullptr},
     {"surface_offset", "float", false, "", nullptr, nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+    {"velocity_space", "string", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_particle_add_emitter = {
     "particle.add_emitter", "particle",
@@ -4234,7 +4456,7 @@ static const MethodDescriptor desc_particle_add_emitter = {
     "particle|add|emitter|particles|create|spawn|emit",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_particle_add_emitter, 25,
+    params_particle_add_emitter, 34,
     true
 };
 static const MethodRegistration reg_particle_add_emitter(desc_particle_add_emitter);
@@ -4271,6 +4493,10 @@ static const MethodDescriptor desc_particle_add_system = {
 };
 static const MethodRegistration reg_particle_add_system(desc_particle_add_system);
 
+static const MethodParam params_particle_clear[] = {
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
 static const MethodDescriptor desc_particle_clear = {
     "particle.clear", "particle",
     "Delete the live particles without touching the emitters",
@@ -4279,11 +4505,35 @@ static const MethodDescriptor desc_particle_clear = {
     "particle|clear|particles|reset",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    nullptr, 0,
+    params_particle_clear, 2,
     true
 };
 static const MethodRegistration reg_particle_clear(desc_particle_clear);
 
+static const MethodParam params_particle_clear_emitter_key[] = {
+    {"emitter", "string", true, "", nullptr, nullptr},
+    {"frame", "int", true, "", nullptr, nullptr},
+    {"emitter_uid", "any", false, "", nullptr, nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
+static const MethodDescriptor desc_particle_clear_emitter_key = {
+    "particle.clear_emitter_key", "particle",
+    "Remove a particle emitter's key on one frame",
+    "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system.",
+    "write", "SceneWrite", false, "any",
+    "particle|clear|emitter|key|particles|timeline|keyframe",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_clear_emitter_key, 5,
+    true
+};
+static const MethodRegistration reg_particle_clear_emitter_key(desc_particle_clear_emitter_key);
+
+static const MethodParam params_particle_clear_emitters[] = {
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
 static const MethodDescriptor desc_particle_clear_emitters = {
     "particle.clear_emitters", "particle",
     "Remove every particle emitter",
@@ -4292,7 +4542,7 @@ static const MethodDescriptor desc_particle_clear_emitters = {
     "particle|clear|emitters|particles|remove",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    nullptr, 0,
+    params_particle_clear_emitters, 2,
     true
 };
 static const MethodRegistration reg_particle_clear_emitters(desc_particle_clear_emitters);
@@ -4310,6 +4560,10 @@ static const MethodDescriptor desc_particle_clear_systems = {
 };
 static const MethodRegistration reg_particle_clear_systems(desc_particle_clear_systems);
 
+static const MethodParam params_particle_emitters[] = {
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
 static const MethodDescriptor desc_particle_emitters = {
     "particle.emitters", "particle",
     "List the particle emitters",
@@ -4318,13 +4572,16 @@ static const MethodDescriptor desc_particle_emitters = {
     "particle|emitters|particles|inventory",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    nullptr, 0,
+    params_particle_emitters, 2,
     true
 };
 static const MethodRegistration reg_particle_emitters(desc_particle_emitters);
 
 static const MethodParam params_particle_get_emitter[] = {
     {"emitter", "string", true, "", nullptr, nullptr},
+    {"emitter_uid", "any", false, "", nullptr, nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
 };
 static const MethodDescriptor desc_particle_get_emitter = {
     "particle.get_emitter", "particle",
@@ -4334,11 +4591,15 @@ static const MethodDescriptor desc_particle_get_emitter = {
     "particle|get|emitter|particles",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_particle_get_emitter, 1,
+    params_particle_get_emitter, 4,
     true
 };
 static const MethodRegistration reg_particle_get_emitter(desc_particle_get_emitter);
 
+static const MethodParam params_particle_get_physics[] = {
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
 static const MethodDescriptor desc_particle_get_physics = {
     "particle.get_physics", "particle",
     "Read the particle solver settings",
@@ -4347,10 +4608,90 @@ static const MethodDescriptor desc_particle_get_physics = {
     "particle|get|physics|particles|solver",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    nullptr, 0,
+    params_particle_get_physics, 2,
     true
 };
 static const MethodRegistration reg_particle_get_physics(desc_particle_get_physics);
+
+static const MethodParam params_particle_get_render[] = {
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
+static const MethodDescriptor desc_particle_get_render = {
+    "particle.get_render", "particle",
+    "Read how a system's particles are drawn: carrier-only flag, RT instancing, shape, material look and weighted scene-mesh sources",
+    "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system. mesh_sources[].resolved is false when the named node no longer exists as a flat mesh; such a source renders nothing.",
+    "read", "Read", false, "any",
+    "particle|get|render|particles|debris|material|inspect",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_get_render, 2,
+    true
+};
+static const MethodRegistration reg_particle_get_render(desc_particle_get_render);
+
+static const MethodParam params_particle_get_state_sample[] = {
+    {"max_count", "int", false, "", "256", nullptr},
+    {"offset", "int", false, "", "0", nullptr},
+    {"stride", "int", false, "", "1", nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
+static const MethodDescriptor desc_particle_get_state_sample = {
+    "particle.get_state_sample", "particle",
+    "Read a bounded slice of live particle positions, velocities and ages plus whole-population centroid, mean velocity, bounds and NaN count",
+    "max_count is clamped to 4096; offset/stride walk alive particles in slot order. Aggregates cover ALL alive particles, so CPU vs GPU runs can be compared without a full dump. Non-finite particles are excluded from the aggregates and counted in nonfinite. Host state is authoritative today, so this costs no device transfer.",
+    "read", "Read", false, "alive_count, capacity, returned, indices, positions, velocities, ages, centroid, mean_velocity, bounds_min, bounds_max, nonfinite",
+    "particle|get|state|sample|particles|measure|verify|baseline|compare",
+    "particle.stats|particle.step|particle.set_physics",
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_get_state_sample, 5,
+    true
+};
+static const MethodRegistration reg_particle_get_state_sample(desc_particle_get_state_sample);
+
+static const MethodParam params_particle_get_system[] = {
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
+static const MethodDescriptor desc_particle_get_system = {
+    "particle.get_system", "particle",
+    "Return one particle system's id, name, enabled/visible state, blend mode and counts",
+    "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system. A read never creates a system: with no system_id/system and no active system it fails.",
+    "read", "Read", false, "any",
+    "particle|get|system|particles|inspect",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_get_system, 2,
+    true
+};
+static const MethodRegistration reg_particle_get_system(desc_particle_get_system);
+
+static const MethodParam params_particle_key_emitter[] = {
+    {"emitter", "string", true, "", nullptr, nullptr},
+    {"frame", "int", true, "", nullptr, nullptr},
+    {"direction", "vec3", false, "", nullptr, nullptr},
+    {"emitter_uid", "any", false, "", nullptr, nullptr},
+    {"enabled", "bool", false, "", nullptr, nullptr},
+    {"point", "vec3", false, "", nullptr, nullptr},
+    {"rate_per_second", "float", false, "", "0.0", nullptr},
+    {"speed", "float", false, "", "0.0", nullptr},
+    {"spread", "float", false, "", "0.0", nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
+static const MethodDescriptor desc_particle_key_emitter = {
+    "particle.key_emitter", "particle",
+    "Key a particle emitter's channels (enabled, rate_per_second, speed, spread, point, direction) on a timeline frame",
+    "Only the channels you pass are keyed, so two calls can key different channels on one frame. Address the emitter by index, name, 'uid:<n>' or emitter_uid. Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system.",
+    "write", "SceneWrite", false, "any",
+    "particle|key|emitter|particles|timeline|keyframe|animate",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_key_emitter, 11,
+    true
+};
+static const MethodRegistration reg_particle_key_emitter(desc_particle_key_emitter);
 
 static const MethodDescriptor desc_particle_list_systems = {
     "particle.list_systems", "particle",
@@ -4367,6 +4708,9 @@ static const MethodRegistration reg_particle_list_systems(desc_particle_list_sys
 
 static const MethodParam params_particle_remove_emitter[] = {
     {"emitter", "string", true, "", nullptr, nullptr},
+    {"emitter_uid", "any", false, "", nullptr, nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
 };
 static const MethodDescriptor desc_particle_remove_emitter = {
     "particle.remove_emitter", "particle",
@@ -4376,10 +4720,44 @@ static const MethodDescriptor desc_particle_remove_emitter = {
     "particle|remove|emitter|particles",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_particle_remove_emitter, 1,
+    params_particle_remove_emitter, 4,
     true
 };
 static const MethodRegistration reg_particle_remove_emitter(desc_particle_remove_emitter);
+
+static const MethodParam params_particle_remove_system[] = {
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
+static const MethodDescriptor desc_particle_remove_system = {
+    "particle.remove_system", "particle",
+    "Remove one particle system with its emitters, colliders, domains and render state",
+    "Requires system_id or system; there is no active-system default for a delete.",
+    "write", "SceneWrite", false, "any",
+    "particle|remove|system|particles|delete",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_remove_system, 2,
+    true
+};
+static const MethodRegistration reg_particle_remove_system(desc_particle_remove_system);
+
+static const MethodParam params_particle_set_active_system[] = {
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
+static const MethodDescriptor desc_particle_set_active_system = {
+    "particle.set_active_system", "particle",
+    "Move the particle panel's selection focus, which is the default target of every particle call",
+    "Selection only: every system keeps simulating regardless of which is active. Prefer passing system_id to each call over relying on this.",
+    "write", "SceneWrite", false, "any",
+    "particle|set|active|system|particles|select|editor",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_set_active_system, 2,
+    true
+};
+static const MethodRegistration reg_particle_set_active_system(desc_particle_set_active_system);
 
 static const MethodParam params_particle_set_emitter[] = {
     {"emitter", "string", true, "", nullptr, nullptr},
@@ -4387,14 +4765,21 @@ static const MethodParam params_particle_set_emitter[] = {
     {"angular_velocity", "float", false, "", nullptr, nullptr},
     {"burst_count", "any", false, "", nullptr, nullptr},
     {"direction", "vec3", false, "", nullptr, nullptr},
-    {"enabled", "any", false, "", nullptr, nullptr},
+    {"emitter_uid", "any", false, "", nullptr, nullptr},
+    {"enabled", "bool", false, "", nullptr, nullptr},
     {"end_color", "vec3", false, "", nullptr, nullptr},
     {"end_opacity", "float", false, "", nullptr, nullptr},
     {"end_size", "float", false, "", nullptr, nullptr},
+    {"grid_density_deposit", "float", false, "", nullptr, nullptr},
+    {"grid_fuel_deposit", "float", false, "", nullptr, nullptr},
+    {"grid_temperature_deposit", "float", false, "", nullptr, nullptr},
+    {"inherit_velocity", "float", false, "", nullptr, nullptr},
     {"lifetime_seconds", "float", false, "", nullptr, nullptr},
     {"local_offset", "vec3", false, "", nullptr, nullptr},
     {"mass", "float", false, "", nullptr, nullptr},
     {"name", "string", false, "", nullptr, nullptr},
+    {"override_grid_deposit", "bool", false, "", nullptr, nullptr},
+    {"parent_object", "string", false, "", nullptr, nullptr},
     {"point", "vec3", false, "", nullptr, nullptr},
     {"rate_per_second", "float", false, "", nullptr, nullptr},
     {"seed", "any", false, "", nullptr, nullptr},
@@ -4408,6 +4793,9 @@ static const MethodParam params_particle_set_emitter[] = {
     {"start_opacity", "float", false, "", nullptr, nullptr},
     {"start_size", "float", false, "", nullptr, nullptr},
     {"surface_offset", "float", false, "", nullptr, nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+    {"velocity_space", "string", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_particle_set_emitter = {
     "particle.set_emitter", "particle",
@@ -4417,7 +4805,7 @@ static const MethodDescriptor desc_particle_set_emitter = {
     "particle|set|emitter|particles|configure",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_particle_set_emitter, 26,
+    params_particle_set_emitter, 36,
     true
 };
 static const MethodRegistration reg_particle_set_emitter(desc_particle_set_emitter);
@@ -4425,6 +4813,7 @@ static const MethodRegistration reg_particle_set_emitter(desc_particle_set_emitt
 static const MethodParam params_particle_set_physics[] = {
     {"buoyancy", "float", false, "", nullptr, nullptr},
     {"cohesion", "float", false, "", nullptr, nullptr},
+    {"execution_policy", "string", false, "", nullptr, nullptr},
     {"gravity_scale", "float", false, "", nullptr, nullptr},
     {"grid_density_deposit", "float", false, "", nullptr, nullptr},
     {"grid_deposit_fade_with_age", "bool", false, "", nullptr, nullptr},
@@ -4438,21 +4827,71 @@ static const MethodParam params_particle_set_physics[] = {
     {"rest_density", "float", false, "", nullptr, nullptr},
     {"self_collision_enabled", "bool", false, "", nullptr, nullptr},
     {"solver_iterations", "int", false, "", nullptr, nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
     {"viscosity", "float", false, "", nullptr, nullptr},
     {"vorticity", "float", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_particle_set_physics = {
     "particle.set_physics", "particle",
-    "Set the particle solver: mode, quality, rest density, viscosity, cohesion, self-collision and grid deposit rates",
+    "Set the particle solver: mode, quality, execution policy (auto|gpu_required|cpu), rest density, viscosity, cohesion, self-collision and grid deposit rates",
     nullptr,
     "write", "SceneWrite", false, "any",
     "particle|set|physics|particles|solver|configure|sph",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_particle_set_physics, 17,
+    params_particle_set_physics, 20,
     true
 };
 static const MethodRegistration reg_particle_set_physics(desc_particle_set_physics);
+
+static const MethodParam params_particle_set_render[] = {
+    {"base_color", "vec3", false, "", nullptr, nullptr},
+    {"emission_strength", "float", false, "", nullptr, nullptr},
+    {"emissive", "bool", false, "", nullptr, nullptr},
+    {"emitter_only", "bool", false, "", nullptr, nullptr},
+    {"inherit_color_from_emitter", "bool", false, "", nullptr, nullptr},
+    {"mesh_sources", "any", false, "", nullptr, nullptr},
+    {"render_in_raytrace", "bool", false, "", nullptr, nullptr},
+    {"roughness", "float", false, "", nullptr, nullptr},
+    {"shape", "any", false, "", nullptr, nullptr},
+    {"size_multiplier", "float", false, "", nullptr, nullptr},
+    {"sphere_subdivisions", "any", false, "", nullptr, nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
+static const MethodDescriptor desc_particle_set_render = {
+    "particle.set_render", "particle",
+    "Set how a system's particles are drawn: shape (sphere|cube|tetra|quad|scene_meshes), size, emission/roughness look and the weighted mesh_sources list",
+    "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system. mesh_sources replaces the whole list ([{node_name, weight}]) and refuses a node that is not a flat mesh in the scene. emitter_only=true hides the carrier particles entirely.",
+    "write", "SceneWrite", false, "any",
+    "particle|set|render|particles|debris|material|configure",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_set_render, 13,
+    true
+};
+static const MethodRegistration reg_particle_set_render(desc_particle_set_render);
+
+static const MethodParam params_particle_set_system[] = {
+    {"blend_mode", "any", false, "", nullptr, nullptr},
+    {"name", "any", false, "", nullptr, nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+    {"visible", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_particle_set_system = {
+    "particle.set_system", "particle",
+    "Rename a particle system or set its visible flag and blend_mode (additive|alpha)",
+    "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system. Duplicate names are refused. enabled is read-only: the runtime simulates only while enabled AND visible, and the panel edits visible.",
+    "write", "SceneWrite", false, "any",
+    "particle|set|system|particles|configure|rename",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_set_system, 5,
+    true
+};
+static const MethodRegistration reg_particle_set_system(desc_particle_set_system);
 
 static const MethodParam params_particle_set_system_emitter_only[] = {
     {"system", "string", true, "", nullptr, nullptr},
@@ -4476,6 +4915,8 @@ static const MethodParam params_particle_spawn[] = {
     {"lifetime_seconds", "float", false, "", "5.0", nullptr},
     {"mass", "float", false, "", "1.0", nullptr},
     {"size", "float", false, "", "0.05", nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
     {"velocity", "vec3", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_particle_spawn = {
@@ -4486,26 +4927,32 @@ static const MethodDescriptor desc_particle_spawn = {
     "particle|spawn|particles|manual|inject",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_particle_spawn, 5,
+    params_particle_spawn, 7,
     true
 };
 static const MethodRegistration reg_particle_spawn(desc_particle_spawn);
 
+static const MethodParam params_particle_stats[] = {
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
+};
 static const MethodDescriptor desc_particle_stats = {
     "particle.stats", "particle",
-    "Report live particle counts and per-stage solver timings",
-    nullptr,
-    "read", "Read", false, "any",
-    "particle|stats|particles|measure|performance|verify",
-    nullptr,
+    "Report live particle counts, per-stage timings, which backend each stage ran on, and the particle step's own GPU transfers",
+    "Read gpu_force_status first: 'gpu' is the only value meaning the GPU force result was used; anything else names why the CPU ran it. gpu_force_ms covers the whole GPU force block including the per-step velocity download -- it is NOT inside integrate_ms. force_* and mirror_* count only the particle step's transfers; grid domains report theirs in fluid.step_stats / gas.step_stats. Values describe the LAST step: step once before reading, and do not read while the timeline is also stepping the same runtime.",
+    "read", "Read", false, "counts; *_ms stage timers; execution_policy, compute_backend, gpu_force_status, forces_on_gpu, step_blocked; stage_backends {emit, forces, integrate, scene_collision, self_collision}; gpu_force_ms; force_* and mirror_* transfer bytes/calls/ms; nonfinite_particles",
+    "particle|stats|particles|measure|performance|verify|backend|transfer",
+    "particle.step|particle.set_physics|particle.get_state_sample|fluid.step_stats",
     nullptr, nullptr, nullptr, nullptr,
-    nullptr, 0,
+    params_particle_stats, 2,
     true
 };
 static const MethodRegistration reg_particle_stats(desc_particle_stats);
 
 static const MethodParam params_particle_step[] = {
     {"dt", "float", false, "", "0.0166667", nullptr},
+    {"system", "string", false, "", "", nullptr},
+    {"system_id", "int", false, "", "-1", nullptr},
 };
 static const MethodDescriptor desc_particle_step = {
     "particle.step", "particle",
@@ -4515,7 +4962,7 @@ static const MethodDescriptor desc_particle_step = {
     "particle|step|particles|advance",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_particle_step, 1,
+    params_particle_step, 3,
     true
 };
 static const MethodRegistration reg_particle_step(desc_particle_step);
@@ -4694,6 +5141,182 @@ static const MethodDescriptor desc_physics_break_fracture_group = {
     true
 };
 static const MethodRegistration reg_physics_break_fracture_group(desc_physics_break_fracture_group);
+
+static const MethodParam params_physics_collider_proxy_delete[] = {
+    {"proxy_id", "int", true, "", nullptr, nullptr},
+    {"set_id", "int", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_physics_collider_proxy_delete = {
+    "physics.collider.proxy.delete", "physics",
+    "Delete one primitive from a kinematic proxy set",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "physics|collider|proxy|delete|rig|kinematic",
+    "physics.collider.proxy.set|physics.collider.proxy_set.get",
+    nullptr, nullptr, nullptr, nullptr,
+    params_physics_collider_proxy_delete, 2,
+    true
+};
+static const MethodRegistration reg_physics_collider_proxy_delete(desc_physics_collider_proxy_delete);
+
+static const MethodParam params_physics_collider_proxy_set[] = {
+    {"set_id", "int", true, "", nullptr, nullptr},
+    {"bone", "any", false, "", nullptr, nullptr},
+    {"enabled", "any", false, "", nullptr, nullptr},
+    {"half_extents", "any", false, "", nullptr, nullptr},
+    {"half_length", "any", false, "", nullptr, nullptr},
+    {"local_axis", "any", false, "", nullptr, nullptr},
+    {"local_position", "any", false, "", nullptr, nullptr},
+    {"local_rotation", "any", false, "", nullptr, nullptr},
+    {"name", "any", false, "", nullptr, nullptr},
+    {"proxy_id", "int", false, "", nullptr, nullptr},
+    {"radius", "any", false, "", nullptr, nullptr},
+    {"shape", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_physics_collider_proxy_set = {
+    "physics.collider.proxy.set", "physics",
+    "Create or patch one bone-local primitive proxy",
+    "Omit proxy_id to create; provide it to patch. Shapes are sphere, capsule and box. Coordinates and dimensions are in bone-local scene units.",
+    "write", "SceneWrite", false, "any",
+    "physics|collider|proxy|set|rig|kinematic|configure",
+    "physics.collider.proxy.delete|physics.collider.proxy_set.sample",
+    nullptr, nullptr, nullptr, nullptr,
+    params_physics_collider_proxy_set, 12,
+    true
+};
+static const MethodRegistration reg_physics_collider_proxy_set(desc_physics_collider_proxy_set);
+
+static const MethodParam params_physics_collider_proxy_set_auto_fit[] = {
+    {"set_id", "int", true, "", nullptr, nullptr},
+    {"maximum_proxies", "any", false, "", nullptr, nullptr},
+    {"maximum_radius", "float", false, "", nullptr, nullptr},
+    {"minimum_bone_length", "float", false, "", nullptr, nullptr},
+    {"minimum_radius", "float", false, "", nullptr, nullptr},
+    {"radius_fraction", "float", false, "", nullptr, nullptr},
+    {"replace_existing", "any", false, "", nullptr, nullptr},
+    {"weighted_bones_only", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_physics_collider_proxy_set_auto_fit = {
+    "physics.collider.proxy_set.auto_fit", "physics",
+    "Generate capsule, sphere and foot-box proxies from a character skeleton",
+    "Auto-fit writes ordinary editable proxies. It is not a second runtime representation. Weighted bones are used by default and maximum_proxies bounds authoring and runtime cost.",
+    "write", "SceneWrite", false, "any",
+    "physics|collider|proxy|set|auto|fit|rig|kinematic|autofit",
+    "physics.collider.proxy.set|physics.collider.proxy_set.sample",
+    nullptr, nullptr, nullptr, nullptr,
+    params_physics_collider_proxy_set_auto_fit, 8,
+    true
+};
+static const MethodRegistration reg_physics_collider_proxy_set_auto_fit(desc_physics_collider_proxy_set_auto_fit);
+
+static const MethodParam params_physics_collider_proxy_set_create[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+    {"target_character", "string", true, "", nullptr, nullptr},
+    {"consumer_mask", "any", false, "", nullptr, nullptr},
+    {"enabled", "any", false, "", nullptr, nullptr},
+    {"friction", "any", false, "", nullptr, nullptr},
+    {"restitution", "any", false, "", nullptr, nullptr},
+    {"target_node_id", "any", false, "", nullptr, nullptr},
+    {"thickness", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_physics_collider_proxy_set_create = {
+    "physics.collider.proxy_set.create", "physics",
+    "Create a solver-neutral kinematic proxy set bound to a rig character",
+    "Creates an empty set. Add proxies explicitly or call auto_fit. K0 resolves target_character by name; target_node_id is reserved and rejected until K1 stable scene identity support. The same authored producer is intended for fluid, gas, granular and particle consumers.",
+    "write", "SceneWrite", false, "any",
+    "physics|collider|proxy|set|create|rig|kinematic",
+    "physics.collider.proxy_set.auto_fit|physics.collider.proxy.set",
+    nullptr, nullptr, nullptr, nullptr,
+    params_physics_collider_proxy_set_create, 8,
+    true
+};
+static const MethodRegistration reg_physics_collider_proxy_set_create(desc_physics_collider_proxy_set_create);
+
+static const MethodParam params_physics_collider_proxy_set_delete[] = {
+    {"set_id", "int", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_physics_collider_proxy_set_delete = {
+    "physics.collider.proxy_set.delete", "physics",
+    "Delete a kinematic proxy set",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "physics|collider|proxy|set|delete|rig|kinematic",
+    "physics.collider.proxy_set.list|physics.collider.proxy_set.create",
+    nullptr, nullptr, nullptr, nullptr,
+    params_physics_collider_proxy_set_delete, 1,
+    true
+};
+static const MethodRegistration reg_physics_collider_proxy_set_delete(desc_physics_collider_proxy_set_delete);
+
+static const MethodParam params_physics_collider_proxy_set_get[] = {
+    {"set_id", "int", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_physics_collider_proxy_set_get = {
+    "physics.collider.proxy_set.get", "physics",
+    "Read one bone-attached kinematic collider proxy set",
+    nullptr,
+    "read", "Read", false, "any",
+    "physics|collider|proxy|set|get|rig|kinematic|read",
+    "physics.collider.proxy_set.list|physics.collider.proxy_set.sample",
+    nullptr, nullptr, nullptr, nullptr,
+    params_physics_collider_proxy_set_get, 1,
+    true
+};
+static const MethodRegistration reg_physics_collider_proxy_set_get(desc_physics_collider_proxy_set_get);
+
+static const MethodDescriptor desc_physics_collider_proxy_set_list = {
+    "physics.collider.proxy_set.list", "physics",
+    "List bone-attached kinematic collider proxy sets",
+    nullptr,
+    "read", "Read", false, "Proxy sets with stable ids, target character, consumer mask, contact material and authored proxies",
+    "physics|collider|proxy|set|list|rig|kinematic",
+    "physics.collider.proxy_set.get|physics.collider.proxy_set.create",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_physics_collider_proxy_set_list(desc_physics_collider_proxy_set_list);
+
+static const MethodParam params_physics_collider_proxy_set_sample[] = {
+    {"set_id", "int", true, "", nullptr, nullptr},
+    {"dt", "float", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_physics_collider_proxy_set_sample = {
+    "physics.collider.proxy_set.sample", "physics",
+    "Inspect resolved world transforms and linear/angular velocities for every proxy",
+    "Read-only instrumentation: sampling uses a registry snapshot and cannot advance the solver's authoritative motion history. Unresolved bones are reported by reason and never emitted at the origin.",
+    "read", "Read", false, "any",
+    "physics|collider|proxy|set|sample|rig|kinematic|measure|read",
+    "physics.collider.proxy_set.get|physics.collider.proxy_set.auto_fit",
+    nullptr, nullptr, nullptr, nullptr,
+    params_physics_collider_proxy_set_sample, 2,
+    true
+};
+static const MethodRegistration reg_physics_collider_proxy_set_sample(desc_physics_collider_proxy_set_sample);
+
+static const MethodParam params_physics_collider_proxy_set_set[] = {
+    {"set_id", "int", true, "", nullptr, nullptr},
+    {"consumer_mask", "any", false, "", nullptr, nullptr},
+    {"enabled", "any", false, "", nullptr, nullptr},
+    {"friction", "any", false, "", nullptr, nullptr},
+    {"name", "any", false, "", nullptr, nullptr},
+    {"restitution", "any", false, "", nullptr, nullptr},
+    {"target_character", "any", false, "", nullptr, nullptr},
+    {"target_node_id", "any", false, "", nullptr, nullptr},
+    {"thickness", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_physics_collider_proxy_set_set = {
+    "physics.collider.proxy_set.set", "physics",
+    "Patch a kinematic proxy set and its shared contact/consumer settings",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "physics|collider|proxy|set|set|rig|kinematic|configure",
+    "physics.collider.proxy_set.get|physics.collider.proxy.set",
+    nullptr, nullptr, nullptr, nullptr,
+    params_physics_collider_proxy_set_set, 9,
+    true
+};
+static const MethodRegistration reg_physics_collider_proxy_set_set(desc_physics_collider_proxy_set_set);
 
 static const MethodParam params_physics_fracture_cluster_groups[] = {
     {"object", "any", true, "", nullptr, nullptr},
@@ -5069,7 +5692,7 @@ static const MethodParam params_project_autosave_now[] = {
 static const MethodDescriptor desc_project_autosave_now = {
     "project.autosave_now", "project",
     "Force-writes the session autosave now, ignoring the interval and the modified flag.",
-    "Writes the session autosave immediately, ignoring both the interval and the modified flag. Reports the FULL autosave status back, not just success, because the useful question after a failure is 'why did it not write' and the answer is in those fields. Autosave was a lie until 2026-09-16: the preference (auto_save_enabled, default true), the restore path (StartupMode::RestoreAutosave) and the Hub's 'Recover the last autosaved scene session' button all existed and NOTHING EVER WROTE THE FILE, so the recovery offered was of a file that could not exist. The writer also has to protect project identity: ProjectManager::saveProject sets current_file_path, renames an Untitled project after the file, and adds the path to the recent list -- correct for a user save, catastrophic for an autosave, because the user's next Ctrl+S would go to autosave.rtp instead of their project. The autosave unit restores path, name and the is_modified flag around the write; is_modified in particular, so an autosave never makes unsaved work look saved and silently suppress the quit prompt. The same writer is called on VK_ERROR_DEVICE_LOST before the viewport backend is torn down.",
+    "Writes the session autosave immediately, ignoring both the interval and the modified flag. Reports the FULL autosave status back, not just success, because the useful question after a failure is 'why did it not write' and the answer is in those fields. Autosave was a lie until 2026-09-16: the preference (auto_save_enabled, default true), the restore path (StartupMode::RestoreAutosave) and the Hub's 'Recover the last autosaved scene session' button all existed and NOTHING EVER WROTE THE FILE, so the recovery offered was of a file that could not exist. The writer also has to protect project identity: ProjectManager::saveProject sets current_file_path, renames an Untitled project after the file, and adds the path to the recent list -- correct for a user save, catastrophic for an autosave, because the user's next Ctrl+S would go to autosave.rtp instead of their project. Since 2026-09-25 the writer calls ProjectManager::saveProjectCopy, which never touches path, name, recent list, is_modified or texture save-dirty flags (swapping them back afterwards stopped being safe once interval writes moved to a background thread: a Ctrl+S mid-write would have saved into autosave.rtp). This forced call writes on the calling thread; interval writes run in the background and are skipped while the timeline plays. The same writer is called on VK_ERROR_DEVICE_LOST before the viewport backend is torn down.",
     "write", "FilesWrite", false, "any",
     "project|autosave|now",
     nullptr,
@@ -5079,10 +5702,27 @@ static const MethodDescriptor desc_project_autosave_now = {
 };
 static const MethodRegistration reg_project_autosave_now(desc_project_autosave_now);
 
+static const MethodParam params_project_autosave_set[] = {
+    {"enabled", "any", false, "Turn interval autosave on or off.", nullptr, nullptr},
+    {"interval_sec", "any", false, "Seconds between interval writes, 30..86400.", nullptr, nullptr},
+};
+static const MethodDescriptor desc_project_autosave_set = {
+    "project.autosave_set", "project",
+    "Set the persisted autosave preference: enabled and/or interval_sec.",
+    "Same preference as File > Project Save Options > Autosave and the Template Hub. Unset fields are left alone; interval_sec outside [30, 86400] is rejected, not clamped, and nothing is written when any field is invalid. Returns the full autosave status after the change.",
+    "write", "FilesWrite", false, "any",
+    "project|autosave|set",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_project_autosave_set, 2,
+    true
+};
+static const MethodRegistration reg_project_autosave_set(desc_project_autosave_set);
+
 static const MethodDescriptor desc_project_autosave_status = {
     "project.autosave_status", "project",
     "Reads the autosave instrument without writing.",
-    "Reads the autosave instrument without writing. Read write_count FIRST: if it is 0 while the app has been open longer than interval_sec, autosave is not running at all. Then read skipped_unmodified -- if THAT is growing while write_count stays 0, the broken thing is not autosave but the is_modified flag, which is why the two counters are separate rather than one 'healthy' boolean. seconds_until_next goes negative only between the due moment and the next tick. file_exists plus file_bytes describe the file on disk, so a status that claims success while file_bytes stays 0 means the write path is reporting an outcome it did not achieve. last_reason distinguishes an interval write from the forced one taken on VK_ERROR_DEVICE_LOST.",
+    "Reads the autosave instrument without writing. Read write_count FIRST: if it is 0 while the app has been open longer than interval_sec, autosave is not running at all. Then read skipped_unmodified -- if THAT is growing while write_count stays 0, the broken thing is not autosave but the is_modified flag, which is why the two counters are separate rather than one 'healthy' boolean. seconds_until_next goes negative only between the due moment and the next tick. file_exists plus file_bytes describe the file on disk, so a status that claims success while file_bytes stays 0 means the write path is reporting an outcome it did not achieve. last_reason distinguishes an interval write from the forced one taken on VK_ERROR_DEVICE_LOST. writing=true means an interval write is running in the background right now (the HUD shows 'Autosaving...').",
     "write", "SceneWrite", false, "any",
     "project|autosave|status",
     nullptr,

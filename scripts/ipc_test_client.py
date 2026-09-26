@@ -534,6 +534,178 @@ def main():
              "particle.spawn")
     run_test("particle.stats", {}, "particle.stats")
     run_test("particle.step", {"dt": 0.016}, "particle.step")
+
+    # Particle roadmap Phase 0: backend/transfer telemetry and state sampling.
+    def particle_stats_after_step(label):
+        response = run_test("particle.stats", {}, label)
+        return (response or {}).get("result") or {}
+
+    stats_result = particle_stats_after_step("particle.stats(phase0 fields)")
+    for key in ("execution_policy", "compute_backend", "gpu_force_status",
+                "forces_on_gpu", "step_blocked", "stage_backends", "gpu_force_ms",
+                "force_upload_bytes", "force_download_bytes",
+                "mirror_upload_bytes", "nonfinite_particles",
+                "grid_deposit_landed", "grid_deposit_dropped_no_domain",
+                "grid_deposit_dropped_no_channel"):
+        if key not in stats_result:
+            print(f"  particle.stats missing '{key}': FAIL")
+            tests_failed += 1
+    run_test("particle.get_state_sample", {"max_count": 8},
+             "particle.get_state_sample")
+    run_test("particle.get_state_sample", {"stride": 0},
+             "particle.get_state_sample(stride 0) → error", expect_error=True)
+    run_test("particle.set_physics", {"execution_policy": "__nope__"},
+             "particle.set_physics(bad execution_policy) → error", expect_error=True)
+    run_test("particle.set_physics", {"execution_policy": "cpu"},
+             "particle.set_physics(execution_policy cpu)")
+    run_test("particle.spawn", {"position": [0.0, 3.0, 0.0]}, "particle.spawn(cpu policy)")
+    run_test("particle.step", {"dt": 0.016}, "particle.step(cpu policy)")
+    stats_result = particle_stats_after_step("particle.stats(cpu policy)")
+    if stats_result.get("gpu_force_status") != "cpu_policy":
+        print(f"  cpu policy not honoured, gpu_force_status="
+              f"{stats_result.get('gpu_force_status')}: FAIL")
+        tests_failed += 1
+    run_test("particle.set_physics", {"execution_policy": "auto"},
+             "particle.set_physics(execution_policy restore)")
+
+    # Particle roadmap Phase 1: explicit system addressing, stable emitter uids,
+    # system/render operations. Every write below targets a system that is NOT
+    # the active one, so a call that silently fell back to the panel's
+    # selection lands in the wrong system and the count checks catch it.
+    def phase1_check(condition, label, detail=""):
+        nonlocal tests_passed, tests_failed
+        if condition:
+            print(f"  {label}: OK")
+            tests_passed += 1
+        else:
+            print(f"  {label}: FAIL {detail}")
+            tests_failed += 1
+
+    def result_of(response):
+        return (response or {}).get("result")
+
+    systems_now = (result_of(run_test("particle.list_systems", {},
+                                      "phase1: list_systems")) or {}).get("systems", [])
+    original_active = next((s for s in systems_now if s.get("active")), None)
+    sys_a = result_of(run_test("particle.add_system", {"name": "IpcPhase1 A"},
+                               "phase1: add_system A")) or {}
+    sys_b = result_of(run_test("particle.add_system", {"name": "IpcPhase1 B"},
+                               "phase1: add_system B")) or {}
+    a_id, b_id = sys_a.get("id"), sys_b.get("id")
+    phase1_check(a_id is not None and b_id is not None and a_id != b_id,
+                 "phase1: distinct system ids", f"a={a_id} b={b_id}")
+    run_test("particle.set_active_system", {"system_id": a_id}, "phase1: set_active_system A")
+    first = result_of(run_test("particle.add_emitter",
+                               {"system_id": b_id, "name": "P1First"},
+                               "phase1: add_emitter into B while A is active")) or {}
+    second = result_of(run_test("particle.add_emitter",
+                                {"system_id": b_id, "name": "P1Second", "rate_per_second": 5.0},
+                                "phase1: add second emitter into B")) or {}
+    phase1_check(first.get("system_id") == b_id, "phase1: emitter reports system B",
+                 f"system_id={first.get('system_id')}")
+    a_emitters = result_of(run_test("particle.emitters", {"system_id": a_id},
+                                    "phase1: emitters(A)")) or []
+    b_emitters = result_of(run_test("particle.emitters", {"system_id": b_id},
+                                    "phase1: emitters(B)")) or []
+    phase1_check(len(a_emitters) == 0 and len(b_emitters) == 2,
+                 "phase1: writes landed in B only", f"A={len(a_emitters)} B={len(b_emitters)}")
+    second_uid = second.get("uid", 0)
+    phase1_check(second_uid and second_uid != first.get("uid"), "phase1: emitter uids distinct",
+                 f"first={first.get('uid')} second={second_uid}")
+    # Remove the FIRST emitter: the second one's index shifts, its uid must not.
+    run_test("particle.remove_emitter", {"system_id": b_id, "emitter": "0"},
+             "phase1: remove emitter 0 of B")
+    by_uid = result_of(run_test("particle.get_emitter",
+                                {"system_id": b_id, "emitter_uid": second_uid},
+                                "phase1: get_emitter by emitter_uid after index shift")) or {}
+    phase1_check(by_uid.get("name") == "P1Second" and by_uid.get("index") == 0,
+                 "phase1: uid survives index shift", f"got={by_uid.get('name')}@{by_uid.get('index')}")
+    run_test("particle.set_emitter", {"system_id": b_id, "emitter": f"uid:{second_uid}",
+                                      "parent_object": "", "inherit_velocity": 0.5,
+                                      "override_grid_deposit": True, "grid_fuel_deposit": 0.25},
+             "phase1: set_emitter by 'uid:' incl. formerly Python-only fields")
+    patched = result_of(run_test("particle.get_emitter",
+                                 {"system_id": b_id, "emitter": f"uid:{second_uid}"},
+                                 "phase1: get_emitter by 'uid:'")) or {}
+    phase1_check(abs(float(patched.get("inherit_velocity", -1)) - 0.5) < 1e-6 and
+                 patched.get("override_grid_deposit") is True,
+                 "phase1: inherit_velocity/override_grid_deposit landed over IPC",
+                 f"got {patched.get('inherit_velocity')} {patched.get('override_grid_deposit')}")
+    run_test("particle.get_emitter", {"system_id": b_id, "emitter": "uid:999999999"},
+             "phase1: unknown uid → error", expect_error=True)
+    run_test("particle.key_emitter", {"system_id": b_id, "emitter_uid": second_uid,
+                                      "frame": 12, "enabled": False},
+             "phase1: key_emitter over IPC")
+    run_test("particle.clear_emitter_key", {"system_id": b_id, "emitter_uid": second_uid,
+                                            "frame": 12},
+             "phase1: clear_emitter_key over IPC")
+    run_test("particle.emitters", {"system_id": 987654},
+             "phase1: unknown system_id → error (no fallback)", expect_error=True)
+    run_test("particle.emitters", {"system": "__no_such_system__"},
+             "phase1: unknown system name → error (no fallback)", expect_error=True)
+    # Render settings, formerly panel-only.
+    render_before = result_of(run_test("particle.get_render", {"system_id": b_id},
+                                       "phase1: get_render(B)")) or {}
+    phase1_check("shape" in render_before and "mesh_sources" in render_before,
+                 "phase1: get_render fields present", str(list(render_before.keys())))
+    run_test("particle.set_render", {"system_id": b_id, "shape": "__nope__"},
+             "phase1: set_render(bad shape) → error", expect_error=True)
+    run_test("particle.set_render", {"system_id": b_id, "shape": "scene_meshes",
+                                     "mesh_sources": [{"node_name": "__no_such_mesh__"}]},
+             "phase1: set_render(missing mesh source) → error", expect_error=True)
+    run_test("particle.set_render", {"system_id": b_id, "shape": "cube",
+                                     "size_multiplier": 2.5, "emitter_only": False},
+             "phase1: set_render(cube)")
+    render_after = result_of(run_test("particle.get_render", {"system_id": b_id},
+                                      "phase1: get_render after set")) or {}
+    phase1_check(render_after.get("shape") == "cube" and
+                 abs(float(render_after.get("size_multiplier", 0)) - 2.5) < 1e-6,
+                 "phase1: set_render landed", f"got {render_after.get('shape')}")
+    # System settings.
+    run_test("particle.set_system", {"system_id": b_id, "name": "IpcPhase1 A"},
+             "phase1: set_system(duplicate name) → error", expect_error=True)
+    run_test("particle.set_system", {"system_id": b_id, "name": "IpcPhase1 B2",
+                                     "blend_mode": "alpha"},
+             "phase1: set_system(rename + blend)")
+    renamed = result_of(run_test("particle.get_system", {"system": "IpcPhase1 B2"},
+                                 "phase1: get_system by new name")) or {}
+    phase1_check(renamed.get("id") == b_id and renamed.get("blend_mode") == "alpha",
+                 "phase1: rename/blend landed", f"got {renamed}")
+    run_test("particle.spawn", {"system_id": b_id, "position": [0.0, 1.0, 0.0]},
+             "phase1: spawn into B")
+    run_test("particle.step", {"system_id": b_id, "dt": 0.016}, "phase1: step B")
+    b_stats = result_of(run_test("particle.stats", {"system_id": b_id},
+                                 "phase1: stats(B)")) or {}
+    phase1_check(b_stats.get("system_id") == b_id, "phase1: stats reports system B",
+                 f"system_id={b_stats.get('system_id')}")
+    run_test("particle.remove_system", {},
+             "phase1: remove_system without a reference → error", expect_error=True)
+    run_test("particle.remove_system", {"system_id": b_id}, "phase1: remove_system(B)")
+    run_test("particle.get_system", {"system_id": b_id},
+             "phase1: get_system(removed) → error", expect_error=True)
+    run_test("particle.remove_system", {"system_id": a_id}, "phase1: remove_system(A)")
+    if original_active is not None:
+        run_test("particle.set_active_system", {"system_id": original_active["id"]},
+                 "phase1: restore active system")
+
+    # Shared simulation colliders over IPC (rt.collider parity).
+    run_test("collider.list", {}, "collider.list")
+    run_test("collider.create", {"name": "IpcCollider", "source_mode": "sphere",
+                                  "sphere_center": [0.0, 1.0, 0.0],
+                                  "sphere_radius": 0.5},
+             "collider.create(sphere)")
+    run_test("collider.update", {"name": "IpcCollider", "sphere_radius": 0.75},
+             "collider.update")
+    collider_response = run_test("collider.get", {"name": "IpcCollider"}, "collider.get")
+    collider_result = (collider_response or {}).get("result") or {}
+    if abs(float(collider_result.get("sphere_radius", -1.0)) - 0.75) > 1e-5:
+        print(f"  collider.update did not land, sphere_radius="
+              f"{collider_result.get('sphere_radius')}: FAIL")
+        tests_failed += 1
+    run_test("collider.remove", {"name": "IpcCollider"}, "collider.remove")
+    run_test("collider.get", {"name": "IpcCollider"},
+             "collider.get(removed) → error", expect_error=True)
+
     run_test("particle.clear", {}, "particle.clear")
     run_test("particle.set_physics", {"gravity_scale": 1.0}, "particle.set_physics(restore)")
     run_test("particle.remove_emitter", {"emitter": "IpcEmitter"}, "particle.remove_emitter")

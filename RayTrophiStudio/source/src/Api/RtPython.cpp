@@ -37,6 +37,8 @@
 #include "RtUiBindings.h"
 #include "RtPyCommon.h" // shared binding helpers + rtpy::registerSceneBindings
 #include "RtPythonFracture.h"
+#include "RtPythonParticle.h"
+#include "RtPythonKinematicCollider.h"
 #include "RtPythonPressure.h"
 #include "RtPythonDebris.h"
 #include "RtPythonMassTransfer.h"
@@ -202,6 +204,7 @@ static py::dict autosaveStatusToDict(const rtapi::AutosaveStatus& st) {
     d["write_count"] = st.write_count;
     d["skipped_unmodified"] = st.skipped_unmodified;
     d["scene_is_modified"] = st.scene_is_modified;
+    d["writing"] = st.writing;
     return d;
 }
 
@@ -1383,295 +1386,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     }, py::arg("position"), py::arg("time") = 0.0f,
        py::arg("velocity") = py::make_tuple(0.0f, 0.0f, 0.0f));
 
-    // ── Particle systems (Faz 5.6b) ─────────────────────────────────────
-    // Emitters + solver settings + stats. Particle colliders and grid domains
-    // live on the SAME runtime and are scripted under rt.fluid, not here.
-    py::module_ particle = module.def_submodule(
-        "particle", "Particle emitters, solver settings and live statistics");
-
-    auto emitterToDict = [](const rtapi::ParticleEmitterInfo& info) -> py::dict {
-        py::dict d;
-        d["index"] = info.index;
-        d["name"] = info.name;
-        d["source_mode"] = info.source_mode;
-        d["spawn_mode"] = info.spawn_mode;
-        d["source_name"] = info.source_name;
-        d["enabled"] = info.enabled;
-        d["point"] = vec3ToPython(info.point);
-        d["local_offset"] = vec3ToPython(info.local_offset);
-        d["direction"] = vec3ToPython(info.direction);
-        d["surface_offset"] = info.surface_offset;
-        d["rate_per_second"] = info.rate_per_second;
-        d["burst_count"] = info.burst_count;
-        d["speed"] = info.speed;
-        d["spread"] = info.spread;
-        d["lifetime_seconds"] = info.lifetime_seconds;
-        d["mass"] = info.mass;
-        d["start_size"] = info.start_size;
-        d["end_size"] = info.end_size;
-        d["size_jitter"] = info.size_jitter;
-        d["start_opacity"] = info.start_opacity;
-        d["end_opacity"] = info.end_opacity;
-        d["start_color"] = vec3ToPython(info.start_color);
-        d["end_color"] = vec3ToPython(info.end_color);
-        d["angular_velocity"] = info.angular_velocity;
-        d["angular_jitter"] = info.angular_jitter;
-        d["seed"] = info.seed;
-        d["parent_object"] = info.parent_object;
-        d["velocity_space"] = info.velocity_space;
-        d["inherit_velocity"] = info.inherit_velocity;
-        d["override_grid_deposit"] = info.override_grid_deposit;
-        d["grid_density_deposit"] = info.grid_density_deposit;
-        d["grid_temperature_deposit"] = info.grid_temperature_deposit;
-        d["grid_fuel_deposit"] = info.grid_fuel_deposit;
-        return d;
-    };
-
-    // Shared by add_emitter (patches a default desc) and set_emitter (patches
-    // the live one), so both accept exactly the same keyword set.
-    auto patchEmitter = [](const py::kwargs& kwargs, rtapi::ParticleEmitterInfo& info) {
-        auto str = [&](const char* key, std::string& target) {
-            if (kwargs.contains(key)) target = py::cast<std::string>(kwargs[key]);
-        };
-        auto flt = [&](const char* key, float& target) {
-            if (kwargs.contains(key)) target = py::cast<float>(kwargs[key]);
-        };
-        auto boolean = [&](const char* key, bool& target) {
-            if (kwargs.contains(key)) target = py::cast<bool>(kwargs[key]);
-        };
-        auto vector = [&](const char* key, Vec3& target) {
-            if (kwargs.contains(key)) target = vec3FromPython(kwargs[key]);
-        };
-        str("name", info.name); str("source_mode", info.source_mode);
-        str("spawn_mode", info.spawn_mode); str("source_name", info.source_name);
-        boolean("enabled", info.enabled);
-        vector("point", info.point); vector("local_offset", info.local_offset);
-        vector("direction", info.direction);
-        flt("surface_offset", info.surface_offset);
-        flt("rate_per_second", info.rate_per_second);
-        if (kwargs.contains("burst_count")) info.burst_count = py::cast<int>(kwargs["burst_count"]);
-        flt("speed", info.speed); flt("spread", info.spread);
-        flt("lifetime_seconds", info.lifetime_seconds); flt("mass", info.mass);
-        flt("start_size", info.start_size); flt("end_size", info.end_size);
-        flt("size_jitter", info.size_jitter);
-        flt("start_opacity", info.start_opacity); flt("end_opacity", info.end_opacity);
-        vector("start_color", info.start_color); vector("end_color", info.end_color);
-        flt("angular_velocity", info.angular_velocity);
-        flt("angular_jitter", info.angular_jitter);
-        if (kwargs.contains("seed"))
-            info.seed = py::cast<unsigned int>(kwargs["seed"]);
-        str("parent_object", info.parent_object);
-        str("velocity_space", info.velocity_space);
-        flt("inherit_velocity", info.inherit_velocity);
-        boolean("override_grid_deposit", info.override_grid_deposit);
-        flt("grid_density_deposit", info.grid_density_deposit);
-        flt("grid_temperature_deposit", info.grid_temperature_deposit);
-        flt("grid_fuel_deposit", info.grid_fuel_deposit);
-    };
-
-    particle.def("emitters", [emitterToDict]() -> py::list {
-        py::list out;
-        for (const rtapi::ParticleEmitterInfo& info : rtapi::listParticleEmitters())
-            out.append(emitterToDict(info));
-        return out;
-    });
-
-    particle.def("get_emitter", [emitterToDict](const std::string& emitter) {
-        rtapi::ParticleEmitterInfo info;
-        requireResult(rtapi::getParticleEmitter(emitter, info));
-        return emitterToDict(info);
-    }, py::arg("emitter"));
-
-    particle.def("add_emitter", [emitterToDict, patchEmitter](const py::kwargs& kwargs) {
-        rtapi::ParticleEmitterInfo info;   // facade defaults
-        patchEmitter(kwargs, info);
-        rtapi::ParticleEmitterInfo created;
-        requireResult(rtapi::addParticleEmitter(info, created));
-        return emitterToDict(created);
-    });
-
-    particle.def("set_emitter", [patchEmitter](const std::string& emitter, const py::kwargs& kwargs) {
-        rtapi::ParticleEmitterInfo info;
-        requireResult(rtapi::getParticleEmitter(emitter, info));
-        patchEmitter(kwargs, info);
-        requireResult(rtapi::updateParticleEmitter(emitter, info));
-    }, py::arg("emitter"));
-
-    // Timeline keys. Only the channels actually passed are keyed, so
-    //   rt.particle.key_emitter("Embers", 120, enabled=False)
-    // keys ONLY the switch and leaves rate/speed free to be keyed separately.
-    particle.def("key_emitter", [](const std::string& emitter, int frame,
-                                   const py::kwargs& kw) {
-        rtapi::ParticleEmitterKey key;
-        key.frame = frame;
-        if (kw.contains("enabled")) { key.has_enabled = true; key.enabled = py::cast<bool>(kw["enabled"]); }
-        if (kw.contains("rate_per_second")) { key.has_rate = true; key.rate_per_second = py::cast<float>(kw["rate_per_second"]); }
-        if (kw.contains("speed")) { key.has_speed = true; key.speed = py::cast<float>(kw["speed"]); }
-        if (kw.contains("spread")) { key.has_spread = true; key.spread = py::cast<float>(kw["spread"]); }
-        if (kw.contains("point")) { key.has_point = true; key.point = vec3FromPython(kw["point"]); }
-        if (kw.contains("direction")) { key.has_direction = true; key.direction = vec3FromPython(kw["direction"]); }
-        requireResult(rtapi::keyParticleEmitter(emitter, key));
-    }, py::arg("emitter"), py::arg("frame"));
-    particle.def("clear_emitter_key", [](const std::string& emitter, int frame) {
-        requireResult(rtapi::clearParticleEmitterKey(emitter, frame));
-    }, py::arg("emitter"), py::arg("frame"));
-    particle.def("remove_emitter", [](const std::string& emitter) {
-        requireResult(rtapi::removeParticleEmitter(emitter));
-    }, py::arg("emitter"));
-
-    particle.def("clear_emitters", []() { requireResult(rtapi::clearParticleEmitters()); });
-
-    // Systems, not particles. clear_emitters/flow_source.remove/collider.remove
-    // only ever touch the ACTIVE system; these reach the rest.
-    particle.def("list_systems", []() -> py::list {
-        std::vector<rtapi::ParticleSystemInfo> systems;
-        requireResult(rtapi::listParticleSystems(systems));
-        py::list out;
-        for (const auto& s : systems) {
-            py::dict d;
-            d["index"] = s.index;
-            d["id"] = s.id;
-            d["name"] = s.name;
-            d["active"] = s.active;
-            d["emitter_only"] = s.emitter_only;
-            d["render_in_raytrace"] = s.render_in_raytrace;
-            d["domain_count"] = s.domain_count;
-            d["flow_source_count"] = s.flow_source_count;
-            d["emitter_count"] = s.emitter_count;
-            d["collider_count"] = s.collider_count;
-            out.append(d);
-        }
-        return out;
-    });
-
-    particle.def("set_system_emitter_only",
-                 [](const std::string& system, bool emitter_only) {
-        requireResult(rtapi::setParticleSystemEmitterOnly(system, emitter_only));
-    }, py::arg("system"), py::arg("emitter_only"),
-       "Use the system only as a gas/fluid emitter source, hiding carrier "
-       "particles from RayFusion, Solid and ray-traced renders.");
-
-    particle.def("add_system", [](const std::string& name) -> py::dict {
-        rtapi::ParticleSystemInfo info;
-        requireResult(rtapi::addParticleSystem(name, info));
-        py::dict d;
-        d["index"] = info.index;
-        d["id"] = info.id;
-        d["name"] = info.name;
-        d["active"] = info.active;
-        d["emitter_only"] = info.emitter_only;
-        d["render_in_raytrace"] = info.render_in_raytrace;
-        return d;
-    }, py::arg("name") = "Particle System",
-       "Create an empty independent particle system without applying a preset.");
-
-    particle.def("add_preset", [](const std::string& preset) -> py::dict {
-        rtapi::ParticleSystemInfo info;
-        requireResult(rtapi::addParticleSystemPreset(preset, info));
-        py::dict d;
-        d["index"] = info.index;
-        d["id"] = info.id;
-        d["name"] = info.name;
-        d["active"] = info.active;
-        d["domain_count"] = info.domain_count;
-        d["flow_source_count"] = info.flow_source_count;
-        d["emitter_count"] = info.emitter_count;
-        d["collider_count"] = info.collider_count;
-        return d;
-    }, py::arg("preset"),
-       "Create one of the authored particle presets additively. Slugs: campfire, "
-       "explosion, smoke, ground_burst, fireball, flamethrower, burning_fuel_spill, "
-       "ignited_fuel_jet, nuclear.");
-
-    particle.def("clear_systems", []() { requireResult(rtapi::clearParticleSystems()); });
-
-    particle.def("get_physics", []() -> py::dict {
-        rtapi::ParticlePhysicsInfo info;
-        requireResult(rtapi::getParticlePhysics(info));
-        py::dict d;
-        d["mode"] = info.mode;
-        d["quality"] = info.quality;
-        d["particle_radius"] = info.particle_radius;
-        d["self_collision_enabled"] = info.self_collision_enabled;
-        d["solver_iterations"] = info.solver_iterations;
-        d["max_neighbors_per_particle"] = info.max_neighbors_per_particle;
-        d["viscosity"] = info.viscosity;
-        d["cohesion"] = info.cohesion;
-        d["pressure_stiffness"] = info.pressure_stiffness;
-        d["rest_density"] = info.rest_density;
-        d["buoyancy"] = info.buoyancy;
-        d["gravity_scale"] = info.gravity_scale;
-        d["vorticity"] = info.vorticity;
-        d["grid_density_deposit"] = info.grid_density_deposit;
-        d["grid_temperature_deposit"] = info.grid_temperature_deposit;
-        d["grid_fuel_deposit"] = info.grid_fuel_deposit;
-        d["grid_deposit_fade_with_age"] = info.grid_deposit_fade_with_age;
-        return d;
-    });
-
-    particle.def("set_physics", [](const py::kwargs& kwargs) {
-        rtapi::ParticlePhysicsInfo info;
-        requireResult(rtapi::getParticlePhysics(info));
-        auto str = [&](const char* key, std::string& target) {
-            if (kwargs.contains(key)) target = py::cast<std::string>(kwargs[key]);
-        };
-        auto flt = [&](const char* key, float& target) {
-            if (kwargs.contains(key)) target = py::cast<float>(kwargs[key]);
-        };
-        auto integer = [&](const char* key, int& target) {
-            if (kwargs.contains(key)) target = py::cast<int>(kwargs[key]);
-        };
-        auto boolean = [&](const char* key, bool& target) {
-            if (kwargs.contains(key)) target = py::cast<bool>(kwargs[key]);
-        };
-        str("mode", info.mode); str("quality", info.quality);
-        flt("particle_radius", info.particle_radius);
-        boolean("self_collision_enabled", info.self_collision_enabled);
-        integer("solver_iterations", info.solver_iterations);
-        integer("max_neighbors_per_particle", info.max_neighbors_per_particle);
-        flt("viscosity", info.viscosity); flt("cohesion", info.cohesion);
-        flt("pressure_stiffness", info.pressure_stiffness);
-        flt("rest_density", info.rest_density); flt("buoyancy", info.buoyancy);
-        flt("gravity_scale", info.gravity_scale); flt("vorticity", info.vorticity);
-        flt("grid_density_deposit", info.grid_density_deposit);
-        flt("grid_temperature_deposit", info.grid_temperature_deposit);
-        flt("grid_fuel_deposit", info.grid_fuel_deposit);
-        boolean("grid_deposit_fade_with_age", info.grid_deposit_fade_with_age);
-        requireResult(rtapi::updateParticlePhysics(info));
-    });
-
-    particle.def("stats", []() -> py::dict {
-        rtapi::ParticleStatsInfo info;
-        requireResult(rtapi::getParticleStats(info));
-        py::dict d;
-        d["alive_count"] = info.alive_count;
-        d["capacity"] = info.capacity;
-        d["emitter_count"] = info.emitter_count;
-        d["collider_count"] = info.collider_count;
-        d["domain_count"] = info.domain_count;
-        d["total_ms"] = info.total_ms;
-        d["emit_ms"] = info.emit_ms;
-        d["integrate_ms"] = info.integrate_ms;
-        d["self_collision_ms"] = info.self_collision_ms;
-        d["grid_domain_ms"] = info.grid_domain_ms;
-        return d;
-    });
-
-    particle.def("spawn", [](const py::handle& position, const py::handle& velocity,
-                             float lifetime_seconds, float mass, float size) {
-        int index = -1;
-        requireResult(rtapi::spawnParticle(vec3FromPython(position), vec3FromPython(velocity),
-                                           lifetime_seconds, mass, size, index));
-        return index;
-    }, py::arg("position") = py::make_tuple(0.0f, 1.0f, 0.0f),
-       py::arg("velocity") = py::make_tuple(0.0f, 0.0f, 0.0f),
-       py::arg("lifetime_seconds") = 5.0f, py::arg("mass") = 1.0f, py::arg("size") = 0.05f);
-
-    particle.def("clear", []() { requireResult(rtapi::clearParticles()); });
-
-    particle.def("step", [](float dt) {
-        requireResult(rtapi::stepParticleSimulation(dt));
-    }, py::arg("dt") = 0.0166667f);
+    // rt.particle lives in RtPythonParticle.cpp (particle roadmap Phase 1).
+    rtpy::registerParticleBindings(module);
 
     // ── Fluid & Gas Simulation Engine (Faz 5.3b) ────────────────────────
     py::module_ fluid = module.def_submodule("fluid", "APIC liquid & fluid domain simulation");
@@ -1714,6 +1430,41 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_residual_strength"] = info.granular_residual_strength;
         d["granular_tack_peak"] = info.granular_tack_peak;
         d["granular_thermal_conductivity"] = info.granular_thermal_conductivity;
+        d["surface_resolution_multiplier"] = info.surface_resolution_multiplier;
+        d["kernel_radius_voxels"] = info.kernel_radius_voxels;
+        d["particle_radius_voxels"] = info.particle_radius_voxels;
+        d["narrow_band_voxels"] = info.narrow_band_voxels;
+        d["smoothing_iterations"] = info.smoothing_iterations;
+        d["anisotropy_enabled"] = info.anisotropy_enabled;
+        d["anisotropy_radius_voxels"] = info.anisotropy_radius_voxels;
+        d["anisotropy_max_stretch"] = info.anisotropy_max_stretch;
+        d["anisotropy_neighbor_min"] = info.anisotropy_neighbor_min;
+        d["position_smoothing"] = info.position_smoothing;
+        d["surface_measured"] = info.surface_measured;
+        d["surface_voxel"] = info.surface_voxel;
+        d["surface_build_ms"] = info.surface_build_ms;
+        d["surface_active_cells"] = info.surface_active_cells;
+        d["thermal_liquid_enabled"] = info.thermal_liquid_enabled;
+        d["thermal_air_cooling_rate"] = info.thermal_air_cooling_rate;
+        d["thermal_contact_cooling_rate"] = info.thermal_contact_cooling_rate;
+        d["thermal_freeze_kelvin"] = info.thermal_freeze_kelvin;
+        d["thermal_viscosity_range"] = info.thermal_viscosity_range;
+        d["thermal_cold_viscosity"] = info.thermal_cold_viscosity;
+        d["thermal_ambient_kelvin"] = info.thermal_ambient_kelvin;
+        d["thermal_measured"] = info.thermal_measured;
+        d["thermal_frozen_particles"] = info.thermal_frozen_particles;
+        d["thermal_froze_this_frame"] = info.thermal_froze_this_frame;
+        d["thermal_melted_this_frame"] = info.thermal_melted_this_frame;
+        d["thermal_cold_unsupported"] = info.thermal_cold_unsupported;
+        d["thermal_air_cooled_particles"] = info.thermal_air_cooled_particles;
+        d["thermal_contact_cooled_particles"] = info.thermal_contact_cooled_particles;
+        d["thermal_min_kelvin"] = info.thermal_min_kelvin;
+        d["thermal_mean_kelvin"] = info.thermal_mean_kelvin;
+        d["thermal_max_kelvin"] = info.thermal_max_kelvin;
+        d["thermal_viscosity_field"] = info.thermal_viscosity_field;
+        d["thermal_min_viscosity"] = info.thermal_min_viscosity;
+        d["thermal_max_viscosity"] = info.thermal_max_viscosity;
+        d["surface_grid_dim"] = py::make_tuple(info.surface_grid_dim[0], info.surface_grid_dim[1], info.surface_grid_dim[2]);
         d["granular_yielded"] = info.granular_yielded_particles;
         d["granular_detached"] = info.granular_detached_particles;
         d["granular_invalid"] = info.granular_invalid_particles;
@@ -1859,6 +1610,41 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_residual_strength"] = info.granular_residual_strength;
         d["granular_tack_peak"] = info.granular_tack_peak;
         d["granular_thermal_conductivity"] = info.granular_thermal_conductivity;
+        d["surface_resolution_multiplier"] = info.surface_resolution_multiplier;
+        d["kernel_radius_voxels"] = info.kernel_radius_voxels;
+        d["particle_radius_voxels"] = info.particle_radius_voxels;
+        d["narrow_band_voxels"] = info.narrow_band_voxels;
+        d["smoothing_iterations"] = info.smoothing_iterations;
+        d["anisotropy_enabled"] = info.anisotropy_enabled;
+        d["anisotropy_radius_voxels"] = info.anisotropy_radius_voxels;
+        d["anisotropy_max_stretch"] = info.anisotropy_max_stretch;
+        d["anisotropy_neighbor_min"] = info.anisotropy_neighbor_min;
+        d["position_smoothing"] = info.position_smoothing;
+        d["surface_measured"] = info.surface_measured;
+        d["surface_voxel"] = info.surface_voxel;
+        d["surface_build_ms"] = info.surface_build_ms;
+        d["surface_active_cells"] = info.surface_active_cells;
+        d["thermal_liquid_enabled"] = info.thermal_liquid_enabled;
+        d["thermal_air_cooling_rate"] = info.thermal_air_cooling_rate;
+        d["thermal_contact_cooling_rate"] = info.thermal_contact_cooling_rate;
+        d["thermal_freeze_kelvin"] = info.thermal_freeze_kelvin;
+        d["thermal_viscosity_range"] = info.thermal_viscosity_range;
+        d["thermal_cold_viscosity"] = info.thermal_cold_viscosity;
+        d["thermal_ambient_kelvin"] = info.thermal_ambient_kelvin;
+        d["thermal_measured"] = info.thermal_measured;
+        d["thermal_frozen_particles"] = info.thermal_frozen_particles;
+        d["thermal_froze_this_frame"] = info.thermal_froze_this_frame;
+        d["thermal_melted_this_frame"] = info.thermal_melted_this_frame;
+        d["thermal_cold_unsupported"] = info.thermal_cold_unsupported;
+        d["thermal_air_cooled_particles"] = info.thermal_air_cooled_particles;
+        d["thermal_contact_cooled_particles"] = info.thermal_contact_cooled_particles;
+        d["thermal_min_kelvin"] = info.thermal_min_kelvin;
+        d["thermal_mean_kelvin"] = info.thermal_mean_kelvin;
+        d["thermal_max_kelvin"] = info.thermal_max_kelvin;
+        d["thermal_viscosity_field"] = info.thermal_viscosity_field;
+        d["thermal_min_viscosity"] = info.thermal_min_viscosity;
+        d["thermal_max_viscosity"] = info.thermal_max_viscosity;
+        d["surface_grid_dim"] = py::make_tuple(info.surface_grid_dim[0], info.surface_grid_dim[1], info.surface_grid_dim[2]);
             d["granular_yielded"] = info.granular_yielded_particles;
             d["granular_detached"] = info.granular_detached_particles;
             d["granular_invalid"] = info.granular_invalid_particles;
@@ -1986,6 +1772,41 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_residual_strength"] = info.granular_residual_strength;
         d["granular_tack_peak"] = info.granular_tack_peak;
         d["granular_thermal_conductivity"] = info.granular_thermal_conductivity;
+        d["surface_resolution_multiplier"] = info.surface_resolution_multiplier;
+        d["kernel_radius_voxels"] = info.kernel_radius_voxels;
+        d["particle_radius_voxels"] = info.particle_radius_voxels;
+        d["narrow_band_voxels"] = info.narrow_band_voxels;
+        d["smoothing_iterations"] = info.smoothing_iterations;
+        d["anisotropy_enabled"] = info.anisotropy_enabled;
+        d["anisotropy_radius_voxels"] = info.anisotropy_radius_voxels;
+        d["anisotropy_max_stretch"] = info.anisotropy_max_stretch;
+        d["anisotropy_neighbor_min"] = info.anisotropy_neighbor_min;
+        d["position_smoothing"] = info.position_smoothing;
+        d["surface_measured"] = info.surface_measured;
+        d["surface_voxel"] = info.surface_voxel;
+        d["surface_build_ms"] = info.surface_build_ms;
+        d["surface_active_cells"] = info.surface_active_cells;
+        d["thermal_liquid_enabled"] = info.thermal_liquid_enabled;
+        d["thermal_air_cooling_rate"] = info.thermal_air_cooling_rate;
+        d["thermal_contact_cooling_rate"] = info.thermal_contact_cooling_rate;
+        d["thermal_freeze_kelvin"] = info.thermal_freeze_kelvin;
+        d["thermal_viscosity_range"] = info.thermal_viscosity_range;
+        d["thermal_cold_viscosity"] = info.thermal_cold_viscosity;
+        d["thermal_ambient_kelvin"] = info.thermal_ambient_kelvin;
+        d["thermal_measured"] = info.thermal_measured;
+        d["thermal_frozen_particles"] = info.thermal_frozen_particles;
+        d["thermal_froze_this_frame"] = info.thermal_froze_this_frame;
+        d["thermal_melted_this_frame"] = info.thermal_melted_this_frame;
+        d["thermal_cold_unsupported"] = info.thermal_cold_unsupported;
+        d["thermal_air_cooled_particles"] = info.thermal_air_cooled_particles;
+        d["thermal_contact_cooled_particles"] = info.thermal_contact_cooled_particles;
+        d["thermal_min_kelvin"] = info.thermal_min_kelvin;
+        d["thermal_mean_kelvin"] = info.thermal_mean_kelvin;
+        d["thermal_max_kelvin"] = info.thermal_max_kelvin;
+        d["thermal_viscosity_field"] = info.thermal_viscosity_field;
+        d["thermal_min_viscosity"] = info.thermal_min_viscosity;
+        d["thermal_max_viscosity"] = info.thermal_max_viscosity;
+        d["surface_grid_dim"] = py::make_tuple(info.surface_grid_dim[0], info.surface_grid_dim[1], info.surface_grid_dim[2]);
         d["granular_yielded"] = info.granular_yielded_particles;
         d["granular_detached"] = info.granular_detached_particles;
         d["granular_invalid"] = info.granular_invalid_particles;
@@ -2287,6 +2108,30 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         float granular_cond=0.0f;const float* p_granular_cond=nullptr;
         if(kwargs.contains("granular_thermal_conductivity")){granular_cond=py::cast<float>(kwargs["granular_thermal_conductivity"]);p_granular_cond=&granular_cond;}
 
+        // Same split as the IPC fluid.set_param: surface + thermal keys go to
+        // their own API calls, applied after the main update (a preset in the
+        // same call must not undo explicit thermal keys).
+        rtapi::FluidSurfaceDetailPatch surface_patch;
+        bool has_surface_patch = false;
+        if(kwargs.contains("surface_resolution_multiplier")){surface_patch.surface_resolution_multiplier=py::cast<int>(kwargs["surface_resolution_multiplier"]);has_surface_patch=true;}
+        if(kwargs.contains("kernel_radius_voxels")){surface_patch.kernel_radius_voxels=py::cast<float>(kwargs["kernel_radius_voxels"]);has_surface_patch=true;}
+        if(kwargs.contains("particle_radius_voxels")){surface_patch.particle_radius_voxels=py::cast<float>(kwargs["particle_radius_voxels"]);has_surface_patch=true;}
+        if(kwargs.contains("narrow_band_voxels")){surface_patch.narrow_band_voxels=py::cast<float>(kwargs["narrow_band_voxels"]);has_surface_patch=true;}
+        if(kwargs.contains("smoothing_iterations")){surface_patch.smoothing_iterations=py::cast<int>(kwargs["smoothing_iterations"]);has_surface_patch=true;}
+        if(kwargs.contains("anisotropy_enabled")){surface_patch.anisotropy_enabled=py::cast<bool>(kwargs["anisotropy_enabled"]);has_surface_patch=true;}
+        if(kwargs.contains("anisotropy_radius_voxels")){surface_patch.anisotropy_radius_voxels=py::cast<float>(kwargs["anisotropy_radius_voxels"]);has_surface_patch=true;}
+        if(kwargs.contains("anisotropy_max_stretch")){surface_patch.anisotropy_max_stretch=py::cast<float>(kwargs["anisotropy_max_stretch"]);has_surface_patch=true;}
+        if(kwargs.contains("anisotropy_neighbor_min")){surface_patch.anisotropy_neighbor_min=py::cast<int>(kwargs["anisotropy_neighbor_min"]);has_surface_patch=true;}
+        if(kwargs.contains("position_smoothing")){surface_patch.position_smoothing=py::cast<float>(kwargs["position_smoothing"]);has_surface_patch=true;}
+        rtapi::FluidThermalPatch thermal_patch;
+        bool has_thermal_patch = false;
+        if(kwargs.contains("thermal_liquid_enabled")){thermal_patch.enabled=py::cast<bool>(kwargs["thermal_liquid_enabled"]);has_thermal_patch=true;}
+        if(kwargs.contains("thermal_air_cooling_rate")){thermal_patch.air_cooling_rate=py::cast<float>(kwargs["thermal_air_cooling_rate"]);has_thermal_patch=true;}
+        if(kwargs.contains("thermal_contact_cooling_rate")){thermal_patch.contact_cooling_rate=py::cast<float>(kwargs["thermal_contact_cooling_rate"]);has_thermal_patch=true;}
+        if(kwargs.contains("thermal_freeze_kelvin")){thermal_patch.freeze_kelvin=py::cast<float>(kwargs["thermal_freeze_kelvin"]);has_thermal_patch=true;}
+        if(kwargs.contains("thermal_viscosity_range")){thermal_patch.viscosity_range=py::cast<float>(kwargs["thermal_viscosity_range"]);has_thermal_patch=true;}
+        if(kwargs.contains("thermal_cold_viscosity")){thermal_patch.cold_viscosity=py::cast<float>(kwargs["thermal_cold_viscosity"]);has_thermal_patch=true;}
+
         requireResult(rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_vs, p_rm, p_dev, p_bound, p_preset, p_visc, p_sweeps, p_slip, p_surf_mat,
                                                p_surface_offset,
                                                p_pore_amt, p_pore_scl, p_pore_det, p_coord,
@@ -2301,6 +2146,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                                                p_granular_soft_temp,p_granular_soft_range,
                                                p_granular_residual,
                                                p_granular_tack, p_granular_cond));
+        if (has_thermal_patch) requireResult(rtapi::setFluidThermal(domain, thermal_patch));
+        if (has_surface_patch) requireResult(rtapi::setFluidSurfaceDetail(domain, surface_patch));
     }, py::arg("domain"));
 
     fluid.def("reset", []() {
@@ -2628,6 +2475,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["fluid_velocity_spread"] = s.fluid_velocity_spread;
         d["fluid_emit_along_normal"] = s.fluid_emit_along_normal;
         d["fluid_substance"] = s.fluid_substance;
+        d["fluid_temperature_override"] = s.fluid_temperature_override;
+        d["fluid_temperature_kelvin"] = s.fluid_temperature_kelvin;
         d["use_time_limit"] = s.use_time_limit;
         d["start_time"] = s.start_time; d["end_time"] = s.end_time;
         d["use_particle_limit"] = s.use_particle_limit;
@@ -2648,6 +2497,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_FLOW_KW(fluid_velocity_spread, float);
         RT_FLOW_KW(fluid_emit_along_normal, bool);
         RT_FLOW_KW(fluid_substance, std::string);
+        RT_FLOW_KW(fluid_temperature_override, bool);
+        RT_FLOW_KW(fluid_temperature_kelvin, float);
         RT_FLOW_KW(use_time_limit, bool);
         RT_FLOW_KW(start_time, float); RT_FLOW_KW(end_time, float);
         RT_FLOW_KW(use_particle_limit, bool); RT_FLOW_KW(max_emitted_particles, int);
@@ -2829,6 +2680,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     collider.def("rebuild_sdf", [](const std::string& name) {
         requireResult(rtapi::rebuildSimulationColliderSDF(name));
     }, py::arg("name"), "Force an asynchronous rebuild of a mesh_sdf collider");
+    rtpy::registerKinematicColliderBindings(collider);
 
     // Material State Field: what scene objects are MADE of. Substance names are
     // assigned on the collider that represents the object, because MSF is keyed
@@ -4396,6 +4248,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::autosaveStatus(st));
         return autosaveStatusToDict(st);
     });
+    project.def("autosave_set", [](std::optional<bool> enabled,
+                                   std::optional<int> interval_sec) -> py::dict {
+        rtapi::AutosaveStatus st;
+        requireResult(rtapi::setAutosaveSettings(enabled, interval_sec, st));
+        return autosaveStatusToDict(st);
+    }, py::arg("enabled") = py::none(), py::arg("interval_sec") = py::none());
     project.def("open", [](const std::string& path) {
         requireResult(rtapi::openProject(path));
     }, py::arg("path"));

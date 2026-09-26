@@ -376,6 +376,12 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_params"]["granular_residual_strength"] = d.fluid_params.granular_residual_strength;
     j["fluid_params"]["granular_tack_peak"] = d.fluid_params.granular_tack_peak;
     j["fluid_params"]["granular_thermal_conductivity"] = d.fluid_params.granular_thermal_conductivity;
+    j["fluid_params"]["thermal_liquid_enabled"] = d.fluid_params.thermal_liquid_enabled;
+    j["fluid_params"]["thermal_air_cooling_rate"] = d.fluid_params.thermal_air_cooling_rate;
+    j["fluid_params"]["thermal_contact_cooling_rate"] = d.fluid_params.thermal_contact_cooling_rate;
+    j["fluid_params"]["thermal_freeze_kelvin"] = d.fluid_params.thermal_freeze_kelvin;
+    j["fluid_params"]["thermal_viscosity_range"] = d.fluid_params.thermal_viscosity_range;
+    j["fluid_params"]["thermal_cold_viscosity"] = d.fluid_params.thermal_cold_viscosity;
     j["fluid_params"]["granular_friction_angle_degrees"] = d.fluid_params.granular_friction_angle_degrees;
     j["fluid_params"]["granular_cohesion"] = d.fluid_params.granular_cohesion;
     j["fluid_params"]["granular_dilatancy_degrees"] = d.fluid_params.granular_dilatancy_degrees;
@@ -589,6 +595,13 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fp.contains("granular_residual_strength")) d.fluid_params.granular_residual_strength = fp["granular_residual_strength"];
         if (fp.contains("granular_tack_peak")) d.fluid_params.granular_tack_peak = fp["granular_tack_peak"];
         if (fp.contains("granular_thermal_conductivity")) d.fluid_params.granular_thermal_conductivity = fp["granular_thermal_conductivity"];
+        if (fp.contains("thermal_liquid_enabled")) d.fluid_params.thermal_liquid_enabled = fp["thermal_liquid_enabled"];
+        if (fp.contains("thermal_air_cooling_rate")) d.fluid_params.thermal_air_cooling_rate = fp["thermal_air_cooling_rate"];
+        if (fp.contains("thermal_contact_cooling_rate")) d.fluid_params.thermal_contact_cooling_rate = fp["thermal_contact_cooling_rate"];
+        if (fp.contains("thermal_freeze_kelvin")) d.fluid_params.thermal_freeze_kelvin = fp["thermal_freeze_kelvin"];
+        if (fp.contains("thermal_viscosity_range")) d.fluid_params.thermal_viscosity_range = fp["thermal_viscosity_range"];
+        if (fp.contains("thermal_cold_viscosity")) d.fluid_params.thermal_cold_viscosity = fp["thermal_cold_viscosity"];
+        d.fluid_params.sanitizeThermalLiquid();
         if (fp.contains("granular_friction_angle_degrees")) d.fluid_params.granular_friction_angle_degrees = fp["granular_friction_angle_degrees"];
         if (fp.contains("granular_cohesion")) d.fluid_params.granular_cohesion = fp["granular_cohesion"];
         if (fp.contains("granular_dilatancy_degrees")) d.fluid_params.granular_dilatancy_degrees = fp["granular_dilatancy_degrees"];
@@ -804,6 +817,8 @@ json flowSourceToJson(const RayTrophiSim::SimulationFlowSourceDesc& fs) {
     j["fluid_velocity_spread"] = fs.fluid_velocity_spread;
     j["fluid_emit_along_normal"] = fs.fluid_emit_along_normal;
     j["fluid_substance"] = fs.fluid_substance;
+    j["fluid_temperature_override"] = fs.fluid_temperature_override;
+    j["fluid_temperature_kelvin"] = fs.fluid_temperature_kelvin;
     j["use_time_limit"] = fs.use_time_limit;
     j["start_time"] = fs.start_time;
     j["end_time"] = fs.end_time;
@@ -834,6 +849,8 @@ RayTrophiSim::SimulationFlowSourceDesc jsonToFlowSource(const json& j) {
     if (j.contains("fluid_velocity_spread")) fs.fluid_velocity_spread = j["fluid_velocity_spread"];
     if (j.contains("fluid_emit_along_normal")) fs.fluid_emit_along_normal = j["fluid_emit_along_normal"];
     if (j.contains("fluid_substance")) fs.fluid_substance = j["fluid_substance"];
+    if (j.contains("fluid_temperature_override")) fs.fluid_temperature_override = j["fluid_temperature_override"];
+    if (j.contains("fluid_temperature_kelvin")) fs.fluid_temperature_kelvin = j["fluid_temperature_kelvin"];
     if (j.contains("use_time_limit")) fs.use_time_limit = j["use_time_limit"];
     if (j.contains("start_time")) fs.start_time = j["start_time"];
     if (j.contains("end_time")) fs.end_time = j["end_time"];

@@ -32,8 +32,28 @@ class RtIpcError(RuntimeError):
     """The engine refused the call. Carries the message the engine gave."""
 
 
+def _running_inside_the_app():
+    # `rt` is a PYBIND11_EMBEDDED_MODULE: importable only in the app's own
+    # interpreter, never from a terminal.
+    try:
+        import rt  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 class RtIpc:
     def __init__(self):
+        # ★ Refuse to run in-process. The script would hold the main thread
+        # while every IPC request waits FOR the main thread, so the first call
+        # dies with "main thread dispatch timeout" - which reads as the app
+        # being hung, not as the script being started from the wrong place.
+        if _running_inside_the_app():
+            raise RtIpcError(
+                "this is an IPC client: run it from a separate terminal "
+                "(python scripts\\test\\<script>.py) with the app open, not "
+                "from the app's script workspace - in-process it deadlocks "
+                "on the main thread")
         self._k32 = ctypes.windll.kernel32
         self._id = 0
         self.handle = self._k32.CreateFileW(

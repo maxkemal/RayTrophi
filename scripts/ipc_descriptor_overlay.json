@@ -1526,8 +1526,8 @@
     "tags": "simulation|advance"
   },
   "fluid.set_param": {
-    "summary": "Update any field of a fluid or gas domain: bounds, voxel size, solver backend, viscosity, granular constitutive settings, render mode and surface material",
-    "notes": "Overlay semantics - fields you do not send keep their value. Changing voxel_size or the bounds invalidates the bake for that domain.",
+    "summary": "Update any field of a fluid or gas domain: bounds, voxel size, solver backend, viscosity, granular constitutive settings, thermal liquid (cooling/freezing), surface reconstruction detail, render mode and surface material",
+    "notes": "Overlay semantics - fields you do not send keep their value. Changing voxel_size or the bounds invalidates the bake for that domain. Surface keys (surface_resolution_multiplier 1..4, kernel/particle radius, smoothing, anisotropy_*) refine the RENDERED surface without touching the simulation and are rejected out of range, not clamped. thermal_* keys drive the wax chain (preset 'wax' sets them all); read the result back as fluid.get thermal_frozen_particles / thermal_min_kelvin, and thermal_cold_unsupported > 0 with nothing frozen means the liquid is cold but touches no collider or closed wall. Thermal and surface keys are applied after preset, so a preset in the same call cannot undo them.",
     "requires": [
       "fluid.create_domain"
     ],
@@ -1961,16 +1961,59 @@
     "tags": "particles|solver"
   },
   "particle.set_physics": {
-    "summary": "Set the particle solver: mode, quality, rest density, viscosity, cohesion, self-collision and grid deposit rates",
+    "summary": "Set the particle solver: mode, quality, execution policy (auto|gpu_required|cpu), rest density, viscosity, cohesion, self-collision and grid deposit rates",
     "tags": "particles|solver|configure|sph"
   },
   "particle.stats": {
-    "summary": "Report live particle counts and per-stage solver timings",
-    "tags": "particles|measure|performance|verify"
+    "summary": "Report live particle counts, per-stage timings, which backend each stage ran on, and the particle step's own GPU transfers",
+    "tags": "particles|measure|performance|verify|backend|transfer",
+    "returns": "counts; *_ms stage timers; execution_policy, compute_backend, gpu_force_status, forces_on_gpu, step_blocked; stage_backends {emit, forces, integrate, scene_collision, self_collision}; gpu_force_ms; force_* and mirror_* transfer bytes/calls/ms; nonfinite_particles",
+    "notes": "Read gpu_force_status first: 'gpu' is the only value meaning the GPU force result was used; anything else names why the CPU ran it. gpu_force_ms covers the whole GPU force block including the per-step velocity download -- it is NOT inside integrate_ms. force_* and mirror_* count only the particle step's transfers; grid domains report theirs in fluid.step_stats / gas.step_stats. Values describe the LAST step: step once before reading, and do not read while the timeline is also stepping the same runtime.",
+    "related": "particle.step|particle.set_physics|particle.get_state_sample|fluid.step_stats"
   },
   "particle.step": {
     "summary": "Advance the particle solver by one timestep",
     "tags": "particles|advance"
+  },
+  "particle.get_system": {
+    "summary": "Return one particle system's id, name, enabled/visible state, blend mode and counts",
+    "tags": "particles|system|inspect",
+    "notes": "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system. A read never creates a system: with no system_id/system and no active system it fails."
+  },
+  "particle.set_system": {
+    "summary": "Rename a particle system or set its visible flag and blend_mode (additive|alpha)",
+    "tags": "particles|system|configure|rename",
+    "notes": "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system. Duplicate names are refused. enabled is read-only: the runtime simulates only while enabled AND visible, and the panel edits visible."
+  },
+  "particle.remove_system": {
+    "summary": "Remove one particle system with its emitters, colliders, domains and render state",
+    "tags": "particles|system|remove|delete",
+    "notes": "Requires system_id or system; there is no active-system default for a delete."
+  },
+  "particle.set_active_system": {
+    "summary": "Move the particle panel's selection focus, which is the default target of every particle call",
+    "tags": "particles|system|select|editor",
+    "notes": "Selection only: every system keeps simulating regardless of which is active. Prefer passing system_id to each call over relying on this."
+  },
+  "particle.get_render": {
+    "summary": "Read how a system's particles are drawn: carrier-only flag, RT instancing, shape, material look and weighted scene-mesh sources",
+    "tags": "particles|render|debris|material|inspect",
+    "notes": "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system. mesh_sources[].resolved is false when the named node no longer exists as a flat mesh; such a source renders nothing."
+  },
+  "particle.set_render": {
+    "summary": "Set how a system's particles are drawn: shape (sphere|cube|tetra|quad|scene_meshes), size, emission/roughness look and the weighted mesh_sources list",
+    "tags": "particles|render|debris|material|configure",
+    "notes": "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system. mesh_sources replaces the whole list ([{node_name, weight}]) and refuses a node that is not a flat mesh in the scene. emitter_only=true hides the carrier particles entirely."
+  },
+  "particle.key_emitter": {
+    "summary": "Key a particle emitter's channels (enabled, rate_per_second, speed, spread, point, direction) on a timeline frame",
+    "tags": "particles|timeline|keyframe|animate",
+    "notes": "Only the channels you pass are keyed, so two calls can key different channels on one frame. Address the emitter by index, name, 'uid:<n>' or emitter_uid. Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system."
+  },
+  "particle.clear_emitter_key": {
+    "summary": "Remove a particle emitter's key on one frame",
+    "tags": "particles|timeline|keyframe",
+    "notes": "Target a system with system_id (stable id from particle.list_systems) or system (panel index or name); neither = the ACTIVE system, i.e. the particle panel's selection. An explicit reference that does not resolve fails; it never falls back to the active system."
   },
   "terrain.list": {
     "summary": "List the terrain objects",
@@ -2758,7 +2801,7 @@
   },
   "project.autosave_now": {
     "summary": "Force-writes the session autosave now, ignoring the interval and the modified flag.",
-    "notes": "Writes the session autosave immediately, ignoring both the interval and the modified flag. Reports the FULL autosave status back, not just success, because the useful question after a failure is 'why did it not write' and the answer is in those fields. Autosave was a lie until 2026-09-16: the preference (auto_save_enabled, default true), the restore path (StartupMode::RestoreAutosave) and the Hub's 'Recover the last autosaved scene session' button all existed and NOTHING EVER WROTE THE FILE, so the recovery offered was of a file that could not exist. The writer also has to protect project identity: ProjectManager::saveProject sets current_file_path, renames an Untitled project after the file, and adds the path to the recent list -- correct for a user save, catastrophic for an autosave, because the user's next Ctrl+S would go to autosave.rtp instead of their project. The autosave unit restores path, name and the is_modified flag around the write; is_modified in particular, so an autosave never makes unsaved work look saved and silently suppress the quit prompt. The same writer is called on VK_ERROR_DEVICE_LOST before the viewport backend is torn down.",
+    "notes": "Writes the session autosave immediately, ignoring both the interval and the modified flag. Reports the FULL autosave status back, not just success, because the useful question after a failure is 'why did it not write' and the answer is in those fields. Autosave was a lie until 2026-09-16: the preference (auto_save_enabled, default true), the restore path (StartupMode::RestoreAutosave) and the Hub's 'Recover the last autosaved scene session' button all existed and NOTHING EVER WROTE THE FILE, so the recovery offered was of a file that could not exist. The writer also has to protect project identity: ProjectManager::saveProject sets current_file_path, renames an Untitled project after the file, and adds the path to the recent list -- correct for a user save, catastrophic for an autosave, because the user's next Ctrl+S would go to autosave.rtp instead of their project. Since 2026-09-25 the writer calls ProjectManager::saveProjectCopy, which never touches path, name, recent list, is_modified or texture save-dirty flags (swapping them back afterwards stopped being safe once interval writes moved to a background thread: a Ctrl+S mid-write would have saved into autosave.rtp). This forced call writes on the calling thread; interval writes run in the background and are skipped while the timeline plays. The same writer is called on VK_ERROR_DEVICE_LOST before the viewport backend is torn down.",
     "params": {
       "reason": {
         "description": "Tag recorded in last_reason so a later status read says what triggered the write. Defaults to 'manual'."
@@ -2767,7 +2810,19 @@
   },
   "project.autosave_status": {
     "summary": "Reads the autosave instrument without writing.",
-    "notes": "Reads the autosave instrument without writing. Read write_count FIRST: if it is 0 while the app has been open longer than interval_sec, autosave is not running at all. Then read skipped_unmodified -- if THAT is growing while write_count stays 0, the broken thing is not autosave but the is_modified flag, which is why the two counters are separate rather than one 'healthy' boolean. seconds_until_next goes negative only between the due moment and the next tick. file_exists plus file_bytes describe the file on disk, so a status that claims success while file_bytes stays 0 means the write path is reporting an outcome it did not achieve. last_reason distinguishes an interval write from the forced one taken on VK_ERROR_DEVICE_LOST."
+    "notes": "Reads the autosave instrument without writing. Read write_count FIRST: if it is 0 while the app has been open longer than interval_sec, autosave is not running at all. Then read skipped_unmodified -- if THAT is growing while write_count stays 0, the broken thing is not autosave but the is_modified flag, which is why the two counters are separate rather than one 'healthy' boolean. seconds_until_next goes negative only between the due moment and the next tick. file_exists plus file_bytes describe the file on disk, so a status that claims success while file_bytes stays 0 means the write path is reporting an outcome it did not achieve. last_reason distinguishes an interval write from the forced one taken on VK_ERROR_DEVICE_LOST. writing=true means an interval write is running in the background right now (the HUD shows 'Autosaving...')."
+  },
+  "project.autosave_set": {
+    "summary": "Set the persisted autosave preference: enabled and/or interval_sec.",
+    "notes": "Same preference as File > Project Save Options > Autosave and the Template Hub. Unset fields are left alone; interval_sec outside [30, 86400] is rejected, not clamped, and nothing is written when any field is invalid. Returns the full autosave status after the change.",
+    "params": {
+      "enabled": {
+        "description": "Turn interval autosave on or off."
+      },
+      "interval_sec": {
+        "description": "Seconds between interval writes, 30..86400."
+      }
+    }
   },
   "project.save": {
     "summary": "Save the project, optionally to a new path",
@@ -5747,5 +5802,97 @@
     "summary": "Translate a gas or fluid grid domain and carry its unparented flow sources with it",
     "tags": "domain|move|gas|fluid|emitter",
     "notes": "READ 'sources_carried'. Moving a domain used to move only the box: its emitters stayed at their old world positions, so the re-simulated smoke reappeared where it always had been -- which reads as a STALE CACHE rather than as stale emitters. Two symptoms, one cause, and the wrong story is the easier one to believe. A move that reports sources_carried = 0 on a domain that visibly owns emitters means those emitters are PARENTED: a parented source follows its parent object, not the domain, because one position cannot have two authorities. Keyframed source positions are translated too - moving only the live position looks correct until the next timeline evaluation writes the old keyed world position straight back. One method covers BOTH domain types because gas and fluid share SimulationGridDomainDesc; separate gas/fluid movers would be two bodies that must not diverge. The call also republishes the domain state (the solver and the RT volume read that, not the descriptor, and while the timeline is parked no step runs to publish it) and drops the frame cache, whose baked frames belong to the old box."
+  },
+  "particle.get_state_sample": {
+    "summary": "Read a bounded slice of live particle positions, velocities and ages plus whole-population centroid, mean velocity, bounds and NaN count",
+    "tags": "particles|measure|verify|state|baseline|compare",
+    "returns": "alive_count, capacity, returned, indices, positions, velocities, ages, centroid, mean_velocity, bounds_min, bounds_max, nonfinite",
+    "notes": "max_count is clamped to 4096; offset/stride walk alive particles in slot order. Aggregates cover ALL alive particles, so CPU vs GPU runs can be compared without a full dump. Non-finite particles are excluded from the aggregates and counted in nonfinite. Host state is authoritative today, so this costs no device transfer.",
+    "related": "particle.stats|particle.step|particle.set_physics"
+  },
+  "collider.list": {
+    "summary": "List the shared simulation colliders used by particles, fluid and gas",
+    "tags": "collider|simulation|particles|fluid|gas|list",
+    "returns": "colliders: array of collider objects (same keys as collider.get)",
+    "related": "collider.get|collider.create|particle.stats"
+  },
+  "collider.get": {
+    "summary": "Read one shared simulation collider by name",
+    "tags": "collider|simulation|read",
+    "notes": "Keys match rt.collider in Python one-to-one. source_mode: plane|sphere|capsule|aabb|obb|mesh_sdf|convex|mesh_bvh. One collider is shared by particles, APIC fluid (fluid_collision_enabled) and gas (gas_*). sdf_ready/sdf_resolution are read-only cook status.",
+    "related": "collider.list|collider.update"
+  },
+  "collider.create": {
+    "summary": "Create a shared simulation collider (plane, sphere, capsule, box, SDF, convex or mesh BVH) for particles, fluid and gas",
+    "tags": "collider|simulation|create|particles|fluid|gas|collision",
+    "notes": "Keys match rt.collider in Python one-to-one. source_mode: plane|sphere|capsule|aabb|obb|mesh_sdf|convex|mesh_bvh. One collider is shared by particles, APIC fluid (fluid_collision_enabled) and gas (gas_*). Object-bound modes need source_object; mesh_sdf cooks asynchronously, poll collider.get sdf_ready before relying on it.",
+    "related": "collider.update|collider.remove|collider.rebuild_sdf|particle.step"
+  },
+  "collider.update": {
+    "summary": "Patch fields of an existing shared simulation collider",
+    "tags": "collider|simulation|configure",
+    "notes": "Keys match rt.collider in Python one-to-one. source_mode: plane|sphere|capsule|aabb|obb|mesh_sdf|convex|mesh_bvh. One collider is shared by particles, APIC fluid (fluid_collision_enabled) and gas (gas_*). Only keys present in the request change; name selects the collider and is not renamed.",
+    "related": "collider.get|collider.create"
+  },
+  "collider.remove": {
+    "summary": "Remove a shared simulation collider",
+    "tags": "collider|simulation|remove",
+    "related": "collider.list|collider.create"
+  },
+  "collider.rebuild_sdf": {
+    "summary": "Force an asynchronous re-cook of a mesh_sdf collider",
+    "tags": "collider|sdf|rebuild",
+    "notes": "Returns immediately; poll collider.get until sdf_ready is true.",
+    "related": "collider.get|collider.create"
+  },
+  "physics.collider.proxy_set.list": {
+    "summary": "List bone-attached kinematic collider proxy sets",
+    "tags": "physics|collider|rig|kinematic|list",
+    "returns": "Proxy sets with stable ids, target character, consumer mask, contact material and authored proxies",
+    "related": "physics.collider.proxy_set.get|physics.collider.proxy_set.create"
+  },
+  "physics.collider.proxy_set.get": {
+    "summary": "Read one bone-attached kinematic collider proxy set",
+    "tags": "physics|collider|rig|kinematic|read",
+    "related": "physics.collider.proxy_set.list|physics.collider.proxy_set.sample"
+  },
+  "physics.collider.proxy_set.create": {
+    "summary": "Create a solver-neutral kinematic proxy set bound to a rig character",
+    "tags": "physics|collider|rig|kinematic|create",
+    "notes": "Creates an empty set. Add proxies explicitly or call auto_fit. K0 resolves target_character by name; target_node_id is reserved and rejected until K1 stable scene identity support. The same authored producer is intended for fluid, gas, granular and particle consumers.",
+    "related": "physics.collider.proxy_set.auto_fit|physics.collider.proxy.set"
+  },
+  "physics.collider.proxy_set.set": {
+    "summary": "Patch a kinematic proxy set and its shared contact/consumer settings",
+    "tags": "physics|collider|rig|kinematic|configure",
+    "related": "physics.collider.proxy_set.get|physics.collider.proxy.set"
+  },
+  "physics.collider.proxy_set.delete": {
+    "summary": "Delete a kinematic proxy set",
+    "tags": "physics|collider|rig|kinematic|delete",
+    "related": "physics.collider.proxy_set.list|physics.collider.proxy_set.create"
+  },
+  "physics.collider.proxy_set.auto_fit": {
+    "summary": "Generate capsule, sphere and foot-box proxies from a character skeleton",
+    "tags": "physics|collider|rig|kinematic|autofit",
+    "notes": "Auto-fit writes ordinary editable proxies. It is not a second runtime representation. Weighted bones are used by default and maximum_proxies bounds authoring and runtime cost.",
+    "related": "physics.collider.proxy.set|physics.collider.proxy_set.sample"
+  },
+  "physics.collider.proxy.set": {
+    "summary": "Create or patch one bone-local primitive proxy",
+    "tags": "physics|collider|rig|kinematic|proxy|configure",
+    "notes": "Omit proxy_id to create; provide it to patch. Shapes are sphere, capsule and box. Coordinates and dimensions are in bone-local scene units.",
+    "related": "physics.collider.proxy.delete|physics.collider.proxy_set.sample"
+  },
+  "physics.collider.proxy.delete": {
+    "summary": "Delete one primitive from a kinematic proxy set",
+    "tags": "physics|collider|rig|kinematic|proxy|delete",
+    "related": "physics.collider.proxy.set|physics.collider.proxy_set.get"
+  },
+  "physics.collider.proxy_set.sample": {
+    "summary": "Inspect resolved world transforms and linear/angular velocities for every proxy",
+    "tags": "physics|collider|rig|kinematic|measure|read",
+    "notes": "Read-only instrumentation: sampling uses a registry snapshot and cannot advance the solver's authoritative motion history. Unresolved bones are reported by reason and never emitted at the origin.",
+    "related": "physics.collider.proxy_set.get|physics.collider.proxy_set.auto_fit"
   }
 }

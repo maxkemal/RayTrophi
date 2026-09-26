@@ -1,8 +1,10 @@
 # Kinematic Collider Sources — characters and animated bodies as solver input
 
-> **Durum:** TASLAK — proposed 2026-09-24. Not implemented. Solver-neutral layer
-> that lets animated characters (bone-driven) push fluid, gas, granular
-> mud/snow and particles through the one collider path they already share.
+> **Durum:** AKTİF — 2026-09-25. K0 kaynak katmanı yazıldı; kullanıcı derlemesi
+> ve çalışma zamanı doğrulaması bekliyor. Kalıcılık, authoring UI, viewport
+> çizimi ve solver tüketimi sonraki aşamalardır. Katman, animasyonlu karakterlerin
+> fluid, gas, granular mud/snow ve particles alanlarını aynı collider girdisiyle
+> sürmesini hedefler.
 
 ## 1. Why this is its own layer
 
@@ -65,7 +67,8 @@ A new collider source kind: **proxy set bound to a skeleton**.
 ```text
 KinematicProxySet
   id, name
-  target: skinned object (stable node id + name fallback)
+  target: skinned object (character name in K0; stable node id + name fallback
+                          after K1 scene identity support)
   proxies[]
     bone name
     shape: Capsule | Sphere | OBB
@@ -97,14 +100,53 @@ An **auto-fit** helper generates a default proxy set from the skeleton and bind
 pose (capsule per long bone, sphere for head/hands, box for feet). Auto-fit is
 a convenience that writes ordinary proxies; it does not own state.
 
+### 4.1 Ownership and data flow
+
+```text
+Rig evaluated joint globals
+          |
+          v
+KinematicColliderRegistry -- authoring, stable IDs, validation
+          |
+          v
+KinematicColliderSampler  -- one pose cache per character per solver step
+          |
+          v
+KinematicColliderSnapshot -- transforms, endpoints, linear/angular velocity
+          |
+          +--> APIC fluid / granular / gas
+          +--> realtime particles (consumer only)
+          +--> MSF deposition/contact
+```
+
+`KinematicProxySet` is a separate registry, not another mode squeezed into a
+single rigid collider. UI, Python and IPC mutate this registry through the same
+core service. Solvers consume immutable sampled snapshots; they do not inspect
+the rig, own bone mappings, or repeat pose evaluation.
+
+### 4.2 Cost contract
+
+- Resolve a character's bone-name map once per sampling pass, not per proxy.
+- Sample the rig once per character per solver step and fan the result out to
+  all consumers.
+- Use analytic sphere/capsule/box proxies in the interactive tier; no deforming
+  mesh SDF rebuild or CPU vertex readback in the default path.
+- Keep authoring visualization analytic and instanced. Selection overlays may
+  be richer, but idle viewport cost must scale with visible proxies, not mesh
+  triangle count.
+- Default auto-fit is 64 proxies and the hard ceiling is 256 proxies per set;
+  the registry also accepts at most 256 sets. Imported production rigs and IPC
+  clients therefore cannot create an unbounded simulation workload.
+
 ## 5. Traps to check before writing code
 
-- **Unit of the bone matrix.** `getFinalBoneMatrices()` returns *skinning*
-  matrices (global pose × offset/inverse bind), not bone world transforms.
-  Feeding them directly as a proxy transform puts every proxy near the origin
-  or in bind space — and it will not crash. Bone world =
-  `final * inverse(offset)` (verify against the skinning shader's convention),
-  then × the object's world transform.
+- **Choose the right pose source.** The current rig path publishes evaluated
+  joint globals through `ImportedModelContext::rigJointGlobals`, and
+  `RigAuthoring::listBones()` applies `rigSceneTransform`; this is the canonical
+  proxy pose. Only a legacy fallback may recover a bone transform from a
+  skinning matrix (`final × inverse(offset)` after verifying conventions).
+  Feeding a skinning matrix directly to a proxy silently puts it in bind space
+  or near the origin.
 - **Frame rate vs step rate.** Collider velocity is `Δcentre / dt` with the
   solver's `dt`. If the animation pose advances once per frame but the solver
   takes several substeps, one substep sees the whole frame's motion and the
@@ -136,6 +178,33 @@ solver?" cannot be answered from outside. Panel editing is required too
 (reverse of rule 1): proxies are drawn and editable in the viewport.
 
 Four layers + capability + descriptor overlay, as usual.
+
+Current source surfaces:
+
+- Core: `KinematicColliderSource` and `KinematicColliderScene`.
+- Shared API: `Api/RtApiKinematicCollider`.
+- Python: `rt.collider.proxy_set.*`.
+- IPC: `physics.collider.proxy_set.*` and `physics.collider.proxy.*`.
+
+### 6.1 Delivery phases and collision boundary
+
+| Phase | Scope | State |
+|---|---|---|
+| K0 | Registry, validation, auto-fit, rig sampling, motion history, Python/IPC inspection | Source complete; build/runtime verification pending |
+| K1 | Scene persistence, contextual authoring panel, analytic viewport proxies and selection | Next |
+| K2 | One shared CPU snapshot consumed by APIC, granular and gas; substep interpolation and discontinuity resets | Planned |
+| K3 | Footprint, compaction, wake, smoke and teleport acceptance scenes with measurable IPC checks | Planned |
+| K4 | Stable snapshot/consumer handoff to the realtime particle system | Planned; particle roadmap owns GPU-side consumption |
+| K5 | Optional hero-quality deforming mesh producer with per-vertex velocity | Future |
+
+Until K4, this work does not modify particle simulation/GPU pipeline files.
+The particle implementation consumes the contract; it must not duplicate rig
+sampling, proxy authoring, or motion history.
+
+K0 resolves targets by character name because the current rig authoring API
+does not expose a scene-wide persistent node identity. `target_node_id` is
+reserved but rejected when non-empty; K1 must implement identity resolution
+before enabling that field. It must never be accepted and silently ignored.
 
 ## 7. Acceptance scenarios
 

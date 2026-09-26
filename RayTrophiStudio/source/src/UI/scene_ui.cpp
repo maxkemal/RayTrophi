@@ -16,6 +16,7 @@
 
 #include "scene_ui.h"
 #include "PerfProfile.h"
+#include "Autosave.h"
 #include <thread>
 #include <filesystem>
 #include <algorithm>
@@ -4103,6 +4104,29 @@ void SceneUI::draw(UIContext& ctx)
             bg_save_state = 0; // Reset
         }
         last_save_state = save_state;
+    }
+
+    // --- AUTOSAVE STATUS (background write, see Autosave.cpp) ---
+    {
+        static bool last_autosave_writing = false;
+        static uint64_t last_autosave_finished = 0;
+        const auto as = raytrophi::autosave::progress();
+        if (as.writing && !last_autosave_writing) {
+            addViewportMessage("Autosaving...", 300.0f, ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
+        }
+        if (as.finished != last_autosave_finished) {
+            clearViewportMessages();
+            if (as.last_ok) {
+                char msg[64];
+                std::snprintf(msg, sizeof(msg), "Autosaved (%.1f s)", as.last_write_ms / 1000.0);
+                addViewportMessage(msg, 2.0f, ImVec4(0.2f, 1.0f, 0.4f, 1.0f));
+            } else {
+                addViewportMessage("Autosave failed: " + as.last_error, 5.0f,
+                                   ImVec4(1.0f, 0.2f, 0.2f, 1.0f));
+            }
+            last_autosave_finished = as.finished;
+        }
+        last_autosave_writing = as.writing;
     }
 
     drawViewportMessages(ctx, left_offset); // Messages/HUD (e.g. Async Rebuild)

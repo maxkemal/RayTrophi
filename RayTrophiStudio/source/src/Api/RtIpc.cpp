@@ -33,6 +33,8 @@
 #include "RtIpcAudit.h"
 #include "RtIpcTransport.h"
 #include "RtIpcFracture.h"
+#include "RtIpcParticle.h"
+#include "RtIpcKinematicCollider.h"
 #include "RtIpcSecurity.h"
 #include "RtIpcTemplates.h"
 #include "RtIpcRayFusion.h"
@@ -341,6 +343,8 @@ json flowSourceToJson(const rtapi::SimulationFlowSourceInfo& s) {
         // anything meaningful, and comparing hashes across a rename would give a
         // difference nobody could interpret.
         {"fluid_substance", s.fluid_substance},
+        {"fluid_temperature_override", s.fluid_temperature_override},
+        {"fluid_temperature_kelvin", s.fluid_temperature_kelvin},
         {"use_time_limit", s.use_time_limit},
         {"start_time", s.start_time}, {"end_time", s.end_time},
         {"use_particle_limit", s.use_particle_limit},
@@ -371,6 +375,8 @@ void applyFlowSourceJson(rtapi::SimulationFlowSourceInfo& s, const json& p) {
     RT_FS_FIELD("fluid_velocity_spread", fluid_velocity_spread);
     RT_FS_FIELD("fluid_emit_along_normal", fluid_emit_along_normal);
     RT_FS_FIELD("fluid_substance", fluid_substance);
+    RT_FS_FIELD("fluid_temperature_override", fluid_temperature_override);
+    RT_FS_FIELD("fluid_temperature_kelvin", fluid_temperature_kelvin);
     RT_FS_FIELD("use_time_limit", use_time_limit);
     RT_FS_FIELD("start_time", start_time);
     RT_FS_FIELD("end_time", end_time);
@@ -432,76 +438,55 @@ json animPlaybackToJson(const rtapi::AnimPlaybackInfo& info) {
                 {"layer", info.layer}};
 }
 
-// Particle emitter / solver settings (Faz 5.6b) <-> JSON. Key names match the
-// Python dicts so a script ports between rt.particle and remote IPC verbatim.
-json particleEmitterToJson(const rtapi::ParticleEmitterInfo& info) {
+// Shared simulation colliders (rt.collider in Python). Keys match the Python
+// dict one-to-one, so a script and an IPC client describe a collider the same
+// way. Before this, colliders were Python-only: an IPC test could not put a
+// wall in front of a particle stream at all.
+json simulationColliderToJson(const rtapi::SimulationColliderInfo& c) {
     return json{
-        {"index", info.index}, {"name", info.name},
-        {"source_mode", info.source_mode}, {"spawn_mode", info.spawn_mode},
-        {"source_name", info.source_name}, {"enabled", info.enabled},
-        {"point", vec3ToJson(info.point)},
-        {"local_offset", vec3ToJson(info.local_offset)},
-        {"direction", vec3ToJson(info.direction)},
-        {"surface_offset", info.surface_offset},
-        {"rate_per_second", info.rate_per_second}, {"burst_count", info.burst_count},
-        {"speed", info.speed}, {"spread", info.spread},
-        {"lifetime_seconds", info.lifetime_seconds}, {"mass", info.mass},
-        {"start_size", info.start_size}, {"end_size", info.end_size},
-        {"size_jitter", info.size_jitter},
-        {"start_opacity", info.start_opacity}, {"end_opacity", info.end_opacity},
-        {"start_color", vec3ToJson(info.start_color)},
-        {"end_color", vec3ToJson(info.end_color)},
-        {"angular_velocity", info.angular_velocity},
-        {"angular_jitter", info.angular_jitter}, {"seed", info.seed}};
+        {"name", c.name}, {"source_mode", c.source_mode},
+        {"source_object", c.source_object}, {"enabled", c.enabled},
+        {"fluid_collision_enabled", c.fluid_collision_enabled},
+        {"plane_y", c.plane_y}, {"sphere_center", vec3ToJson(c.sphere_center)},
+        {"sphere_radius", c.sphere_radius},
+        {"capsule_start", vec3ToJson(c.capsule_start)},
+        {"capsule_end", vec3ToJson(c.capsule_end)},
+        {"capsule_radius", c.capsule_radius},
+        {"bounds_min", vec3ToJson(c.bounds_min)},
+        {"bounds_max", vec3ToJson(c.bounds_max)},
+        {"friction", c.friction}, {"restitution", c.restitution},
+        {"thickness", c.thickness},
+        {"sdf_resolution_mode", c.sdf_resolution_mode},
+        {"sdf_ready", c.sdf_ready}, {"sdf_resolution", c.sdf_resolution},
+        {"gas_interaction_enabled", c.gas_interaction_enabled},
+        {"gas_density_rate", c.gas_density_rate},
+        {"gas_temperature_rate", c.gas_temperature_rate},
+        {"gas_fuel_rate", c.gas_fuel_rate},
+        {"gas_flame_rate", c.gas_flame_rate},
+        {"gas_ignite_on_contact", c.gas_ignite_on_contact},
+        {"msf_substance", c.msf_substance},
+        {"msf_override_ignition", c.msf_override_ignition},
+        {"msf_ignition_kelvin", c.msf_ignition_kelvin},
+        {"msf_burn_rate_scale", c.msf_burn_rate_scale},
+        {"msf_fuel_capacity_scale", c.msf_fuel_capacity_scale},
+        {"msf_mask_resolution", c.msf_mask_resolution},
+        {"msf_generate_char_mask", c.msf_generate_char_mask},
+        {"msf_auto_transfer", c.msf_auto_transfer},
+        {"msf_transfer_domain", c.msf_transfer_domain},
+        {"msf_transfer_rate_kg_s", c.msf_transfer_rate_kg_s},
+        {"msf_transfer_min_mass_kg", c.msf_transfer_min_mass_kg},
+        {"msf_transfer_particles_per_kg", c.msf_transfer_particles_per_kg},
+        {"msf_transfer_max_batch_particles", c.msf_transfer_max_batch_particles},
+        {"msf_transfer_velocity", vec3ToJson(c.msf_transfer_velocity)},
+        {"msf_melt_flow_enabled", c.msf_melt_flow_enabled},
+        {"msf_melt_height_loss", c.msf_melt_height_loss},
+        {"msf_melt_spread", c.msf_melt_spread},
+        {"msf_melt_sdf_refresh", c.msf_melt_sdf_refresh},
+        {"msf_melt_sdf_revision_interval", c.msf_melt_sdf_revision_interval},
+        {"msf_melt_sdf_change_threshold", c.msf_melt_sdf_change_threshold}};
 }
 
-void applyParticleEmitterPatch(const json& patch, rtapi::ParticleEmitterInfo& info) {
-    auto str = [&](const char* key, std::string& target) {
-        if (patch.contains(key)) target = patch[key].get<std::string>();
-    };
-    auto flt = [&](const char* key, float& target) {
-        if (patch.contains(key)) target = patch[key].get<float>();
-    };
-    auto vector = [&](const char* key, Vec3& target) {
-        if (patch.contains(key)) target = requireVec3(patch, key);
-    };
-    str("name", info.name); str("source_mode", info.source_mode);
-    str("spawn_mode", info.spawn_mode); str("source_name", info.source_name);
-    if (patch.contains("enabled")) info.enabled = patch["enabled"].get<bool>();
-    vector("point", info.point); vector("local_offset", info.local_offset);
-    vector("direction", info.direction);
-    flt("surface_offset", info.surface_offset);
-    flt("rate_per_second", info.rate_per_second);
-    if (patch.contains("burst_count")) info.burst_count = patch["burst_count"].get<int>();
-    flt("speed", info.speed); flt("spread", info.spread);
-    flt("lifetime_seconds", info.lifetime_seconds); flt("mass", info.mass);
-    flt("start_size", info.start_size); flt("end_size", info.end_size);
-    flt("size_jitter", info.size_jitter);
-    flt("start_opacity", info.start_opacity); flt("end_opacity", info.end_opacity);
-    vector("start_color", info.start_color); vector("end_color", info.end_color);
-    flt("angular_velocity", info.angular_velocity);
-    flt("angular_jitter", info.angular_jitter);
-    if (patch.contains("seed")) info.seed = patch["seed"].get<unsigned int>();
-}
-
-json particlePhysicsToJson(const rtapi::ParticlePhysicsInfo& info) {
-    return json{
-        {"mode", info.mode}, {"quality", info.quality},
-        {"particle_radius", info.particle_radius},
-        {"self_collision_enabled", info.self_collision_enabled},
-        {"solver_iterations", info.solver_iterations},
-        {"max_neighbors_per_particle", info.max_neighbors_per_particle},
-        {"viscosity", info.viscosity}, {"cohesion", info.cohesion},
-        {"pressure_stiffness", info.pressure_stiffness},
-        {"rest_density", info.rest_density}, {"buoyancy", info.buoyancy},
-        {"gravity_scale", info.gravity_scale}, {"vorticity", info.vorticity},
-        {"grid_density_deposit", info.grid_density_deposit},
-        {"grid_temperature_deposit", info.grid_temperature_deposit},
-        {"grid_fuel_deposit", info.grid_fuel_deposit},
-        {"grid_deposit_fade_with_age", info.grid_deposit_fade_with_age}};
-}
-
-void applyParticlePhysicsPatch(const json& patch, rtapi::ParticlePhysicsInfo& info) {
+void applySimulationColliderPatch(const json& patch, rtapi::SimulationColliderInfo& c) {
     auto str = [&](const char* key, std::string& target) {
         if (patch.contains(key)) target = patch[key].get<std::string>();
     };
@@ -511,22 +496,51 @@ void applyParticlePhysicsPatch(const json& patch, rtapi::ParticlePhysicsInfo& in
     auto integer = [&](const char* key, int& target) {
         if (patch.contains(key)) target = patch[key].get<int>();
     };
+    auto unsigned32 = [&](const char* key, uint32_t& target) {
+        if (patch.contains(key)) target = patch[key].get<uint32_t>();
+    };
     auto boolean = [&](const char* key, bool& target) {
         if (patch.contains(key)) target = patch[key].get<bool>();
     };
-    str("mode", info.mode); str("quality", info.quality);
-    flt("particle_radius", info.particle_radius);
-    boolean("self_collision_enabled", info.self_collision_enabled);
-    integer("solver_iterations", info.solver_iterations);
-    integer("max_neighbors_per_particle", info.max_neighbors_per_particle);
-    flt("viscosity", info.viscosity); flt("cohesion", info.cohesion);
-    flt("pressure_stiffness", info.pressure_stiffness);
-    flt("rest_density", info.rest_density); flt("buoyancy", info.buoyancy);
-    flt("gravity_scale", info.gravity_scale); flt("vorticity", info.vorticity);
-    flt("grid_density_deposit", info.grid_density_deposit);
-    flt("grid_temperature_deposit", info.grid_temperature_deposit);
-    flt("grid_fuel_deposit", info.grid_fuel_deposit);
-    boolean("grid_deposit_fade_with_age", info.grid_deposit_fade_with_age);
+    auto vector = [&](const char* key, Vec3& target) {
+        if (patch.contains(key)) target = requireVec3(patch, key);
+    };
+    str("source_mode", c.source_mode); str("source_object", c.source_object);
+    boolean("enabled", c.enabled);
+    boolean("fluid_collision_enabled", c.fluid_collision_enabled);
+    flt("plane_y", c.plane_y);
+    vector("sphere_center", c.sphere_center); flt("sphere_radius", c.sphere_radius);
+    vector("capsule_start", c.capsule_start); vector("capsule_end", c.capsule_end);
+    flt("capsule_radius", c.capsule_radius);
+    vector("bounds_min", c.bounds_min); vector("bounds_max", c.bounds_max);
+    flt("friction", c.friction); flt("restitution", c.restitution);
+    flt("thickness", c.thickness);
+    integer("sdf_resolution_mode", c.sdf_resolution_mode);
+    boolean("gas_interaction_enabled", c.gas_interaction_enabled);
+    flt("gas_density_rate", c.gas_density_rate);
+    flt("gas_temperature_rate", c.gas_temperature_rate);
+    flt("gas_fuel_rate", c.gas_fuel_rate); flt("gas_flame_rate", c.gas_flame_rate);
+    boolean("gas_ignite_on_contact", c.gas_ignite_on_contact);
+    str("msf_substance", c.msf_substance);
+    boolean("msf_override_ignition", c.msf_override_ignition);
+    flt("msf_ignition_kelvin", c.msf_ignition_kelvin);
+    flt("msf_burn_rate_scale", c.msf_burn_rate_scale);
+    flt("msf_fuel_capacity_scale", c.msf_fuel_capacity_scale);
+    integer("msf_mask_resolution", c.msf_mask_resolution);
+    boolean("msf_generate_char_mask", c.msf_generate_char_mask);
+    boolean("msf_auto_transfer", c.msf_auto_transfer);
+    str("msf_transfer_domain", c.msf_transfer_domain);
+    flt("msf_transfer_rate_kg_s", c.msf_transfer_rate_kg_s);
+    flt("msf_transfer_min_mass_kg", c.msf_transfer_min_mass_kg);
+    flt("msf_transfer_particles_per_kg", c.msf_transfer_particles_per_kg);
+    unsigned32("msf_transfer_max_batch_particles", c.msf_transfer_max_batch_particles);
+    vector("msf_transfer_velocity", c.msf_transfer_velocity);
+    boolean("msf_melt_flow_enabled", c.msf_melt_flow_enabled);
+    flt("msf_melt_height_loss", c.msf_melt_height_loss);
+    flt("msf_melt_spread", c.msf_melt_spread);
+    boolean("msf_melt_sdf_refresh", c.msf_melt_sdf_refresh);
+    unsigned32("msf_melt_sdf_revision_interval", c.msf_melt_sdf_revision_interval);
+    flt("msf_melt_sdf_change_threshold", c.msf_melt_sdf_change_threshold);
 }
 
 void applyForceFieldPatch(const json& patch, rtapi::ForceFieldInfo& info) {
@@ -634,7 +648,8 @@ static json autosaveStatusJson(const rtapi::AutosaveStatus& st, const rtapi::Res
            {"last_error", st.last_error},
            {"write_count", st.write_count},
            {"skipped_unmodified", st.skipped_unmodified},
-           {"scene_is_modified", st.scene_is_modified}};
+           {"scene_is_modified", st.scene_is_modified},
+           {"writing", st.writing}};
     if (!r.ok) j["__error"] = r.error;
     return j;
 }
@@ -2411,6 +2426,22 @@ json dispatchMethod(const std::string& method, const json& params) {
             fracture_result)) {
         return fracture_result;
     }
+    json particle_result;
+    if (dispatchParticleIpc(
+            method, params,
+            [](RtIpcParticleQuery query) { return enqueueQuery(std::move(query)); },
+            particle_result)) {
+        return particle_result;
+    }
+    json kinematic_collider_result;
+    if (dispatchKinematicColliderIpc(
+            method, params,
+            [](RtIpcKinematicColliderQuery query) {
+                return enqueueQuery(std::move(query));
+            },
+            kinematic_collider_result)) {
+        return kinematic_collider_result;
+    }
 
     // ── Fluid Simulation Engine (Faz 5.3b) ──────────────────────────────
     if (method == "fluid.create_domain" || method == "gas.create_domain") {
@@ -2461,6 +2492,41 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"granular_residual_strength", info.granular_residual_strength},
                         {"granular_tack_peak", info.granular_tack_peak},
                         {"granular_thermal_conductivity", info.granular_thermal_conductivity},
+                        {"surface_resolution_multiplier", info.surface_resolution_multiplier},
+                        {"kernel_radius_voxels", info.kernel_radius_voxels},
+                        {"particle_radius_voxels", info.particle_radius_voxels},
+                        {"narrow_band_voxels", info.narrow_band_voxels},
+                        {"smoothing_iterations", info.smoothing_iterations},
+                        {"anisotropy_enabled", info.anisotropy_enabled},
+                        {"anisotropy_radius_voxels", info.anisotropy_radius_voxels},
+                        {"anisotropy_max_stretch", info.anisotropy_max_stretch},
+                        {"anisotropy_neighbor_min", info.anisotropy_neighbor_min},
+                        {"position_smoothing", info.position_smoothing},
+                        {"surface_measured", info.surface_measured},
+                        {"surface_grid_dim", json::array({info.surface_grid_dim[0], info.surface_grid_dim[1], info.surface_grid_dim[2]})},
+                        {"surface_voxel", info.surface_voxel},
+                        {"surface_build_ms", info.surface_build_ms},
+                        {"surface_active_cells", info.surface_active_cells},
+                        {"thermal_liquid_enabled", info.thermal_liquid_enabled},
+                        {"thermal_air_cooling_rate", info.thermal_air_cooling_rate},
+                        {"thermal_contact_cooling_rate", info.thermal_contact_cooling_rate},
+                        {"thermal_freeze_kelvin", info.thermal_freeze_kelvin},
+                        {"thermal_viscosity_range", info.thermal_viscosity_range},
+                        {"thermal_cold_viscosity", info.thermal_cold_viscosity},
+                        {"thermal_ambient_kelvin", info.thermal_ambient_kelvin},
+                        {"thermal_measured", info.thermal_measured},
+                        {"thermal_frozen_particles", info.thermal_frozen_particles},
+                        {"thermal_froze_this_frame", info.thermal_froze_this_frame},
+                        {"thermal_melted_this_frame", info.thermal_melted_this_frame},
+                        {"thermal_cold_unsupported", info.thermal_cold_unsupported},
+                        {"thermal_air_cooled_particles", info.thermal_air_cooled_particles},
+                        {"thermal_contact_cooled_particles", info.thermal_contact_cooled_particles},
+                        {"thermal_min_kelvin", info.thermal_min_kelvin},
+                        {"thermal_mean_kelvin", info.thermal_mean_kelvin},
+                        {"thermal_max_kelvin", info.thermal_max_kelvin},
+                        {"thermal_viscosity_field", info.thermal_viscosity_field},
+                        {"thermal_min_viscosity", info.thermal_min_viscosity},
+                        {"thermal_max_viscosity", info.thermal_max_viscosity},
                         {"granular_yielded", info.granular_yielded_particles},
                         {"granular_detached", info.granular_detached_particles},
                         {"granular_invalid", info.granular_invalid_particles},
@@ -2564,6 +2630,41 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"granular_residual_strength", info.granular_residual_strength},
                         {"granular_tack_peak", info.granular_tack_peak},
                         {"granular_thermal_conductivity", info.granular_thermal_conductivity},
+                        {"surface_resolution_multiplier", info.surface_resolution_multiplier},
+                        {"kernel_radius_voxels", info.kernel_radius_voxels},
+                        {"particle_radius_voxels", info.particle_radius_voxels},
+                        {"narrow_band_voxels", info.narrow_band_voxels},
+                        {"smoothing_iterations", info.smoothing_iterations},
+                        {"anisotropy_enabled", info.anisotropy_enabled},
+                        {"anisotropy_radius_voxels", info.anisotropy_radius_voxels},
+                        {"anisotropy_max_stretch", info.anisotropy_max_stretch},
+                        {"anisotropy_neighbor_min", info.anisotropy_neighbor_min},
+                        {"position_smoothing", info.position_smoothing},
+                        {"surface_measured", info.surface_measured},
+                        {"surface_grid_dim", json::array({info.surface_grid_dim[0], info.surface_grid_dim[1], info.surface_grid_dim[2]})},
+                        {"surface_voxel", info.surface_voxel},
+                        {"surface_build_ms", info.surface_build_ms},
+                        {"surface_active_cells", info.surface_active_cells},
+                        {"thermal_liquid_enabled", info.thermal_liquid_enabled},
+                        {"thermal_air_cooling_rate", info.thermal_air_cooling_rate},
+                        {"thermal_contact_cooling_rate", info.thermal_contact_cooling_rate},
+                        {"thermal_freeze_kelvin", info.thermal_freeze_kelvin},
+                        {"thermal_viscosity_range", info.thermal_viscosity_range},
+                        {"thermal_cold_viscosity", info.thermal_cold_viscosity},
+                        {"thermal_ambient_kelvin", info.thermal_ambient_kelvin},
+                        {"thermal_measured", info.thermal_measured},
+                        {"thermal_frozen_particles", info.thermal_frozen_particles},
+                        {"thermal_froze_this_frame", info.thermal_froze_this_frame},
+                        {"thermal_melted_this_frame", info.thermal_melted_this_frame},
+                        {"thermal_cold_unsupported", info.thermal_cold_unsupported},
+                        {"thermal_air_cooled_particles", info.thermal_air_cooled_particles},
+                        {"thermal_contact_cooled_particles", info.thermal_contact_cooled_particles},
+                        {"thermal_min_kelvin", info.thermal_min_kelvin},
+                        {"thermal_mean_kelvin", info.thermal_mean_kelvin},
+                        {"thermal_max_kelvin", info.thermal_max_kelvin},
+                        {"thermal_viscosity_field", info.thermal_viscosity_field},
+                        {"thermal_min_viscosity", info.thermal_min_viscosity},
+                        {"thermal_max_viscosity", info.thermal_max_viscosity},
                     {"granular_yielded", info.granular_yielded_particles},
                     {"granular_detached", info.granular_detached_particles},
                     {"granular_invalid", info.granular_invalid_particles},
@@ -2791,7 +2892,32 @@ json dispatchMethod(const std::string& method, const json& params) {
             if(params.contains("granular_tack_peak")){granular_tack=params.at("granular_tack_peak").get<float>();p_granular_tack=&granular_tack;}
             float granular_cond=0.0f;const float* p_granular_cond=nullptr;
             if(params.contains("granular_thermal_conductivity")){granular_cond=params.at("granular_thermal_conductivity").get<float>();p_granular_cond=&granular_cond;}
-            return rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_voxel, p_render,
+            // Surface reconstruction + thermal liquid: separate API calls
+            // (setFluidSurfaceDetail / setFluidThermal), same method on the
+            // wire. Parsed here, applied AFTER the main update so a `preset`
+            // in the same call (which switches the thermal chain off for every
+            // preset but wax) cannot undo explicit thermal keys.
+            rtapi::FluidSurfaceDetailPatch surface_patch;
+            bool has_surface_patch = false;
+            if(params.contains("surface_resolution_multiplier")){surface_patch.surface_resolution_multiplier=params.at("surface_resolution_multiplier").get<int>();has_surface_patch=true;}
+            if(params.contains("kernel_radius_voxels")){surface_patch.kernel_radius_voxels=params.at("kernel_radius_voxels").get<float>();has_surface_patch=true;}
+            if(params.contains("particle_radius_voxels")){surface_patch.particle_radius_voxels=params.at("particle_radius_voxels").get<float>();has_surface_patch=true;}
+            if(params.contains("narrow_band_voxels")){surface_patch.narrow_band_voxels=params.at("narrow_band_voxels").get<float>();has_surface_patch=true;}
+            if(params.contains("smoothing_iterations")){surface_patch.smoothing_iterations=params.at("smoothing_iterations").get<int>();has_surface_patch=true;}
+            if(params.contains("anisotropy_enabled")){surface_patch.anisotropy_enabled=params.at("anisotropy_enabled").get<bool>();has_surface_patch=true;}
+            if(params.contains("anisotropy_radius_voxels")){surface_patch.anisotropy_radius_voxels=params.at("anisotropy_radius_voxels").get<float>();has_surface_patch=true;}
+            if(params.contains("anisotropy_max_stretch")){surface_patch.anisotropy_max_stretch=params.at("anisotropy_max_stretch").get<float>();has_surface_patch=true;}
+            if(params.contains("anisotropy_neighbor_min")){surface_patch.anisotropy_neighbor_min=params.at("anisotropy_neighbor_min").get<int>();has_surface_patch=true;}
+            if(params.contains("position_smoothing")){surface_patch.position_smoothing=params.at("position_smoothing").get<float>();has_surface_patch=true;}
+            rtapi::FluidThermalPatch thermal_patch;
+            bool has_thermal_patch = false;
+            if(params.contains("thermal_liquid_enabled")){thermal_patch.enabled=params.at("thermal_liquid_enabled").get<bool>();has_thermal_patch=true;}
+            if(params.contains("thermal_air_cooling_rate")){thermal_patch.air_cooling_rate=params.at("thermal_air_cooling_rate").get<float>();has_thermal_patch=true;}
+            if(params.contains("thermal_contact_cooling_rate")){thermal_patch.contact_cooling_rate=params.at("thermal_contact_cooling_rate").get<float>();has_thermal_patch=true;}
+            if(params.contains("thermal_freeze_kelvin")){thermal_patch.freeze_kelvin=params.at("thermal_freeze_kelvin").get<float>();has_thermal_patch=true;}
+            if(params.contains("thermal_viscosity_range")){thermal_patch.viscosity_range=params.at("thermal_viscosity_range").get<float>();has_thermal_patch=true;}
+            if(params.contains("thermal_cold_viscosity")){thermal_patch.cold_viscosity=params.at("thermal_cold_viscosity").get<float>();has_thermal_patch=true;}
+            rtapi::Result main_result = rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_voxel, p_render,
                                             p_backend, p_boundary, p_preset, p_viscosity,
                                             p_sweeps, p_wall_slip, p_surf_mat,
                                             p_surface_offset,
@@ -2808,6 +2934,16 @@ json dispatchMethod(const std::string& method, const json& params) {
                                             p_granular_soft_temp,p_granular_soft_range,
                                             p_granular_residual,
                                             p_granular_tack, p_granular_cond);
+            if (!main_result.ok) return main_result;
+            if (has_thermal_patch) {
+                rtapi::Result tr = rtapi::setFluidThermal(domain, thermal_patch);
+                if (!tr.ok) return tr;
+            }
+            if (has_surface_patch) {
+                rtapi::Result sr = rtapi::setFluidSurfaceDetail(domain, surface_patch);
+                if (!sr.ok) return sr;
+            }
+            return main_result;
         });
     }
     if (method == "fluid.reset" || method == "gas.reset") {
@@ -4776,6 +4912,26 @@ json dispatchMethod(const std::string& method, const json& params) {
             return autosaveStatusJson(st, r);
         });
     }
+    if (method == "project.autosave_set") {
+        std::optional<bool> enabled;
+        std::optional<int> interval_sec;
+        if (params.contains("enabled")) {
+            if (!params["enabled"].is_boolean()) throw std::runtime_error("enabled must be a boolean");
+            enabled = params["enabled"].get<bool>();
+        }
+        if (params.contains("interval_sec")) {
+            if (!params["interval_sec"].is_number_integer())
+                throw std::runtime_error("interval_sec must be an integer");
+            interval_sec = params["interval_sec"].get<int>();
+        }
+        if (!enabled && !interval_sec)
+            throw std::runtime_error("project.autosave_set needs enabled and/or interval_sec");
+        return enqueueQuery([enabled, interval_sec](UIContext&) {
+            rtapi::AutosaveStatus st;
+            rtapi::Result r = rtapi::setAutosaveSettings(enabled, interval_sec, st);
+            return autosaveStatusJson(st, r);
+        });
+    }
     if (method == "project.open") {
         std::string path = requireString(params, "path");
         return enqueueResult([path](UIContext&) {
@@ -5446,145 +5602,63 @@ json dispatchMethod(const std::string& method, const json& params) {
         });
     }
 
-    // ── Particle systems (Faz 5.6b) ─────────────────────────────────────
-    if (method == "particle.emitters") {
+    // ── Shared simulation colliders (rt.collider parity) ────────────────
+    if (method == "collider.list") {
         return enqueueQuery([](UIContext&) {
-            json result = json::array();
-            for (const rtapi::ParticleEmitterInfo& info : rtapi::listParticleEmitters())
-                result.push_back(particleEmitterToJson(info));
-            return result;
-        });
-    }
-    if (method == "particle.get_emitter") {
-        std::string emitter = requireString(params, "emitter");
-        return enqueueQuery([emitter](UIContext&) {
-            rtapi::ParticleEmitterInfo info;
-            rtapi::Result r = rtapi::getParticleEmitter(emitter, info);
+            std::vector<rtapi::SimulationColliderInfo> colliders;
+            rtapi::Result r = rtapi::listSimulationColliders(colliders);
             if (!r.ok) return json{{"__error", r.error}};
-            return particleEmitterToJson(info);
+            json out = json::array();
+            for (const auto& c : colliders) out.push_back(simulationColliderToJson(c));
+            return json{{"colliders", out}};
         });
     }
-    if (method == "particle.add_emitter") {
-        json patch = params;
-        return enqueueQuery([patch](UIContext&) {
-            rtapi::ParticleEmitterInfo info;   // facade defaults
-            applyParticleEmitterPatch(patch, info);
-            rtapi::ParticleEmitterInfo created;
-            rtapi::Result r = rtapi::addParticleEmitter(info, created);
-            if (!r.ok) return json{{"__error", r.error}};
-            return particleEmitterToJson(created);
-        });
-    }
-    if (method == "particle.set_emitter") {
-        std::string emitter = requireString(params, "emitter");
-        json patch = params;
-        patch.erase("emitter");
-        return enqueueResult([emitter, patch](UIContext&) {
-            rtapi::ParticleEmitterInfo info;
-            rtapi::Result read = rtapi::getParticleEmitter(emitter, info);
-            if (!read.ok) return read;
-            applyParticleEmitterPatch(patch, info);
-            return rtapi::updateParticleEmitter(emitter, info);
-        });
-    }
-    if (method == "particle.remove_emitter") {
-        std::string emitter = requireString(params, "emitter");
-        return enqueueResult([emitter](UIContext&) {
-            return rtapi::removeParticleEmitter(emitter);
-        });
-    }
-    if (method == "particle.clear_emitters") {
-        return enqueueResult([](UIContext&) { return rtapi::clearParticleEmitters(); });
-    }
-    // ".list" in the name is what classifies this as Read in RtIpcSecurity.
-    if (method == "particle.list_systems") {
-        return enqueueQuery([](UIContext&) {
-            std::vector<rtapi::ParticleSystemInfo> systems;
-            rtapi::Result r = rtapi::listParticleSystems(systems);
-            if (!r.ok) return json{{"__error", r.error}};
-            json arr = json::array();
-            for (const auto& s : systems) {
-                arr.push_back(json{
-                    {"index", s.index}, {"id", s.id}, {"name", s.name},
-                    {"active", s.active}, {"emitter_only", s.emitter_only},
-                    {"render_in_raytrace", s.render_in_raytrace},
-                    {"domain_count", s.domain_count},
-                    {"flow_source_count", s.flow_source_count},
-                    {"emitter_count", s.emitter_count},
-                    {"collider_count", s.collider_count}});
-            }
-            return json{{"systems", arr}};
-        });
-    }
-    if (method == "particle.set_system_emitter_only") {
-        std::string system = requireString(params, "system");
-        bool emitter_only = params.value("emitter_only", true);
-        return enqueueResult([system, emitter_only](UIContext&) {
-            return rtapi::setParticleSystemEmitterOnly(system, emitter_only);
-        });
-    }
-    if (method == "particle.add_system") {
-        std::string name = params.value("name", "Particle System");
+    if (method == "collider.get") {
+        std::string name = requireString(params, "name");
         return enqueueQuery([name](UIContext&) {
-            rtapi::ParticleSystemInfo info;
-            rtapi::Result r = rtapi::addParticleSystem(name, info);
+            rtapi::SimulationColliderInfo c;
+            rtapi::Result r = rtapi::getSimulationCollider(name, c);
             if (!r.ok) return json{{"__error", r.error}};
-            return json{{"index", info.index}, {"id", info.id},
-                        {"name", info.name}, {"active", info.active},
-                        {"emitter_only", info.emitter_only},
-                        {"render_in_raytrace", info.render_in_raytrace}};
+            return simulationColliderToJson(c);
         });
     }
-    if (method == "particle.add_preset") {
-        std::string preset = requireString(params, "preset");
-        return enqueueQuery([preset](UIContext&) {
-            rtapi::ParticleSystemInfo info;
-            rtapi::Result r = rtapi::addParticleSystemPreset(preset, info);
-            if (!r.ok) return json{{"__error", r.error}};
-            return json{{"index", info.index}, {"id", info.id}, {"name", info.name},
-                        {"active", info.active},
-                        {"domain_count", info.domain_count},
-                        {"flow_source_count", info.flow_source_count},
-                        {"emitter_count", info.emitter_count},
-                        {"collider_count", info.collider_count}};
-        });
-    }
-    if (method == "particle.clear_systems") {
-        return enqueueResult([](UIContext&) { return rtapi::clearParticleSystems(); });
-    }
-    if (method == "particle.get_physics") {
-        return enqueueQuery([](UIContext&) {
-            rtapi::ParticlePhysicsInfo info;
-            rtapi::Result r = rtapi::getParticlePhysics(info);
-            if (!r.ok) return json{{"__error", r.error}};
-            return particlePhysicsToJson(info);
-        });
-    }
-    if (method == "particle.set_physics") {
+    if (method == "collider.create") {
+        std::string name = requireString(params, "name");
         json patch = params;
-        return enqueueResult([patch](UIContext&) {
-            rtapi::ParticlePhysicsInfo info;
-            rtapi::Result read = rtapi::getParticlePhysics(info);
-            if (!read.ok) return read;
-            applyParticlePhysicsPatch(patch, info);
-            return rtapi::updateParticlePhysics(info);
-        });
-    }
-    if (method == "particle.stats") {
-        return enqueueQuery([](UIContext&) {
-            rtapi::ParticleStatsInfo info;
-            rtapi::Result r = rtapi::getParticleStats(info);
+        return enqueueQuery([name, patch](UIContext&) {
+            rtapi::SimulationColliderInfo c;
+            c.name = name;
+            applySimulationColliderPatch(patch, c);
+            rtapi::SimulationColliderInfo created;
+            rtapi::Result r = rtapi::createSimulationCollider(c, created);
             if (!r.ok) return json{{"__error", r.error}};
-            return json{{"alive_count", info.alive_count}, {"capacity", info.capacity},
-                        {"emitter_count", info.emitter_count},
-                        {"collider_count", info.collider_count},
-                        {"domain_count", info.domain_count},
-                        {"total_ms", info.total_ms}, {"emit_ms", info.emit_ms},
-                        {"integrate_ms", info.integrate_ms},
-                        {"self_collision_ms", info.self_collision_ms},
-                        {"grid_domain_ms", info.grid_domain_ms}};
+            return simulationColliderToJson(created);
         });
     }
+    if (method == "collider.update") {
+        std::string name = requireString(params, "name");
+        json patch = params;
+        return enqueueResult([name, patch](UIContext&) {
+            rtapi::SimulationColliderInfo c;
+            rtapi::Result read = rtapi::getSimulationCollider(name, c);
+            if (!read.ok) return read;
+            applySimulationColliderPatch(patch, c);
+            return rtapi::updateSimulationCollider(name, c);
+        });
+    }
+    if (method == "collider.remove") {
+        std::string name = requireString(params, "name");
+        return enqueueResult([name](UIContext&) {
+            return rtapi::removeSimulationCollider(name);
+        });
+    }
+    if (method == "collider.rebuild_sdf") {
+        std::string name = requireString(params, "name");
+        return enqueueResult([name](UIContext&) {
+            return rtapi::rebuildSimulationColliderSDF(name);
+        });
+    }
+
     if (method == "fluid.step_stats") {
         std::string domain = requireString(params, "domain");
         return enqueueQuery([domain](UIContext&) {
@@ -5673,28 +5747,6 @@ json dispatchMethod(const std::string& method, const json& params) {
             return j;
         });
     }
-    if (method == "particle.spawn") {
-        Vec3 position = requireVec3(params, "position");
-        Vec3 velocity(0.0f, 0.0f, 0.0f);
-        if (params.contains("velocity")) velocity = requireVec3(params, "velocity");
-        float lifetime = params.value("lifetime_seconds", 5.0f);
-        float mass = params.value("mass", 1.0f);
-        float size = params.value("size", 0.05f);
-        return enqueueQuery([position, velocity, lifetime, mass, size](UIContext&) {
-            int index = -1;
-            rtapi::Result r = rtapi::spawnParticle(position, velocity, lifetime, mass, size, index);
-            if (!r.ok) return json{{"__error", r.error}};
-            return json(index);
-        });
-    }
-    if (method == "particle.clear") {
-        return enqueueResult([](UIContext&) { return rtapi::clearParticles(); });
-    }
-    if (method == "particle.step") {
-        float dt = params.value("dt", 0.0166667f);
-        return enqueueResult([dt](UIContext&) { return rtapi::stepParticleSimulation(dt); });
-    }
-
     // ── Script ──────────────────────────────────────────────────────────
     if (method == "script.run_file") {
         std::string path = requireString(params, "path");

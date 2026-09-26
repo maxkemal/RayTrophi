@@ -40,12 +40,23 @@ struct AffineC {
     AffineC() : col0(0,0,0), col1(0,0,0), col2(0,0,0) {}
 };
 
+// Bits of FluidParticles::flags. Bit 1 is the advection pass's outflow mark
+// (APICFluidSolver.cpp, FLAG_OUTFLOW); keep new bits clear of it.
+//
+// FROZEN: a thermal-liquid parcel that cooled below the freeze temperature
+// while touching a support (collider, closed domain wall or another frozen
+// parcel). It is SOLID - stamped into grid.solid through the solid-phase
+// overlay - and PINNED: its velocity is held at zero, so it neither flows nor
+// falls. Set and cleared only by Fluid::updateThermalFreeze; see
+// FluidThermalLiquid.h for why freezing needs a support.
+constexpr uint32_t kParticleFlagFrozen = 1u << 3;
+
 class FluidParticles {
 public:
     std::vector<Vec3>     position;   // world space
     std::vector<Vec3>     velocity;   // world space, m/s
     std::vector<AffineC>  affine;     // APIC velocity gradient
-    std::vector<uint32_t> flags;      // reserved (bit 0 = sleeping, etc.)
+    std::vector<uint32_t> flags;      // see kParticleFlag* above
     // Remaining material mass relative to the authored particle mass.  This
     // is deliberately kept separate from position/velocity so combustion can
     // evaporate or burn a liquid without changing APIC momentum until the

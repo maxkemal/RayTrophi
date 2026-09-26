@@ -30,6 +30,7 @@
 #include "Api/RtApiRigEnvelopeWeights.h"
 #include "Api/RtApiRigEditing.h"
 #include "Api/RtApiClipBinding.h"
+#include "Api/RtApiKinematicCollider.h"
 
 #include <cstdint>
 #include <functional>
@@ -2382,9 +2383,14 @@ struct AutosaveStatus {
     uint64_t write_count = 0;
     uint64_t skipped_unmodified = 0;
     bool scene_is_modified = false;
+    bool writing = false;        // an interval write is running in the background
 };
 Result autosaveNow(const std::string& reason, AutosaveStatus& out);
 Result autosaveStatus(AutosaveStatus& out);
+// Persisted autosave preferences. Unset fields are left alone; an interval
+// outside [30, 86400] s is rejected, not clamped. Returns the new status.
+Result setAutosaveSettings(std::optional<bool> enabled, std::optional<int> interval_sec,
+                           AutosaveStatus& out);
 
 // OptiX birikim aleti. "Sayac ilerliyor ama goruntu birikmiyor" sorusunu
 // cevaplar: wipe_count, accumulated_samples'tan BAGIMSIZ sayilir, cunku
@@ -3215,9 +3221,28 @@ Result evaluateForceFields(Vec3 world_position, float time, Vec3 velocity, Vec3&
 // ★`burst_count` is one-shot but must NOT be zeroed to "consume" it — the
 // runtime tracks that separately so the burst survives serialization and
 // replays on rewind. A script that clears burst_count kills the effect on disk.
+//
+// ★★ Particle roadmap Phase 1: every per-system call takes a trailing
+// ParticleSystemRef. Before it, all of them resolved to the ACTIVE system,
+// which is the particle panel's selection focus -- so a script could only ever
+// address the system created last, and what it edited depended on what a human
+// had clicked. An empty ref keeps that default; an explicit ref never falls
+// back to the active system, it fails.
+//
+// Emitters can also be addressed by their stable uid as "uid:<n>" (the uid is
+// the saved timeline identity, see ParticleEmitterInfo::uid). Unlike the
+// index it survives removal of an earlier emitter and a save/load round trip.
 // ---------------------------------------------------------------------------
+struct ParticleSystemRef {
+    int id = -1;                  // ParticleSystemObject::id (stable); wins when >= 0
+    std::string index_or_name;    // panel index or name, used when id < 0
+    bool isDefault() const { return id < 0 && index_or_name.empty(); }
+};
+
 struct ParticleEmitterInfo {
     int index = -1;
+    uint64_t uid = 0;        // stable, saved; address as "uid:<n>". Read-only.
+    uint32_t system_id = 0;  // system the emitter was read from. Read-only.
     std::string name = "Particle Emitter";
     std::string source_mode = "point";  // point | object_origin | force_field_origin
     std::string spawn_mode = "center";  // center | object_aabb_surface | mesh_surface
@@ -3268,6 +3293,9 @@ struct ParticleEmitterInfo {
 struct ParticlePhysicsInfo {
     std::string mode = "spark";        // spark | granular | fluid | gas
     std::string quality = "realtime";  // realtime | preview | offline
+    // auto | gpu_required | cpu. gpu_required does not fall back: the step is
+    // refused and particle.stats reports step_blocked + gpu_force_status.
+    std::string execution_policy = "auto";
     float particle_radius = 0.04f;
     bool self_collision_enabled = false;
     int solver_iterations = 1;
@@ -3292,6 +3320,7 @@ struct ParticlePhysicsInfo {
 // emitter is added. The timings are per-step measurements and stay zero until
 // the simulation has actually stepped.
 struct ParticleStatsInfo {
+    uint32_t system_id = 0;   // which system these numbers describe
     int alive_count = 0;
     int capacity = 0;
     int emitter_count = 0;
@@ -3302,6 +3331,70 @@ struct ParticleStatsInfo {
     float integrate_ms = 0.0f;
     float self_collision_ms = 0.0f;
     float grid_domain_ms = 0.0f;
+    float upload_ms = 0.0f;
+
+    // ── Execution / transfer telemetry (particle roadmap Phase 0) ──────────
+    // Where each stage ran. Everything except forces is CPU-only today; the
+    // fields exist so a later phase moving a stage changes a VALUE here, not
+    // the schema.
+    std::string execution_policy = "auto";   // auto | gpu_required | cpu
+    std::string compute_backend = "none";
+    std::string gpu_force_status = "not_attempted";
+    bool forces_on_gpu = false;
+    bool step_blocked = false;
+    std::string emit_backend = "cpu";
+    std::string forces_backend = "cpu";
+    std::string integrate_backend = "cpu";        // lifetime, integration, over-life
+    std::string scene_collision_backend = "cpu";
+    std::string self_collision_backend = "off";   // off | cpu
+    float gpu_force_ms = 0.0f;   // whole GPU force block incl. transfers
+    // Particle-step transfers only (grid domains report their own).
+    uint64_t force_upload_bytes = 0;
+    uint64_t force_download_bytes = 0;
+    uint32_t force_dispatch_calls = 0;
+    uint32_t force_synchronize_calls = 0;
+    double force_upload_call_ms = 0.0;
+    double force_download_call_ms = 0.0;
+    double force_synchronize_ms = 0.0;
+    uint64_t mirror_upload_bytes = 0;
+    uint32_t mirror_upload_calls = 0;
+    double mirror_upload_call_ms = 0.0;
+    uint32_t nonfinite_particles = 0;
+
+    // Particle -> gas deposit, last step, counted per particle. Panel-only
+    // until 2026-09-25, so "my particles do not feed the gas" could not be
+    // measured from a script. Read in order:
+    //   landed             reached at least one gas domain OF THIS SYSTEM
+    //   dropped_no_domain  had a non-zero rate but was inside none of this
+    //                      system's gas domains (a domain owned by another
+    //                      particle system does not count -- deposit is
+    //                      per-system)
+    //   dropped_no_channel reached a domain with no Fuel channel
+    // All three stay 0 when the deposit rates are 0: nothing was attempted.
+    uint32_t grid_deposit_landed = 0;
+    uint32_t grid_deposit_dropped_no_domain = 0;
+    uint32_t grid_deposit_dropped_no_channel = 0;
+};
+
+// Bounded read of live particle state for CPU/GPU comparison and baselines.
+// Host state is authoritative today, so this costs no device transfer; once a
+// stage is device-resident this call becomes an explicit snapshot and must be
+// counted as one.
+struct ParticleStateSample {
+    int alive_count = 0;
+    int capacity = 0;
+    int returned = 0;
+    std::vector<int> indices;
+    std::vector<Vec3> positions;
+    std::vector<Vec3> velocities;
+    std::vector<float> ages;
+    // Aggregates over ALL alive particles, not only the returned slice, so a
+    // whole-population comparison needs no full dump.
+    Vec3 centroid = Vec3(0.0f);
+    Vec3 mean_velocity = Vec3(0.0f);
+    Vec3 bounds_min = Vec3(0.0f);
+    Vec3 bounds_max = Vec3(0.0f);
+    int nonfinite = 0;
 };
 
 struct FluidStepStats {
@@ -3406,21 +3499,30 @@ struct GasStepStats {
 };
 Result getGasStepStats(const std::string& domain_id_or_name, GasStepStats& out);
 
-std::vector<ParticleEmitterInfo> listParticleEmitters();
-Result getParticleEmitter(const std::string& index_or_name, ParticleEmitterInfo& out);
-Result addParticleEmitter(const ParticleEmitterInfo& info, ParticleEmitterInfo& out);
-Result removeParticleEmitter(const std::string& index_or_name);
-Result updateParticleEmitter(const std::string& index_or_name, const ParticleEmitterInfo& info);
-Result clearParticleEmitters();
+// An unresolvable explicit `system` makes listParticleEmitters return empty;
+// use the Result-returning form below when that must be told apart from "no
+// emitters".
+std::vector<ParticleEmitterInfo> listParticleEmitters(const ParticleSystemRef& system = {});
+Result listParticleEmitters(const ParticleSystemRef& system, std::vector<ParticleEmitterInfo>& out);
+Result getParticleEmitter(const std::string& index_or_name, ParticleEmitterInfo& out,
+                          const ParticleSystemRef& system = {});
+Result addParticleEmitter(const ParticleEmitterInfo& info, ParticleEmitterInfo& out,
+                          const ParticleSystemRef& system = {});
+Result removeParticleEmitter(const std::string& index_or_name,
+                             const ParticleSystemRef& system = {});
+Result updateParticleEmitter(const std::string& index_or_name, const ParticleEmitterInfo& info,
+                             const ParticleSystemRef& system = {});
+Result clearParticleEmitters(const ParticleSystemRef& system = {});
 
-// Particle SYSTEMS, not particles. Every other simulation call is scoped to the
-// active system; these two are the only way to see and remove what lives in the
-// others (a UI preset always creates its own).
+// Particle SYSTEMS, not particles.
 struct ParticleSystemInfo {
     int index = -1;
     uint32_t id = 0;
     std::string name;
-    bool active = false;
+    bool active = false;          // panel selection focus; NOT a simulation gate
+    bool enabled = true;
+    bool visible = true;
+    std::string blend_mode = "additive";  // additive | alpha (viewport billboards)
     bool emitter_only = true;
     bool render_in_raytrace = false;
     int domain_count = 0;
@@ -3429,10 +3531,50 @@ struct ParticleSystemInfo {
     int collider_count = 0;
 };
 Result listParticleSystems(std::vector<ParticleSystemInfo>& out);
+Result getParticleSystem(const ParticleSystemRef& system, ParticleSystemInfo& out);
 Result addParticleSystem(const std::string& name, ParticleSystemInfo& out);
 Result setParticleSystemEmitterOnly(const std::string& index_or_name,
                                     bool emitter_only);
+// Writes name, visible and blend_mode from `info`; every other field is
+// read-only here (emitter_only / render_in_raytrace live in the render
+// settings). `enabled` is reported but not written: the runtime simulates
+// only while enabled AND visible, the panel edits only `visible`, and a second
+// switch with the same effect that only a script can flip would be a field the
+// panel cannot show honestly. A duplicate name is refused: names are how
+// scripts and the panel tell systems apart.
+Result updateParticleSystem(const ParticleSystemRef& system, const ParticleSystemInfo& info);
+// Removes ONE system with its emitters, colliders, domains and render state.
+Result removeParticleSystem(const ParticleSystemRef& system);
+// Moves the panel's selection focus. A value, so it crosses IPC (CLAUDE.md
+// rule 1: the editor's state is scriptable, its draw calls are not).
+Result setActiveParticleSystem(const ParticleSystemRef& system);
 Result clearParticleSystems();
+
+// How a system's particles are drawn in the real render paths. Was panel-only
+// until Phase 1, so no script could build a visible debris effect.
+struct ParticleRenderMeshSourceInfo {
+    std::string node_name;
+    float weight = 1.0f;
+    bool resolved = false;   // read-only: the node exists in the scene right now
+};
+struct ParticleRenderInfo {
+    bool emitter_only = true;          // carrier-only: no billboards, no RT instances
+    bool render_in_raytrace = true;
+    std::string shape = "sphere";      // sphere | cube | tetra | quad | scene_meshes
+    float size_multiplier = 1.0f;
+    int sphere_subdivisions = 1;       // 0..3
+    bool emissive = true;
+    bool inherit_color_from_emitter = true;
+    Vec3 base_color = Vec3(1.0f, 0.6f, 0.2f);
+    float emission_strength = 6.0f;
+    float roughness = 0.6f;
+    // Only used when shape == scene_meshes. Writing refuses a node that does
+    // not exist; reading reports a since-deleted node with resolved = false
+    // instead of hiding it.
+    std::vector<ParticleRenderMeshSourceInfo> mesh_sources;
+};
+Result getParticleRender(const ParticleSystemRef& system, ParticleRenderInfo& out);
+Result updateParticleRender(const ParticleSystemRef& system, const ParticleRenderInfo& info);
 
 // Create one of the authored production presets (the same recipes the particle
 // panel's preset list installs), additively: existing systems are untouched.
@@ -3506,18 +3648,24 @@ Result measureGasPlume(const std::string& domain_id_or_name,
                        float density_threshold,
                        GasPlumeMeasurement& out);
 
-Result getParticlePhysics(ParticlePhysicsInfo& out);
-Result updateParticlePhysics(const ParticlePhysicsInfo& info);
-Result getParticleStats(ParticleStatsInfo& out);
+Result getParticlePhysics(ParticlePhysicsInfo& out, const ParticleSystemRef& system = {});
+Result updateParticlePhysics(const ParticlePhysicsInfo& info,
+                             const ParticleSystemRef& system = {});
+Result getParticleStats(ParticleStatsInfo& out, const ParticleSystemRef& system = {});
+// Alive particles in slot order, starting at the `offset`-th alive particle,
+// every `stride`-th one, at most `max_count` (clamped to 4096).
+Result getParticleStateSample(int max_count, int offset, int stride,
+                              ParticleStateSample& out,
+                              const ParticleSystemRef& system = {});
 
 // Direct particle authoring / control. spawnParticle bypasses the emitters and
 // injects one particle; stepParticleSimulation advances only the particle
 // system (fluid/gas domains have their own step), and clearParticles drops the
 // live particles while keeping emitters and settings.
 Result spawnParticle(Vec3 position, Vec3 velocity, float lifetime_seconds, float mass,
-                     float size, int& out_index);
-Result clearParticles();
-Result stepParticleSimulation(float dt = 0.0166667f);
+                     float size, int& out_index, const ParticleSystemRef& system = {});
+Result clearParticles(const ParticleSystemRef& system = {});
+Result stepParticleSimulation(float dt = 0.0166667f, const ParticleSystemRef& system = {});
 
 // ---------------------------------------------------------------------------
 // Fluid Simulation Engine (Faz 5.3b). APIC liquid & grid domain simulation.
@@ -3753,8 +3901,86 @@ struct FluidDomainInfo {
     // parcels a cell must be to block flow (fraction of the seed density).
     bool  solid_phase_enabled = true;
     float solid_phase_fill = 0.25f;
+    // ── Surface reconstruction (SurfaceSDF) ─────────────────────────────────
+    // The level-set controls that decide how fine and how clean the rendered
+    // liquid surface is. Written through setFluidSurfaceDetail. Until
+    // 2026-09-25 these were panel-only, so the one lever that refines the
+    // surface WITHOUT raising the simulation cost could not be measured or
+    // A/B-rendered by a script.
+    int   surface_resolution_multiplier = 1;   // SDF grid = sim grid x this (1..4)
+    float kernel_radius_voxels = 2.0f;
+    float particle_radius_voxels = 0.55f;
+    float narrow_band_voxels = 3.0f;
+    int   smoothing_iterations = 2;
+    bool  anisotropy_enabled = false;
+    float anisotropy_radius_voxels = 2.5f;
+    float anisotropy_max_stretch = 4.0f;
+    int   anisotropy_neighbor_min = 6;
+    float position_smoothing = 0.9f;
+    // Measured, from the last surface build. surface_measured false = no build
+    // has happened for this domain yet (not "zero cost").
+    bool  surface_measured = false;
+    int   surface_grid_dim[3] = {0, 0, 0};
+    float surface_voxel = 0.0f;
+    float surface_build_ms = 0.0f;
+    uint64_t surface_active_cells = 0;
+    // ── Thermal liquid (cooling / ν(T) / freezing) ─────────────────────────
+    // See APICSolverParams::thermal_* and FluidThermalLiquid.h. Written through
+    // setFluidThermal.
+    bool  thermal_liquid_enabled = false;
+    float thermal_air_cooling_rate = 0.15f;
+    float thermal_contact_cooling_rate = 2.0f;
+    float thermal_freeze_kelvin = 330.0f;
+    float thermal_viscosity_range = 25.0f;
+    float thermal_cold_viscosity = 0.05f;
+    // The temperature parcels cool toward and are born at (domain override or
+    // world ambient), resolved — so a script need not repeat that rule.
+    float thermal_ambient_kelvin = 293.0f;
+    // Measured, last simulated frame. thermal_measured false = the chain did
+    // not run (off, granular, empty), NOT "nothing is hot".
+    bool     thermal_measured = false;
+    uint64_t thermal_frozen_particles = 0;
+    uint64_t thermal_froze_this_frame = 0;
+    uint64_t thermal_melted_this_frame = 0;
+    // Cold enough to set but touching no support. Non-zero with zero frozen is
+    // the reading for "the wax touches nothing it can set against".
+    uint64_t thermal_cold_unsupported = 0;
+    uint64_t thermal_air_cooled_particles = 0;
+    uint64_t thermal_contact_cooled_particles = 0;
+    float    thermal_min_kelvin = 0.0f;
+    float    thermal_mean_kelvin = 0.0f;
+    float    thermal_max_kelvin = 0.0f;
+    bool     thermal_viscosity_field = false;
+    float    thermal_min_viscosity = 0.0f;
+    float    thermal_max_viscosity = 0.0f;
     bool enabled = true;
     bool visible = true;
+};
+
+// Overlay patches: fields left empty keep their value.
+struct FluidSurfaceDetailPatch {
+    std::optional<int>   surface_resolution_multiplier;  // 1..4
+    std::optional<float> kernel_radius_voxels;           // 0.5..6
+    std::optional<float> particle_radius_voxels;         // 0.05..2
+    std::optional<float> narrow_band_voxels;             // 1..8
+    std::optional<int>   smoothing_iterations;           // 0..8
+    std::optional<bool>  anisotropy_enabled;
+    std::optional<float> anisotropy_radius_voxels;       // 1..6
+    std::optional<float> anisotropy_max_stretch;         // 1..8
+    std::optional<int>   anisotropy_neighbor_min;        // 1..24
+    std::optional<float> position_smoothing;             // 0..1
+};
+
+struct FluidThermalPatch {
+    std::optional<bool>  enabled;
+    std::optional<float> air_cooling_rate;       // 1/s
+    std::optional<float> contact_cooling_rate;   // 1/s
+    std::optional<float> freeze_kelvin;          // K
+    std::optional<float> viscosity_range;        // K
+    std::optional<float> cold_viscosity;         // m²/s
+    // Shared with the granular melt path (fluid_params.granular_thermal_
+    // conductivity); exposed here too because a wax pour needs it.
+    std::optional<float> conductivity;           // 1/s
 };
 
 struct GasDomainSettings {
@@ -3882,6 +4108,10 @@ struct SimulationFlowSourceInfo {
     bool fluid_emit_along_normal = false;
     // Substance this source pours; empty = untagged (domain material).
     std::string fluid_substance;
+    // Kelvin the emitted liquid is born at. Off = the domain ambient. NOT the
+    // `temperature` above, which is the gas solver's normalised unit.
+    bool  fluid_temperature_override = false;
+    float fluid_temperature_kelvin = 353.0f;
     bool use_time_limit = false;
     float start_time = 0.0f;
     float end_time = 5.0f;
@@ -4135,6 +4365,17 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
                          const float* granular_residual_strength = nullptr,
                          const float* granular_tack_peak = nullptr,
                          const float* granular_thermal_conductivity = nullptr);
+// Surface reconstruction controls of a fluid domain (see FluidDomainInfo's
+// surface_* block). Out-of-range values are REJECTED, not clamped: these decide
+// cost as much as look (the multiplier is cubic), and a silently snapped 8 -> 4
+// would let a script believe it had asked for a detail level it did not get.
+// Rebuilds the surface on the next bridge update; the simulation is untouched.
+Result setFluidSurfaceDetail(const std::string& domain_id_or_name,
+                             const FluidSurfaceDetailPatch& patch);
+// Thermal-liquid chain of a fluid domain (cooling, ν(T), freezing). Editing it
+// demotes the rheology preset to "custom", like any other rheology field.
+Result setFluidThermal(const std::string& domain_id_or_name,
+                       const FluidThermalPatch& patch);
 // Bind a material to a SUBSTANCE within one fluid domain. An empty
 // `material_name` clears the binding; the literal "dielectric" binds the
 // built-in refractive liquid for that substance specifically, which is how one
@@ -4210,8 +4451,10 @@ struct ParticleEmitterKey {
     bool has_point = false;     Vec3  point;
     bool has_direction = false; Vec3  direction;
 };
-Result keyParticleEmitter(const std::string& name, const ParticleEmitterKey& key);
-Result clearParticleEmitterKey(const std::string& name, int frame);
+Result keyParticleEmitter(const std::string& name, const ParticleEmitterKey& key,
+                          const ParticleSystemRef& system = {});
+Result clearParticleEmitterKey(const std::string& name, int frame,
+                               const ParticleSystemRef& system = {});
 
 Result listSimulationFlowSources(std::vector<SimulationFlowSourceInfo>& out_sources);
 Result getSimulationFlowSource(const std::string& name, SimulationFlowSourceInfo& out_source);

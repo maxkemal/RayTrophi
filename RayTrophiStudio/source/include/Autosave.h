@@ -45,16 +45,36 @@ struct Status {
     //   olan autosave degil, degisiklik bayragidir.
     uint64_t skipped_unmodified = 0;
     bool scene_is_modified = false;
+    bool writing = false;                    // a background write is running now
 };
 
-// Araliga bakar, gerekiyorsa yazar. Her karede cagrilabilir; ucuz.
-// `busy` true iken hicbir sey yapmaz (sahne yukleniyor vb.).
+// Cheap per-frame view for the HUD (status() touches the filesystem).
+struct Progress {
+    bool writing = false;
+    uint64_t finished = 0;   // background writes completed; an edge = one just ended
+    bool last_ok = false;
+    double last_write_ms = 0.0;
+    std::string last_error;
+};
+
+constexpr int kMinIntervalSec = 30;
+constexpr int kMaxIntervalSec = 24 * 60 * 60;
+
+// Araliga bakar, gerekiyorsa ARKA PLANDA yazar. Her karede cagrilabilir; ucuz.
+// `busy` true iken hicbir sey yapmaz (sahne yukleniyor, oynatma vb.).
 void tick(SceneData& scene, RenderSettings& settings, Renderer& renderer, bool busy);
 
-// Aralia ve `is_modified`'a BAKMADAN yazar. Cihaz kaybi yolu bunu kullanir.
+// Aralia ve `is_modified`'a BAKMADAN, CAGIRAN IPLIKTE yazar. Cihaz kaybi yolu
+// bunu kullanir: orada kayit bitmeden devam etmek anlamsiz.
 bool writeNow(SceneData& scene, RenderSettings& settings, Renderer& renderer,
               const std::string& reason);
 
 Status status();
+Progress progress();
+
+// Persisted preferences (StartupPreferences). setIntervalSec rejects values
+// outside [kMinIntervalSec, kMaxIntervalSec] instead of clamping.
+void setEnabled(bool enabled);
+bool setIntervalSec(int seconds);
 
 }  // namespace raytrophi::autosave

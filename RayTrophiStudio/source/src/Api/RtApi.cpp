@@ -1890,6 +1890,7 @@ static void fillAutosaveStatus(const raytrophi::autosave::Status& in, AutosaveSt
     out.write_count = in.write_count;
     out.skipped_unmodified = in.skipped_unmodified;
     out.scene_is_modified = in.scene_is_modified;
+    out.writing = in.writing;
 }
 
 Result autosaveNow(const std::string& reason, AutosaveStatus& out) {
@@ -1964,6 +1965,25 @@ Result optixAccumStatus(OptixAccumStatus& out) {
 
 Result autosaveStatus(AutosaveStatus& out) {
     out = AutosaveStatus{};
+    fillAutosaveStatus(raytrophi::autosave::status(), out);
+    return Result::success();
+}
+
+Result setAutosaveSettings(std::optional<bool> enabled, std::optional<int> interval_sec,
+                           AutosaveStatus& out) {
+    out = AutosaveStatus{};
+    // Validate everything before writing anything: a half-applied patch
+    // would persist to the preference file.
+    if (interval_sec &&
+        (*interval_sec < raytrophi::autosave::kMinIntervalSec ||
+         *interval_sec > raytrophi::autosave::kMaxIntervalSec)) {
+        fillAutosaveStatus(raytrophi::autosave::status(), out);
+        return Result::fail("interval_sec must be in [" +
+                            std::to_string(raytrophi::autosave::kMinIntervalSec) + ", " +
+                            std::to_string(raytrophi::autosave::kMaxIntervalSec) + "]");
+    }
+    if (enabled) raytrophi::autosave::setEnabled(*enabled);
+    if (interval_sec) raytrophi::autosave::setIntervalSec(*interval_sec);
     fillAutosaveStatus(raytrophi::autosave::status(), out);
     return Result::success();
 }

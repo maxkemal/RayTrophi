@@ -1,4 +1,5 @@
 #include "scene_ui_forcefield.hpp"
+#include "scene_ui_fluid_thermal.hpp"
 #include "ui_modern.h"
 
 #include "Api/RtApi.h"
@@ -338,15 +339,19 @@ void drawSimulationDomainControls(
                 if (domain.backend == RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB) {
                     domain.backend = RayTrophiSim::SimulationDomainBackend::CPU_Dense;
                 }
+                // Vulkan is listed first among the GPU paths: it matches CUDA in
+                // speed and accuracy and runs on every vendor. CUDA stays as a
+                // secondary NVIDIA-only path. The stored enum values do not
+                // depend on this order (backend_values maps them).
                 const char* backends[] = {
-                    "CPU (Dense - Standard)",
-                    "GPU (CUDA - High Speed)",
-                    "GPU (Vulkan Compute)"
+                    "CPU (Dense - Reference)",
+                    "GPU (Vulkan Compute - Recommended)",
+                    "GPU (CUDA - Alternative, NVIDIA)"
                 };
                 const RayTrophiSim::SimulationDomainBackend backend_values[] = {
                     RayTrophiSim::SimulationDomainBackend::CPU_Dense,
-                    RayTrophiSim::SimulationDomainBackend::GPU_Compute,
-                    RayTrophiSim::SimulationDomainBackend::GPU_Vulkan
+                    RayTrophiSim::SimulationDomainBackend::GPU_Vulkan,
+                    RayTrophiSim::SimulationDomainBackend::GPU_Compute
                 };
                 int current_backend = 0;
                 for (int bi = 0; bi < 3; ++bi)
@@ -364,11 +369,11 @@ void drawSimulationDomainControls(
                 }
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Selects which hardware execution unit running the simulation solver:\n\n"
-                                      "1. CPU (Dense): Stable standard processor solver. Ideal for small-scale tests.\n"
-                                      "2. GPU (CUDA): NVIDIA-only compute path. Somewhat faster than Vulkan.\n"
-                                      "3. GPU (Vulkan Compute): Cross-vendor GPU compute solver (APIC fluid + MGPCG\n"
-                                      "   pressure + whitewater). The primary GPU path and the one that runs\n"
-                                      "   everywhere; produces the same results as CPU/CUDA.\n\n"
+                                      "1. CPU (Dense): Reference processor solver. Ideal for small-scale tests.\n"
+                                      "2. GPU (Vulkan Compute): Recommended. Cross-vendor GPU solver (APIC fluid +\n"
+                                      "   MGPCG pressure + whitewater); matches CUDA in speed and accuracy and\n"
+                                      "   runs everywhere. Particle GPU stages run only on this path.\n"
+                                      "3. GPU (CUDA): Secondary NVIDIA-only path, kept as an alternative.\n\n"
                                       "New domains default to Vulkan when this machine supports it, CUDA when it\n"
                                       "does not, and CPU when neither is available.");
                 }
@@ -1192,42 +1197,10 @@ void drawSimulationDomainControls(
                     // The world defines ambient everywhere; a domain may override
                     // it inside its own bounds. Off by default, so a domain that
                     // says nothing simply inherits the world.
-                    if (UIWidgets::CollapsingHeader("Thermal Override (Material State Field)")) {
-                        ImGui::Spacing();
-                        ImGui::Checkbox("Override World Ambient Inside This Domain##DomThermal",
-                                        &domain.thermal_override_enabled);
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip(
-                                "Boundary conditions for object surface heating inside this\n"
-                                "domain's box. Affects the Material State Field (heating,\n"
-                                "ignition, char, glow) — NOT the gas solve itself.\n\n"
-                                "Off: this domain inherits the world's ambient and oxygen.");
-                        }
-                        ImGui::BeginDisabled(!domain.thermal_override_enabled);
-                        ImGui::DragFloat("Ambient (K)##DomThermalK",
-                                         &domain.thermal_ambient_kelvin, 1.0f, 0.0f, 3000.0f, "%.0f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip(
-                                "Ambient temperature a surface relaxes toward while it is\n"
-                                "inside this box. Tested per surface ELEMENT, so an object\n"
-                                "half in and half out is genuinely half-heated.");
-                        }
-                        ImGui::DragFloat("Oxygen##DomThermalO2",
-                                         &domain.thermal_oxygen, 0.01f, 0.0f, 1.0f, "%.2f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip(
-                                "0..1. Throttles pyrolysis burn rate inside this domain.\n"
-                                "0 smothers fire entirely. It can only slow burning down,\n"
-                                "never start it.");
-                        }
-                        ImGui::EndDisabled();
-                        // Said explicitly because its absence is a design decision,
-                        // not an oversight, and someone WILL look for it here.
-                        ImGui::TextDisabled("Kelvin-per-unit is global on purpose — the burn\n"
-                                            "mask quantizes glow in absolute Kelvin, so a\n"
-                                            "per-domain mapping would make the same object\n"
-                                            "glow differently in different boxes.");
-                    }
+                    FluidThermalUI::drawBoundaryOverride(
+                        domain,
+                        particles->worldThermal().ambient_kelvin,
+                        particles->worldThermal().oxygen_availability);
 
                     // Procedural turbulence (divergence-free curl-noise detail).
                     if (UIWidgets::CollapsingHeader("Turbulence (Procedural Detail)")) {
@@ -1562,6 +1535,28 @@ void drawSimulationDomainControls(
                                           "1 = free-slip: slides freely. Water.");
                     }
 
+                    // ── Thermal liquid (wax) ─────────────────────────────────
+                    // Mirrors fluid.set_param's thermal_* keys one for one; the
+                    // live readout below is the same ThermalLiquidStats fluid.get
+                    // reports, so panel and script cannot disagree about whether
+                    // anything froze.
+                    const RayTrophiSim::Fluid::ThermalLiquidStats* thermal_stats = nullptr;
+                    if (particles && selected_domain_index >= 0 &&
+                        selected_domain_index <
+                            static_cast<int>(particles->gridDomainStates().size())) {
+                        thermal_stats = &particles->gridDomainStates()
+                            [static_cast<std::size_t>(selected_domain_index)].thermal_stats;
+                    }
+                    const float thermal_ambient_kelvin =
+                        RayTrophiSim::fluidDomainAmbientKelvin(
+                            domain,
+                            particles->worldThermal());
+                    fp_edited |= FluidThermalUI::drawDomainControls(
+                        fp,
+                        thermal_stats,
+                        thermal_ambient_kelvin,
+                        particles->flowSources(),
+                        selected_domain_index);
                     fp_edited |= ImGui::DragFloat("Density Correction Strength", &fp.density_correction, 0.05f, 0.0f, 10.0f, "%.2f");
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Repulsive force preventing particles from clustering too close. Helps maintain fluid incompressibility. ~1.0 is recommended.");
@@ -1906,6 +1901,9 @@ void drawSimulationDomainControls(
                     RayTrophiSim::SimulationFlowSourceDesc desc;
                     const std::string node = ui_ctx.selection.selected.object->getNodeName();
                     desc.name = node.empty() ? "Object Flow Source" : node + " Flow";
+                    desc.name = FluidThermalUI::uniqueSourceName(
+                        desc.name,
+                        particles->flowSources());
                     desc.source_mode = RayTrophiSim::SimulationFlowSourceMode::ObjectBounds;
                     desc.source_name = node;
                     desc.domain_index = selected_domain_index;
@@ -1953,7 +1951,9 @@ void drawSimulationDomainControls(
 
                 if (ImGui::Button("Add Point Flow Source##DomainFlow", ImVec2(-1, 28))) {
                     RayTrophiSim::SimulationFlowSourceDesc desc;
-                    desc.name = "Point Flow Source";
+                    desc.name = FluidThermalUI::uniqueSourceName(
+                        "Point Flow Source",
+                        particles->flowSources());
                     desc.source_mode = RayTrophiSim::SimulationFlowSourceMode::Point;
                     desc.domain_index = selected_domain_index;
                     desc.position = (Vec3::min(domain.bounds_min, domain.bounds_max) +
@@ -2354,6 +2354,19 @@ void drawSimulationDomainControls(
                                     "already in the domain keeps what it was poured as.");
                             }
                         }
+
+                        // ── Pour temperature (Kelvin) ────────────────────────
+                        // Not the gas "Temperature" above: that one is the gas
+                        // solver's normalised unit. This is what the emitted
+                        // liquid is born at, read by the thermal-liquid chain.
+                        const float source_ambient_kelvin =
+                            RayTrophiSim::fluidDomainAmbientKelvin(
+                                domain,
+                                particles->worldThermal());
+                        FluidThermalUI::drawSourceControls(
+                            source,
+                            source_ambient_kelvin,
+                            domain.fluid_params);
                     }
 
                     if (source.source_mode == RayTrophiSim::SimulationFlowSourceMode::Point) {

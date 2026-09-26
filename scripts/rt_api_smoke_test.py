@@ -903,6 +903,50 @@ assert stats["alive_count"] == alive_before + 1
 assert stats["emitter_count"] >= 1, "stats() counts must not wait for a step"
 assert stats["capacity"] >= stats["alive_count"]
 rt.particle.step(0.016)
+
+# Particle roadmap Phase 0: every stage reports where it ran, and the force
+# stage says WHY it ran there. "gpu" is the only status meaning the GPU result
+# was used.
+stats = rt.particle.stats()
+for key in ("execution_policy", "compute_backend", "gpu_force_status",
+            "forces_on_gpu", "step_blocked", "stage_backends", "gpu_force_ms",
+            "force_upload_bytes", "force_download_bytes", "mirror_upload_bytes",
+            "nonfinite_particles"):
+    assert key in stats, "particle.stats missing %s" % key
+assert set(stats["stage_backends"]) == {"emit", "forces", "integrate",
+                                        "scene_collision", "self_collision"}
+assert (stats["gpu_force_status"] == "gpu") == stats["forces_on_gpu"]
+assert stats["nonfinite_particles"] == 0
+sample = rt.particle.get_state_sample(max_count=4)
+assert sample["alive_count"] == stats["alive_count"]
+assert sample["returned"] == min(4, sample["alive_count"])
+assert len(sample["positions"]) == sample["returned"]
+raised = False
+try:
+    rt.particle.get_state_sample(stride=0)
+except Exception:
+    raised = True
+assert raised, "get_state_sample must reject stride 0"
+
+# The CPU policy must actually keep the force stage on the CPU, and an unknown
+# policy is refused rather than defaulted.
+policy_before = rt.particle.get_physics()["execution_policy"]
+rt.particle.set_physics(execution_policy="cpu")
+assert rt.particle.get_physics()["execution_policy"] == "cpu"
+rt.particle.spawn(position=(0.0, 3.0, 0.0), lifetime_seconds=4.0)
+rt.particle.step(0.016)
+stats = rt.particle.stats()
+assert stats["gpu_force_status"] == "cpu_policy", stats["gpu_force_status"]
+assert stats["forces_on_gpu"] is False
+assert stats["force_download_bytes"] == 0, "CPU policy must not download velocity"
+raised = False
+try:
+    rt.particle.set_physics(execution_policy="__nope__")
+except Exception:
+    raised = True
+assert raised, "set_physics must reject an unknown execution_policy"
+rt.particle.set_physics(execution_policy=policy_before)
+
 rt.particle.clear()
 assert rt.particle.stats()["alive_count"] == 0
 
@@ -930,6 +974,44 @@ if pt_created_empty_system:
     rt.particle.clear_systems()
     assert not rt.particle.list_systems()
 print("[rt-smoke] rt.particle emitter-only + emitters + physics + stats + spawn: OK")
+
+# Particle roadmap Phase 1: explicit system addressing. Writes target B while A
+# is active, so a call that fell back to the panel's selection is caught.
+p1_active = next((s for s in rt.particle.list_systems() if s["active"]), None)
+p1_a = rt.particle.add_system("SmokePhase1 A")
+p1_b = rt.particle.add_system("SmokePhase1 B")
+assert p1_a["id"] != p1_b["id"]
+rt.particle.set_active_system(system_id=p1_a["id"])
+p1_first = rt.particle.add_emitter(system_id=p1_b["id"], name="P1First")
+p1_second = rt.particle.add_emitter(system_id=p1_b["id"], name="P1Second")
+assert p1_first["system_id"] == p1_b["id"]
+assert len(rt.particle.emitters(system_id=p1_a["id"])) == 0
+assert len(rt.particle.emitters(system_id=p1_b["id"])) == 2
+rt.particle.remove_emitter("0", system_id=p1_b["id"])
+p1_uid = "uid:%d" % p1_second["uid"]
+assert rt.particle.get_emitter(p1_uid, system_id=p1_b["id"])["index"] == 0
+for call in (lambda: rt.particle.emitters(system_id=987654),
+             lambda: rt.particle.emitters(system="__no_such_system__"),
+             lambda: rt.particle.set_render(system_id=p1_b["id"], shape="__nope__"),
+             lambda: rt.particle.set_system(system_id=p1_b["id"], name="SmokePhase1 A"),
+             lambda: rt.particle.remove_system()):
+    raised = False
+    try:
+        call()
+    except Exception:
+        raised = True
+    assert raised, "phase-1 negative case must raise"
+rt.particle.set_render(system_id=p1_b["id"], shape="cube", size_multiplier=2.5)
+p1_render = rt.particle.get_render(system_id=p1_b["id"])
+assert p1_render["shape"] == "cube" and abs(p1_render["size_multiplier"] - 2.5) < 1e-6
+rt.particle.set_system(system_id=p1_b["id"], name="SmokePhase1 B2", blend_mode="alpha")
+assert rt.particle.get_system(system="SmokePhase1 B2")["blend_mode"] == "alpha"
+assert rt.particle.stats(system_id=p1_b["id"])["system_id"] == p1_b["id"]
+rt.particle.remove_system(system_id=p1_b["id"])
+rt.particle.remove_system(system_id=p1_a["id"])
+if p1_active is not None:
+    rt.particle.set_active_system(system_id=p1_active["id"])
+print("[rt-smoke] rt.particle phase-1 system addressing + render + uid: OK")
 
 # 5.6c - rt.anim skeletal playback (transport + graph parameters only)
 for fn in ("characters", "character", "clips", "play", "stop", "set_paused",

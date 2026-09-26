@@ -15,6 +15,7 @@
 // This file is included by scene_ui.cpp to reduce file size
 
 #include "ProjectManager.h"
+#include "Autosave.h"
 #include "scene_data.h"
 #include "renderer.h"
 #include "SceneSelection.h"
@@ -323,6 +324,27 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
 
                 ImGui::Separator();
                 ImGui::TextWrapped("Embedded keeps a self-contained project. Project-local copies writes textures next to the .rtp. Keep original paths stores external paths only.");
+
+                ImGui::Separator();
+                // Autosave preference (also project.autosave_set / rt.project.autosave_set).
+                {
+                    auto as_status = raytrophi::autosave::status();
+                    bool as_enabled = as_status.enabled;
+                    if (ImGui::Checkbox("Autosave", &as_enabled)) {
+                        raytrophi::autosave::setEnabled(as_enabled);
+                    }
+                    int as_minutes = std::max(1, as_status.interval_sec / 60);
+                    ImGui::BeginDisabled(!as_enabled);
+                    ImGui::SetNextItemWidth(160.0f);
+                    if (ImGui::SliderInt("Interval (min)", &as_minutes, 1, 60)) {
+                        raytrophi::autosave::setIntervalSec(as_minutes * 60);
+                    }
+                    ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                        ImGui::SetTooltip("Writes a recovery copy in the background (never your project file).\n"
+                                          "Skipped while the timeline plays; runs on the next pause.");
+                    }
+                }
                 ImGui::EndMenu();
             }
 

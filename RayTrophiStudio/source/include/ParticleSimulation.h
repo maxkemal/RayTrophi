@@ -5,6 +5,7 @@
 #include "Fluid/FluidParticles.h"
 #include "Fluid/APICFluidSolver.h"
 #include "Fluid/FluidLevelSet.h"
+#include "Fluid/FluidThermalLiquid.h"
 #include "Fluid/FluidFoam.h"
 #include "Fluid/FluidRenderMode.h"
 #include "Fluid/GranularGpuState.h"
@@ -68,6 +69,19 @@ enum class ParticleQualityMode {
     Offline
 };
 
+// Which backend a particle step is allowed to run on (PARTICLE_SYSTEM_GPU_ROADMAP
+// §7.1). Auto prefers the GPU stages that exist and falls back to CPU, and the
+// fallback is REPORTED (ParticleSimulationStats::gpu_force_status), never
+// silent. GPURequired refuses to advance instead of falling back, so a test
+// that asks for the GPU cannot pass on the CPU path by accident. CPU runs the
+// reference implementation even when a GPU is available -- that is the
+// baseline every GPU stage is compared against.
+enum class ParticleExecutionPolicy {
+    Auto,
+    GPURequired,
+    CPU
+};
+
 // Tag for what kind of solver a grid domain feeds. Gas is the legacy gas/smoke
 // path through GridFluid::step (advect → projection → buoyancy → fire). Fluid
 // is the APIC liquid path (P2G → projection → G2P → advect particles). All
@@ -81,12 +95,13 @@ enum class SimulationDomainType {
 
 enum class SimulationDomainBackend {
     CPU_Dense     = 0,
-    // GPU_Compute: auto-selects CUDA if available, falls back to Vulkan.
-    // UI shows "GPU Compute" — backend is transparent to the user.
+    // GPU_Compute: the explicit CUDA choice (panel: "GPU (CUDA - Alternative)"),
+    // a secondary NVIDIA-only path; falls back to Vulkan when CUDA is missing.
     GPU_Compute   = 1,
     CPU_SparseVDB = 2,
-    // GPU_Vulkan: forces Vulkan even when CUDA is present. No longer a testing-only
-    // escape hatch — it is what new domains default to (defaultSimulationDomainBackend).
+    // GPU_Vulkan: the recommended GPU path (parity with CUDA in speed and
+    // accuracy, cross-vendor) and what new domains default to
+    // (defaultSimulationDomainBackend).
     GPU_Vulkan    = 3,
     // Legacy alias kept so old project files load correctly.
     GPU_CUDA      = GPU_Compute,
@@ -211,6 +226,7 @@ inline float computeFluidFillSeedAABB(const Vec3& bounds_min,
 struct ParticlePhysicsSettings {
     ParticlePhysicsMode mode = ParticlePhysicsMode::Spark;
     ParticleQualityMode quality = ParticleQualityMode::Realtime;
+    ParticleExecutionPolicy execution_policy = ParticleExecutionPolicy::Auto;
     float particle_radius = 0.04f;
     bool self_collision_enabled = false;
     int solver_iterations = 1;
@@ -819,6 +835,18 @@ struct SimulationGridDomainDesc {
     bool fluid_debug_overlay = false;
 };
 
+// The rest temperature a fluid domain's parcels cool toward and are born at:
+// the domain's own ambient when it overrides the world, the world's otherwise.
+// One definition for the emitter, the seed, the cooling pass and the API
+// readout — two opinions about "room temperature" would make freshly emitted
+// liquid cool or warm on its first frame for no reason anyone authored.
+inline float fluidDomainAmbientKelvin(const SimulationGridDomainDesc& domain,
+                                      const WorldThermalState& world) {
+    const float k = domain.thermal_override_enabled ? domain.thermal_ambient_kelvin
+                                                    : world.ambient_kelvin;
+    return std::max(1.0f, k);
+}
+
 // Per-step telemetry for one Gas domain — the counterpart of
 // Fluid::APICSolverStats, which is what the Fluid panel reports. The gas step
 // is a hybrid: individual stages run on the device while the rest of the
@@ -967,6 +995,10 @@ struct SimulationGridDomainState {
     // Fluid-only runtime state. Empty for Gas domains.
     Fluid::FluidParticles particles;
     Fluid::APICSolverStats fluid_stats;
+    // Thermal-liquid readout (cooling / freezing / ν(T)). Kept beside
+    // fluid_stats rather than inside it: Fluid::step resets its stats on entry,
+    // and the thermal chain runs once per FRAME, before the solver.
+    Fluid::ThermalLiquidStats thermal_stats;
     SimulationComputeContext::TransferStats fluid_transfer_stats;
     // Whitewater secondary particles (spray/foam/bubbles). Render-only — never
     // fed back into the pressure solve, so it cannot affect liquid mass.
@@ -1434,6 +1466,14 @@ struct SimulationFlowSourceDesc {
     std::string fluid_substance;
     // Per-source accumulator for fractional emit counts (kept in the desc so
     // it survives step boundaries; reset on disable).
+    // Kelvin the emitted LIQUID is born at (a hot wax pour). Separate from
+    // `temperature` above, which is the GAS source's normalised 0..N unit —
+    // one field serving both would hand 0.8 "normalised" to a threshold
+    // authored as 330 K and silently never freeze. The switch is its own field
+    // rather than a sentinel value: off means "the domain ambient", which is a
+    // real temperature and not an absence of one.
+    bool  fluid_temperature_override = false;
+    float fluid_temperature_kelvin = 353.0f;
     float fluid_emit_accumulator = 0.0f;
     // Dynamic emission limits (Houdini/Blender style flow controls)
     bool use_time_limit = false;
@@ -1781,6 +1821,42 @@ struct ParticleSimulationStats {
     std::size_t emitter_count = 0;
     std::size_t collider_count = 0;
     std::size_t domain_count = 0;
+
+    // ── Execution / transfer telemetry (roadmap Phase 0) ────────────────────
+    // Which backend each stage actually ran on, and what the partial GPU path
+    // costs in transfers. Before this, the GPU force block (upload + dispatch +
+    // synchronize + velocity download) ran BEFORE integrate_start, so no stage
+    // timer covered it; it only showed up as an unexplained gap in total_ms.
+    //
+    // All strings are static literals: stats_ is reset every step and must not
+    // allocate.
+    ParticleExecutionPolicy execution_policy = ParticleExecutionPolicy::Auto;
+    const char* compute_backend = "none";   // SimulationComputeContext::backendName()
+    // Why the force stage ran where it did. "gpu" is the only value meaning the
+    // GPU kernel's result was used. Values:
+    //   not_attempted, cpu_policy, no_compute_context, backend_not_vulkan,
+    //   no_dispatch_support, buffers_not_ready, dispatch_failed,
+    //   download_failed, gpu_required_blocked, gpu
+    const char* gpu_force_status = "not_attempted";
+    bool forces_on_gpu = false;
+    // GPURequired and the GPU force stage was unavailable or failed: the step
+    // did NOT integrate. gpu_force_status says why. Never true under Auto/CPU.
+    // The runtime's grid domains still step: the policy governs particle
+    // stages only.
+    bool step_blocked = false;
+    // Host wall time of the whole GPU force block, transfers included. Zero
+    // when the force stage ran on the CPU (it is then inside integrate_ms).
+    float gpu_force_ms = 0.0f;
+    // Transfers issued by the particle step itself, split by purpose. Grid
+    // domain transfers are NOT here -- they belong to fluid.step_stats /
+    // gas.step_stats.
+    //   force_transfer  — pre-dispatch mirror upload, dispatch, sync, velocity download
+    //   mirror_transfer — end-of-step host->device mirror of the whole SoA
+    SimulationComputeContext::TransferStats force_transfer;
+    SimulationComputeContext::TransferStats mirror_transfer;
+    // Particles whose position or velocity was NaN/Inf after this step's
+    // integrate + collision. Counted, not removed: Phase 0 only observes.
+    uint32_t nonfinite_particles = 0;
 };
 
 struct MoltenMassTransferRequest {
@@ -2289,6 +2365,14 @@ private:
     float linear_drag_ = 0.0f;
     ParticlePhysicsSettings physics_settings_;
     ParticleSimulationStats stats_;
+    // GPU force results land here first and are swapped into buffers_ only
+    // when ALL three components downloaded. Downloading straight into buffers_
+    // meant a failure on y after x succeeded left x already GPU-integrated, and
+    // the CPU fallback then applied the forces to x a second time -- a silent
+    // half-GPU/half-CPU step (roadmap §7.4 forbids it). Grow-only.
+    std::vector<float> gpu_velocity_scratch_x_;
+    std::vector<float> gpu_velocity_scratch_y_;
+    std::vector<float> gpu_velocity_scratch_z_;
     std::size_t alive_count_ = 0;
     uint64_t data_version_ = 1;
     uint32_t emitter_spawn_serial_ = 1;

@@ -46,8 +46,10 @@ inline std::atomic<int> g_active_sdf_bakes{0};
 #include "Core/RenderStateManager.h"
 #include "globals.h"
 #include "SurfaceMeshCache.h"
+#include "PerfProfile.h"
 #include "HittableInstance.h"
 #include "ColliderMeshBVH.h"
+#include "KinematicColliderSource.h"
 #include "MeshModifiers.h"
 #include "GeometryNodesV2.h"
 #include "MaterialNodesV2.h"
@@ -127,6 +129,13 @@ struct SceneData {
     // resolves once for the whole bake instead of N times per frame.
     mutable std::unordered_set<std::string> surface_cache_epoch_done_;
     mutable uint64_t surface_cache_epoch_gen_ = ~0ull;
+    // OBB memo for resolveObjectOBBForSimulation, dropped whenever the node's
+    // surface_mesh_cache entry is rebuilt or erased. The OBB is a pure function
+    // of that entry's triangles, yet it was re-derived from EVERY triangle
+    // (copy + two passes) on each call - per collider, several times per sim
+    // step. On a high-poly mesh_sdf collider that was a steady ~8 ms/step
+    // inside sim.fluid.voxelize_colliders even with the voxel cache hitting.
+    mutable std::unordered_map<std::string, RayTrophiSim::ParticleColliderOBB> sim_obb_memo_;
     struct SimulationLocalBounds {
         Vec3 min = Vec3(0.0f);
         Vec3 max = Vec3(0.0f);
@@ -2518,6 +2527,7 @@ struct SceneData {
     std::vector<std::pair<uint32_t, uint64_t>> sim_bake_hashes_;
 
     void syncSimulationRenderVolumes() {
+        RTPERF_FRAME_SCOPE("sim.timeline.render_sync");
         // The bridge does CUDA work (registerOrUpdateLiveVolume -> uploadToGPU) and
         // mutates world.objects. Doing either while a backend is tearing down /
         // rebuilding GPU state poisons the CUDA context (hangs / error 700) — the
@@ -3929,6 +3939,14 @@ struct SceneData {
         h = mix(h, fb(fp.granular_residual_strength));
         h = mix(h, fb(fp.granular_tack_peak));
         h = mix(h, fb(fp.granular_thermal_conductivity));
+        // Thermal liquid: every dial changes what freezes where, so a bake made
+        // under other values no longer describes this liquid.
+        h = mix(h, fp.thermal_liquid_enabled ? 1ull : 0ull);
+        h = mix(h, fb(fp.thermal_air_cooling_rate));
+        h = mix(h, fb(fp.thermal_contact_cooling_rate));
+        h = mix(h, fb(fp.thermal_freeze_kelvin));
+        h = mix(h, fb(fp.thermal_viscosity_range));
+        h = mix(h, fb(fp.thermal_cold_viscosity));
 
         // Authored initial state. A seed box or fill level that does not re-key
         // the cache means the tank the user just resized replays at its old
@@ -4118,6 +4136,8 @@ struct SceneData {
                 h = mix(h, qf(f.fluid_particles_per_second));
                 h = mix(h, qf(f.fluid_velocity_spread));
                 h = mix(h, f.fluid_emit_along_normal ? 1ull : 0ull);
+                h = mix(h, f.fluid_temperature_override ? 1ull : 0ull);
+                h = mix(h, qf(f.fluid_temperature_kelvin));
                 // ★ The substance changes what the liquid IS, so a cached
                 // sequence baked under the old name no longer describes it.
                 h = mix(h, static_cast<uint64_t>(
@@ -4474,6 +4494,8 @@ struct SceneData {
                 h = mix(h, qf(f.fluid_particles_per_second));
                 h = mix(h, qf(f.fluid_velocity_spread));
                 h = mix(h, f.fluid_emit_along_normal ? 1ull : 0ull);
+                h = mix(h, f.fluid_temperature_override ? 1ull : 0ull);
+                h = mix(h, qf(f.fluid_temperature_kelvin));
                 h = mix(h, static_cast<uint64_t>(
                     RayTrophiSim::Fluid::substanceTag(f.fluid_substance)));
                 h = mix(h, f.use_time_limit ? 1ull : 0ull);
@@ -5822,6 +5844,7 @@ struct SceneData {
     }
 
     void captureSimFrame(int frame) {
+        RTPERF_FRAME_SCOPE("sim.timeline.capture_frame");
         const bool already_cached = sim_frame_cache_.find(frame) != sim_frame_cache_.end();
         if (!already_cached &&
             (static_cast<int>(sim_frame_cache_.size()) >= kMaxCachedSimFrames ||
@@ -5941,6 +5964,7 @@ struct SceneData {
     }
 
     bool restoreSimFrame(int frame, float fixed_dt = 1.0f / 24.0f) {
+        RTPERF_FRAME_SCOPE("sim.timeline.restore_frame");
         // Frame 0 is reconstructed from the rest pose rather than from a cache
         // entry: it is the one frame that is exactly reproducible, and resetting
         // here is what makes a loop-back put a fallen body back at the top.
@@ -6008,6 +6032,7 @@ struct SceneData {
     // bound, the frame is out of the baked range, or any system file is missing/
     // corrupt — callers then fall back to resimulation as before.
     bool restoreSimFrameFromDisk(int frame, float fixed_dt = 1.0f / 24.0f) {
+        RTPERF_FRAME_SCOPE("sim.timeline.restore_frame_disk");
         if (!sim_cache_valid_ || sim_cache_dir_.empty()) return false;
         if (frame < sim_cache_start_frame_ || frame > sim_cache_end_frame_) return false;
 
@@ -6426,6 +6451,9 @@ struct SceneData {
 
     void updateSimulationTimeline(int tl_frame, bool playing, float realtime_dt, float fps, bool live_mode,
                                   bool ui_editing = false) {
+        // Parent of the sim.timeline.* / sim.fluid.* stages: the time between
+        // this and the sum of its children is sim work with no scope yet.
+        RTPERF_FRAME_SCOPE("sim.timeline.update");
         if (tl_frame < 0) tl_frame = 0;
         const bool preserve_timeline_range_edit = timeline_range_edit_grace_ > 0;
         publishCompletedSdfBakes();
@@ -6511,7 +6539,10 @@ struct SceneData {
         // Auto-invalidate the in-memory bake cache when the simulation SETUP
         // changes (add/remove of any sim element, rigid-body param edit, …) so a
         // stale cache is never replayed.
-        const uint64_t cfg_sig = computeSimConfigSignature();
+        const uint64_t cfg_sig = [&] {
+            RTPERF_FRAME_SCOPE("sim.timeline.config_sig");
+            return computeSimConfigSignature();
+        }();
         if (cfg_sig != last_sim_config_sig_ || fps_changed) {
             // Settle-gate: defer the (expensive) cache drop until the edit finishes.
             // The signature changes on EVERY drag tick, so committing immediately
@@ -6715,14 +6746,20 @@ struct SceneData {
                     // Re-pose keyframed sim-source objects (e.g. moving colliders)
                     // for the frame we are about to step INTO, so the solid mask
                     // tracks the animated geometry instead of freezing at one pose.
-                    applySimSourceObjectPosesForFrame(sim_timeline_frame_ + 1);
-                    syncSimulationWorld();
+                    {
+                        RTPERF_FRAME_SCOPE("sim.timeline.source_poses");
+                        applySimSourceObjectPosesForFrame(sim_timeline_frame_ + 1);
+                        syncSimulationWorld();
+                    }
                     // Keys are evaluated against the frame being stepped INTO —
                     // the same one the source poses above were just set to. The
                     // world's own frame_ counter is not that number: it only ever
                     // gets re-anchored by resetTime, so it drifts across scrubs.
                     simulation_world.setTimelineFrame(sim_timeline_frame_ + 1);
-                    simulation_world.stepOnce(fixed_dt);
+                    {
+                        RTPERF_FRAME_SCOPE("sim.timeline.step");
+                        simulation_world.stepOnce(fixed_dt);
+                    }
                     processFractureImpacts();  // shatter on impact above threshold
                     emitCombustionStructuralImpulses(fixed_dt);  // fire -> blast
                     processStructuralImpulseEvents();  // ...and by blast overpressure
@@ -7987,7 +8024,11 @@ public:
         }
         particle_systems.clear();
         active_particle_system_index = -1;
-        next_particle_system_id = 1;
+        // next_particle_system_id is deliberately NOT reset. Ids are how
+        // scripts address a system (ParticleSystemRef); restarting at 1 would
+        // hand a cleared system's id to the next new one, and a script still
+        // holding it would silently edit the wrong system. Loading a project
+        // sets the counter from the file.
     }
 
     bool anyParticleRuntimeEnabled() const {
@@ -8182,10 +8223,12 @@ public:
     void invalidateSurfaceMeshCache(const std::string& node_name = std::string()) const {
         if (node_name.empty()) {
             surface_mesh_cache.clear();
+            sim_obb_memo_.clear();
             simulation_local_bounds_.clear();
             last_sim_pose_applied_.clear();  // drop stale sim-pose memo on full reset/reload
         } else {
             surface_mesh_cache.erase(node_name);
+            sim_obb_memo_.erase(node_name);
             simulation_local_bounds_.erase(node_name);
             last_sim_pose_applied_.erase(node_name);
         }
@@ -8229,6 +8272,10 @@ public:
             }
         }
 
+        // From here the entry is rebuilt (or erased): any memo derived from
+        // the old triangles is stale.
+        RTPERF_FRAME_SCOPE("sim.collider.surface_cache_rebuild");
+        sim_obb_memo_.erase(node_name);
         std::vector<std::shared_ptr<Triangle>> triangles;
         for (const auto& obj : world.objects) {
             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
@@ -8539,9 +8586,16 @@ public:
     // removed the resolver cost — not the shortcut.
     bool resolveObjectOBBForSimulation(const std::string& node_name,
                                        RayTrophiSim::ParticleColliderOBB& out_obb) const {
+        RTPERF_FRAME_SCOPE("sim.collider.obb_resolve");
         const auto* surface_cache = getSurfaceMeshCacheForObject(node_name);
         if (!surface_cache) {
             return false;
+        }
+        // getSurfaceMeshCacheForObject drops the memo whenever it rebuilds the
+        // entry, so a hit here was derived from exactly these triangles.
+        if (auto memo = sim_obb_memo_.find(node_name); memo != sim_obb_memo_.end()) {
+            out_obb = memo->second;
+            return true;
         }
 
         // Derive the oriented box DIRECTLY from current world-space vertices, so it
@@ -8621,6 +8675,7 @@ public:
         out_obb.local_bounds_min = min_bound;
         out_obb.local_bounds_max = max_bound;
         out_obb.local_to_world = m;
+        sim_obb_memo_[node_name] = out_obb;
         return true;
     }
 
@@ -9383,6 +9438,9 @@ public:
     // Force Fields (Universal Physics System)
     // =========================================================================
     Physics::ForceFieldManager force_field_manager;
+    // Solver-neutral bone-attached primitive producers. Runtime motion history
+    // lives inside the registry; solvers consume sampled proxies, never rigs.
+    RayTrophiSim::KinematicColliderRegistry kinematic_colliders;
     RayTrophiSim::SimulationWorld simulation_world;
 
     // Live dense gas fields publish raw Vulkan buffer device addresses through
@@ -9407,11 +9465,17 @@ public:
         g_gas_volumes_dirty = true;
     }
 
+    // Device on which a particle-requested Vulkan compute backend failed to
+    // create; syncSimulationWorld() does not retry until the device changes.
+    void* particle_vulkan_failed_device_ = nullptr;
+
     void syncSimulationWorld() {
         simulation_world.setForceFieldManager(&force_field_manager);
 
-        // GPU_Compute (value 1) = auto-select: CUDA preferred, Vulkan fallback.
-        // GPU_Vulkan  (value 3) = force Vulkan regardless (for explicit testing).
+        // GPU_Vulkan  (value 3) = the default for new domains whenever the device
+        //                        supports Vulkan compute (defaultSimulationDomainBackend).
+        // GPU_Compute (value 1) = the panel's explicit "GPU (CUDA)" choice; falls
+        //                        back to Vulkan only when CUDA is unavailable.
         bool auto_gpu_requested    = g_sim_use_gpu_solver;
         bool vulkan_only_requested = false;
         for (const auto& system : particle_systems) {
@@ -9422,6 +9486,22 @@ public:
                     if (domain.backend == RayTrophiSim::SimulationDomainBackend::GPU_Vulkan)
                         vulkan_only_requested = true;
                 }
+            }
+        }
+        // Particle execution policy is a backend request too. It used to play
+        // no part here, so a domain-less particle system under Auto always
+        // stepped on the CPU context and reported "backend_not_vulkan" -- the
+        // GPU path had never been reachable, and a baseline read it as "no
+        // speedup". The particle force kernel is Vulkan-only, so particles ask
+        // for Vulkan; a domain's own request (CUDA-preferred Auto) still wins.
+        bool particle_gpu_requested = false;
+        for (const auto& system : particle_systems) {
+            if (system.runtime &&
+                system.runtime->physicsSettings().execution_policy !=
+                    RayTrophiSim::ParticleExecutionPolicy::CPU &&
+                (!system.runtime->emitters().empty() || system.runtime->aliveCount() > 0)) {
+                particle_gpu_requested = true;
+                break;
             }
         }
 
@@ -9437,12 +9517,13 @@ public:
                 compute.setBackend(std::move(vk_backend));
             }
         } else if (auto_gpu_requested || vulkan_only_requested) {
-            // Auto: try CUDA first, fall back to Vulkan
+            // A domain explicitly set to CUDA (the panel's secondary GPU path):
+            // use CUDA, fall back to Vulkan only when CUDA is unavailable.
             if (compute.backendType() == RayTrophiSim::ComputeBackendType::CUDA) {
                 // Already on CUDA — keep it
             } else {
-                // GPU_Compute is CUDA-preferred even if an earlier selection
-                // left this context on Vulkan.
+                // The user chose CUDA for this domain, so an earlier selection
+                // that left this context on Vulkan is replaced.
                 invalidateSimulationDenseGpuAddresses();
                 auto cuda_backend = RayTrophiSim::createCudaSimulationComputeBackend();
                 if (cuda_backend) {
@@ -9454,6 +9535,19 @@ public:
                     g_hasVulkanComputeSim = (vk_backend != nullptr);
                     compute.setBackend(std::move(vk_backend));
                 }
+            }
+        } else if (particle_gpu_requested) {
+            // A failed creation is not retried on every sync for the same
+            // device: that would build and discard a backend each frame.
+            if (compute.backendType() != RayTrophiSim::ComputeBackendType::VulkanCompute &&
+                particle_vulkan_failed_device_ != g_vulkan_sim_compute_ctx.device) {
+                invalidateSimulationDenseGpuAddresses();
+                auto vk_backend =
+                    RayTrophiSim::createVulkanSimulationComputeBackend(g_vulkan_sim_compute_ctx);
+                g_hasVulkanComputeSim = (vk_backend != nullptr);
+                particle_vulkan_failed_device_ =
+                    vk_backend ? nullptr : g_vulkan_sim_compute_ctx.device;
+                compute.setBackend(std::move(vk_backend));
             }
         } else if (compute.backendType() != RayTrophiSim::ComputeBackendType::CPU) {
             invalidateSimulationDenseGpuAddresses();
@@ -9530,6 +9624,7 @@ public:
         cameras.clear();
         animationDataList.clear();
         boneData.clear();              // Clear bone hierarchy
+        kinematic_colliders.clear();   // Drop authored proxies and motion history
         timeline.clear();              // Clear keyframes
         ui_settings_json_str = "";     // Clear UI settings string
         load_counter = 0;              // Reset load counter
