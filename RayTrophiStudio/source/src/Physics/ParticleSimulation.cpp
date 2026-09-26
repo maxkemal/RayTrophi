@@ -150,10 +150,6 @@ float safeInverseMass(float mass) {
     return mass > 1e-6f ? 1.0f / mass : 0.0f;
 }
 
-inline float lerpf(float a, float b, float t) {
-    return a + (b - a) * t;
-}
-
 // Voxelize a collider list into the grid.solid[] mask. Called once per Fluid
 // domain step BEFORE the APIC solver, so enforceSolidBoundaries and the free-
 // surface pressure projection see the up-to-date solid set (movable colliders
@@ -7765,23 +7761,9 @@ std::size_t ParticleSimulationSystem::spawn(const ParticleSpawnDesc& desc) {
     buffers_.inverse_mass[index] = safeInverseMass(desc.mass);
     buffers_.emitter_index[index] = desc.emitter_index;
 
-    buffers_.start_size[index] = desc.start_size;
-    buffers_.end_size[index] = desc.end_size;
-    buffers_.start_opacity[index] = desc.start_opacity;
-    buffers_.end_opacity[index] = desc.end_opacity;
-    buffers_.start_color_r[index] = desc.start_color.x;
-    buffers_.start_color_g[index] = desc.start_color.y;
-    buffers_.start_color_b[index] = desc.start_color.z;
-    buffers_.end_color_r[index] = desc.end_color.x;
-    buffers_.end_color_g[index] = desc.end_color.y;
-    buffers_.end_color_b[index] = desc.end_color.z;
-
-    // Current = start at birth (age = 0).
-    buffers_.size[index] = desc.start_size;
-    buffers_.opacity[index] = desc.start_opacity;
-    buffers_.color_r[index] = desc.start_color.x;
-    buffers_.color_g[index] = desc.start_color.y;
-    buffers_.color_b[index] = desc.start_color.z;
+    buffers_.appearance_profile[index] = desc.appearance_profile_id;
+    buffers_.size_scale[index] = std::isfinite(desc.size_scale)
+        ? std::max(0.0f, desc.size_scale) : 1.0f;
     buffers_.rotation[index] = desc.rotation;
     buffers_.angular_velocity[index] = desc.angular_velocity;
 
@@ -7820,6 +7802,7 @@ ParticleEmitterDesc& ParticleSimulationSystem::addEmitter(const ParticleEmitterD
     if (emitter.seed == 0u) {
         emitter.seed = static_cast<uint32_t>(emitters_.size() * 97u + 1u);
     }
+    ensureEmitterAppearanceProfile(emitter);
     // Stable identity for the emitter's timeline track. Same allocator pattern
     // as flow sources: a loaded project keeps its uid, and the counter is
     // advanced past it so a later new emitter cannot collide with it.
@@ -9829,8 +9812,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 std::clamp(raw_velocity.x, -kMaxDepositedVelocity, kMaxDepositedVelocity),
                 std::clamp(raw_velocity.y, -kMaxDepositedVelocity, kMaxDepositedVelocity),
                 std::clamp(raw_velocity.z, -kMaxDepositedVelocity, kMaxDepositedVelocity));
-            const float raw_opacity =
-                particle < buffers_.opacity.size() ? buffers_.opacity[particle] : 1.0f;
+            const float raw_opacity = sampleAppearance(particle).opacity;
             const float opacity =
                 std::isfinite(raw_opacity) ? std::clamp(raw_opacity, 0.0f, 1.0f) : 0.0f;
             // A cooling ember must stop igniting things well before it vanishes,
@@ -12886,16 +12868,8 @@ void ParticleSimulationSystem::step(const SimulationContext& context) {
         buffers_.velocity_y[i] = velocity.y;
         buffers_.velocity_z[i] = velocity.z;
 
-        // Evaluate over-life visual attributes (linear start -> end across lifetime).
-        const float lifetime = buffers_.lifetime_seconds[i];
-        const float t = lifetime > 1e-6f
-            ? std::clamp(buffers_.age_seconds[i] / lifetime, 0.0f, 1.0f)
-            : 0.0f;
-        buffers_.size[i] = lerpf(buffers_.start_size[i], buffers_.end_size[i], t);
-        buffers_.opacity[i] = lerpf(buffers_.start_opacity[i], buffers_.end_opacity[i], t);
-        buffers_.color_r[i] = lerpf(buffers_.start_color_r[i], buffers_.end_color_r[i], t);
-        buffers_.color_g[i] = lerpf(buffers_.start_color_g[i], buffers_.end_color_g[i], t);
-        buffers_.color_b[i] = lerpf(buffers_.start_color_b[i], buffers_.end_color_b[i], t);
+        // Colour / size / opacity are no longer written here: consumers
+        // evaluate the appearance profile at age / lifetime (sampleAppearance).
         buffers_.rotation[i] += buffers_.angular_velocity[i] * dt;
     }
     const auto integrate_end = SimulationClock::now();
@@ -13422,12 +13396,8 @@ void ParticleSimulationSystem::emitFromEmitters(const SimulationContext& context
             // Visual attributes (with per-particle jitter where configured).
             const float size_rand = 1.0f + emitter.size_jitter *
                 (hashUnitFloat((serial * 9781u + emitter.seed) ^ 0x2c1b3c6du) * 2.0f - 1.0f);
-            desc.start_size = std::max(0.0f, emitter.start_size * size_rand);
-            desc.end_size = std::max(0.0f, emitter.end_size * size_rand);
-            desc.start_opacity = emitter.start_opacity;
-            desc.end_opacity = emitter.end_opacity;
-            desc.start_color = emitter.start_color;
-            desc.end_color = emitter.end_color;
+            desc.appearance_profile_id = emitter.appearance_profile_id;
+            desc.size_scale = std::max(0.0f, size_rand);
             desc.rotation = 6.28318530718f * hashUnitFloat(serial ^ (emitter.seed * 2654435761u) ^ 0x7a5b9c1fu);
             desc.angular_velocity = emitter.angular_velocity + emitter.angular_jitter *
                 (hashUnitFloat((serial * 40503u + emitter.seed) ^ 0x68bc21f3u) * 2.0f - 1.0f);
@@ -13450,23 +13420,10 @@ void ParticleSimulationSystem::resizeStorage(std::size_t capacity) {
     buffers_.alive.resize(capacity, 0u);
     buffers_.emitter_index.resize(capacity, kNoEmitterIndex);
 
-    buffers_.size.resize(capacity, 0.0f);
+    buffers_.appearance_profile.resize(capacity, 0u);
+    buffers_.size_scale.resize(capacity, 1.0f);
     buffers_.rotation.resize(capacity, 0.0f);
     buffers_.angular_velocity.resize(capacity, 0.0f);
-    buffers_.color_r.resize(capacity, 1.0f);
-    buffers_.color_g.resize(capacity, 1.0f);
-    buffers_.color_b.resize(capacity, 1.0f);
-    buffers_.opacity.resize(capacity, 0.0f);
-    buffers_.start_size.resize(capacity, 0.0f);
-    buffers_.end_size.resize(capacity, 0.0f);
-    buffers_.start_opacity.resize(capacity, 0.0f);
-    buffers_.end_opacity.resize(capacity, 0.0f);
-    buffers_.start_color_r.resize(capacity, 1.0f);
-    buffers_.start_color_g.resize(capacity, 1.0f);
-    buffers_.start_color_b.resize(capacity, 1.0f);
-    buffers_.end_color_r.resize(capacity, 1.0f);
-    buffers_.end_color_g.resize(capacity, 1.0f);
-    buffers_.end_color_b.resize(capacity, 1.0f);
     ++data_version_;
 }
 

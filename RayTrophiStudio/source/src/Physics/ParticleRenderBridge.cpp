@@ -529,14 +529,18 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
         // Structural (BLAS/material set), so a full rebuild bakes per-instance data.
         SourceState& st = g_source_state[system.render_instance_group_id];
         uint64_t sig = renderSignature(system.render);
-        // Editing the first emitter's start color must invalidate the shared
-        // material when the inherit toggle is on.
+        // "Inherit colour" = the birth colour of the first emitter's appearance
+        // profile. Editing that profile (or re-pointing the emitter) must
+        // invalidate the shared material when the inherit toggle is on.
+        Vec3 inherited_color = system.render.base_color;
         if (system.render.inherit_color_from_emitter &&
             system.runtime && !system.runtime->emitters().empty()) {
             const auto& em = system.runtime->emitters().front();
-            sig = hashCombine(sig, quantize(em.start_color.x));
-            sig = hashCombine(sig, quantize(em.start_color.y));
-            sig = hashCombine(sig, quantize(em.start_color.z));
+            inherited_color = RayTrophiSim::sampleParticleAppearanceLut(
+                system.runtime->appearanceLutRow(em.appearance_profile_id), 0.0f).color;
+            sig = hashCombine(sig, quantize(inherited_color.x));
+            sig = hashCombine(sig, quantize(inherited_color.y));
+            sig = hashCombine(sig, quantize(inherited_color.z));
         }
         const bool want_scene_meshes =
             system.render.shape == SceneData::ParticleRenderShape::SceneMeshes &&
@@ -562,11 +566,7 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
                     (system.render.shape == SceneData::ParticleRenderShape::SceneMeshes)
                         ? SceneData::ParticleRenderShape::Sphere
                         : system.render.shape;
-                Vec3 material_color = system.render.base_color;
-                if (system.render.inherit_color_from_emitter &&
-                    system.runtime && !system.runtime->emitters().empty()) {
-                    material_color = system.runtime->emitters().front().start_color;
-                }
+                const Vec3 material_color = inherited_color;
                 const std::string mat_name =
                     "[PSysMat] #" + std::to_string(system.id);
                 const std::string geo_node =
@@ -659,7 +659,9 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
             tr.source_index = src_index;
 
             const bool has_slot = i < soa_slots;
-            float sz = (has_slot && i < buf.size.size()) ? buf.size[i] : 0.0f;
+            // Same profile LUT the raster billboards read, at the same age.
+            float sz = (has_slot && buf.alive[i] != 0u)
+                ? system.runtime->sampleAppearance(i).size : 0.0f;
             sz *= mult;
             const float px = (has_slot && i < buf.position_x.size()) ? buf.position_x[i] : 0.0f;
             const float py = (has_slot && i < buf.position_y.size()) ? buf.position_y[i] : 0.0f;

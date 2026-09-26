@@ -453,6 +453,10 @@
     <ClInclude Include="source\include\SimCache.h" />
     <ClInclude Include="source\include\SimFrameCompress.h" />
     <ClInclude Include="source\include\SimFrameCacheMemory.h" />
+    <ClInclude Include="source\include\UI\ParticleAppearanceUI.h" />
+    <ClInclude Include="source\include\UI\ParticleBillboardBuilder.h" />
+    <ClInclude Include="source\include\ParticleAppearanceProfile.h" />
+    <ClInclude Include="source\include\Viewport\ParticleBillboardData.h" />
     <ClInclude Include="source\include\MeshEdit\HalfEdgeMesh.h" />
     <ClInclude Include="source\include\MeshEdit\MeshTool.h" />
     <ClInclude Include="source\include\MeshEdit\MeshOperation.h" />
@@ -1463,6 +1467,7 @@
     <ClCompile Include="source\src\Paint\PaintLayerStack.cpp" />
     <ClCompile Include="source\src\Render\HitMaterialResolver.cpp" />
     <ClCompile Include="source\src\Scene\TriangleMesh.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanViewportParticles.cpp" />
     <ClCompile Include="source\src\simdjson.cpp" />
     <ClCompile Include="source\src\Hair\HairBSDF.cpp" />
     <ClCompile Include="source\src\Hair\HairStrand.cpp" />
@@ -1686,6 +1691,8 @@
     <ClCompile Include="source\src\UI\scene_ui_hierarchy.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_lights.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_materials.cpp" />
+    <ClCompile Include="source\src\UI\ParticleAppearanceUI.cpp" />
+    <ClCompile Include="source\src\UI\ParticleBillboardBuilder.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_modifiers.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_simnodes.cpp" />
     <ClCompile Include="source\src\Api\RtApiUiState.cpp" />
@@ -1713,6 +1720,8 @@
     <ClCompile Include="source\src\MeshEdit\MeshOperation.cpp" />
     <ClCompile Include="source\src\MeshEdit\MeshTopologyTransaction.cpp" />
     <ClCompile Include="source\src\MeshEdit\FlatMeshPublisher.cpp" />
+    <ClCompile Include="source\src\Physics\ParticleAppearanceProfile.cpp" />
+    <ClCompile Include="source\src\Physics\ParticleSimulationAppearance.cpp" />
     <ClCompile Include="source\src\MeshEdit\FlatMeshUndoSnapshot.cpp" />
     <ClCompile Include="source\src\MeshEdit\FlatMeshGeometryCommand.cpp" />
     <ClCompile Include="source\src\MeshEdit\FlatMeshEditService.cpp" />

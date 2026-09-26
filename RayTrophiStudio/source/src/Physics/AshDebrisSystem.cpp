@@ -60,6 +60,12 @@ std::size_t AshDebrisSystem::emit(
         mass_kg / std::max<float>(1.0f, static_cast<float>(after_lod)), 1e-9f);
     const float size_scale = std::clamp(
         std::cbrt(mass_each / nominal_mass), 1.0f, 4.0f);
+    // One profile per target system, shared by every ash particle it receives.
+    const uint32_t appearance_id = particles.findOrAddAppearanceProfile(
+        makeTwoKeyParticleAppearance(
+            "Ash Debris", ParticleAppearanceBlend::Alpha,
+            0.025f, 0.008f, 0.75f, 0.0f,
+            Vec3(0.12f, 0.10f, 0.08f), Vec3(0.28f, 0.27f, 0.25f)));
     for (std::size_t i = 0; i < count; ++i) {
         const uint32_t key = seed + static_cast<uint32_t>(i * 3u);
         const Vec3 jitter(unitHash(key) - 0.5f, unitHash(key + 1u),
@@ -69,12 +75,8 @@ std::size_t AshDebrisSystem::emit(
         desc.velocity = velocity + jitter * 0.8f + Vec3(0.0f, 0.35f, 0.0f);
         desc.lifetime_seconds = std::max(settings_.lifetime_seconds, 0.05f);
         desc.mass = std::max(mass_each, 1e-6f);
-        desc.start_size = 0.025f * size_scale;
-        desc.end_size = 0.008f * size_scale;
-        desc.start_opacity = 0.75f;
-        desc.end_opacity = 0.0f;
-        desc.start_color = Vec3(0.12f, 0.10f, 0.08f);
-        desc.end_color = Vec3(0.28f, 0.27f, 0.25f);
+        desc.appearance_profile_id = appearance_id;
+        desc.size_scale = size_scale;
         particles.spawn(desc);
     }
     stats_.spawned_particles += count;

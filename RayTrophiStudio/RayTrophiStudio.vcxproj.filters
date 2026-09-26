@@ -193,6 +193,18 @@
     <ClInclude Include="source\include\UI\ParticleSystemAuthoringUI.h">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\UI\ParticleAppearanceUI.h">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\ParticleBillboardBuilder.h">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\ParticleAppearanceProfile.h">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Viewport\ParticleBillboardData.h">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\SimCache.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
@@ -936,6 +948,12 @@
     <ClCompile Include="source\src\Physics\ParticleRenderBridge.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Physics\ParticleAppearanceProfile.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\ParticleSimulationAppearance.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\MeshEdit\HalfEdgeMesh.cpp">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClCompile>
@@ -1344,6 +1362,12 @@
     <ClCompile Include="source\src\UI\ParticleSystemAuthoringUI.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\UI\ParticleAppearanceUI.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\ParticleBillboardBuilder.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\UI\scene_ui_hierarchy.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
@@ -1543,6 +1567,9 @@
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanViewportParticles.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Scene\AssetRegistry.cpp">

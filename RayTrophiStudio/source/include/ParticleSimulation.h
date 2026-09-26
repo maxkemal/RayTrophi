@@ -30,6 +30,7 @@
 #include <SurfaceMeshCache.h>
 #include "ColliderMeshBVH.h"
 #include "MaterialStateField.h"
+#include "ParticleAppearanceProfile.h"
 
 namespace RayTrophiSim {
 
@@ -1522,14 +1523,13 @@ struct ParticleSpawnDesc {
     Vec3 velocity = Vec3(0.0f, 0.0f, 0.0f);
     float lifetime_seconds = 5.0f;
     float mass = 1.0f;
-    // Visual attributes evolve linearly from start (birth) to end (death) across
-    // the particle's lifetime. Renderers read the current values from the SoA.
-    float start_size = 0.05f;
-    float end_size = 0.05f;
-    float start_opacity = 1.0f;
-    float end_opacity = 0.0f;
-    Vec3 start_color = Vec3(1.0f, 1.0f, 1.0f);
-    Vec3 end_color = Vec3(1.0f, 1.0f, 1.0f);
+    // Appearance over life comes from the system's profile with this id
+    // (ParticleAppearanceProfile.h); 0 or an unknown id draws with
+    // fallbackParticleAppearance(). size_scale multiplies the profile's size
+    // curve (per-particle jitter; with the fallback's unit curve it is the
+    // width in metres).
+    uint32_t appearance_profile_id = 0;
+    float size_scale = 1.0f;
     float rotation = 0.0f;          // initial angle (radians)
     float angular_velocity = 0.0f;  // spin (radians/sec)
 };
@@ -1591,14 +1591,11 @@ struct ParticleEmitterDesc {
     float spread = 0.35f;
     float lifetime_seconds = 4.0f;
     float mass = 1.0f;
-    // Visual attributes pushed onto spawned particles (over-life start -> end).
-    float start_size = 0.06f;
-    float end_size = 0.02f;
+    // Appearance profile of this system (ParticleAppearanceProfile::id). The
+    // runtime never leaves it at 0: addEmitter creates a default profile for an
+    // emitter that names none, so every emitter's look is editable.
+    uint32_t appearance_profile_id = 0;
     float size_jitter = 0.0f;          // +/- random fraction of size at spawn
-    float start_opacity = 1.0f;
-    float end_opacity = 0.0f;
-    Vec3 start_color = Vec3(1.0f, 0.85f, 0.5f);
-    Vec3 end_color = Vec3(1.0f, 0.25f, 0.08f);
     float angular_velocity = 0.0f;     // mean spin (radians/sec)
     float angular_jitter = 0.0f;       // +/- random spin added at spawn
     bool enabled = true;
@@ -1761,26 +1758,14 @@ struct ParticleSoABuffers {
     // to the system-wide rates, so this never becomes a dangling reference.
     std::vector<uint16_t> emitter_index;
 
-    // Visual attributes — current values written each step, consumed by renderers.
-    std::vector<float> size;
+    // Appearance. Colour, opacity and size are NOT stored per particle: every
+    // consumer evaluates the profile at age / lifetime through
+    // ParticleSimulationSystem::sampleAppearance (CPU) or the same baked LUT
+    // (raster shader). Only the spawn-time inputs live here.
+    std::vector<uint32_t> appearance_profile;  // ParticleAppearanceProfile::id
+    std::vector<float> size_scale;             // multiplies the size curve
     std::vector<float> rotation;          // radians
     std::vector<float> angular_velocity;  // radians/sec
-    std::vector<float> color_r;
-    std::vector<float> color_g;
-    std::vector<float> color_b;
-    std::vector<float> opacity;
-
-    // Over-life endpoints captured at spawn (current = lerp(start, end, age/life)).
-    std::vector<float> start_size;
-    std::vector<float> end_size;
-    std::vector<float> start_opacity;
-    std::vector<float> end_opacity;
-    std::vector<float> start_color_r;
-    std::vector<float> start_color_g;
-    std::vector<float> start_color_b;
-    std::vector<float> end_color_r;
-    std::vector<float> end_color_g;
-    std::vector<float> end_color_b;
 };
 
 struct ParticleComputeBuffers {
@@ -1938,6 +1923,32 @@ public:
     ParticleEmitterDesc& addEmitter(const ParticleEmitterDesc& desc);
     bool removeEmitter(std::size_t index);
     void clearEmitters();
+
+    // ── Appearance profiles (ParticleAppearanceProfile.h) ────────────────────
+    // Profiles are owned here, next to the emitters that reference them, and
+    // are only writable through these calls so the baked LUT can never go
+    // stale. Ids are per system, monotonic and never reused.
+    const std::vector<ParticleAppearanceProfile>& appearanceProfiles() const;
+    const ParticleAppearanceProfile* findAppearanceProfile(uint32_t id) const;
+    // Baked LUT row of `id`, or the fallback row when the id resolves to nothing.
+    const float* appearanceLutRow(uint32_t id) const;
+    // Adds a copy of `profile`. Its id is honoured when non-zero and unused
+    // (project load), otherwise a fresh one is issued. Returns 0 and fills
+    // `error` when the profile is invalid.
+    uint32_t addAppearanceProfile(const ParticleAppearanceProfile& profile,
+                                  std::string* error = nullptr);
+    // Replaces the profile with the same id. The id itself cannot change.
+    bool updateAppearanceProfile(const ParticleAppearanceProfile& profile,
+                                 std::string* error = nullptr);
+    // Refuses while an emitter still references the profile: removing it would
+    // silently switch that emitter to the fallback look.
+    bool removeAppearanceProfile(uint32_t id, std::string* error = nullptr);
+    // Built-in spawners (ash debris) own one profile per system, found by name.
+    uint32_t findOrAddAppearanceProfile(const ParticleAppearanceProfile& profile);
+    // Appearance of particle `index` right now (age / lifetime).
+    ParticleAppearanceSample sampleAppearance(std::size_t index) const;
+    uint32_t nextAppearanceProfileId() const { return next_appearance_profile_id_; }
+    void setNextAppearanceProfileId(uint32_t next);
     void setEmitterSourceResolver(std::function<bool(const ParticleEmitterDesc&, Vec3&, Vec3&)> resolver);
     void setEmitterBoundsResolver(std::function<bool(const ParticleEmitterDesc&, Vec3&, Vec3&)> resolver);
     void setEmitterSurfaceSampler(std::function<bool(const ParticleEmitterDesc&, uint32_t, ParticleSurfaceSample&)> sampler);
@@ -2229,6 +2240,9 @@ private:
     };
 
     void resizeStorage(std::size_t capacity);
+    // Gives an emitter with no (or an unresolvable) profile id a profile of its
+    // own carrying the old default look.
+    void ensureEmitterAppearanceProfile(ParticleEmitterDesc& emitter);
     std::size_t findDeadSlot() const;
     bool hasActiveEmitters() const;
     bool hasActiveGridSimulation() const;
@@ -2268,6 +2282,9 @@ private:
     ParticleComputeBuffers compute_buffers_;
     std::vector<NeighborGridEntry> neighbor_grid_;
     std::vector<ParticleEmitterDesc> emitters_;
+    std::vector<ParticleAppearanceProfile> appearance_profiles_;
+    std::vector<std::vector<float>> appearance_luts_;  // parallel to the profiles
+    uint32_t next_appearance_profile_id_ = 1;
     std::vector<ParticleColliderDesc> colliders_;
     std::vector<ResolvedCollider> resolved_colliders_;
     // Moving-collider momentum transfer (grid-domain fluid). Per-collider linear

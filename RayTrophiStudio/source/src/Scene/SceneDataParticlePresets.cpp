@@ -25,6 +25,15 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
         ParticleSystemObject& sys = addParticleSystemObject(preset_name);
         auto rt = sys.runtime;
         if (!rt) return sys;
+        // Two-key appearance profile on this system. Additive: every preset
+        // below drew with the additive blend before profiles existed.
+        auto look = [&rt](const std::string& name, float size0, float size1,
+                          float opacity0, float opacity1,
+                          const Vec3& color0, const Vec3& color1) {
+            return rt->addAppearanceProfile(RayTrophiSim::makeTwoKeyParticleAppearance(
+                name, RayTrophiSim::ParticleAppearanceBlend::Additive,
+                size0, size1, opacity0, opacity1, color0, color1));
+        };
 
         // The new runtime starts empty. Scene-wide rigid-body proxy colliders
         // installed by addParticleSystemObject are intentionally retained.
@@ -45,9 +54,10 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 e.speed = 1.6f;
                 e.spread = 0.35f;
                 e.lifetime_seconds = 1.4f;
-                e.start_size = 0.08f;  e.end_size = 0.01f;  e.size_jitter = 0.5f;
-                e.start_opacity = 1.0f; e.end_opacity = 0.0f;
-                e.start_color = Vec3(1.0f, 0.8f, 0.35f); e.end_color = Vec3(0.9f, 0.15f, 0.03f);
+                e.appearance_profile_id = look("Campfire Sparks", 0.08f, 0.01f, 1.0f, 0.0f,
+                                               Vec3(1.0f, 0.8f, 0.35f),
+                                               Vec3(0.9f, 0.15f, 0.03f));
+                e.size_jitter = 0.5f;
                 e.angular_velocity = 2.0f; e.angular_jitter = 3.0f;
                 rt->addEmitter(e);
 
@@ -104,7 +114,6 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 fire.falloff = 1.5f;
                 rt->addFlowSource(fire);
 
-                sys.blend_mode = ParticleBlendMode::Additive;
                 sys.render.render_in_raytrace = true;
                 sys.render.shape = ParticleRenderShape::Sphere;
                 sys.render.emissive = true;
@@ -127,9 +136,10 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 e.speed = 6.0f;
                 e.spread = 3.0f;          // near-omnidirectional
                 e.lifetime_seconds = 2.0f;
-                e.start_size = 0.1f;  e.end_size = 0.04f;  e.size_jitter = 0.6f;
-                e.start_opacity = 1.0f; e.end_opacity = 0.0f;
-                e.start_color = Vec3(1.0f, 0.9f, 0.5f); e.end_color = Vec3(0.3f, 0.08f, 0.02f);
+                e.appearance_profile_id = look("Explosion Burst", 0.1f, 0.04f, 1.0f, 0.0f,
+                                               Vec3(1.0f, 0.9f, 0.5f),
+                                               Vec3(0.3f, 0.08f, 0.02f));
+                e.size_jitter = 0.6f;
                 e.angular_velocity = 4.0f; e.angular_jitter = 8.0f;
                 rt->addEmitter(e);
 
@@ -139,11 +149,10 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 core.speed = 2.2f;
                 core.spread = 2.8f;
                 core.lifetime_seconds = 0.7f;
-                core.start_size = 0.32f;
-                core.end_size = 0.05f;
+                core.appearance_profile_id = look("Explosion Fireball Core", 0.32f, 0.05f,
+                                                  1.0f, 0.0f, Vec3(1.0f, 0.95f, 0.65f),
+                                                  Vec3(1.0f, 0.16f, 0.015f));
                 core.size_jitter = 0.35f;
-                core.start_color = Vec3(1.0f, 0.95f, 0.65f);
-                core.end_color = Vec3(1.0f, 0.16f, 0.015f);
                 core.angular_velocity = 1.5f;
                 core.angular_jitter = 3.0f;
                 core.seed = 0x51f15e5du;
@@ -203,7 +212,6 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 blast.end_time = 0.12f;
                 rt->addFlowSource(blast);
 
-                sys.blend_mode = ParticleBlendMode::Additive;
                 sys.render.render_in_raytrace = true;
                 sys.render.shape = ParticleRenderShape::Tetra;  // chunky debris (or set SceneMeshes)
                 sys.render.emissive = true;
@@ -265,10 +273,10 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 debris.speed = 7.5f;
                 debris.spread = 1.45f;
                 debris.lifetime_seconds = 2.6f;
-                debris.start_size = 0.09f; debris.end_size = 0.03f; debris.size_jitter = 0.7f;
-                debris.start_opacity = 1.0f; debris.end_opacity = 0.0f;
-                debris.start_color = Vec3(1.0f, 0.72f, 0.28f);
-                debris.end_color = Vec3(0.22f, 0.09f, 0.05f);
+                debris.appearance_profile_id = look("Burning Debris", 0.09f, 0.03f, 1.0f, 0.0f,
+                                                    Vec3(1.0f, 0.72f, 0.28f),
+                                                    Vec3(0.22f, 0.09f, 0.05f));
+                debris.size_jitter = 0.7f;
                 debris.angular_velocity = 5.0f; debris.angular_jitter = 9.0f;
                 rt->addEmitter(debris);
 
@@ -279,9 +287,10 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 dirt.speed = 4.0f;
                 dirt.spread = 1.1f;
                 dirt.lifetime_seconds = 3.2f;
-                dirt.start_size = 0.13f; dirt.end_size = 0.09f; dirt.size_jitter = 0.8f;
-                dirt.start_color = Vec3(0.42f, 0.31f, 0.2f);
-                dirt.end_color = Vec3(0.2f, 0.15f, 0.1f);
+                dirt.appearance_profile_id = look("Dirt", 0.13f, 0.09f, 1.0f, 0.0f,
+                                                  Vec3(0.42f, 0.31f, 0.2f),
+                                                  Vec3(0.2f, 0.15f, 0.1f));
+                dirt.size_jitter = 0.8f;
                 dirt.seed = 0x6a17d17du;
                 rt->addEmitter(dirt);
 
@@ -334,7 +343,6 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 blast.end_time = 0.1f;
                 rt->addFlowSource(blast);
 
-                sys.blend_mode = ParticleBlendMode::Additive;
                 sys.render.render_in_raytrace = true;
                 sys.render.shape = ParticleRenderShape::Tetra;
                 sys.render.emissive = true;
@@ -360,10 +368,10 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 embers.speed = 3.0f;
                 embers.spread = 2.4f;
                 embers.lifetime_seconds = 3.0f;
-                embers.start_size = 0.11f; embers.end_size = 0.02f; embers.size_jitter = 0.55f;
-                embers.start_opacity = 1.0f; embers.end_opacity = 0.0f;
-                embers.start_color = Vec3(1.0f, 0.88f, 0.5f);
-                embers.end_color = Vec3(0.8f, 0.12f, 0.02f);
+                embers.appearance_profile_id = look("Embers", 0.11f, 0.02f, 1.0f, 0.0f,
+                                                    Vec3(1.0f, 0.88f, 0.5f),
+                                                    Vec3(0.8f, 0.12f, 0.02f));
+                embers.size_jitter = 0.55f;
                 embers.angular_velocity = 2.0f; embers.angular_jitter = 4.0f;
                 rt->addEmitter(embers);
 
@@ -416,7 +424,6 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 fuel.end_time = 0.35f;            // long charge -> sustained roll
                 rt->addFlowSource(fuel);
 
-                sys.blend_mode = ParticleBlendMode::Additive;
                 sys.render.render_in_raytrace = true;
                 sys.render.shape = ParticleRenderShape::Sphere;
                 sys.render.emissive = true;
@@ -441,10 +448,9 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 sparks.speed = 11.0f;
                 sparks.spread = 0.16f;
                 sparks.lifetime_seconds = 1.1f;
-                sparks.start_size = 0.055f; sparks.end_size = 0.012f;
-                sparks.start_opacity = 1.0f; sparks.end_opacity = 0.0f;
-                sparks.start_color = Vec3(1.0f, 0.92f, 0.48f);
-                sparks.end_color = Vec3(1.0f, 0.12f, 0.01f);
+                sparks.appearance_profile_id = look("Sparks", 0.055f, 0.012f, 1.0f, 0.0f,
+                                                    Vec3(1.0f, 0.92f, 0.48f),
+                                                    Vec3(1.0f, 0.12f, 0.01f));
                 sparks.seed = 0xf1a6e701u;
                 rt->addEmitter(sparks);
                 rt->physicsSettings().grid_density_deposit = 0.35f;
@@ -519,7 +525,6 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 jet.use_time_limit = false;
                 rt->addFlowSource(jet);
 
-                sys.blend_mode = ParticleBlendMode::Additive;
                 sys.render.render_in_raytrace = true;
                 sys.render.shape = ParticleRenderShape::Sphere;
                 sys.render.emissive = true;
@@ -811,11 +816,10 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 // ** Was left at the 1.0 default, which is NOT neutral: drag is
                 // 0.8 and gravity 9.81, so a heavier fragment flattened its arc.
                 debris.mass = 0.4f;
-                debris.start_size = 0.09f; debris.end_size = 0.02f;
+                debris.appearance_profile_id = look("Nuclear Debris", 0.09f, 0.02f, 1.0f, 0.0f,
+                                                    Vec3(1.0f, 0.93f, 0.62f),
+                                                    Vec3(0.35f, 0.18f, 0.10f));
                 debris.size_jitter = 0.6f;
-                debris.start_opacity = 1.0f; debris.end_opacity = 0.0f;
-                debris.start_color = Vec3(1.0f, 0.93f, 0.62f);
-                debris.end_color = Vec3(0.35f, 0.18f, 0.10f);
                 debris.angular_velocity = 3.0f; debris.angular_jitter = 5.0f;
                 debris.seed = 0x4e554b45u;
                 rt->addEmitter(debris);
@@ -1101,7 +1105,6 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 stem.end_time = 4.5f;
                 rt->addFlowSource(stem);
 
-                sys.blend_mode = ParticleBlendMode::Additive;
                 sys.render.render_in_raytrace = true;
                 sys.render.shape = ParticleRenderShape::Sphere;
                 sys.render.emissive = true;

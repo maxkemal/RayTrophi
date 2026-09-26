@@ -3261,14 +3261,11 @@ struct ParticleEmitterInfo {
     float lifetime_seconds = 4.0f;
     float mass = 1.0f;
 
-    // Visual attributes evolve linearly from birth to death.
-    float start_size = 0.06f;
-    float end_size = 0.02f;
-    float size_jitter = 0.0f;
-    float start_opacity = 1.0f;
-    float end_opacity = 0.0f;
-    Vec3 start_color = Vec3(1.0f, 0.85f, 0.5f);
-    Vec3 end_color = Vec3(1.0f, 0.25f, 0.08f);
+    // Look over life = the system's appearance profile with this id (see
+    // ParticleAppearanceInfo). 0 on add creates a default profile for the
+    // emitter; any other value must name a profile of the same system.
+    uint32_t appearance_profile_id = 0;
+    float size_jitter = 0.0f;           // +/- fraction applied to the profile size
     float angular_velocity = 0.0f;
     float angular_jitter = 0.0f;
     unsigned int seed = 1;
@@ -3522,22 +3519,22 @@ struct ParticleSystemInfo {
     bool active = false;          // panel selection focus; NOT a simulation gate
     bool enabled = true;
     bool visible = true;
-    std::string blend_mode = "additive";  // additive | alpha (viewport billboards)
     bool emitter_only = true;
     bool render_in_raytrace = false;
     int domain_count = 0;
     int flow_source_count = 0;
     int emitter_count = 0;
     int collider_count = 0;
+    int appearance_profile_count = 0;
 };
 Result listParticleSystems(std::vector<ParticleSystemInfo>& out);
 Result getParticleSystem(const ParticleSystemRef& system, ParticleSystemInfo& out);
 Result addParticleSystem(const std::string& name, ParticleSystemInfo& out);
 Result setParticleSystemEmitterOnly(const std::string& index_or_name,
                                     bool emitter_only);
-// Writes name, visible and blend_mode from `info`; every other field is
-// read-only here (emitter_only / render_in_raytrace live in the render
-// settings). `enabled` is reported but not written: the runtime simulates
+// Writes name and visible from `info`; every other field is read-only here
+// (emitter_only / render_in_raytrace live in the render settings; the
+// billboard blend moved to appearance profiles in Phase 1.5). `enabled` is reported but not written: the runtime simulates
 // only while enabled AND visible, the panel edits only `visible`, and a second
 // switch with the same effect that only a script can flip would be a field the
 // panel cannot show honestly. A duplicate name is refused: names are how
@@ -3549,6 +3546,43 @@ Result removeParticleSystem(const ParticleSystemRef& system);
 // rule 1: the editor's state is scriptable, its draw calls are not).
 Result setActiveParticleSystem(const ParticleSystemRef& system);
 Result clearParticleSystems();
+
+// Appearance profiles (particle roadmap Phase 1.5). A profile is the look of a
+// particle over its life — colour ramp, opacity / size / emission curves over
+// normalized age (0 = birth, 1 = death), piecewise linear — plus the billboard
+// blend. Emitters reference one by `appearance_profile_id`; several emitters
+// may share one. Every renderer reads the same baked 64-sample LUT.
+struct ParticleCurveKeyInfo {
+    float t = 0.0f;
+    float value = 0.0f;
+};
+struct ParticleColorStopInfo {
+    float t = 0.0f;
+    Vec3 color = Vec3(1.0f, 1.0f, 1.0f);
+};
+struct ParticleAppearanceInfo {
+    uint32_t id = 0;          // per system; read-only (0 on add = issue a new one)
+    uint32_t system_id = 0;   // read-only
+    std::string name = "Appearance";
+    std::string blend = "additive";                // additive | alpha
+    std::vector<ParticleColorStopInfo> color_ramp;  // colour >= 0 (HDR allowed)
+    std::vector<ParticleCurveKeyInfo> opacity_curve;   // 0..1
+    std::vector<ParticleCurveKeyInfo> size_curve;      // billboard width, metres
+    std::vector<ParticleCurveKeyInfo> emission_curve;  // colour multiplier, >= 0
+    std::vector<uint64_t> used_by_emitter_uids;        // read-only
+};
+Result listParticleAppearances(const ParticleSystemRef& system,
+                               std::vector<ParticleAppearanceInfo>& out);
+Result getParticleAppearance(uint32_t profile_id, ParticleAppearanceInfo& out,
+                             const ParticleSystemRef& system = {});
+Result addParticleAppearance(const ParticleAppearanceInfo& info, ParticleAppearanceInfo& out,
+                             const ParticleSystemRef& system = {});
+// Replaces every authored field of the profile (read-modify-write, like
+// updateParticleEmitter). Validation happens before anything is written.
+Result updateParticleAppearance(uint32_t profile_id, const ParticleAppearanceInfo& info,
+                                const ParticleSystemRef& system = {});
+// Refused while an emitter still references the profile.
+Result removeParticleAppearance(uint32_t profile_id, const ParticleSystemRef& system = {});
 
 // How a system's particles are drawn in the real render paths. Was panel-only
 // until Phase 1, so no script could build a visible debris effect.

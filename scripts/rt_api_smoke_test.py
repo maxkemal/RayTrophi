@@ -1004,9 +1004,39 @@ for call in (lambda: rt.particle.emitters(system_id=987654),
 rt.particle.set_render(system_id=p1_b["id"], shape="cube", size_multiplier=2.5)
 p1_render = rt.particle.get_render(system_id=p1_b["id"])
 assert p1_render["shape"] == "cube" and abs(p1_render["size_multiplier"] - 2.5) < 1e-6
-rt.particle.set_system(system_id=p1_b["id"], name="SmokePhase1 B2", blend_mode="alpha")
-assert rt.particle.get_system(system="SmokePhase1 B2")["blend_mode"] == "alpha"
+rt.particle.set_system(system_id=p1_b["id"], name="SmokePhase1 B2")
+assert "blend_mode" not in rt.particle.get_system(system="SmokePhase1 B2")
 assert rt.particle.stats(system_id=p1_b["id"])["system_id"] == p1_b["id"]
+
+# Phase 1.5 Batch A: appearance profiles (same keys as IPC).
+p15_emitter = rt.particle.get_emitter(p1_uid, system_id=p1_b["id"])
+assert p15_emitter["appearance_profile_id"] > 0, "new emitter must get its own profile"
+p15_smoke = rt.particle.add_appearance(
+    system_id=p1_b["id"], name="PySmoke", blend="alpha",
+    color_ramp=[(0.0, 0.2, 0.2, 0.2), (1.0, 0.5, 0.5, 0.5)],
+    opacity_curve=[(1.0, 0.0), (0.0, 0.0), (0.2, 0.6)],
+    size_curve=[(0.0, 0.1), (1.0, 0.6)])
+assert [round(k[0], 4) for k in p15_smoke["opacity_curve"]] == [0.0, 0.2, 1.0]
+rt.particle.set_emitter(p1_uid, system_id=p1_b["id"], appearance_profile_id=p15_smoke["id"])
+assert rt.particle.get_emitter(p1_uid, system_id=p1_b["id"])["appearance_profile_id"] == p15_smoke["id"]
+rt.particle.set_appearance(p15_smoke["id"], system_id=p1_b["id"], emission_curve=[(0.0, 3.0)])
+p15_edited = rt.particle.get_appearance(p15_smoke["id"], system_id=p1_b["id"])
+assert p15_edited["blend"] == "alpha" and len(p15_edited["size_curve"]) == 2
+assert p1_second["uid"] in p15_edited["used_by_emitter_uids"]
+for call in (lambda: rt.particle.set_system(system_id=p1_b["id"], blend_mode="alpha"),
+             lambda: rt.particle.set_emitter(p1_uid, system_id=p1_b["id"], start_size=0.2),
+             lambda: rt.particle.add_appearance(system_id=p1_b["id"], name="Bad",
+                                                opacity_curve=[(0.0, 2.0)]),
+             lambda: rt.particle.set_emitter(p1_uid, system_id=p1_b["id"],
+                                             appearance_profile_id=987654),
+             lambda: rt.particle.remove_appearance(p15_smoke["id"], system_id=p1_b["id"])):
+    raised = False
+    try:
+        call()
+    except Exception:
+        raised = True
+    assert raised, "phase-1.5 negative case must raise"
+print("[rt-smoke] rt.particle phase-1.5 appearance profiles: OK")
 rt.particle.remove_system(system_id=p1_b["id"])
 rt.particle.remove_system(system_id=p1_a["id"])
 if p1_active is not None:

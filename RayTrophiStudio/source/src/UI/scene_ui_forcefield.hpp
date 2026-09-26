@@ -35,6 +35,7 @@
 #include "scene_ui_molten_transfer.hpp"
 #include "scene_ui_particle_usage.hpp"
 #include "UI/ParticleSystemAuthoringUI.h"
+#include "UI/ParticleAppearanceUI.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -615,14 +616,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
             const bool emitter_only = ParticleUsageUI::draw(ui_ctx);
             if (!emitter_only) {
             ImGui::Spacing();
-            int blend = static_cast<int>(active_obj->blend_mode);
-            const char* blend_names[] = { "Additive (Fire/Spark Glow)", "Alpha (Smoke/Dust Shadows)" };
-            if (ImGui::Combo("Blend Mode##PartBlend", &blend, blend_names, IM_ARRAYSIZE(blend_names))) {
-                active_obj->blend_mode = static_cast<SceneData::ParticleBlendMode>(blend);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Sets the rasterized viewport blend behavior:\n\n1. Additive: Spells bright glow for fiery particles.\n2. Alpha: Provides shadowing and transparency sorting for smoke/fog.");
-            }
+            ImGui::TextDisabled("Billboard blend is set per appearance profile (Emitters tab).");
 
             ImGui::Spacing();
             ImGui::Separator();
@@ -1258,13 +1252,11 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 ImGui::DragFloat3("Local Pivot Offset", &emitter.local_offset.x, 0.05f, -1000.0f, 1000.0f, "%.2f");
 
                 if (UIWidgets::CollapsingHeader("Spawning Appearance Dynamics")) {
-                    ImGui::DragFloat("Start Size", &emitter.start_size, 0.005f, 0.0f, 100.0f, "%.3f");
-                    ImGui::DragFloat("End Size", &emitter.end_size, 0.005f, 0.0f, 100.0f, "%.3f");
+                    if (const auto* system_obj = scene.activeParticleSystemObject()) {
+                        ParticleAppearanceUI::drawEmitterAppearance(ui_ctx, system_obj->id,
+                                                                    emitter);
+                    }
                     ImGui::SliderFloat("Size Jitter", &emitter.size_jitter, 0.0f, 1.0f, "%.2f");
-                    ImGui::SliderFloat("Start Opacity", &emitter.start_opacity, 0.0f, 1.0f, "%.2f");
-                    ImGui::SliderFloat("End Opacity", &emitter.end_opacity, 0.0f, 1.0f, "%.2f");
-                    ImGui::ColorEdit3("Start Color##EmitColS", &emitter.start_color.x);
-                    ImGui::ColorEdit3("End Color##EmitColE", &emitter.end_color.x);
                     ImGui::DragFloat("Angular Velocity (rad/s)", &emitter.angular_velocity, 0.05f, -100.0f, 100.0f, "%.2f");
                     ImGui::DragFloat("Angular Velocity Jitter", &emitter.angular_jitter, 0.05f, 0.0f, 100.0f, "%.2f");
                 }

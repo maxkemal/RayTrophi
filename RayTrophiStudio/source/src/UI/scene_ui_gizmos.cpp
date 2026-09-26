@@ -22,7 +22,7 @@
 #include "Api/RtApi.h"
 #include "scene_ui_gas.hpp"  // For GasUI::selected_gas_volume
 #include "scene_ui_forcefield.hpp"
-#include "scene_ui_fluid_billboards.hpp"
+#include "UI/ParticleBillboardBuilder.h"
 #include "MeshEdit/SplineObject.h"
 #include "MeshEdit/ProfileSplineOverlay.h"
 #include "MeshEdit/ProfileSplinePointGizmo.h"
@@ -980,9 +980,6 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
     const std::size_t stride = capacity > 4000 ? (capacity / 4000 + 1) : 1;
     const float focal_px = screen_h / (2.0f * std::max(tan_half_fov, 1e-4f));
 
-    const auto hasAttr = [](const std::vector<float>& v, std::size_t i) {
-        return i < v.size();
-    };
     const auto channel = [](float c) {
         return static_cast<int>(std::clamp(c, 0.0f, 1.0f) * 255.0f + 0.5f);
     };
@@ -997,15 +994,16 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
         if (!projectPoint(pos, screen_pos, depth)) {
             continue;
         }
-        const float opacity = hasAttr(buffers.opacity, i) ? std::clamp(buffers.opacity[i], 0.0f, 1.0f) : 1.0f;
+        const RayTrophiSim::ParticleAppearanceSample look = particles->sampleAppearance(i);
+        const float opacity = std::clamp(look.opacity, 0.0f, 1.0f);
         if (opacity <= 0.002f) {
             continue;
         }
-        const float world_size = hasAttr(buffers.size, i) ? buffers.size[i] : 0.05f;
+        const float world_size = look.size;
         const float radius = std::clamp((world_size * 0.5f) * focal_px / std::max(depth, 0.05f), 1.0f, 320.0f);
-        const int cr = hasAttr(buffers.color_r, i) ? channel(buffers.color_r[i]) : 255;
-        const int cg = hasAttr(buffers.color_g, i) ? channel(buffers.color_g[i]) : 255;
-        const int cb = hasAttr(buffers.color_b, i) ? channel(buffers.color_b[i]) : 255;
+        const int cr = channel(look.color.x);
+        const int cg = channel(look.color.y);
+        const int cb = channel(look.color.z);
         const ImU32 halo_col = IM_COL32(cr, cg, cb, static_cast<int>(opacity * 70.0f));
         const ImU32 core_col = IM_COL32(cr, cg, cb, static_cast<int>(opacity * 205.0f));
         draw_list->AddCircleFilled(screen_pos, radius * 1.9f, halo_col, 14);
@@ -1019,81 +1017,16 @@ void SceneUI::uploadParticleBillboards(UIContext& ctx) {
         return;
     }
     // Debug display mode uses the ImGui overlay instead; clear any billboards so we
+    static ParticleBillboardUpload upload;  // reused: keeps vector capacity
     // don't render both. Solid (0) and Render (2) draw real billboards.
     if (ctx.particle_display_mode == 1 || !ctx.scene.camera) {
-        vpb->uploadParticleBillboards({}, 0, {}, 0);
+        upload.additive.clear();
+        upload.alpha.clear();
+        vpb->uploadParticleBillboards(upload);
         return;
     }
-
-    const Camera& cam = *ctx.scene.camera;
-    // Hand-rolled normalize: Vec3::normalize() zeroes sub-mm vectors.
-    auto unit = [](const Vec3& v, const Vec3& fb) {
-        const float l = v.length();
-        return l > 1e-8f ? v * (1.0f / l) : fb;
-    };
-    const Vec3 fwd   = unit(cam.lookat - cam.lookfrom, Vec3(0.0f, 0.0f, -1.0f));
-    const Vec3 right = unit(Vec3::cross(fwd, cam.vup), Vec3(1.0f, 0.0f, 0.0f));
-    const Vec3 up    = unit(Vec3::cross(right, fwd), Vec3(0.0f, 1.0f, 0.0f));
-
-    std::vector<float> addData;
-    std::vector<float> alphaData;
-    constexpr std::size_t kMaxBillboards = 60000; // safety cap across all systems
-    std::size_t drawn = 0;
-
-    auto pushVertex = [](std::vector<float>& out, const Vec3& p, float u, float v,
-                         float r, float g, float b, float a) {
-        out.push_back(p.x); out.push_back(p.y); out.push_back(p.z);
-        out.push_back(u);   out.push_back(v);
-        out.push_back(r);   out.push_back(g); out.push_back(b); out.push_back(a);
-    };
-
-    for (const auto& system : ctx.scene.particle_systems) {
-        if (!system.visible || !system.runtime || system.render.emitter_only) {
-            continue;
-        }
-        std::vector<float>& out = (system.blend_mode == SceneData::ParticleBlendMode::Alpha)
-            ? alphaData : addData;
-
-        const auto& buf = system.runtime->buffers();
-        const std::size_t cap = buf.alive.size();
-        for (std::size_t i = 0; i < cap && drawn < kMaxBillboards; ++i) {
-            if (buf.alive[i] == 0u) continue;
-
-            const float a = (i < buf.opacity.size()) ? buf.opacity[i] : 1.0f;
-            if (a <= 0.002f) continue;
-            const float sz = (i < buf.size.size()) ? buf.size[i] : 0.05f;
-            const float h = sz * 0.5f;
-            if (h <= 1e-5f) continue;
-
-            const Vec3 c(buf.position_x[i], buf.position_y[i], buf.position_z[i]);
-            const float r = (i < buf.color_r.size()) ? buf.color_r[i] : 1.0f;
-            const float g = (i < buf.color_g.size()) ? buf.color_g[i] : 1.0f;
-            const float bcol = (i < buf.color_b.size()) ? buf.color_b[i] : 1.0f;
-
-            const Vec3 rh = right * h;
-            const Vec3 uh = up * h;
-            const Vec3 c00 = c - rh - uh;
-            const Vec3 c10 = c + rh - uh;
-            const Vec3 c11 = c + rh + uh;
-            const Vec3 c01 = c - rh + uh;
-
-            pushVertex(out, c00, -1.f, -1.f, r, g, bcol, a);
-            pushVertex(out, c10,  1.f, -1.f, r, g, bcol, a);
-            pushVertex(out, c11,  1.f,  1.f, r, g, bcol, a);
-            pushVertex(out, c00, -1.f, -1.f, r, g, bcol, a);
-            pushVertex(out, c11,  1.f,  1.f, r, g, bcol, a);
-            pushVertex(out, c01, -1.f,  1.f, r, g, bcol, a);
-            ++drawn;
-        }
-        if (drawn >= kMaxBillboards) break;
-    }
-
-    FluidBillboardUI::appendGridDomainParticles(
-        ctx.scene, right, up, alphaData, drawn, kMaxBillboards);
-
-    const uint32_t addCount   = static_cast<uint32_t>(addData.size() / 9);
-    const uint32_t alphaCount = static_cast<uint32_t>(alphaData.size() / 9);
-    vpb->uploadParticleBillboards(addData, addCount, alphaData, alphaCount);
+    ParticleBillboardBuilder::build(ctx.scene, upload);
+    vpb->uploadParticleBillboards(upload);
 }
 
 void SceneUI::moveObjectPivot(UIContext& ctx, const std::string& objectName, const Vec3& worldDelta) {
