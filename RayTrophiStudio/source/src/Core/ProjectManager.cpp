@@ -304,15 +304,33 @@ namespace {
                std::to_string(width) + "x" + std::to_string(height);
     }
 
-    void loadPreviousEmbeddedTextureEntries(const std::filesystem::path& json_path,
-                                            const std::filesystem::path& bin_path) {
-        g_previous_embedded_texture_entries.clear();
-        if (!std::filesystem::exists(json_path) || !std::filesystem::exists(bin_path)) {
+    // Adds one saved project's embedded-texture manifest to the reuse index.
+    // Existing keys win, so the caller decides precedence by call order.
+    //
+    // ★★★★ The manifest lives in the ".shared" sidecar since format 3.0; only
+    //   older projects carry "textures" in the main JSON. This used to read the
+    //   main JSON alone, so the index was EMPTY for every current project and
+    //   every save re-encoded every embedded texture on the main thread.
+    //   Measured 2026-09-25 on a 64-texture scene: serializeTextures 122.6 s
+    //   for 1.22 GB, "previous-embed-reused: 0", and the 5-minute autosave
+    //   paid it too - reported as the app "sometimes freezing on one core"
+    //   during a fluid sim, which is where everyone looked first.
+    void addPreviousEmbeddedTextureEntries(const std::filesystem::path& json_path,
+                                           const std::filesystem::path& bin_path) {
+        if (!std::filesystem::exists(bin_path)) {
+            return;
+        }
+        std::filesystem::path manifest_path = json_path;
+        manifest_path += ".shared";
+        if (!std::filesystem::exists(manifest_path)) {
+            manifest_path = json_path;  // pre-3.0 layout
+        }
+        if (!std::filesystem::exists(manifest_path)) {
             return;
         }
 
         try {
-            std::ifstream in(json_path);
+            std::ifstream in(manifest_path);
             if (!in.is_open()) {
                 return;
             }
@@ -322,6 +340,7 @@ namespace {
             if (!root.contains("textures") || !root["textures"].is_array()) {
                 return;
             }
+            std::size_t added = 0;
 
             for (const auto& tex : root["textures"]) {
                 if (tex.value("mode", std::string{}) != "embed") {
@@ -343,15 +362,19 @@ namespace {
                 entry.offset = offset;
                 entry.size = size;
                 entry.format = tex.value("format", std::string{});
-                g_previous_embedded_texture_entries[previousEmbeddedTextureKey(original_name, usage, width, height)] = std::move(entry);
+                if (g_previous_embedded_texture_entries.emplace(
+                        previousEmbeddedTextureKey(original_name, usage, width, height),
+                        std::move(entry)).second) {
+                    ++added;
+                }
             }
 
-            SCENE_LOG_INFO("[ProjectManager] Loaded " +
-                           std::to_string(g_previous_embedded_texture_entries.size()) +
-                           " previous embedded texture entries for save reuse.");
+            SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(added) +
+                           " previous embedded texture entries for save reuse from " +
+                           manifest_path.string());
         } catch (const std::exception& e) {
-            g_previous_embedded_texture_entries.clear();
-            SCENE_LOG_WARN("[ProjectManager] Failed to read previous embedded texture manifest: " + std::string(e.what()));
+            SCENE_LOG_WARN("[ProjectManager] Failed to read previous embedded texture manifest " +
+                           manifest_path.string() + ": " + std::string(e.what()));
         }
     }
 
@@ -803,6 +826,21 @@ static RayTrophiSim::ParticleQualityMode particleQualityModeFromString(const std
     return RayTrophiSim::ParticleQualityMode::Realtime;
 }
 
+static const char* particleExecutionPolicyToString(RayTrophiSim::ParticleExecutionPolicy policy) {
+    switch (policy) {
+        case RayTrophiSim::ParticleExecutionPolicy::GPURequired: return "GPURequired";
+        case RayTrophiSim::ParticleExecutionPolicy::CPU: return "CPU";
+        case RayTrophiSim::ParticleExecutionPolicy::Auto:
+        default: return "Auto";
+    }
+}
+
+static RayTrophiSim::ParticleExecutionPolicy particleExecutionPolicyFromString(const std::string& value) {
+    if (value == "GPURequired") return RayTrophiSim::ParticleExecutionPolicy::GPURequired;
+    if (value == "CPU") return RayTrophiSim::ParticleExecutionPolicy::CPU;
+    return RayTrophiSim::ParticleExecutionPolicy::Auto;
+}
+
 static json mat4ToJson(const Matrix4x4& m) {
     json j = json::array();
     for(int i = 0; i < 4; ++i)
@@ -1221,7 +1259,29 @@ bool ProjectManager::saveProject(SceneData& scene, RenderSettings& settings, Ren
 
 bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, RenderSettings& settings, Renderer& renderer,
                                   std::function<void(int, const std::string&)> progress_callback) {
-    ScopedPerfTimer total_timer("ProjectManager::saveProject total");
+    return saveProjectImpl(filepath, scene, settings, renderer, std::move(progress_callback), false);
+}
+
+bool ProjectManager::saveProjectCopy(const std::string& filepath, SceneData& scene,
+                                     RenderSettings& settings, Renderer& renderer) {
+    return saveProjectImpl(filepath, scene, settings, renderer, nullptr, true);
+}
+
+bool ProjectManager::saveProjectImpl(const std::string& filepath, SceneData& scene, RenderSettings& settings,
+                                     Renderer& renderer,
+                                     std::function<void(int, const std::string&)> progress_callback,
+                                     bool as_copy) {
+    std::lock_guard<std::mutex> save_lock(save_mutex_);
+    save_in_progress_.store(true, std::memory_order_release);
+    struct SaveInProgressReset {
+        std::atomic<bool>& flag;
+        ~SaveInProgressReset() { flag.store(false, std::memory_order_release); }
+    } save_in_progress_reset{save_in_progress_};
+    active_save_as_copy_ = as_copy;
+    active_save_path_ = filepath;
+
+    ScopedPerfTimer total_timer(as_copy ? "ProjectManager::saveProjectCopy total"
+                                        : "ProjectManager::saveProject total");
 
     if (progress_callback) progress_callback(0, "Preparing to save...");
 
@@ -1229,11 +1289,16 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
     // This ensures assets (like terrains) get the correct prefix
     fs::path p(filepath);
     std::string filename = p.stem().string(); // "my_project" from "C:/.../my_project.rtp"
-    if (g_project.project_name == "Untitled" || g_project.project_name.empty()) {
+    if (!as_copy && (g_project.project_name == "Untitled" || g_project.project_name.empty())) {
         g_project.project_name = filename;
     }
-    // Also store the current path
-    g_project.current_file_path = filepath;
+    // The project this scene came from, before the path is retargeted below.
+    // Its .bin already holds every unchanged embedded texture; an autosave or
+    // a first "Save As" writes to a different file and would otherwise
+    // re-encode all of them.
+    const std::string source_project_path = g_project.current_file_path;
+    // Also store the current path (a copy leaves the project's identity alone)
+    if (!as_copy) g_project.current_file_path = filepath;
 
     {
         ScopedPerfTimer timer("saveProject compactPendingDeletedObjects");
@@ -1263,7 +1328,16 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
     fs::path temp_shared_path = final_shared_path;
     temp_shared_path += ".tmp";
 
-    loadPreviousEmbeddedTextureEntries(final_json_path, final_bin_path);
+    g_previous_embedded_texture_entries.clear();
+    addPreviousEmbeddedTextureEntries(final_json_path, final_bin_path);
+    if (!source_project_path.empty()) {
+        const fs::path source_json_path = pathFromUtf8(source_project_path);
+        if (source_json_path != final_json_path) {
+            fs::path source_bin_path = source_json_path;
+            source_bin_path += ".bin";
+            addPreviousEmbeddedTextureEntries(source_json_path, source_bin_path);
+        }
+    }
 
     // 2. Open Streams
     std::ofstream out_json(temp_json_path);
@@ -1854,12 +1928,14 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         return false;
     }
     
-    g_project.current_file_path = filepath;
-    g_project.is_modified = false;
-    raytrophi::templates::TemplateHubUI::instance().addRecentProject(filepath);
+    if (!as_copy) {
+        g_project.current_file_path = filepath;
+        g_project.is_modified = false;
+        raytrophi::templates::TemplateHubUI::instance().addRecentProject(filepath);
+    }
     
     if (progress_callback) progress_callback(100, "Done.");
-    SCENE_LOG_INFO("Project saved successfully: " + filepath);
+    SCENE_LOG_INFO(std::string(as_copy ? "Project copy saved: " : "Project saved successfully: ") + filepath);
     return true;
 }
 
@@ -4349,7 +4425,9 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
     uint64_t texture_bin_bytes_written = 0;
     uint64_t project_local_bytes_written = 0;
     std::vector<char> file_copy_buffer(1024 * 1024);
-    const fs::path current_project_path = g_project.current_file_path.empty() ? fs::path() : pathFromUtf8(g_project.current_file_path);
+    // The file being WRITTEN, not the project's identity: a copy (autosave)
+    // must place its generated/local textures next to the copy.
+    const fs::path current_project_path = active_save_path_.empty() ? fs::path() : pathFromUtf8(active_save_path_);
     const fs::path project_dir = current_project_path.empty() ? fs::path() : current_project_path.parent_path();
     const fs::path project_local_texture_dir = current_project_path.empty()
         ? fs::path()
@@ -4435,18 +4513,17 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                         previous_it != g_previous_embedded_texture_entries.end()) {
                         std::vector<char> prev_blob;
                         if (readPreviousEmbeddedTextureBlob(previous_it->second, prev_blob)) {
-                            auto recomp = pickColorRecompression(prev_blob.data(), prev_blob.size(), usage);
-                            const char* write_data = recomp.recompressed ? recomp.bytes.data() : prev_blob.data();
-                            const size_t write_size = recomp.recompressed ? recomp.bytes.size() : prev_blob.size();
-                            const std::string write_ext = recomp.recompressed ? recomp.ext : previous_it->second.format;
-
-                            bin_out.write(write_data, static_cast<std::streamsize>(write_size));
-                            tex_entry["size"] = write_size;
-                            tex_entry["format"] = write_ext;
-                            if (recomp.recompressed) ++png_reencoded_count;
-                            else ++previous_embed_reused_count;
-                            texture_bin_bytes_written += static_cast<uint64_t>(write_size);
-                            prop.texture->clearSaveDirty();
+                            // Byte-for-byte: this blob already went through the
+                            // role-aware encoder when it was first saved. Trying
+                            // the JPG recompression again cost a full PNG decode
+                            // per texture per save for every blob it had already
+                            // declined (alpha, non-colour, did not shrink).
+                            bin_out.write(prev_blob.data(), static_cast<std::streamsize>(prev_blob.size()));
+                            tex_entry["size"] = prev_blob.size();
+                            tex_entry["format"] = previous_it->second.format;
+                            ++previous_embed_reused_count;
+                            texture_bin_bytes_written += static_cast<uint64_t>(prev_blob.size());
+                            if (!active_save_as_copy_) prop.texture->clearSaveDirty();
                             texture_map[path] = texture_id++;
                             arr.push_back(tex_entry);
                             return;
@@ -4546,7 +4623,7 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                         if (recomp.recompressed) ++png_reencoded_count;
                         else ++cache_passthrough_count;
                         texture_bin_bytes_written += static_cast<uint64_t>(write_size);
-                        prop.texture->clearSaveDirty();
+                        if (!active_save_as_copy_) prop.texture->clearSaveDirty();
                         texture_map[path] = texture_id++;
                         arr.push_back(tex_entry);
                         return;
@@ -4798,7 +4875,7 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                     }
                 }
                 
-                prop.texture->clearSaveDirty();
+                if (!active_save_as_copy_) prop.texture->clearSaveDirty();
                 texture_map[path] = texture_id++;
                 arr.push_back(tex_entry);
             }
@@ -5584,6 +5661,8 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         f["fluid_velocity_spread"] = source.fluid_velocity_spread;
         f["fluid_emit_along_normal"] = source.fluid_emit_along_normal;
         f["fluid_substance"] = source.fluid_substance;
+        f["fluid_temperature_override"] = source.fluid_temperature_override;
+        f["fluid_temperature_kelvin"] = source.fluid_temperature_kelvin;
         f["use_time_limit"] = source.use_time_limit;
         f["start_time"] = source.start_time;
         f["end_time"] = source.end_time;
@@ -5721,6 +5800,12 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"granular_residual_strength", domain.fluid_params.granular_residual_strength},
             {"granular_tack_peak", domain.fluid_params.granular_tack_peak},
             {"granular_thermal_conductivity", domain.fluid_params.granular_thermal_conductivity},
+            {"thermal_liquid_enabled", domain.fluid_params.thermal_liquid_enabled},
+            {"thermal_air_cooling_rate", domain.fluid_params.thermal_air_cooling_rate},
+            {"thermal_contact_cooling_rate", domain.fluid_params.thermal_contact_cooling_rate},
+            {"thermal_freeze_kelvin", domain.fluid_params.thermal_freeze_kelvin},
+            {"thermal_viscosity_range", domain.fluid_params.thermal_viscosity_range},
+            {"thermal_cold_viscosity", domain.fluid_params.thermal_cold_viscosity},
             {"current_preset", static_cast<int>(domain.fluid_params.current_preset)},
             {"chemistry_preset", static_cast<int>(domain.fluid_params.chemistry_preset)},
             {"fuel_profile", {
@@ -5920,6 +6005,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"physics", {
                 {"mode", particlePhysicsModeToString(physics.mode)},
                 {"quality", particleQualityModeToString(physics.quality)},
+                {"execution_policy", particleExecutionPolicyToString(physics.execution_policy)},
                 {"particle_radius", physics.particle_radius},
                 {"self_collision_enabled", physics.self_collision_enabled},
                 {"solver_iterations", physics.solver_iterations},
@@ -6157,6 +6243,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         // Absent in older files -> empty -> untagged -> the domain material, i.e.
         // exactly how the scene rendered before substances existed.
         source.fluid_substance = item.value("fluid_substance", source.fluid_substance);
+        source.fluid_temperature_override = item.value("fluid_temperature_override", source.fluid_temperature_override);
+        source.fluid_temperature_kelvin = std::max(1.0f, item.value("fluid_temperature_kelvin", source.fluid_temperature_kelvin));
         source.use_time_limit = item.value("use_time_limit", source.use_time_limit);
         source.start_time = item.value("start_time", source.start_time);
         source.end_time = item.value("end_time", source.end_time);
@@ -6318,6 +6406,13 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.granular_residual_strength = f.value("granular_residual_strength", domain.fluid_params.granular_residual_strength);
             domain.fluid_params.granular_tack_peak = f.value("granular_tack_peak", domain.fluid_params.granular_tack_peak);
             domain.fluid_params.granular_thermal_conductivity = f.value("granular_thermal_conductivity", domain.fluid_params.granular_thermal_conductivity);
+            domain.fluid_params.thermal_liquid_enabled = f.value("thermal_liquid_enabled", domain.fluid_params.thermal_liquid_enabled);
+            domain.fluid_params.thermal_air_cooling_rate = f.value("thermal_air_cooling_rate", domain.fluid_params.thermal_air_cooling_rate);
+            domain.fluid_params.thermal_contact_cooling_rate = f.value("thermal_contact_cooling_rate", domain.fluid_params.thermal_contact_cooling_rate);
+            domain.fluid_params.thermal_freeze_kelvin = f.value("thermal_freeze_kelvin", domain.fluid_params.thermal_freeze_kelvin);
+            domain.fluid_params.thermal_viscosity_range = f.value("thermal_viscosity_range", domain.fluid_params.thermal_viscosity_range);
+            domain.fluid_params.thermal_cold_viscosity = f.value("thermal_cold_viscosity", domain.fluid_params.thermal_cold_viscosity);
+            domain.fluid_params.sanitizeThermalLiquid();
             domain.fluid_params.sanitizeGranularMaterial();
             // ★ TRIPWIRE — remove once the .rtp fluid_params loss is closed.
             //
@@ -6592,6 +6687,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             auto& physics = runtime.physicsSettings();
             physics.mode = particlePhysicsModeFromString(p.value("mode", std::string("Spark")));
             physics.quality = particleQualityModeFromString(p.value("quality", std::string("Realtime")));
+            physics.execution_policy = particleExecutionPolicyFromString(
+                p.value("execution_policy", std::string("Auto")));
             physics.particle_radius = p.value("particle_radius", physics.particle_radius);
             physics.self_collision_enabled = p.value("self_collision_enabled", physics.self_collision_enabled);
             physics.solver_iterations = p.value("solver_iterations", physics.solver_iterations);

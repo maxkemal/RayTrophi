@@ -310,6 +310,10 @@ bool buildSubstanceViscosityField(const FluidParticles& particles,
 // a falling chunk punch a hole through the liquid without pushing it, which
 // looks like weightlessness and reads as a tuning problem.
 //
+// `include_frozen` also counts parcels carrying kParticleFlagFrozen (thermal
+// liquid set solid, FluidThermalLiquid.h) whatever their tag. Frozen wax has
+// no substance to be declared solid by; the flag is its phase.
+//
 // Returns false (and clears both outputs) when no solid-phase parcel reaches
 // the threshold anywhere — the caller must then leave the mask untouched
 // rather than stamp an empty overlay.
@@ -319,7 +323,8 @@ bool buildSubstanceSolidCells(const FluidParticles& particles,
                               std::size_t solid_tag_count,
                               float fill_threshold,
                               std::vector<uint32_t>& cells_out,
-                              std::vector<Vec3>& cell_velocity_out);
+                              std::vector<Vec3>& cell_velocity_out,
+                              bool include_frozen = false);
 
 } // namespace Fluid
 } // namespace RayTrophiSim

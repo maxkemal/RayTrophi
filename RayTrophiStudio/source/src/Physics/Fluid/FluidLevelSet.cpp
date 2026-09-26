@@ -1428,7 +1428,8 @@ bool buildSubstanceSolidCells(const FluidParticles& particles,
                               std::size_t solid_tag_count,
                               float fill_threshold,
                               std::vector<uint32_t>& cells_out,
-                              std::vector<Vec3>& cell_velocity_out)
+                              std::vector<Vec3>& cell_velocity_out,
+                              bool include_frozen)
 {
     cells_out.clear();
     cell_velocity_out.clear();
@@ -1439,13 +1440,16 @@ bool buildSubstanceSolidCells(const FluidParticles& particles,
                                    static_cast<std::size_t>(ny) *
                                    static_cast<std::size_t>(nz);
     const std::size_t particle_count = particles.size();
+    const bool use_tags = solid_tags != nullptr && solid_tag_count > 0 &&
+                          particles.substance_tag.size() >= particle_count;
+    const bool use_frozen = include_frozen && particles.flags.size() >= particle_count;
     if (cell_count == 0 || particle_count == 0 || voxel <= 0.0f ||
-        solid_tags == nullptr || solid_tag_count == 0 ||
-        particles.substance_tag.size() < particle_count) {
+        (!use_tags && !use_frozen)) {
         return false;
     }
 
     auto isSolidTag = [&](uint32_t tag) -> bool {
+        if (!use_tags) return false;
         // ★ Untagged liquid is never solid. A domain fill, a scripted spawn and
         // everything authored before substances existed all carry tag 0, and
         // freezing them because a table row happens to exist would turn a
@@ -1469,7 +1473,9 @@ bool buildSubstanceSolidCells(const FluidParticles& particles,
     const float inv_h = 1.0f / voxel;
     bool any_solid_parcel = false;
     for (std::size_t p = 0; p < particle_count; ++p) {
-        const bool solid_parcel = isSolidTag(particles.substance_tag[p]);
+        const bool solid_parcel =
+            (use_frozen && (particles.flags[p] & kParticleFlagFrozen) != 0u) ||
+            (use_tags && isSolidTag(particles.substance_tag[p]));
         const float mass = (p < particles.mass_fraction.size())
             ? std::max(0.0f, std::min(1.0f, particles.mass_fraction[p]))
             : 1.0f;

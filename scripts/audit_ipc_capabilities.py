@@ -72,7 +72,8 @@ def required(method, namespaces):
     # scene.export_gltf sits in the "scene." namespace but reads the scene and
     # writes a FILE, so it must be named here or the namespace table below would
     # mirror it as SceneWrite and disagree with RtIpcSecurity.cpp.
-    if method in ("project.save", "project.autosave_now", "terrain.export_heightmap",
+    if method in ("project.save", "project.autosave_now", "project.autosave_set",
+                  "terrain.export_heightmap",
                   "paint.export_channel", "scene.export_gltf"):
         return "FilesWrite"
     if method.startswith("render."):
@@ -163,6 +164,10 @@ def required(method, namespaces):
     # measurement was invalidated, so gating it above Read would make the
     # honest path the privileged one.
     if method == "sim.control_state":
+        return "Read"
+    if method in ("physics.collider.proxy_set.list",
+                  "physics.collider.proxy_set.get",
+                  "physics.collider.proxy_set.sample"):
         return "Read"
     # sim_graph.*: queries are Read, everything that builds the graph is
     # SceneWrite. Same ordering lesson as viewport.* — the read heuristics below

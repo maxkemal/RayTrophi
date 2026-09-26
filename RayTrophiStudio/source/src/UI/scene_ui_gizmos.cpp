@@ -2579,7 +2579,7 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
     }
 }
 
-void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
+void SceneUI::drawLightGizmos(UIContext& ctx, bool& /*gizmo_hit*/)
 {
     ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
     ImGuiIO& io = ImGui::GetIO();
@@ -2649,31 +2649,10 @@ void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
 
         if (!visible) continue;
 
-        // -------- PICKING --------
-        float dx = io.MousePos.x - center.x;
-        float dy = io.MousePos.y - center.y;
-        float d = sqrtf(dx * dx + dy * dy);
-
-        // Mirror the viewport-raycast lock in handleObjectSelection: while
-        // sculpt/edit-mesh tools own the click, icon picks must not steal
-        // selection, otherwise the brush stays armed on an off-mesh target
-        // and subsequent clicks hit the lock and go nowhere.
-        const bool edit_mode_locked =
-            mesh_overlay_settings.enabled &&
-            mesh_overlay_settings.edit_mode &&
-            ctx.selection.mesh_element_mode != MeshElementSelectMode::Object &&
-            !active_mesh_edit_object_name.empty();
-        const bool sculpt_mode_locked =
-            sculpt_mode_state.enabled &&
-            mesh_workspace_mode == MeshWorkspaceMode::Sculpt &&
-            mesh_overlay_settings.edit_mode &&
-            (terrain_sculpt_proxy_active || !sculpt_mode_state.active_target_name.empty());
-
-        if (d < 20.0f && ImGui::IsMouseClicked(0) && !ImGuizmo::IsOver() &&
-            !edit_mode_locked && !sculpt_mode_locked) {
-            ctx.selection.selectLight(light);
-            gizmo_hit = true;
-        }
+        // Picking is resolved together with scene geometry in
+        // handleMouseSelection(). Keeping it here used to give every light a
+        // 40-pixel-wide unconditional click target, so a small nearby object
+        // could never receive the click even when it was visibly in front.
 
         if (selected) {
             std::string label = light->nodeName.empty() ? "Light" : light->nodeName;

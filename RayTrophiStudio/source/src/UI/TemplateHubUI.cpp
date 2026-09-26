@@ -1,4 +1,5 @@
 #include "UI/TemplateHubUI.h"
+#include "Autosave.h"
 
 #include "ui_modern.h"
 #include "Template/TemplateRegistry.h"
@@ -548,6 +549,23 @@ void TemplateHubUI::renderStartupPreferencesSection() {
         pref_mgr.setStartupMode(static_cast<StartupMode>(current_item));
     }
     ImGui::PopItemWidth();
+
+    ImGui::Spacing();
+    ImGui::TextColored(theme_subtext, "AUTOSAVE");
+    ImGui::Spacing();
+    // Same preference as File > Project Save Options and project.autosave_set.
+    bool as_enabled = pref_mgr.isAutoSaveEnabled();
+    if (ImGui::Checkbox("Autosave##HubAutosave", &as_enabled)) {
+        raytrophi::autosave::setEnabled(as_enabled);
+    }
+    int as_minutes = std::max(1, pref_mgr.getAutoSaveIntervalSec() / 60);
+    ImGui::BeginDisabled(!as_enabled);
+    ImGui::PushItemWidth(-1.0f);
+    if (ImGui::SliderInt("##HubAutosaveInterval", &as_minutes, 1, 60, "every %d min")) {
+        raytrophi::autosave::setIntervalSec(as_minutes * 60);
+    }
+    ImGui::PopItemWidth();
+    ImGui::EndDisabled();
 }
 
 void TemplateHubUI::renderCategoryTabs() {

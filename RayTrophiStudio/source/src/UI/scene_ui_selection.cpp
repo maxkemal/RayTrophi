@@ -779,37 +779,48 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 return;
             }
 
-            // Check for Light Selection first (Bounding Sphere Intersection)
+            // Check light icons in screen space. A fixed world-space sphere used
+            // to grow to a very large pixel footprint as the camera approached,
+            // stealing clicks from small nearby objects. Match the visible point
+            // light ring instead and let depth resolve genuine overlaps below.
             std::shared_ptr<Light> closest_light = nullptr;
             float closest_t = 1e9f;
+            float closest_light_screen_distance = 1e9f;
             int closest_light_index = -1;
+            constexpr float light_pick_radius_pixels = 12.0f;
 
             for (size_t i = 0; i < ctx.scene.lights.size(); ++i) {
                 auto& light = ctx.scene.lights[i];
-                if (!light) continue;
+                if (!light || !light->visible) continue;
 
-                // Proxy Sphere at light position - smaller radius for precise selection
-                Vec3 oc = r.origin - light->position;
-                float radius = 0.2f;  // Reduced from 0.5 to not block nearby objects
-                float a = r.direction.dot(r.direction);
-                float half_b = oc.dot(r.direction);
-                float c = oc.dot(oc) - radius * radius;
-                float discriminant = half_b * half_b - a * c;
+                ImVec2 light_screen;
+                const bool is_ortho = ctx.scene.camera->orthographic &&
+                                      viewport_settings.shading_mode != 2;
+                if (!projectSelectionPointToScreen(
+                        *ctx.scene.camera, ImVec2(win_w, win_h), light->position,
+                        light_screen, is_ortho)) {
+                    continue;
+                }
 
-                if (discriminant > 0) {
-                    float root = sqrt(discriminant);
-                    float temp = (-half_b - root) / a;
-                    if (temp < closest_t && temp > 0.001f) {
-                        closest_t = temp;
-                        closest_light = light;
-                        closest_light_index = (int)i;
-                    }
-                    temp = (-half_b + root) / a;
-                    if (temp < closest_t && temp > 0.001f) {
-                        closest_t = temp;
-                        closest_light = light;
-                        closest_light_index = (int)i;
-                    }
+                const float dx = static_cast<float>(x) - light_screen.x;
+                const float dy = static_cast<float>(y) - light_screen.y;
+                const float screen_distance = std::sqrt(dx * dx + dy * dy);
+                if (screen_distance > light_pick_radius_pixels) continue;
+
+                const float direction_length_sq = r.direction.dot(r.direction);
+                if (direction_length_sq <= 1e-8f) continue;
+                const float candidate_t =
+                    (light->position - r.origin).dot(r.direction) /
+                    direction_length_sq;
+                if (candidate_t <= 0.001f) continue;
+
+                if (screen_distance < closest_light_screen_distance ||
+                    (std::abs(screen_distance - closest_light_screen_distance) < 0.01f &&
+                     candidate_t < closest_t)) {
+                    closest_light_screen_distance = screen_distance;
+                    closest_t = candidate_t;
+                    closest_light = light;
+                    closest_light_index = static_cast<int>(i);
                 }
             }
 
@@ -1112,7 +1123,9 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 // return valid hits. We try BVH first for O(log N) performance,
                 // then fall back to linear scan if BVH misses or is unavailable.
                 if (ctx.scene.bvh && !pending_timeline_selection_sync) {
-                    if (ctx.scene.bvh->hit(r, 0.001f, closest_so_far, temp_rec)) {
+                    if (ctx.scene.bvh->hit(
+                            r, 0.001f, closest_so_far, temp_rec,
+                            /*ignore_volumes=*/true)) {
                         hit = true;
                         closest_so_far = temp_rec.t;
                         rec = temp_rec;
@@ -1124,7 +1137,9 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 if (!hit && (pending_timeline_selection_sync || ctx.scene.world.objects.size() < 1000 || !ctx.scene.bvh || interactive_selection_fallback)) {
                     for (const auto& obj : ctx.scene.world.objects) {
                         if (!obj) continue;
-                        if (obj->hit(r, 0.001f, closest_so_far, temp_rec)) {
+                        if (obj->hit(
+                                r, 0.001f, closest_so_far, temp_rec,
+                                /*ignore_volumes=*/true)) {
                             // Filter ForceField helper meshes by resolved hit triangle name.
                             if (temp_rec.triangle) {
                                 const std::string& name = temp_rec.triangle->getNodeName();
@@ -1152,6 +1167,11 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
 
             // Check VDB Volumes (not in main BVH, separate list)
             for (const auto& vdb : ctx.scene.vdb_volumes) {
+                // Simulation cache surfaces are render representations of a
+                // domain, not independent authoring objects. They are absent
+                // from the hierarchy and must not form an invisible selection
+                // shell around meshes/lights inside the domain.
+                if (!vdb || vdb->transient) continue;
                 if (vdb->hit(r, 0.001f, closest_so_far, temp_rec)) {
                     hit = true;
                     closest_so_far = temp_rec.t;
@@ -1324,6 +1344,31 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 return; // Camera selected, done
             }
 
+            if (closest_light && closest_t < closest_so_far) {
+                if (ctrl_held) {
+                    SelectableItem item;
+                    item.type = SelectableType::Light;
+                    item.light = closest_light;
+                    item.light_index = closest_light_index;
+                    item.name = closest_light->nodeName.empty()
+                        ? "Light"
+                        : closest_light->nodeName;
+
+                    if (ctx.selection.isSelected(item)) {
+                        ctx.selection.removeFromSelection(item);
+                    } else {
+                        ctx.selection.addToSelection(item);
+                    }
+                } else {
+                    ctx.selection.selectLight(
+                        closest_light, closest_light_index,
+                        closest_light->nodeName.empty()
+                            ? "Light"
+                            : closest_light->nodeName);
+                }
+                return;
+            }
+
             // Object-mode fallback: right-button box selection already resolves
             // flat meshes from the canonical hierarchy cache without depending on
             // CPU BVH membership. Reuse that exact path for a left-click point when
@@ -1491,7 +1536,9 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                         bool retry_hit = false;
                         for (const auto& obj : ctx.scene.world.objects) {
                             if (!obj) continue;
-                            if (obj->hit(r, 0.001f, retry_closest, retry_rec)) {
+                            if (obj->hit(
+                                    r, 0.001f, retry_closest, retry_rec,
+                                    /*ignore_volumes=*/true)) {
                                 if (retry_rec.triangle) {
                                     const std::string& retry_name = retry_rec.triangle->getNodeName();
                                     if (retry_name.find("ForceField") != std::string::npos ||

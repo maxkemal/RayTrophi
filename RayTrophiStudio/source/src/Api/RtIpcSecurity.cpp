@@ -228,7 +228,10 @@ uint32_t requiredCapabilities(const std::string& method) {
     // scene - it reads it and writes a file. Without this line the namespace
     // table below would demand SceneWrite, so a read+files-write agent could not
     // export, and a scene-write agent could export without a file capability.
+    // autosave_set persists a preference that decides when the app writes
+    // the recovery file, so it is gated like the write itself.
     if (method == "project.save" || method == "project.autosave_now" ||
+        method == "project.autosave_set" ||
         method == "terrain.export_heightmap" ||
         method == "paint.export_channel" || method == "scene.export_gltf") return FilesWrite;
     if (method.rfind("render.", 0) == 0) {
@@ -246,6 +249,9 @@ uint32_t requiredCapabilities(const std::string& method) {
     // know whether its own measurement was invalidated - gating it any higher
     // would make the honest path the privileged one.
     if (method == "sim.control_state") return Read;
+    if (method == "physics.collider.proxy_set.list" ||
+        method == "physics.collider.proxy_set.get" ||
+        method == "physics.collider.proxy_set.sample") return Read;
     if (method == "rayfusion.core_status" || method == "rayfusion.validate_core" ||
         method == "rayfusion.probe_field" || method == "rayfusion.scene_as") return Read;
     // Choosing the probe producer changes what the viewport renders, so it is
@@ -435,6 +441,10 @@ uint32_t requiredCapabilities(const std::string& method) {
         "scene.", "select.", "material.", "lights.", "timeline.", "camera.", "spline.", "geometry_cache.", "mesh.profile.",
         "world.", "post.", "anim.", "rig.", "nodes.", "modifiers.",
         "scatter.", "physics.", "forcefield.", "particle.", "fluid.", "gas.", "msf.", "terrain.",
+        // Shared simulation colliders (rt.collider parity). `collider.list` and
+        // `collider.get` fall through to Read above; create/update/remove/
+        // rebuild_sdf land here as SceneWrite.
+        "collider.",
         // Emitters. `flow_source.list`/`.get` fall through to Read above via the
         // substring heuristics; create/update/remove land here as SceneWrite.
         "flow_source.",

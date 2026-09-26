@@ -45,6 +45,7 @@ const char* fluidPresetName(RayTrophiSim::Fluid::APICSolverParams::FluidPreset p
         case FluidPreset::Gravel:       return "gravel";
         case FluidPreset::CohesiveSoil: return "cohesive_soil";
         case FluidPreset::MoltenPlastic: return "molten_plastic";
+        case FluidPreset::Wax:           return "wax";
         case FluidPreset::Custom:
         default:                     return "custom";
     }
@@ -76,6 +77,54 @@ void fillFluidRheology(const RayTrophiSim::Fluid::APICSolverParams& params,
     info.granular_residual_strength = params.granular_residual_strength;
     info.granular_tack_peak = params.granular_tack_peak;
     info.granular_thermal_conductivity = params.granular_thermal_conductivity;
+    info.thermal_liquid_enabled = params.thermal_liquid_enabled;
+    info.thermal_air_cooling_rate = params.thermal_air_cooling_rate;
+    info.thermal_contact_cooling_rate = params.thermal_contact_cooling_rate;
+    info.thermal_freeze_kelvin = params.thermal_freeze_kelvin;
+    info.thermal_viscosity_range = params.thermal_viscosity_range;
+    info.thermal_cold_viscosity = params.thermal_cold_viscosity;
+}
+
+// Surface reconstruction controls (descriptor) plus the last build's measured
+// grid, when the scene layer has built one for this domain. `sdf` is null when
+// no build exists yet — reported as surface_measured=false, never as zeros that
+// would read as "a free, empty surface".
+void fillFluidSurfaceDetail(const RayTrophiSim::SimulationGridDomainDesc& d,
+                            const RayTrophiSim::Fluid::LevelSetStats* sdf,
+                            FluidDomainInfo& info) {
+    const auto& l = d.fluid_level_set_params;
+    info.surface_resolution_multiplier = l.surface_resolution_multiplier;
+    info.kernel_radius_voxels = l.kernel_radius_voxels;
+    info.particle_radius_voxels = l.particle_radius_voxels;
+    info.narrow_band_voxels = l.narrow_band_voxels;
+    info.smoothing_iterations = l.smoothing_iterations;
+    info.anisotropy_enabled = l.anisotropy_enabled;
+    info.anisotropy_radius_voxels = l.anisotropy_radius_voxels;
+    info.anisotropy_max_stretch = l.anisotropy_max_stretch;
+    info.anisotropy_neighbor_min = l.anisotropy_neighbor_min;
+    info.position_smoothing = l.position_smoothing;
+    info.surface_measured = sdf != nullptr && sdf->eff_nx > 0;
+    if (info.surface_measured) {
+        info.surface_grid_dim[0] = sdf->eff_nx;
+        info.surface_grid_dim[1] = sdf->eff_ny;
+        info.surface_grid_dim[2] = sdf->eff_nz;
+        info.surface_voxel = sdf->eff_voxel;
+        info.surface_build_ms = sdf->build_ms;
+        info.surface_active_cells = static_cast<uint64_t>(sdf->active_cells);
+    }
+}
+
+// The scene-layer surface stats for domain `index` of runtime `sys`. They live
+// on the ParticleSystemObject that OWNS the runtime, which is not necessarily
+// the active one.
+const RayTrophiSim::Fluid::LevelSetStats* findFluidSurfaceStats(
+    const RayTrophiSim::ParticleSimulationSystem* sys, std::size_t index) {
+    if (!g_ctx || !sys) return nullptr;
+    for (const auto& ps : g_ctx->scene.particle_systems) {
+        if (ps.runtime.get() != sys) continue;
+        return index < ps.domain_sdf_stats.size() ? &ps.domain_sdf_stats[index] : nullptr;
+    }
+    return nullptr;
 }
 
 // Report the isosurface material by NAME. Lives on the grid descriptor rather
@@ -243,6 +292,20 @@ void fillFluidSolidPhase(const RayTrophiSim::SimulationGridDomainState& state,
     info.granular_overburden_pressure = state.fluid_stats.granular_overburden_pressure;
     info.granular_young_modulus_for_load = state.fluid_stats.granular_young_modulus_for_load;
     info.granular_stiffness_below_load = state.fluid_stats.granular_stiffness_below_load;
+    const auto& ts = state.thermal_stats;
+    info.thermal_measured = ts.measured;
+    info.thermal_frozen_particles = static_cast<uint64_t>(ts.frozen_particles);
+    info.thermal_froze_this_frame = static_cast<uint64_t>(ts.froze_this_frame);
+    info.thermal_melted_this_frame = static_cast<uint64_t>(ts.melted_this_frame);
+    info.thermal_cold_unsupported = static_cast<uint64_t>(ts.cold_unsupported);
+    info.thermal_air_cooled_particles = static_cast<uint64_t>(ts.air_cooled_particles);
+    info.thermal_contact_cooled_particles = static_cast<uint64_t>(ts.contact_cooled_particles);
+    info.thermal_min_kelvin = ts.min_kelvin;
+    info.thermal_mean_kelvin = ts.mean_kelvin;
+    info.thermal_max_kelvin = ts.max_kelvin;
+    info.thermal_viscosity_field = ts.viscosity_field_built;
+    info.thermal_min_viscosity = ts.min_viscosity;
+    info.thermal_max_viscosity = ts.max_viscosity;
 }
 
 void fillFluidMaterialCoords(const RayTrophiSim::SimulationGridDomainState& state,
@@ -354,7 +417,136 @@ RayTrophiSim::SimulationGridDomainDesc* findGasDomainDesc(
     return &(*it);
 }
 
+// The LIQUID counterpart of findGasDomainDesc: same name resolution as
+// fluid.get, rejects gas domains (they have no particles to cool and no
+// level set to refine).
+RayTrophiSim::SimulationGridDomainDesc* findLiquidDomainDesc(
+    const std::string& domain_id_or_name, Result& out_error) {
+    if (!g_ctx) { out_error = notBound(); return nullptr; }
+    FluidDomainInfo info;
+    Result found = getFluidDomain(domain_id_or_name, info);
+    if (!found.ok) { out_error = found; return nullptr; }
+    auto& domains = g_ctx->scene.ensureParticleSimulationSystem().gridDomains();
+    auto it = std::find_if(domains.begin(), domains.end(),
+        [&info](const auto& d) { return d.name == info.name; });
+    if (it == domains.end() || it->type != RayTrophiSim::SimulationDomainType::Fluid) {
+        out_error = Result::fail("liquid (fluid) domain not found: " + domain_id_or_name);
+        return nullptr;
+    }
+    out_error = Result::success();
+    return &(*it);
+}
+
 } // namespace
+
+Result setFluidSurfaceDetail(const std::string& domain_id_or_name,
+                             const FluidSurfaceDetailPatch& patch) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    // Validate EVERYTHING before writing anything: a patch that half-applies
+    // and then fails leaves a surface nobody asked for.
+    auto inRange = [](float v, float lo, float hi) {
+        return std::isfinite(v) && v >= lo && v <= hi;
+    };
+    if (patch.surface_resolution_multiplier &&
+        (*patch.surface_resolution_multiplier < 1 || *patch.surface_resolution_multiplier > 4))
+        return Result::fail("surface_resolution_multiplier must be in [1, 4]");
+    if (patch.kernel_radius_voxels && !inRange(*patch.kernel_radius_voxels, 0.5f, 6.0f))
+        return Result::fail("kernel_radius_voxels must be in [0.5, 6]");
+    if (patch.particle_radius_voxels && !inRange(*patch.particle_radius_voxels, 0.05f, 2.0f))
+        return Result::fail("particle_radius_voxels must be in [0.05, 2]");
+    if (patch.narrow_band_voxels && !inRange(*patch.narrow_band_voxels, 1.0f, 8.0f))
+        return Result::fail("narrow_band_voxels must be in [1, 8]");
+    if (patch.smoothing_iterations &&
+        (*patch.smoothing_iterations < 0 || *patch.smoothing_iterations > 8))
+        return Result::fail("smoothing_iterations must be in [0, 8]");
+    if (patch.anisotropy_radius_voxels && !inRange(*patch.anisotropy_radius_voxels, 1.0f, 6.0f))
+        return Result::fail("anisotropy_radius_voxels must be in [1, 6]");
+    if (patch.anisotropy_max_stretch && !inRange(*patch.anisotropy_max_stretch, 1.0f, 8.0f))
+        return Result::fail("anisotropy_max_stretch must be in [1, 8]");
+    if (patch.anisotropy_neighbor_min &&
+        (*patch.anisotropy_neighbor_min < 1 || *patch.anisotropy_neighbor_min > 24))
+        return Result::fail("anisotropy_neighbor_min must be in [1, 24]");
+    if (patch.position_smoothing && !inRange(*patch.position_smoothing, 0.0f, 1.0f))
+        return Result::fail("position_smoothing must be in [0, 1]");
+
+    Result found;
+    auto* dom = findLiquidDomainDesc(domain_id_or_name, found);
+    if (!dom) return found;
+    auto& l = dom->fluid_level_set_params;
+    if (patch.surface_resolution_multiplier) l.surface_resolution_multiplier = *patch.surface_resolution_multiplier;
+    if (patch.kernel_radius_voxels) l.kernel_radius_voxels = *patch.kernel_radius_voxels;
+    if (patch.particle_radius_voxels) l.particle_radius_voxels = *patch.particle_radius_voxels;
+    if (patch.narrow_band_voxels) l.narrow_band_voxels = *patch.narrow_band_voxels;
+    if (patch.smoothing_iterations) l.smoothing_iterations = *patch.smoothing_iterations;
+    if (patch.anisotropy_enabled) l.anisotropy_enabled = *patch.anisotropy_enabled;
+    if (patch.anisotropy_radius_voxels) l.anisotropy_radius_voxels = *patch.anisotropy_radius_voxels;
+    if (patch.anisotropy_max_stretch) l.anisotropy_max_stretch = *patch.anisotropy_max_stretch;
+    if (patch.anisotropy_neighbor_min) l.anisotropy_neighbor_min = *patch.anisotropy_neighbor_min;
+    if (patch.position_smoothing) l.position_smoothing = *patch.position_smoothing;
+
+    // Same commit the panel's sdf_changed does: rebuild the surface from the
+    // current particles (no simulation reset) and drop the converged image, or
+    // a script that sets a knob and renders captures mostly the OLD surface.
+    g_ctx->scene.requestSimulationTimelineRenderResync();
+    g_ctx->renderer.resetCPUAccumulation();
+    if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
+    g_ctx->start_render = true;
+    return Result::success();
+}
+
+Result setFluidThermal(const std::string& domain_id_or_name,
+                       const FluidThermalPatch& patch) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    auto finiteIn = [](const std::optional<float>& v, float lo, float hi) {
+        return !v || (std::isfinite(*v) && *v >= lo && *v <= hi);
+    };
+    // Rejected, not clamped — same reasoning as setFluidSurfaceDetail. A freeze
+    // point of 0 K silently raised to 1 K would still never freeze anything,
+    // and the script would believe it had configured wax.
+    if (!finiteIn(patch.air_cooling_rate, 0.0f, 100.0f))
+        return Result::fail("air_cooling_rate must be in [0, 100] 1/s");
+    if (!finiteIn(patch.contact_cooling_rate, 0.0f, 100.0f))
+        return Result::fail("contact_cooling_rate must be in [0, 100] 1/s");
+    if (!finiteIn(patch.freeze_kelvin, 1.0f, 5000.0f))
+        return Result::fail("freeze_kelvin must be in [1, 5000] K");
+    if (!finiteIn(patch.viscosity_range, 1.0f, 2000.0f))
+        return Result::fail("viscosity_range must be in [1, 2000] K");
+    if (!finiteIn(patch.cold_viscosity, 0.0f, 1000.0f))
+        return Result::fail("cold_viscosity must be in [0, 1000] m^2/s");
+    if (!finiteIn(patch.conductivity, 0.0f, 200.0f))
+        return Result::fail("conductivity must be in [0, 200] 1/s");
+
+    Result found;
+    auto* dom = findLiquidDomainDesc(domain_id_or_name, found);
+    if (!dom) return found;
+    auto& p = dom->fluid_params;
+    if (patch.enabled) p.thermal_liquid_enabled = *patch.enabled;
+    if (patch.air_cooling_rate) p.thermal_air_cooling_rate = *patch.air_cooling_rate;
+    if (patch.contact_cooling_rate) p.thermal_contact_cooling_rate = *patch.contact_cooling_rate;
+    if (patch.freeze_kelvin) p.thermal_freeze_kelvin = *patch.freeze_kelvin;
+    if (patch.viscosity_range) p.thermal_viscosity_range = *patch.viscosity_range;
+    if (patch.cold_viscosity) p.thermal_cold_viscosity = *patch.cold_viscosity;
+    if (patch.conductivity) p.granular_thermal_conductivity = *patch.conductivity;
+    p.sanitizeThermalLiquid();
+    // Rheology edit: the preset no longer describes this liquid.
+    p.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
+    // Mirror onto the legacy editor object, as setFluidDomainParams does for
+    // every rheology field, so the two authoring copies cannot drift.
+    for (auto& fo : g_ctx->scene.fluid_objects) {
+        if (fo.name != dom->name) continue;
+        fo.params.thermal_liquid_enabled = p.thermal_liquid_enabled;
+        fo.params.thermal_air_cooling_rate = p.thermal_air_cooling_rate;
+        fo.params.thermal_contact_cooling_rate = p.thermal_contact_cooling_rate;
+        fo.params.thermal_freeze_kelvin = p.thermal_freeze_kelvin;
+        fo.params.thermal_viscosity_range = p.thermal_viscosity_range;
+        fo.params.thermal_cold_viscosity = p.thermal_cold_viscosity;
+        fo.params.granular_thermal_conductivity = p.granular_thermal_conductivity;
+        fo.params.current_preset = p.current_preset;
+    }
+    return Result::success();
+}
 
 Result setFluidSplatMaterial(const std::string& domain_id_or_name,
                              const std::string& material_name) {
@@ -568,10 +760,9 @@ Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_m
         RayTrophiSim::SimulationGridDomainDesc desc;
         desc.name = domain_name;
         desc.type = is_gas ? RayTrophiSim::SimulationDomainType::Gas : RayTrophiSim::SimulationDomainType::Fluid;
-        // Both gas and liquid now start on the fastest solver the machine has —
-        // scripted domains should not be slower than panel-created ones. Scene
-        // synchronization selects CUDA first and Vulkan second, and retains the
-        // deterministic CPU fallback when neither GPU backend is usable.
+        // Both gas and liquid start on the same backend as panel-created
+        // domains: Vulkan compute when the device supports it, CUDA only when
+        // Vulkan compute is missing, CPU when neither is usable.
         desc.backend = RayTrophiSim::defaultSimulationDomainBackend();
         desc.boundary_mode = is_gas ? RayTrophiSim::SimulationGridDomainBoundaryMode::Open : RayTrophiSim::SimulationGridDomainBoundaryMode::Closed;
         desc.bounds_min = domain_min;
@@ -768,7 +959,10 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
         // granular dial come from the descriptor the solver is actually running.
         fillFluidRheology(gd->fluid_params, out_info);
         fillFluidSurfaceMaterial(*gd, out_info);
+        fillFluidSurfaceDetail(*gd, findFluidSurfaceStats(gd_sys, gd_index), out_info);
         if (gd_sys) {
+            out_info.thermal_ambient_kelvin = RayTrophiSim::fluidDomainAmbientKelvin(
+                *gd, gd_sys->worldThermal());
             const auto& states = gd_sys->gridDomainStates();
             if (gd_index < states.size() && states[gd_index].valid) {
                 out_info.particle_count = states[gd_index].particles.size();
@@ -851,6 +1045,9 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
             (grid_dom->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
         fillFluidRheology(grid_dom->fluid_params, out_info);
         fillFluidSurfaceMaterial(*grid_dom, out_info);
+        fillFluidSurfaceDetail(*grid_dom, findFluidSurfaceStats(owning_sys, grid_index), out_info);
+        out_info.thermal_ambient_kelvin = RayTrophiSim::fluidDomainAmbientKelvin(
+            *grid_dom, owning_sys->worldThermal());
         const auto& states = owning_sys->gridDomainStates();
         // Index comes from the search above, not from pointer arithmetic: the
         // candidate may have been picked in an earlier system than the one this
@@ -919,6 +1116,13 @@ Result listFluidDomains(std::vector<rtapi::FluidDomainInfo>& out_domains) {
                 const auto& all = system.runtime->gridDomains();
                 const auto& states = system.runtime->gridDomainStates();
                 const std::size_t index = static_cast<std::size_t>(&d - all.data());
+                if (d.type != RayTrophiSim::SimulationDomainType::Gas) {
+                    fillFluidSurfaceDetail(d, index < system.domain_sdf_stats.size()
+                                                  ? &system.domain_sdf_stats[index] : nullptr,
+                                           info);
+                    info.thermal_ambient_kelvin = RayTrophiSim::fluidDomainAmbientKelvin(
+                        d, system.runtime->worldThermal());
+                }
                 if (index < states.size() && states[index].valid) {
                     info.particle_count = states[index].particles.size();
                     info.live_state = true;   // only now is the count a measurement
@@ -1261,6 +1465,7 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         else if (p == "gravel")                               chosen = FluidPreset::Gravel;
         else if (p == "cohesive_soil" || p == "cohesivesoil") chosen = FluidPreset::CohesiveSoil;
         else if (p == "molten_plastic" || p == "moltenplastic" || p == "plastic") chosen = FluidPreset::MoltenPlastic;
+        else if (p == "wax" || p == "candle_wax" || p == "paraffin") chosen = FluidPreset::Wax;
         // ★ "custom" is what fluid.get REPORTS for a hand-tuned domain, so
         // rejecting it here broke the obvious round trip: read a domain, write
         // it back, get an error on a value this very API produced. It applies
@@ -1271,7 +1476,7 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         if (!known) {
             return Result::fail("unknown fluid preset: " + *preset +
                                 " (water, oil, mud, honey, lava, sand, chocolate,"
-                                " wet_sand, gravel, cohesive_soil, molten_plastic, custom)");
+                                " wet_sand, gravel, cohesive_soil, molten_plastic, wax, custom)");
         }
         if (obj)      obj->params.applyPreset(chosen);
         if (grid_dom) grid_dom->fluid_params.applyPreset(chosen);
@@ -1492,10 +1697,13 @@ Result setFluidSubstanceMaterial(const std::string& domain_id_or_name,
         return Result::fail("substance name is required");
 
     Result found;
-    // Same lookup the gas settings use; the descriptor list is shared and this
-    // helper already reports a usable error for a bad name.
+    // ★ The LIQUID lookup. This used findGasDomainDesc ("same lookup the gas
+    // settings use"), which rejects every non-gas domain — and substances only
+    // exist in liquid domains, so on a fluid domain this call could only ever
+    // answer "gas domain not found". Found by reading, 2026-09-25; the check
+    // list carries the non-mutating probe that confirms it on a live build.
     RayTrophiSim::SimulationGridDomainDesc* dom =
-        findGasDomainDesc(domain_id_or_name, found);
+        findLiquidDomainDesc(domain_id_or_name, found);
     if (!dom) return found;
 
     // Resolve the material FIRST. Writing the binding and then discovering the
@@ -2073,6 +2281,8 @@ SimulationFlowSourceInfo flowInfoFromDesc(
     out.fluid_velocity_spread = source.fluid_velocity_spread;
     out.fluid_emit_along_normal = source.fluid_emit_along_normal;
     out.fluid_substance = source.fluid_substance;
+    out.fluid_temperature_override = source.fluid_temperature_override;
+    out.fluid_temperature_kelvin = source.fluid_temperature_kelvin;
     out.use_time_limit = source.use_time_limit;
     out.start_time = source.start_time;
     out.end_time = source.end_time;
@@ -2117,6 +2327,11 @@ Result flowDescFromInfo(const SimulationFlowSourceInfo& info,
     out.fluid_velocity_spread = std::max(0.0f, info.fluid_velocity_spread);
     out.fluid_emit_along_normal = info.fluid_emit_along_normal;
     out.fluid_substance = info.fluid_substance;
+    if (!std::isfinite(info.fluid_temperature_kelvin) || info.fluid_temperature_kelvin < 1.0f ||
+        info.fluid_temperature_kelvin > 5000.0f)
+        return Result::fail("fluid_temperature_kelvin must be in [1, 5000] K");
+    out.fluid_temperature_override = info.fluid_temperature_override;
+    out.fluid_temperature_kelvin = info.fluid_temperature_kelvin;
     out.use_time_limit = info.use_time_limit;
     out.start_time = info.start_time;
     out.end_time = std::max(info.start_time, info.end_time);

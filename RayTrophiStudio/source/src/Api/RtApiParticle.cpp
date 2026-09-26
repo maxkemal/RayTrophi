@@ -30,12 +30,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <string>
 #include <vector>
 
 #include "ParticleSimulation.h"
 #include "ParticleSystemUsage.h"
+#include "ProjectManager.h"
+#include "TriangleMesh.h"
 
 namespace rtapi {
 namespace {
@@ -90,6 +93,13 @@ const QualityName kQualities[] = {
     { ParticleQualityMode::Offline,  "offline" },
 };
 
+struct ExecutionPolicyName { RayTrophiSim::ParticleExecutionPolicy mode; const char* name; };
+const ExecutionPolicyName kExecutionPolicies[] = {
+    { RayTrophiSim::ParticleExecutionPolicy::Auto,        "auto" },
+    { RayTrophiSim::ParticleExecutionPolicy::GPURequired, "gpu_required" },
+    { RayTrophiSim::ParticleExecutionPolicy::CPU,         "cpu" },
+};
+
 template <typename Table>
 const char* nameOf(const Table& table, decltype(table[0].mode) mode, const char* fallback) {
     for (const auto& entry : table)
@@ -116,12 +126,28 @@ std::string optionList(const Table& table) {
     return out;
 }
 
-// Emitters have no stable id, so they are addressed the way the panel lists
-// them: by index. An all-digit token is an index; anything else is matched
-// against the name, first hit wins (the runtime does not unique names).
-Result resolveEmitterIndex(const std::string& index_or_name, std::size_t& out_index) {
-    auto& emitters = scriptSimulationRuntime().emitters();
+// Emitters are addressed the way the panel lists them -- by index -- or by
+// name (first hit wins; the runtime does not unique names), or by their stable
+// timeline uid spelled "uid:<n>". Only the uid survives removal of an earlier
+// emitter and a save/load round trip.
+Result resolveEmitterIndex(const RayTrophiSim::ParticleSimulationSystem& runtime,
+                           const std::string& index_or_name, std::size_t& out_index) {
+    const auto& emitters = runtime.emitters();
     if (emitters.empty()) return Result::fail("no particle emitters in the scene");
+    static const std::string kUidPrefix = "uid:";
+    if (index_or_name.compare(0, kUidPrefix.size(), kUidPrefix) == 0) {
+        const std::string digits = index_or_name.substr(kUidPrefix.size());
+        if (digits.empty() ||
+            !std::all_of(digits.begin(), digits.end(),
+                         [](unsigned char c) { return std::isdigit(c) != 0; })) {
+            return Result::fail("malformed particle emitter uid: " + index_or_name);
+        }
+        const uint64_t uid = std::strtoull(digits.c_str(), nullptr, 10);
+        for (std::size_t i = 0; i < emitters.size(); ++i) {
+            if (emitters[i].timeline_uid == uid) { out_index = i; return Result::success(); }
+        }
+        return Result::fail("particle emitter not found: " + index_or_name);
+    }
     const bool numeric = !index_or_name.empty() &&
         std::all_of(index_or_name.begin(), index_or_name.end(),
                     [](unsigned char c) { return std::isdigit(c) != 0; });
@@ -164,9 +190,99 @@ Result resolveSystemIndex(const std::string& index_or_name, std::size_t& out_ind
     return Result::fail("particle system not found: " + index_or_name);
 }
 
+// The system a call targets. The default ref is the ACTIVE system and creates
+// one when the scene has none -- what every pre-Phase-1 script relies on. An
+// explicit ref never falls back to the active system: a typo must fail, not
+// quietly edit whatever the panel happens to have selected.
+Result resolveSystemObject(const ParticleSystemRef& ref, std::size_t& out_index) {
+    auto& scene = g_ctx->scene;
+    if (ref.isDefault()) {
+        scene.ensureActiveParticleSystemObject();
+        if (scene.active_particle_system_index < 0 ||
+            static_cast<std::size_t>(scene.active_particle_system_index) >=
+                scene.particle_systems.size()) {
+            return Result::fail("no active particle system");
+        }
+        out_index = static_cast<std::size_t>(scene.active_particle_system_index);
+        return Result::success();
+    }
+    if (ref.id >= 0) {
+        for (std::size_t i = 0; i < scene.particle_systems.size(); ++i) {
+            if (scene.particle_systems[i].id == static_cast<uint32_t>(ref.id)) {
+                out_index = i;
+                return Result::success();
+            }
+        }
+        return Result::fail("particle system not found: id " + std::to_string(ref.id));
+    }
+    return resolveSystemIndex(ref.index_or_name, out_index);
+}
+
+Result resolveRuntime(const ParticleSystemRef& ref,
+                      RayTrophiSim::ParticleSimulationSystem*& out_runtime,
+                      uint32_t* out_system_id = nullptr) {
+    std::size_t index = 0;
+    if (Result r = resolveSystemObject(ref, index); !r) return r;
+    auto& system = g_ctx->scene.particle_systems[index];
+    if (!system.runtime) {
+        return Result::fail("particle system has no runtime: " + system.name);
+    }
+    out_runtime = system.runtime.get();
+    if (out_system_id) *out_system_id = system.id;
+    return Result::success();
+}
+
+const char* blendModeName(SceneData::ParticleBlendMode mode) {
+    return mode == SceneData::ParticleBlendMode::Alpha ? "alpha" : "additive";
+}
+
+ParticleSystemInfo infoFromSystem(const SceneData::ParticleSystemObject& sys, std::size_t index) {
+    ParticleSystemInfo info;
+    info.index = static_cast<int>(index);
+    info.id = sys.id;
+    info.name = sys.name;
+    info.active = (static_cast<int>(index) == g_ctx->scene.active_particle_system_index);
+    info.enabled = sys.enabled;
+    info.visible = sys.visible;
+    info.blend_mode = blendModeName(sys.blend_mode);
+    info.emitter_only = sys.render.emitter_only;
+    info.render_in_raytrace = sys.render.render_in_raytrace;
+    if (sys.runtime) {
+        info.domain_count = static_cast<int>(sys.runtime->gridDomains().size());
+        info.flow_source_count = static_cast<int>(sys.runtime->flowSources().size());
+        info.emitter_count = static_cast<int>(sys.runtime->emitters().size());
+        info.collider_count = static_cast<int>(sys.runtime->colliders().size());
+    }
+    return info;
+}
+
+// Same test ParticleRenderBridge's gatherSceneMeshSource applies: a flat
+// TriangleMesh with that node name and geometry. objectExists() is NOT that
+// test -- it also accepts splines and Triangle facades, which the bridge never
+// reads, so "resolved" would be true for a source that renders nothing.
+bool particleMeshSourceResolves(const std::string& node_name) {
+    if (node_name.empty() || g_ctx->scene.isEditorPendingDeleteObjectName(node_name))
+        return false;
+    for (const auto& obj : g_ctx->scene.world.objects) {
+        auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj);
+        if (mesh && mesh->nodeName == node_name && mesh->geometry) return true;
+    }
+    return false;
+}
+
+struct RenderShapeName { SceneData::ParticleRenderShape mode; const char* name; };
+const RenderShapeName kRenderShapes[] = {
+    { SceneData::ParticleRenderShape::Sphere,      "sphere" },
+    { SceneData::ParticleRenderShape::Cube,        "cube" },
+    { SceneData::ParticleRenderShape::Tetra,       "tetra" },
+    { SceneData::ParticleRenderShape::Quad,        "quad" },
+    { SceneData::ParticleRenderShape::SceneMeshes, "scene_meshes" },
+};
+
 ParticleEmitterInfo infoFromEmitter(const ParticleEmitterDesc& desc, int index) {
     ParticleEmitterInfo info;
     info.index = index;
+    info.uid = desc.timeline_uid;
     info.name = desc.name;
     info.source_mode = nameOf(kSourceModes, desc.source_mode, "point");
     info.spawn_mode = nameOf(kSpawnModes, desc.spawn_mode, "center");
@@ -295,66 +411,95 @@ Result applyInfoToEmitter(const ParticleEmitterInfo& info, ParticleEmitterDesc& 
 
 } // namespace
 
-std::vector<ParticleEmitterInfo> listParticleEmitters() {
-    std::vector<ParticleEmitterInfo> out;
-    if (!g_ctx) return out;
-    const auto& emitters = scriptSimulationRuntime().emitters();
-    out.reserve(emitters.size());
-    for (std::size_t i = 0; i < emitters.size(); ++i)
-        out.push_back(infoFromEmitter(emitters[i], static_cast<int>(i)));
-    return out;
-}
-
-Result getParticleEmitter(const std::string& index_or_name, ParticleEmitterInfo& out) {
+Result listParticleEmitters(const ParticleSystemRef& system,
+                            std::vector<ParticleEmitterInfo>& out) {
+    out.clear();
     if (!g_ctx) return notBound();
-    std::size_t index = 0;
-    if (Result r = resolveEmitterIndex(index_or_name, index); !r) return r;
-    out = infoFromEmitter(scriptSimulationRuntime().emitters()[index], static_cast<int>(index));
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    uint32_t system_id = 0;
+    if (Result r = resolveRuntime(system, runtime, &system_id); !r) return r;
+    const auto& emitters = runtime->emitters();
+    out.reserve(emitters.size());
+    for (std::size_t i = 0; i < emitters.size(); ++i) {
+        out.push_back(infoFromEmitter(emitters[i], static_cast<int>(i)));
+        out.back().system_id = system_id;
+    }
     return Result::success();
 }
 
-Result addParticleEmitter(const ParticleEmitterInfo& info, ParticleEmitterInfo& out) {
+std::vector<ParticleEmitterInfo> listParticleEmitters(const ParticleSystemRef& system) {
+    std::vector<ParticleEmitterInfo> out;
+    (void)listParticleEmitters(system, out);
+    return out;
+}
+
+Result getParticleEmitter(const std::string& index_or_name, ParticleEmitterInfo& out,
+                          const ParticleSystemRef& system) {
+    if (!g_ctx) return notBound();
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    uint32_t system_id = 0;
+    if (Result r = resolveRuntime(system, runtime, &system_id); !r) return r;
+    std::size_t index = 0;
+    if (Result r = resolveEmitterIndex(*runtime, index_or_name, index); !r) return r;
+    out = infoFromEmitter(runtime->emitters()[index], static_cast<int>(index));
+    out.system_id = system_id;
+    return Result::success();
+}
+
+Result addParticleEmitter(const ParticleEmitterInfo& info, ParticleEmitterInfo& out,
+                          const ParticleSystemRef& system) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     ParticleEmitterDesc desc;
     if (Result r = applyInfoToEmitter(info, desc); !r) return r;
-    // Goes through the scene wrapper, not runtime.addEmitter(), so the active
-    // particle-system object is created when the scene has none yet.
-    ParticleEmitterDesc& created = g_ctx->scene.addParticleEmitter(desc);
-    const auto& emitters = scriptSimulationRuntime().emitters();
-    out = infoFromEmitter(created, static_cast<int>(emitters.size()) - 1);
+    // The default ref creates the active system when the scene has none, so
+    // runtime->addEmitter() here is what scene.addParticleEmitter() used to do.
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    uint32_t system_id = 0;
+    if (Result r = resolveRuntime(system, runtime, &system_id); !r) return r;
+    ParticleEmitterDesc& created = runtime->addEmitter(desc);
+    out = infoFromEmitter(created, static_cast<int>(runtime->emitters().size()) - 1);
+    out.system_id = system_id;
     invalidateScriptSimulation();
     return Result::success();
 }
 
-Result removeParticleEmitter(const std::string& index_or_name) {
+Result removeParticleEmitter(const std::string& index_or_name, const ParticleSystemRef& system) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    if (Result r = resolveRuntime(system, runtime); !r) return r;
     std::size_t index = 0;
-    if (Result r = resolveEmitterIndex(index_or_name, index); !r) return r;
-    if (!scriptSimulationRuntime().removeEmitter(index))
+    if (Result r = resolveEmitterIndex(*runtime, index_or_name, index); !r) return r;
+    if (!runtime->removeEmitter(index))
         return Result::fail("could not remove particle emitter: " + index_or_name);
     invalidateScriptSimulation();
     return Result::success();
 }
 
-Result updateParticleEmitter(const std::string& index_or_name, const ParticleEmitterInfo& info) {
+Result updateParticleEmitter(const std::string& index_or_name, const ParticleEmitterInfo& info,
+                             const ParticleSystemRef& system) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    if (Result r = resolveRuntime(system, runtime); !r) return r;
     std::size_t index = 0;
-    if (Result r = resolveEmitterIndex(index_or_name, index); !r) return r;
-    if (Result r = applyInfoToEmitter(info, scriptSimulationRuntime().emitters()[index]); !r)
+    if (Result r = resolveEmitterIndex(*runtime, index_or_name, index); !r) return r;
+    if (Result r = applyInfoToEmitter(info, runtime->emitters()[index]); !r)
         return r;
     invalidateScriptSimulation();
     return Result::success();
 }
 
-Result keyParticleEmitter(const std::string& index_or_name, const ParticleEmitterKey& key) {
+Result keyParticleEmitter(const std::string& index_or_name, const ParticleEmitterKey& key,
+                          const ParticleSystemRef& system) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    if (Result r = resolveRuntime(system, runtime); !r) return r;
     std::size_t index = 0;
-    if (Result r = resolveEmitterIndex(index_or_name, index); !r) return r;
-    auto& emitter = scriptSimulationRuntime().emitters()[index];
+    if (Result r = resolveEmitterIndex(*runtime, index_or_name, index); !r) return r;
+    auto& emitter = runtime->emitters()[index];
     // Merge, so several calls can key different channels on one frame.
     auto& stored = emitter.keyframes[key.frame];
     if (key.has_enabled)   { stored.has_enabled = true;   stored.enabled = key.enabled; }
@@ -367,20 +512,25 @@ Result keyParticleEmitter(const std::string& index_or_name, const ParticleEmitte
     return Result::success();
 }
 
-Result clearParticleEmitterKey(const std::string& index_or_name, int frame) {
+Result clearParticleEmitterKey(const std::string& index_or_name, int frame,
+                               const ParticleSystemRef& system) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    if (Result r = resolveRuntime(system, runtime); !r) return r;
     std::size_t index = 0;
-    if (Result r = resolveEmitterIndex(index_or_name, index); !r) return r;
-    scriptSimulationRuntime().emitters()[index].keyframes.erase(frame);
+    if (Result r = resolveEmitterIndex(*runtime, index_or_name, index); !r) return r;
+    runtime->emitters()[index].keyframes.erase(frame);
     invalidateScriptSimulation();
     return Result::success();
 }
 
-Result clearParticleEmitters() {
+Result clearParticleEmitters(const ParticleSystemRef& system) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
-    g_ctx->scene.clearParticleEmitters();
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    if (Result r = resolveRuntime(system, runtime); !r) return r;
+    runtime->clearEmitters();
     invalidateScriptSimulation();
     return Result::success();
 }
@@ -389,22 +539,20 @@ Result listParticleSystems(std::vector<ParticleSystemInfo>& out) {
     if (!g_ctx) return notBound();
     out.clear();
     for (std::size_t i = 0; i < g_ctx->scene.particle_systems.size(); ++i) {
-        const auto& sys = g_ctx->scene.particle_systems[i];
-        ParticleSystemInfo info;
-        info.index = static_cast<int>(i);
-        info.id = sys.id;
-        info.name = sys.name;
-        info.active = (static_cast<int>(i) == g_ctx->scene.active_particle_system_index);
-        info.emitter_only = sys.render.emitter_only;
-        info.render_in_raytrace = sys.render.render_in_raytrace;
-        if (sys.runtime) {
-            info.domain_count = static_cast<int>(sys.runtime->gridDomains().size());
-            info.flow_source_count = static_cast<int>(sys.runtime->flowSources().size());
-            info.emitter_count = static_cast<int>(sys.runtime->emitters().size());
-            info.collider_count = static_cast<int>(sys.runtime->colliders().size());
-        }
-        out.push_back(std::move(info));
+        out.push_back(infoFromSystem(g_ctx->scene.particle_systems[i], i));
     }
+    return Result::success();
+}
+
+Result getParticleSystem(const ParticleSystemRef& system, ParticleSystemInfo& out) {
+    if (!g_ctx) return notBound();
+    // A read must not create a system as a side effect, so the default ref is
+    // resolved without ensureActiveParticleSystemObject().
+    if (system.isDefault() && !g_ctx->scene.activeParticleSystemObject())
+        return Result::fail("no active particle system");
+    std::size_t index = 0;
+    if (Result r = resolveSystemObject(system, index); !r) return r;
+    out = infoFromSystem(g_ctx->scene.particle_systems[index], index);
     return Result::success();
 }
 
@@ -414,14 +562,145 @@ Result addParticleSystem(const std::string& name, ParticleSystemInfo& out) {
 
     SceneData::ParticleSystemObject& system =
         g_ctx->scene.addParticleSystemObject(name);
-    out = ParticleSystemInfo{};
-    out.index = static_cast<int>(g_ctx->scene.particle_systems.size()) - 1;
-    out.id = system.id;
-    out.name = system.name;
-    out.active = true;
-    out.emitter_only = system.render.emitter_only;
-    out.render_in_raytrace = system.render.render_in_raytrace;
+    out = infoFromSystem(system, g_ctx->scene.particle_systems.size() - 1u);
     invalidateScriptSimulation();
+    return Result::success();
+}
+
+Result updateParticleSystem(const ParticleSystemRef& system, const ParticleSystemInfo& info) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    std::size_t index = 0;
+    if (Result r = resolveSystemObject(system, index); !r) return r;
+    auto& systems = g_ctx->scene.particle_systems;
+
+    // Validate everything before writing anything.
+    if (info.name.empty()) return Result::fail("particle system name must not be empty");
+    for (std::size_t i = 0; i < systems.size(); ++i) {
+        if (i != index && systems[i].name == info.name)
+            return Result::fail("particle system name already in use: " + info.name);
+    }
+    SceneData::ParticleBlendMode blend = systems[index].blend_mode;
+    const std::string blend_key = canonical(info.blend_mode);
+    if (blend_key == "additive") blend = SceneData::ParticleBlendMode::Additive;
+    else if (blend_key == "alpha") blend = SceneData::ParticleBlendMode::Alpha;
+    else if (!info.blend_mode.empty())
+        return Result::fail("unknown particle blend_mode: " + info.blend_mode + " (additive|alpha)");
+
+    auto& target = systems[index];
+    target.name = info.name;
+    target.visible = info.visible;
+    target.blend_mode = blend;
+    SceneData::applyParticleSystemEnabledState(target);
+    g_ctx->renderer.resetCPUAccumulation();
+    ProjectManager::getInstance().markModified();
+    invalidateScriptSimulation();
+    return Result::success();
+}
+
+Result removeParticleSystem(const ParticleSystemRef& system) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (system.isDefault())
+        return Result::fail("removeParticleSystem needs an explicit system (id, index or name)");
+    std::size_t index = 0;
+    if (Result r = resolveSystemObject(system, index); !r) return r;
+    if (!g_ctx->scene.removeParticleSystemObject(index))
+        return Result::fail("could not remove particle system");
+    g_ctx->renderer.resetCPUAccumulation();
+    ProjectManager::getInstance().markModified();
+    invalidateScriptSimulation();
+    return Result::success();
+}
+
+Result setActiveParticleSystem(const ParticleSystemRef& system) {
+    if (!g_ctx) return notBound();
+    if (system.isDefault())
+        return Result::fail("setActiveParticleSystem needs an explicit system (id, index or name)");
+    std::size_t index = 0;
+    if (Result r = resolveSystemObject(system, index); !r) return r;
+    g_ctx->scene.setActiveParticleSystemObject(index);
+    return Result::success();
+}
+
+Result getParticleRender(const ParticleSystemRef& system, ParticleRenderInfo& out) {
+    if (!g_ctx) return notBound();
+    std::size_t index = 0;
+    if (Result r = resolveSystemObject(system, index); !r) return r;
+    const auto& rs = g_ctx->scene.particle_systems[index].render;
+    out = ParticleRenderInfo{};
+    out.emitter_only = rs.emitter_only;
+    out.render_in_raytrace = rs.render_in_raytrace;
+    out.shape = nameOf(kRenderShapes, rs.shape, "sphere");
+    out.size_multiplier = rs.size_multiplier;
+    out.sphere_subdivisions = rs.sphere_subdivisions;
+    out.emissive = rs.emissive;
+    out.inherit_color_from_emitter = rs.inherit_color_from_emitter;
+    out.base_color = rs.base_color;
+    out.emission_strength = rs.emission_strength;
+    out.roughness = rs.roughness;
+    for (const auto& source : rs.mesh_sources) {
+        ParticleRenderMeshSourceInfo entry;
+        entry.node_name = source.node_name;
+        entry.weight = source.weight;
+        entry.resolved = particleMeshSourceResolves(source.node_name);
+        out.mesh_sources.push_back(std::move(entry));
+    }
+    return Result::success();
+}
+
+Result updateParticleRender(const ParticleSystemRef& system, const ParticleRenderInfo& info) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    std::size_t index = 0;
+    if (Result r = resolveSystemObject(system, index); !r) return r;
+
+    SceneData::ParticleRenderShape shape = SceneData::ParticleRenderShape::Sphere;
+    if (!parseMode(kRenderShapes, info.shape, shape))
+        return Result::fail("unknown particle render shape: " + info.shape +
+                            " (" + optionList(kRenderShapes) + ")");
+    if (!(info.size_multiplier > 0.0f))
+        return Result::fail("size_multiplier must be positive");
+    if (info.sphere_subdivisions < 0 || info.sphere_subdivisions > 3)
+        return Result::fail("sphere_subdivisions must be in 0..3");
+    if (info.emission_strength < 0.0f)
+        return Result::fail("emission_strength must be >= 0");
+    if (info.roughness < 0.0f || info.roughness > 1.0f)
+        return Result::fail("roughness must be in 0..1");
+    std::vector<SceneData::ParticleRenderMeshSource> sources;
+    for (const auto& entry : info.mesh_sources) {
+        if (entry.node_name.empty())
+            return Result::fail("mesh source node_name must not be empty");
+        if (!(entry.weight >= 0.0f))
+            return Result::fail("mesh source weight must be >= 0: " + entry.node_name);
+        // Writing a dangling reference is refused; one that dangles LATER is
+        // reported by getParticleRender as resolved = false.
+        if (!particleMeshSourceResolves(entry.node_name))
+            return Result::fail("mesh source object not found: " + entry.node_name);
+        for (const auto& existing : sources) {
+            if (existing.node_name == entry.node_name)
+                return Result::fail("mesh source listed twice: " + entry.node_name);
+        }
+        SceneData::ParticleRenderMeshSource source;
+        source.node_name = entry.node_name;
+        source.weight = entry.weight;
+        sources.push_back(std::move(source));
+    }
+
+    auto& rs = g_ctx->scene.particle_systems[index].render;
+    rs.emitter_only = info.emitter_only;
+    rs.render_in_raytrace = info.render_in_raytrace;
+    rs.shape = shape;
+    rs.size_multiplier = info.size_multiplier;
+    rs.sphere_subdivisions = info.sphere_subdivisions;
+    rs.emissive = info.emissive;
+    rs.inherit_color_from_emitter = info.inherit_color_from_emitter;
+    rs.base_color = info.base_color;
+    rs.emission_strength = info.emission_strength;
+    rs.roughness = info.roughness;
+    rs.mesh_sources = std::move(sources);
+    g_ctx->renderer.resetCPUAccumulation();
+    ProjectManager::getInstance().markModified();
     return Result::success();
 }
 
@@ -480,19 +759,7 @@ Result addParticleSystemPreset(const std::string& preset, ParticleSystemInfo& ou
         return Result::fail("particle preset '" + slug + "' did not create a system");
     }
 
-    out = ParticleSystemInfo{};
-    out.index = static_cast<int>(g_ctx->scene.particle_systems.size()) - 1;
-    out.id = sys.id;
-    out.name = sys.name;
-    out.active = (out.index == g_ctx->scene.active_particle_system_index);
-    out.emitter_only = sys.render.emitter_only;
-    out.render_in_raytrace = sys.render.render_in_raytrace;
-    if (sys.runtime) {
-        out.domain_count = static_cast<int>(sys.runtime->gridDomains().size());
-        out.flow_source_count = static_cast<int>(sys.runtime->flowSources().size());
-        out.emitter_count = static_cast<int>(sys.runtime->emitters().size());
-        out.collider_count = static_cast<int>(sys.runtime->colliders().size());
-    }
+    out = infoFromSystem(sys, g_ctx->scene.particle_systems.size() - 1u);
     invalidateScriptSimulation();
     return Result::success();
 }
@@ -516,13 +783,11 @@ Result setParticleSystemEmitterOnly(const std::string& index_or_name,
     return Result::success();
 }
 
-// ★ Every other simulation facade (flow sources, emitters, colliders, keys)
-// reaches the runtime through scriptSimulationRuntime(), which is the ACTIVE
-// particle system and nothing else. A UI preset creates its OWN system, so
-// anything it left behind in a non-active system is invisible to list() and
-// unreachable by remove() — there is literally no scripted way to delete it.
-// This is that way: it wipes every system scene-wide, and the next add
-// re-creates a clean one.
+// Wipes every system scene-wide; the next add re-creates a clean one. Particle
+// calls can target one system (ParticleSystemRef, removeParticleSystem), but
+// flow sources, colliders and fluid domains in RtApiFluid.cpp still reach only
+// the ACTIVE system through scriptSimulationRuntime(), so this remains the one
+// scripted way to clear what those left in other systems.
 Result clearParticleSystems() {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
@@ -531,11 +796,14 @@ Result clearParticleSystems() {
     return Result::success();
 }
 
-Result getParticlePhysics(ParticlePhysicsInfo& out) {
+Result getParticlePhysics(ParticlePhysicsInfo& out, const ParticleSystemRef& system) {
     if (!g_ctx) return notBound();
-    const ParticlePhysicsSettings& s = scriptSimulationRuntime().physicsSettings();
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    if (Result r = resolveRuntime(system, runtime); !r) return r;
+    const ParticlePhysicsSettings& s = runtime->physicsSettings();
     out.mode = nameOf(kPhysicsModes, s.mode, "spark");
     out.quality = nameOf(kQualities, s.quality, "realtime");
+    out.execution_policy = nameOf(kExecutionPolicies, s.execution_policy, "auto");
     out.particle_radius = s.particle_radius;
     out.self_collision_enabled = s.self_collision_enabled;
     out.solver_iterations = s.solver_iterations;
@@ -554,10 +822,12 @@ Result getParticlePhysics(ParticlePhysicsInfo& out) {
     return Result::success();
 }
 
-Result updateParticlePhysics(const ParticlePhysicsInfo& info) {
+Result updateParticlePhysics(const ParticlePhysicsInfo& info, const ParticleSystemRef& system) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
-    ParticlePhysicsSettings& s = scriptSimulationRuntime().physicsSettings();
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    if (Result r = resolveRuntime(system, runtime); !r) return r;
+    ParticlePhysicsSettings& s = runtime->physicsSettings();
 
     ParticlePhysicsMode mode = s.mode;
     if (!info.mode.empty() && !parseMode(kPhysicsModes, info.mode, mode))
@@ -567,6 +837,11 @@ Result updateParticlePhysics(const ParticlePhysicsInfo& info) {
     if (!info.quality.empty() && !parseMode(kQualities, info.quality, quality))
         return Result::fail("unknown particle quality mode: " + info.quality +
                             " (" + optionList(kQualities) + ")");
+    RayTrophiSim::ParticleExecutionPolicy policy = s.execution_policy;
+    if (!info.execution_policy.empty() &&
+        !parseMode(kExecutionPolicies, info.execution_policy, policy))
+        return Result::fail("unknown particle execution_policy: " + info.execution_policy +
+                            " (" + optionList(kExecutionPolicies) + ")");
     if (info.particle_radius <= 0.0f)
         return Result::fail("particle_radius must be positive");
     if (info.solver_iterations < 1)
@@ -578,6 +853,7 @@ Result updateParticlePhysics(const ParticlePhysicsInfo& info) {
 
     s.mode = mode;
     s.quality = quality;
+    s.execution_policy = policy;
     s.particle_radius = info.particle_radius;
     s.self_collision_enabled = info.self_collision_enabled;
     s.solver_iterations = info.solver_iterations;
@@ -597,9 +873,13 @@ Result updateParticlePhysics(const ParticlePhysicsInfo& info) {
     return Result::success();
 }
 
-Result getParticleStats(ParticleStatsInfo& out) {
+Result getParticleStats(ParticleStatsInfo& out, const ParticleSystemRef& system) {
     if (!g_ctx) return notBound();
-    auto& runtime = scriptSimulationRuntime();
+    RayTrophiSim::ParticleSimulationSystem* runtime_ptr = nullptr;
+    uint32_t system_id = 0;
+    if (Result r = resolveRuntime(system, runtime_ptr, &system_id); !r) return r;
+    auto& runtime = *runtime_ptr;
+    out.system_id = system_id;
     const RayTrophiSim::ParticleSimulationStats& stats = runtime.stats();
     // ★The counts come from the LIVE containers, not from stats_: the runtime
     // only refreshes those fields inside step(), so a script that adds an
@@ -616,6 +896,112 @@ Result getParticleStats(ParticleStatsInfo& out) {
     out.integrate_ms = stats.integrate_ms;
     out.self_collision_ms = stats.self_collision_ms;
     out.grid_domain_ms = stats.grid_domain_ms;
+    out.upload_ms = stats.upload_ms;
+
+    // Stage backends. Only the force stage has a GPU implementation today;
+    // every other stage is written out explicitly as "cpu" so a script can
+    // assert on it and a later phase changes a value, not the schema.
+    out.execution_policy = nameOf(kExecutionPolicies, stats.execution_policy, "auto");
+    out.compute_backend = stats.compute_backend ? stats.compute_backend : "none";
+    out.gpu_force_status = stats.gpu_force_status ? stats.gpu_force_status : "not_attempted";
+    out.forces_on_gpu = stats.forces_on_gpu;
+    out.step_blocked = stats.step_blocked;
+    out.emit_backend = "cpu";
+    out.forces_backend = stats.forces_on_gpu ? "gpu" : "cpu";
+    out.integrate_backend = "cpu";
+    out.scene_collision_backend = "cpu";
+    out.self_collision_backend =
+        runtime.physicsSettings().self_collision_enabled ? "cpu" : "off";
+    if (stats.step_blocked) {
+        out.forces_backend = "blocked";
+        out.integrate_backend = "blocked";
+        out.scene_collision_backend = "blocked";
+        out.self_collision_backend = "blocked";
+    }
+    out.gpu_force_ms = stats.gpu_force_ms;
+    out.force_upload_bytes = stats.force_transfer.upload_bytes;
+    out.force_download_bytes = stats.force_transfer.download_bytes;
+    out.force_dispatch_calls = stats.force_transfer.dispatch_calls;
+    out.force_synchronize_calls = stats.force_transfer.synchronize_calls;
+    out.force_upload_call_ms = stats.force_transfer.upload_call_ms;
+    out.force_download_call_ms = stats.force_transfer.download_call_ms;
+    out.force_synchronize_ms = stats.force_transfer.synchronize_ms;
+    out.mirror_upload_bytes = stats.mirror_transfer.upload_bytes;
+    out.mirror_upload_calls = stats.mirror_transfer.upload_calls;
+    out.mirror_upload_call_ms = stats.mirror_transfer.upload_call_ms;
+    out.nonfinite_particles = stats.nonfinite_particles;
+    out.grid_deposit_landed = stats.grid_deposit_landed;
+    out.grid_deposit_dropped_no_domain = stats.grid_deposit_dropped_no_domain;
+    out.grid_deposit_dropped_no_channel = stats.grid_deposit_dropped_no_channel;
+    return Result::success();
+}
+
+Result getParticleStateSample(int max_count, int offset, int stride,
+                              ParticleStateSample& out, const ParticleSystemRef& system) {
+    if (!g_ctx) return notBound();
+    if (max_count < 0) return Result::fail("max_count must be >= 0");
+    if (offset < 0) return Result::fail("offset must be >= 0");
+    if (stride < 1) return Result::fail("stride must be at least 1");
+    max_count = std::min(max_count, 4096);
+
+    RayTrophiSim::ParticleSimulationSystem* runtime_ptr = nullptr;
+    if (Result r = resolveRuntime(system, runtime_ptr); !r) return r;
+    const auto& runtime = *runtime_ptr;
+    const RayTrophiSim::ParticleSoABuffers& b = runtime.buffers();
+    out = ParticleStateSample{};
+    out.capacity = static_cast<int>(b.alive.size());
+    out.indices.reserve(static_cast<std::size_t>(max_count));
+    out.positions.reserve(static_cast<std::size_t>(max_count));
+    out.velocities.reserve(static_cast<std::size_t>(max_count));
+    out.ages.reserve(static_cast<std::size_t>(max_count));
+
+    double sum_p[3] = {0.0, 0.0, 0.0};
+    double sum_v[3] = {0.0, 0.0, 0.0};
+    int finite_count = 0;
+    int alive_ordinal = 0;
+    bool have_bounds = false;
+    for (std::size_t i = 0; i < b.alive.size(); ++i) {
+        if (b.alive[i] == 0u) continue;
+        const Vec3 p(b.position_x[i], b.position_y[i], b.position_z[i]);
+        const Vec3 v(b.velocity_x[i], b.velocity_y[i], b.velocity_z[i]);
+        ++out.alive_count;
+        const bool finite = std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z) &&
+                            std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+        if (!finite) {
+            ++out.nonfinite;
+        } else {
+            // Aggregates skip non-finite particles so one NaN does not erase
+            // the whole population's centroid; `nonfinite` reports them.
+            ++finite_count;
+            sum_p[0] += p.x; sum_p[1] += p.y; sum_p[2] += p.z;
+            sum_v[0] += v.x; sum_v[1] += v.y; sum_v[2] += v.z;
+            if (!have_bounds) {
+                out.bounds_min = p;
+                out.bounds_max = p;
+                have_bounds = true;
+            } else {
+                out.bounds_min = Vec3::min(out.bounds_min, p);
+                out.bounds_max = Vec3::max(out.bounds_max, p);
+            }
+        }
+        const int ordinal = alive_ordinal++;
+        if (ordinal < offset || ((ordinal - offset) % stride) != 0) continue;
+        if (out.returned >= max_count) continue;
+        out.indices.push_back(static_cast<int>(i));
+        out.positions.push_back(p);
+        out.velocities.push_back(v);
+        out.ages.push_back(b.age_seconds[i]);
+        ++out.returned;
+    }
+    if (finite_count > 0) {
+        const double inv = 1.0 / static_cast<double>(finite_count);
+        out.centroid = Vec3(static_cast<float>(sum_p[0] * inv),
+                            static_cast<float>(sum_p[1] * inv),
+                            static_cast<float>(sum_p[2] * inv));
+        out.mean_velocity = Vec3(static_cast<float>(sum_v[0] * inv),
+                                 static_cast<float>(sum_v[1] * inv),
+                                 static_cast<float>(sum_v[2] * inv));
+    }
     return Result::success();
 }
 
@@ -767,11 +1153,13 @@ Result getGasStepStats(const std::string& domain_id_or_name, GasStepStats& out) 
 }
 
 Result spawnParticle(Vec3 position, Vec3 velocity, float lifetime_seconds, float mass,
-                     float size, int& out_index) {
+                     float size, int& out_index, const ParticleSystemRef& system) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     if (lifetime_seconds <= 0.0f) return Result::fail("lifetime_seconds must be positive");
     if (mass <= 0.0f) return Result::fail("mass must be positive");
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    if (Result r = resolveRuntime(system, runtime); !r) return r;
     RayTrophiSim::ParticleSpawnDesc desc;
     desc.position = position;
     desc.velocity = velocity;
@@ -779,27 +1167,41 @@ Result spawnParticle(Vec3 position, Vec3 velocity, float lifetime_seconds, float
     desc.mass = mass;
     desc.start_size = size;
     desc.end_size = size;
-    out_index = static_cast<int>(g_ctx->scene.spawnParticle(desc));
+    out_index = static_cast<int>(runtime->spawn(desc));
     invalidateScriptSimulation();
     return Result::success();
 }
 
-Result clearParticles() {
+Result clearParticles(const ParticleSystemRef& system) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
-    scriptSimulationRuntime().clear();
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    if (Result r = resolveRuntime(system, runtime); !r) return r;
+    runtime->clear();
     invalidateScriptSimulation();
     return Result::success();
 }
 
-Result stepParticleSimulation(float dt) {
+Result stepParticleSimulation(float dt, const ParticleSystemRef& system) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     if (dt <= 0.0f) dt = 0.0166667f;
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    if (Result r = resolveRuntime(system, runtime); !r) return r;
+    // Select the compute backend the current policies ask for. Without this a
+    // scripted step ran on whatever the last frame-loop sync left behind, so
+    // a policy change made over IPC was never reflected in the backend.
+    g_ctx->scene.syncSimulationWorld();
     RayTrophiSim::SimulationContext context =
         g_ctx->scene.simulation_world.makeContext(dt, 0, 1);
     context.dt = dt;
-    scriptSimulationRuntime().step(context);
+    // Same frame boundary as SimulationWorld::executeStep: the Vulkan backend
+    // submits and fences in endFrame(), so a scripted step must not leave
+    // recorded dispatches open for a later cache restore to invalidate.
+    auto& compute = g_ctx->scene.simulation_world.compute();
+    compute.beginFrame(0);
+    runtime->step(context);
+    compute.endFrame();
     return Result::success();
 }
 

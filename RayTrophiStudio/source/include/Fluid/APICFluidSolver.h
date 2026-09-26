@@ -195,6 +195,48 @@ struct APICSolverParams {
     // body heats only at the surface and its interior never softens.
     float granular_thermal_conductivity = 0.0f;
 
+    // ── Thermal liquid: cooling, temperature-dependent viscosity, freezing ────
+    // The candle-wax chain, for the LIQUID solver (granular domains have their
+    // own melt path above and only take the cooling half of this one).
+    //
+    // A poured wax does not look like wax because it is viscous - molten
+    // paraffin is only a few times thicker than water. It looks like wax because
+    // it SETS as it cools: runs thicken, stop, and the next pour stacks on the
+    // last one. So the three pieces are:
+    //   1. cooling   - surface parcels lose heat to the air, parcels touching a
+    //                  collider or a closed wall lose it faster (Newton, toward
+    //                  the domain ambient); the interior only cools through
+    //                  conduction (granular_thermal_conductivity, which already
+    //                  drives particle<->particle conduction for every domain);
+    //   2. viscosity - ν ramps from the domain's hot value to
+    //                  thermal_cold_viscosity over thermal_viscosity_range K
+    //                  above the freeze point, interpolated in LOG space (a
+    //                  linear ramp would spend the whole range near the cold
+    //                  end and read as "suddenly solid");
+    //   3. freezing  - below thermal_freeze_kelvin a parcel becomes a pinned
+    //                  solid, but only where it touches a support. See
+    //                  FluidThermalLiquid.h for why.
+    //
+    // ★ Off by default, and every other domain behaves exactly as before: the
+    // viscosity field is only built, and the frozen flag only ever set, when
+    // this is on.
+    bool  thermal_liquid_enabled = false;
+    float thermal_air_cooling_rate = 0.15f;     // 1/s, parcels in a surface cell
+    float thermal_contact_cooling_rate = 2.0f;  // 1/s, parcels touching a collider/closed wall
+    float thermal_freeze_kelvin = 330.0f;       // K, below = solid where supported
+    float thermal_viscosity_range = 25.0f;      // K above freeze over which ν ramps
+    float thermal_cold_viscosity = 0.05f;       // m²/s at the freeze point
+
+    void sanitizeThermalLiquid() {
+        thermal_air_cooling_rate = std::clamp(thermal_air_cooling_rate, 0.0f, 100.0f);
+        thermal_contact_cooling_rate = std::clamp(thermal_contact_cooling_rate, 0.0f, 100.0f);
+        thermal_freeze_kelvin = std::clamp(thermal_freeze_kelvin, 1.0f, 5000.0f);
+        // A zero range is a step function: a parcel would jump from hot ν to
+        // cold ν between two frames, which reads as a sudden jam, not a setting.
+        thermal_viscosity_range = std::clamp(thermal_viscosity_range, 1.0f, 2000.0f);
+        thermal_cold_viscosity = std::clamp(thermal_cold_viscosity, 0.0f, 1000.0f);
+    }
+
     // Canonical validation used by UI, scripting/IPC and scene loading. Keep
     // every authoring surface on the same material contract.
     void sanitizeGranularMaterial() {
@@ -393,9 +435,9 @@ struct APICSolverParams {
 
     // Backward-compatible bridge: old Oil fluid presets retain oil chemistry.
     void applyFuelProfile(FluidPreset preset) {
-        applyChemistryProfile(preset == FluidPreset::Oil
-            ? FluidChemistryPreset::Oil
-            : FluidChemistryPreset::Inert);
+        applyChemistryProfile(preset == FluidPreset::Oil ? FluidChemistryPreset::Oil
+                            : preset == FluidPreset::Wax ? FluidChemistryPreset::Wax
+                                                         : FluidChemistryPreset::Inert);
     }
 
     // CPU reference path controls. Thread count 0 means automatic.
@@ -496,11 +538,18 @@ struct APICSolverParams {
         WetSand,      // capillary cohesion: clumps, holds a steeper wall
         Gravel,       // coarse, strongly dilatant, no cohesion
         CohesiveSoil, // clay-like: low friction, high cohesion, blocky failure
-        MoltenPlastic // thermoplastic: rigid cold, TACKY hot, then viscous
+        MoltenPlastic, // thermoplastic: rigid cold, TACKY hot, then viscous
+        Wax            // molten paraffin: thin hot, thickens and SETS as it cools
     };
     FluidPreset current_preset = FluidPreset::Water;
 
     void applyPreset(FluidPreset preset) {
+        // ★★ Every preset except Wax turns the thermal-liquid chain OFF. It is
+        // not a rheology field the other presets would naturally overwrite, so
+        // without this, switching Wax -> Water would keep freezing on: water
+        // born at 293 K is below wax's 330 K freeze point, and the "water"
+        // would set solid on the first surface it touched.
+        if (preset != FluidPreset::Custom) thermal_liquid_enabled = false;
         switch (preset) {
             case FluidPreset::Water:
                 granular_enabled = false;
@@ -779,6 +828,39 @@ struct APICSolverParams {
                 air_drag = 0.05f;  wall_damping = 0.70f;
                 affine_damping = 0.98f; max_velocity = 50.0f;
                 break;
+            case FluidPreset::Wax:
+                granular_enabled = false;
+                // Molten paraffin near 80 °C: μ ≈ 3-4 mPa·s, ρ ≈ 770 kg/m³, so
+                // ν ≈ 5e-6 m²/s — a few times water, i.e. effectively thin at
+                // any renderable voxel. The wax LOOK comes from the thermal
+                // chain below, not from this number.
+                kinematic_viscosity = 5.0e-6f; viscosity_sweeps = 16;
+                // Wax wets and sticks to what it runs over.
+                viscosity_wall_slip = 0.0f;
+                internal_friction = 0.0f;
+                flip_blend = 0.90f; apic_blend = 0.92f;
+                velocity_damping = 0.999f;
+                density_correction = 1.0f;
+                air_drag = 0.15f;  wall_damping = 0.40f;
+                affine_damping = 0.95f; max_velocity = 50.0f;
+                thermal_liquid_enabled = true;
+                // Paraffin congeals around 50-65 °C; 330 K (57 °C) is mid-range.
+                thermal_freeze_kelvin = 330.0f;
+                // ν climbs over the last 25 K before it sets — the runs visibly
+                // slow down before they stop, which is what reads as wax.
+                thermal_viscosity_range = 25.0f;
+                thermal_cold_viscosity = 0.05f;
+                // ★ Rates are ART-DIRECTED FASTER than a physical Newton
+                // constant. hA/(ρcV) for a 3 mm drop in still air is ~0.02/s
+                // (a minute to set); these let a pour set within a few seconds
+                // of shot time. Contact dominates, as it does for real wax on a
+                // cold surface: the layer touching the object sets first.
+                thermal_air_cooling_rate = 0.15f;
+                thermal_contact_cooling_rate = 2.0f;
+                // Particle<->particle conduction: a fresh hot pour warms, and
+                // can re-melt, the layer it lands on.
+                granular_thermal_conductivity = 1.0f;
+                break;
             case FluidPreset::Custom:
             default:
                 return; // leave fields untouched
@@ -982,7 +1064,11 @@ void seedBox(FluidParticles& particles,
              const Vec3& max_world,
              int particles_per_cell,
              uint32_t seed = 0u,
-             size_t max_new_particles = static_cast<size_t>(-1));
+             size_t max_new_particles = static_cast<size_t>(-1),
+             // Kelvin the new parcels are born at. 293 K rather than 0: a parcel
+             // at 0 K is not cold, it is unwritten, and the thermal chain would
+             // freeze it on first contact. Grid domains pass their ambient.
+             float temperature_kelvin = 293.0f);
 
 } // namespace Fluid
 } // namespace RayTrophiSim

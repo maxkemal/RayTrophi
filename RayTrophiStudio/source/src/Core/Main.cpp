@@ -2800,10 +2800,14 @@ int main(int argc, char* argv[]) try {
 
         // Aralikli autosave. `busy` iken hicbir sey yapmaz: sahne yuklenirken
         // yazmak yarim bir sahneyi kurtarma dosyasi diye kaydetmek olurdu.
+        // ★ Playback is busy too: the save runs on this thread, so even the
+        //   byte-copy path stalls a playing sim for the time it takes to write
+        //   the whole .bin (1.2 GB in the wax scene). A due save fires on the
+        //   first tick after pause instead.
         raytrophi::autosave::tick(
             scene, render_settings, ray_renderer,
             ui.scene_loading.load() || g_scene_loading_in_progress.load() ||
-                rendering_in_progress.load());
+                rendering_in_progress.load() || ui.timeline.isPlaying());
 
         // ★★★★★ TDR'den AYNI OTURUMDA donus. `backend_changed` blogu yalnizca
         //   kullanici mod degistirince kosar; cihaz kaybindan sonra onu

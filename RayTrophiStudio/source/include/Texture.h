@@ -799,7 +799,7 @@ public:
             // strokes are invisible in Vulkan RT / raster MP after project
             // load because flattenChannelRegionInto takes this branch when
             // is_gpu_uploaded=false and never sets vulkan_dirty.
-            if (m_is_loaded) markVulkanDirtyFull();
+            if (m_is_loaded) markVulkanUploadPending();
             SCENE_LOG_INFO("CUDA/OptiX unavailable: CPU/Vulkan texture mode.");
             return false;
         }
@@ -813,7 +813,7 @@ public:
         // paint clones produced before the first CUDA upload window never get
         // queued for Vulkan re-upload.
         if (!isCudaTextureUploadAllowed()) {
-            if (m_is_loaded) markVulkanDirtyFull();
+            if (m_is_loaded) markVulkanUploadPending();
             return m_is_loaded;
         }
 
@@ -1165,9 +1165,20 @@ public:
     int  vulkan_dirty_max_x = -1;
     int  vulkan_dirty_max_y = -1;
 
+    // Pixels changed: the GPU copy AND the saved copy are stale.
     void markVulkanDirtyFull() {
-        vulkan_dirty = true;
+        markVulkanUploadPending();
         save_dirty = true;
+    }
+    // Only the GPU copy is missing; the pixels are what was loaded.
+    // ★★★ Kept apart from markVulkanDirtyFull on purpose: upload_to_gpu() takes
+    //   this path for a loaded texture whenever the CUDA upload is unavailable
+    //   or deferred, and routing it through the "pixels changed" mark made an
+    //   unedited loaded texture save-dirty. The save path then
+    //   skipped its byte-for-byte reuse of the previous .bin and re-encoded all
+    //   of them - 122.6 s for 64 textures on the main thread (2026-09-25).
+    void markVulkanUploadPending() {
+        vulkan_dirty = true;
         vulkan_dirty_full = true;
         vulkan_dirty_min_x = 0;
         vulkan_dirty_min_y = 0;

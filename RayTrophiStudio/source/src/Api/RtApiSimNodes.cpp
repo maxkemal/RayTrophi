@@ -640,6 +640,7 @@ bool readEmitterParameter(const std::string& emitter, const std::string& key,
     else if (key == "inherit_velocity")           { out = src.inherit_velocity; return true; }
     else if (key == "fluid_particles_per_second") { out = src.fluid_particles_per_second; return true; }
     else if (key == "fluid_velocity_spread")      { out = src.fluid_velocity_spread; return true; }
+    else if (key == "fluid_temperature_kelvin")   { out = src.fluid_temperature_kelvin; return true; }
     return false;                       // unknown key: say so, do not guess
 }
 
@@ -657,6 +658,10 @@ bool writeEmitterParameter(const std::string& emitter, const std::string& key,
     else if (key == "inherit_velocity")           src.inherit_velocity = value;
     else if (key == "fluid_particles_per_second") src.fluid_particles_per_second = value;
     else if (key == "fluid_velocity_spread")      src.fluid_velocity_spread = value;
+    // Driving the pour temperature from a graph means the author wants it
+    // used; a keyed value that stays switched off would animate nothing.
+    else if (key == "fluid_temperature_kelvin") { src.fluid_temperature_kelvin = value;
+                                                  src.fluid_temperature_override = true; }
     // ★★★ `domain` is deliberately absent. Which region a source feeds resolves
     // an ambiguity (an object inside two overlapping domains has no geometric
     // answer) and is authored on the source. A graph silently rebinding it would

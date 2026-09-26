@@ -308,6 +308,7 @@
     <ClInclude Include="source\include\OptixAccelManager.h" />
     <ClInclude Include="source\include\OzzRuntime.h" />
     <ClInclude Include="source\include\Api\RtApi.h" />
+    <ClInclude Include="source\include\Api\RtApiKinematicCollider.h" />
     <ClInclude Include="source\include\Api\RtApiRasterDiagnostics.h" />
     <ClInclude Include="source\src\Api\RtRasterDiagnosticsBindings.h" />
     <ClInclude Include="source\include\Api\RtPython.h" />
@@ -321,6 +322,10 @@
     <ClInclude Include="source\include\SceneHistory.h" />
     <ClInclude Include="source\include\SceneSelection.h" />
     <ClInclude Include="source\include\SceneSerializer.h" />
+    <ClInclude Include="source\include\KinematicColliderSource.h" />
+    <ClInclude Include="source\include\KinematicColliderScene.h" />
+    <ClInclude Include="source\src\Api\RtIpcKinematicCollider.h" />
+    <ClInclude Include="source\src\Api\RtPythonKinematicCollider.h" />
     <ClInclude Include="source\include\TimelineWidget.h" />
     <ClInclude Include="source\include\tinyexr.h" />
     <ClInclude Include="source\include\unified_noise.h" />
@@ -347,6 +352,7 @@
     <ClInclude Include="source\include\scene_data.h" />
     <ClInclude Include="source\include\scene_ui.h" />
     <ClInclude Include="source\src\UI\scene_ui_agent_chat.hpp" />
+    <ClInclude Include="source\src\UI\scene_ui_fluid_thermal.hpp" />
     <ClInclude Include="source\include\Viewport\RasterFrameTelemetry.h" />
     <ClInclude Include="source\include\Viewport\RasterGpuCull.h" />
     <ClInclude Include="source\include\Viewport\RasterInstanceUpload.h" />
@@ -544,6 +550,7 @@
     <ClInclude Include="source\include\Fluid\FluidObject.h" />
     <ClInclude Include="source\include\Fluid\FluidSimulationSystem.h" />
     <ClInclude Include="source\include\Fluid\FluidLevelSet.h" />
+    <ClInclude Include="source\include\Fluid\FluidThermalLiquid.h" />
     <ClInclude Include="source\include\Fluid\FluidFoam.h" />
     <ClInclude Include="source\include\Fluid\FluidSplatMaterialPolicy.h" />
     <ClInclude Include="source\include\Fluid\FluidSplatMaterialAuthoring.h" />
@@ -1588,13 +1595,22 @@
     <ClCompile Include="source\src\Api\RtIpcPostExposure.cpp" />
     <ClCompile Include="source\src\Api\RtApiModifiers.cpp" />
     <ClCompile Include="source\src\Api\RtApiFluid.cpp" />
+    <ClCompile Include="source\src\Api\RtApiKinematicCollider.cpp" />
     <ClCompile Include="source\src\Api\RtApiFracture.cpp" />
     <ClCompile Include="source\src\Api\RtApiDebris.cpp" />
     <ClCompile Include="source\src\Api\RtApiMassTransfer.cpp" />
     <ClCompile Include="source\src\Api\RtIpcFracture.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcParticle.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcKinematicCollider.cpp" />
     <ClCompile Include="source\src\Api\RtIpcTemplates.cpp" />
     <ClCompile Include="source\src\Api\RtApiTemplates.cpp" />
     <ClCompile Include="source\src\Api\RtPythonFracture.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonParticle.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonKinematicCollider.cpp">
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtPythonPressure.cpp">
@@ -1676,6 +1692,7 @@
     <ClCompile Include="source\src\UI\scene_ui_procamera.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_scatter.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_selection.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_fluid_thermal.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_simulation_domains.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_stylize.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_vdb.cpp" />
@@ -1687,6 +1704,8 @@
     <ClCompile Include="source\src\Scene\SpotLight.cpp" />
     <ClCompile Include="source\src\Scene\SceneDataParticlePresets.cpp" />
     <ClCompile Include="source\src\Physics\ParticleSimulation.cpp" />
+    <ClCompile Include="source\src\Physics\KinematicColliderSource.cpp" />
+    <ClCompile Include="source\src\Physics\KinematicColliderScene.cpp" />
     <ClCompile Include="source\src\Physics\ParticleRenderBridge.cpp" />
     <ClCompile Include="source\src\Physics\SimCache.cpp" />
     <ClCompile Include="source\src\MeshEdit\HalfEdgeMesh.cpp" />
@@ -1804,6 +1823,7 @@
     <ClCompile Include="source\src\Physics\Fluid\FluidParticleSolidRecovery.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidSimulationSystem.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidLevelSet.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\FluidThermalLiquid.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidFoam.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidSplatMaterialPolicy.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidSplatMaterialAuthoring.cpp" />

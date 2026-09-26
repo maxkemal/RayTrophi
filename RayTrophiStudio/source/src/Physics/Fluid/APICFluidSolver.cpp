@@ -383,7 +383,8 @@ void seedBox(FluidParticles& particles,
              const Vec3& max_world,
              int particles_per_cell,
              uint32_t seed,
-             size_t max_new_particles) {
+             size_t max_new_particles,
+             float temperature_kelvin) {
     if (particles_per_cell <= 0 || max_new_particles == 0) return;
 
     int i0, j0, k0, i1, j1, k1;
@@ -435,7 +436,7 @@ void seedBox(FluidParticles& particles,
                 (static_cast<float>(sx) + U(rng)) * inv_sub,
                 (static_cast<float>(sy) + U(rng)) * inv_sub,
                 (static_cast<float>(sz) + U(rng)) * inv_sub);
-            particles.emit(cellMin + frac * h, Vec3(0, 0, 0));
+            particles.emit(cellMin + frac * h, Vec3(0, 0, 0), temperature_kelvin);
             ++emitted;
             ++placed;
         }
@@ -3090,17 +3091,33 @@ void step(FluidParticles& particles,
     // existed, which is what keeps liquid-only domains bit-identical.
     static std::vector<uint8_t> s_solid_particle;
     const uint8_t* solid_particle = nullptr;
-    if (params.solid_substance_tags && !params.solid_substance_tags->empty() &&
-        particles.substance_tag.size() >= particles.size()) {
-        const auto& tags = *params.solid_substance_tags;
+    // Two producers of "this parcel IS the solid": a solid-phase substance tag,
+    // and the thermal-liquid FROZEN flag (FluidThermalLiquid.h). Both take the
+    // same exemptions below; only frozen parcels are additionally pinned.
+    const bool tag_solids = params.solid_substance_tags &&
+                            !params.solid_substance_tags->empty() &&
+                            particles.substance_tag.size() >= particles.size();
+    bool any_frozen = false;
+    if (particles.flags.size() >= particles.size()) {
+        for (std::size_t pi = 0; pi < particles.size(); ++pi) {
+            if (particles.flags[pi] & kParticleFlagFrozen) { any_frozen = true; break; }
+        }
+    }
+    if (tag_solids || any_frozen) {
         s_solid_particle.assign(particles.size(), 0u);
         bool any = false;
         for (std::size_t pi = 0; pi < particles.size(); ++pi) {
+            if (any_frozen && (particles.flags[pi] & kParticleFlagFrozen)) {
+                s_solid_particle[pi] = 1u;
+                any = true;
+                continue;
+            }
+            if (!tag_solids) continue;
             const uint32_t tag = particles.substance_tag[pi];
             // ★ Tag 0 is untagged liquid, never solid — see
             // buildSubstanceSolidCells for why that matters.
             if (tag == kSubstanceUntagged) continue;
-            for (uint32_t st : tags) {
+            for (uint32_t st : *params.solid_substance_tags) {
                 if (st != tag) continue;
                 s_solid_particle[pi] = 1u;
                 any = true;
@@ -3116,6 +3133,19 @@ void step(FluidParticles& particles,
     auto stage_begin = SolverClock::now();
     if (!params.external_forces_preintegrated) {
         applyExternalForces(particles, grid, params, forces, time_seconds, dt);
+    }
+    // Frozen thermal-liquid parcels are PINNED. Gravity was just added to them
+    // (here, or on the device before this call), and a solid parcel advects by
+    // its own velocity — so without this a frozen layer on a vertical face
+    // slides down it like sand, one g·dt² per step. Zeroed after the force
+    // stage on every call, including the split-step tails, because every call
+    // that advects must see the pinned value.
+    if (any_frozen) {
+        for (std::size_t pi = 0; pi < particles.size(); ++pi) {
+            if (!(particles.flags[pi] & kParticleFlagFrozen)) continue;
+            particles.velocity[pi] = Vec3(0.0f, 0.0f, 0.0f);
+            if (pi < particles.affine.size()) particles.affine[pi] = AffineC{};
+        }
     }
     auto stage_end = SolverClock::now();
     out_stats.forces_ms = elapsedMs(stage_begin, stage_end);

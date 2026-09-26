@@ -3,12 +3,14 @@
 #include "ProjectManager.h"
 #include "ProjectData.h"
 #include "Template/StartupPreferences.h"
-#include "UI/TemplateHubUI.h"
 #include "globals.h"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <mutex>
+#include <thread>
 
 namespace raytrophi::autosave {
 namespace {
@@ -21,6 +23,11 @@ bool       g_haveLastWrite = false;
 Clock::time_point g_lastWrite;
 Clock::time_point g_lastTick;
 bool       g_haveLastTick = false;
+
+// Background writer. Only one at a time; `g_finished` lets the UI see an
+// edge ("a write just ended") without taking g_mutex every frame.
+std::atomic<bool>     g_writing{false};
+std::atomic<uint64_t> g_finished{0};
 
 std::filesystem::path autosavePath() {
     return raytrophi::templates::StartupPreferencesManager::instance().getAutosavePath();
@@ -45,20 +52,17 @@ bool writeNow(SceneData& scene, RenderSettings& settings, Renderer& renderer,
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
 
-    // ★★★★ Kimligi kaydin ETRAFINDA koru. `saveProject` `current_file_path`i
-    //   kendi yoluna cevirir, "Untitled" ise proje adini dosya adindan uretir
-    //   ve yolu son projeler listesine ekler. Bunlar bir KULLANICI kaydi icin
-    //   dogru, bir autosave icin felakettir: kullanicinin bir sonraki Ctrl+S'i
-    //   kendi projesine degil autosave.rtp'ye giderdi.
-    const std::string prevPath = g_project.current_file_path;
-    const std::string prevName = g_project.project_name;
-    const bool        prevModified = g_project.is_modified;
-
+    // ★★★★ saveProjectCopy, not saveProject. saveProject retargets the
+    //   project's identity (current path, name, recent list, modified flag)
+    //   and clears texture save-dirty flags. The autosave used to swap the
+    //   identity back afterwards, which only worked while it ran on the main
+    //   thread: from a background thread a Ctrl+S issued mid-write would read
+    //   the autosave path and save the user's work into the recovery file.
     const auto t0 = Clock::now();
     bool ok = false;
     std::string err;
     try {
-        ok = ProjectManager::getInstance().saveProject(
+        ok = ProjectManager::getInstance().saveProjectCopy(
             path.string(), scene, settings, renderer);
     } catch (const std::exception& e) {
         err = e.what();
@@ -67,18 +71,10 @@ bool writeNow(SceneData& scene, RenderSettings& settings, Renderer& renderer,
     }
     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 
-    g_project.current_file_path = prevPath;
-    g_project.project_name = prevName;
-    // ★★ "kaydedildi" bayragi da geri yuklenir: autosave kullanicinin
-    //   kaydedilmemis degisikligini KAYDEDILMIS gostermemeli, yoksa cikista
-    //   "kaydetmek ister misiniz" sorusu sorulmaz ve is sessizce kaybolur.
-    g_project.is_modified = prevModified;
-    raytrophi::templates::TemplateHubUI::instance().removeRecentProject(path);
-
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_status.last_ok = ok;
-        g_status.last_error = ok ? std::string() : (err.empty() ? "saveProject returned false" : err);
+        g_status.last_error = ok ? std::string() : (err.empty() ? "saveProjectCopy returned false" : err);
         g_status.last_reason = reason;
         g_status.last_write_ms = ms;
         if (ok) {
@@ -90,10 +86,11 @@ bool writeNow(SceneData& scene, RenderSettings& settings, Renderer& renderer,
     }
 
     if (ok) {
-        SCENE_LOG_INFO("[Autosave] wrote " + path.string() + " (" + reason + ")");
+        SCENE_LOG_INFO("[Autosave] wrote " + path.string() + " (" + reason + ", " +
+                       std::to_string(static_cast<int>(ms)) + " ms)");
     } else {
         SCENE_LOG_ERROR("[Autosave] FAILED (" + reason + "): " +
-                        (err.empty() ? "saveProject returned false" : err));
+                        (err.empty() ? "saveProjectCopy returned false" : err));
     }
     return ok;
 }
@@ -110,7 +107,12 @@ void tick(SceneData& scene, RenderSettings& settings, Renderer& renderer, bool b
         g_status.scene_is_modified = g_project.is_modified;
     }
 
-    if (!enabled || interval <= 0 || busy) return;
+    // A running write (ours or a user save) is "busy" too: never queue a
+    // second copy behind it.
+    if (!enabled || interval <= 0 || busy || g_writing.load(std::memory_order_acquire) ||
+        ProjectManager::getInstance().isSaveInProgress()) {
+        return;
+    }
 
     const auto now = Clock::now();
     if (!g_haveLastTick) {
@@ -142,7 +144,41 @@ void tick(SceneData& scene, RenderSettings& settings, Renderer& renderer, bool b
         return;
     }
 
-    writeNow(scene, settings, renderer, "interval");
+    // ★★★ Off the main thread, like the menu's Ctrl+S. Measured 2026-09-25:
+    //   on the main thread one interval write stalled the app for 122.8 s
+    //   (texture re-encode) and read as "the fluid sim freezes sometimes".
+    //   The same trade-off as the menu save applies: the scene is read while
+    //   the loop keeps running, which is why `busy` includes playback (the sim
+    //   would be mutating what is being written).
+    // Restart the interval now so a slow write is not immediately re-armed.
+    g_lastWrite = now;
+    g_writing.store(true, std::memory_order_release);
+    std::thread([&scene, &settings, &renderer]() {
+        writeNow(scene, settings, renderer, "interval");
+        g_writing.store(false, std::memory_order_release);
+        g_finished.fetch_add(1, std::memory_order_acq_rel);
+    }).detach();
+}
+
+Progress progress() {
+    Progress p;
+    p.writing = g_writing.load(std::memory_order_acquire);
+    p.finished = g_finished.load(std::memory_order_acquire);
+    std::lock_guard<std::mutex> lock(g_mutex);
+    p.last_ok = g_status.last_ok;
+    p.last_write_ms = g_status.last_write_ms;
+    p.last_error = g_status.last_error;
+    return p;
+}
+
+void setEnabled(bool enabled) {
+    raytrophi::templates::StartupPreferencesManager::instance().setAutoSaveEnabled(enabled);
+}
+
+bool setIntervalSec(int seconds) {
+    if (seconds < kMinIntervalSec || seconds > kMaxIntervalSec) return false;
+    raytrophi::templates::StartupPreferencesManager::instance().setAutoSaveIntervalSec(seconds);
+    return true;
 }
 
 Status status() {
@@ -150,6 +186,12 @@ Status status() {
     Status s = g_status;
     refreshFileFacts(s, autosavePath());
     s.scene_is_modified = g_project.is_modified;
+    s.writing = g_writing.load(std::memory_order_acquire);
+    // tick() refreshes these; report the preference itself so a change made
+    // over IPC is visible before the next frame.
+    auto& prefs = raytrophi::templates::StartupPreferencesManager::instance();
+    s.enabled = prefs.isAutoSaveEnabled();
+    s.interval_sec = prefs.getAutoSaveIntervalSec();
     return s;
 }
 

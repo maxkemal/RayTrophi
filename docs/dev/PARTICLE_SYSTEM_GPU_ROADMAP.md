@@ -4,7 +4,9 @@
 > particle system, high-quality low-cost effects, GPU-first physics, CPU
 > fallback, multi-geometry rendering, and optional domain coupling.
 >
-> **Last updated:** 2026-09-24 (review pass: vertical slice after Phase 1,
+> **Last updated:** 2026-09-25 (Phase 0 measured: GPU path was unreachable
+> under Auto, fixed; Phase 1 first batch + frozen contract).
+> Previous: 2026-09-24 (review pass: vertical slice after Phase 1,
 > load-only legacy migration, Surface State Deposit output, field-masked
 > surface sources, kinematic collider proxies moved to their own note,
 > deterministic event ordering, RT instance budget, mud/snow and volcanic
@@ -616,6 +618,70 @@ existence or successful compilation alone is not completion.
 
 ### Phase 0 — Baseline, contracts and probes
 
+> **Status 2026-09-24:** code written, NOT yet built or measured. Added:
+> `ParticleExecutionPolicy` (auto | gpu_required | cpu) on the physics
+> settings, saved with the project and editable in the Physics tab;
+> `particle.stats` stage backends, `gpu_force_status` reason, `gpu_force_ms`,
+> force/mirror transfer counters and a NaN/Inf count;
+> `particle.get_state_sample`; `collider.*` over IPC (colliders were
+> Python-only); `scripts/ipc/Probe-ParticleBaseline.ps1`. Also fixed: a failed
+> partial velocity download could apply forces twice (now all-or-nothing).
+> Baselines are recorded once `NEXT_BUILD_CHECKS.md` items 6–8 pass.
+> Schema-name freezing for profiles, geometry sets and outputs moves to
+> Phase 1, where those types are introduced.
+>
+> **Status 2026-09-25 (measured on the 13:09 build):** checks 1 and 5 pass
+> (208/208 IPC tests; GPURequired refuses the step and the particle does not
+> move). Check 6 produced exactly its "most insidious" result: every Auto row
+> reported `backend_not_vulkan`. Root cause: `SceneData::syncSimulationWorld()`
+> chose the simulation compute backend from **grid-domain** backends only, so
+> the particle execution policy never requested anything — a domain-less
+> particle system under Auto always ran on the CPU context, and the scripted
+> `particle.step` did not even run the backend selection. Fixed (particles now
+> request Vulkan when no domain decides; IPC step syncs and closes its compute
+> frame). CPU reference timings from that run are kept in
+> `particle_baseline_2026-09-25_cpu.json` (ballistic 32k ≈ 0.93 ms, self
+> collision 32k ≈ 25.4 ms per step); the GPU half is re-measured after the
+> next build. The probe now leaves `speedup` empty and warns when the other
+> policy never ran the GPU stage, instead of printing a CPU/CPU ratio.
+> **Status 2026-09-26 — Phase 0 ACCEPTED (measured on the 23:21 build).**
+> Auto rows now report `force[gpu]`; velocity download = 12 B × capacity per
+> step, exactly as predicted. Files: `particle_baseline_2026-09-26.json`
+> (all scenarios) and `particle_baseline_2026-09-26_plane.json` (the plane
+> rows of the first file are INVALID: the cloud was thrown upward and never
+> reached the plane — identical centroid to ballistic, zero contacts; the probe
+> now throws it down at the plane and warns if it never arrives).
+>
+> | per step | 1k | 8k | 32k |
+> |---|---|---|---|
+> | ballistic CPU | 0.04 ms | 0.29 ms | 1.18 ms |
+> | ballistic partial GPU | 1.67 ms | 2.93 ms | 3.98 ms |
+> | plane CPU | 0.07 ms | 0.35 ms | 1.26 ms |
+> | self collision CPU | 0.73 ms | 5.96 ms | 25.8 ms |
+> | self collision partial GPU | 1.70 ms | 7.99 ms | 28.1 ms |
+>
+> Findings that set the later gates:
+> - **Correctness holds:** ballistic and plane CPU vs GPU max position delta
+>   ≤ 2.4e-7 m (plane: 0); self collision ≤ 1.9e-4 m (contact chaos amplifies
+>   float noise). Phase 5 tolerance: ballistic ≤ 1e-5 m after 16 steps,
+>   plane contacts exact to 1e-5 m, self collision ≤ 1e-3 m. No NaN anywhere.
+> - **The partial GPU path is slower at every count** (0.03×–0.9×). Its cost is
+>   a ~0.85–1.2 ms fixed per-step synchronisation + readback, independent of
+>   count. Phase 5 gate: device-resident ballistic at 32k must beat 1.18 ms
+>   CPU with zero per-step readback; the sync alone nearly consumes that budget,
+>   which is why removing it — not a faster kernel — is the phase.
+> - **Self collision is the real cost** (25.8 ms at 32k on CPU, >90 % of the
+>   step). Moving forces to GPU saves nothing there; Phase 6 is where the
+>   speedup lives.
+> - Noise caveat: measured with a live Campfire scene rendering on the same
+>   GPU; the 32k partial-GPU rows (e.g. plane 1.98 ms < 8k 3.08 ms) are not
+>   monotonic and should be re-read on an empty scene before quoting.
+>
+> Not a gap: new domains default to Vulkan compute; `GPU_Compute` is the
+> panel's explicit "GPU (CUDA)" choice. A system sharing a world with such a
+> domain reports `backend_not_vulkan` for its particle force stage, which is
+> the correct report of the user's choice (the force kernel is Vulkan-only).
+
 **Deliverables**
 
 - Record CPU and current partial-GPU performance for ballistic, scene-collision
@@ -633,6 +699,59 @@ existence or successful compilation alone is not completion.
 
 ### Phase 1 — Core authoring service and schema split
 
+> **Status 2026-09-25:** first batch written, NOT yet built. The core service
+> is the `rtapi::*Particle*` layer (`RtApiParticle.cpp`); IPC and Python moved
+> to focused modules (`RtIpcParticle.cpp`, `RtPythonParticle.cpp`) that only
+> translate. Delivered:
+> - **Explicit system addressing.** Every per-system call takes
+>   `ParticleSystemRef` (`system_id` = stable id, or `system` = index/name).
+>   Before this every call resolved to the ACTIVE system, i.e. the panel's
+>   selection focus, so a script could only reach the system created last. An
+>   explicit reference that does not resolve fails; it never falls back.
+> - **Stable emitter identity** = the existing saved `timeline_uid`, addressable
+>   as `"uid:<n>"` / `emitter_uid`. `addEmitter` now re-issues a uid that
+>   already exists in the same system (a copied desc used to share it).
+> - **System ids are never reused** in a session (`clearParticleSystemObjects`
+>   no longer resets the counter).
+> - New operations: `particle.get_system / set_system / remove_system /
+>   set_active_system / get_render / set_render / key_emitter /
+>   clear_emitter_key`. Render settings and emitter keys were panel-only /
+>   Python-only; emitter `parent_object`, `velocity_space`, `inherit_velocity`
+>   and the per-emitter deposit override were Python-only.
+> - Panel: system rename, routed through `rtapi::updateParticleSystem`.
+>
+> **Open in Phase 1:** existing panel widgets (emitter, physics, render) still
+> write descriptors directly; they move behind the service as they are
+> touched. Serialization version field for the particle block is not added
+> yet — it lands with the first new persisted type (Phase 1.5), since there is
+> nothing to version before that.
+
+#### Frozen contract (2026-09-25)
+
+These names and rules are frozen. Phase 1.5 may amend them; later phases may
+not without updating this section first.
+
+| Concept | Frozen name | Identity |
+|---|---|---|
+| System | `ParticleSystemObject` | `id` (uint32, per scene, monotonic, never reused in a session, saved) |
+| Emitter | `ParticleEmitterDesc` | `timeline_uid` (uint64, process-wide monotonic, saved; unique within a system) |
+| Appearance profile | `ParticleAppearanceProfile` | `id` (uint32, per system) |
+| Geometry set | `ParticleGeometrySet` | `id` (uint32, per system) |
+| Output | `ParticleOutput` | `id` (uint32, per system) |
+| Execution policy | `ParticleExecutionPolicy` | `auto` / `gpu_required` / `cpu` |
+
+- IPC/Python spelling of references: `system_id` / `system`, `emitter_uid` /
+  `emitter` (`"uid:<n>"` accepted), and later `profile_id`, `geometry_set_id`,
+  `output_id`. Names are never identities.
+- **A schema type enters the code together with its first consumer.** The
+  repository's most expensive failure class is configuration that is stored,
+  saved and editable but read by nothing (`Volume` render mode, the gas shader
+  preset). So `ParticleAppearanceProfile` enters with the raster consumer in
+  Phase 1.5, `ParticleGeometrySet` with spawn-time selection in Phase 3,
+  `ParticleOutput` with the output list in Phase 1.5/4 — not before.
+- Every new persisted field gets a new name (CLAUDE.md rule 5); the legacy
+  start/end appearance fields are only ever read by the loader.
+
 **Deliverables**
 
 - Focused modules for particle system, emitter, profile, geometry-set, output,
@@ -647,6 +766,35 @@ existence or successful compilation alone is not completion.
 - Save/load preserves ids and references.
 
 ### Phase 1.5 — Vertical slice: campfire
+
+> **Plan agreed 2026-09-26 (not started).** Measured starting point:
+> raster billboards are built on the CPU every frame
+> (`SceneUI::uploadParticleBillboards`, scene_ui_gizmos.cpp: 6 vertices × 9
+> floats per particle, colour/size/opacity already lerped on the CPU in the
+> step); the particle pipeline borrows the solid pipeline layout and has **no
+> descriptor set**, so there is no channel for a LUT. The Campfire preset hides
+> its carrier particles (`emitter_only`), so the slice is a particle-only
+> campfire (flame / smoke / spark layers, no domain).
+>
+> - **Batch A — appearance profile + GPU LUT.** `ParticleAppearanceProfile`
+>   (shading model, colour ramp, opacity / size / emission curves → 64-sample
+>   LUT), `appearance_profile_id` on the emitter, a dedicated particle pipeline
+>   layout + descriptor set with the LUT as a storage buffer; the shader reads
+>   colour/size/opacity from `(normalized age, profile)`. CPU still expands
+>   quads but sends age + profile, not colour. `particle.appearance.*` over
+>   IPC/Python, panel editor, save/load.
+>   **Decision: the legacy start/end fields are migrated to two-key profiles
+>   at LOAD time and the old path is removed in this same batch** (Phase 2's
+>   migration pulled forward, rule 5: no second live path, not even
+>   temporarily). Touches `VulkanViewportBackend.cpp`.
+> - **Batch B — GPU-resident ballistic + vertex pulling.** Spawn/age/kill/
+>   integrate stay on device; the vertex shader reads the SoA storage buffers
+>   through Batch A's descriptor set. Removes the ~1 ms per-step sync +
+>   readback measured in Phase 0.
+> - **Batch C — Light Proxy output + slice script.** Output list minimum
+>   (Billboard + Light Proxy), `scripts/tests/particle_campfire_slice.py`
+>   builds/renders/saves/reloads purely over IPC; contract changes written back
+>   into Phase 1.
 
 Purpose: prove the frozen contracts end-to-end on one visible scene before the
 long parallel phases begin. A single person cannot validate contracts for

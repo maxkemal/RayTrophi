@@ -147,7 +147,10 @@ inline bool drawFluidPresetCombo(const char* id, RayTrophiSim::Fluid::APICSolver
     // the enum appends: SceneSerializer stores the raw int.
     static const char* names[] = {
         "Custom (Manual)", "Water", "Oil", "Mud", "Honey", "Lava", "Sand",
-        "Chocolate", "Wet Sand", "Gravel", "Cohesive Soil"
+        "Chocolate", "Wet Sand", "Gravel", "Cohesive Soil",
+        // ★ Molten Plastic was missing: a domain on that preset showed as
+        // "Custom (Manual)" here — the index fell off the end of this list.
+        "Molten Plastic", "Wax"
     };
     bool applied = false;
     int idx = static_cast<int>(params.current_preset);
@@ -185,7 +188,12 @@ inline bool drawFluidPresetCombo(const char* id, RayTrophiSim::Fluid::APICSolver
             "Gravel        : coarse and interlocking, strongly dilatant.\n"
             "                43 deg, honest to ~1.9 m.\n"
             "Cohesive Soil : clay-like - strength is cohesion, not friction.\n"
-            "                Blocky cracks. 20 deg, honest to ~0.76 m.");
+            "                Blocky cracks. 20 deg, honest to ~0.76 m.\n"
+            "Molten Plastic: granular skeleton that softens with heat.\n\n"
+            "THERMAL LIQUID\n"
+            "Wax           : thin when hot (nu=5e-6), thickens as it cools and\n"
+            "                SETS below 330 K where it touches something. Pour\n"
+            "                it hot: set the flow source's pour temperature.");
     }
     return applied;
 }
@@ -573,6 +581,37 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         }
         auto* active_obj = scene.activeParticleSystemObject();
         if (active_obj) {
+            {
+                // Rename through the same core call scripts use, so the empty /
+                // duplicate-name rules cannot drift between panel and IPC.
+                static uint32_t rename_system_id = 0;
+                static char rename_buffer[128] = {};
+                static std::string rename_error;
+                if (rename_system_id != active_obj->id) {
+                    rename_system_id = active_obj->id;
+                    std::snprintf(rename_buffer, sizeof(rename_buffer), "%s", active_obj->name.c_str());
+                    rename_error.clear();
+                }
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                ImGui::InputText("##ParticleSystemName", rename_buffer, sizeof(rename_buffer));
+                if (ImGui::IsItemDeactivatedAfterEdit() && active_obj->name != rename_buffer) {
+                    rtapi::ParticleSystemRef ref;
+                    ref.id = static_cast<int>(active_obj->id);
+                    rtapi::ParticleSystemInfo info;
+                    rtapi::Result result = rtapi::getParticleSystem(ref, info);
+                    if (result.ok) {
+                        info.name = rename_buffer;
+                        result = rtapi::updateParticleSystem(ref, info);
+                    }
+                    rename_error = result.ok ? std::string() : result.error;
+                    if (!result.ok) {
+                        std::snprintf(rename_buffer, sizeof(rename_buffer), "%s", active_obj->name.c_str());
+                    }
+                }
+                if (!rename_error.empty()) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%s", rename_error.c_str());
+                }
+            }
             const bool emitter_only = ParticleUsageUI::draw(ui_ctx);
             if (!emitter_only) {
             ImGui::Spacing();
@@ -720,6 +759,33 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Sets neighborhood tracking grid precision and timestep subdivs. Offline is ideal for final bakes.");
+            }
+
+            const char* execution_policies[] = { "Auto (GPU if available)", "GPU Required", "CPU (Reference)" };
+            int execution_policy = static_cast<int>(physics.execution_policy);
+            if (ImGui::Combo("Execution##PartExecPolicy", &execution_policy, execution_policies,
+                             IM_ARRAYSIZE(execution_policies))) {
+                physics.execution_policy =
+                    static_cast<RayTrophiSim::ParticleExecutionPolicy>(execution_policy);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Where the particle step may run.\n\n"
+                                  "Auto: use GPU stages that exist, fall back to CPU and report why.\n"
+                                  "GPU Required: never fall back; the step is refused instead.\n"
+                                  "CPU: reference implementation, used for baselines.");
+            }
+            {
+                // What the LAST step actually did -- the setting above is only
+                // the request. Same values particle.stats reports.
+                const auto& step_stats = particles->stats();
+                ImGui::TextDisabled("Last step: forces %s (%s), %s",
+                                    step_stats.forces_on_gpu ? "GPU" : "CPU",
+                                    step_stats.gpu_force_status,
+                                    step_stats.compute_backend);
+                if (step_stats.step_blocked) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
+                                       "Step blocked: GPU required but unavailable");
+                }
             }
 
             ImGui::DragFloat("Particle Radius", &physics.particle_radius, 0.002f, 0.001f, 10.0f, "%.3f");

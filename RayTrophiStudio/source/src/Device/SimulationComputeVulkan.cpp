@@ -925,6 +925,9 @@ private:
             // FluidDensitySplatGpuConstants = 36 bytes (nx,ny,nz,particle_count,orig_x,orig_y,orig_z,voxel_size,particle_density)
             // FluidParticleIntegrateGpuConstants = 36 bytes (9 fields × 4)
             { "sim_fluid_clear_float",              "sim_fluid_clear_float.spv",           1, 36 },
+            // Device twin of enforceSolidBoundaries (vel_x, vel_y, vel_z,
+            // fluid_mask); shares FluidP2GGpuConstants = 36 bytes.
+            { "sim_fluid_zero_solid_faces",         "sim_fluid_zero_solid_faces.spv",      4, 36 },
             { "sim_fluid_particle_integrate_forces","sim_fluid_particle_forces.spv",       4, 96 },
             { "sim_fluid_surface_columns_clear",    "sim_fluid_surface_columns_clear.spv", 1, 96 },
             { "sim_fluid_surface_columns_build",    "sim_fluid_surface_columns_build.spv", 2, 96 },

@@ -732,6 +732,7 @@ public:
             {"inherit_velocity"},
             {"fluid_particles_per_second"},
             {"fluid_velocity_spread"},
+            {"fluid_temperature_kelvin"},
         };
     }
 

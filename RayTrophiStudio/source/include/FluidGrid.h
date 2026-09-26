@@ -225,6 +225,22 @@ public:
     // incremental footprint reset. Set true once weights are globally valid;
     // cleared by the caller whenever a step runs without recomputing them.
     bool collider_weights_init = false;
+    // Faces the solid-phase overlay closed on top of the COLLIDER weights, with
+    // the value each held before (face index << 8 | old weight), one list per
+    // MAC component. Restored at the start of the next step, so the collider
+    // weights underneath stay valid and their cache keeps hitting.
+    //
+    // ★★★ THIS REPLACES INVALIDATING THE WEIGHT CACHE EVERY STEP. With any
+    // overlay present the caller used to clear collider_weights_init, which
+    // forced the full reset + analytic super-sample of every collider each
+    // frame. Harmless for a sphere; for a mesh collider it is the dominant
+    // cost of the step. Measured 2026-09-25: a wax pour froze onto a mesh
+    // camera and the frame went from ~60 ms of solver time to 2.6 s — the
+    // freeze starts AT the contact, so it read as "touching the collider
+    // explodes the CPU".
+    std::vector<uint64_t> overlay_weight_restore_u;
+    std::vector<uint64_t> overlay_weight_restore_v;
+    std::vector<uint64_t> overlay_weight_restore_w;
 
     // Ghost-fluid free surface: cell-centered liquid level set (signed distance,
     // negative inside fluid). Lazy (sized by the projection only when ghost-fluid
@@ -338,6 +354,10 @@ public:
         collider_voxel_sig = 0;
         collider_weights_sig = 0;
         collider_weights_init = false;
+        // Indices into the old layout; the weights are rebuilt from scratch.
+        overlay_weight_restore_u.clear();
+        overlay_weight_restore_v.clear();
+        overlay_weight_restore_w.clear();
         collider_track_dim[0] = collider_track_dim[1] = collider_track_dim[2] = -1;
     }
     

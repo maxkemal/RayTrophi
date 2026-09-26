@@ -21,6 +21,8 @@
 #include <fstream>
 #include <istream>
 #include <unordered_map>
+#include <atomic>
+#include <mutex>
 
 // TextureType enum forward declaration (defined in Texture.h)
 enum class TextureType;
@@ -62,6 +64,17 @@ public:
     // Save without dialog if path already known
     bool saveProject(SceneData& scene, RenderSettings& settings, Renderer& renderer,
                      std::function<void(int, const std::string&)> progress_callback = nullptr);
+
+    // Writes a recovery COPY (autosave). The project's identity - current
+    // path, name, recent list, modified flag - and every texture's save-dirty
+    // flag are left exactly as they were, so a Ctrl+S issued while it runs, or
+    // after it, still targets the user's file with the user's pending edits.
+    bool saveProjectCopy(const std::string& filepath, SceneData& scene, RenderSettings& settings,
+                         Renderer& renderer);
+
+    // Every save variant is serialized on one mutex: a background Ctrl+S and
+    // a background autosave share the texture-reuse index and the scene.
+    bool isSaveInProgress() const { return save_in_progress_.load(std::memory_order_acquire); }
     
     // Synchronize ProjectData with live SceneData (Captures moves, deletes, etc.)
     void syncProjectToScene(SceneData& scene);
@@ -244,6 +257,23 @@ public:
         bool save_geometry = true;         // Save scene geometry (for self-contained)
     };
     SaveSettings save_settings;
+
+private:
+    bool saveProjectImpl(const std::string& filepath, SceneData& scene, RenderSettings& settings,
+                         Renderer& renderer,
+                         std::function<void(int, const std::string&)> progress_callback,
+                         bool as_copy);
+
+    std::mutex save_mutex_;
+    std::atomic<bool> save_in_progress_{false};
+    // Valid only while save_mutex_ is held.
+    // ★★★ active_save_as_copy_ keeps texture save-dirty flags: the flag means
+    //   "differs from the USER's project file", and the save path reuses the
+    //   previous .bin bytes of any texture that is not dirty. A copy clearing
+    //   it would let the next Ctrl+S copy the pre-edit bytes back out of the
+    //   user's .bin - a painted texture lost with no error.
+    bool active_save_as_copy_ = false;
+    std::string active_save_path_;
 };
 
 // Convenience macro
