@@ -1330,6 +1330,60 @@ struct VolumeTablesInfo {
 VolumeTablesInfo volumeTables();
 
 // ---------------------------------------------------------------------------
+// Per-SLOT volume table (render.volume_slots).
+//
+// ★★ volume_tables reports COUNTS, and a count cannot answer the questions the
+// volume-identity bugs of this repo turned on: is this slot still the same
+// object (stable_key), was the SSBO laid out for it (published), is its content
+// live or deliberately inactive (is_active), and did a publish happen at all
+// between two reads (upload_serial). A retired liquid volume that keeps its slot
+// and one that is still drawn look identical as "instance_count 1".
+//
+// Identity test recipe: read twice around an operation; a stable_key that
+// changes for the same volume name is churn, an upload_serial that does not
+// move means nothing was republished.
+struct VolumeSlotRow {
+    int slot = -1;               // TLAS customIndex
+    int stable_key = 0;
+    std::string name;
+    int vdb_id = -1;
+    bool published = false;
+    bool packet_order = false;   // no TLAS on this backend: no name/stable_key, match by vdb_id
+    bool has_contents = false;
+    int  is_active = 0;
+    std::string source;          // "nanovdb" | "cloud" | "sdf" | "live_gas" | "other"
+    int  volume_type = -1;
+    bool has_density = false;
+    bool has_temperature = false;
+    Vec3 aabb_min = Vec3(0.0f, 0.0f, 0.0f);
+    Vec3 aabb_max = Vec3(0.0f, 0.0f, 0.0f);
+};
+struct VolumeSlotTable {
+    std::string role;            // "render" | "viewport"
+    bool is_vulkan = false;
+    uint64_t upload_serial = 0;
+    uint32_t instance_count = 0; // uploaded count; may differ from slots.size()
+    std::vector<VolumeSlotRow> slots;
+};
+// Scene side: which volume each grid domain currently owns.
+struct DomainVolumeRow {
+    std::string system;
+    int domain_index = -1;
+    std::string domain;
+    std::string type;            // "gas" | "fluid"
+    std::string render_mode;     // liquid only: "particles" | "surface" | "fog"
+    int vdb_id = -1;
+    bool has_volume = false;
+    std::string volume_name;
+};
+struct VolumeSlotsInfo {
+    bool available = false;
+    std::vector<VolumeSlotTable> backends;
+    std::vector<DomainVolumeRow> domains;
+};
+VolumeSlotsInfo volumeSlots();
+
+// ---------------------------------------------------------------------------
 // Viewport measurement.
 //
 // ★★★ An agent that can only SAVE a render is guessing; one that can read the

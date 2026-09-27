@@ -3,11 +3,69 @@
 > **Durum:** CANLI — her partide üzerine yazılır. Önceki sürüm (particle
 > authoring + SSS) git geçmişinde: `git show 220bed8:docs/dev/NEXT_BUILD_CHECKS.md`.
 >
-> ★ En üstteki dört bölüm (sıvı Fog modu; splat havuzu raster'da + Virtual
-> Particles söküldü, 2026-09-27) YENİ. Altındakiler önceki derlemelere girdi; doğrulanan
-> maddeleri ✔ işaretli, kalanlar açık.
+> ★ En üstteki bölüm (render.volume_slots, 2026-09-27, 7. parti) YENİ.
+> Altındakiler önceki derlemelere girdi; doğrulanan maddeleri ✔ işaretli,
+> kalanlar açık.
+
+## `render.volume_slots`: hacim başına satır + kimlik testi (2026-09-27, 7. parti)
+
+> ✔ 2. derleme (2026-09-27): `solid` PASS (viewport, packet order) ve `rendered` PASS
+> (iki backend, SKIP yok — TLAS/stable_key yolu dahil).
+> 1. derleme: 10 FAIL — araç TLAS'sız viewport'a kördü.
+> Faz 0'ın ilk kod işi (`BIRLESIK_MADDE_DOMAIN_TASARIMI.md` §8b madde 3). Yeni IPC/
+> Python metodu; `VulkanDevice::updateVolumeBuffer` artık son yüklemenin CPU
+> gölgesini ve bir `upload_serial` tutuyor. ⚠ `VulkanBackend.h` değişti →
+> uzun derleme. Render davranışı DEĞİŞMEZ (yalnız okuma).
+
+1. **Derleme.** Yeni dosya yok; vcxproj değişmedi.
+2. **Tek komut, hepsini koşar** (uygulama açık, timeline duraklatılmış, ~30 s):
+   `python scripts	est
+t_test_volume_slot_identity_ipc.py`
+   *Görmen gereken:* `PASS`. Kendi domain'ini (`SlotProbe`) kurar, siler.
+   *Bozuksa, hangi madde:*
+   - **0 FAIL** (domain hacim sahibi değil): üretici/rota sorunu, araç değil.
+   - **1 FAIL** (stable_key değişti): hiçbir şey değişmezken kimlik churn'ü —
+     siyah bant sınıfı; çıktıyı bana getir.
+   - **6 FAIL** (vdb_id uyuşmuyor): sahne ile backend farklı hacmi gösteriyor.
+   - **5 FAIL** (has_temperature true): köpük kapalıyken SDF'ye sıcaklık yükleniyor.
+   - **4 FAIL**: alakasız TLAS rebuild SDF'yi düşürüyor (bilinen tarihî arıza).
+   - **2 FAIL**: particles modunda sıvı hacmi hâlâ aktif çiziliyor.
+3. **★ SİNSİ: `[SKIP] render` normaldir, `[SKIP] viewport` değildir.** Render
+   backend'i Solid'de hacim tutmaz (Rendered'a girince dolar). Raster viewport
+   TLAS kurmaz; slotları `packet_order: true` ile gelir (ad/stable_key yok,
+   `vdb_id` ile eşlenir). İlk derlemede araç bu yolu hiç görmüyordu — 10 FAIL'in
+   kökü buydu, uygulama değil. Viewport SKIP görürsen araç yine kör demektir.
+
+## IPC `fluid.set_param render_mode` artık render senkronu istiyor (2026-09-27, 6. parti)
+
+> ✔ 2026-09-27 (exe 22:21): probe -ForceResync OLMADAN koştu — particles→surface→fog
+> sırasında viewport hacmi 0→1→1, üç mod Solid'de doğru temsil. Madde 3 (panel) elle bakılmadı.
+>
+> Faz 0 canlı matrisinde bulundu (`BIRLESIK_MADDE_DOMAIN_TASARIMI.md` §8b 2. tur).
+> Panel combo'su mod değişince `requestSimulationTimelineRenderResync()` +
+> `start_render` çağırıyordu, IPC çağırmıyordu. Duraklatılmış timeline'da
+> Solid/Material bir ÖNCEKİ modun temsilini çiziyordu; Rendered her karede kendi
+> senkronladığı için doğruydu. Tek değişiklik: `RtApiFluid.cpp` render_mode dalı.
+
+1. **Derleme.** Tek satırlık ekleme; hata beklenmez.
+2. **Probe, -ForceResync OLMADAN.** Sıvısı olan bir domain'le (timeline duraklatılmış):
+   `.\scripts\ipc\Probe-FluidRenderMatrix.ps1 -Domain "<ad>" -OutDir C:\temp\m`
+   *Görmen gereken:* viewport sütununda particles satırları surface/fog
+   satırlarından **bir eksik** hacim gösterir; `particles_solid.jpg` yalnız
+   küreler, `surface_solid.jpg` yüzey, `fog_solid.jpg` açık mavi sis önizlemesi.
+   *Bozuksa:* surface_solid boş ya da fog_solid keskin yüzey → istek hâlâ
+   ulaşmıyor (exe eski mi, önce zaman damgasına bak).
+3. **Panel davranışı değişmemeli.** Panelden modu değiştir: eskisi gibi anında.
+4. **★ SİNSİ: Rendered'da hiçbir fark görmezsin.** Rendered zaten her karede
+   senkronluyordu; "değişiklik bir şey yapmadı" sanma — fark yalnız Solid ve
+   Material'da, duraklatılmış timeline'da.
+5. **Bilinen, bu partide düzeltilmedi:** `fluid.step` de render senkronunu
+   tetiklemiyor (yalnız `timeline.set_frame` ve Rendered tetikliyor). Script'le
+   adım atıp raster'ı ölçen testler hâlâ bir önceki kareyi görebilir.
 
 ## Fog Spread + sisin blackbody'si parçacık sıcaklığından (2026-09-27, 5. parti)
+
+> ✔ 2026-09-27: kullanıcı derledi ve test etti — sorun yok, sıcaklıkla blackbody doğru davranıyor.
 
 > Ham splat parçacık başına yalnız 8 hücreye değiyor; seyrek sprey tek tek
 > lekelere dönüşüyordu. Eski "geniş bulut" görüntüsü gerçek yoğunluk değil,
@@ -19,7 +77,8 @@
 > okuma `fluid.get fog_spread_voxels`.
 
 1. **Derleme.** Yeni `.cpp` projede; link hatası varsa vcxproj girdisi.
-2. **Script.** `python scripts	estt_test_fluid_fog_mode_ipc.py "Grid Domain 1"`
+2. **Script.** `python scripts	est
+t_test_fluid_fog_mode_ipc.py "Grid Domain 1"`
    — 4. adım: 2.5 geri okunur, 7 reddedilir.
 3. **Görsel, fog modunda.** Panelde "Volume Material (Fog)" altında
    "Fog Spread (voxels)". 0 → bugünkü lekeler; 1.5 → sürekli bulut; 3+ →
@@ -107,7 +166,8 @@
 
 > Kök nedenler canlı sahnede ölçüldü (88k su, granüler kapalı), düzeltmeler
 > derlenmedi. Özet: `docs/dev/GRANULAR_HEIGHTFIELD_GORUNUM.md` "Neden söküldü".
-> Otomatik test: `python scripts	estt_test_fluid_splat_raster_ipc.py "Grid Domain 1"`
+> Otomatik test: `python scripts	est
+t_test_fluid_splat_raster_ipc.py "Grid Domain 1"`
 > (domain'de parçacık olmalı; mod/subdiv/shading'i geri yükler).
 
 Sıra: bağımsız ve hızlı olanlar önce; 5–7 birbirini maskeler, 1–4 geçmeden bakma.

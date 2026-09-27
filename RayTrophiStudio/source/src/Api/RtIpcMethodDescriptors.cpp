@@ -6302,6 +6302,19 @@ static const MethodDescriptor desc_render_volume_counters = {
 };
 static const MethodRegistration reg_render_volume_counters(desc_render_volume_counters);
 
+static const MethodDescriptor desc_render_volume_slots = {
+    "render.volume_slots", "render",
+    "List every TLAS volume slot per Vulkan backend (identity key, name, vdb id, published, is_active, source type, density/temperature channels, AABB) and which volume each grid domain owns",
+    "Counts (render.volume_tables) cannot separate a retired volume that keeps its slot from one still drawn. Identity test: read before and after an operation; a stable_key change for the same name is identity churn, an unchanged upload_serial means nothing was republished. On a surface-SDF slot has_temperature means foam, not Kelvin. A backend with no TLAS (the raster viewport) reports packet_order=true slots: no name or stable_key, match them by vdb_id.",
+    "render", "Render", false, "VolumeSlotsInfo",
+    "render|volume|slots|diagnostics|backend|verify|identity",
+    "render.volume_tables|fluid.get",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_render_volume_slots(desc_render_volume_slots);
+
 static const MethodDescriptor desc_render_volume_stats = {
     "render.volume_stats", "render",
     "Return volume traversal counters for the last frame",

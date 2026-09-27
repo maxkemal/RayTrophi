@@ -1138,6 +1138,12 @@ public:
     VulkanRT::BufferHandle m_terrainLayerBuffer; // SSBO containing VkTerrainLayerData array (binding 12)
     VulkanRT::BufferHandle m_matProgramBuffer;   // SSBO: flattened material-program VM stream (binding 23, Faz 2b)
     uint32_t m_volumeCount = 0;
+    // Host copy of the last binding-9 upload and a serial bumped on EVERY
+    // upload (including empty ones). Read only by render.volume_slots: the
+    // count alone cannot tell "slot kept, content inactive" from "slot live",
+    // nor whether a publish happened at all between two reads.
+    std::vector<VkVolumeInstance> m_volumeShadow;
+    uint64_t m_volumeUploadSerial = 0;
     uint32_t m_terrainLayerCount = 0;
     
     // Atmosphere LUT Textures (for raygen/miss shaders)
@@ -2048,6 +2054,28 @@ public:
     // Live dense-gas grids this backend holds its OWN copy of, because it does
     // not own the simulation compute device. See m_denseGasBuffers.
     std::size_t denseGasMirrorBufferCount() const { return m_denseGasBuffers.size(); }
+
+    // One row per TLAS volume instance, in TLAS (= customIndex) order, joined
+    // with what the binding-9 SSBO holds for that slot. Diagnostic only
+    // (render.volume_slots); values, no handles.
+    struct VolumeSlotDiag {
+        int slot = -1;
+        int stable_key = 0;          // backend-local object identity; a change = new object
+        std::string name;
+        int vdb_id = -1;             // resource handle; churns by design (see m_volumeStableKeys)
+        bool published = false;      // SSBO was last laid out with THIS object in THIS slot
+        bool packet_order = false;   // no TLAS mapping (raster viewport): no object identity
+        bool has_contents = false;   // slot < uploaded instance count
+        int  is_active = 0;
+        int  source_type = -1;       // VkVolumeInstance::source_type
+        int  volume_type = -1;
+        bool has_density = false;    // vdb_grid_address != 0
+        bool has_temperature = false;// vdb_temp_address != 0 (SDF: foam rides this)
+        float aabb_min[3] = {0, 0, 0};
+        float aabb_max[3] = {0, 0, 0};
+    };
+    std::vector<VolumeSlotDiag> describeVolumeSlots() const;
+    uint64_t volumeUploadSerial() const { return m_device ? m_device->m_volumeUploadSerial : 0; }
 
     /**
      * @brief Upload Atmosphere LUT host arrays into Vulkan images and bind to descriptor slot 8
@@ -3354,6 +3382,9 @@ private:
     // access and nothing for a call site to forget.
     std::unordered_map<int, VulkanRT::VkVolumeInstance> m_publishedVolumeByKey;
     std::vector<int> m_publishedVolumeKeyOrder;
+    // Packet-order publish only (no TLAS mapping): the vdb id each slot was
+    // filled from. Diagnostic (render.volume_slots); nothing renders from it.
+    std::vector<int> m_publishedPacketVdbIds;
     // Volume identity for each entry of m_orderedVDBInstances, in TLAS order.
     // A backend-local serial per volume OBJECT; kNoVolumeKey for a null entry.
     //

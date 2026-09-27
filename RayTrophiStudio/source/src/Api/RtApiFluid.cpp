@@ -1572,6 +1572,11 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         if (obj) {
             obj->render_mode = grid_mode;
         }
+        // Same request the panel combo makes. Without it a paused timeline never
+        // re-runs the volume route, so the raster viewport keeps drawing the
+        // PREVIOUS representation (Rendered re-syncs on its own and hides this).
+        g_ctx->scene.requestSimulationTimelineRenderResync();
+        g_ctx->start_render = true;
     }
 
     // ★ Rheology writes go to BOTH representations. The grid domain descriptor is
