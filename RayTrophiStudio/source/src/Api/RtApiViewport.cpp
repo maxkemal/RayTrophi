@@ -35,6 +35,7 @@
 #include "Backend/IBackend.h"
 #include "Backend/IViewportBackend.h"
 #include "globals.h"
+#include "InstanceManager.h"
 
 #include <algorithm>
 #include <atomic>
@@ -362,6 +363,10 @@ ViewportFrameTelemetryInfo viewportFrameTelemetry() {
         }
     }
 
+    for (const auto& group : InstanceManager::getInstance().getGroups()) {
+        if (group.raster_sphere_active) ++out.raster_sphere_groups;
+    }
+
     Backend::RasterFrameTelemetry t;
     bool found = false;
     forEachViewportBackend([&](Backend::IBackend& b) {
@@ -407,6 +412,9 @@ ViewportFrameTelemetryInfo viewportFrameTelemetry() {
     // okunmasi gereken andir.
     out.stale_descset_rebuilds  = t.stale_descset_rebuilds;
     out.device_lost             = t.device_lost;
+    out.sphere_impostor_ready     = t.sphere_impostor_ready;
+    out.sphere_impostors_uploaded = t.sphere_impostors_uploaded;
+    out.sphere_impostors_drawn    = t.sphere_impostors_drawn;
     return out;
 }
 

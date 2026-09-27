@@ -324,6 +324,10 @@
     <ClInclude Include="source\include\SceneSerializer.h" />
     <ClInclude Include="source\include\KinematicColliderSource.h" />
     <ClInclude Include="source\include\KinematicColliderScene.h" />
+    <ClInclude Include="source\include\KinematicColliderSerialization.h" />
+    <ClInclude Include="source\include\KinematicColliderVoxelizer.h" />
+    <ClInclude Include="source\include\UI\KinematicColliderAuthoringUI.h" />
+    <ClInclude Include="source\include\UI\KinematicColliderOverlay.h" />
     <ClInclude Include="source\src\Api\RtIpcKinematicCollider.h" />
     <ClInclude Include="source\src\Api\RtPythonKinematicCollider.h" />
     <ClInclude Include="source\include\TimelineWidget.h" />
@@ -489,6 +493,7 @@
     <ClInclude Include="source\include\Animation\RigTemplates.h" />
     <ClInclude Include="source\include\Animation\SkinWeightContract.h" />
     <ClInclude Include="source\include\Animation\GraphRestDefaults.h" />
+    <ClInclude Include="source\include\Animation\RootMotionUnroll.h" />
     <ClInclude Include="source\include\Api\RtApiRigWeightMap.h" />
     <ClInclude Include="source\include\UI\ScalarFieldOverlay.h" />
     <ClInclude Include="source\include\UI\RigWeightMapUI.h" />
@@ -1475,6 +1480,7 @@
     <ClCompile Include="source\src\Hair\HairSystem_Skinning.cpp" />
     <ClCompile Include="source\src\Scene\AABB.cpp" />
     <ClCompile Include="source\src\Animation\AnimationController.cpp" />
+    <ClCompile Include="source\src\Animation\RootMotionUnroll.cpp" />
     <ClCompile Include="source\src\Animation\AnimationNodes.cpp" />
     <ClCompile Include="source\src\Scene\AreaLight.cpp" />
     <ClCompile Include="source\src\Scene\AssetRegistry.cpp" />
@@ -1713,6 +1719,10 @@
     <ClCompile Include="source\src\Physics\ParticleSimulation.cpp" />
     <ClCompile Include="source\src\Physics\KinematicColliderSource.cpp" />
     <ClCompile Include="source\src\Physics\KinematicColliderScene.cpp" />
+    <ClCompile Include="source\src\Physics\KinematicColliderSerialization.cpp" />
+    <ClCompile Include="source\src\Physics\KinematicColliderVoxelizer.cpp" />
+    <ClCompile Include="source\src\UI\KinematicColliderAuthoringUI.cpp" />
+    <ClCompile Include="source\src\UI\KinematicColliderOverlay.cpp" />
     <ClCompile Include="source\src\Physics\ParticleRenderBridge.cpp" />
     <ClCompile Include="source\src\Physics\SimCache.cpp" />
     <ClCompile Include="source\src\MeshEdit\HalfEdgeMesh.cpp" />
@@ -1722,6 +1732,7 @@
     <ClCompile Include="source\src\MeshEdit\FlatMeshPublisher.cpp" />
     <ClCompile Include="source\src\Physics\ParticleAppearanceProfile.cpp" />
     <ClCompile Include="source\src\Physics\ParticleSimulationAppearance.cpp" />
+    <ClCompile Include="source\src\Physics\ParticleDeviceResidency.cpp" />
     <ClCompile Include="source\src\MeshEdit\FlatMeshUndoSnapshot.cpp" />
     <ClCompile Include="source\src\MeshEdit\FlatMeshGeometryCommand.cpp" />
     <ClCompile Include="source\src\MeshEdit\FlatMeshEditService.cpp" />
@@ -1829,6 +1840,7 @@
     <ClCompile Include="source\src\Physics\Fluid\APICFluidSolver.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidDomainParticleAuthoring.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidDomainRenderLifecycle.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\FluidFogDensity.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidParticleSolidRecovery.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidSimulationSystem.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidLevelSet.cpp" />

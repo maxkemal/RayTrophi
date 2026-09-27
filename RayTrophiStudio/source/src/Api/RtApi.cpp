@@ -11,6 +11,7 @@
 */
 #include "Api/RtApi.h"
 #include "RtApiInternal.h"
+#include "Backend/VulkanRecoveryPolicy.h"
 
 #include <deque>
 #include <algorithm>
@@ -1926,10 +1927,11 @@ Result viewportRecoveryStatus(ViewportRecoveryStatus& out) {
 }
 
 Result viewportRetryDeviceRecovery() {
+    VulkanRecoveryPolicy::resetAttempts();
     g_viewport_recovery_given_up.store(false, std::memory_order_release);
     g_viewport_recovery_consecutive_losses.store(0, std::memory_order_release);
     g_viewport_rebuild_pending_after_loss.store(true, std::memory_order_release);
-    g_viewport_rebuild_not_before_ms.store(0, std::memory_order_release);
+    // Preserve a pending driver-reset delay; a retry must not bypass it.
     return Result::success();
 }
 

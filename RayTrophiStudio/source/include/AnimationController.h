@@ -10,6 +10,7 @@
 */
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <map>
@@ -37,10 +38,6 @@ struct AnimationClip {
     // Source animation data (reference)
     std::shared_ptr<AnimationData> sourceData = nullptr;
     
-    // Root motion settings
-    bool extractRootMotion = false;
-    std::string rootBoneName = "Hips"; // Usually hips or root
-    
     // Cached frame range (for timeline display)
     int startFrame = 0;
     int endFrame = 0;
@@ -65,6 +62,8 @@ struct AnimationBlendState {
     
     float timeA = 0.0f;            // Playback time in clip A
     float timeB = 0.0f;            // Playback time in clip B
+    int64_t cyclesA = 0;           // Completed loops of A (drives root motion)
+    int64_t cyclesB = 0;           // Completed loops of B
     float blendWeight = 0.0f;      // 0 = 100% A, 1 = 100% B
     float blendDuration = 0.3f;    // Crossfade duration in seconds
     
@@ -82,15 +81,6 @@ struct AnimationQueueItem {
     // Callbacks
     std::function<void()> onStart;
     std::function<void()> onEnd;
-};
-
-struct RootMotionDelta {
-    Vec3 positionDelta = Vec3(0,0,0);
-    Quaternion rotationDelta;
-    bool hasPosition = false;
-    bool hasRotation = false;
-    
-    RootMotionDelta() : rotationDelta(1,0,0,0) {}
 };
 
 struct AnimationLayer {
@@ -139,8 +129,8 @@ public:
     void setLayerBlendMode(int layer, BlendMode mode);
     void setLayerBoneMask(int layer, const std::vector<std::string>& bones);
     
+    // Root motion unrolls the loop in the root bone (Animation/RootMotionUnroll.h).
     void setRootMotionEnabled(bool enabled, const std::string& rootBone = "Hips");
-    RootMotionDelta consumeRootMotion();
     std::string findBestRootMotionBone(const std::string& clipName);
     
     bool update(float deltaTime, const BoneData& boneData);
@@ -165,9 +155,8 @@ private:
     void updateLayer(AnimationLayer& layer, float deltaTime, const BoneData& boneData);
     void processQueue(AnimationLayer& layer);
     Matrix4x4 calculateNodeTransform(std::shared_ptr<AnimationData> anim, float timeInTicks, const std::string& nodeName, const Matrix4x4& defaultTransform, bool wrap = true) const;
-    Matrix4x4 getAnimatedGlobalTransform(const std::string& boneName, const BoneData& boneData, std::shared_ptr<AnimationData> animA, float timeA, std::shared_ptr<AnimationData> animB, float timeB, float blendWeight, BlendMode mode, std::unordered_map<std::string, Matrix4x4>& cache) const;
+    Matrix4x4 getAnimatedGlobalTransform(const std::string& boneName, const BoneData& boneData, std::shared_ptr<AnimationData> animA, float timeA, int64_t cyclesA, std::shared_ptr<AnimationData> animB, float timeB, int64_t cyclesB, float blendWeight, BlendMode mode, std::unordered_map<std::string, Matrix4x4>& cache) const;
     Matrix4x4 blendTransforms(const Matrix4x4& a, const Matrix4x4& b, float weight, BlendMode mode) const;
-    void extractRootMotion(std::shared_ptr<AnimationData> anim, float prevTime, float currentTime, const std::string& rootBone);
     
     std::vector<AnimationClip> clips;
     std::map<std::string, size_t> clipNameToIndex;
@@ -176,9 +165,6 @@ private:
     
     bool rootMotionEnabled = false;
     std::string rootMotionBone = "Hips";
-    RootMotionDelta accumulatedRootMotion;
-    Vec3 lastRootPosition;
-    Quaternion lastRootRotation;
     
     std::vector<Matrix4x4> cachedFinalBoneMatrices;
     std::unordered_map<std::string, Matrix4x4> cachedJointGlobals;

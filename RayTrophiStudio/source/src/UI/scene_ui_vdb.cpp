@@ -651,84 +651,120 @@ void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
     // VOLUME RENDER MODE
     // ═══════════════════════════════════════════════════════════════════════════
     if (UIWidgets::BeginSection("Volume Render Mode", ImVec4(0.3f, 0.7f, 0.9f, 1.0f))) {
-        int current_mode = vdb->render_as_isosurface ? 1 : 0;
-        const char* render_modes[] = { "Volumetric Fog / Gas", "Refractive Fluid Surface (SDF Isosurface)" };
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 10.0f);
-        if (ImGui::Combo("##VDBRenderModeCombo", &current_mode, render_modes, IM_ARRAYSIZE(render_modes))) {
-            vdb->render_as_isosurface = (current_mode == 1);
-            
-            // Auto-apply beautiful defaults on mode change to make life super easy for the user!
-            if (vdb->render_as_isosurface) {
-                // Initialize with premium fluid look
-                vdb->render_isosurface_ior = 1.333f; // Water IOR
-                vdb->render_isosurface_roughness = 0.02f; // Smooth liquid
-                vdb->render_isosurface_foam = 0.0f;
-                
-                // Automatically set shader values matching simulation level-set look
-                auto shader = vdb->getOrCreateShader();
-                shader->name = "Liquid Surface (SDF)";
-                shader->density.multiplier = 60.0f; // High density to create solid boundary
-                shader->density.cutoff_threshold = 0.05f;
-                shader->scattering.color = Vec3(0.92f, 0.96f, 1.0f); // Light blue tint
-                shader->scattering.coefficient = 0.4f;
-                shader->scattering.anisotropy = 0.0f;
-                shader->absorption.color = Vec3(0.85f, 0.40f, 0.12f); // Orange absorption -> blue water depth look!
-                shader->absorption.coefficient = 2.5f;
-                shader->emission.mode = VolumeEmissionMode::None;
-                
-                // Raymarching steps for high quality refraction/depth
-                shader->quality.max_steps = 256;
-                shader->quality.step_size = 0.05f;
-            } else {
-                // Restore standard smoke preset
-                auto shader = vdb->getOrCreateShader();
-                shader->name = "Smoke Preset";
-                shader->density.multiplier = 1.0f;
-                shader->density.cutoff_threshold = 0.0f;
-                shader->scattering.color = Vec3(0.8f, 0.8f, 0.8f);
-                shader->scattering.coefficient = 1.0f;
-                shader->scattering.anisotropy = 0.0f;
-                shader->absorption.color = Vec3(0.1f, 0.1f, 0.1f);
-                shader->absorption.coefficient = 0.1f;
-            }
-            changed = true;
-        }
-        
-        if (vdb->render_as_isosurface) {
-            ImGui::Spacing();
-            ImGui::Indent();
-            
-            if (ImGui::DragFloat("Index of Refraction (IOR)", &vdb->render_isosurface_ior, 0.01f, 1.0f, 3.0f, "%.3f")) changed = true;
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Water: 1.333 | Glass: 1.500 | Ice: 1.309 | Diamond: 2.417");
-            }
-            
-            if (ImGui::SliderFloat("Surface Roughness", &vdb->render_isosurface_roughness, 0.0f, 1.0f, "%.3f")) changed = true;
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Roughness of the liquid surface boundary (GGX microfacet).");
-            }
-            
-            if (ImGui::SliderFloat("Curvature Foam Strength", &vdb->render_isosurface_foam, 0.0f, 1.0f, "%.3f")) changed = true;
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Strength of the curvature-driven foam/whitewater highlights.");
-            }
-            
-            ImGui::Spacing();
-            if (UIWidgets::SecondaryButton("Reset Fluid Material Preset")) {
-                auto shader = vdb->getOrCreateShader();
-                shader->density.multiplier = 60.0f;
-                shader->density.cutoff_threshold = 0.05f;
-                shader->scattering.color = Vec3(0.92f, 0.96f, 1.0f);
-                shader->scattering.coefficient = 0.4f;
-                shader->absorption.color = Vec3(0.85f, 0.40f, 0.12f);
-                shader->absorption.coefficient = 2.5f;
-                shader->emission.mode = VolumeEmissionMode::None;
-                shader->quality.max_steps = 256;
-                shader->quality.step_size = 0.05f;
+        // ★★★ A liquid domain's volume is rebuilt from the DOMAIN every sync:
+        //   writing render_as_isosurface / IOR here was overwritten on the next
+        //   frame, which is exactly the "switches back to refractive when the
+        //   frame changes" report. For such a volume these controls edit the
+        //   domain, and the volume follows. Presets are not applied here: the
+        //   domain retunes its own shader when its mode changes.
+        if (auto* owner = ctx.scene.fluidDomainOwningVolume(vdb)) {
+            const bool surface =
+                owner->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF ||
+                owner->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Volume;
+            int owned_mode = surface ? 1 : 0;
+            const char* owned_modes[] = { "Volumetric Fog / Gas", "Refractive Fluid Surface (SDF Isosurface)" };
+            ImGui::TextDisabled("Owned by liquid domain '%s' -- edits the domain.", owner->name.c_str());
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 10.0f);
+            if (ImGui::Combo("##VDBOwnedRenderModeCombo", &owned_mode, owned_modes, IM_ARRAYSIZE(owned_modes))) {
+                owner->fluid_render_mode = owned_mode == 1
+                    ? RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF
+                    : RayTrophiSim::Fluid::FluidRenderMode::VolumeFog;
+                ctx.scene.requestSimulationTimelineRenderResync();
                 changed = true;
             }
+            if (owned_mode == 1) {
+                ImGui::Spacing();
+                ImGui::Indent();
+                bool surface_changed = false;
+                surface_changed |= ImGui::DragFloat("Index of Refraction (IOR)##Owned", &owner->fluid_surface_ior, 0.01f, 1.0f, 3.0f, "%.3f");
+                surface_changed |= ImGui::SliderFloat("Surface Roughness##Owned", &owner->fluid_surface_roughness, 0.0f, 1.0f, "%.3f");
+                surface_changed |= ImGui::SliderFloat("Curvature Foam Strength##Owned", &owner->fluid_surface_foam, 0.0f, 1.0f, "%.3f");
+                if (surface_changed) {
+                    ctx.scene.refreshFluidSurfaceMaterial();
+                    changed = true;
+                }
+                ImGui::Unindent();
+            }
+        } else {
+            int current_mode = vdb->render_as_isosurface ? 1 : 0;
+            const char* render_modes[] = { "Volumetric Fog / Gas", "Refractive Fluid Surface (SDF Isosurface)" };
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 10.0f);
+            if (ImGui::Combo("##VDBRenderModeCombo", &current_mode, render_modes, IM_ARRAYSIZE(render_modes))) {
+                vdb->render_as_isosurface = (current_mode == 1);
             
-            ImGui::Unindent();
+                // Auto-apply beautiful defaults on mode change to make life super easy for the user!
+                if (vdb->render_as_isosurface) {
+                    // Initialize with premium fluid look
+                    vdb->render_isosurface_ior = 1.333f; // Water IOR
+                    vdb->render_isosurface_roughness = 0.02f; // Smooth liquid
+                    vdb->render_isosurface_foam = 0.0f;
+                
+                    // Automatically set shader values matching simulation level-set look
+                    auto shader = vdb->getOrCreateShader();
+                    shader->name = "Liquid Surface (SDF)";
+                    shader->density.multiplier = 60.0f; // High density to create solid boundary
+                    shader->density.cutoff_threshold = 0.05f;
+                    shader->scattering.color = Vec3(0.92f, 0.96f, 1.0f); // Light blue tint
+                    shader->scattering.coefficient = 0.4f;
+                    shader->scattering.anisotropy = 0.0f;
+                    shader->absorption.color = Vec3(0.85f, 0.40f, 0.12f); // Orange absorption -> blue water depth look!
+                    shader->absorption.coefficient = 2.5f;
+                    shader->emission.mode = VolumeEmissionMode::None;
+                
+                    // Raymarching steps for high quality refraction/depth
+                    shader->quality.max_steps = 256;
+                    shader->quality.step_size = 0.05f;
+                } else {
+                    // Restore standard smoke preset
+                    auto shader = vdb->getOrCreateShader();
+                    shader->name = "Smoke Preset";
+                    shader->density.multiplier = 1.0f;
+                    shader->density.cutoff_threshold = 0.0f;
+                    shader->scattering.color = Vec3(0.8f, 0.8f, 0.8f);
+                    shader->scattering.coefficient = 1.0f;
+                    shader->scattering.anisotropy = 0.0f;
+                    shader->absorption.color = Vec3(0.1f, 0.1f, 0.1f);
+                    shader->absorption.coefficient = 0.1f;
+                }
+                changed = true;
+            }
+        
+            if (vdb->render_as_isosurface) {
+                ImGui::Spacing();
+                ImGui::Indent();
+            
+                if (ImGui::DragFloat("Index of Refraction (IOR)", &vdb->render_isosurface_ior, 0.01f, 1.0f, 3.0f, "%.3f")) changed = true;
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Water: 1.333 | Glass: 1.500 | Ice: 1.309 | Diamond: 2.417");
+                }
+            
+                if (ImGui::SliderFloat("Surface Roughness", &vdb->render_isosurface_roughness, 0.0f, 1.0f, "%.3f")) changed = true;
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Roughness of the liquid surface boundary (GGX microfacet).");
+                }
+            
+                if (ImGui::SliderFloat("Curvature Foam Strength", &vdb->render_isosurface_foam, 0.0f, 1.0f, "%.3f")) changed = true;
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Strength of the curvature-driven foam/whitewater highlights.");
+                }
+            
+                ImGui::Spacing();
+                if (UIWidgets::SecondaryButton("Reset Fluid Material Preset")) {
+                    auto shader = vdb->getOrCreateShader();
+                    shader->density.multiplier = 60.0f;
+                    shader->density.cutoff_threshold = 0.05f;
+                    shader->scattering.color = Vec3(0.92f, 0.96f, 1.0f);
+                    shader->scattering.coefficient = 0.4f;
+                    shader->absorption.color = Vec3(0.85f, 0.40f, 0.12f);
+                    shader->absorption.coefficient = 2.5f;
+                    shader->emission.mode = VolumeEmissionMode::None;
+                    shader->quality.max_steps = 256;
+                    shader->quality.step_size = 0.05f;
+                    changed = true;
+                }
+            
+                ImGui::Unindent();
+            }
         }
         
         UIWidgets::EndSection();

@@ -481,7 +481,8 @@ void VulkanBackendAdapter::uploadVisibleRasterInstances(RasterMeshBuffer& mesh) 
             }
         }
         visibleInstanceIndices = std::move(fullInstances);
-    } else if (mesh.isScatterGroup && rasterScatterLodSplitEnabled()) {
+    } else if (mesh.isScatterGroup && !mesh.scatterLodExempt &&
+               rasterScatterLodSplitEnabled()) {
         const uint64_t trianglesPerInstance = (mesh.indexBuffer.buffer && mesh.indexCount > 0)
             ? (static_cast<uint64_t>(mesh.indexCount) / 3ull)
             : (static_cast<uint64_t>(mesh.vertexCount) / 3ull);
@@ -2065,8 +2066,10 @@ void VulkanBackendAdapter::rebuildRasterCullBindings() {
         //   proxy YUKLEMESI kosulluydu. Bunu proxy varligina baglamak, flat SoA
         //   kaynakli scatter gruplarinda (ki proxy'leri uretilmiyor) butceyi
         //   tamamen etkisiz birakiyordu.
-        if (mesh.isScatterGroup && b.trianglesPerInstance > 0 &&
-            rasterScatterLodSplitEnabled()) {
+        // Simulation splat pools are exempt: no proxy card, no budget trim,
+        // and no share of the foliage triangle target (RasterMeshBuffer).
+        if (mesh.isScatterGroup && !mesh.scatterLodExempt &&
+            b.trianglesPerInstance > 0 && rasterScatterLodSplitEnabled()) {
             b.flags |= RasterGpuCull::kFlagLodSplit;
 
             if (!mesh.proxyMeshKey.empty()) {

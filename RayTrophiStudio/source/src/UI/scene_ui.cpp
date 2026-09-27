@@ -4046,7 +4046,6 @@ void SceneUI::draw(UIContext& ctx)
     // worker, which showed up as a ~10x slowdown ~10-15 frames in. The viewport
     // isn't interactively shown during the render anyway, so skip it entirely.
     if (!render_owns_sim) {
-        uploadParticleBillboards(ctx);
     }
 
     // Mirror discrete particles into the ray-traced render every frame, driven
@@ -4059,6 +4058,7 @@ void SceneUI::draw(UIContext& ctx)
     // Skipped while the sequence-render worker owns the bridge (see above).
     if (!render_owns_sim) {
         ctx.scene.syncParticleRenderInstances(ctx.particle_display_mode != 1);
+        uploadParticleBillboards(ctx);
     }
 
     // --- HAIR TRANSFORM SYNC (Global) ---

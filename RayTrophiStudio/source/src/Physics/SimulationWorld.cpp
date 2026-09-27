@@ -311,7 +311,19 @@ void SimulationWorld::refreshForceFieldSnapshot() {
 }
 
 SimulationComputeContext& SimulationWorld::compute() {
+    // Re-armed on every mutable access instead of once in a constructor: every
+    // backend swap goes through compute().setBackend(...), so the owner is
+    // always this world even if the world object was moved.
+    compute_context_.setBackendChangeCallback(&SimulationWorld::onComputeBackendChanging, this);
     return compute_context_;
+}
+
+void SimulationWorld::onComputeBackendChanging(void* owner, SimulationComputeContext& context) {
+    auto* world = static_cast<SimulationWorld*>(owner);
+    if (!world) return;
+    for (const auto& system : world->systems_) {
+        if (system) system->onComputeBackendChanging(context);
+    }
 }
 
 const SimulationComputeContext& SimulationWorld::compute() const {

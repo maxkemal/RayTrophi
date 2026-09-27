@@ -1774,10 +1774,11 @@ public:
     // Upload camera-facing particle billboards for the raster viewport overlay
     // (VulkanViewportParticles.cpp). Vertices carry particle centres; the
     // shader expands quads and reads the appearance LUT. Two groups by the
-    // profile's blend: additive and alpha.
+    // profile's blend: additive and alpha. `pulled` systems are drawn from the
+    // simulation's own buffers; the caller guarantees they are on this device.
     void uploadParticleBillboards(const ParticleBillboardUpload& data);
-    // Points the billboard descriptor set at the LUT buffer when stale. Safe
-    // only while no frame using the set is in flight.
+    // Points the billboard descriptor set at the LUT + row-lookup buffers when
+    // stale. Safe only while no frame using the set is in flight.
     void writeParticleLutDescriptor();
     // Edit-mesh overlay (raster viewport GPU wireframe/vertex/face passes).
     // Buffers are split by update frequency so each piece re-uploads only
@@ -1985,6 +1986,12 @@ public:
         m_rasterBuiltGeometryGeneration = toGeneration;
         m_rasterBuiltGenSource = "in_place_mesh_edit";
         return true;
+    }
+    // Raster-only invalidation: the next buildRasterGeometry runs even though
+    // the scene generation did not move. Meshes are torn down by that build.
+    void invalidateRasterGeometryCache(const char* reason) {
+        m_rasterBuiltGeometryGeneration = 0;
+        m_rasterBuiltGenSource = reason;
     }
     bool hasValidRasterCache(uint64_t sceneGeometryGeneration) const override {
         return !m_rasterMeshes.empty() && m_rasterBuiltGeometryGeneration == sceneGeometryGeneration;
@@ -2467,9 +2474,9 @@ protected:
         uint32_t hairLineVertexCount = 0;
 
         // Particle billboard overlay (Solid/Matcap viewport). Two pipelines share
-        // the same shaders and their own layout (set 0 = appearance LUT) and
-        // differ only in blend state; particles are grouped into the matching
-        // vertex buffer by their appearance profile's blend.
+        // the same shaders and their own layout (set 0 = appearance LUT + row
+        // lookup) and differ only in blend state; particles are grouped into the
+        // matching vertex buffer by their appearance profile's blend.
         VkPipeline particleAddPipeline = VK_NULL_HANDLE;    // additive (fire/spark)
         VkPipeline particleAlphaPipeline = VK_NULL_HANDLE;  // alpha (smoke/dust)
         VkPipelineLayout particlePipelineLayout = VK_NULL_HANDLE;
@@ -2478,11 +2485,30 @@ protected:
         VkDescriptorSet particleDescSet = VK_NULL_HANDLE;
         VulkanRT::BufferHandle particleLutBuffer;
         std::vector<float> particleLutUploaded;  // content of particleLutBuffer
+        VulkanRT::BufferHandle particleRowLookupBuffer;
+        std::vector<uint32_t> particleRowLookupUploaded;
         bool particleLutDescriptorStale = true;
         VulkanRT::BufferHandle particleAddVertexBuffer;
+        VkPipeline sphereImpostorPipeline = VK_NULL_HANDLE;
+        VulkanRT::BufferHandle sphereImpostorBuffer;
+        std::vector<SphereImpostorInstance> sphereImpostorsUploaded;
         uint32_t particleAddVertexCount = 0;
         VulkanRT::BufferHandle particleAlphaVertexBuffer;
         uint32_t particleAlphaVertexCount = 0;
+        // Vertex pulling of device-resident systems: set 1 = the simulation's
+        // own storage buffers, one descriptor set per pulled system.
+        VkPipeline particlePullAddPipeline = VK_NULL_HANDLE;
+        VkPipeline particlePullAlphaPipeline = VK_NULL_HANDLE;
+        VkPipelineLayout particlePullPipelineLayout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout particlePullDescLayout = VK_NULL_HANDLE;
+        VkDescriptorPool particlePullDescPool = VK_NULL_HANDLE;
+        uint32_t particlePullDescCapacity = 0;
+        struct ParticlePullSlot {
+            VkDescriptorSet set = VK_NULL_HANDLE;
+            uint64_t buffers[kPulledStreamCount] = {};  // what `set` points at
+        };
+        std::vector<ParticlePullSlot> particlePullSlots;
+        std::vector<ParticlePulledDraw> particlePulledDraws;
 
         // Edit-mesh overlay (Solid/Matcap viewport): GPU wireframe, vertex
         // markers and face fills for mesh edit mode. Own pipeline layout
@@ -2874,6 +2900,13 @@ protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapan
         bool hasSkinning = false;
         bool isScatterGroup = false;
         bool isScatterProxy = false;
+        // Scatter pool that must never be demoted to the card proxy or trimmed
+        // by the scatter triangle budget: simulation splats (fluid, foam,
+        // particle spheres). A proxy card is a foliage approximation; on a
+        // splat pool it read as flat sheets, and the frame-time-adaptive
+        // budget moved the full/proxy boundary every frame. isScatterGroup
+        // stays true for these so outline/re-cull loops still skip the pool.
+        bool scatterLodExempt = false;
         std::string proxyMeshKey;
         std::vector<uint32_t> instanceIndices;  // indices into m_rasterInstances
         std::vector<CullingChunk> cullingChunks;
@@ -2935,6 +2968,9 @@ protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapan
         uint8_t mask = 0xFF;       // visibility
         int scatterGroupId = -1;   // direct InstanceManager lookup for large scatter groups
         bool rayFusionExcluded = false;
+        // Slot of a simulation splat pool. Its mask follows the slot's scale
+        // (0 = empty slot), so mask 0 here means "no particle", not "hidden".
+        bool simPoolSlot = false;
         uint32_t scatterInstanceIndex = UINT32_MAX;
         Matrix4x4 scatterSourceTransform = Matrix4x4::identity();
         int8_t scatterLodHint = -1; // -1=reclassify, 0=full, 1=proxy during paint

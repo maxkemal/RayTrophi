@@ -167,7 +167,8 @@ def required(method, namespaces):
         return "Read"
     if method in ("physics.collider.proxy_set.list",
                   "physics.collider.proxy_set.get",
-                  "physics.collider.proxy_set.sample"):
+                  "physics.collider.proxy_set.sample",
+                  "physics.collider.proxy_set.solver_stamps"):
         return "Read"
     # sim_graph.*: queries are Read, everything that builds the graph is
     # SceneWrite. Same ordering lesson as viewport.* — the read heuristics below

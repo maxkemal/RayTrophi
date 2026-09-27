@@ -1404,6 +1404,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["domain_max"] = vec3ToPython(info.domain_max);
         d["voxel_size"] = info.voxel_size;
         d["particle_count"] = info.particle_count;
+        d["active_density_cells"] = info.active_density_cells;
+        d["max_density"] = info.max_density;
         d["live_state"] = info.live_state;
         d["render_mode"] = info.render_mode;
         d["backend"] = info.backend;
@@ -1498,6 +1500,16 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_stiffness_below_load"] = info.granular_stiffness_below_load;
         d["surface_material"] = info.surface_material;
         d["splat_material"] = info.splat_material;
+        d["splat_geometry"] = info.splat_geometry;
+        d["splat_geometry_source"] = info.splat_geometry_source;
+        d["splat_subdivisions"] = info.splat_subdivisions;
+        d["splat_triangles"] = info.splat_triangles;
+        d["splat_radius_factor"] = info.splat_radius_factor;
+        d["splat_size_multiplier"] = info.splat_size_multiplier;
+        d["fog_spread_voxels"] = info.fog_spread_voxels;
+        d["particle_kelvin_measured"] = info.particle_kelvin_measured;
+        d["particle_min_kelvin"] = info.particle_min_kelvin;
+        d["particle_max_kelvin"] = info.particle_max_kelvin;
         d["surface_offset_voxels"] = info.surface_offset_voxels;
         // Porosity was readable over IPC but not from Python — a script could
         // set it and never read it back. Closed here rather than in a separate
@@ -1584,6 +1596,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["domain_max"] = vec3ToPython(info.domain_max);
             d["voxel_size"] = info.voxel_size;
             d["particle_count"] = info.particle_count;
+            d["active_density_cells"] = info.active_density_cells;
+            d["max_density"] = info.max_density;
             d["live_state"] = info.live_state;
             d["render_mode"] = info.render_mode;
             d["backend"] = info.backend;
@@ -1678,6 +1692,16 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["granular_stiffness_below_load"] = info.granular_stiffness_below_load;
             d["surface_material"] = info.surface_material;
             d["splat_material"] = info.splat_material;
+            d["splat_geometry"] = info.splat_geometry;
+            d["splat_geometry_source"] = info.splat_geometry_source;
+            d["splat_subdivisions"] = info.splat_subdivisions;
+            d["splat_triangles"] = info.splat_triangles;
+            d["splat_radius_factor"] = info.splat_radius_factor;
+            d["splat_size_multiplier"] = info.splat_size_multiplier;
+            d["fog_spread_voxels"] = info.fog_spread_voxels;
+            d["particle_kelvin_measured"] = info.particle_kelvin_measured;
+            d["particle_min_kelvin"] = info.particle_min_kelvin;
+            d["particle_max_kelvin"] = info.particle_max_kelvin;
             d["surface_offset_voxels"] = info.surface_offset_voxels;
             d["pore_amount"] = info.pore_amount;
             d["pore_scale"] = info.pore_scale;
@@ -1746,6 +1770,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["domain_max"] = vec3ToPython(info.domain_max);
         d["voxel_size"] = info.voxel_size;
         d["particle_count"] = info.particle_count;
+        d["active_density_cells"] = info.active_density_cells;
+        d["max_density"] = info.max_density;
         d["live_state"] = info.live_state;
         d["render_mode"] = info.render_mode;
         d["backend"] = info.backend;
@@ -1840,6 +1866,16 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_stiffness_below_load"] = info.granular_stiffness_below_load;
         d["surface_material"] = info.surface_material;
         d["splat_material"] = info.splat_material;
+        d["splat_geometry"] = info.splat_geometry;
+        d["splat_geometry_source"] = info.splat_geometry_source;
+        d["splat_subdivisions"] = info.splat_subdivisions;
+        d["splat_triangles"] = info.splat_triangles;
+        d["splat_radius_factor"] = info.splat_radius_factor;
+        d["splat_size_multiplier"] = info.splat_size_multiplier;
+        d["fog_spread_voxels"] = info.fog_spread_voxels;
+        d["particle_kelvin_measured"] = info.particle_kelvin_measured;
+        d["particle_min_kelvin"] = info.particle_min_kelvin;
+        d["particle_max_kelvin"] = info.particle_max_kelvin;
         d["surface_offset_voxels"] = info.surface_offset_voxels;
         // Porosity was readable over IPC but not from Python — a script could
         // set it and never read it back. Closed here rather than in a separate
@@ -1948,6 +1984,37 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
               [](const std::string& domain, const std::string& material) {
         requireResult(rtapi::setFluidSplatMaterial(domain, material));
     }, py::arg("domain"), py::arg("material") = std::string());
+
+    // Splat geometry of a liquid domain. None = leave that field alone.
+    fluid.def("set_splat_geometry",
+              [](const std::string& domain, const py::object& geometry,
+                 const py::object& geometry_source, const py::object& subdivisions,
+                 const py::object& radius_factor, const py::object& size_multiplier) {
+        rtapi::FluidSplatGeometryPatch patch;
+        if (!geometry.is_none()) patch.geometry = py::cast<std::string>(geometry);
+        if (!geometry_source.is_none()) patch.geometry_source = py::cast<std::string>(geometry_source);
+        if (!subdivisions.is_none()) patch.subdivisions = py::cast<int>(subdivisions);
+        if (!radius_factor.is_none()) patch.radius_factor = py::cast<float>(radius_factor);
+        if (!size_multiplier.is_none()) patch.size_multiplier = py::cast<float>(size_multiplier);
+        requireResult(rtapi::setFluidSplatGeometry(domain, patch));
+    }, py::arg("domain"), py::arg("geometry") = py::none(),
+       py::arg("geometry_source") = py::none(), py::arg("subdivisions") = py::none(),
+       py::arg("radius_factor") = py::none(), py::arg("size_multiplier") = py::none(),
+       "Splat geometry: geometry 'icosphere' | 'scene_object', geometry_source "
+       "(live scene node), subdivisions 0..3 (20/80/320/1280 triangles), "
+       "radius_factor 0.05..1.5, size_multiplier 0.05..8. Out-of-range values "
+       "are rejected, not clamped.");
+
+    // VolumeFog shaping of a liquid domain. None = leave that field alone.
+    fluid.def("set_fog",
+              [](const std::string& domain, const py::object& spread_voxels) {
+        rtapi::FluidFogPatch patch;
+        if (!spread_voxels.is_none()) patch.spread_voxels = py::cast<float>(spread_voxels);
+        requireResult(rtapi::setFluidFog(domain, patch));
+    }, py::arg("domain"), py::arg("spread_voxels") = py::none(),
+       "Volumetric Fog: spread_voxels 0..6 is the Gaussian sigma (simulation "
+       "voxels) applied to the splatted density before it is raymarched; 0 "
+       "draws the raw splat. Render-side only. Out-of-range values are rejected.");
 
     fluid.def("set_substance_material",
               [](const std::string& domain, const std::string& substance,
@@ -3579,6 +3646,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["graph_follows_timeline"] = info.graph_follows_timeline;
         d["root_motion"] = info.root_motion;
         d["root_motion_bone"] = info.root_motion_bone;
+        d["root_motion_resolved_bone"] = info.root_motion_resolved_bone;
+        d["root_motion_cycle_travel"] = py::make_tuple(info.root_motion_cycle_travel.x,
+                                                       info.root_motion_cycle_travel.y,
+                                                       info.root_motion_cycle_travel.z);
+        d["root_motion_travel_valid"] = info.root_motion_travel_valid;
         d["visible"] = info.visible;
         return d;
     };
@@ -3681,6 +3753,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     anim.def("set_loop", [](const std::string& character, bool loop, int layer) {
         requireResult(rtapi::setAnimLoop(character, loop, layer));
     }, py::arg("character"), py::arg("loop"), py::arg("layer") = 0);
+    anim.def("set_root_motion", [](const std::string& character, bool enabled, const std::string& bone) {
+        requireResult(rtapi::setAnimRootMotion(character, enabled, bone));
+    }, py::arg("character"), py::arg("enabled"), py::arg("bone") = std::string());
     anim.def("status", [playbackToDict](const std::string& character, int layer) {
         rtapi::AnimPlaybackInfo info;
         requireResult(rtapi::getAnimPlayback(character, layer, info));
@@ -4963,6 +5038,10 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         // okunmasi gereken andir.
         d["stale_descset_rebuilds"] = t.stale_descset_rebuilds;
         d["device_lost"] = t.device_lost;
+        d["raster_sphere_groups"] = t.raster_sphere_groups;
+        d["sphere_impostor_ready"] = t.sphere_impostor_ready;
+        d["sphere_impostors_uploaded"] = t.sphere_impostors_uploaded;
+        d["sphere_impostors_drawn"] = t.sphere_impostors_drawn;
         if (!t.available) return d;
         d["async_present"] = t.async_present;
         d["synchronous_present"] = t.synchronous_present;

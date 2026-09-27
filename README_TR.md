@@ -191,6 +191,7 @@ CPU, CUDA ve Vulkan Compute yürütme yollarına sahip, çok iş parçacıklı g
 - **Faza duyarlı katılaşma** — donan parçacıklar mevcut katı-faz overlay'ine girer ve biriken katmanlar oluşturabilir; minimum/ortalama/maksimum sıcaklık, katılaşan/eriyen/desteksiz parçacık sayıları ve viskozite aralığı panel, Python ve IPC üzerinden izlenir
 - **Çoklu-substance taşınımı** — parçacık substance kimliği advection ve reseeding boyunca korunur; substance başına materyal, temsil, viskozite, karışabilirlik ve faz kontrolleri bulunur
 - **Granüler/kohezif materyal modu** — sürtünme açısı, kohezyon, dilatancy, elastisite, çekme kesimi, hardening, compaction, fracture/damage, healing/rebonding ve termal yumuşama; kararlılık ve adaptif alt-adım telemetrisiyle birlikte
+- **Splat küre havuzları** — fluid, köpük ve parçacık splat'leri foliage proxy kartlarına düşürülmez; viewport havuzun her slotunu tutar, simülasyon ortasında doğan parçacıklar yeniden kurulum beklemeden görünür. Splat'ler varsayılan olarak 20 üçgenlik ikosfer; geometri, alt bölüm, yarıçap ve boyut Python ve IPC'den ayarlanır (`fluid.set_splat_geometry`)
 - Authoring arayüzü etkin ortam/doğum sıcaklığını, hızların zaman sabitlerini, faz eşiklerini, tahmini eşik geçiş sürelerini ve anında-donma ya da hiç-donmama uyarılarını gösterir
 
 ### Sıvı yüzey gölgeleme — izoyüzey artık bir materyal yüzeyi

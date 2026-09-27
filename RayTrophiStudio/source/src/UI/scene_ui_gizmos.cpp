@@ -27,6 +27,7 @@
 #include "MeshEdit/ProfileSplineOverlay.h"
 #include "MeshEdit/ProfileSplinePointGizmo.h"
 #include "UI/ParticleEmitterGizmo.h"
+#include "UI/KinematicColliderOverlay.h"
 #include "Backend/IViewportBackend.h"
 #include <Backend/VulkanBackend.h>
 #include <Backend/OptixBackend.h>
@@ -975,6 +976,8 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
     if (particles->aliveCount() == 0) {
         return;
     }
+    // Device-resident positions come home first (counted in particle.stats).
+    particles->syncHostState("debug_dots");
     const auto& buffers = particles->buffers();
     const std::size_t capacity = particles->capacity();
     const std::size_t stride = capacity > 4000 ? (capacity / 4000 + 1) : 1;
@@ -1016,16 +1019,24 @@ void SceneUI::uploadParticleBillboards(UIContext& ctx) {
     if (!vpb) {
         return;
     }
-    // Debug display mode uses the ImGui overlay instead; clear any billboards so we
     static ParticleBillboardUpload upload;  // reused: keeps vector capacity
+    // Debug display mode uses the ImGui overlay instead; clear any billboards so we
     // don't render both. Solid (0) and Render (2) draw real billboards.
     if (ctx.particle_display_mode == 1 || !ctx.scene.camera) {
         upload.additive.clear();
         upload.alpha.clear();
+        upload.pulled.clear();
+        upload.spheres.clear();
         vpb->uploadParticleBillboards(upload);
         return;
     }
-    ParticleBillboardBuilder::build(ctx.scene, upload);
+    // The viewport's own device decides which systems can be pulled from the
+    // simulation buffers; the rest become CPU quads.
+    void* viewport_device = nullptr;
+    if (auto* dev = vpb->getVulkanDevice()) {
+        viewport_device = static_cast<void*>(dev->getDevice());
+    }
+    ParticleBillboardBuilder::build(ctx.scene, viewport_device, upload);
     vpb->uploadParticleBillboards(upload);
 }
 
@@ -5006,6 +5017,9 @@ void SceneUI::drawSelectionGizmos(UIContext& ctx)
     drawSculptMaskViewportOverlay(ctx);
     RigUI::drawRigWeightMapOverlay(ctx);
     MeshEdit::drawProfileSplineOverlay(ctx);
+    if (viewport_settings.show_gizmos) {
+        KinematicColliderUI::drawViewportOverlay(ctx);
+    }
     // While a sculpt session owns the selected object, suppress the selection bbox /
     // outline / transform gizmo: the brush draws its own cursor + mask overlay, and the
     // selection outline kept re-tracing the brush-deformed dab edges (distracting + it

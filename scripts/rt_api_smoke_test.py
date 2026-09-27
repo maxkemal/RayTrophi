@@ -904,19 +904,23 @@ assert stats["emitter_count"] >= 1, "stats() counts must not wait for a step"
 assert stats["capacity"] >= stats["alive_count"]
 rt.particle.step(0.016)
 
-# Particle roadmap Phase 0: every stage reports where it ran, and the force
-# stage says WHY it ran there. "gpu" is the only status meaning the GPU result
-# was used.
+# Particle roadmap Phase 0 / 1.5 B: every stage reports where it ran, and the
+# step says WHY it ran there. "gpu_resident" is the only status meaning the
+# device ran it.
 stats = rt.particle.stats()
-for key in ("execution_policy", "compute_backend", "gpu_force_status",
-            "forces_on_gpu", "step_blocked", "stage_backends", "gpu_force_ms",
-            "force_upload_bytes", "force_download_bytes", "mirror_upload_bytes",
-            "nonfinite_particles"):
+for key in ("execution_policy", "compute_backend", "gpu_status",
+            "device_resident", "step_blocked", "stage_backends", "gpu_step_ms",
+            "residency", "resident_capacity", "slot_records",
+            "step_upload_bytes", "step_download_bytes", "snapshot_sync_count",
+            "snapshot_mirrored_steps", "snapshot_download_bytes",
+            "snapshot_last_reason", "nonfinite_particles", "nonfinite_measured"):
     assert key in stats, "particle.stats missing %s" % key
 assert set(stats["stage_backends"]) == {"emit", "forces", "integrate",
                                         "scene_collision", "self_collision"}
-assert (stats["gpu_force_status"] == "gpu") == stats["forces_on_gpu"]
-assert stats["nonfinite_particles"] == 0
+assert (stats["gpu_status"] == "gpu_resident") == stats["device_resident"]
+assert stats["residency"] in ("host", "equal", "device")
+if stats["nonfinite_measured"] or not stats["device_resident"]:
+    assert stats["nonfinite_particles"] == 0
 sample = rt.particle.get_state_sample(max_count=4)
 assert sample["alive_count"] == stats["alive_count"]
 assert sample["returned"] == min(4, sample["alive_count"])
@@ -936,9 +940,10 @@ assert rt.particle.get_physics()["execution_policy"] == "cpu"
 rt.particle.spawn(position=(0.0, 3.0, 0.0), lifetime_seconds=4.0)
 rt.particle.step(0.016)
 stats = rt.particle.stats()
-assert stats["gpu_force_status"] == "cpu_policy", stats["gpu_force_status"]
-assert stats["forces_on_gpu"] is False
-assert stats["force_download_bytes"] == 0, "CPU policy must not download velocity"
+assert stats["gpu_status"] == "cpu_policy", stats["gpu_status"]
+assert stats["device_resident"] is False
+assert stats["residency"] == "host", stats["residency"]
+assert stats["step_download_bytes"] == 0, "the CPU path makes no transfers"
 raised = False
 try:
     rt.particle.set_physics(execution_policy="__nope__")

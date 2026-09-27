@@ -25,6 +25,8 @@
 */
 
 #include "RtApiInternal.h"
+#include "Animation/RootMotionUnroll.h"
+#include "ProjectManager.h"
 
 #include <algorithm>
 #include <map>
@@ -81,6 +83,15 @@ AnimCharacterInfo infoFromContext(const SceneData::ImportedModelContext& ctx) {
     info.graph_follows_timeline = ctx.animGraphFollowTimeline;
     info.root_motion = ctx.useRootMotion;
     info.root_motion_bone = ctx.rootMotionBone;
+    if (ctx.animator && !ctx.animator->getAllClips().empty()) {
+        const AnimationClip& clip = ctx.animator->getAllClips().front();
+        info.root_motion_resolved_bone = !ctx.rootMotionBone.empty()
+            ? ctx.rootMotionBone
+            : ctx.animator->findBestRootMotionBone(clip.name);
+        info.root_motion_travel_valid = clip.sourceData &&
+            RootMotionUnroll::cycleTravel(*clip.sourceData, info.root_motion_resolved_bone,
+                                          info.root_motion_cycle_travel);
+    }
     info.visible = ctx.visible;
     return info;
 }
@@ -295,6 +306,24 @@ Result setAnimLoop(const std::string& character, bool loop, int layer) {
     if (Result r = requireCharacter(character, ctx); !r) return r;
     if (Result r = requireLayer(layer); !r) return r;
     ctx->animator->setLoop(loop, layer);
+    return Result::success();
+}
+
+Result setAnimRootMotion(const std::string& character, bool enabled, const std::string& bone) {
+    SceneData::ImportedModelContext* ctx = nullptr;
+    if (Result r = requireCharacter(character, ctx); !r) return r;
+    if (!bone.empty()) {
+        // A bone without translation keys would be accepted and never move:
+        // refuse it instead of storing a silent no-op.
+        const auto& clips = ctx->animator->getAllClips();
+        const bool keyed = !clips.empty() && clips.front().sourceData &&
+            clips.front().sourceData->positionKeys.count(bone) != 0;
+        if (!keyed)
+            return Result::fail("root motion bone has no position keys in the first clip: " + bone);
+    }
+    ctx->useRootMotion = enabled;
+    ctx->rootMotionBone = bone;
+    ProjectManager::getInstance().markModified();
     return Result::success();
 }
 

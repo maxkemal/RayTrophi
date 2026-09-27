@@ -954,6 +954,9 @@
     <ClCompile Include="source\src\Physics\ParticleSimulationAppearance.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Physics\ParticleDeviceResidency.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\MeshEdit\HalfEdgeMesh.cpp">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClCompile>
@@ -1087,6 +1090,9 @@
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\FluidDomainRenderLifecycle.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidFogDensity.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\FluidParticleSolidRecovery.cpp">
@@ -1474,6 +1480,9 @@
       <Filter>Kaynak Dosyalar\Scene</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Animation\AnimationController.cpp">
+      <Filter>Kaynak Dosyalar\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RootMotionUnroll.cpp">
       <Filter>Kaynak Dosyalar\Animation</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Animation\AnimationNodes.cpp">
@@ -2267,11 +2276,20 @@
   <ItemGroup>
     <ClInclude Include="source\include\KinematicColliderSource.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\include\KinematicColliderScene.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\KinematicColliderSerialization.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\KinematicColliderVoxelizer.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Animation\RootMotionUnroll.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\UI\KinematicColliderAuthoringUI.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\UI\KinematicColliderOverlay.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\include\Api\RtApiKinematicCollider.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\src\Api\RtIpcKinematicCollider.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\src\Api\RtPythonKinematicCollider.h"><Filter>Header Files</Filter></ClInclude>
     <ClCompile Include="source\src\Physics\KinematicColliderSource.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\Physics\KinematicColliderScene.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Physics\KinematicColliderSerialization.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Physics\KinematicColliderVoxelizer.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\KinematicColliderAuthoringUI.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\KinematicColliderOverlay.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\Api\RtApiKinematicCollider.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\Api\RtIpcKinematicCollider.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\Api\RtPythonKinematicCollider.cpp"><Filter>Source Files</Filter></ClCompile>

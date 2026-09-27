@@ -55,6 +55,7 @@ struct KinematicProxySet {
     // rather than pretending it was honored.
     std::string target_node_id;
     bool enabled = true;
+    bool viewport_visible = true;
     uint32_t consumer_mask = KinematicConsumerAll;
     float friction = 0.45f;
     float restitution = 0.0f;
@@ -68,11 +69,18 @@ struct KinematicJointPose {
     std::string parent;
     Matrix4x4 world = Matrix4x4::identity();
     bool weighted = false;
+    // Bone-local bounds of the rest-pose skinned vertices whose dominant
+    // influence is this joint. False when the joint dominates no vertex, in
+    // which case auto-fit falls back to joint-only heuristics.
+    bool has_mesh_bounds = false;
+    Vec3 mesh_bounds_min = Vec3(0.0f);
+    Vec3 mesh_bounds_max = Vec3(0.0f);
 };
 
 struct KinematicAutoFitOptions {
     bool replace_existing = true;
     bool weighted_bones_only = true;
+    bool include_detail_bones = false;
     float radius_fraction = 0.18f;
     float minimum_radius = 0.025f;
     float maximum_radius = 0.20f;
@@ -88,6 +96,9 @@ struct KinematicProxySample {
     std::string target_character;
     std::string bone;
     KinematicProxyShape shape = KinematicProxyShape::Capsule;
+    uint32_t consumer_mask = KinematicConsumerAll;
+    float friction = 0.45f;
+    float restitution = 0.0f;
     bool resolved = false;
     std::string unresolved_reason;
 

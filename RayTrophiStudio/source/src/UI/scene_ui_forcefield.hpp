@@ -35,6 +35,7 @@
 #include "scene_ui_molten_transfer.hpp"
 #include "scene_ui_particle_usage.hpp"
 #include "UI/ParticleSystemAuthoringUI.h"
+#include "UI/KinematicColliderAuthoringUI.h"
 #include "UI/ParticleAppearanceUI.h"
 #include <algorithm>
 #include <chrono>
@@ -764,7 +765,9 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Where the particle step may run.\n\n"
-                                  "Auto: use GPU stages that exist, fall back to CPU and report why.\n"
+                                  "Auto: run the whole step on the GPU when the system allows it\n"
+                                  "(no colliders, no self collision, no grid domain), otherwise the\n"
+                                  "CPU, and report why.\n"
                                   "GPU Required: never fall back; the step is refused instead.\n"
                                   "CPU: reference implementation, used for baselines.");
             }
@@ -772,13 +775,15 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 // What the LAST step actually did -- the setting above is only
                 // the request. Same values particle.stats reports.
                 const auto& step_stats = particles->stats();
-                ImGui::TextDisabled("Last step: forces %s (%s), %s",
-                                    step_stats.forces_on_gpu ? "GPU" : "CPU",
-                                    step_stats.gpu_force_status,
-                                    step_stats.compute_backend);
+                ImGui::TextDisabled("Last step: %s (%s), %s, state on %s",
+                                    step_stats.device_resident ? "GPU" : "CPU",
+                                    step_stats.gpu_status,
+                                    step_stats.compute_backend,
+                                    RayTrophiSim::particleKinematicResidencyName(
+                                        particles->kinematicResidency()));
                 if (step_stats.step_blocked) {
                     ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
-                                       "Step blocked: GPU required but unavailable");
+                                       "Step blocked: GPU required (%s)", step_stats.gpu_status);
                 }
             }
 
@@ -1336,10 +1341,12 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 fluid->render_mode = RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;
                 current_mode_idx = 1;
             }
-            const char* fluid_render_modes[] = { "Particles (Spheres)", "Surface SDF" };
+            const char* fluid_render_modes[] = {
+                "Particles (Spheres)", "Surface SDF"
+            };
             if (ImGui::Combo("Render Mode##Fluid", &current_mode_idx,
-                             fluid_render_modes, 2)) {
-                fluid->render_mode = (current_mode_idx == 0)
+                             fluid_render_modes, IM_ARRAYSIZE(fluid_render_modes))) {
+                fluid->render_mode = current_mode_idx == 0
                     ? RayTrophiSim::Fluid::FluidRenderMode::Particles
                     : RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;
                 ui_ctx.start_render = true;
@@ -1395,7 +1402,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 }
             }
 
-            if (fluid->render_mode != RayTrophiSim::Fluid::FluidRenderMode::Particles) {
+            if (fluid->render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) {
                 if (!fluid->shader) {
                     fluid->shader = VolumeShader::createSmokePreset();
                     fluid->shader->name = (fluid->render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF)
@@ -3626,6 +3633,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
     if (simulation_section == 3) {
         if (section_changed) clearForceFieldSelection();
         drawColliderControls();
+        KinematicColliderUI::drawAuthoringPanel(ui_ctx);
         return;
     }
     if (simulation_section == 4) {

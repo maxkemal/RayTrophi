@@ -86,6 +86,7 @@ json setToJson(const RayTrophiSim::KinematicProxySet& set) {
         {"target_character", set.target_character},
         {"target_node_id", set.target_node_id},
         {"enabled", set.enabled},
+        {"viewport_visible", set.viewport_visible},
         {"consumer_mask", set.consumer_mask},
         {"friction", set.friction},
         {"restitution", set.restitution},
@@ -109,6 +110,9 @@ json sampleToJson(const RayTrophiSim::KinematicProxySample& sample) {
         {"target_character", sample.target_character},
         {"bone", sample.bone},
         {"shape", RayTrophiSim::kinematicProxyShapeName(sample.shape)},
+        {"consumer_mask", sample.consumer_mask},
+        {"friction", sample.friction},
+        {"restitution", sample.restitution},
         {"resolved", sample.resolved},
         {"unresolved_reason", sample.unresolved_reason},
         {"world_transform", std::move(matrix)},
@@ -134,6 +138,9 @@ void patchSet(const json& params, RayTrophiSim::KinematicProxySet& set) {
     }
     if (params.contains("enabled")) {
         set.enabled = params["enabled"].get<bool>();
+    }
+    if (params.contains("viewport_visible")) {
+        set.viewport_visible = params["viewport_visible"].get<bool>();
     }
     if (params.contains("consumer_mask")) {
         set.consumer_mask = params["consumer_mask"].get<uint32_t>();
@@ -268,6 +275,10 @@ bool dispatchKinematicColliderIpc(
             options.weighted_bones_only =
                 params["weighted_bones_only"].get<bool>();
         }
+        if (params.contains("include_detail_bones")) {
+            options.include_detail_bones =
+                params["include_detail_bones"].get<bool>();
+        }
         options.radius_fraction = optionalFloat(
             params, "radius_fraction", options.radius_fraction);
         options.minimum_radius = optionalFloat(
@@ -343,6 +354,40 @@ bool dispatchKinematicColliderIpc(
             json out = json::array();
             for (const auto& sample : samples) {
                 out.push_back(sampleToJson(sample));
+            }
+            return out;
+        });
+        return true;
+    }
+    if (method == "physics.collider.proxy_set.solver_stamps") {
+        out_result = enqueue([](UIContext&) {
+            std::vector<rtapi::KinematicSolverStamps> systems;
+            const rtapi::Result result =
+                rtapi::getKinematicSolverStamps(systems);
+            if (!result.ok) {
+                return json{{"__error", result.error}};
+            }
+            json out = json::array();
+            for (const auto& system : systems) {
+                json stamps = json::array();
+                for (const auto& stamp : system.stamps) {
+                    stamps.push_back(json{
+                        {"domain", stamp.domain},
+                        {"consumer_mask", stamp.consumer_mask},
+                        {"frame", stamp.frame},
+                        {"set_id", stamp.set_id},
+                        {"proxy_id", stamp.proxy_id},
+                        {"proxy_name", stamp.proxy_name},
+                        {"stamped_cells", stamp.stamped_cells},
+                        {"linear_velocity", vec3ToJson(stamp.linear_velocity)},
+                        {"angular_velocity", vec3ToJson(stamp.angular_velocity)},
+                        {"velocity_valid", stamp.velocity_valid}});
+                }
+                out.push_back(json{
+                    {"system_id", system.system_id},
+                    {"system_name", system.system_name},
+                    {"steps", system.steps},
+                    {"stamps", std::move(stamps)}});
             }
             return out;
         });

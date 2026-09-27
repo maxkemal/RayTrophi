@@ -652,7 +652,8 @@ bool VulkanBackendAdapter::ensureRayFusionSceneAS() {
         std::to_string(state->instanceCount) + " instances, " +
         std::to_string(state->skinnedBlasIndices.size()) + " skinned, " +
         std::to_string(state->asBytes / 1024u) + " KB, " +
-        std::to_string(state->lastBuildMs) + " ms");
+        std::to_string(state->lastBuildMs) + " ms, device=" +
+        std::to_string(reinterpret_cast<uintptr_t>(m_device->getDevice())));
     return true;
 }
 
@@ -790,7 +791,8 @@ bool VulkanBackendAdapter::rebuildRayFusionTLAS() {
         if (instance.mask == 0) {
             // Counted only for instances that would OTHERWISE be traced, so the
             // number answers "what did visibility remove", not "what is absent".
-            ++state->instancesHidden;
+            // An empty splat-pool slot is absent, not removed.
+            if (!instance.simPoolSlot) ++state->instancesHidden;
             continue;
         }
         if (tlasInfo.instances.size() >= kMaxSceneASInstances) {

@@ -1,9 +1,10 @@
-#include "scene_ui_forcefield.hpp"
+﻿#include "scene_ui_forcefield.hpp"
 #include "scene_ui_fluid_thermal.hpp"
 #include "ui_modern.h"
 
 #include "Api/RtApi.h"
 #include "Fluid/FluidSplatMaterialAuthoring.h"
+#include "Fluid/FluidFogDensity.h"
 
 namespace ForceFieldUI {
 
@@ -2590,9 +2591,11 @@ void drawSimulationDomainControls(
                         ImGui::Spacing();
                     ImGui::TextDisabled("Domain default; Substance Overrides can replace it per liquid type.");
 
-                    int current_mode_idx = 0; // default to Particles
+                    int current_mode_idx = 0; // default to explicit spheres
                     if (domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) {
                         current_mode_idx = 1;
+                    } else if (domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::VolumeFog) {
+                        current_mode_idx = 2;
                     } else if (domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Volume) {
                         // Display only — do NOT write. Drawing a panel must never
                         // repair scene data: this assignment was the real reason a
@@ -2601,21 +2604,28 @@ void drawSimulationDomainControls(
                         // invalid 'Volume' liquid mode where it is consumed.
                         current_mode_idx = 1;
                     }
-                    const char* fluid_render_modes[] = { "Splat Spheres (Fast Preview)", "Smooth Glassy Surface (Level Set SDF)" };
+                    const char* fluid_render_modes[] = {
+                        "Splat Spheres (Exact Geometry)",
+                        "Smooth Glassy Surface (Level Set SDF)",
+                        "Volumetric Fog / Gas (Density Volume)"
+                    };
                     if (ImGui::Combo("Visualization Mode##DomainFluid", &current_mode_idx,
-                                     fluid_render_modes, 2)) {
-                        domain.fluid_render_mode = (current_mode_idx == 0)
-                             ? RayTrophiSim::Fluid::FluidRenderMode::Particles
-                             : RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;
+                                     fluid_render_modes, IM_ARRAYSIZE(fluid_render_modes))) {
+                        domain.fluid_render_mode = current_mode_idx == 0
+                            ? RayTrophiSim::Fluid::FluidRenderMode::Particles
+                            : (current_mode_idx == 1
+                                ? RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF
+                                : RayTrophiSim::Fluid::FluidRenderMode::VolumeFog);
                         scene.requestSimulationTimelineRenderResync();
                         ui_ctx.start_render = true;
                     }
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Choose how the liquid particles are visualised:\n\n"
-                                          "1. Splat Spheres: Renders individual particles as solid spheres (high performance).\n"
-                                          "2. Smooth Surface: Reconstructs a glassy, refractive fluid mesh boundary.");
+                                          "1. Splat Spheres: exact sphere geometry for every particle.\n"
+                                          "2. Smooth Surface: reconstructs a glassy, refractive fluid boundary.\n"
+                                          "3. Volumetric Fog: raymarches the liquid's splatted density with the\n"
+                                          "   Volume Material below (mist, murky water, gas-like looks).");
                     }
-
                     // ★★★ WHAT IS ACTUALLY DRAWN, resolved the way the render
                     // bridge resolves it. Two knobs answer one question here — a
                     // domain default and a per-substance override — and the combo
@@ -2625,32 +2635,53 @@ void drawSimulationDomainControls(
                     // rule the bridge uses is the only line in this panel that
                     // cannot drift from the picture.
                     {
-                        const bool domain_is_splat = (current_mode_idx == 0);
-                        std::string as_spheres, as_surface;
+                        const bool domain_is_splat = current_mode_idx == 0;
+                        // The domain has ONE volume, drawn either as an isosurface or
+                        // as fog. Any SurfaceSDF override claims it for the surface
+                        // (syncSimulationRenderVolumes: fluid_surface_route), so a fog
+                        // default then shows nothing as fog -- report that, do not
+                        // promise it.
+                        const bool any_sdf_override = std::any_of(
+                            domain.fluid_substance_materials.begin(),
+                            domain.fluid_substance_materials.end(),
+                            [](const auto& b) {
+                                return b.representation ==
+                                    RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF;
+                            });
+                        const bool domain_is_fog = current_mode_idx == 2 && !any_sdf_override;
+                        std::string as_spheres, as_surface, as_fog;
+                        auto default_bucket = [&]() -> std::string& {
+                            return domain_is_splat ? as_spheres
+                                                   : (domain_is_fog ? as_fog : as_surface);
+                        };
                         for (const auto& b : domain.fluid_substance_materials) {
-                            bool splat = domain_is_splat;
+                            std::string* bucket = &default_bucket();
                             if (b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::Splat)
-                                splat = true;
+                                bucket = &as_spheres;
                             else if (b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF)
-                                splat = false;
-                            std::string& bucket = splat ? as_spheres : as_surface;
-                            if (!bucket.empty()) bucket += ", ";
-                            bucket += b.substance.empty() ? std::string("(unnamed)") : b.substance;
+                                bucket = &as_surface;
+                            if (!bucket->empty()) *bucket += ", ";
+                            *bucket += b.substance.empty() ? std::string("(unnamed)") : b.substance;
                         }
                         // Untagged particles never match a binding, so they always
                         // follow the domain default. They are the reason the
                         // default still matters once every substance overrides it.
                         {
-                            std::string& bucket = domain_is_splat ? as_spheres : as_surface;
+                            std::string& bucket = default_bucket();
                             if (!bucket.empty()) bucket += ", ";
                             bucket += "untagged";
                         }
                         ImGui::TextDisabled("Now drawing:");
                         ImGui::Indent(8.0f);
+                        if (current_mode_idx == 2 && any_sdf_override)
+                            ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f),
+                                "A Surface SDF override takes the domain volume; fog is not drawn.");
+                        if (!as_fog.empty())
+                            ImGui::TextWrapped("Fog volume: %s", as_fog.c_str());
                         if (!as_surface.empty())
                             ImGui::TextWrapped("Isosurface: %s", as_surface.c_str());
                         if (!as_spheres.empty())
-                            ImGui::TextWrapped("Splat spheres: %s", as_spheres.c_str());
+                            ImGui::TextWrapped("Particle representation: %s", as_spheres.c_str());
                         ImGui::Unindent(8.0f);
                     }
 
@@ -3521,7 +3552,8 @@ void drawSimulationDomainControls(
                                 // normalises to — Surface SDF: the panel told you to
                                 // pick a setting the combo already showed as picked.
                                 if (fo.render_mode == RayTrophiSim::Fluid::FoamRenderMode::Volume &&
-                                    domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) {
+                                    domain.fluid_render_mode ==
+                                        RayTrophiSim::Fluid::FluidRenderMode::Particles) {
                                     ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
                                         "  Volume foam needs Fluid Render = Surface SDF (it rides that volume).");
                                 }
@@ -3733,8 +3765,20 @@ void drawSimulationDomainControls(
                     }
 
                     // NanoVDB shader UI
+                    const bool fog_mode =
+                        domain.fluid_render_mode ==
+                            RayTrophiSim::Fluid::FluidRenderMode::VolumeFog;
                     const bool wants_volume_panel =
-                        domain.fluid_render_mode != RayTrophiSim::Fluid::FluidRenderMode::Particles;
+                        fog_mode ||
+                        domain.fluid_render_mode ==
+                            RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF ||
+                        std::any_of(
+                            domain.fluid_substance_materials.begin(),
+                            domain.fluid_substance_materials.end(),
+                            [](const auto& binding) {
+                                return binding.representation ==
+                                    RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF;
+                            });
                     if (wants_volume_panel) {
                         if (!domain.shader) {
                             domain.shader = VolumeShader::createSmokePreset();
@@ -3744,7 +3788,12 @@ void drawSimulationDomainControls(
                             domain.shader->scattering.coefficient = 1.1f;
                             domain.shader->absorption.coefficient = 0.04f;
                         }
-                        if (UIWidgets::CollapsingHeader("Volumetric Absorption & Density", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        // Same VolumeShader in both modes, two meanings: in fog mode it IS
+                        // the material; under SDF it only tints the built-in dielectric.
+                        if (UIWidgets::CollapsingHeader(
+                                fog_mode ? "Volume Material (Fog)##LiquidVolume"
+                                         : "Volumetric Absorption & Density##LiquidVolume",
+                                ImGuiTreeNodeFlags_DefaultOpen)) {
                             ImGui::Spacing();
                             const bool has_surface_sdf =
                                 domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF ||
@@ -3762,6 +3811,35 @@ void drawSimulationDomainControls(
                                     "the SDF. Shape comes from Surface SDF Settings. Scattering/Absorption "
                                     "shade the built-in dielectric; a bound Principled BSDF uses its own "
                                     "Transmission and Interior controls.");
+                                ImGui::Separator();
+                            }
+                            if (fog_mode) {
+                                // Same field and range as fluid.set_fog spread_voxels.
+                                if (ImGui::SliderFloat("Fog Spread (voxels)##LiquidFog",
+                                                       &domain.fluid_fog_spread_voxels, 0.0f,
+                                                       RayTrophiSim::Fluid::kFogSpreadMaxVoxels, "%.2f")) {
+                                    domain.fluid_fog_spread_voxels = std::clamp(
+                                        domain.fluid_fog_spread_voxels, 0.0f,
+                                        RayTrophiSim::Fluid::kFogSpreadMaxVoxels);
+                                    scene.requestSimulationTimelineRenderResync();
+                                    ui_ctx.renderer.resetCPUAccumulation();
+                                    if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
+                                    ui_ctx.start_render = true;
+                                }
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip(
+                                        "Gaussian spread of the particle density before it is drawn.\n"
+                                        "0 = raw splat (spray shows as dots); 1.5-3 = continuous cloud.\n"
+                                        "Render only: does not change the simulation.");
+                                if (domain.shader &&
+                                    (domain.shader->emission.mode == VolumeEmissionMode::Blackbody ||
+                                     domain.shader->emission.mode == VolumeEmissionMode::ChannelDriven)) {
+                                    ImGui::TextWrapped(
+                                        "Emission temperature = particle Kelvin. Ambient liquid barely "
+                                        "glows (radiance ~ T^4); give the Flow Source a temperature "
+                                        "override for hot liquid, and enable the thermal chain to "
+                                        "let it cool.");
+                                }
                                 ImGui::Separator();
                             }
                             if (SceneUI::drawVolumeShaderUI(ui_ctx, domain.shader, nullptr, nullptr)) {

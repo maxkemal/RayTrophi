@@ -183,7 +183,8 @@ public:
     void initializeAnimationSystem(SceneData& scene);
     
     // Update animation using the new node graph system (returns true if geometry changed)
-    bool updateAnimationWithGraph(SceneData& scene, float deltaTime, bool apply_cpu_skinning = true);
+    // timelineSeconds < 0: not a timeline evaluation; timeline-driven graphs keep their clip time.
+    bool updateAnimationWithGraph(SceneData& scene, float deltaTime, bool apply_cpu_skinning = true, float timelineSeconds = -1.0f);
     
     // Flag to use new animation system (can be toggled for compatibility)
     bool useNewAnimationSystem = false;

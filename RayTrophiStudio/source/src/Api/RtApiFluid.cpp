@@ -9,6 +9,7 @@
 
 #include "RtApiInternal.h"
 #include "Fluid/FluidObject.h"
+#include "Fluid/FluidFogDensity.h"
 #include "Fluid/FluidSimulationSystem.h"
 #include "Fluid/SubstanceTag.h"
 #include "Fluid/APICFluidSolver.h"
@@ -48,6 +49,17 @@ const char* fluidPresetName(RayTrophiSim::Fluid::APICSolverParams::FluidPreset p
         case FluidPreset::Wax:           return "wax";
         case FluidPreset::Custom:
         default:                     return "custom";
+    }
+}
+
+const char* fluidRenderModeName(RayTrophiSim::Fluid::FluidRenderMode mode) {
+    using Mode = RayTrophiSim::Fluid::FluidRenderMode;
+    switch (mode) {
+        case Mode::Particles:        return "particles";
+        case Mode::SurfaceSDF:       return "surface";
+        case Mode::VolumeFog:        return "fog";
+        case Mode::Volume:
+        default:                     return "volume";
     }
 }
 
@@ -144,6 +156,16 @@ void fillFluidSurfaceMaterial(const RayTrophiSim::SimulationGridDomainDesc& d,
     info.solid_phase_fill = d.fluid_solid_phase_fill;
     info.uvw_refresh_period = d.fluid_params.uvw_refresh_period;
     info.splat_material = RayTrophiSim::Fluid::fluidSplatMaterialName(d);
+    info.splat_geometry =
+        d.fluid_particle_geometry_mode == 1 ? "scene_object" : "icosphere";
+    info.splat_geometry_source = d.fluid_particle_geometry_source;
+    info.splat_subdivisions = std::clamp(d.fluid_particle_subdivisions, 0, 3);
+    // Same clamp the bridge applies; 20 * 4^level icosahedron faces.
+    info.splat_triangles = d.fluid_particle_geometry_mode == 1
+        ? 0 : 20 << (2 * info.splat_subdivisions);
+    info.splat_radius_factor = d.fluid_particle_radius_factor;
+    info.splat_size_multiplier = d.fluid_particle_size_multiplier;
+    info.fog_spread_voxels = d.fluid_fog_spread_voxels;
 
     // Substance -> material bindings, with the material NAME resolved. A script
     // that could only read the id would have to keep its own copy of the
@@ -151,6 +173,14 @@ void fillFluidSurfaceMaterial(const RayTrophiSim::SimulationGridDomainDesc& d,
     info.substance_materials.clear();
     {
         const auto& all = MaterialManager::getInstance().getAllMaterials();
+        // One domain volume: any SurfaceSDF override claims it for the
+        // isosurface, so a fog default cannot be what Inherit resolves to.
+        const bool any_sdf_override = std::any_of(
+            d.fluid_substance_materials.begin(), d.fluid_substance_materials.end(),
+            [](const auto& b) {
+                return b.representation ==
+                    RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF;
+            });
         for (const auto& b : d.fluid_substance_materials) {
             FluidDomainInfo::SubstanceMaterialBinding out_b;
             out_b.substance = b.substance;
@@ -166,7 +196,11 @@ void fillFluidSurfaceMaterial(const RayTrophiSim::SimulationGridDomainDesc& d,
             out_b.effective_representation =
                 b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::Splat ? "splat" :
                 b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF ? "sdf" :
-                (d.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles ? "splat" : "sdf");
+                (d.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles
+                    ? "splat"
+                    : (d.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::VolumeFog &&
+                       !any_sdf_override
+                        ? "fog" : "sdf"));
             if (b.material_id >= 0 &&
                 static_cast<std::size_t>(b.material_id) < all.size() &&
                 all[static_cast<std::size_t>(b.material_id)]) {
@@ -306,6 +340,28 @@ void fillFluidSolidPhase(const RayTrophiSim::SimulationGridDomainState& state,
     info.thermal_viscosity_field = ts.viscosity_field_built;
     info.thermal_min_viscosity = ts.min_viscosity;
     info.thermal_max_viscosity = ts.max_viscosity;
+}
+
+// The splatted density grid is what the Volume (fog) render mode draws; a
+// liquid that shows no fog with active_density_cells > 0 is a render problem,
+// with 0 it is a producer problem.
+void fillFluidDensityStats(const RayTrophiSim::SimulationGridDomainState& state,
+                           FluidDomainInfo& info) {
+    info.active_density_cells = state.active_density_cells;
+    info.max_density = state.max_density;
+    // 0 K marks an unwritten parcel, not a cold one (FluidParticles::temperature).
+    const auto& temps = state.particles.temperature;
+    float t_min = 0.0f, t_max = 0.0f;
+    bool any = false;
+    for (float t : temps) {
+        if (!std::isfinite(t) || t <= 0.0f) continue;
+        t_min = any ? std::min(t_min, t) : t;
+        t_max = any ? std::max(t_max, t) : t;
+        any = true;
+    }
+    info.particle_kelvin_measured = any;
+    info.particle_min_kelvin = t_min;
+    info.particle_max_kelvin = t_max;
 }
 
 void fillFluidMaterialCoords(const RayTrophiSim::SimulationGridDomainState& state,
@@ -488,6 +544,77 @@ Result setFluidSurfaceDetail(const std::string& domain_id_or_name,
     // Same commit the panel's sdf_changed does: rebuild the surface from the
     // current particles (no simulation reset) and drop the converged image, or
     // a script that sets a knob and renders captures mostly the OLD surface.
+    g_ctx->scene.requestSimulationTimelineRenderResync();
+    g_ctx->renderer.resetCPUAccumulation();
+    if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
+    g_ctx->start_render = true;
+    return Result::success();
+}
+
+Result setFluidSplatGeometry(const std::string& domain_id_or_name,
+                             const FluidSplatGeometryPatch& patch) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    auto finiteIn = [](const std::optional<float>& v, float lo, float hi) {
+        return !v || (std::isfinite(*v) && *v >= lo && *v <= hi);
+    };
+    int geometry_mode = -1;
+    if (patch.geometry) {
+        if (*patch.geometry == "icosphere") geometry_mode = 0;
+        else if (*patch.geometry == "scene_object") geometry_mode = 1;
+        else return Result::fail("geometry must be 'icosphere' or 'scene_object'");
+    }
+    if (patch.subdivisions && (*patch.subdivisions < 0 || *patch.subdivisions > 3))
+        return Result::fail("subdivisions must be in [0, 3]");
+    if (!finiteIn(patch.radius_factor, 0.05f, 1.5f))
+        return Result::fail("radius_factor must be in [0.05, 1.5]");
+    if (!finiteIn(patch.size_multiplier, 0.05f, 8.0f))
+        return Result::fail("size_multiplier must be in [0.05, 8]");
+    if (patch.geometry_source && !patch.geometry_source->empty() &&
+        !g_ctx->scene.hasLiveSimulationObject(*patch.geometry_source))
+        return Result::fail("geometry_source is not a live scene object: " +
+                            *patch.geometry_source);
+
+    Result found;
+    auto* dom = findLiquidDomainDesc(domain_id_or_name, found);
+    if (!dom) return found;
+    const std::string resulting_source =
+        patch.geometry_source ? *patch.geometry_source : dom->fluid_particle_geometry_source;
+    const int resulting_mode = geometry_mode >= 0 ? geometry_mode : dom->fluid_particle_geometry_mode;
+    // The bridge falls back to the icosphere for a missing node and says so
+    // only in the panel. A script asking for scene_object must name one.
+    if (resulting_mode == 1 && !g_ctx->scene.hasLiveSimulationObject(resulting_source))
+        return Result::fail("geometry 'scene_object' needs geometry_source naming a live scene object");
+
+    if (geometry_mode >= 0) dom->fluid_particle_geometry_mode = geometry_mode;
+    if (patch.geometry_source) dom->fluid_particle_geometry_source = *patch.geometry_source;
+    if (patch.subdivisions) dom->fluid_particle_subdivisions = *patch.subdivisions;
+    if (patch.radius_factor) dom->fluid_particle_radius_factor = *patch.radius_factor;
+    if (patch.size_multiplier) dom->fluid_particle_size_multiplier = *patch.size_multiplier;
+
+    // Same commit as the panel: the bridge rebuilds its source on the next
+    // update from the current particles; no simulation reset.
+    g_ctx->scene.requestSimulationTimelineRenderResync();
+    g_ctx->renderer.resetCPUAccumulation();
+    if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
+    g_ctx->start_render = true;
+    return Result::success();
+}
+
+Result setFluidFog(const std::string& domain_id_or_name,
+                   const FluidFogPatch& patch) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (patch.spread_voxels &&
+        !(std::isfinite(*patch.spread_voxels) && *patch.spread_voxels >= 0.0f &&
+          *patch.spread_voxels <= RayTrophiSim::Fluid::kFogSpreadMaxVoxels))
+        return Result::fail("spread_voxels must be in [0, 6]");
+    Result found;
+    auto* dom = findLiquidDomainDesc(domain_id_or_name, found);
+    if (!dom) return found;
+    if (patch.spread_voxels) dom->fluid_fog_spread_voxels = *patch.spread_voxels;
+    // The bridge only re-uploads a volume when asked; on a paused timeline
+    // nothing else would.
     g_ctx->scene.requestSimulationTimelineRenderResync();
     g_ctx->renderer.resetCPUAccumulation();
     if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
@@ -839,8 +966,7 @@ Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_m
     out_info.domain_max = obj->domain_max;
     out_info.voxel_size = obj->voxel_size;
     out_info.particle_count = obj->particles.size();
-    out_info.render_mode = (obj->render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) ? "surface" :
-                           (obj->render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
+    out_info.render_mode = fluidRenderModeName(obj->render_mode);
     out_info.boundary = (obj->params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Open) ? "open" :
                         (obj->params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Periodic) ? "periodic" : "closed";
     fillFluidRheology(obj->params, out_info);
@@ -856,9 +982,7 @@ Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_m
     // Filtering on it would pick a domain the solver is not running as granular
     // at all, and nothing would report an error.
     if (grid_dom) {
-        out_info.render_mode =
-            (grid_dom->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) ? "surface" :
-            (grid_dom->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
+        out_info.render_mode = fluidRenderModeName(grid_dom->fluid_render_mode);
         out_info.boundary =
             (grid_dom->fluid_params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Open) ? "open" :
             (grid_dom->fluid_params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Periodic) ? "periodic" : "closed";
@@ -943,9 +1067,7 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
         out_info.domain_max = gd->bounds_max;
         out_info.voxel_size = gd->voxel_size;
         out_info.particle_count = 0;
-        out_info.render_mode =
-            (gd->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) ? "surface" :
-            (gd->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
+        out_info.render_mode = fluidRenderModeName(gd->fluid_render_mode);
         out_info.boundary =
             (gd->boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Open) ? "open" :
             (gd->boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic) ? "periodic" : "closed";
@@ -968,6 +1090,7 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
                 out_info.particle_count = states[gd_index].particles.size();
                 out_info.live_state = true;  // only now is the count a measurement
                 fillFluidMaterialCoords(states[gd_index], out_info);
+                fillFluidDensityStats(states[gd_index], out_info);
                 fillFluidSolidPhase(states[gd_index], out_info);
             }
         }
@@ -1025,8 +1148,7 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
     out_info.domain_max = obj->domain_max;
     out_info.voxel_size = obj->voxel_size;
     out_info.particle_count = obj->particles.size();
-    out_info.render_mode = (obj->render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) ? "surface" :
-                           (obj->render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
+    out_info.render_mode = fluidRenderModeName(obj->render_mode);
     out_info.boundary = (obj->params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Open) ? "open" :
                         (obj->params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Periodic) ? "periodic" : "closed";
     fillFluidRheology(obj->params, out_info);
@@ -1040,9 +1162,7 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
     // transfer may specialize an empty domain without mutating the legacy
     // editor mirror, so report those live values when available.
     if (grid_dom) {
-        out_info.render_mode =
-            (grid_dom->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) ? "surface" :
-            (grid_dom->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
+        out_info.render_mode = fluidRenderModeName(grid_dom->fluid_render_mode);
         fillFluidRheology(grid_dom->fluid_params, out_info);
         fillFluidSurfaceMaterial(*grid_dom, out_info);
         fillFluidSurfaceDetail(*grid_dom, findFluidSurfaceStats(owning_sys, grid_index), out_info);
@@ -1058,6 +1178,7 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
             out_info.particle_count = states[index].particles.size();
             out_info.live_state = true;   // only now is the count a measurement
             fillFluidMaterialCoords(states[index], out_info);
+            fillFluidDensityStats(states[index], out_info);
             fillFluidSolidPhase(states[index], out_info);
         }
     }
@@ -1103,9 +1224,7 @@ Result listFluidDomains(std::vector<rtapi::FluidDomainInfo>& out_domains) {
                     info.id = obj->id;
                     info.visible = obj->visible;
                 }
-                info.render_mode =
-                    (d.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) ? "surface" :
-                    (d.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
+                info.render_mode = fluidRenderModeName(d.fluid_render_mode);
                 fillFluidRheology(d.fluid_params, info);
             }
 
@@ -1127,6 +1246,7 @@ Result listFluidDomains(std::vector<rtapi::FluidDomainInfo>& out_domains) {
                     info.particle_count = states[index].particles.size();
                     info.live_state = true;   // only now is the count a measurement
                     fillFluidMaterialCoords(states[index], info);
+                    fillFluidDensityStats(states[index], info);
                     fillFluidSolidPhase(states[index], info);
                 }
             }
@@ -1422,18 +1542,31 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         RayTrophiSim::Fluid::FluidRenderMode grid_mode;
         if (rm == "surface" || rm == "sdf") {
             grid_mode = RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;
+        } else if (rm == "virtual_particles" || rm == "virtual" ||
+                   rm == "adaptive") {
+            // Retired, and refused rather than aliased: for liquids it drew
+            // exactly what 'particles' draws, and quietly answering an old
+            // script with a different mode is how a request's meaning drifts.
+            return Result::fail(
+                "render_mode '" + *render_mode + "' was removed. It rendered "
+                "liquids identically to 'particles'; use 'particles' (alias "
+                "'splat') or 'surface' (alias 'sdf').");
         } else if (rm == "particles" || rm == "splat") {
             grid_mode = RayTrophiSim::Fluid::FluidRenderMode::Particles;
-        } else if (rm == "volume") {
-            // Legal for GAS only; a liquid domain normalises it to the
-            // isosurface where it is consumed, so it is accepted but never a
-            // way to ask a liquid for something new.
-            grid_mode = RayTrophiSim::Fluid::FluidRenderMode::Volume;
+        } else if (rm == "fog" || rm == "volume_fog" || rm == "volume") {
+            // A liquid gets the fog mode it asked for. 'volume' on a liquid
+            // used to be accepted and then silently normalised to the
+            // isosurface -- the request and the picture disagreed. A gas
+            // domain keeps the plain Volume value (its route ignores it).
+            const bool liquid = obj ||
+                (grid_dom && grid_dom->type == RayTrophiSim::SimulationDomainType::Fluid);
+            grid_mode = liquid ? RayTrophiSim::Fluid::FluidRenderMode::VolumeFog
+                               : RayTrophiSim::Fluid::FluidRenderMode::Volume;
         } else {
             return Result::fail(
                 "render_mode '" + *render_mode + "' is not a render mode. "
-                "Use 'particles' (alias 'splat'), 'surface' (alias 'sdf'), or "
-                "'volume' for gas domains.");
+                "Use 'particles' (alias 'splat'), 'surface' (alias 'sdf'), "
+                "or 'fog' (aliases 'volume_fog', 'volume').");
         }
         if (grid_dom) grid_dom->fluid_render_mode = grid_mode;
         if (obj) {

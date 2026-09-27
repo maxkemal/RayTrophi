@@ -73,6 +73,14 @@ struct RasterFrameTelemetry {
     // tekrarlanamazdi. > 0 = o kok neden sinifi GORULDU.
     std::uint64_t stale_descset_rebuilds = 0;
 
+    // Solid/Matcap sphere impostor for simulation splat pools. Uploaded is the
+    // CPU list handed to the GPU; drawn is the instance count of the last
+    // recorded draw, 0 when any gate (pipeline, buffer, descriptor, mode)
+    // closed. uploaded > 0 with drawn == 0 names the gate as the failure.
+    bool          sphere_impostor_ready = false;
+    std::uint64_t sphere_impostors_uploaded = 0;
+    std::uint64_t sphere_impostors_drawn = 0;
+
     // Surucu bu oturumda raster gonderiminde kayboldu mu. Cokme senaryosunun
     // sonucu da bir DEGER olmali: bir script "actim, cokmedi" diyebilmeli.
     bool device_lost = false;

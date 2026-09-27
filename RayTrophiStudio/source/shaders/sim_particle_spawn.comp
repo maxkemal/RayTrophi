@@ -1,0 +1,40 @@
+#version 450
+// Device-resident particle slot writes (particle roadmap Phase 1.5 Batch B).
+//
+// The host decides WHICH slot a new particle takes (it keeps the lifecycle
+// bookkeeping); this kernel copies each record into its slot. A record writes
+// every stream of the slot, so it is also how an external kill reaches the
+// device (alive = 0). Layout must match ParticleResidentSlotRecord in
+// ParticleDeviceResidency.cpp (48 bytes).
+layout(local_size_x=64) in;
+layout(push_constant) uniform PC { uint record_count; } pc;
+struct SlotRecord {
+    uint slot; uint alive; uint profile; float size_scale;
+    vec4 position_lifetime;   // xyz, lifetime
+    vec4 velocity_age;        // xyz, age
+};
+layout(set=0,binding=0,std430) readonly buffer Records {SlotRecord records[];};
+layout(set=0,binding=1) writeonly buffer PX {float px[];};
+layout(set=0,binding=2) writeonly buffer PY {float py[];};
+layout(set=0,binding=3) writeonly buffer PZ {float pz[];};
+layout(set=0,binding=4) writeonly buffer VX {float vx[];};
+layout(set=0,binding=5) writeonly buffer VY {float vy[];};
+layout(set=0,binding=6) writeonly buffer VZ {float vz[];};
+layout(set=0,binding=7) writeonly buffer Age {float age[];};
+layout(set=0,binding=8) writeonly buffer Lifetime {float lifetime[];};
+layout(set=0,binding=9) writeonly buffer Alive {uint alive[];};
+layout(set=0,binding=10) writeonly buffer Profile {uint profile[];};
+layout(set=0,binding=11) writeonly buffer SizeScale {float size_scale[];};
+void main(){
+    uint r=gl_GlobalInvocationID.x;
+    if(r>=pc.record_count)return;
+    SlotRecord rec=records[r];
+    uint s=rec.slot;
+    px[s]=rec.position_lifetime.x;py[s]=rec.position_lifetime.y;pz[s]=rec.position_lifetime.z;
+    vx[s]=rec.velocity_age.x;vy[s]=rec.velocity_age.y;vz[s]=rec.velocity_age.z;
+    age[s]=rec.velocity_age.w;
+    lifetime[s]=rec.position_lifetime.w;
+    alive[s]=rec.alive;
+    profile[s]=rec.profile;
+    size_scale[s]=rec.size_scale;
+}

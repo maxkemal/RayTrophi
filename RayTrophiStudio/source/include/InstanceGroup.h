@@ -168,6 +168,8 @@ struct InstanceGroup {
     // full Rendered backend must omit the pool from their acceleration
     // structures and use the SurfaceSDF volume instead.
     bool rendered_rt_excluded = false;
+    bool raster_sphere_candidate = false; // Runtime-only built-in domain spheres.
+    bool raster_sphere_active = false;    // Geometry replacement, never RT exclusion.
     
     // Multi-Source Meshes (NEW)
     std::vector<ScatterSource> sources;             // Multiple source meshes with weights

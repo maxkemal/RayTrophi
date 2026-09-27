@@ -58,11 +58,13 @@ fully CPU or fully GPU:
 - `ParticleSimulationSystem` owns the authoritative particle SoA and already
   supports independent emitters, colliders, force fields, per-emitter domain
   deposits and multiple systems.
-- The current Vulkan particle compute path dispatches
-  `sim_particle_force_integrate`, synchronizes, downloads velocity, and then
-  performs lifetime, position integration, scene collision, over-life visual
-  interpolation and self-collision on the CPU. It is a partial accelerator, not
-  a GPU-resident particle simulation.
+- (Updated 2026-09-26, Phase 1.5 Batch B, not yet built.) A system with no
+  collider, no self collision and no grid domain runs its whole step
+  device-resident (`sim_particle_spawn` + `sim_particle_ballistic`,
+  `ParticleDeviceResidency.cpp`) and is drawn by vertex pulling; every other
+  system runs the CPU reference end to end. The earlier partial path
+  (`sim_particle_force_integrate` + per-step sync + velocity download + CPU
+  integration) is removed.
 - Current self-collision uses a CPU sorted neighbor grid. Scene collision
   supports planes, spheres, capsules, AABB, OBB, SDF, convex decomposition and
   mesh BVH, but resolution is CPU-side for ordinary particles.
@@ -830,6 +832,74 @@ not without updating this section first.
 >   integrate stay on device; the vertex shader reads the SoA storage buffers
 >   through Batch A's descriptor set. Removes the ~1 ms per-step sync +
 >   readback measured in Phase 0.
+>
+>   **Batch B status 2026-09-26: written, NOT built** (shaders compiled
+>   clean). Code: `ParticleDeviceResidency.cpp` (all residency logic; step()
+>   only decides), `sim_particle_ballistic.comp`, `sim_particle_spawn.comp`,
+>   `particle_viewport_pull.vert` + `include/particle_appearance_lut.glsl`
+>   (one LUT lookup for both vertex shaders), backend-change hook
+>   `SimulationComputeContext::setBackend` → `ISimulationSystem::
+>   onComputeBackendChanging`. `particle.stats` renamed with the meaning
+>   change (rule 5): `gpu_status` / `device_resident` / `gpu_step_ms` /
+>   `step_*`; new `residency`, `snapshot_*` (cumulative), `slot_records`,
+>   `nonfinite_measured`. Checks: `NEXT_BUILD_CHECKS.md` "Faz 1.5 Batch B".
+>
+>   **Batch B design 2026-09-26 (read from the code before writing):**
+>   - *What is actually removed.* The partial path uploads the WHOLE SoA
+>     (10 streams) twice per step, dispatches forces, `synchronize()`s and
+>     downloads velocity, then ages/kills/integrates on the CPU. Nothing else
+>     reads the device mirror (`computeBuffers()` has no caller). The
+>     partial path is **deleted, not kept beside the resident one** (rule 5;
+>     Phase 0 measured it slower than the CPU at every count). A system is
+>     either device-resident or runs the CPU reference end to end.
+>   - *Frame boundary.* `SimulationWorld::executeStep` already ends every
+>     step with `endFrame()` = submit + fence wait. The resident step records
+>     spawn upload + two dispatches and rides that one fence: zero extra
+>     synchronisation points, and after `endFrame` the device buffers are
+>     complete — so a same-device reader needs no semaphore.
+>   - *Residency split (7.3 three-state contract, per stream group).*
+>     Kinematics (position, velocity) are **device authoritative** on a
+>     resident system. Lifecycle streams (alive, age, lifetime, profile id,
+>     size scale, rotation, emitter index) stay **host authoritative**: the
+>     CPU keeps doing the age/kill/rotation bookkeeping (a float add per
+>     particle), which is what lets it allocate spawn slots without reading
+>     anything back. The device advances age and kills with the same float
+>     operations, so both sides agree bit for bit; a spawn record overwrites
+>     every field of its slot, so the host allocator is the authority even if
+>     they ever disagreed. State: `Host` (device copy absent/stale → full
+>     upload), `Equal`, `Device`.
+>   - *Spawn.* Emitter evaluation stays on the CPU (one evaluator for every
+>     spawn shape, mesh sampler and hash). Each spawned or externally killed
+>     slot becomes a 48-byte record; `sim_particle_spawn` scatters the records
+>     into the SoA. Per-step upload = records only (bounded by 512 per
+>     emitter per step), never the SoA.
+>   - *Eligibility* (evaluated every step, reported as the reason when not
+>     met): no enabled collider, self collision off, no grid domain in the
+>     runtime. These are exactly the stages that read host positions
+>     mid-step; Phase 6 moves them to the device. Under `GPURequired` an
+>     ineligible system is refused with that reason — it no longer gets a
+>     "GPU" label for a force stage that was only a fraction of its step.
+>   - *Host consumers take an explicit, counted snapshot*
+>     (`syncHostState(reason)`, cumulative count/bytes/last reason in
+>     `particle.stats`): the timeline scrub cache (every captured frame —
+>     the honest cost of a scrub cache, recorded as such), the ray-traced
+>     instance bridge, the ImGui debug dots, `particle.get_state_sample`, a
+>     backend switch (`SimulationWorld::setComputeBackend` asks every system
+>     to pull its device state home BEFORE the old backend dies) and a
+>     device-capacity growth. The raster viewport is NOT a consumer when it
+>     shares the simulation's VkDevice.
+>   - *Vertex pulling.* Same device → `particle_viewport_pull.vert` reads
+>     position / age / lifetime / alive / profile / size scale straight from
+>     the simulation buffers (per-system descriptor set), draws `6 ×
+>     capacity` vertices, collapses dead particles and particles of the other
+>     blend. Profile id → LUT row goes through a small lookup buffer whose
+>     entries carry the blend bit. Foreign device (the two-`VkDevice`
+>     topology, see `render.volume_tables`) → the builder snapshots (reason
+>     `foreign_device`, counted) and uses the CPU quad path — the same
+>     consequence live gas already has, not a second implementation.
+>   - *Known consequence.* A Vulkan device teardown loses the kinematics
+>     simulated since the last snapshot; the system continues from the last
+>     host state.
 > - **Batch C — Light Proxy output + slice script.** Output list minimum
 >   (Billboard + Light Proxy), `scripts/tests/particle_campfire_slice.py`
 >   builds/renders/saves/reloads purely over IPC; contract changes written back

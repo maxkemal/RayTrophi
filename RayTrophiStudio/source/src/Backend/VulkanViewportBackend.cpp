@@ -1,4 +1,4 @@
-#include "Backend/VulkanViewportBackend.h"
+﻿#include "Backend/VulkanViewportBackend.h"
 #include "Viewport/RasterImageBarrier.h"
 #include "Viewport/RasterInstanceUpload.h"
 #include "Viewport/RasterViewportFrameRing.h"
@@ -10,6 +10,7 @@
 #include "Texture.h"
 #include "TerrainSemanticMap.h"
 #include "Triangle.h"
+#include "Viewport/SphereImpostorAvailability.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -970,16 +971,23 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
     if (m_interactiveViewport.stagingBuffer.buffer) {
         m_device->destroyBuffer(m_interactiveViewport.stagingBuffer);
     }
-    if (m_interactiveViewport.matcapDescSet != VK_NULL_HANDLE) {
-        m_interactiveViewport.matcapDescSet = VK_NULL_HANDLE;
-    }
-    if (m_interactiveViewport.matcapDescPool != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(vkDevice, m_interactiveViewport.matcapDescPool, nullptr);
-        m_interactiveViewport.matcapDescPool = VK_NULL_HANDLE;
-    }
-    if (m_interactiveViewport.matcapDescLayout != VK_NULL_HANDLE) {
-        vkDestroyDescriptorSetLayout(vkDevice, m_interactiveViewport.matcapDescLayout, nullptr);
-        m_interactiveViewport.matcapDescLayout = VK_NULL_HANDLE;
+    // ★★★★ Matcap descriptor layout/pool/set live as long as the PIPELINE
+    //   LAYOUT built from them, so they follow keepPipeline like it does.
+    //   Tearing them down on every resize (keepPipeline) left matcapDescSet
+    //   NULL for good: only the from-scratch pipeline path recreates it.
+    //   Solid geometry binds it behind a != NULL guard and kept drawing, so
+    //   nothing looked wrong -- but the sphere impostor requires it and
+    //   silently stopped drawing every splat after the first panel resize.
+    if (!keepPipeline) {
+        m_interactiveViewport.matcapDescSet = VK_NULL_HANDLE;  // freed with the pool
+        if (m_interactiveViewport.matcapDescPool != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(vkDevice, m_interactiveViewport.matcapDescPool, nullptr);
+            m_interactiveViewport.matcapDescPool = VK_NULL_HANDLE;
+        }
+        if (m_interactiveViewport.matcapDescLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(vkDevice, m_interactiveViewport.matcapDescLayout, nullptr);
+            m_interactiveViewport.matcapDescLayout = VK_NULL_HANDLE;
+        }
     }
     if (m_interactiveViewport.gridVertexBuffer.buffer) {
         m_device->destroyBuffer(m_interactiveViewport.gridVertexBuffer);
@@ -3338,6 +3346,9 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         // Ring kurulmamis olsa bile yayinlanir: teshis sayaci ring'e degil
         // descriptor set'e ait, ve ring cokmeden once de bayat olabilir.
         t.stale_descset_rebuilds = m_staleMaterialPreviewDescSetEvents;
+        t.sphere_impostor_ready = g_sphere_impostor_ready.load();
+        t.sphere_impostors_uploaded = m_interactiveViewport.sphereImpostorsUploaded.size();
+        t.sphere_impostors_drawn = m_sphereImpostorsDrawn;
         t.device_lost = g_vulkan_device_lost;
         // Geometri olcumu ayri bir uyeden gelir: bu lambda cizim dongusunden
         // ONCE tanimlaniyor, yani oradaki yerel sayaclari yakalayamaz. Ayrica
@@ -5119,7 +5130,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     const bool canLog = s_lastDiagLog.time_since_epoch().count() == 0 ||
         std::chrono::duration_cast<std::chrono::milliseconds>(frameEnd - s_lastDiagLog).count() >= 750;
     if (canLog && (slowFrame || visibleTriangleCliff)) {
-        SCENE_LOG_INFO(
+       /* SCENE_LOG_INFO(
             std::string("[Perf] [") + (useMaterialPreview ? "ViewportMaterial" : "ViewportSolid") +
             "] frame_ms=" + std::to_string(frameMs) +
             " async=" + std::string(usingFrameRing ? "1" : "0") +
@@ -5139,7 +5150,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
             " scatter_target=" + std::to_string(m_rasterScatterTriangleTarget) +
             " max_draw_tris=" + std::to_string(maxDrawTriangles) +
             " max_draw_instances=" + std::to_string(maxDrawInstances) +
-            " max_draw_mesh='" + maxDrawMeshKey + "'");
+            " max_draw_mesh='" + maxDrawMeshKey + "'");*/
         s_lastDiagLog = frameEnd;
     }
     s_prevVisibleTriangleTotal = visibleTriangleTotal;
@@ -7345,6 +7356,7 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
     size_t totalValidScatterInstances = 0;
     for (size_t gi = 0; gi < instanceGroups.size(); ++gi) {
         const auto& group = instanceGroups[gi];
+        if (group.raster_sphere_active) continue;
         if (group.instances.empty() || group.sources.empty()) continue;
         auto& meta = groupMeta[gi];
         meta.entriesBySrc.resize(group.sources.size());
@@ -7364,7 +7376,8 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                     //   yogun flat scatter'da ucgen butcesinin uygulanacagi ama
                     //   demote edilenlerin CIZILMEYECEGI (yani kaybolacagi)
                     //   anlamina geliyordu.
-                    ensureScatterProxyMesh(meshKey);
+                    if (group.transient) rasterMeshIt->second.scatterLodExempt = true;
+                    else ensureScatterProxyMesh(meshKey);
                     const Matrix4x4 sourceWorld = mesh->transform ? mesh->transform->getFinal() : Matrix4x4::identity();
                     meta.entriesBySrc[si].push_back({meshKey,
                         Matrix4x4::translation(-source.mesh_center) * sourceWorld});
@@ -7390,12 +7403,27 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
             auto rasterMeshIt = m_rasterMeshes.find(meshKey);
             if (rasterMeshIt != m_rasterMeshes.end()) {
                 rasterMeshIt->second.isScatterGroup = true;
-                ensureScatterProxyMesh(meshKey);
+                // Simulation splat pools (transient) are never demoted to the
+                // foliage card proxy -- see RasterMeshBuffer::scatterLodExempt.
+                if (group.transient) rasterMeshIt->second.scatterLodExempt = true;
+                else ensureScatterProxyMesh(meshKey);
             }
             meta.entriesBySrc[si].push_back({std::move(meshKey), Matrix4x4::identity()});
         }
 
+        // Transient (simulation) pools keep EVERY slot, zero-scale ones masked
+        // off: slots fill and empty every frame, and syncRasterInstanceTransforms
+        // can only update instances that exist. Compacting them out meant a
+        // particle born into an existing slot never reached raster until a
+        // structural rebuild -- which the generation gate then skipped.
+        const bool keepAllSlots = group.transient;
         for (const auto& inst : group.instances) {
+            if (!keepAllSlots &&
+                inst.scale.x == 0.0f &&
+                inst.scale.y == 0.0f &&
+                inst.scale.z == 0.0f) {
+                continue;
+            }
             int srcIdx = inst.source_index;
             if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
             if (srcIdx < static_cast<int>(meta.entriesBySrc.size()))
@@ -7411,13 +7439,22 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
 
     for (size_t gi = 0; gi < instanceGroups.size(); ++gi) {
         const auto& group = instanceGroups[gi];
+        if (group.raster_sphere_active) continue;
         if (group.instances.empty() || group.sources.empty()) continue;
         const auto& entriesBySrc = groupMeta[gi].entriesBySrc;
         if (entriesBySrc.empty()) continue;
 
         const size_t count = group.instances.size();
+        const bool keepAllSlots = group.transient;
         std::vector<size_t> offsets(count + 1, 0);
         for (size_t i = 0; i < count; ++i) {
+            if (!keepAllSlots &&
+                group.instances[i].scale.x == 0.0f &&
+                group.instances[i].scale.y == 0.0f &&
+                group.instances[i].scale.z == 0.0f) {
+                offsets[i + 1] = offsets[i];
+                continue;
+            }
             int srcIdx = group.instances[i].source_index;
             if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
             offsets[i + 1] = offsets[i] +
@@ -7425,10 +7462,16 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         }
         std::vector<RasterInstance> localInstances(offsets.back());
 
-        auto fillRange = [&group, &entriesBySrc, &offsets, &localInstances](size_t start, size_t end) {
+        auto fillRange = [&group, &entriesBySrc, &offsets, &localInstances, keepAllSlots](size_t start, size_t end) {
             const std::string nodePrefix = "_inst_gid" + std::to_string(group.id) + "_";
             for (size_t i = start; i < end; ++i) {
                 const auto& inst = group.instances[i];
+                const bool zeroScale = inst.scale.x == 0.0f &&
+                                       inst.scale.y == 0.0f &&
+                                       inst.scale.z == 0.0f;
+                if (zeroScale && !keepAllSlots) {
+                    continue;
+                }
                 int srcIdx = inst.source_index;
                 if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
                 if (srcIdx >= static_cast<int>(entriesBySrc.size())) {
@@ -7440,7 +7483,8 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                     ri.meshKey = entry.meshKey;
                     ri.nodeName = nodePrefix + std::to_string(i);
                     ri.transform = inst.toMatrix() * entry.sourceToScatter;
-                    ri.mask = 0xFF;
+                    ri.mask = zeroScale ? 0 : 0xFF;
+                    ri.simPoolSlot = keepAllSlots;
                     ri.scatterGroupId = group.id;
                     ri.rayFusionExcluded = group.rendered_rt_excluded;
                     ri.scatterInstanceIndex = static_cast<uint32_t>(i);
@@ -7624,7 +7668,26 @@ void VulkanViewportBackend::syncRasterInstanceTransforms(
                 if (groupIt != scatterGroupsById.end()) {
                     const auto* group = groupIt->second;
                     if (ri.scatterInstanceIndex < group->instances.size()) {
-                        newTransform = group->instances[ri.scatterInstanceIndex].toMatrix();
+                        const auto& inst = group->instances[ri.scatterInstanceIndex];
+                        if (ri.simPoolSlot) {
+                            const uint8_t mask =
+                                (inst.scale.x == 0.0f && inst.scale.y == 0.0f &&
+                                 inst.scale.z == 0.0f) ? 0 : 0xFF;
+                            if (mask != ri.mask) {
+                                ri.mask = mask;
+                                localDirty.insert(ri.meshKey);
+                            }
+                            // An empty slot that stays empty has nothing to
+                            // update. A 1M pool is mostly such slots, and the
+                            // matrix build + compare below measured ~40 ms per
+                            // sim frame in Material mode (pool 524k -> 1M at
+                            // the same live count: 49 -> 91 ms).
+                            if (mask == 0) continue;
+                        }
+                        // Same composition as buildRasterGeometry. Dropping the
+                        // source factor moved flat-source scatter by its
+                        // recentering offset on the first transform sync.
+                        newTransform = inst.toMatrix() * ri.scatterSourceTransform;
                         hasTransform = true;
                     }
                 }

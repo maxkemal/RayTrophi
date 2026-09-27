@@ -49,6 +49,8 @@ private:
     // Log bir kez yazilir ama SAYAC her olayda artar: tekrar eden bir purge ile
     // tek seferlik bir yarisi ancak bu sayi ayirt eder.
     std::uint64_t m_staleMaterialPreviewDescSetEvents = 0;
+    // Instances in the last recorded sphere-impostor draw (0 = not drawn).
+    std::uint64_t m_sphereImpostorsDrawn = 0;
     bool m_rasterSynchronousPresent = false;
     RasterFrameTelemetry m_rasterTelemetry;
     VkBuffer m_externalMaterialBuffer = VK_NULL_HANDLE;

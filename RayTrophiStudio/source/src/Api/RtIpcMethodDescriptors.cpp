@@ -276,7 +276,7 @@ static const MethodParam params_anim_character[] = {
 static const MethodDescriptor desc_anim_character = {
     "anim.character", "anim",
     "Return one character's animation state",
-    nullptr,
+    "root_motion_resolved_bone is the bone the runtime actually unrolls (override or auto-detected from the first clip); root_motion_cycle_travel is its travel over one loop in parent-space units, and root_motion_travel_valid=false means root motion cannot move this character.",
     "read", "Read", false, "any",
     "anim|character|animation",
     nullptr,
@@ -517,6 +517,24 @@ static const MethodDescriptor desc_anim_set_paused = {
     true
 };
 static const MethodRegistration reg_anim_set_paused(desc_anim_set_paused);
+
+static const MethodParam params_anim_set_root_motion[] = {
+    {"character", "string", true, "", nullptr, nullptr},
+    {"enabled", "bool", true, "", nullptr, nullptr},
+    {"bone", "string", false, "", "", nullptr},
+};
+static const MethodDescriptor desc_anim_set_root_motion = {
+    "anim.set_root_motion", "anim",
+    "Turn root motion on or off for a character and optionally pin its root bone",
+    "Root motion unrolls a looping clip: the root bone keeps its in-cycle motion (height included) and gains completed_loops * cycle_travel. Both come from the clip time, so on a timeline-driven graph a scrub or rewind lands on the same pose and position; the object's transform is never moved and its position keys still apply. bone='' auto-detects; a bone with no position keys in the first clip is refused. Verify with anim.character root_motion_resolved_bone / root_motion_cycle_travel.",
+    "write", "SceneWrite", false, "any",
+    "anim|set|root|motion|animation|root-motion|locomotion|timeline",
+    "anim.character|anim.set_loop|timeline.set_frame",
+    nullptr, nullptr, nullptr, nullptr,
+    params_anim_set_root_motion, 3,
+    true
+};
+static const MethodRegistration reg_anim_set_root_motion(desc_anim_set_root_motion);
 
 static const MethodParam params_anim_set_speed[] = {
     {"character", "string", true, "", nullptr, nullptr},
@@ -1587,6 +1605,23 @@ static const MethodDescriptor desc_fluid_set_combustion = {
 };
 static const MethodRegistration reg_fluid_set_combustion(desc_fluid_set_combustion);
 
+static const MethodParam params_fluid_set_fog[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"spread_voxels", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_set_fog = {
+    "fluid.set_fog", "fluid",
+    "Shape the Volumetric Fog of a liquid domain: Gaussian spread of the splatted density",
+    "Overlay semantics - keys you do not send keep their value. spread_voxels 0..6 is the Gaussian sigma in simulation voxels (default 1.5); 0 draws the raw trilinear splat, where spray shows as isolated dots. Render-side only: the solver density and fluid.get active_density_cells are unchanged. Takes effect only when render_mode is 'fog'. Out-of-range values are rejected. Read back with fluid.get fog_spread_voxels. Blackbody/ChannelDriven emission of a fog domain reads the PARTICLE temperature in Kelvin (mass-weighted, same spread), not the gas heat channel: ambient liquid barely glows (radiance ~ T^4); a Flow Source temperature override makes hot liquid, the thermal chain cools it. fluid.get particle_min_kelvin / particle_max_kelvin (particle_kelvin_measured) report what the emission is fed.",
+    "write", "SceneWrite", false, "any",
+    "fluid|set|fog",
+    nullptr,
+    nullptr, nullptr, "fluid.get", nullptr,
+    params_fluid_set_fog, 2,
+    true
+};
+static const MethodRegistration reg_fluid_set_fog(desc_fluid_set_fog);
+
 static const MethodParam params_fluid_set_param[] = {
     {"domain", "string", true, "", nullptr, nullptr},
     {"anisotropy_enabled", "any", false, "", nullptr, nullptr},
@@ -1650,7 +1685,7 @@ static const MethodParam params_fluid_set_param[] = {
 static const MethodDescriptor desc_fluid_set_param = {
     "fluid.set_param", "fluid",
     "Update any field of a fluid or gas domain: bounds, voxel size, solver backend, viscosity, granular constitutive settings, thermal liquid (cooling/freezing), surface reconstruction detail, render mode and surface material",
-    "Overlay semantics - fields you do not send keep their value. Changing voxel_size or the bounds invalidates the bake for that domain. Surface keys (surface_resolution_multiplier 1..4, kernel/particle radius, smoothing, anisotropy_*) refine the RENDERED surface without touching the simulation and are rejected out of range, not clamped. thermal_* keys drive the wax chain (preset 'wax' sets them all); read the result back as fluid.get thermal_frozen_particles / thermal_min_kelvin, and thermal_cold_unsupported > 0 with nothing frozen means the liquid is cold but touches no collider or closed wall. Thermal and surface keys are applied after preset, so a preset in the same call cannot undo them.",
+    "Overlay semantics - fields you do not send keep their value. render_mode accepts particles/splat, surface/sdf and fog (aliases volume_fog, volume); on a liquid 'fog' raymarches the splatted density with the domain VolumeShader, on a gas domain 'volume' is the plain gas route. Reads return the canonical name ('fog' for a liquid). A SurfaceSDF substance override claims the single domain volume, so a fog domain with one draws that surface, not fog (substance_materials effective_representation says which). fluid.get reports active_density_cells / max_density, the fog mode's input. The retired virtual_particles/virtual/adaptive names are refused with an error. Changing voxel_size or the bounds invalidates the bake for that domain. Surface keys (surface_resolution_multiplier 1..4, kernel/particle radius, smoothing, anisotropy_*) refine the RENDERED surface without touching the simulation and are rejected out of range, not clamped. thermal_* keys drive the wax chain (preset 'wax' sets them all); read the result back as fluid.get thermal_frozen_particles / thermal_min_kelvin, and thermal_cold_unsupported > 0 with nothing frozen means the liquid is cold but touches no collider or closed wall. Thermal and surface keys are applied after preset, so a preset in the same call cannot undo them.",
     "write", "SceneWrite", false, "any",
     "fluid|set|param|simulation|configure|viscosity|granular|render-mode|backend",
     "fluid.get|fluid.set_substance_material",
@@ -1659,6 +1694,27 @@ static const MethodDescriptor desc_fluid_set_param = {
     true
 };
 static const MethodRegistration reg_fluid_set_param(desc_fluid_set_param);
+
+static const MethodParam params_fluid_set_splat_geometry[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"geometry", "string", false, "", nullptr, nullptr},
+    {"geometry_source", "any", false, "", nullptr, nullptr},
+    {"radius_factor", "any", false, "", nullptr, nullptr},
+    {"size_multiplier", "any", false, "", nullptr, nullptr},
+    {"subdivisions", "int", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_set_splat_geometry = {
+    "fluid.set_splat_geometry", "fluid",
+    "Set the splat-sphere geometry of a liquid domain: icosphere subdivisions, scene-object geometry, radius and size",
+    "Overlay semantics - keys you do not send keep their value. subdivisions 0..3 = 20/80/320/1280 triangles per splat (default 0); each level multiplies raster triangles and RT BLAS memory by four. geometry 'scene_object' requires geometry_source naming a live scene node. Out-of-range values are rejected, not clamped. Read back with fluid.get splat_geometry / splat_subdivisions / splat_triangles.",
+    "write", "SceneWrite", false, "any",
+    "fluid|set|splat|geometry|simulation|render|appearance|performance",
+    "fluid.set_splat_material|fluid.set_param",
+    nullptr, nullptr, "fluid.get|viewport.frame_telemetry", nullptr,
+    params_fluid_set_splat_geometry, 6,
+    true
+};
+static const MethodRegistration reg_fluid_set_splat_geometry(desc_fluid_set_splat_geometry);
 
 static const MethodParam params_fluid_set_splat_material[] = {
     {"domain", "string", true, "", nullptr, nullptr},
@@ -4676,7 +4732,7 @@ static const MethodParam params_particle_get_state_sample[] = {
 static const MethodDescriptor desc_particle_get_state_sample = {
     "particle.get_state_sample", "particle",
     "Read a bounded slice of live particle positions, velocities and ages plus whole-population centroid, mean velocity, bounds and NaN count",
-    "max_count is clamped to 4096; offset/stride walk alive particles in slot order. Aggregates cover ALL alive particles, so CPU vs GPU runs can be compared without a full dump. Non-finite particles are excluded from the aggregates and counted in nonfinite. Host state is authoritative today, so this costs no device transfer.",
+    "max_count is clamped to 4096; offset/stride walk alive particles in slot order. Aggregates cover ALL alive particles, so CPU vs GPU runs can be compared without a full dump. Non-finite particles are excluded from the aggregates and counted in nonfinite. On a device-resident system this first brings position/velocity home: an explicit snapshot counted in particle.stats (snapshot_last_reason 'state_sample'), and it makes the next step mirror inside its own submission.",
     "read", "Read", false, "alive_count, capacity, returned, indices, positions, velocities, ages, centroid, mean_velocity, bounds_min, bounds_max, nonfinite",
     "particle|get|state|sample|particles|measure|verify|baseline|compare",
     "particle.stats|particle.step|particle.set_physics",
@@ -5027,10 +5083,10 @@ static const MethodParam params_particle_stats[] = {
 };
 static const MethodDescriptor desc_particle_stats = {
     "particle.stats", "particle",
-    "Report live particle counts, per-stage timings, which backend each stage ran on, and the particle step's own GPU transfers",
-    "Read gpu_force_status first: 'gpu' is the only value meaning the GPU force result was used; anything else names why the CPU ran it. gpu_force_ms covers the whole GPU force block including the per-step velocity download -- it is NOT inside integrate_ms. force_* and mirror_* count only the particle step's transfers; grid domains report theirs in fluid.step_stats / gas.step_stats. Values describe the LAST step: step once before reading, and do not read while the timeline is also stepping the same runtime.",
-    "read", "Read", false, "counts; *_ms stage timers; execution_policy, compute_backend, gpu_force_status, forces_on_gpu, step_blocked; stage_backends {emit, forces, integrate, scene_collision, self_collision}; gpu_force_ms; force_* and mirror_* transfer bytes/calls/ms; nonfinite_particles",
-    "particle|stats|particles|measure|performance|verify|backend|transfer",
+    "Report live particle counts, per-stage timings, whether the step ran device-resident or on the CPU and why, where position/velocity live, and every host snapshot of device state",
+    "Read gpu_status first: 'gpu_resident' is the only value meaning the device ran the step (spawn scatter, age/kill, forces, integration); host_consumer_* names the stage that keeps the system on the CPU (colliders, self collision, grid domains) and gpu_required refuses the step with that reason. A healthy resident step uploads slot records only: step_download_bytes stays 0 unless a consumer asked for host state during the previous step, in which case the download rides the step (snapshot_mirrored_steps). snapshot_* are CUMULATIVE -- diff two reads; snapshot_sync_count counts consumers that paid their own synchronisation (state_sample, foreign_device, raytrace_instances, backend_switch, capacity_growth, ...). nonfinite_particles is only meaningful when nonfinite_measured is true. step_* count only the particle step's transfers; grid domains report theirs in fluid.step_stats / gas.step_stats. Values describe the LAST step: step once before reading, and do not read while the timeline is also stepping the same runtime.",
+    "read", "Read", false, "counts; *_ms stage timers; execution_policy, compute_backend, gpu_status, device_resident, step_blocked; stage_backends {emit, forces, integrate, scene_collision, self_collision}; gpu_step_ms; residency (host|equal|device), resident_capacity, slot_records; step_* transfer bytes/calls/ms; snapshot_sync_count, snapshot_mirrored_steps, snapshot_download_bytes, snapshot_last_reason (cumulative); nonfinite_particles + nonfinite_measured",
+    "particle|stats|particles|measure|performance|verify|backend|transfer|residency",
     "particle.step|particle.set_physics|particle.get_state_sample|fluid.step_stats",
     nullptr, nullptr, nullptr, nullptr,
     params_particle_stats, 2,
@@ -5289,12 +5345,12 @@ static const MethodParam params_physics_collider_proxy_set_auto_fit[] = {
 static const MethodDescriptor desc_physics_collider_proxy_set_auto_fit = {
     "physics.collider.proxy_set.auto_fit", "physics",
     "Generate capsule, sphere and foot-box proxies from a character skeleton",
-    "Auto-fit writes ordinary editable proxies. It is not a second runtime representation. Weighted body bones are used by default; finger, eye, skirt, twist and end/detail bones require include_detail_bones=true. Body bones are ordered before details so maximum_proxies cannot silently remove a foot while keeping fingers.",
+    "Auto-fit writes ordinary editable proxies. It is not a second runtime representation. Weighted body bones are used by default; finger, eye, skirt, twist and end/detail bones require include_detail_bones=true. Body bones are ordered before details so maximum_proxies cannot silently remove a foot while keeping fingers. Foot and toe boxes are measured from the rest-pose skinned vertices each joint dominates (weight >= 0.5), so they cover heel, sole and toes instead of centring on the ankle pivot; a joint that dominates no vertex keeps the joint-only fallback box. Verify with physics.collider.proxy_set.solver_stamps (stamped_cells per foot).",
     "write", "SceneWrite", false, "any",
     "physics|collider|proxy|set|auto|fit|rig|kinematic|autofit",
-    "physics.collider.proxy.set|physics.collider.proxy_set.sample",
+    "physics.collider.proxy.set|physics.collider.proxy_set.sample|physics.collider.proxy_set.solver_stamps",
     nullptr, nullptr, nullptr, nullptr,
-    params_physics_collider_proxy_set_auto_fit, 8,
+    params_physics_collider_proxy_set_auto_fit, 9,
     true
 };
 static const MethodRegistration reg_physics_collider_proxy_set_auto_fit(desc_physics_collider_proxy_set_auto_fit);
@@ -5318,7 +5374,7 @@ static const MethodDescriptor desc_physics_collider_proxy_set_create = {
     "physics|collider|proxy|set|create|rig|kinematic",
     "physics.collider.proxy_set.auto_fit|physics.collider.proxy.set",
     nullptr, nullptr, nullptr, nullptr,
-    params_physics_collider_proxy_set_create, 8,
+    params_physics_collider_proxy_set_create, 9,
     true
 };
 static const MethodRegistration reg_physics_collider_proxy_set_create(desc_physics_collider_proxy_set_create);
@@ -5375,10 +5431,10 @@ static const MethodParam params_physics_collider_proxy_set_sample[] = {
 static const MethodDescriptor desc_physics_collider_proxy_set_sample = {
     "physics.collider.proxy_set.sample", "physics",
     "Inspect resolved world transforms and linear/angular velocities for every proxy",
-    "Read-only instrumentation: sampling uses a registry snapshot and cannot advance the solver's authoritative motion history. Unresolved bones are reported by reason and never emitted at the origin.",
+    "Read-only instrumentation: sampling uses a registry snapshot and cannot advance the solver's authoritative motion history. Unresolved bones are reported by reason and never emitted at the origin. The velocity is relative to the solver's motion history at READ time, not the velocity the solver stamped; use physics.collider.proxy_set.solver_stamps for that.",
     "read", "Read", false, "any",
     "physics|collider|proxy|set|sample|rig|kinematic|measure|read",
-    "physics.collider.proxy_set.get|physics.collider.proxy_set.auto_fit",
+    "physics.collider.proxy_set.get|physics.collider.proxy_set.auto_fit|physics.collider.proxy_set.solver_stamps",
     nullptr, nullptr, nullptr, nullptr,
     params_physics_collider_proxy_set_sample, 2,
     true
@@ -5405,10 +5461,23 @@ static const MethodDescriptor desc_physics_collider_proxy_set_set = {
     "physics|collider|proxy|set|set|rig|kinematic|configure",
     "physics.collider.proxy_set.get|physics.collider.proxy.set",
     nullptr, nullptr, nullptr, nullptr,
-    params_physics_collider_proxy_set_set, 9,
+    params_physics_collider_proxy_set_set, 10,
     true
 };
 static const MethodRegistration reg_physics_collider_proxy_set_set(desc_physics_collider_proxy_set_set);
+
+static const MethodDescriptor desc_physics_collider_proxy_set_solver_stamps = {
+    "physics.collider.proxy_set.solver_stamps", "physics",
+    "Read what the solver actually stamped per kinematic proxy and grid domain in its last grid step",
+    "Measured inside the step, not re-sampled: stamped_cells counts grid cells whose centre fell inside the proxy, and the velocities are the ones written into solid_vel. A resolved proxy that stamped nothing is still listed with stamped_cells=0, which is the signal for an under-resolved or out-of-domain proxy. The log is replaced every grid step; poll a perf counter such as sim.fluid.voxelize_colliders to know a step has run.",
+    "read", "Read", false, "Per particle system: system_id, system_name, steps (0 = never stepped) and stamps[] with domain, consumer_mask, frame, set_id, proxy_id, proxy_name, stamped_cells, linear_velocity, angular_velocity, velocity_valid",
+    "physics|collider|proxy|set|solver|stamps|rig|kinematic|fluid|measure|read",
+    "physics.collider.proxy_set.sample|physics.collider.proxy_set.auto_fit|fluid.get",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_physics_collider_proxy_set_solver_stamps(desc_physics_collider_proxy_set_solver_stamps);
 
 static const MethodParam params_physics_fracture_cluster_groups[] = {
     {"object", "any", true, "", nullptr, nullptr},

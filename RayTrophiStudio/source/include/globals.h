@@ -660,6 +660,13 @@ extern bool g_vulkan_rebuild_pending;    // GPU Vulkan geometry needs rebuild
 extern bool g_vulkan_geometry_append_pending; // Additive-only mutation hint — Main loop tries incremental TLAS refit before falling back to full rebuild
 extern bool g_geometry_deform_pending; // A physics body baked new verts into its source mesh this frame — Main loop refits ONLY those nodes in place on the active path (raster Solid / OptiX / Vulkan RT) + a cheap CPU Embree refit, instead of a full-scene teardown every frame
 extern bool g_viewport_raster_rebuild_pending; // Interactive raster viewport needs rebuild
+// The raster REPRESENTATION changed without the scene geometry changing (a
+// splat pool moved between the sphere impostor and instanced geometry).
+// buildRasterGeometry early-outs on an unchanged g_scene_geometry_generation,
+// so a bare rebuild request is dropped; this flag drops the raster cache
+// stamp first. Bumping the generation instead would also rebuild the RT
+// backends' acceleration structures for a raster-only change.
+extern bool g_viewport_raster_cache_invalid;
 extern bool g_optix_rebuild_pending;
 // Discrete-particle render bridge changed its instance set (structural or motion).
 // Consumed ONLY when the CPU reference backend is active (Main loop translates it

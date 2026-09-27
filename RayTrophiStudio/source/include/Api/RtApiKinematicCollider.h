@@ -1,8 +1,10 @@
 #pragma once
 
 #include "KinematicColliderSource.h"
+#include "KinematicColliderVoxelizer.h"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace rtapi {
@@ -37,5 +39,15 @@ Result sampleKinematicProxySet(
     uint64_t set_id,
     float dt,
     std::vector<RayTrophiSim::KinematicProxySample>& out_samples);
+
+// What the solver actually stamped in its last grid step, per particle
+// system. steps == 0 means the runtime has never stepped.
+struct KinematicSolverStamps {
+    uint32_t system_id = 0;
+    std::string system_name;
+    uint64_t steps = 0;
+    std::vector<RayTrophiSim::KinematicStampRecord> stamps;
+};
+Result getKinematicSolverStamps(std::vector<KinematicSolverStamps>& out);
 
 } // namespace rtapi

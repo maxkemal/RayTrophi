@@ -1,6 +1,7 @@
 #include "KinematicColliderSerialization.h"
 
 #include <exception>
+#include <utility>
 #include <vector>
 
 namespace RayTrophiSim {
@@ -95,6 +96,7 @@ nlohmann::json serializeKinematicColliders(
             {"target_character", set.target_character},
             {"target_node_id", set.target_node_id},
             {"enabled", set.enabled},
+            {"viewport_visible", set.viewport_visible},
             {"consumer_mask", set.consumer_mask},
             {"friction", set.friction},
             {"restitution", set.restitution},
@@ -140,6 +142,7 @@ bool deserializeKinematicColliders(
             set.target_node_id =
                 item.value("target_node_id", std::string());
             set.enabled = item.value("enabled", true);
+            set.viewport_visible = item.value("viewport_visible", true);
             set.consumer_mask = item.value(
                 "consumer_mask", static_cast<uint32_t>(KinematicConsumerAll));
             set.friction = item.value("friction", set.friction);

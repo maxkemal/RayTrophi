@@ -428,6 +428,11 @@ json animCharacterToJson(const rtapi::AnimCharacterInfo& info) {
                 {"graph_follows_timeline", info.graph_follows_timeline},
                 {"root_motion", info.root_motion},
                 {"root_motion_bone", info.root_motion_bone},
+                {"root_motion_resolved_bone", info.root_motion_resolved_bone},
+                {"root_motion_cycle_travel", json::array({info.root_motion_cycle_travel.x,
+                                                          info.root_motion_cycle_travel.y,
+                                                          info.root_motion_cycle_travel.z})},
+                {"root_motion_travel_valid", info.root_motion_travel_valid},
                 {"visible", info.visible}};
 }
 
@@ -2456,7 +2461,7 @@ json dispatchMethod(const std::string& method, const json& params) {
             rtapi::Result r = rtapi::createFluidDomain(name, dmin, dmax, vs, type, info);
             if (!r.ok) return json{{"__error", r.error}};
             return json{{"id", info.id}, {"name", info.name}, {"type", info.type}, {"voxel_size", info.voxel_size},
-                        {"particle_count", info.particle_count}, {"live_state", info.live_state}, {"render_mode", info.render_mode}};
+                        {"particle_count", info.particle_count}, {"active_density_cells", info.active_density_cells}, {"max_density", info.max_density}, {"live_state", info.live_state}, {"render_mode", info.render_mode}};
         });
     }
     if (method == "fluid.get" || method == "gas.get") {
@@ -2468,7 +2473,7 @@ json dispatchMethod(const std::string& method, const json& params) {
             return json{{"id", info.id}, {"name", info.name}, {"type", info.type},
                         {"domain_min", json::array({info.domain_min.x, info.domain_min.y, info.domain_min.z})},
                         {"domain_max", json::array({info.domain_max.x, info.domain_max.y, info.domain_max.z})},
-                        {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count}, {"live_state", info.live_state},
+                        {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count}, {"active_density_cells", info.active_density_cells}, {"max_density", info.max_density}, {"live_state", info.live_state},
                         {"render_mode", info.render_mode}, {"backend", info.backend},
                         {"boundary", info.boundary}, {"preset", info.preset},
                         {"kinematic_viscosity", info.kinematic_viscosity},
@@ -2560,6 +2565,16 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"granular_stiffness_below_load", info.granular_stiffness_below_load},
                         {"surface_material", info.surface_material},
                         {"splat_material", info.splat_material},
+                        {"splat_geometry", info.splat_geometry},
+                        {"splat_geometry_source", info.splat_geometry_source},
+                        {"splat_subdivisions", info.splat_subdivisions},
+                        {"splat_triangles", info.splat_triangles},
+                        {"splat_radius_factor", info.splat_radius_factor},
+                        {"splat_size_multiplier", info.splat_size_multiplier},
+                        {"fog_spread_voxels", info.fog_spread_voxels},
+                        {"particle_kelvin_measured", info.particle_kelvin_measured},
+                        {"particle_min_kelvin", info.particle_min_kelvin},
+                        {"particle_max_kelvin", info.particle_max_kelvin},
                         {"surface_offset_voxels", info.surface_offset_voxels},
                         {"pore_amount", info.pore_amount},
                         {"pore_scale", info.pore_scale},
@@ -2606,7 +2621,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"id", info.id}, {"name", info.name}, {"type", info.type},
                     {"domain_min", json::array({info.domain_min.x, info.domain_min.y, info.domain_min.z})},
                     {"domain_max", json::array({info.domain_max.x, info.domain_max.y, info.domain_max.z})},
-                    {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count}, {"live_state", info.live_state},
+                    {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count}, {"active_density_cells", info.active_density_cells}, {"max_density", info.max_density}, {"live_state", info.live_state},
                     {"render_mode", info.render_mode}, {"backend", info.backend},
                     {"boundary", info.boundary}, {"preset", info.preset},
                     {"kinematic_viscosity", info.kinematic_viscosity},
@@ -2698,6 +2713,16 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"granular_stiffness_below_load", info.granular_stiffness_below_load},
                     {"surface_material", info.surface_material},
                     {"splat_material", info.splat_material},
+                    {"splat_geometry", info.splat_geometry},
+                    {"splat_geometry_source", info.splat_geometry_source},
+                    {"splat_subdivisions", info.splat_subdivisions},
+                    {"splat_triangles", info.splat_triangles},
+                    {"splat_radius_factor", info.splat_radius_factor},
+                    {"splat_size_multiplier", info.splat_size_multiplier},
+                    {"fog_spread_voxels", info.fog_spread_voxels},
+                    {"particle_kelvin_measured", info.particle_kelvin_measured},
+                    {"particle_min_kelvin", info.particle_min_kelvin},
+                    {"particle_max_kelvin", info.particle_max_kelvin},
                     {"surface_offset_voxels", info.surface_offset_voxels},
                     {"pore_amount", info.pore_amount},
                     {"pore_scale", info.pore_scale},
@@ -4699,7 +4724,11 @@ json dispatchMethod(const std::string& method, const json& params) {
             // anda gizlerdi -- ve bir ajan "olcum yok"u "sorun yok" diye okurdu.
             const json diag{
                 {"stale_descset_rebuilds", t.stale_descset_rebuilds},
-                {"device_lost", t.device_lost}};
+                {"device_lost", t.device_lost},
+                {"raster_sphere_groups", t.raster_sphere_groups},
+                {"sphere_impostor_ready", t.sphere_impostor_ready},
+                {"sphere_impostors_uploaded", t.sphere_impostors_uploaded},
+                {"sphere_impostors_drawn", t.sphere_impostors_drawn}};
             if (!t.available) {
                 json miss{
                     {"available", false},
@@ -4746,6 +4775,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"proxy_instances", t.proxy_instances},
                 {"scatter_triangle_target", t.scatter_triangle_target}};
             out.update(display);
+            out.update(diag);
             return out;
         });
     }
@@ -5105,6 +5135,14 @@ json dispatchMethod(const std::string& method, const json& params) {
             return rtapi::setAnimLoop(character, loop, layer);
         });
     }
+    if (method == "anim.set_root_motion") {
+        std::string character = requireString(params, "character");
+        bool enabled = requireBool(params, "enabled");
+        std::string bone = params.value("bone", std::string());
+        return enqueueResult([character, enabled, bone](UIContext&) {
+            return rtapi::setAnimRootMotion(character, enabled, bone);
+        });
+    }
     if (method == "anim.status") {
         std::string character = requireString(params, "character");
         int layer = params.value("layer", 0);
@@ -5441,6 +5479,33 @@ json dispatchMethod(const std::string& method, const json& params) {
         std::string material = params.value("material", "");
         return enqueueResult([domain, material](UIContext&) {
             return rtapi::setFluidSplatMaterial(domain, material);
+        });
+    }
+    if (method == "fluid.set_splat_geometry") {
+        std::string domain = requireString(params, "domain");
+        // Only supplied keys are written; the rest keep their value.
+        rtapi::FluidSplatGeometryPatch patch;
+        if (params.contains("geometry")) patch.geometry = requireString(params, "geometry");
+        if (params.contains("geometry_source"))
+            patch.geometry_source = params.at("geometry_source").get<std::string>();
+        if (params.contains("subdivisions"))
+            patch.subdivisions = requireInt(params, "subdivisions");
+        if (params.contains("radius_factor"))
+            patch.radius_factor = params.at("radius_factor").get<float>();
+        if (params.contains("size_multiplier"))
+            patch.size_multiplier = params.at("size_multiplier").get<float>();
+        return enqueueResult([domain, patch](UIContext&) {
+            return rtapi::setFluidSplatGeometry(domain, patch);
+        });
+    }
+    if (method == "fluid.set_fog") {
+        std::string domain = requireString(params, "domain");
+        // Only supplied keys are written; the rest keep their value.
+        rtapi::FluidFogPatch patch;
+        if (params.contains("spread_voxels"))
+            patch.spread_voxels = params.at("spread_voxels").get<float>();
+        return enqueueResult([domain, patch](UIContext&) {
+            return rtapi::setFluidFog(domain, patch);
         });
     }
     if (method == "fluid.set_substance_material") {

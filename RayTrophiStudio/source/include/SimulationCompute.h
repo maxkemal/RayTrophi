@@ -138,6 +138,11 @@ public:
         return nullptr;
     }
 
+    // The API device the buffers live on (VkDevice for Vulkan), or nullptr.
+    // A consumer on another device must not bind nativeBufferPtr handles: this
+    // process can run two VkDevices (see render.volume_tables).
+    virtual void* nativeDevice() const { return nullptr; }
+
     // GPU device address of a buffer created with ComputeBufferUsage::AccelInput, for
     // zero-copy interop with the RT backend's BLAS build (Phase 3d; both share one
     // VkDevice). Returns 0 when unsupported or the buffer is not address-capable.
@@ -207,6 +212,11 @@ public:
     SimulationComputeContext();
 
     void setBackend(std::unique_ptr<ISimulationComputeBackend> backend);
+    // Called by setBackend BEFORE the current backend is released, so state
+    // that lives only in its buffers (device-resident particles) can be pulled
+    // home first. The owner is re-armed by SimulationWorld::compute().
+    using BackendChangeCallback = void (*)(void* owner, SimulationComputeContext& context);
+    void setBackendChangeCallback(BackendChangeCallback callback, void* owner);
     ISimulationComputeBackend& backend();
     const ISimulationComputeBackend& backend() const;
 
@@ -235,6 +245,7 @@ public:
     bool endTransferBatch();
 
     void* nativeBufferPtr(ComputeBufferHandle handle) const;
+    void* nativeDevice() const;
     uint64_t bufferDeviceAddress(ComputeBufferHandle handle) const;
     bool dispatch(const ComputeDispatch& cmd);
     bool supportsDispatch() const;  // true when the backend can run kernels (GPU)
@@ -266,6 +277,8 @@ public:
 private:
     std::unique_ptr<ISimulationComputeBackend> backend_;
     mutable TransferStats* transfer_probe_ = nullptr;
+    BackendChangeCallback backend_change_callback_ = nullptr;
+    void* backend_change_owner_ = nullptr;
 };
 
 class SimulationTransferProbeScope {

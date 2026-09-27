@@ -1,5 +1,6 @@
 ﻿#include "AnimationNodes.h"
 #include "Animation/GraphRestDefaults.h"
+#include "Animation/RootMotionUnroll.h"
 #include "globals.h"
 #include <algorithm>
 #include <cmath>
@@ -153,10 +154,7 @@ namespace AnimationGraph {
         
         if (!clip || !clip->sourceData) return result;
         
-        // 2. Update time (Unreal Style)
-        float prevTime = currentTime;
-        float currTimeTemp = currentTime;
-        
+        // 2. Update time
         float effectivePlaybackSpeed = playbackSpeed;
         if (!playbackSpeedParamName.empty()) {
             effectivePlaybackSpeed *= ctx.getFloatParam(playbackSpeedParamName, 1.0f);
@@ -168,44 +166,35 @@ namespace AnimationGraph {
 
         float inputTimeOverride = 0.0f;
         const bool hasTimeOverride = tryGetAnimationInputFloat(this, 0, ctx, inputTimeOverride);
-        if (hasTimeOverride) {
-            currentTime = std::max(0.0f, inputTimeOverride);
-        }
 
-        if (isPlaying) {
-            currTimeTemp = hasTimeOverride ? currentTime : (currTimeTemp + ctx.deltaTime * effectivePlaybackSpeed);
-            float duration = clip->getDurationInSeconds();
-            
-            // --- ROOT MOTION EXTRACTION ---
-            if (ctx.useRootMotion && clip->sourceData) {
-                double tps = clip->sourceData->ticksPerSecond;
-                auto extractRM = [&](float startT, float endT) {
-                    float startTicks = startT * (float)tps;
-                    float endTicks = endT * (float)tps;
-                    auto posIt = clip->sourceData->positionKeys.find(ctx.rootMotionBone);
-                    if (posIt != clip->sourceData->positionKeys.end() && !posIt->second.empty()) {
-                        Vec3 posPrev = sampleVectorKey(posIt->second, startTicks, clip->sourceData->duration, false);
-                        Vec3 posCurr = sampleVectorKey(posIt->second, endTicks, clip->sourceData->duration, false);
-                        result.rootMotion.positionDelta = result.rootMotion.positionDelta + (posCurr - posPrev);
-                        result.rootMotion.hasPosition = true;
-                    }
-                };
-                
-                if (loop && duration > 0.0f && currTimeTemp >= duration) {
-                    extractRM(prevTime, duration);
-                    extractRM(0.0f, fmodf(currTimeTemp, duration));
-                } else if (duration > 0.0f) {
-                    extractRM(prevTime, currTimeTemp);
-                }
-            }
-            
-            currentTime = currTimeTemp;
-            if (duration > 0.0f) {
-                if (loop) currentTime = fmodf(currentTime, duration);
-                else currentTime = std::clamp(currentTime, 0.0f, duration);
-            }
+        // Time sources, strongest first: an explicit Time Override pin, the
+        // timeline (absolute, so a scrub lands on the frame's own pose), and
+        // otherwise autonomous playback that integrates the frame delta.
+        // loopCycles counts completed loops in every mode; root motion is
+        // derived from it, never integrated.
+        const float duration = clip->getDurationInSeconds();
+        const float timeBefore = currentTime;
+        const int64_t cyclesBefore = loopCycles;
+        if (hasTimeOverride) {
+            const auto looped = RootMotionUnroll::wrap(
+                std::max(0.0f, inputTimeOverride), duration, loop);
+            currentTime = looped.seconds;
+            loopCycles = looped.cycles;
+        } else if (isPlaying && ctx.timelineDriven) {
+            const auto looped = RootMotionUnroll::wrap(
+                static_cast<double>(ctx.timelineSeconds) * effectivePlaybackSpeed + startTime,
+                duration, loop);
+            currentTime = looped.seconds;
+            loopCycles = looped.cycles;
+        } else if (isPlaying) {
+            const auto looped = RootMotionUnroll::wrap(
+                static_cast<double>(currentTime) + ctx.deltaTime * effectivePlaybackSpeed,
+                duration, loop);
+            currentTime = looped.seconds;
+            loopCycles += looped.cycles;
         }
-        
+        const bool progressed = currentTime != timeBefore || loopCycles != cyclesBefore;
+
         // 3. Sample Animation to TRS (Industry Standard)
         size_t boneCount = ctx.boneData->getBoneIndexCapacity();
         result.trsTransforms.resize(boneCount);
@@ -214,11 +203,15 @@ namespace AnimationGraph {
         // name. No producer used to fill this, so every one of those lookups missed and
         // the mask silently degraded to "layer affects nothing".
         result.boneNames.assign(boneCount, std::string{});
-        result.wasUpdated = isPlaying && (ctx.deltaTime > 0.0f);
-        
+        result.wasUpdated = progressed || (isPlaying && ctx.deltaTime > 0.0f);
+
         float timeInTicks = currentTime * clip->ticksPerSecond;
         auto anim = clip->sourceData;
-        
+
+        Vec3 rootTravel(0.0f, 0.0f, 0.0f);
+        const bool unrollRoot = ctx.useRootMotion && loop && loopCycles != 0 &&
+            RootMotionUnroll::cycleTravel(*anim, ctx.rootMotionBone, rootTravel);
+
         for (const auto& [boneName, boneIndex] : ctx.boneData->boneNameToIndex) {
             BoneTransform trs = graphRestLocalTRS(*ctx.boneData, boneName);
             // Keyed components replace local rest; omitted components retain it.
@@ -236,9 +229,8 @@ namespace AnimationGraph {
             if (sclIt != anim->scalingKeys.end() && !sclIt->second.empty())
                 trs.scale = sampleVectorKey(sclIt->second, timeInTicks, anim->duration, true);
             
-            // ROOT MOTION ZEROING
-            if (ctx.useRootMotion && boneName == ctx.rootMotionBone) {
-                trs.translation = Vec3(0, 0, 0);
+            if (unrollRoot && boneName == ctx.rootMotionBone) {
+                trs.translation = RootMotionUnroll::unrolled(trs.translation, rootTravel, loopCycles);
             }
             
             result.trsTransforms[boneIndex] = trs;
@@ -270,9 +262,9 @@ namespace AnimationGraph {
              if (sclIt != anim->scalingKeys.end() && !sclIt->second.empty())
                  trs.scale = sampleVectorKey(sclIt->second, timeInTicks, anim->duration, true);
                  
-             // ROOT MOTION ZEROING for Extra Nodes too (e.g. root bone without skin weights)
-             if (ctx.useRootMotion && nodeName == ctx.rootMotionBone) {
-                 trs.translation = Vec3(0, 0, 0);
+             // The root may be an unskinned helper node (e.g. Armature).
+             if (unrollRoot && nodeName == ctx.rootMotionBone) {
+                 trs.translation = RootMotionUnroll::unrolled(trs.translation, rootTravel, loopCycles);
              }
                  
              result.extraTransforms[nodeName] = trs;
@@ -554,18 +546,6 @@ namespace AnimationGraph {
         // Forward normalized time from the dominant pose
         result.normalizedTime = (t > 0.5f) ? b.normalizedTime : a.normalizedTime;
         
-        // Blend Root Motion
-        if (a.rootMotion.hasPosition && b.rootMotion.hasPosition) {
-            result.rootMotion.positionDelta = Vec3::lerp(a.rootMotion.positionDelta, b.rootMotion.positionDelta, t);
-            result.rootMotion.hasPosition = true;
-        } else if (a.rootMotion.hasPosition) {
-            result.rootMotion.positionDelta = a.rootMotion.positionDelta * (1.0f - t);
-            result.rootMotion.hasPosition = true;
-        } else if (b.rootMotion.hasPosition) {
-            result.rootMotion.positionDelta = b.rootMotion.positionDelta * t;
-            result.rootMotion.hasPosition = true;
-        }
-        
         // TRS Interpolation (Smooth and Correct)
         for (size_t i = 0; i < count; ++i) {
             BoneTransform trsA = (i < a.trsTransforms.size()) ? a.trsTransforms[i] : BoneTransform::identity();
@@ -659,12 +639,6 @@ namespace AnimationGraph {
             // base offsets are applied AFTER blending, so TRS is enough.
         }
         
-        // Additive Blend Root Motion
-        if (additive.rootMotion.hasPosition) {
-            result.rootMotion.positionDelta = base.rootMotion.positionDelta + additive.rootMotion.positionDelta;
-            result.rootMotion.hasPosition = true;
-        }
-        
 
         for (const auto& [nodeName, trsAdditive] : additive.extraTransforms) {
             auto baseIt = base.extraTransforms.find(nodeName);
@@ -719,21 +693,6 @@ namespace AnimationGraph {
         PoseData result = basePose;  // Start with base
         result.wasUpdated = basePose.wasUpdated || layerPose.wasUpdated;
         
-        // Layered Blend Root Motion (assuming root bone is in the mask, interpolate it)
-        float rootWeight = 0.0f;
-        auto getRootWeight = [&]() -> float {
-            if (affectedBones.empty()) return 1.0f;
-            for (const auto& bone : affectedBones) {
-                if (bone == ctx.rootMotionBone || bone == "RootNode") return 1.0f;
-            }
-            return 0.0f;
-        };
-        rootWeight = getRootWeight() * alpha;
-        
-        if (layerPose.rootMotion.hasPosition) {
-            result.rootMotion.positionDelta = Vec3::lerp(basePose.rootMotion.positionDelta, layerPose.rootMotion.positionDelta, rootWeight);
-            result.rootMotion.hasPosition = true;
-        }
         
         // Blend in layer poses wherever weight > 0
         // Ensure result has TRS and matrices
@@ -1126,9 +1085,11 @@ namespace AnimationGraph {
             AnimClipNode tempClip;
             tempClip.clipName = blendPoints[0].clipName;
             tempClip.currentTime = blendPoints[0].currentTime;
+            tempClip.loopCycles = blendPoints[0].loopCycles;
             tempClip.loop = true;
             PoseData pose = tempClip.computePose(ctx);
             blendPoints[0].currentTime = tempClip.currentTime;
+            blendPoints[0].loopCycles = tempClip.loopCycles;
             if (syncAnimations && pose.isValid()) {
                 float duration = pose.normalizedTime > 0.0f ? (tempClip.currentTime / pose.normalizedTime) : 0.0f;
                 if (duration > 0.0f) {
@@ -1149,10 +1110,13 @@ namespace AnimationGraph {
         auto evalPoint = [&](size_t pointIndex) -> PoseData {
             AnimClipNode clip;
             clip.clipName = blendPoints[pointIndex].clipName;
-            clip.currentTime = syncAnimations ? blendPoints[sortedIndices.front()].currentTime : blendPoints[pointIndex].currentTime;
+            const auto& timeSource = syncAnimations ? blendPoints[sortedIndices.front()] : blendPoints[pointIndex];
+            clip.currentTime = timeSource.currentTime;
+            clip.loopCycles = timeSource.loopCycles;
             clip.loop = true;
             PoseData pose = clip.computePose(ctx);
             blendPoints[pointIndex].currentTime = clip.currentTime;
+            blendPoints[pointIndex].loopCycles = clip.loopCycles;
             return pose;
         };
 
@@ -1760,7 +1724,7 @@ namespace AnimationGraph {
         for (auto& node : nodes) {
             if (auto* clipNode = dynamic_cast<AnimClipNode*>(node.get())) {
                 clipNode->isPlaying = false;
-                clipNode->currentTime = clipNode->startTime;
+                clipNode->reset();
             }
         }
     }
@@ -1768,7 +1732,7 @@ namespace AnimationGraph {
     void AnimationNodeGraph::resetPlayback() {
         for (auto& node : nodes) {
             if (auto* clipNode = dynamic_cast<AnimClipNode*>(node.get())) {
-                clipNode->currentTime = clipNode->startTime;
+                clipNode->reset();
             }
         }
     }

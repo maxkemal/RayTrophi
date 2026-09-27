@@ -31,6 +31,8 @@
 #include "ColliderMeshBVH.h"
 #include "MaterialStateField.h"
 #include "ParticleAppearanceProfile.h"
+#include "KinematicColliderSource.h"
+#include "KinematicColliderVoxelizer.h"
 
 namespace RayTrophiSim {
 
@@ -71,9 +73,9 @@ enum class ParticleQualityMode {
 };
 
 // Which backend a particle step is allowed to run on (PARTICLE_SYSTEM_GPU_ROADMAP
-// §7.1). Auto prefers the GPU stages that exist and falls back to CPU, and the
-// fallback is REPORTED (ParticleSimulationStats::gpu_force_status), never
-// silent. GPURequired refuses to advance instead of falling back, so a test
+// §7.1). Auto runs a system device-resident when it is eligible and falls back
+// to CPU otherwise, and the fallback is REPORTED (ParticleSimulationStats::
+// gpu_status), never silent. GPURequired refuses to advance instead of falling back, so a test
 // that asks for the GPU cannot pass on the CPU path by accident. CPU runs the
 // reference implementation even when a GPU is available -- that is the
 // baseline every GPU stage is compared against.
@@ -584,13 +586,21 @@ struct SimulationGridDomainDesc {
     // The consumer-side normalisation stays: it still repairs old .rtp files
     // that literally saved Volume. This just stops manufacturing new ones.
     Fluid::FluidRenderMode fluid_render_mode = Fluid::FluidRenderMode::SurfaceSDF;
+    // VolumeFog only: Gaussian sigma, in simulation voxels, applied to the
+    // splatted density before it is raymarched (Fluid::spreadFogDensity).
+    // The raw splat reaches 8 cells per particle and draws spray as dots;
+    // 0 draws it raw. Render-side only -- the solver's grid is not touched.
+    float fluid_fog_spread_voxels = 1.5f;
 
-    // Particles-mode render config (consumed only when fluid_render_mode ==
-    // Particles). Mirrors the per-system render in ParticleSystemObject.
+    // Particle representation config for explicit spheres. Mirrors
+    // ParticleSystemObject.
     Vec3  fluid_particle_color = Vec3(0.40f, 0.65f, 0.95f);
     float fluid_particle_radius_factor = 0.45f;
     float fluid_particle_size_multiplier = 1.0f;
-    int   fluid_particle_subdivisions = 1;
+    // Icosphere subdivision 0..3 = 20/80/320/1280 triangles per splat. Default
+    // 0: a dense splat pool reads as a surface long before facets show, and
+    // each level multiplies raster triangles and RT BLAS memory by four.
+    int   fluid_particle_subdivisions = 0;
     // Geometry instanced at each splat. 0 = built-in icosphere; 1 = triangles
     // belonging to the named scene node, recentered and normalized once.
     int   fluid_particle_geometry_mode = 0;
@@ -1768,7 +1778,19 @@ struct ParticleSoABuffers {
     std::vector<float> angular_velocity;  // radians/sec
 };
 
-struct ParticleComputeBuffers {
+// ── Device residency (particle roadmap Phase 1.5 Batch B, §7.3) ─────────────
+// Where position/velocity are authoritative. Lifecycle streams (alive, age,
+// lifetime, profile, size scale, rotation) are ALWAYS host authoritative; see
+// ParticleDeviceResidency.cpp.
+//   Host   - the device copy is absent or stale; a resident step uploads all
+//   Equal  - host and device agree
+//   Device - the device is newer; host consumers call syncHostState() first
+enum class ParticleKinematicResidency : uint8_t { Host, Equal, Device };
+const char* particleKinematicResidencyName(ParticleKinematicResidency residency);
+
+// The simulation's own device streams of a resident system, sized to a power
+// of two >= the host capacity (padding slots are dead).
+struct ParticleResidentBuffers {
     ComputeBufferHandle position_x;
     ComputeBufferHandle position_y;
     ComputeBufferHandle position_z;
@@ -1777,10 +1799,40 @@ struct ParticleComputeBuffers {
     ComputeBufferHandle velocity_z;
     ComputeBufferHandle age_seconds;
     ComputeBufferHandle lifetime_seconds;
-    ComputeBufferHandle inverse_mass;
-    ComputeBufferHandle alive;
+    ComputeBufferHandle alive;               // uint32 per slot
+    ComputeBufferHandle appearance_profile;  // uint32 per slot
+    ComputeBufferHandle size_scale;
+    ComputeBufferHandle slot_records;        // ParticleResidentSlotRecord upload
     std::size_t capacity = 0;
-    uint64_t source_version = 0;
+    std::size_t record_capacity = 0;
+};
+
+// One host-decided slot write (spawn or external kill), scattered into every
+// device stream by sim_particle_spawn.comp. 48 bytes, std430.
+struct ParticleResidentSlotRecord {
+    uint32_t slot = 0;
+    uint32_t alive = 0;
+    uint32_t profile = 0;
+    float size_scale = 1.0f;
+    float position_lifetime[4] = {};   // xyz, lifetime
+    float velocity_age[4] = {};        // xyz, age
+};
+
+// What the raster viewport binds to pull a resident system. Only valid on
+// `device`; a consumer on another VkDevice must take a host snapshot instead.
+struct ParticleResidentDrawBuffers {
+    void* device = nullptr;
+    void* buffers[8] = {};  // position x/y/z, age, lifetime, alive, profile, size scale
+    uint32_t capacity = 0;
+    uint64_t state_version = 0;
+};
+
+// Host snapshots of device kinematics, cumulative since the runtime was made.
+struct ParticleHostSnapshotStats {
+    uint64_t synchronous_count = 0;  // a consumer paid its own synchronisation
+    uint64_t mirrored_steps = 0;     // the download rode a resident step's fence
+    uint64_t download_bytes = 0;
+    const char* last_reason = "none";
 };
 
 struct ParticleSimulationStats {
@@ -1800,48 +1852,48 @@ struct ParticleSimulationStats {
     float integrate_ms = 0.0f;
     float self_collision_ms = 0.0f;
     float grid_domain_ms = 0.0f;
-    float upload_ms = 0.0f;
     std::size_t alive_count = 0;
     std::size_t capacity = 0;
     std::size_t emitter_count = 0;
     std::size_t collider_count = 0;
     std::size_t domain_count = 0;
 
-    // ── Execution / transfer telemetry (roadmap Phase 0) ────────────────────
-    // Which backend each stage actually ran on, and what the partial GPU path
-    // costs in transfers. Before this, the GPU force block (upload + dispatch +
-    // synchronize + velocity download) ran BEFORE integrate_start, so no stage
-    // timer covered it; it only showed up as an unexplained gap in total_ms.
+    // ── Execution / transfer telemetry (roadmap Phase 0 / 1.5 Batch B) ──────
+    // A system is either device resident for the whole step or runs the CPU
+    // reference; the Phase 0 partial path (GPU forces + velocity readback +
+    // CPU integration) is removed, and its gpu_force_* / force_* / mirror_*
+    // names went with it.
     //
     // All strings are static literals: stats_ is reset every step and must not
     // allocate.
     ParticleExecutionPolicy execution_policy = ParticleExecutionPolicy::Auto;
     const char* compute_backend = "none";   // SimulationComputeContext::backendName()
-    // Why the force stage ran where it did. "gpu" is the only value meaning the
-    // GPU kernel's result was used. Values:
+    // Why the step ran where it did. "gpu_resident" is the only value meaning
+    // the device ran it. Values:
     //   not_attempted, cpu_policy, no_compute_context, backend_not_vulkan,
-    //   no_dispatch_support, buffers_not_ready, dispatch_failed,
-    //   download_failed, gpu_required_blocked, gpu
-    const char* gpu_force_status = "not_attempted";
-    bool forces_on_gpu = false;
-    // GPURequired and the GPU force stage was unavailable or failed: the step
-    // did NOT integrate. gpu_force_status says why. Never true under Auto/CPU.
-    // The runtime's grid domains still step: the policy governs particle
-    // stages only.
+    //   no_dispatch_support, host_consumer_colliders,
+    //   host_consumer_self_collision, host_consumer_grid_domains,
+    //   buffers_not_ready, dispatch_failed, gpu_required_blocked, gpu_resident
+    const char* gpu_status = "not_attempted";
+    bool device_resident = false;
+    // GPURequired and the resident step was unavailable, ineligible or failed:
+    // the step did NOT integrate. gpu_status says why. Never true under
+    // Auto/CPU. The runtime's grid domains still step: the policy governs
+    // particle stages only.
     bool step_blocked = false;
-    // Host wall time of the whole GPU force block, transfers included. Zero
-    // when the force stage ran on the CPU (it is then inside integrate_ms).
-    float gpu_force_ms = 0.0f;
-    // Transfers issued by the particle step itself, split by purpose. Grid
-    // domain transfers are NOT here -- they belong to fluid.step_stats /
-    // gas.step_stats.
-    //   force_transfer  — pre-dispatch mirror upload, dispatch, sync, velocity download
-    //   mirror_transfer — end-of-step host->device mirror of the whole SoA
-    SimulationComputeContext::TransferStats force_transfer;
-    SimulationComputeContext::TransferStats mirror_transfer;
-    // Particles whose position or velocity was NaN/Inf after this step's
-    // integrate + collision. Counted, not removed: Phase 0 only observes.
+    // Host wall time of the resident step, transfers included. Zero on the CPU
+    // path (whose work is inside integrate_ms).
+    float gpu_step_ms = 0.0f;
+    // Spawn/kill slot writes sent to the device this step.
+    uint32_t slot_records = 0;
+    // Transfers issued by the resident step itself (slot records, dispatches,
+    // a mirrored download). Grid domain transfers are NOT here -- they belong
+    // to fluid.step_stats / gas.step_stats.
+    SimulationComputeContext::TransferStats step_transfer;
+    // Particles whose position or velocity was NaN/Inf after this step. On a
+    // resident step only known when the state came home (nonfinite_measured).
     uint32_t nonfinite_particles = 0;
+    bool nonfinite_measured = false;
 };
 
 struct MoltenMassTransferRequest {
@@ -1903,6 +1955,9 @@ public:
     int order() const override { return 300; }
     bool enabled() const override;
     void step(const SimulationContext& context) override;
+    // Device-resident kinematics come home before the backend that holds
+    // them is replaced (SimulationComputeContext::setBackend).
+    void onComputeBackendChanging(SimulationComputeContext& compute) override;
 
     void setEnabled(bool enabled);
     void reserve(std::size_t capacity);
@@ -1961,6 +2016,12 @@ public:
     void setColliderBoundsResolver(std::function<bool(const ParticleColliderDesc&, Vec3&, Vec3&)> resolver);
     void setColliderOBBResolver(std::function<bool(const ParticleColliderDesc&, ParticleColliderOBB&)> resolver);
     void setColliderMeshResolver(std::function<bool(const ParticleColliderDesc&, std::vector<SurfaceMeshTriangle>&, uint64_t&)> resolver);
+    void setKinematicColliderProvider(
+        std::function<bool(int,
+                           float,
+                           bool,
+                           std::vector<KinematicProxySample>&,
+                           std::string&)> provider);
 
     // ── Material State Field ─────────────────────────────────────────────────
     // Persistent per-object thermal/pyrolysis surface state — the sole owner of
@@ -2065,6 +2126,13 @@ public:
     const std::vector<CouplingTraceEntry>& couplingTrace() const {
         return coupling_trace_;
     }
+    // Per proxy and domain: cells stamped and the velocity written into
+    // solid_vel during the last grid step. steps == 0 means never stepped,
+    // which an empty log alone cannot tell apart from "nothing stamped".
+    const std::vector<KinematicStampRecord>& kinematicStampLog() const {
+        return kinematic_stamp_log_;
+    }
+    uint64_t kinematicStampSteps() const { return kinematic_stamp_steps_; }
 
     std::vector<SimulationGridDomainDesc>& gridDomains();
     const std::vector<SimulationGridDomainDesc>& gridDomains() const;
@@ -2207,9 +2275,25 @@ public:
 
     std::size_t capacity() const;
     std::size_t aliveCount() const;
+    // HOST copy. On a device-resident system position/velocity may be stale
+    // here: a consumer that reads them calls syncHostState(reason) first.
     const ParticleSoABuffers& buffers() const;
-    const ParticleComputeBuffers& computeBuffers() const;
     const ParticleSimulationStats& stats() const;
+
+    // ── Device residency (particle roadmap Phase 1.5 Batch B) ───────────────
+    // Brings device-authoritative position/velocity home: an explicit,
+    // counted snapshot (hostSnapshotStats, particle.stats snapshot_*). A no-op
+    // when the host is current. Asking marks demand, so a consumer that asks
+    // every frame makes the following steps mirror inside their own
+    // submission instead of paying a separate synchronisation.
+    bool syncHostState(const char* reason);
+    ParticleKinematicResidency kinematicResidency() const;
+    std::size_t residentCapacity() const;
+    const ParticleHostSnapshotStats& hostSnapshotStats() const;
+    // True when the raster viewport can pull this system straight from the
+    // simulation buffers (resident, Vulkan). The caller still has to compare
+    // out.device with its own VkDevice.
+    bool residentDrawBuffers(ParticleResidentDrawBuffers& out) const;
 
     void setGravity(const Vec3& gravity);
     void setLinearDrag(float drag);
@@ -2257,7 +2341,19 @@ private:
                                           SimulationComputeContext* compute);
     void buildNeighborGrid(float cell_size);
     void solveSelfCollisions(float dt);
-    void uploadToCompute(const SimulationContext& context);
+    // Device residency (ParticleDeviceResidency.cpp).
+    const char* residentIneligibility() const;
+    bool stepDeviceResident(const SimulationContext& context, float drag_factor);
+    void advanceHostLifecycle(float dt);
+    void noteResidentSlotWrite(std::size_t index);
+    void resetResidency();
+    bool residentBuffersValidFor(const SimulationComputeContext& compute) const;
+    bool ensureResidentBuffers(SimulationComputeContext& compute);
+    bool uploadResidentFullState(SimulationComputeContext& compute);
+    bool downloadResidentKinematics(SimulationComputeContext& compute, const char* reason,
+                                    bool in_step);
+    void releaseResidentBuffers(SimulationComputeContext& compute);
+    void forgetResidentBuffers();
     void ensureComputeBuffer(SimulationComputeContext& compute,
                              ComputeBufferHandle& handle,
                              const char* name,
@@ -2279,7 +2375,20 @@ private:
     bool validateGpuFluidMGPCG(SimulationComputeContext* compute);
 
     ParticleSoABuffers buffers_;
-    ParticleComputeBuffers compute_buffers_;
+    ParticleResidentBuffers resident_buffers_;
+    ParticleKinematicResidency residency_ = ParticleKinematicResidency::Host;
+    // The context the resident buffers live in; set by the resident step.
+    SimulationComputeContext* resident_compute_ = nullptr;
+    // Slots written on the host since the last resident step (spawn / kill).
+    std::vector<uint32_t> resident_pending_slots_;
+    std::vector<ParticleResidentSlotRecord> resident_records_;
+    std::vector<uint8_t> resident_slot_mask_;
+    std::vector<float> resident_f32_scratch_;
+    std::vector<uint32_t> resident_u32_scratch_;
+    std::vector<float> resident_download_[6];
+    ParticleHostSnapshotStats host_snapshot_stats_;
+    uint64_t resident_step_serial_ = 0;
+    uint64_t host_demand_serial_ = 0;
     std::vector<NeighborGridEntry> neighbor_grid_;
     std::vector<ParticleEmitterDesc> emitters_;
     std::vector<ParticleAppearanceProfile> appearance_profiles_;
@@ -2334,6 +2443,15 @@ private:
     std::function<bool(const ParticleColliderDesc&, Vec3&, Vec3&)> collider_bounds_resolver_;
     std::function<bool(const ParticleColliderDesc&, ParticleColliderOBB&)> collider_obb_resolver_;
     std::function<bool(const ParticleColliderDesc&, std::vector<SurfaceMeshTriangle>&, uint64_t&)> collider_mesh_resolver_;
+    std::function<bool(int,
+                       float,
+                       bool,
+                       std::vector<KinematicProxySample>&,
+                       std::string&)> kinematic_collider_provider_;
+    bool kinematic_collider_discontinuity_ = true;
+    std::vector<KinematicStampRecord> kinematic_stamp_log_;
+    std::vector<uint32_t> kinematic_stamp_counts_;
+    uint64_t kinematic_stamp_steps_ = 0;
     // Couplings that RAN during the last stepGridDomains, in execution order.
     // Cleared at the top of every step; see couplingTrace().
     std::vector<CouplingTraceEntry> coupling_trace_;
@@ -2382,14 +2500,6 @@ private:
     float linear_drag_ = 0.0f;
     ParticlePhysicsSettings physics_settings_;
     ParticleSimulationStats stats_;
-    // GPU force results land here first and are swapped into buffers_ only
-    // when ALL three components downloaded. Downloading straight into buffers_
-    // meant a failure on y after x succeeded left x already GPU-integrated, and
-    // the CPU fallback then applied the forces to x a second time -- a silent
-    // half-GPU/half-CPU step (roadmap §7.4 forbids it). Grow-only.
-    std::vector<float> gpu_velocity_scratch_x_;
-    std::vector<float> gpu_velocity_scratch_y_;
-    std::vector<float> gpu_velocity_scratch_z_;
     std::size_t alive_count_ = 0;
     uint64_t data_version_ = 1;
     uint32_t emitter_spawn_serial_ = 1;

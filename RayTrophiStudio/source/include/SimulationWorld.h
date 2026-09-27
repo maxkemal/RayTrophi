@@ -160,6 +160,10 @@ public:
     virtual void prepare(const SimulationContext& context) { (void)context; }
     virtual void step(const SimulationContext& context) = 0;
     virtual void finalize(const SimulationContext& context) { (void)context; }
+    // The compute backend is about to be replaced; its buffers are still
+    // readable. A system whose newest state lives only on the device copies it
+    // home here, or loses it.
+    virtual void onComputeBackendChanging(SimulationComputeContext& compute) { (void)compute; }
 };
 
 struct SimulationWorldStats {
@@ -214,6 +218,7 @@ public:
     const SimulationForceFieldComputeBuffer& getForceFieldComputeBuffer() const;
 
 private:
+    static void onComputeBackendChanging(void* owner, SimulationComputeContext& context);
     void sortSystems();
     void rebuildForceFieldSnapshot();
     void uploadForceFieldSnapshotToCompute();
