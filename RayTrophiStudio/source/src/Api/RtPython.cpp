@@ -4456,6 +4456,60 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "non-zero means the realtime viewport was never given the volumes and "
        "will draw none. volume_stats() cannot see this — a pass that never ran "
        "counts zero, exactly like a scene with no volumes.");
+    render.def("volume_slots", [] {
+        const rtapi::VolumeSlotsInfo t = rtapi::volumeSlots();
+        auto vec3 = [](const Vec3& v) { return py::make_tuple(v.x, v.y, v.z); };
+        py::list backends;
+        for (const auto& b : t.backends) {
+            py::list slots;
+            for (const auto& s : b.slots) {
+                py::dict e;
+                e["slot"] = s.slot;
+                e["stable_key"] = s.stable_key;
+                e["name"] = s.name;
+                e["vdb_id"] = s.vdb_id;
+                e["published"] = s.published;
+                e["packet_order"] = s.packet_order;
+                e["has_contents"] = s.has_contents;
+                e["is_active"] = s.is_active;
+                e["source"] = s.source;
+                e["volume_type"] = s.volume_type;
+                e["has_density"] = s.has_density;
+                e["has_temperature"] = s.has_temperature;
+                e["aabb_min"] = vec3(s.aabb_min);
+                e["aabb_max"] = vec3(s.aabb_max);
+                slots.append(e);
+            }
+            py::dict e;
+            e["role"] = b.role;
+            e["is_vulkan"] = b.is_vulkan;
+            e["upload_serial"] = b.upload_serial;
+            e["instance_count"] = b.instance_count;
+            e["slots"] = slots;
+            backends.append(e);
+        }
+        py::list domains;
+        for (const auto& d : t.domains) {
+            py::dict e;
+            e["system"] = d.system;
+            e["domain_index"] = d.domain_index;
+            e["domain"] = d.domain;
+            e["type"] = d.type;
+            e["render_mode"] = d.render_mode;
+            e["vdb_id"] = d.vdb_id;
+            e["has_volume"] = d.has_volume;
+            e["volume_name"] = d.volume_name;
+            domains.append(e);
+        }
+        py::dict d;
+        d["available"] = t.available;
+        d["backends"] = backends;
+        d["domains"] = domains;
+        return d;
+    }, "One row per TLAS volume slot per backend (identity, published, is_active, "
+       "source, channels) plus which volume each grid domain owns. Read twice "
+       "around an operation: a stable_key change for the same name is identity "
+       "churn; an unchanged upload_serial means nothing was republished.");
 
     // ── Viewport measurement ────────────────────────────────────────────────
     // ★ Reading a render's DATA instead of saving it and looking. See

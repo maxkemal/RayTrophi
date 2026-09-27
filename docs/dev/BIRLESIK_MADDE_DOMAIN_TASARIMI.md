@@ -16,8 +16,9 @@
 | | |
 |---|---|
 | **Son güncelleme** | 2026-09-27 |
-| **Kodda ne var** | Hiçbir faz başlamadı. Ön hazırlık olarak sıvıda fog modu (gerçek yoğunluk + Gauss yayma + parçacık Kelvin'i ile blackbody) yazıldı; son parti DERLENMEDİ — `docs/dev/NEXT_BUILD_CHECKS.md` en üst bölüm |
-| **Sıradaki iş** | Faz 0 envanteri (§8b) — koda dokunmadan: 85+ gaz/sıvı dalının sınıflandırması, render matrisi ÖLÇÜMÜ, hacim kimliği değişmez testleri, materyal envanteri (§4.6), UI mock'u |
+| **Kodda ne var** | Hiçbir faz başlamadı. Ön hazırlık olarak sıvıda fog modu (gerçek yoğunluk + Gauss yayma + parçacık Kelvin'i ile blackbody) yazıldı; derlendi ve kullanıcı testiyle doğrulandı (commit 77acbbb + doğrulama) |
+| **Faz 0 durumu** | 1. tur (koddan) + 2. tur (canlı) BİTTİ — §8b. Kısıt: `density`/sıcaklık/hız faza göre farklı ANLAM taşıyor → ortak grid ≠ ortak alan. Canlı: Vulkan matrisi 9/9 çiziyor (fog Material ≈ siyah); gaz+SDF katmanı 3 yolda tutuyor; sim VRAM'i izlenmiyor (519 MB). IPC render_mode resync düzeltmesi ✔ derlendi ve doğrulandı (exe 22:21) |
+| **Sıradaki iş** | (0) `render.volume_slots` ✔ derlendi; kimlik testi `solid` + `rendered` PASS. (1) Test geçince Faz 0 kapısı: `fluid.get` görünüm listesi (Faz 1'in tek karar noktasıyla birlikte, ayrı kopya olarak DEĞİL). (2) UI mock'u |
 | **Karar verilmiş** | §3 ilkeleri; kimlik+depolama birleşir, çözücü değerlendirmesi birleşmez; önce zayıf bağlama; ayrı "1. adım refactor"u YOK (Faz 1 doğrudan görünüm çözücüsü) |
 | **Açık karar** | §8 açık sorular; §4.6 materyal sözleşmesinin ayrıntısı; OptiX farkının kullanıcıya gösterimi |
 | **Kullanıcıyla konuşulan** | Hedef fizik-kimya sistemi (§4.5); şelale ilk senaryo; UI modelden türemeli, kod öncesi mock |
@@ -60,7 +61,9 @@ dağınıklığı büyütmek yerine ortadan kaldırmalı.
 - **Ortak konteyner zaten var.** Gaz ve sıvı domain'i aynı
   `SimulationGridDomainState`'i ve aynı `grid`'i kullanıyor (hız yüzleri,
   `density`, `temperature`, `fuel`, `interaction`, `solid`). Ayrılan şey
-  hangi alanı kimin doldurduğu.
+  hangi alanı kimin doldurduğu. ⚠ Ve **ne anlama geldiği**: sıvıda `density`
+  hacim oranıdır, gaz kanalları hiç ayrılmaz, hız alanı APIC'in çalışma
+  alanıdır (§8b 1. tur, madde 2).
 - **İki çözücü de grid üzerinde basınç çözüyor.** APIC sıvısı parçacıktır ama
   P2G → basınç → G2P ile aynı tür MAC grid'ini kullanır; gaz Euler grid'idir.
 - **Render katmanlaması zaten var** —
@@ -283,10 +286,12 @@ Kurallar:
    | köpük oranı | ✔ | etiket | ✔ |
    | alev / reaksiyon hızı | — | — | ✔ (gaz) |
 
-   Bugün splat havuzu domain başına tek materyal taşıyor gibi görünüyor
-   (scene-object splat'te yüz materyalleri); instance başına veri yolu olup
-   olmadığı Faz 0'da DOĞRULANMALI. Yoksa sıcaklık/madde başına splat rengi
-   yeni bir instance veri yolu ister (RT ve raster ikisinde).
+   Koddan doğrulandı (§8b 1. tur): splat instance'ında instance başına veri
+   YOK (transform + kaynak indeksi); madde başına materyal, materyal başına
+   ayrı geometri kaynağıyla yapılıyor. Sıcaklıkla boyanan splat yeni bir
+   instance veri yolu ister (RT ve raster ikisinde). SDF'de sıcaklık kanalı
+   bugün köpüğe ait — tablodaki SDF sıcaklık hücresinin ön koşulu köpüğün
+   kendi kanalı.
 4. **Kanallar birbirini ödünç ALMAZ.** Köpüğün SDF `temperature` kanalına
    binmesi (`FOAM_TEMP_SCALE`) tarihsel bir kısayoldur; sıcaklık gerçek veri
    taşıdığı anda iki anlam çakışır. Birleşik modelde köpük kendi kanalını alır.
@@ -413,6 +418,175 @@ modelin görünüm çözücüsü olarak kurulur, mevcut modun etrafına değil.
   runtime durumu da ortak `SimulationGridDomainState`. Tip enum'u bugün
   "hangi alan grubu anlamlı" seçicisi gibi çalışıyor — birleşme depolamada
   değil, **dallarda** yapılacak.
+  ⚠ 1. tur bunu DARALTTI — aşağıya bak: tanım tek struct, ama **alanların
+  anlamı** faza göre değişiyor.
+
+### Faz 0 envanteri — 1. tur bulguları (2026-09-27, koddan okundu, ölçülmedi)
+
+**1. 85 dal sınıflandırıldı** (`SimulationDomainType::` doğrudan karşılaştırma):
+
+| Sınıf | Adet | Nerede | Birleşik modelde |
+|---|---|---|---|
+| (b) çözücü / "faz var mı" | 43 | `ParticleSimulation.cpp` 23, `RtApiFluid.cpp` 9 (7'si "gas domain not found" araması), `scene_data.h` 4, Molten/GasPulse/GasStructural/ParticleAuthoring 6, `RtApiParticle` 1 | Çoğu mekanik: `type == Gas` → "gaz fazı var mı" yüklemi. Zor olanlar aşağıda |
+| (e) kimlik / depolama / serileştirme | 18 | `ProjectManager` 4, presetler 4, `RtApiFluid` oluşturma+tip dizgisi 5, `ParticleSimulation.h` 2, kanal düzeni 2, 1 test grid'i | Faz 4 göçü |
+| (d) UI | 13 | `scene_ui_simulation_domains` 8, gizmo 3, force field 1, molten transfer 1 | Yeniden tasarım (mock) |
+| (c) render | 11 | `scene_data.h` 6, köprü 2, lifecycle 1, `RtApiFluid` 1, splat materyali 1 | Görünüm çözücüsü (Faz 1) |
+
+Bayrağa çevrilmiş kullanım (`is_fluid_domain`, `is_gas_state`,
+`wants_gas_channels` …) ayrıca **~60**: UI 21, `scene_data.h` 10 (render
+rotası), `ParticleSimulation.cpp` 9, `RtApiFluid.cpp` 8, köprü 4.
+`APICFluidSolver.cpp` ve basınç shader'larındaki `is_fluid` **hücre** bayrağıdır,
+domain tipi değil — sayılmadı. `ForceField`'ın `is_gas`'ı tüketici filtresi
+(`affects_gas`); birleşik domain'de faz başına sorulmalı.
+
+(b)'nin **zor** olanları — mekanik değil, anlam değiştiren dallar:
+- `ParticleSimulation.cpp` ~9861: partikül → grid birikimi gaz-only, çünkü
+  sıvı domain'de `density` başka bir şey (aşağıda ★★★).
+- ~9040: `allocate_gas_channels` sıvıda **kapalı** — `temperature`, `fuel`,
+  `interaction` sıvı domain'de BOŞ vektör. Birleşik domain gaz kanallarını
+  "gaz fazı var mı"ya bağlamalı; aksi halde her sıvı 3 float/hücre öder.
+- ~12451: analiz geçişi (4. parti fog hatasının yeri — sayaç kapsamı).
+- ~6194 ve ~11560: sıvı → gaz yanması bugün **iki ayrı domain** arasında,
+  kutuların kesişimi üzerinden. Birleşik modelde bu domain içi alışveriş olur
+  (§4.4) — en doğal Faz 3 adayı.
+
+**★★★ 2. Aynı alan adı, iki fiziksel anlam** (§2'deki "ortak konteyner"
+iddiasının sınırı):
+
+| Alan | Gaz domain'inde | Sıvı domain'inde |
+|---|---|---|
+| `grid.density` | duman yoğunluğu (birimsiz) | parçacık sayısı / ppc = **hacim oranı** (`sim_fluid_density_splat`) |
+| sıcaklık | `grid.temperature`, 0 tabanlı ısı, render'da ×3000 → K | **parçacık üzerinde** Kelvin; grid kanalı yok |
+| `vel_x/y/z` | gazın hız alanı | APIC'in P2G/basınç çalışma alanı |
+
+Sonuç: **§5.A'daki "ortak grid" ortak ALAN demek olamaz.** İki faz aynı
+seyrek topolojiyi/adreslemeyi paylaşabilir, ama her faz kendi `density` /
+sıcaklık / hız alanını taşımalı — yoksa ikinci çözücü ilkinin alanını
+sessizce ezer. Bu, §8.2'deki birim sorusunun somut hâli: `mist` aktarımı
+"hacim oranı"nı "duman yoğunluğu"na çevirir ve dönüşüm tek yerde yaşamalı.
+
+**3. Hacim kimliği — ölçü aleti YOK.** `render.volume_tables` backend başına
+**sayı** raporlar (`instance_count`, `dense_gas_mirror_buffers`), hacim başına
+**satır** değil. Kimlik değişmezlerinin testi (slot sabit kalır mı, invalidate
+TLAS slotunu kaybeder mi, alakasız rebuild SDF'yi atar mı) ancak şu okuma
+eklenince yazılabilir: hacim başına `{domain, rol (sdf/fog/foam), vdb_id,
+ssbo_slot, maske sınıfı, is_active, kayıt/yeniden kurulum sayacı}`. Bu Faz 0'ın
+**ilk kod işi** — §6 Faz 0 kapısıyla aynı yer (`fluid.get` görünüm listesi).
+
+- ★ Tarihçe: domain başına **ikinci hacim slotu zaten vardı**
+  (`domain_foam_volumes`, `domain_foam_vdb_ids`). 2026-06-25'te köpüğü SDF
+  hacmiyle çakıştığı için (siyah küp) sökülüp sıcaklık kanalına bindirildi;
+  kod bugün yalnız eski oturumdan kalanları söküyor. Çakışık kutu kökü
+  **sonra**, 2026-08-16'da çözüldü. Yani söküm gerekçesi muhtemelen artık
+  geçersiz — ama DOĞRULANMADI. Faz 1'in ilk canlı ölçümü bu olmalı.
+- Katmanlama sözleşmesi ([VULKAN_GAS_FLUID_LAYERING.md](VULKAN_GAS_FLUID_LAYERING.md))
+  **iki ayrı domain** için doğrulandı (Burning Fuel Spill: sıvı domain + gaz
+  domain). Aynı domain içinde SDF + fog aynı kutuda HİÇ denenmedi.
+- **Fog + fog** (iki katılımcı ortam aynı kutuda) için Vulkan'da hakem yok;
+  sözleşme "iki tam çakışık AABB yürüyüşü" yasaklıyor. §4.3'ün "mist + gaz
+  tek fog hacmi" kararı bunu zaten önlüyor — ama o zaman iki kaynağın
+  yoğunluğu tek birimde birleşmeli (madde 2).
+
+**★★ 4. Köpük kanalı: bugün çakışma yok, ama tuzak kurulu.** SDF rotasında
+sıcaklık kanalı **hiç yüklenmiyor** (rafine SDF grid'i sim grid'inden farklı
+çözünürlükte; `up_temp = nullptr`). Köpük o boş kanala biniyor ve shader
+köpüğü `vol.vdb_temp_address != 0` ile TANIYOR (`volume_closesthit.rchit`
+~2403, `ray_color.cuh` ~647). Yani SDF'ye erimiş-madde parıltısı için Kelvin
+yüklendiği gün, shader onu **beyaz köpük** olarak çizer (1400 K / 10000 =
+0.14 köpük yoğunluğu) — hatasız, makul görünen yanlış. Fog rotası Kelvin'i
+alır ama köpüğü almaz; ikisi bugün rotayla birbirini dışladığı için
+karşılaşmıyor. §4.6'daki "SDF hacmi: sıcaklık ✔" hücresi HEDEF'tir; ön koşulu
+köpüğün kendi kanalı ve rafine çözünürlükte sıcaklık.
+
+**5. Tek karar noktası — bugün DÖRT kopya** (§1'deki iddia koddan
+doğrulandı): `scene_data.h` ~2663 (`fluid_surface_route` /
+`fluid_fog_route`), köprü ~1400 (parçacık başına splat mı), `RtApiFluid.cpp`
+~196 (`effective_representation`, yorumu "exactly the way the render bridge
+resolves it" diyor — yani elle kopya), UI ~2651 ("Now drawing", combo
+indeksinden). Dördü bugün tutarlı görünüyor; Faz 1 bunları tek fonksiyona
+indirir. **Doğrulanmadı:** fog + SDF override durumunda SDF'nin untagged /
+Inherit parçacıkları da içerip içermediği (UI ve API "sdf" diyor).
+
+**6. Materyal envanteri (§4.6):**
+- Splat instance'ı yalnız `InstanceTransform` + `source_index` taşır; instance
+  başına renk/sıcaklık/madde verisi YOK. Madde başına materyal, **materyal
+  başına ayrı geometri kaynağı** ile yapılıyor (instance kaynak seçer).
+  Sıcaklıkla boyanan splat yeni bir instance veri yolu ister (RT + raster).
+- Köpük/sprey/kabarcık üç ayrı materyal (`fparams.*_material_id`), ayrı
+  instance grubu.
+- **`ParticleAppearanceProfile` ≠ madde görünüm profili.** Partikülünkü
+  normalize YAŞ ekseninde bir billboard eğrisi (renk rampası, opaklık, boyut,
+  emisyon; sistem başına id, tek GPU LUT). Madde profilinin ekseni faz ve
+  sıcaklık. Öneri: birleştirme; adları ayır ("Appearance Profile" partikülde
+  kalır, madde tarafı `SubstanceAppearance`). İlişki tek yönlü: bir partikül
+  emitter'ının `Domain Deposit`'i hedef maddeyi (`substanceTag`) söyler,
+  domain o maddenin profilini kullanır.
+
+**7. Domain'in sahibi.** Grid domain'leri bir `ParticleSimulationSystem`
+runtime'ının içinde yaşıyor (`ParticleSystemObject::runtime`, hacim adı
+`"<sistem> Domain <d>"`); partikül yol haritası da "grid domain'i olan sistem
+device-resident yola girmez" diyor. §3.4 ("üretici domain'in sahibi olmaz")
+kavramsal olarak doğru, ama **konteyner olarak** bugün sahip sistemdir. Faz
+4'ün kararı: domain sistemde mi kalır, üst seviyeye mi çıkar. Karar verilmedi.
+
+### Faz 0 envanteri — 2. tur: canlı ölçüm (2026-09-27, exe 13:34)
+
+Probe: `scripts/ipc/Probe-FluidRenderMatrix.ps1`. Boş sahne, 2 m'lik kutuda
+38.720 parçacıklık su bloğu; ardından `burning_fuel_spill` preset'i.
+
+**Render matrisi — tek başına sıvı (Vulkan):**
+
+| Görünüm | Solid | Material (RayFusion) | Rendered (Vulkan RT) |
+|---|---|---|---|
+| splat | ✔ impostor küreler (38.720 yüklendi = çizildi) | ✔ instance (38.720), soluk | ✔ |
+| SDF | ✔ gri yüzey | ⚠ soluk gri-beyaz kütle — Rendered'daki mavi camla aynı madde gibi görünmüyor | ✔ mavi dielektrik |
+| fog | ✔ düz açık mavi önizleme | ⚠ **neredeyse siyah** | ✔ gri-kahve sis |
+
+**Gaz + SDF aynı XZ kutusunda (iki ayrı domain, Burning Fuel Spill):** üç
+yolda da iki katman birlikte çiziliyor; katmanlama sözleşmesi canlıda da
+tutuyor. Yanma zinciri çalışıyor (60 karede 24.192 → 21.995 parçacık yandı, gaz
+26k hücre).
+
+**OptiX hücreleri ölçülemedi:** IPC'den OptiX'e geçiş yok. Dondurulmuş
+yolda bu kabul edilebilir, ama §8b madde 7'nin "fark nasıl gösterilir"
+sorusunu otomatik testle cevaplamak da mümkün değil.
+
+**★★★ Ölçüm sırasında bulunan hata — IPC mod değişikliği raster'da bir mod
+GERİDE kalıyordu.** `fluid.set_param render_mode` yalnız alanı yazıyordu;
+panel combo'su ise `requestSimulationTimelineRenderResync()` + `start_render`
+de çağırıyor. Duraklatılmış timeline'da hacim rotası yeniden koşmadığı için
+Solid/Material, bir **önceki** modun temsilini çizdi: particles'ta eski SDF
+splat'lerle üst üste, surface'te boş ekran, fog'da keskin yüzey. Rendered her
+karede kendi senkronladığı için hep doğruydu, bu da hatayı gizledi.
+`fluid.step` de senkronu tetiklemiyor; yalnız `timeline.set_frame` ya da bir
+Rendered karesi tetikliyor. Kanıt: aynı exe'de mod değişikliğinin ardından
+resync isteyen `fluid.set_fog` çağrılınca üç mod da Solid'de anında doğru
+çizildi. Düzeltme `RtApiFluid.cpp` render_mode dalına yazıldı (panelle
+birebir aynı); ✔ exe 22:21'de doğrulandı. ★ Bu tür, IPC'den sürülen raster testlerinin
+**yanlış kareyi ölçmesi** demek — 3. partideki fog testinin raster adımları da
+bundan etkilenmiş olabilir.
+
+**Hacim tabloları (sayı):** particles modunda render backend tablosu `1`,
+viewport `0` kaldı; sökülen SDF render tarafında slotunu tutuyor olabilir
+(tasarım: "slot korunur, içerik pasif") — sayıdan ayırt edilemiyor. Madde
+3'teki satır aracı tam olarak bunu ölçecek.
+
+**VRAM (madde 4):** iki domain'li sahnede kullanım 1,10 GB; bunun **519 MB'ı
+`untracked_bytes`**. Kategoride simülasyon yok. §7'deki "sim tamponları VRAM
+muhasebesine kaydolmuyor" tahmini **canlıda doğrulandı** — Faz 3'ün ön koşulu
+açık. 16 hacim tavanı ölçülmedi (bu sahnede en çok 2 hacim).
+
+**Kalan:** UI mock'u.
+
+**★★ Faz 1 riski — raster viewport'ta hacim KİMLİĞİ yok (2026-09-27, ölçüldü).**
+Viewport backend'i TLAS kurmaz; hacim SSBO'sunu paket sırasıyla yayımlar ve
+slotun tek tanıtıcısı `vdb_id`'dir. `vdb_id` tasarım gereği döner: kimlik
+testinde particles → surface turu onu 0 → 1 yaptı. Bugün domain başına tek
+hacim olduğu için sorun yok. Faz 1'de bir domain SDF + fog iki hacim taşıdığında
+viewport tarafında "hangi slot hangi görünüm" sorusu yalnız paket sırasına
+bağlı kalır. Render backend bu sorunu `stable_key` ile çözmüştü
+(`m_volumeStableKeys`); Faz 1 aynı kimliği paket yoluna da vermeli ya da
+paketin kendisine görünüm rolünü (sdf/fog) taşıtmalı.
 
 **Faz 0 envanteri (yeni oturumun ilk işi):**
 
@@ -458,5 +632,13 @@ IPC karşılığı mock'ta işaretlenir.
   olmadan kimse fark etmez.
 - **Sayaç sıfırlama/yeniden doldurma kapsamı** (2026-09-27 fog hatası): bir
   faz için sıfırlanan her istatistik aynı faz için yeniden doldurulmalı.
+- **★★ SDF'ye sıcaklık yüklemek köpük çizer:** shader SDF hacminde
+  `vdb_temp_address != 0` gördüğünde onu köpük sayar. Erimiş madde Kelvin'i o
+  kanala girerse ekranda soluk beyaz bir örtü çıkar, parıltı çıkmaz — "köpük
+  açık kalmış" gibi görünür, kimse bug demez (§8b 1. tur, madde 4).
+- **★★★ Ortak alan, iki çözücü:** gaz ve sıvı aynı `density`/`vel_*`
+  vektörüne yazarsa hiçbir şey çökmez; ikinci çözücü birincinin alanını
+  "başlangıç koşulu" sanıp devam eder. Belirti fizik gibi görünür (garip
+  türbülans, kaybolan duman). Her faz kendi alanını taşır.
 - **Varsayılan ölçüm değildir:** etiket sayısı 0 dönerse "hiç sprey yok" mu,
   "sınıflandırma çalışmadı" mı — `*_measured` bayrağı şart.

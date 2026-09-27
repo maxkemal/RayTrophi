@@ -5313,9 +5313,17 @@ void VulkanDevice::updateWorldBuffer(const void* data, uint64_t size, uint32_t c
 // Volume Buffer Upload — OptiX-compatible VkVolumeInstance SSBO (binding 9)
 // ════════════════════════════════════════════════════════════════════════════════
 void VulkanDevice::updateVolumeBuffer(const void* data, uint64_t size, uint32_t count) {
+    ++m_volumeUploadSerial;
     if (size == 0 || data == nullptr) {
         m_volumeCount = 0;
+        m_volumeShadow.clear();
         return;
+    }
+    {
+        const auto* first = static_cast<const VkVolumeInstance*>(data);
+        const std::size_t n = (std::min)(static_cast<std::size_t>(count),
+            static_cast<std::size_t>(size / sizeof(VkVolumeInstance)));
+        m_volumeShadow.assign(first, first + n);
     }
     
     if (m_volumeBuffer.size < size) {

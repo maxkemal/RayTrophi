@@ -1267,6 +1267,13 @@
     "notes": "The raster viewport can be a SECOND VulkanBackendAdapter with its own VkDevice and its own volume table. A 'viewport' row with instance_count 0 while 'render' is non-zero means the realtime viewport was never handed the volumes and will draw none — render.volume_stats cannot see this, because a pass that never ran counts zero exactly like a scene with no volumes. sim_device_is_this_backends false means live dense gas addresses are suppressed for that backend and it falls back to the per-adapter NanoVDB upload (a frozen grid, not a fault).",
     "related": "render.volume_stats|viewport.status"
   },
+  "render.volume_slots": {
+    "summary": "List every TLAS volume slot per Vulkan backend (identity key, name, vdb id, published, is_active, source type, density/temperature channels, AABB) and which volume each grid domain owns",
+    "returns": "VolumeSlotsInfo",
+    "tags": "diagnostics|volume|backend|verify|identity",
+    "notes": "Counts (render.volume_tables) cannot separate a retired volume that keeps its slot from one still drawn. Identity test: read before and after an operation; a stable_key change for the same name is identity churn, an unchanged upload_serial means nothing was republished. On a surface-SDF slot has_temperature means foam, not Kelvin. A backend with no TLAS (the raster viewport) reports packet_order=true slots: no name or stable_key, match them by vdb_id.",
+    "related": "render.volume_tables|fluid.get"
+  },
   "viewport.status": {
     "summary": "Report viewport backend, shading mode, resolution, sample count, capture state and whether a frame is available",
     "returns": "ViewportStatusInfo",

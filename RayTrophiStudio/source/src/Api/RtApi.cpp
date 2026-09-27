@@ -1734,6 +1734,80 @@ VolumeTablesInfo volumeTables() {
     return out;
 }
 
+VolumeSlotsInfo volumeSlots() {
+    VolumeSlotsInfo out;
+    auto sourceName = [](int source_type) -> const char* {
+        switch (source_type) {
+            case 0: return "nanovdb";
+            case 3: return "cloud";
+            case 4: return "sdf";
+            case 5: return "live_gas";
+            default: return "other";
+        }
+    };
+    // Same role rule as volumeTables(): name the two ROLES, not backend_ptr.
+    auto describe = [&](const char* role, Backend::IBackend* backend) {
+        if (!backend) return;
+        VolumeSlotTable table;
+        table.role = role;
+        auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(backend);
+        if (vk) {
+            table.is_vulkan = true;
+            out.available = true;
+            table.upload_serial = vk->volumeUploadSerial();
+            if (auto* dev = vk->getVulkanDevice()) table.instance_count = dev->m_volumeCount;
+            for (const auto& d : vk->describeVolumeSlots()) {
+                VolumeSlotRow r;
+                r.slot = d.slot;
+                r.stable_key = d.stable_key;
+                r.name = d.name;
+                r.vdb_id = d.vdb_id;
+                r.published = d.published;
+                r.packet_order = d.packet_order;
+                r.has_contents = d.has_contents;
+                r.is_active = d.is_active;
+                r.source = d.has_contents ? sourceName(d.source_type) : "";
+                r.volume_type = d.volume_type;
+                r.has_density = d.has_density;
+                r.has_temperature = d.has_temperature;
+                r.aabb_min = Vec3(d.aabb_min[0], d.aabb_min[1], d.aabb_min[2]);
+                r.aabb_max = Vec3(d.aabb_max[0], d.aabb_max[1], d.aabb_max[2]);
+                table.slots.push_back(std::move(r));
+            }
+        }
+        out.backends.push_back(std::move(table));
+    };
+    describe("render", ::g_backend.get());
+    describe("viewport", ::g_viewport_backend.get());
+
+    if (!g_ctx) return out;
+    for (const auto& system : g_ctx->scene.particle_systems) {
+        if (!system.runtime) continue;
+        const auto& descs = system.runtime->gridDomains();
+        for (std::size_t d = 0; d < descs.size(); ++d) {
+            DomainVolumeRow row;
+            row.system = system.name;
+            row.domain_index = static_cast<int>(d);
+            row.domain = descs[d].name;
+            const bool fluid = descs[d].type == RayTrophiSim::SimulationDomainType::Fluid;
+            row.type = fluid ? "fluid" : "gas";
+            if (fluid) {
+                using Mode = RayTrophiSim::Fluid::FluidRenderMode;
+                const Mode m = descs[d].fluid_render_mode;
+                row.render_mode = m == Mode::Particles ? "particles"
+                                : m == Mode::VolumeFog ? "fog" : "surface";
+            }
+            if (d < system.domain_vdb_ids.size()) row.vdb_id = system.domain_vdb_ids[d];
+            if (d < system.domain_volumes.size() && system.domain_volumes[d]) {
+                row.has_volume = true;
+                row.volume_name = system.domain_volumes[d]->name;
+            }
+            out.domains.push_back(std::move(row));
+        }
+    }
+    return out;
+}
+
 void completeRenderOutput(bool ok, const std::string& error) {
     if (g_render_job.state != RenderJobState::Rendering) return;
     if (g_ctx) {

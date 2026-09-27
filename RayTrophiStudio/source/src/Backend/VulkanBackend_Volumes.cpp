@@ -75,6 +75,66 @@ int VulkanBackendAdapter::stableVolumeKey(const std::shared_ptr<Hittable>& insta
 // volume OBJECT occupying the slot, so it survives grid unload/re-register
 // cycles — which is the whole point: the published-slot cache is consumed after
 // a TLAS re-bake, long after a sim rebind may have replaced every VDB id.
+std::vector<VulkanBackendAdapter::VolumeSlotDiag>
+VulkanBackendAdapter::describeVolumeSlots() const {
+    std::vector<VolumeSlotDiag> rows;
+    rows.reserve(m_orderedVDBInstances.size());
+    const auto* shadow = m_device ? &m_device->m_volumeShadow : nullptr;
+    for (std::size_t i = 0; i < m_orderedVDBInstances.size(); ++i) {
+        const auto& h = m_orderedVDBInstances[i];
+        VolumeSlotDiag r;
+        r.slot = static_cast<int>(i);
+        r.stable_key = stableVolumeKey(h);
+        if (auto* vdb = dynamic_cast<VDBVolume*>(h.get())) {
+            r.name = vdb->name;
+            r.vdb_id = vdb->getVDBVolumeID();
+        } else if (auto* gas = dynamic_cast<GasVolume*>(h.get())) {
+            r.name = gas->name;
+            r.vdb_id = gas->live_vdb_id;
+        }
+        r.published = i < m_publishedVolumeKeyOrder.size() &&
+                      m_publishedVolumeKeyOrder[i] == r.stable_key;
+        if (shadow && i < shadow->size()) {
+            const auto& v = (*shadow)[i];
+            r.has_contents = true;
+            r.is_active = v.is_active;
+            r.source_type = v.source_type;
+            r.volume_type = v.volume_type;
+            r.has_density = v.vdb_grid_address != 0;
+            r.has_temperature = v.vdb_temp_address != 0;
+            for (int k = 0; k < 3; ++k) {
+                r.aabb_min[k] = v.aabb_min[k];
+                r.aabb_max[k] = v.aabb_max[k];
+            }
+        }
+        rows.push_back(std::move(r));
+    }
+    // A backend that never builds a TLAS (the raster viewport) still publishes
+    // the SSBO, in packet order. Report those slots too, or the tool is blind to
+    // exactly the second device the volume-table bugs lived on.
+    if (m_orderedVDBInstances.empty() && shadow) {
+        for (std::size_t i = 0; i < shadow->size(); ++i) {
+            const auto& v = (*shadow)[i];
+            VolumeSlotDiag r;
+            r.slot = static_cast<int>(i);
+            r.packet_order = true;
+            r.vdb_id = i < m_publishedPacketVdbIds.size() ? m_publishedPacketVdbIds[i] : -1;
+            r.has_contents = true;
+            r.is_active = v.is_active;
+            r.source_type = v.source_type;
+            r.volume_type = v.volume_type;
+            r.has_density = v.vdb_grid_address != 0;
+            r.has_temperature = v.vdb_temp_address != 0;
+            for (int k = 0; k < 3; ++k) {
+                r.aabb_min[k] = v.aabb_min[k];
+                r.aabb_max[k] = v.aabb_max[k];
+            }
+            rows.push_back(std::move(r));
+        }
+    }
+    return rows;
+}
+
 std::vector<int> VulkanBackendAdapter::computeOrderedVolumeKeys() const {
     std::vector<int> keys;
     keys.reserve(m_orderedVDBInstances.size());
@@ -338,6 +398,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
     // After updateGeometry(), m_orderedVDBInstances records VDBs in TLAS traversal order.
     // If BVH reorders them vs. scene.vdb_volumes, this ensures shader lookups are correct.
     std::vector<const GpuVDBVolume*> orderedVols;
+    bool packetOrder = false;  // fallback: no TLAS mapping, slots follow the packet
     if (!m_orderedVDBInstances.empty()) {
         std::size_t proceduralIndex = 0;
         for (const auto& hittable : m_orderedVDBInstances) {
@@ -428,6 +489,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         // is no customIndex to disagree with, and the branch above now guarantees
         // that "no mapping" really does mean "no TLAS volume slots either".
         for (const auto& v : vols) orderedVols.push_back(&v);
+        packetOrder = true;
     }
     // Never leave the published count disagreeing with the buffer contents: if
     // there is nothing to publish, publish an empty buffer rather than only
@@ -1141,6 +1203,12 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
     // Remember what each volume slot HOLDS, keyed by identity. Only valid when
     // the mapping was used (the fallback branch above publishes in arbitrary
     // packet order and has no TLAS order to be keyed against).
+    // Diagnostic only (render.volume_slots): without a TLAS mapping the slot has
+    // no object identity, so remember the resource id it was filled from.
+    m_publishedPacketVdbIds.clear();
+    if (packetOrder) {
+        for (const auto* v : orderedVols) m_publishedPacketVdbIds.push_back(v ? v->vdb_id : -1);
+    }
     if (orderedKeys.size() == instances.size()) {
         m_publishedVolumeKeyOrder = orderedKeys;
         m_publishedVolumeByKey.clear();

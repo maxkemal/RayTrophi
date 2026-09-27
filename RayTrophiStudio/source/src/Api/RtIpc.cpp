@@ -3994,6 +3994,42 @@ json dispatchMethod(const std::string& method, const json& params) {
             return json{{"available", t.available}, {"backends", backends}};
         });
     }
+    if (method == "render.volume_slots") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::VolumeSlotsInfo t = rtapi::volumeSlots();
+            json backends = json::array();
+            for (const auto& b : t.backends) {
+                json slots = json::array();
+                for (const auto& s : b.slots) {
+                    slots.push_back(json{
+                        {"slot", s.slot}, {"stable_key", s.stable_key},
+                        {"name", s.name}, {"vdb_id", s.vdb_id},
+                        {"published", s.published}, {"packet_order", s.packet_order},
+                        {"has_contents", s.has_contents},
+                        {"is_active", s.is_active}, {"source", s.source},
+                        {"volume_type", s.volume_type},
+                        {"has_density", s.has_density},
+                        {"has_temperature", s.has_temperature},
+                        {"aabb_min", json::array({s.aabb_min.x, s.aabb_min.y, s.aabb_min.z})},
+                        {"aabb_max", json::array({s.aabb_max.x, s.aabb_max.y, s.aabb_max.z})}});
+                }
+                backends.push_back(json{
+                    {"role", b.role}, {"is_vulkan", b.is_vulkan},
+                    {"upload_serial", b.upload_serial},
+                    {"instance_count", b.instance_count}, {"slots", slots}});
+            }
+            json domains = json::array();
+            for (const auto& d : t.domains) {
+                domains.push_back(json{
+                    {"system", d.system}, {"domain_index", d.domain_index},
+                    {"domain", d.domain}, {"type", d.type},
+                    {"render_mode", d.render_mode}, {"vdb_id", d.vdb_id},
+                    {"has_volume", d.has_volume}, {"volume_name", d.volume_name}});
+            }
+            return json{{"available", t.available}, {"backends", backends},
+                        {"domains", domains}};
+        });
+    }
     // -- sim_graph.* : every method names the scope it means -----------------
     //
     // *** `scope` is REQUIRED and there is no active-domain fallback. Making it
