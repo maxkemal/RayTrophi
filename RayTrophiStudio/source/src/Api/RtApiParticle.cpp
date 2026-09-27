@@ -1031,20 +1031,22 @@ Result getParticleStats(ParticleStatsInfo& out, const ParticleSystemRef& system)
     out.integrate_ms = stats.integrate_ms;
     out.self_collision_ms = stats.self_collision_ms;
     out.grid_domain_ms = stats.grid_domain_ms;
-    out.upload_ms = stats.upload_ms;
 
-    // Stage backends. Only the force stage has a GPU implementation today;
-    // every other stage is written out explicitly as "cpu" so a script can
-    // assert on it and a later phase changes a value, not the schema.
+    // Stage backends, written out explicitly so a script can assert on them.
+    // A resident step runs forces + integration on the device; emission
+    // (spawn decisions) stays on the CPU, and a resident system has no
+    // collision stages by construction (they are what make it ineligible).
     out.execution_policy = nameOf(kExecutionPolicies, stats.execution_policy, "auto");
     out.compute_backend = stats.compute_backend ? stats.compute_backend : "none";
-    out.gpu_force_status = stats.gpu_force_status ? stats.gpu_force_status : "not_attempted";
-    out.forces_on_gpu = stats.forces_on_gpu;
+    out.gpu_status = stats.gpu_status ? stats.gpu_status : "not_attempted";
+    out.device_resident = stats.device_resident;
     out.step_blocked = stats.step_blocked;
+    bool any_collider = false;
+    for (const auto& collider : runtime.colliders()) any_collider = any_collider || collider.enabled;
     out.emit_backend = "cpu";
-    out.forces_backend = stats.forces_on_gpu ? "gpu" : "cpu";
-    out.integrate_backend = "cpu";
-    out.scene_collision_backend = "cpu";
+    out.forces_backend = stats.device_resident ? "gpu" : "cpu";
+    out.integrate_backend = stats.device_resident ? "gpu" : "cpu";
+    out.scene_collision_backend = any_collider ? "cpu" : "off";
     out.self_collision_backend =
         runtime.physicsSettings().self_collision_enabled ? "cpu" : "off";
     if (stats.step_blocked) {
@@ -1053,18 +1055,24 @@ Result getParticleStats(ParticleStatsInfo& out, const ParticleSystemRef& system)
         out.scene_collision_backend = "blocked";
         out.self_collision_backend = "blocked";
     }
-    out.gpu_force_ms = stats.gpu_force_ms;
-    out.force_upload_bytes = stats.force_transfer.upload_bytes;
-    out.force_download_bytes = stats.force_transfer.download_bytes;
-    out.force_dispatch_calls = stats.force_transfer.dispatch_calls;
-    out.force_synchronize_calls = stats.force_transfer.synchronize_calls;
-    out.force_upload_call_ms = stats.force_transfer.upload_call_ms;
-    out.force_download_call_ms = stats.force_transfer.download_call_ms;
-    out.force_synchronize_ms = stats.force_transfer.synchronize_ms;
-    out.mirror_upload_bytes = stats.mirror_transfer.upload_bytes;
-    out.mirror_upload_calls = stats.mirror_transfer.upload_calls;
-    out.mirror_upload_call_ms = stats.mirror_transfer.upload_call_ms;
+    out.gpu_step_ms = stats.gpu_step_ms;
+    out.residency = RayTrophiSim::particleKinematicResidencyName(runtime.kinematicResidency());
+    out.resident_capacity = static_cast<int>(runtime.residentCapacity());
+    out.slot_records = stats.slot_records;
+    out.step_upload_bytes = stats.step_transfer.upload_bytes;
+    out.step_download_bytes = stats.step_transfer.download_bytes;
+    out.step_dispatch_calls = stats.step_transfer.dispatch_calls;
+    out.step_synchronize_calls = stats.step_transfer.synchronize_calls;
+    out.step_upload_call_ms = stats.step_transfer.upload_call_ms;
+    out.step_download_call_ms = stats.step_transfer.download_call_ms;
+    out.step_synchronize_ms = stats.step_transfer.synchronize_ms;
+    const auto& snapshots = runtime.hostSnapshotStats();
+    out.snapshot_sync_count = snapshots.synchronous_count;
+    out.snapshot_mirrored_steps = snapshots.mirrored_steps;
+    out.snapshot_download_bytes = snapshots.download_bytes;
+    out.snapshot_last_reason = snapshots.last_reason ? snapshots.last_reason : "none";
     out.nonfinite_particles = stats.nonfinite_particles;
+    out.nonfinite_measured = stats.nonfinite_measured;
     out.grid_deposit_landed = stats.grid_deposit_landed;
     out.grid_deposit_dropped_no_domain = stats.grid_deposit_dropped_no_domain;
     out.grid_deposit_dropped_no_channel = stats.grid_deposit_dropped_no_channel;
@@ -1081,6 +1089,12 @@ Result getParticleStateSample(int max_count, int offset, int stride,
 
     RayTrophiSim::ParticleSimulationSystem* runtime_ptr = nullptr;
     if (Result r = resolveRuntime(system, runtime_ptr); !r) return r;
+    // Device-resident kinematics come home first: an explicit, counted
+    // snapshot, never a silent read of stale host positions.
+    if (!runtime_ptr->syncHostState("state_sample")) {
+        return Result::fail("particle state is device-resident and could not be read back "
+                            "(see the console)");
+    }
     const auto& runtime = *runtime_ptr;
     const RayTrophiSim::ParticleSoABuffers& b = runtime.buffers();
     out = ParticleStateSample{};

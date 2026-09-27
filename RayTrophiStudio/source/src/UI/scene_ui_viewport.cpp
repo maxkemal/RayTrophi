@@ -10,6 +10,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "UI/VulkanRecoveryHUD.h"
 #include "UI/scene_ui_volume_performance.hpp"
 #include "ui_modern.h"
 #include "renderer.h"
@@ -1981,6 +1982,10 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
         if (tinyFont) ImGui::PushFont(tinyFont);
         
         // 1. Persistent HUD: Render Status (ALWAYS AT TOP)
+        VulkanRecoveryHUD::draw(
+            !ctx.render_settings.use_vulkan && !ctx.render_settings.use_optix,
+            ctx.render_settings.use_vulkan,
+            ctx.render_settings.render_current_samples);
         if (ctx.scene.initialized) {
             const bool in_rendered_mode = (viewport_settings.shading_mode == 2);
 

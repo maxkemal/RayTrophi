@@ -444,6 +444,7 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_oxygen_dilution"] = d.fluid_oxygen_dilution;
     j["fluid_fill_wall_margin"] = d.fluid_fill_wall_margin;
     j["fluid_render_mode"] = (int)d.fluid_render_mode;
+    j["fluid_fog_spread_voxels"] = d.fluid_fog_spread_voxels;
     j["fluid_particle_color"] = vec3ToJson(d.fluid_particle_color);
     j["fluid_particle_radius_factor"] = d.fluid_particle_radius_factor;
     j["fluid_particle_size_multiplier"] = d.fluid_particle_size_multiplier;
@@ -681,7 +682,8 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_cooling_power")) d.fluid_cooling_power = j["fluid_cooling_power"];
     if (j.contains("fluid_oxygen_dilution")) d.fluid_oxygen_dilution = j["fluid_oxygen_dilution"];
     if (j.contains("fluid_fill_wall_margin")) d.fluid_fill_wall_margin = j["fluid_fill_wall_margin"];
-    if (j.contains("fluid_render_mode")) d.fluid_render_mode = (RayTrophiSim::Fluid::FluidRenderMode)j["fluid_render_mode"];
+    if (j.contains("fluid_render_mode")) d.fluid_render_mode = RayTrophiSim::Fluid::fluidRenderModeFromStored(j["fluid_render_mode"].get<int>());
+    if (j.contains("fluid_fog_spread_voxels")) d.fluid_fog_spread_voxels = j["fluid_fog_spread_voxels"];
     if (j.contains("fluid_particle_color")) d.fluid_particle_color = jsonToVec3(j["fluid_particle_color"]);
     if (j.contains("fluid_particle_radius_factor")) d.fluid_particle_radius_factor = j["fluid_particle_radius_factor"];
     if (j.contains("fluid_particle_size_multiplier")) d.fluid_particle_size_multiplier = j["fluid_particle_size_multiplier"];

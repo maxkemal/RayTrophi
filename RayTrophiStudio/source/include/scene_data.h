@@ -37,6 +37,7 @@
 inline std::atomic<bool> g_cancel_sdf_bakes{false};
 inline std::atomic<int> g_active_sdf_bakes{0};
 #include "Fluid/FluidObject.h"
+#include "Fluid/FluidFogDensity.h"
 #include "Fluid/FluidSimulationSystem.h"
 #include "Fluid/SubstanceTag.h"
 #include "RigidBodySystem.h"
@@ -50,6 +51,7 @@ inline std::atomic<int> g_active_sdf_bakes{0};
 #include "HittableInstance.h"
 #include "ColliderMeshBVH.h"
 #include "KinematicColliderSource.h"
+#include "KinematicColliderScene.h"
 #include "MeshModifiers.h"
 #include "GeometryNodesV2.h"
 #include "MaterialNodesV2.h"
@@ -2105,10 +2107,8 @@ struct SceneData {
         std::vector<int> domain_foam_vdb_ids;
         std::vector<std::shared_ptr<VDBVolume>> domain_foam_volumes;
         std::vector<std::vector<float>> domain_foam_density;
-        // Transient InstanceManager group id per grid domain for the Particles
-        // render mode (only used when the domain is type=Fluid AND
-        // fluid_render_mode == Particles; -1 otherwise). Parallel-indexed to
-        // gridDomainStates(); see SceneData::syncDomainFluidParticleInstances.
+        // Transient InstanceManager group id per grid domain for explicit
+        // particles. Parallel-indexed to gridDomainStates().
         std::vector<int>    domain_particle_render_group_ids;
         // Peak-seen alive particle count per domain. Pool only grows so cheap
         // TLAS refit stays valid across reseed-driven shrinks (matches the
@@ -2662,7 +2662,12 @@ struct SceneData {
                 }
                 const bool fluid_surface_route = is_fluid_domain &&
                     (fluid_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF || has_sdf_override);
-                const bool fluid_skip_volume = is_fluid_domain && !fluid_surface_route;
+                // VolumeFog raymarches the splatted density with the domain
+                // shader -- the same producer->NanoVDB path a gas domain uses.
+                const bool fluid_fog_route = is_fluid_domain && !fluid_surface_route &&
+                    fluid_mode == RayTrophiSim::Fluid::FluidRenderMode::VolumeFog;
+                const bool fluid_skip_volume =
+                    is_fluid_domain && !fluid_surface_route && !fluid_fog_route;
                 // Volume whitewater: foam rides THIS surface volume's temperature
                 // channel (single volume → no coincident-volume drop). Only on the
                 // surface route (that is the volume it rides) and only when the foam
@@ -2695,7 +2700,8 @@ struct SceneData {
                     std::to_string(d) + "' " + (renderable ? "RENDERABLE" : "NOT renderable") +
                     " | fluid=" + (is_fluid_domain ? "1" : "0") +
                     " route=" + (fluid_skip_volume ? "Particles"
-                                 : (fluid_surface_route ? "SurfaceSDF" : "Volume")) +
+                                 : (fluid_surface_route ? "SurfaceSDF"
+                                    : (fluid_fog_route ? "VolumeFog" : "Volume"))) +
                     " render_enabled=" + (domain_render_enabled ? "1" : "0") +
                     " sys_visible=" + (system.visible ? "1" : "0") +
                     " valid=" + (state.valid ? "1" : "0") +
@@ -2847,7 +2853,7 @@ struct SceneData {
                             }
                         }
                         switch (fluid_mode) {
-                            case RayTrophiSim::Fluid::FluidRenderMode::Volume:
+                            case RayTrophiSim::Fluid::FluidRenderMode::VolumeFog:
                                 // Fluid splat density is in [0,1] (per-particle
                                 // = 1/8 with default ppc=8, trilinear-spread
                                 // across 8 cells = 0.125 max per particle).
@@ -2893,7 +2899,10 @@ struct SceneData {
                                 domain_shader->quality.step_size = 0.05f;
                                 break;
                             case RayTrophiSim::Fluid::FluidRenderMode::Particles:
-                                // Volume is torn down anyway; leave shader as-is.
+                            case RayTrophiSim::Fluid::FluidRenderMode::Volume:
+                                // Particles: volume is torn down anyway. Volume is
+                                // normalised to SurfaceSDF above for liquids and
+                                // never reaches this switch. Leave shader as-is.
                                 break;
                         }
                         system.domain_last_fluid_render_mode[d] = cur_mode;
@@ -3212,15 +3221,21 @@ struct SceneData {
                         : ((frame % stride) == 0)));
                 if (do_update) {
                     // Upload temperature too when the shader maps it to emission
-                    // (blackbody / channel-driven fire). registerOrUpdateLiveVolume
-                    // keeps temperature voxels only above ~300 (Kelvin gas
-                    // heuristic), so scale our 0-based heat into a Kelvin-ish range.
+                    // (blackbody / channel-driven fire). The shader reads it as
+                    // Kelvin, so the gas's 0-based heat is scaled into Kelvin;
+                    // registerOrUpdateLiveVolume keeps everything above ~1e-3
+                    // (the old 300 K cutoff is gone).
                     const float* temp_ptr = nullptr;
                     std::vector<float> scaled_temp;
-                    const bool wants_temp =
+                    const bool wants_emission_temp =
                         domain_shader &&
                         (domain_shader->emission.mode == VolumeEmissionMode::Blackbody ||
-                         domain_shader->emission.mode == VolumeEmissionMode::ChannelDriven) &&
+                         domain_shader->emission.mode == VolumeEmissionMode::ChannelDriven);
+                    // A liquid's temperature lives on its particles, in Kelvin
+                    // (the thermal-liquid chain writes it); grid.temperature is
+                    // the GAS heat channel and its x3000 scale is gas-only.
+                    const bool wants_temp =
+                        wants_emission_temp && !fluid_fog_route &&
                         !state.grid.temperature.empty();
                     if (wants_temp) {
                         constexpr float kHeatToKelvin = 3000.0f;
@@ -3229,11 +3244,39 @@ struct SceneData {
                             scaled_temp[ci] = state.grid.temperature[ci] * kHeatToKelvin;
                         }
                         temp_ptr = scaled_temp.data();
+                    } else if (wants_emission_temp && fluid_fog_route &&
+                               d < domains.size() &&
+                               RayTrophiSim::Fluid::splatFogTemperatureKelvin(
+                                   state.particles,
+                                   state.grid.nx, state.grid.ny, state.grid.nz,
+                                   state.grid.origin, state.grid.voxel_size,
+                                   domains[d].fluid_fog_spread_voxels, scaled_temp)) {
+                        // Same grid and spread as the fog density, so a hot
+                        // parcel glows exactly where it is drawn. Nothing is
+                        // cut off: the shader's T^4 radiance is what keeps an
+                        // ambient (~293 K) liquid dark and dims it as it cools.
+                        temp_ptr = scaled_temp.data();
                     }
 
                     const float* density_ptr = density_ptr_override
                         ? density_ptr_override
                         : state.grid.density.data();
+                    // VolumeFog draws a Gaussian-spread copy of the splat: the
+                    // raw trilinear splat reaches 8 cells per particle and shows
+                    // spray as isolated dots. Sim resolution, so the temperature
+                    // channel below still lines up.
+                    std::vector<float> fog_density;
+                    if (fluid_fog_route && !density_ptr_override &&
+                        d < domains.size() &&
+                        domains[d].fluid_fog_spread_voxels > 0.0f &&
+                        state.grid.density.size() ==
+                            static_cast<std::size_t>(state.grid.getCellCount())) {
+                        RayTrophiSim::Fluid::spreadFogDensity(
+                            state.grid.density.data(),
+                            state.grid.nx, state.grid.ny, state.grid.nz,
+                            domains[d].fluid_fog_spread_voxels, fog_density);
+                        density_ptr = fog_density.data();
+                    }
                     // The SurfaceSDF proxy may be on a refined grid; upload at its
                     // effective resolution. Same origin/extent, finer voxels. The
                     // sim-sized temperature array can't ride a refined upload, so
@@ -5884,6 +5927,10 @@ struct SceneData {
         for (auto& system : particle_systems) {
             if (system.runtime) {
                 ParticleFrameSnapshot snapshot;
+                // Device-resident kinematics come home for the cache. Asked
+                // every played frame, so the resident steps mirror inside
+                // their own submission (particle.stats snapshot_*).
+                system.runtime->syncHostState("timeline_cache");
                 snapshot.buffers = system.runtime->buffers();
                 snapshot.alive_count = system.runtime->aliveCount();
                 snapshot.runtime = system.runtime->captureRuntimeState();
@@ -6133,6 +6180,8 @@ struct SceneData {
     }
 
     void resetSimulationToStart(bool clear_cache = true, bool capture_frame = true) {
+        kinematic_colliders.resetMotionHistory();
+        kinematic_snapshot_step_frame_ = std::numeric_limits<int>::min();
         if (clear_cache) {
             clearSimFrameCache();
         }
@@ -7646,6 +7695,7 @@ private:
             // contribute scene geometry at the same time.
             const bool wants_volume_route =
                 obj.render_mode == RayTrophiSim::Fluid::FluidRenderMode::Volume ||
+                obj.render_mode == RayTrophiSim::Fluid::FluidRenderMode::VolumeFog ||
                 obj.render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;
             if (!wants_volume_route) {
                 destroyFluidRenderVolume(obj.id);
@@ -8075,6 +8125,26 @@ public:
             }
         }
         return false;
+    }
+
+    // Liquid grid domain whose transient render volume this is, or nullptr.
+    // The volume is a per-frame PRODUCT of the domain: its render mode and
+    // surface fields are rewritten from the domain every sync, so a panel that
+    // edits them on the volume is overwritten on the next frame. Edits go here.
+    RayTrophiSim::SimulationGridDomainDesc* fluidDomainOwningVolume(const VDBVolume* vol) {
+        if (!vol) return nullptr;
+        for (auto& system : particle_systems) {
+            if (!system.runtime) continue;
+            auto& domains = system.runtime->gridDomains();
+            const std::size_t n = std::min(domains.size(), system.domain_volumes.size());
+            for (std::size_t d = 0; d < n; ++d) {
+                if (system.domain_volumes[d].get() == vol &&
+                    domains[d].type == RayTrophiSim::SimulationDomainType::Fluid) {
+                    return &domains[d];
+                }
+            }
+        }
+        return nullptr;
     }
 
     bool hasLiveSimulationObject(const std::string& node_name) const {
@@ -8784,6 +8854,27 @@ public:
                     out_version = surface_cache->version;
                     return true;
                 });
+            runtime.setKinematicColliderProvider(
+                [this](int step_frame,
+                       float dt,
+                       bool discontinuity,
+                       std::vector<RayTrophiSim::KinematicProxySample>& samples,
+                       std::string& error) {
+                    if (kinematic_snapshot_step_frame_ != step_frame) {
+                        kinematic_snapshot_step_frame_ = step_frame;
+                        kinematic_snapshot_error_.clear();
+                        kinematic_snapshot_valid_ =
+                            RayTrophiSim::sampleAllKinematicProxySets(
+                                *this,
+                                dt,
+                                discontinuity,
+                                kinematic_snapshot_samples_,
+                                kinematic_snapshot_error_);
+                    }
+                    samples = kinematic_snapshot_samples_;
+                    error = kinematic_snapshot_error_;
+                    return kinematic_snapshot_valid_;
+                });
             runtime.setGridDomainBoundsResolver(
                 [this](const RayTrophiSim::SimulationGridDomainDesc& domain, Vec3& out_min, Vec3& out_max) {
                     if (domain.source_mode != RayTrophiSim::SimulationGridDomainSourceMode::ObjectBounds ||
@@ -9440,6 +9531,10 @@ public:
     // Solver-neutral bone-attached primitive producers. Runtime motion history
     // lives inside the registry; solvers consume sampled proxies, never rigs.
     RayTrophiSim::KinematicColliderRegistry kinematic_colliders;
+    int kinematic_snapshot_step_frame_ = std::numeric_limits<int>::min();
+    bool kinematic_snapshot_valid_ = false;
+    std::vector<RayTrophiSim::KinematicProxySample> kinematic_snapshot_samples_;
+    std::string kinematic_snapshot_error_;
     RayTrophiSim::SimulationWorld simulation_world;
 
     // Live dense gas fields publish raw Vulkan buffer device addresses through

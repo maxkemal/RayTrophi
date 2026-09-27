@@ -47,7 +47,11 @@ void main() {
                            !any(isnan(r2)) && !any(isinf(r2));
     float det = dot(cross(r0.xyz, r1.xyz), r2.xyz);
     if (!finiteTransform || isnan(det) || isinf(det) || abs(det) < 1e-12) {
-        r0 = vec4(1,0,0,0); r1 = vec4(0,1,0,0); r2 = vec4(0,0,1,0);
+        // Parked far below the scene at millimetre size, never identity: a
+        // pool's dead slots all on the origin's unit box made every ray through
+        // the origin visit each of them. Keep in step with
+        // parkedTLASInstanceTransform() in VulkanBackend.cpp.
+        r0 = vec4(1e-3,0,0,0); r1 = vec4(0,1e-3,0,-1e4); r2 = vec4(0,0,1e-3,0);
         mask = 0u;
     }
 

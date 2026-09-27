@@ -59,6 +59,19 @@ def main() -> None:
             set_id=set_id,
             restitution=1.01,
         )
+        client.call(
+            "physics.collider.proxy_set.set",
+            set_id=set_id,
+            viewport_visible=False,
+            consumer_mask=7,
+        )
+        fetched = client.call("physics.collider.proxy_set.get", set_id=set_id)
+        require(not fetched["viewport_visible"],
+                "viewport visibility did not round-trip")
+        require(fetched["consumer_mask"] == 7,
+                "consumer mask did not round-trip")
+        require(fetched["revision"] == 2,
+                "successful set update must advance revision")
 
         proxy = client.call(
             "physics.collider.proxy.set",
@@ -75,7 +88,7 @@ def main() -> None:
         require(proxy_id > 0, "proxy id must be positive")
 
         fetched = client.call("physics.collider.proxy_set.get", set_id=set_id)
-        require(fetched["revision"] == 2, "proxy creation must advance revision")
+        require(fetched["revision"] == 3, "proxy creation must advance revision")
         require(len(fetched["proxies"]) == 1, "proxy was not stored")
 
         samples = client.call(

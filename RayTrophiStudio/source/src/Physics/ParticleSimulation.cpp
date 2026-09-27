@@ -5,6 +5,7 @@
 #include "Fluid/GranularGpuDispatch.h"
 #include "Fluid/FluidGpuParticleUpload.h"
 #include "Fluid/FluidGpuFlipSnapshot.h"
+#include "KinematicColliderVoxelizer.h"
 
 #include "GridFluidSolver.h"
 #include "globals.h"
@@ -877,7 +878,8 @@ inline void computeSolidFaceWeights(
     const std::vector<ParticleColliderDesc>& colliders,
     const std::function<bool(const ParticleColliderDesc&, Vec3&, Vec3&)>& bounds_resolver,
     const std::function<bool(const ParticleColliderDesc&, ParticleColliderOBB&)>& obb_resolver,
-    bool fluid_collision_only = false) {
+    bool fluid_collision_only = false,
+    bool has_external_solids = false) {
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
     if (nx <= 0 || ny <= 0 || nz <= 0) return;
 
@@ -951,7 +953,7 @@ inline void computeSolidFaceWeights(
     }
 
     // Colliders removed this frame: just leave everything open.
-    if (colliders.empty()) {
+    if (colliders.empty() && !has_external_solids) {
         if (sized) {
             if (need_full) fullOpenInit();
             else { int rlo[3], rhi[3]; if (footprintUnion(rlo, rhi)) resetWeightFaces(rlo, rhi); }
@@ -1440,19 +1442,6 @@ struct GasForceFieldGpuConstants {
 };
 static_assert(sizeof(GasForceFieldGpuConstants) == 48,
               "sim_gas_force push-constant ABI changed");
-
-struct ParticleForceGpuConstants {
-    int particle_count = 0;
-    float dt = 0.0f;
-    float gravity_x = 0.0f, gravity_y = 0.0f, gravity_z = 0.0f;
-    float buoyancy = 0.0f;
-    float drag_factor = 1.0f;
-    float time_seconds = 0.0f;
-    uint32_t system_mask = 0u;
-    uint32_t force_count = 0u;
-};
-static_assert(sizeof(ParticleForceGpuConstants) == 40,
-              "sim_particle_force_integrate push-constant ABI changed");
 
 struct GasVorticityGpuConstants {
     int nx = 0;
@@ -7615,10 +7604,10 @@ void ParticleSimulationSystem::reserve(std::size_t capacity) {
 }
 
 void ParticleSimulationSystem::clear() {
+    kinematic_collider_discontinuity_ = true;
     buffers_ = ParticleSoABuffers{};
     neighbor_grid_.clear();
-    compute_buffers_.capacity = 0;
-    compute_buffers_.source_version = 0;
+    resetResidency();  // device kinematics describe particles that no longer exist
     alive_count_ = 0;
     for (auto& source : flow_sources_) {
         source.fluid_emit_accumulator = 0.0f;
@@ -7656,9 +7645,9 @@ void ParticleSimulationSystem::restoreSoA(const ParticleSoABuffers& src, std::si
     alive_count_ = std::min(alive_count, buffers_.alive.size());
     // The neighbor grid is rebuilt from scratch each step, so just drop it.
     neighbor_grid_.clear();
-    // Force the next uploadToCompute to re-push the whole SoA to the GPU (the
-    // restored data is a brand-new state the device hasn't seen).
-    compute_buffers_.source_version = 0;
+    // A brand-new host state the device hasn't seen: the next resident step
+    // uploads everything.
+    resetResidency();
     ++data_version_;
 }
 
@@ -7711,25 +7700,11 @@ void ParticleSimulationSystem::restoreRuntimeState(const ParticleSimulationRunti
 }
 
 void ParticleSimulationSystem::releaseComputeResources(SimulationComputeContext& compute) {
-    auto destroy = [&](ComputeBufferHandle& handle) {
-        if (handle.valid()) {
-            compute.destroyBuffer(handle);
-            handle = {};
-        }
-    };
-
-    destroy(compute_buffers_.position_x);
-    destroy(compute_buffers_.position_y);
-    destroy(compute_buffers_.position_z);
-    destroy(compute_buffers_.velocity_x);
-    destroy(compute_buffers_.velocity_y);
-    destroy(compute_buffers_.velocity_z);
-    destroy(compute_buffers_.age_seconds);
-    destroy(compute_buffers_.lifetime_seconds);
-    destroy(compute_buffers_.inverse_mass);
-    destroy(compute_buffers_.alive);
-    compute_buffers_.capacity = 0;
-    compute_buffers_.source_version = 0;
+    // Whatever only the device knows comes home before its buffers go.
+    if (residency_ == ParticleKinematicResidency::Device && residentBuffersValidFor(compute)) {
+        downloadResidentKinematics(compute, "release", /*in_step=*/false);
+    }
+    releaseResidentBuffers(compute);
 
     for (auto& buffers : grid_domain_compute_buffers_) {
         releaseGridDomainComputeBuffers(compute, buffers);
@@ -7771,6 +7746,7 @@ std::size_t ParticleSimulationSystem::spawn(const ParticleSpawnDesc& desc) {
         ++alive_count_;
     }
     buffers_.alive[index] = 1u;
+    noteResidentSlotWrite(index);
     ++data_version_;
     return index;
 }
@@ -7784,6 +7760,7 @@ bool ParticleSimulationSystem::kill(std::size_t index) {
     if (alive_count_ > 0) {
         --alive_count_;
     }
+    noteResidentSlotWrite(index);
     ++data_version_;
     return true;
 }
@@ -7898,6 +7875,15 @@ void ParticleSimulationSystem::setColliderOBBResolver(
 void ParticleSimulationSystem::setColliderMeshResolver(
     std::function<bool(const ParticleColliderDesc&, std::vector<SurfaceMeshTriangle>&, uint64_t&)> resolver) {
     collider_mesh_resolver_ = std::move(resolver);
+}
+
+void ParticleSimulationSystem::setKinematicColliderProvider(
+    std::function<bool(int,
+                       float,
+                       bool,
+                       std::vector<KinematicProxySample>&,
+                       std::string&)> provider) {
+    kinematic_collider_provider_ = std::move(provider);
 }
 
 std::vector<SimulationGridDomainDesc>& ParticleSimulationSystem::gridDomains() {
@@ -8350,6 +8336,7 @@ void ParticleSimulationSystem::resetGridDomainStates() {
     // against the MSF reservoir as it stood, and the reset is about to roll that
     // reservoir back. Carrying the intent across would spawn the same mass twice.
     discardMoltenMassTransferState();
+    kinematic_collider_discontinuity_ = true;
     grid_domain_states_.clear();
     grid_domain_states_.resize(grid_domains_.size());
     // Timeline reset/rewind replaces the CPU grid state without dispatching a
@@ -8367,6 +8354,7 @@ void ParticleSimulationSystem::setGridDomainStates(const std::vector<SimulationG
     // particle SoA and (alongside it) the MSF snapshot, so any transfer request
     // still in flight belongs to a future that has just been undone.
     discardMoltenMassTransferState();
+    kinematic_collider_discontinuity_ = true;
     grid_domain_states_ = states;
     // A cached frame remembers where the domain WAS. The descriptor is where it
     // IS. Re-seat the frame before anyone reads it (see the header note).
@@ -8710,10 +8698,6 @@ std::size_t ParticleSimulationSystem::aliveCount() const {
 
 const ParticleSoABuffers& ParticleSimulationSystem::buffers() const {
     return buffers_;
-}
-
-const ParticleComputeBuffers& ParticleSimulationSystem::computeBuffers() const {
-    return compute_buffers_;
 }
 
 const ParticleSimulationStats& ParticleSimulationSystem::stats() const {
@@ -9715,6 +9699,23 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
     coupling_trace_.clear();
 
     const float dt = context.dt;
+    std::vector<KinematicProxySample> kinematic_samples;
+    // Same lifetime as coupling_trace_: describes THIS step only.
+    kinematic_stamp_log_.clear();
+    ++kinematic_stamp_steps_;
+    if (kinematic_collider_provider_) {
+        std::string kinematic_error;
+        if (kinematic_collider_provider_(
+                context.frame,
+                dt,
+                kinematic_collider_discontinuity_,
+                kinematic_samples,
+                kinematic_error)) {
+            kinematic_collider_discontinuity_ = false;
+        } else {
+            kinematic_samples.clear();
+        }
+    }
     const bool automatic_molten_transfer =
         std::any_of(colliders_.begin(), colliders_.end(), [](const auto& c) {
             return c.enabled && c.msf_auto_transfer;
@@ -10331,9 +10332,11 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             // so its cache compares a pure collider mask against a collider
             // signature. Consume-before-service: see clearSubstanceSolidOverlay.
             clearSubstanceSolidOverlay(state.grid);
+            prepareKinematicColliderGrid(state.grid);
             // Stamp the active collider set into grid.solid[] every step so
             // Fluid::step's pressure projection + enforceSolidBoundaries see
             // up-to-date boundaries (works for moving/scaled colliders too).
+            bool has_kinematic_solids = false;
             {
             RTPERF_FRAME_SCOPE("sim.fluid.voxelize_colliders");
             voxelizeCollidersIntoGrid(state.grid,
@@ -10344,6 +10347,18 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                                        nullptr,
                                        nullptr,
                                        true);
+            has_kinematic_solids = voxelizeKinematicColliders(
+                state.grid,
+                kinematic_samples,
+                KinematicConsumerFluid | KinematicConsumerGranular,
+                &kinematic_stamp_counts_);
+            appendKinematicStampRecords(
+                kinematic_stamp_log_,
+                i < grid_domains_.size() ? grid_domains_[i].name : std::string(),
+                KinematicConsumerFluid | KinematicConsumerGranular,
+                context.frame,
+                kinematic_samples,
+                kinematic_stamp_counts_);
             }
             // Cached/deforming colliders can enclose particles that were valid
             // in the previous frame. Recover before P2G so neither the pressure
@@ -10476,7 +10491,8 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                                         colliders_,
                                         collider_bounds_resolver_,
                                         collider_obb_resolver_,
-                                        true);
+                                        true,
+                                        has_kinematic_solids);
                 // The weights above describe COLLIDERS only; close the overlay's
                 // own faces or a chunk is invisible to the variational pressure
                 // solve while remaining visible to the binary one.
@@ -11578,6 +11594,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         // boundary enforcement + pressure projection treat colliders as walls
         // (moving colliders carry momentum via grid.solid_vel). voxelize is a
         // no-op-cheap dirty-region update when nothing moved / no colliders.
+        prepareKinematicColliderGrid(state.grid);
         voxelizeCollidersIntoGrid(state.grid,
                                   colliders_,
                                   collider_bounds_resolver_,
@@ -11585,13 +11602,25 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                                   &collider_velocities_,
                                   &collider_angular_velocities_,
                                   &prev_collider_centers_);
+        const bool has_kinematic_solids = voxelizeKinematicColliders(
+            state.grid, kinematic_samples, KinematicConsumerGas,
+            &kinematic_stamp_counts_);
+        appendKinematicStampRecords(
+            kinematic_stamp_log_,
+            i < grid_domains_.size() ? grid_domains_[i].name : std::string(),
+            KinematicConsumerGas,
+            context.frame,
+            kinematic_samples,
+            kinematic_stamp_counts_);
         // Fractional MAC-face openness removes the stair-stepped binary boundary
         // around spheres/rotated boxes. The same weights feed Vulkan divergence,
         // pressure and gradient stages; static colliders reuse the cached result.
         computeSolidFaceWeights(state.grid,
                                 colliders_,
                                 collider_bounds_resolver_,
-                                collider_obb_resolver_);
+                                collider_obb_resolver_,
+                                false,
+                                has_kinematic_solids);
         state.gas_stats.voxelize_ms =
             elapsedMilliseconds(gas_step_begin, SimulationClock::now());
         const bool domain_has_solid = state.grid.hasAnySolid();
@@ -12402,8 +12431,13 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         state.active_density_min[2] = state.grid.nz;
         state.active_density_max[0] = state.active_density_max[1] =
             state.active_density_max[2] = -1;
-        // Gas-only field readback. Fluid domains don't touch grid.density; skip
-        // the O(cells) walk to avoid burning cycles.
+        // The counters above are reset for EVERY domain, so every domain whose
+        // grid.density is live has to be rescanned here. Liquids splat their
+        // particles into grid.density each step (runGpuFluidDensitySplat /
+        // splatFluidDensityCPU); this pass used to be gas-only on the premise
+        // that fluids never touch density, which left a liquid permanently at
+        // active_density_cells == 0 with empty bounds -- the VolumeFog route
+        // gated itself off and never drew. Gas panel counters stay gas-only.
         //
         // The density scan (which the RT bridge needs) and the panel counters
         // share ONE pass. Each counter used to own its own walk, which turned a
@@ -12417,8 +12451,9 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         const bool is_gas_state = (state.type == SimulationDomainType::Gas);
         const std::size_t cells =
             static_cast<std::size_t>(state.grid.getCellCount());
+        const bool is_fluid_state = (state.type == SimulationDomainType::Fluid);
         const bool want_density =
-            is_gas_state &&
+            (is_gas_state || is_fluid_state) &&
             hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Density) &&
             state.grid.density.size() == cells;
         // Panel counters are only produced for a domain that actually stepped;
@@ -12548,8 +12583,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 state.gas_stats.burning_cells += partial.burning_cells;
                 state.gas_stats.solid_cells += partial.solid_cells;
             }
-            state.gas_stats.total_density += static_cast<float>(total_density_sum);
-            state.gas_stats.total_fuel += static_cast<float>(total_fuel_sum);
+            if (is_gas_state) {
+                state.gas_stats.total_density += static_cast<float>(total_density_sum);
+                state.gas_stats.total_fuel += static_cast<float>(total_fuel_sum);
+            }
         }
         if (want_counters) {
             state.gas_stats.cell_count = cells;
@@ -12659,9 +12696,10 @@ void ParticleSimulationSystem::step(const SimulationContext& context) {
         return;
     }
 
-    // The GPU force stage needs a Vulkan compute backend that can dispatch.
-    // Decided BEFORE emitting, so GPURequired can refuse the whole step without
-    // having half-applied it (emitted but not integrated).
+    // A resident step needs a Vulkan compute backend that can dispatch, and a
+    // system with no stage that reads host positions mid-step. Decided BEFORE
+    // emitting, so GPURequired can refuse the whole step without having
+    // half-applied it (emitted but not integrated).
     const ParticleExecutionPolicy policy = physics_settings_.execution_policy;
     // A refused particle step still advances the runtime's grid domains: the
     // policy governs PARTICLE stages, and silently freezing a gas or fluid
@@ -12684,8 +12722,12 @@ void ParticleSimulationSystem::step(const SimulationContext& context) {
     } else if (!context.compute->supportsDispatch()) {
         gpu_unavailable_reason = "no_dispatch_support";
     }
-    if (policy == ParticleExecutionPolicy::GPURequired && gpu_unavailable_reason) {
-        stats_.gpu_force_status = "gpu_required_blocked";
+    const char* ineligible_reason =
+        policy == ParticleExecutionPolicy::CPU ? nullptr : residentIneligibility();
+    if (policy == ParticleExecutionPolicy::GPURequired &&
+        (gpu_unavailable_reason || ineligible_reason)) {
+        // An ineligible system reports WHICH stage keeps it on the CPU.
+        stats_.gpu_status = gpu_unavailable_reason ? "gpu_required_blocked" : ineligible_reason;
         finish_blocked_step();
         return;
     }
@@ -12705,6 +12747,9 @@ void ParticleSimulationSystem::step(const SimulationContext& context) {
         stepGridDomains(context);
         const auto grid_end = SimulationClock::now();
         stats_.grid_domain_ms = elapsedMilliseconds(grid_start, grid_end);
+        // Nothing alive on the host: whatever the device still holds (a last
+        // kill that was never sent) must not be drawn as a frozen ghost.
+        resetResidency();
         stats_.alive_count = alive_count_;
         stats_.capacity = buffers_.alive.size();
         stats_.total_ms = elapsedMilliseconds(total_start, SimulationClock::now());
@@ -12714,109 +12759,35 @@ void ParticleSimulationSystem::step(const SimulationContext& context) {
     const float dt = context.dt;
     const float effective_drag = std::max(0.0f, linear_drag_ + physics_settings_.viscosity);
     const float drag_factor = effective_drag > 0.0f ? std::max(0.0f, 1.0f - effective_drag * dt) : 1.0f;
-    bool gpu_particle_forces = false;
     if (policy == ParticleExecutionPolicy::CPU) {
-        stats_.gpu_force_status = "cpu_policy";
+        stats_.gpu_status = "cpu_policy";
     } else if (gpu_unavailable_reason) {
-        stats_.gpu_force_status = gpu_unavailable_reason;
-    } else {
-        const auto gpu_force_start = SimulationClock::now();
-        SimulationTransferProbeScope force_probe(context.compute, stats_.force_transfer);
-        stats_.gpu_force_status = "buffers_not_ready";
-        uploadToCompute(context);
-        const bool fields_ready =
-            !context.force_snapshot || context.force_snapshot->empty() ||
-            (context.force_compute_buffer && context.force_compute_buffer->valid());
-        ComputeBufferHandle force_handle =
-            context.force_compute_buffer && context.force_compute_buffer->valid()
-                ? context.force_compute_buffer->buffer
-                : compute_buffers_.velocity_x;
-        ComputeBufferHandle particle_force_buffers[7] = {
-            compute_buffers_.position_x, compute_buffers_.position_y,
-            compute_buffers_.position_z, compute_buffers_.velocity_x,
-            compute_buffers_.velocity_y, compute_buffers_.velocity_z,
-            force_handle
-        };
-        bool buffers_ready = fields_ready;
-        for (const auto& handle : particle_force_buffers)
-            buffers_ready = buffers_ready && handle.valid();
-        if (buffers_ready) {
-            ParticleForceGpuConstants constants;
-            constants.particle_count = static_cast<int>(
-                std::min<std::size_t>(buffers_.alive.size(),
-                                      std::numeric_limits<int>::max()));
-            constants.dt = dt;
-            constants.gravity_x = gravity_.x * physics_settings_.gravity_scale;
-            constants.gravity_y = gravity_.y * physics_settings_.gravity_scale;
-            constants.gravity_z = gravity_.z * physics_settings_.gravity_scale;
-            constants.buoyancy =
-                physics_settings_.mode == ParticlePhysicsMode::Gas
-                    ? physics_settings_.buoyancy : 0.0f;
-            constants.drag_factor = drag_factor;
-            constants.time_seconds = context.time_seconds;
-            constants.system_mask =
-                toSimulationSystemMask(SimulationSystemKind::Particle);
-            constants.force_count =
-                context.force_compute_buffer && context.force_compute_buffer->valid()
-                    ? static_cast<uint32_t>(std::min<std::size_t>(
-                          context.force_compute_buffer->count,
-                          std::numeric_limits<uint32_t>::max()))
-                    : 0u;
-            ComputeDispatch cmd;
-            cmd.kernel = "sim_particle_force_integrate";
-            cmd.buffers = particle_force_buffers;
-            cmd.buffer_count = 7;
-            cmd.constants = &constants;
-            cmd.constants_size = sizeof(constants);
-            cmd.groups.groups_x =
-                (static_cast<uint32_t>(constants.particle_count) + 255u) / 256u;
-            const bool dispatched = context.compute->dispatch(cmd);
-            if (!dispatched) {
-                stats_.gpu_force_status = "dispatch_failed";
-            } else {
-                context.compute->synchronize();
-                const std::size_t n = buffers_.velocity_x.size();
-                if (gpu_velocity_scratch_x_.size() != n) {
-                    gpu_velocity_scratch_x_.resize(n);
-                    gpu_velocity_scratch_y_.resize(n);
-                    gpu_velocity_scratch_z_.resize(n);
-                }
-                context.compute->beginTransferBatch();
-                bool downloaded =
-                    context.compute->downloadBuffer(
-                        compute_buffers_.velocity_x, gpu_velocity_scratch_x_.data(),
-                        n * sizeof(float)) &&
-                    context.compute->downloadBuffer(
-                        compute_buffers_.velocity_y, gpu_velocity_scratch_y_.data(),
-                        n * sizeof(float)) &&
-                    context.compute->downloadBuffer(
-                        compute_buffers_.velocity_z, gpu_velocity_scratch_z_.data(),
-                        n * sizeof(float));
-                downloaded = context.compute->endTransferBatch() && downloaded;
-                if (downloaded) {
-                    // All-or-nothing commit: host velocity is either fully the
-                    // GPU result or untouched for the CPU path to integrate.
-                    buffers_.velocity_x.swap(gpu_velocity_scratch_x_);
-                    buffers_.velocity_y.swap(gpu_velocity_scratch_y_);
-                    buffers_.velocity_z.swap(gpu_velocity_scratch_z_);
-                    gpu_particle_forces = true;
-                    stats_.gpu_force_status = "gpu";
-                } else {
-                    stats_.gpu_force_status = "download_failed";
-                }
-            }
-        }
-        stats_.gpu_force_ms =
-            elapsedMilliseconds(gpu_force_start, SimulationClock::now());
+        stats_.gpu_status = gpu_unavailable_reason;
+    } else if (ineligible_reason) {
+        stats_.gpu_status = ineligible_reason;
+    } else if (stepDeviceResident(context, drag_factor)) {
+        // Spawn scatter, age/kill, forces and integration ran on the device;
+        // the host did the lifecycle bookkeeping. No collider, no self
+        // collision and no grid domain by eligibility, so the step is done.
+        ++data_version_;
+        stats_.alive_count = alive_count_;
+        stats_.capacity = buffers_.alive.size();
+        stats_.total_ms = elapsedMilliseconds(total_start, SimulationClock::now());
+        return;
     }
-    stats_.forces_on_gpu = gpu_particle_forces;
-    if (!gpu_particle_forces && policy == ParticleExecutionPolicy::GPURequired) {
-        // The device was there but the stage failed mid-step. Emission already
+    if (policy == ParticleExecutionPolicy::GPURequired) {
+        // The device was there but the resident step failed. Emission already
         // happened; integration must not silently continue on the CPU.
-        // gpu_force_status keeps the actual failure (dispatch_failed,
-        // download_failed, buffers_not_ready) -- that is the diagnosis.
+        // gpu_status keeps the actual failure (dispatch_failed,
+        // buffers_not_ready) -- that is the diagnosis.
         finish_blocked_step();
         return;
+    }
+    // CPU reference from here. Newer device kinematics come home first
+    // (roadmap 7.4: one full download from the last valid device state), and
+    // afterwards the host is the newer side.
+    if (residency_ == ParticleKinematicResidency::Device) {
+        syncHostState("cpu_path");
     }
 
     const auto integrate_start = SimulationClock::now();
@@ -12838,20 +12809,19 @@ void ParticleSimulationSystem::step(const SimulationContext& context) {
         const Vec3 previous_position(buffers_.position_x[i], buffers_.position_y[i], buffers_.position_z[i]);
         Vec3 position = previous_position;
         Vec3 velocity(buffers_.velocity_x[i], buffers_.velocity_y[i], buffers_.velocity_z[i]);
-        if (!gpu_particle_forces) {
-            Vec3 acceleration = gravity_ * physics_settings_.gravity_scale;
-            if (physics_settings_.mode == ParticlePhysicsMode::Gas &&
-                physics_settings_.buoyancy != 0.0f) {
-                acceleration =
-                    acceleration + Vec3(0.0f, physics_settings_.buoyancy, 0.0f);
-            }
-            if (context.force_snapshot) {
-                acceleration = acceleration + context.force_snapshot->evaluateAt(
-                    position, context.time_seconds, velocity,
-                    SimulationSystemKind::Particle);
-            }
-            velocity = (velocity + acceleration * dt) * drag_factor;
+        // Same operations, same order as sim_particle_ballistic.comp.
+        Vec3 acceleration = gravity_ * physics_settings_.gravity_scale;
+        if (physics_settings_.mode == ParticlePhysicsMode::Gas &&
+            physics_settings_.buoyancy != 0.0f) {
+            acceleration =
+                acceleration + Vec3(0.0f, physics_settings_.buoyancy, 0.0f);
         }
+        if (context.force_snapshot) {
+            acceleration = acceleration + context.force_snapshot->evaluateAt(
+                position, context.time_seconds, velocity,
+                SimulationSystemKind::Particle);
+        }
+        velocity = (velocity + acceleration * dt) * drag_factor;
         position = position + velocity * dt;
 
         applyColliders(position, velocity, &previous_position);
@@ -12886,13 +12856,9 @@ void ParticleSimulationSystem::step(const SimulationContext& context) {
     stats_.grid_domain_ms = elapsedMilliseconds(grid_start, grid_end);
 
     ++data_version_;
-    const auto upload_start = SimulationClock::now();
-    {
-        SimulationTransferProbeScope mirror_probe(context.compute, stats_.mirror_transfer);
-        uploadToCompute(context);
-    }
-    const auto upload_end = SimulationClock::now();
-    stats_.upload_ms = elapsedMilliseconds(upload_start, upload_end);
+    // The host moved every particle: a device copy is now stale.
+    resetResidency();
+    stats_.nonfinite_measured = true;
     stats_.alive_count = alive_count_;
     stats_.capacity = buffers_.alive.size();
     stats_.domain_count = grid_domains_.size();
@@ -13434,47 +13400,6 @@ std::size_t ParticleSimulationSystem::findDeadSlot() const {
         }
     }
     return kInvalidParticle;
-}
-
-void ParticleSimulationSystem::uploadToCompute(const SimulationContext& context) {
-    if (!context.compute || buffers_.alive.empty() || compute_buffers_.source_version == data_version_) {
-        return;
-    }
-
-    SimulationComputeContext& compute = *context.compute;
-    const std::size_t float_bytes = buffers_.alive.size() * sizeof(float);
-    const std::size_t alive_bytes = buffers_.alive.size() * sizeof(uint8_t);
-    const ComputeBufferUsage float_usage = ComputeBufferUsage::Storage |
-                                           ComputeBufferUsage::Upload |
-                                           ComputeBufferUsage::ReadWrite;
-    const ComputeBufferUsage alive_usage = ComputeBufferUsage::Storage |
-                                           ComputeBufferUsage::Upload |
-                                           ComputeBufferUsage::ReadOnly;
-
-    ensureComputeBuffer(compute, compute_buffers_.position_x, "ParticlePositionX", float_bytes, float_usage);
-    ensureComputeBuffer(compute, compute_buffers_.position_y, "ParticlePositionY", float_bytes, float_usage);
-    ensureComputeBuffer(compute, compute_buffers_.position_z, "ParticlePositionZ", float_bytes, float_usage);
-    ensureComputeBuffer(compute, compute_buffers_.velocity_x, "ParticleVelocityX", float_bytes, float_usage);
-    ensureComputeBuffer(compute, compute_buffers_.velocity_y, "ParticleVelocityY", float_bytes, float_usage);
-    ensureComputeBuffer(compute, compute_buffers_.velocity_z, "ParticleVelocityZ", float_bytes, float_usage);
-    ensureComputeBuffer(compute, compute_buffers_.age_seconds, "ParticleAge", float_bytes, float_usage);
-    ensureComputeBuffer(compute, compute_buffers_.lifetime_seconds, "ParticleLifetime", float_bytes, float_usage);
-    ensureComputeBuffer(compute, compute_buffers_.inverse_mass, "ParticleInverseMass", float_bytes, float_usage);
-    ensureComputeBuffer(compute, compute_buffers_.alive, "ParticleAlive", alive_bytes, alive_usage);
-
-    compute.uploadBuffer(compute_buffers_.position_x, buffers_.position_x.data(), float_bytes);
-    compute.uploadBuffer(compute_buffers_.position_y, buffers_.position_y.data(), float_bytes);
-    compute.uploadBuffer(compute_buffers_.position_z, buffers_.position_z.data(), float_bytes);
-    compute.uploadBuffer(compute_buffers_.velocity_x, buffers_.velocity_x.data(), float_bytes);
-    compute.uploadBuffer(compute_buffers_.velocity_y, buffers_.velocity_y.data(), float_bytes);
-    compute.uploadBuffer(compute_buffers_.velocity_z, buffers_.velocity_z.data(), float_bytes);
-    compute.uploadBuffer(compute_buffers_.age_seconds, buffers_.age_seconds.data(), float_bytes);
-    compute.uploadBuffer(compute_buffers_.lifetime_seconds, buffers_.lifetime_seconds.data(), float_bytes);
-    compute.uploadBuffer(compute_buffers_.inverse_mass, buffers_.inverse_mass.data(), float_bytes);
-    compute.uploadBuffer(compute_buffers_.alive, buffers_.alive.data(), alive_bytes);
-
-    compute_buffers_.capacity = buffers_.alive.size();
-    compute_buffers_.source_version = data_version_;
 }
 
 void ParticleSimulationSystem::ensureComputeBuffer(SimulationComputeContext& compute,

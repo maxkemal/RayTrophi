@@ -1484,6 +1484,15 @@ struct ViewportFrameTelemetryInfo {
     // gereken andir.
     uint64_t stale_descset_rebuilds = 0;
     bool     device_lost = false;
+    // Solid/Matcap sphere impostor for simulation splat pools. raster_sphere_
+    // groups is core state (pools currently handed to the impostor instead of
+    // instanced geometry); the other three come from the viewport backend.
+    // uploaded > 0 with drawn == 0 = a draw gate closed; groups > 0 with
+    // uploaded == 0 = the pools hold no visible particle.
+    uint64_t raster_sphere_groups = 0;
+    bool     sphere_impostor_ready = false;
+    uint64_t sphere_impostors_uploaded = 0;
+    uint64_t sphere_impostors_drawn = 0;
 };
 
 // ★★★ Ana dongu bu olcumu her karede buraya birakir. Backend'den GELMEZ --
@@ -2501,6 +2510,13 @@ struct AnimCharacterInfo {
     bool graph_follows_timeline = false;
     bool root_motion = false;
     std::string root_motion_bone;     // empty = auto detect
+    // What the runtime actually uses: the override, or the auto-detected bone
+    // of the first clip. cycle_travel is that bone's travel over one loop in
+    // its parent space (the per-loop step root motion adds); travel_valid is
+    // false when the bone has no position keys, i.e. root motion cannot move.
+    std::string root_motion_resolved_bone;
+    Vec3 root_motion_cycle_travel = Vec3(0.0f, 0.0f, 0.0f);
+    bool root_motion_travel_valid = false;
     bool visible = true;
 };
 
@@ -2590,6 +2606,10 @@ Result setAnimPaused(const std::string& character, bool paused);
 Result setAnimTime(const std::string& character, float seconds, int layer = 0);
 Result setAnimSpeed(const std::string& character, float speed, int layer = 0);
 Result setAnimLoop(const std::string& character, bool loop, int layer = 0);
+// Root motion unrolls a looping clip: the root bone gains completed_loops *
+// cycle_travel, derived from the clip time (deterministic on the timeline);
+// the object's transform is never moved. bone empty = auto detect.
+Result setAnimRootMotion(const std::string& character, bool enabled, const std::string& bone);
 Result getAnimPlayback(const std::string& character, int layer, AnimPlaybackInfo& out);
 
 // Graph parameters drive the character's animation node graph (its Parameter
@@ -3291,7 +3311,7 @@ struct ParticlePhysicsInfo {
     std::string mode = "spark";        // spark | granular | fluid | gas
     std::string quality = "realtime";  // realtime | preview | offline
     // auto | gpu_required | cpu. gpu_required does not fall back: the step is
-    // refused and particle.stats reports step_blocked + gpu_force_status.
+    // refused and particle.stats reports step_blocked + gpu_status.
     std::string execution_policy = "auto";
     float particle_radius = 0.04f;
     bool self_collision_enabled = false;
@@ -3328,35 +3348,52 @@ struct ParticleStatsInfo {
     float integrate_ms = 0.0f;
     float self_collision_ms = 0.0f;
     float grid_domain_ms = 0.0f;
-    float upload_ms = 0.0f;
 
-    // ── Execution / transfer telemetry (particle roadmap Phase 0) ──────────
-    // Where each stage ran. Everything except forces is CPU-only today; the
-    // fields exist so a later phase moving a stage changes a VALUE here, not
-    // the schema.
+    // ── Execution / transfer telemetry (particle roadmap Phase 0 / 1.5 B) ──
+    // A system is either device resident for the whole step or runs the CPU
+    // reference; the Phase 0 "partial GPU" force stage is gone, and the old
+    // gpu_force_* / forces_on_gpu / force_* / mirror_* names went with it.
     std::string execution_policy = "auto";   // auto | gpu_required | cpu
     std::string compute_backend = "none";
-    std::string gpu_force_status = "not_attempted";
-    bool forces_on_gpu = false;
+    // Why the step ran where it did. "gpu_resident" is the only value meaning
+    // the device ran it. Values: not_attempted, cpu_policy, no_compute_context,
+    // backend_not_vulkan, no_dispatch_support, host_consumer_colliders,
+    // host_consumer_self_collision, host_consumer_grid_domains,
+    // buffers_not_ready, dispatch_failed, gpu_required_blocked, gpu_resident
+    std::string gpu_status = "not_attempted";
+    bool device_resident = false;
     bool step_blocked = false;
-    std::string emit_backend = "cpu";
+    std::string emit_backend = "cpu";             // spawn decisions stay on the CPU
     std::string forces_backend = "cpu";
-    std::string integrate_backend = "cpu";        // lifetime, integration, over-life
-    std::string scene_collision_backend = "cpu";
+    std::string integrate_backend = "cpu";        // lifetime + integration
+    std::string scene_collision_backend = "off";  // off | cpu
     std::string self_collision_backend = "off";   // off | cpu
-    float gpu_force_ms = 0.0f;   // whole GPU force block incl. transfers
-    // Particle-step transfers only (grid domains report their own).
-    uint64_t force_upload_bytes = 0;
-    uint64_t force_download_bytes = 0;
-    uint32_t force_dispatch_calls = 0;
-    uint32_t force_synchronize_calls = 0;
-    double force_upload_call_ms = 0.0;
-    double force_download_call_ms = 0.0;
-    double force_synchronize_ms = 0.0;
-    uint64_t mirror_upload_bytes = 0;
-    uint32_t mirror_upload_calls = 0;
-    double mirror_upload_call_ms = 0.0;
+    float gpu_step_ms = 0.0f;   // host wall time of the resident step incl. transfers
+    // Where position/velocity are authoritative: host | equal | device.
+    std::string residency = "host";
+    int resident_capacity = 0;      // device slots (power of two)
+    uint32_t slot_records = 0;      // spawn/kill slot writes sent this step
+    // Transfers of the resident step (the CPU path makes none). A healthy
+    // resident step uploads slot records only and downloads nothing unless a
+    // consumer asked for host state (then the download rides the step).
+    uint64_t step_upload_bytes = 0;
+    uint64_t step_download_bytes = 0;
+    uint32_t step_dispatch_calls = 0;
+    uint32_t step_synchronize_calls = 0;
+    double step_upload_call_ms = 0.0;
+    double step_download_call_ms = 0.0;
+    double step_synchronize_ms = 0.0;
+    // Host snapshots of device kinematics, CUMULATIVE since the runtime was
+    // created: diff two reads. sync_count = a consumer paid its own
+    // synchronisation; mirrored_steps = the download rode a step's fence.
+    uint64_t snapshot_sync_count = 0;
+    uint64_t snapshot_mirrored_steps = 0;
+    uint64_t snapshot_download_bytes = 0;
+    std::string snapshot_last_reason = "none";
+    // A resident step only knows NaN/Inf when its state came home; otherwise
+    // nonfinite_measured is false and the count means nothing.
     uint32_t nonfinite_particles = 0;
+    bool nonfinite_measured = false;
 
     // Particle -> gas deposit, last step, counted per particle. Panel-only
     // until 2026-09-25, so "my particles do not feed the gas" could not be
@@ -3374,9 +3411,8 @@ struct ParticleStatsInfo {
 };
 
 // Bounded read of live particle state for CPU/GPU comparison and baselines.
-// Host state is authoritative today, so this costs no device transfer; once a
-// stage is device-resident this call becomes an explicit snapshot and must be
-// counted as one.
+// On a device-resident system this is an explicit host snapshot, counted in
+// particle.stats snapshot_* (reason "state_sample").
 struct ParticleStateSample {
     int alive_count = 0;
     int capacity = 0;
@@ -3712,6 +3748,10 @@ struct FluidDomainInfo {
     Vec3 domain_max;
     float voxel_size = 0.05f;
     size_t particle_count = 0;
+    // Density grid the liquid splats every step (the Volume render mode's
+    // input). Valid only when live_state is true, like particle_count.
+    size_t active_density_cells = 0;
+    float  max_density = 0.0f;
     // ★★★ particle_count is only a MEASUREMENT when this is true.
     //
     // Measured 2026-08-16: fluid.get reported particle_count = 0 for a domain
@@ -3725,7 +3765,7 @@ struct FluidDomainInfo {
     // burn — a plausible, completely wrong observation, which is the worst kind.
     // Callers must check this before acting on particle_count.
     bool live_state = false;
-    std::string render_mode; // "volume", "surface", "particles"
+    std::string render_mode; // "fog" (liquid), "volume" (gas), "surface", "particles"
     std::string backend;     // "cpu", "gpu", "vulkan", "cpu_sparse"
     std::string boundary;    // "closed", "open", "periodic"
     // "water","oil","mud","honey","lava","chocolate" (liquid) |
@@ -3764,6 +3804,24 @@ struct FluidDomainInfo {
     // Explicit material shading splat geometry. Empty means scene default for
     // Built-in Icosphere or preserved per-face materials for a scene object.
     std::string splat_material;
+    // Splat geometry, as written by setFluidSplatGeometry / the Splat Geometry
+    // panel. splat_triangles is what ONE splat costs: the icosphere count for
+    // "icosphere", 0 for "scene_object" (depends on the node, not measured here).
+    std::string splat_geometry;          // "icosphere" | "scene_object"
+    std::string splat_geometry_source;   // scene node name, "" when unset
+    int   splat_subdivisions = 0;        // 0..3
+    int   splat_triangles = 0;
+    float splat_radius_factor = 0.0f;
+    float splat_size_multiplier = 0.0f;
+    // VolumeFog Gaussian spread (sigma, simulation voxels); 0 = raw splat.
+    float fog_spread_voxels = 0.0f;
+    // Particle temperature range, Kelvin, over parcels that carry one (> 0).
+    // Measured on every read, whether or not the thermal chain is on: this is
+    // what the fog's blackbody emission is fed. particle_kelvin_measured is
+    // false when no particle carries a temperature.
+    bool  particle_kelvin_measured = false;
+    float particle_min_kelvin = 0.0f;
+    float particle_max_kelvin = 0.0f;
     // Zero-level-set displacement in simulation voxels. This is the canonical
     // geometric fullness control; optical volume density must never be used to
     // grow or shrink a SurfaceSDF.
@@ -3827,7 +3885,7 @@ struct FluidDomainInfo {
         // happily while the substance is drawn the other way. The panel shows
         // the same resolution, so the script and the picture can be compared.
         // Read-only: routing is still authored through `representation`.
-        std::string effective_representation; // "inherit", "splat", "sdf"
+        std::string effective_representation; // "splat", "sdf", "fog"
         // ★ REPORTED AS AUTHORED, including the -1 sentinel: a reader has to be
         // able to tell "inherits the domain" from "was explicitly set to the
         // same number the domain happens to have". Resolving it here would make
@@ -3989,6 +4047,20 @@ struct FluidDomainInfo {
     float    thermal_max_viscosity = 0.0f;
     bool enabled = true;
     bool visible = true;
+};
+
+// Splat-sphere geometry of a liquid domain. Empty fields keep their value.
+struct FluidSplatGeometryPatch {
+    std::optional<std::string> geometry;         // "icosphere" | "scene_object"
+    std::optional<std::string> geometry_source;  // live scene node; "" clears
+    std::optional<int>   subdivisions;           // 0..3 (20/80/320/1280 tris)
+    std::optional<float> radius_factor;          // 0.05..1.5, x voxel size
+    std::optional<float> size_multiplier;        // 0.05..8
+};
+
+// Volumetric Fog shaping of a liquid domain. Empty fields keep their value.
+struct FluidFogPatch {
+    std::optional<float> spread_voxels;  // 0..6, Gaussian sigma; 0 = raw splat
 };
 
 // Overlay patches: fields left empty keep their value.
@@ -4406,6 +4478,17 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
 // Rebuilds the surface on the next bridge update; the simulation is untouched.
 Result setFluidSurfaceDetail(const std::string& domain_id_or_name,
                              const FluidSurfaceDetailPatch& patch);
+// Splat geometry (the Splat Geometry & Preview panel). Rejected, not clamped,
+// like setFluidSurfaceDetail: subdivision multiplies every splat's triangles
+// by four per level. "scene_object" needs a live scene node, either in this
+// patch or already on the domain; a missing node would silently fall back to
+// the icosphere. Takes effect on the next bridge update, no simulation reset.
+Result setFluidSplatGeometry(const std::string& domain_id_or_name,
+                             const FluidSplatGeometryPatch& patch);
+// VolumeFog shaping. Render-side only (the solver density is untouched), so
+// it applies to a paused frame without re-simulating. Rejected, not clamped.
+Result setFluidFog(const std::string& domain_id_or_name,
+                   const FluidFogPatch& patch);
 // Thermal-liquid chain of a fluid domain (cooling, ν(T), freezing). Editing it
 // demotes the rheology preset to "custom", like any other rheology field.
 Result setFluidThermal(const std::string& domain_id_or_name,

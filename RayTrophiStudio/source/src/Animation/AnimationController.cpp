@@ -1,5 +1,6 @@
 ﻿#include "AnimationController.h"
 #include "Animation/AnimationKeys.h"
+#include "Animation/RootMotionUnroll.h"
 #include "globals.h"
 #include <cmath>
 #include <algorithm>
@@ -68,9 +69,6 @@ void AnimationController::clear() {
     // Reset root motion state
     rootMotionEnabled = false;
     rootMotionBone = "Hips";
-    accumulatedRootMotion = RootMotionDelta();
-    lastRootPosition = Vec3(0, 0, 0);
-    lastRootRotation = Quaternion();
     
     // Reset flags
     boneMatricesDirty = true;
@@ -166,12 +164,14 @@ void AnimationController::play(const std::string& clipName, float blendTime, int
         // Crossfade from current (A) to new (B)
         layerRef.blendState.clipB = clip;
         layerRef.blendState.timeB = 0.0f;
+        layerRef.blendState.cyclesB = 0;
         layerRef.blendState.blendWeight = 0.0f;
         layerRef.blendState.blendDuration = blendTime;
     } else {
         // Instant switch
         layerRef.blendState.clipA = clip;
         layerRef.blendState.timeA = 0.0f;
+        layerRef.blendState.cyclesA = 0;
         layerRef.blendState.clipB = nullptr;
         layerRef.blendState.blendWeight = 0.0f;
     }
@@ -241,7 +241,18 @@ void AnimationController::setTime(float time, int layer) {
     if (layer < 0) return;
     if (layer >= static_cast<int>(layers.size())) return;
     
-    layers[layer].blendState.timeA = time;
+    // An absolute time (the timeline seek) splits into loops + time inside
+    // the clip, so root motion after a seek matches continuous playback.
+    auto& state = layers[layer].blendState;
+    const float duration = state.clipA ? state.clipA->getDurationInSeconds() : 0.0f;
+    if (duration > 0.0f) {
+        const auto looped = RootMotionUnroll::wrap(time, duration, state.clipA->loop);
+        state.timeA = looped.seconds;
+        state.cyclesA = looped.cycles;
+    } else {
+        state.timeA = time;
+        state.cyclesA = 0;
+    }
     boneMatricesDirty = true;
 }
 
@@ -291,13 +302,7 @@ void AnimationController::setRootMotionEnabled(bool enabled, const std::string& 
     
     rootMotionEnabled = enabled;
     rootMotionBone = rootBone;
-    accumulatedRootMotion = RootMotionDelta();
-}
-
-RootMotionDelta AnimationController::consumeRootMotion() {
-    RootMotionDelta result = accumulatedRootMotion;
-    accumulatedRootMotion = RootMotionDelta();
-    return result;
+    boneMatricesDirty = true;
 }
 
 std::string AnimationController::findBestRootMotionBone(const std::string& clipName) {
@@ -410,8 +415,8 @@ bool AnimationController::update(float deltaTime, const BoneData& boneData) {
                 // Get global animated transform (recursively)
                 Matrix4x4 animatedGlobal = getAnimatedGlobalTransform(
                     boneName, boneData, 
-                    animA, state.timeA, 
-                    animB, state.timeB, 
+                    animA, state.timeA, state.cyclesA,
+                    animB, state.timeB, state.cyclesB,
                     weight, state.mode, 
                     globalTransformCache);
                 
@@ -474,23 +479,13 @@ void AnimationController::updateLayer(AnimationLayer& layer, float deltaTime, co
     // Update playback time
     float durationA = state.clipA->getDurationInSeconds();
     state.timeA += deltaTime;
-    
-    // Extract root motion from clipA
-    if (rootMotionEnabled && state.clipA->sourceData) {
-        float prevTime = state.timeA - deltaTime;
-        float currTime = state.timeA;
-        if (state.clipA->loop && durationA > 0.0f && currTime >= durationA) {
-            extractRootMotion(state.clipA->sourceData, prevTime, durationA, rootMotionBone);
-            extractRootMotion(state.clipA->sourceData, 0.0f, fmodf(currTime, durationA), rootMotionBone);
-        } else {
-            extractRootMotion(state.clipA->sourceData, prevTime, currTime, rootMotionBone);
-        }
-    }
 
-    // Handle looping
+    // Handle looping; cyclesA feeds root motion (RootMotionUnroll).
     if (state.clipA->loop) {
-        if (durationA > 0.0f && state.timeA >= durationA) {
-            state.timeA = AnimationUtils::wrapTime(state.timeA, durationA);
+        if (durationA > 0.0f && (state.timeA >= durationA || state.timeA < 0.0f)) {
+            const auto looped = RootMotionUnroll::wrap(state.timeA, durationA, true);
+            state.timeA = looped.seconds;
+            state.cyclesA += looped.cycles;
         }
     } else {
         // Check if animation ended
@@ -508,13 +503,16 @@ void AnimationController::updateLayer(AnimationLayer& layer, float deltaTime, co
         // Handle B clip looping
         float durationB = state.clipB->getDurationInSeconds();
         if (state.clipB->loop && durationB > 0.0f && state.timeB >= durationB) {
-            state.timeB = AnimationUtils::wrapTime(state.timeB, durationB);
+            const auto looped = RootMotionUnroll::wrap(state.timeB, durationB, true);
+            state.timeB = looped.seconds;
+            state.cyclesB += looped.cycles;
         }
         
         if (state.blendWeight >= 1.0f) {
             // Blend complete - switch to B
             state.clipA = state.clipB;
             state.timeA = state.timeB;
+            state.cyclesA = state.cyclesB;
             state.clipB = nullptr;
             state.blendWeight = 0.0f;
         }
@@ -541,11 +539,13 @@ void AnimationController::processQueue(AnimationLayer& layer) {
     if (item.blendInTime > 0.0f && state.clipA != nullptr) {
         state.clipB = clip;
         state.timeB = 0.0f;
+        state.cyclesB = 0;
         state.blendWeight = 0.0f;
         state.blendDuration = item.blendInTime;
     } else {
         state.clipA = clip;
         state.timeA = 0.0f;
+        state.cyclesA = 0;
         state.clipB = nullptr;
         state.blendWeight = 0.0f;
     }
@@ -733,8 +733,8 @@ Matrix4x4 AnimationController::calculateNodeTransform(
 Matrix4x4 AnimationController::getAnimatedGlobalTransform(
     const std::string& boneName,
     const BoneData& boneData,
-    std::shared_ptr<AnimationData> animA, float timeA,
-    std::shared_ptr<AnimationData> animB, float timeB,
+    std::shared_ptr<AnimationData> animA, float timeA, int64_t cyclesA,
+    std::shared_ptr<AnimationData> animB, float timeB, int64_t cyclesB,
     float blendWeight, BlendMode mode,
     std::unordered_map<std::string, Matrix4x4>& cache
 ) const {
@@ -752,20 +752,25 @@ Matrix4x4 AnimationController::getAnimatedGlobalTransform(
     float ticksPerSecA = animA ? (float)animA->ticksPerSecond : 24.0f;
     Matrix4x4 localA = calculateNodeTransform(animA, timeA * ticksPerSecA, boneName, localDefault);
     
-    // ROOT MOTION ISOLATION: If this is the root bone and RM is enabled, we remove translation
-    // to prevent the character from moving twice (double transformation).
-    if (rootMotionEnabled && matchesRootMotionBoneName(boneName, rootMotionBone)) {
-        localA.m[0][3] = 0; localA.m[1][3] = 0; localA.m[2][3] = 0;
-    }
+    const bool rootBone = rootMotionEnabled && matchesRootMotionBoneName(boneName, rootMotionBone);
+    auto unrollRoot = [&](Matrix4x4& local, const std::shared_ptr<AnimationData>& anim, int64_t cycles) {
+        Vec3 travel;
+        if (!rootBone || cycles == 0 || !anim ||
+            !RootMotionUnroll::cycleTravel(*anim, boneName, travel)) {
+            return;
+        }
+        const Vec3 moved = RootMotionUnroll::unrolled(
+            Vec3(local.m[0][3], local.m[1][3], local.m[2][3]), travel, cycles);
+        local.m[0][3] = moved.x; local.m[1][3] = moved.y; local.m[2][3] = moved.z;
+    };
+    unrollRoot(localA, animA, cyclesA);
 
     Matrix4x4 localFinal = localA;
     if (animB && blendWeight > 0.0f) {
         float ticksPerSecB = animB ? (float)animB->ticksPerSecond : 24.0f;
         Matrix4x4 localB = calculateNodeTransform(animB, timeB * ticksPerSecB, boneName, localDefault);
         
-        if (rootMotionEnabled && matchesRootMotionBoneName(boneName, rootMotionBone)) {
-            localB.m[0][3] = 0; localB.m[1][3] = 0; localB.m[2][3] = 0;
-        }
+        unrollRoot(localB, animB, cyclesB);
 
         localFinal = blendTransforms(localA, localB, blendWeight, mode);
     }
@@ -774,7 +779,7 @@ Matrix4x4 AnimationController::getAnimatedGlobalTransform(
     Matrix4x4 parentGlobal = Matrix4x4::identity();
     auto parentIt = boneData.boneParents.find(boneName);
     if (parentIt != boneData.boneParents.end()) {
-        parentGlobal = getAnimatedGlobalTransform(parentIt->second, boneData, animA, timeA, animB, timeB, blendWeight, mode, cache);
+        parentGlobal = getAnimatedGlobalTransform(parentIt->second, boneData, animA, timeA, cyclesA, animB, timeB, cyclesB, blendWeight, mode, cache);
     }
 
     // 4. Combine: Global = ParentGlobal * Local
@@ -804,30 +809,6 @@ Matrix4x4 AnimationController::blendTransforms(
     }
     
     return result;
-}
-
-void AnimationController::extractRootMotion(
-    std::shared_ptr<AnimationData> anim,
-    float prevTime,
-    float currentTime,
-    const std::string& rootBone
-) {
-    if (!anim || !rootMotionEnabled) return;
-    
-    double ticksPerSec = anim->ticksPerSecond;
-    
-    // CRITICAL: Disable wrapping here so we sample pos(duration) and pos(0) correctly
-    // instead of both wrapping to pos(0).
-    Matrix4x4 matPrev = calculateNodeTransform(anim, (float)(prevTime * ticksPerSec), rootBone, Matrix4x4::identity(), false);
-    Matrix4x4 matCurr = calculateNodeTransform(anim, (float)(currentTime * ticksPerSec), rootBone, Matrix4x4::identity(), false);
-    
-    Vec3 posPrev(matPrev.m[0][3], matPrev.m[1][3], matPrev.m[2][3]);
-    Vec3 posCurr(matCurr.m[0][3], matCurr.m[1][3], matCurr.m[2][3]);
-    
-    Vec3 delta = posCurr - posPrev;
-    
-    accumulatedRootMotion.positionDelta = accumulatedRootMotion.positionDelta + delta;
-    accumulatedRootMotion.hasPosition = true;
 }
 
 // ========================================================================

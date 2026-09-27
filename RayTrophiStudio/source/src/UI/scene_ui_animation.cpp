@@ -122,19 +122,9 @@ void SceneUI::processAnimations(UIContext& ctx) {
                          Vec3 final_rot = transform_handle->rotation;
                          Vec3 final_scale = transform_handle->scale;
                          
-                         // ROOT MOTION CHECK: If this object is an animated character using root motion,
-                         // we skip EVALUATING the position track so the animator can drive it.
-                         bool skip_eval_pos = false;
-                         for (const auto& mctx : ctx.scene.importedModelContexts) {
-                             // Match either the model name exactly (root node) or a prefixed node name
-                             bool nameMatch = (mctx.importName == name) || (name.find(mctx.importName + "_") == 0);
-                             if (nameMatch && mctx.useRootMotion) {
-                                 skip_eval_pos = true;
-                                 break;
-                             }
-                         }
-
-                         if (tk.has_position && !skip_eval_pos) final_pos = tk.position;
+                         // Root motion lives in the pose, never in this transform,
+                         // so a character's position keys always apply.
+                         if (tk.has_position) final_pos = tk.position;
                          if (tk.has_rotation) final_rot = tk.rotation;
                          if (tk.has_scale)    final_scale = tk.scale;
                          

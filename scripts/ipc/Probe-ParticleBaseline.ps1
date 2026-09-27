@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Particle roadmap Phase 0 baseline: CPU vs current partial-GPU cost and
+Particle roadmap baseline: CPU reference vs device-resident step cost and
 trajectory agreement, at several particle counts, over IPC.
 
 .DESCRIPTION
@@ -27,15 +27,22 @@ REQUIREMENTS
     (two stats reads with no step between them must match) and refuses.
 
 READING THE RESULT
-  * gpu_force_status must be 'gpu' on the Auto rows for them to mean
-    anything. Any other value names why the CPU ran the force stage, and the
-    Auto row is then just a second CPU row.
-  * force_download_bytes per step is the cost the roadmap wants gone
-    (velocity readback). mirror_upload_bytes is the end-of-step host->device
-    copy of the whole SoA. Both are CAPACITY-sized, not alive-sized.
+  * gpu_status must be 'gpu_resident' on the Auto rows for them to mean
+    anything (Phase 1.5 Batch B: the whole step runs on the device, or the
+    CPU reference runs it all). host_consumer_* names the stage that keeps a
+    scenario on the CPU -- the plane and self_collision scenarios report it by
+    design until Phase 6; their Auto rows are a second CPU row.
+  * step_download_bytes per step must be 0 on a resident row. Non-zero means
+    a consumer is pulling host state every frame (a viewport on another
+    VkDevice, the debug-dot overlay, the timeline scrub cache) and each step
+    mirrors -- the probe warns. step_upload_bytes is slot records only (48 B
+    per spawned/killed particle), never the SoA.
+  * The Phase 0 rows (gpu_force_*, force_*, mirror_*) measured the removed
+    partial path: ballistic 32k CPU 1.18 ms vs partial GPU 3.98 ms. The Phase 5
+    gate is a resident ballistic 32k row below the CPU row with zero download.
   * compare.max_position_delta is the largest CPU-vs-Auto position difference
     over the sampled particles. Small (float noise, ~1e-4 m after a second) is
-    expected; large means the GPU force kernel and the CPU path disagree.
+    expected; large means the ballistic kernel and the CPU path disagree.
 
 .EXAMPLE
 .\scripts\ipc\Probe-ParticleBaseline.ps1 -OutputPath .\particle_baseline.json
@@ -185,16 +192,15 @@ try {
                         emit_ms              = [double]$s.emit_ms
                         integrate_ms         = [double]$s.integrate_ms
                         self_collision_ms    = [double]$s.self_collision_ms
-                        upload_ms            = [double]$s.upload_ms
-                        gpu_force_ms         = [double]$s.gpu_force_ms
-                        force_upload_bytes   = [double]$s.force_upload_bytes
-                        force_download_bytes = [double]$s.force_download_bytes
-                        force_sync_calls     = [double]$s.force_synchronize_calls
-                        force_sync_ms        = [double]$s.force_synchronize_ms
-                        force_download_ms    = [double]$s.force_download_call_ms
-                        mirror_upload_bytes  = [double]$s.mirror_upload_bytes
-                        mirror_upload_ms     = [double]$s.mirror_upload_call_ms
-                        gpu_force_status     = [string]$s.gpu_force_status
+                        gpu_step_ms          = [double]$s.gpu_step_ms
+                        step_upload_bytes    = [double]$s.step_upload_bytes
+                        step_download_bytes  = [double]$s.step_download_bytes
+                        step_sync_calls      = [double]$s.step_synchronize_calls
+                        step_sync_ms         = [double]$s.step_synchronize_ms
+                        step_download_ms     = [double]$s.step_download_call_ms
+                        slot_records         = [double]$s.slot_records
+                        residency            = [string]$s.residency
+                        gpu_status           = [string]$s.gpu_status
                         step_blocked         = [bool]$s.step_blocked
                         nonfinite            = [int]$s.nonfinite_particles
                         alive                = [int]$s.alive_count
@@ -216,13 +222,14 @@ try {
                     }
                 }
 
-                $statuses = @($rows | ForEach-Object { $_.gpu_force_status } | Sort-Object -Unique)
+                $statuses = @($rows | ForEach-Object { $_.gpu_status } | Sort-Object -Unique)
                 $runs += [pscustomobject]@{
                     scenario             = $scenario
                     count                = $count
                     policy               = $policy
                     compute_backend      = $last.compute_backend
-                    gpu_force_status     = ($statuses -join ',')
+                    gpu_status           = ($statuses -join ',')
+                    residency            = (@($rows | ForEach-Object { $_.residency } | Sort-Object -Unique) -join ',')
                     stage_backends       = $last.stage_backends
                     blocked_steps        = @($rows | Where-Object { $_.step_blocked }).Count
                     alive                = $last.alive_count
@@ -232,23 +239,25 @@ try {
                     emit_median_ms       = Get-Median $rows 'emit_ms'
                     integrate_median_ms  = Get-Median $rows 'integrate_ms'
                     self_collision_median_ms = Get-Median $rows 'self_collision_ms'
-                    gpu_force_median_ms  = Get-Median $rows 'gpu_force_ms'
-                    force_sync_median_ms = Get-Median $rows 'force_sync_ms'
-                    force_download_median_ms = Get-Median $rows 'force_download_ms'
-                    upload_median_ms     = Get-Median $rows 'upload_ms'
-                    force_upload_bytes_per_step   = Get-Median $rows 'force_upload_bytes'
-                    force_download_bytes_per_step = Get-Median $rows 'force_download_bytes'
-                    force_sync_calls_per_step     = Get-Median $rows 'force_sync_calls'
-                    mirror_upload_bytes_per_step  = Get-Median $rows 'mirror_upload_bytes'
+                    gpu_step_median_ms   = Get-Median $rows 'gpu_step_ms'
+                    step_sync_median_ms  = Get-Median $rows 'step_sync_ms'
+                    step_download_median_ms = Get-Median $rows 'step_download_ms'
+                    step_upload_bytes_per_step   = Get-Median $rows 'step_upload_bytes'
+                    step_download_bytes_per_step = Get-Median $rows 'step_download_bytes'
+                    step_sync_calls_per_step     = Get-Median $rows 'step_sync_calls'
+                    slot_records_per_step        = Get-Median $rows 'slot_records'
                     ipc_wall_median_ms   = Get-Median $rows 'ipc_wall_ms'
                     nonfinite_max        = (@($rows | ForEach-Object { $_.nonfinite }) | Measure-Object -Maximum).Maximum
                     state                = $state
                     rows                 = $rows
                 }
-                Write-Host ("{0,-15} {1,7} {2,-12} total {3,8:N3} ms  force[{4}] {5,8:N3} ms  down {6,10:N0} B  mirror {7,10:N0} B" -f `
-                    $scenario, $count, $policy, $runs[-1].total_median_ms, $runs[-1].gpu_force_status,
-                    $runs[-1].gpu_force_median_ms, $runs[-1].force_download_bytes_per_step,
-                    $runs[-1].mirror_upload_bytes_per_step)
+                Write-Host ("{0,-15} {1,7} {2,-12} total {3,8:N3} ms  step[{4}] {5,8:N3} ms  up {6,10:N0} B  down {7,10:N0} B" -f `
+                    $scenario, $count, $policy, $runs[-1].total_median_ms, $runs[-1].gpu_status,
+                    $runs[-1].gpu_step_median_ms, $runs[-1].step_upload_bytes_per_step,
+                    $runs[-1].step_download_bytes_per_step)
+                if ($runs[-1].gpu_status -eq 'gpu_resident' -and $runs[-1].step_download_bytes_per_step -gt 0) {
+                    Write-Warning "$scenario/$count/${policy}: resident steps downloaded $($runs[-1].step_download_bytes_per_step) B each -- a consumer pulls host state every frame (viewport on another VkDevice? debug dots? timeline cache?). This row is not the healthy resident cost."
+                }
             }
         }
     }
@@ -276,16 +285,16 @@ try {
             $ca = $a.centroid; $cb = $b.centroid
             $centroidDelta = [Math]::Sqrt([Math]::Pow($ca[0] - $cb[0], 2) + [Math]::Pow($ca[1] - $cb[1], 2) + [Math]::Pow($ca[2] - $cb[2], 2))
             # A ratio of two CPU runs is noise, not a speedup: leave it empty
-            # unless the other policy's force stage actually ran on the GPU.
+            # unless the other policy's step actually ran device-resident.
             $speedup = $null
-            if ($other.gpu_force_status -eq 'gpu' -and $other.total_median_ms -gt 0) {
+            if ($other.gpu_status -eq 'gpu_resident' -and $other.total_median_ms -gt 0) {
                 $speedup = $cpu[0].total_median_ms / $other.total_median_ms
             }
             $comparisons += [pscustomobject]@{
                 scenario             = $cpu[0].scenario
                 count                = $cpu[0].count
                 policy               = $other.policy
-                other_force_status   = $other.gpu_force_status
+                other_gpu_status     = $other.gpu_status
                 matched_particles    = $matched
                 max_position_delta   = $maxDelta
                 centroid_delta       = $centroidDelta
@@ -311,12 +320,12 @@ try {
     }
     Write-Host ''
     Write-Host 'CPU vs other policy:'
-    $comparisons | Format-Table scenario, count, policy, other_force_status, matched_particles,
+    $comparisons | Format-Table scenario, count, policy, other_gpu_status, matched_particles,
         max_position_delta, centroid_delta, cpu_total_median_ms, other_total_median_ms, speedup -AutoSize
-    $notGpu = @($comparisons | Where-Object { $_.other_force_status -ne 'gpu' })
+    $notGpu = @($comparisons | Where-Object { $_.other_gpu_status -ne 'gpu_resident' })
     if ($notGpu.Count -gt 0) {
-        $reasons = @($notGpu | ForEach-Object { $_.other_force_status } | Sort-Object -Unique) -join ', '
-        Write-Warning ("$($notGpu.Count) of $($comparisons.Count) comparison rows never ran the GPU force stage " +
+        $reasons = @($notGpu | ForEach-Object { $_.other_gpu_status } | Sort-Object -Unique) -join ', '
+        Write-Warning ("$($notGpu.Count) of $($comparisons.Count) comparison rows never ran device-resident " +
             "($reasons). Their timings compare CPU with CPU; speedup is left empty.")
     }
 } finally {

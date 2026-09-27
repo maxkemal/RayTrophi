@@ -150,6 +150,11 @@ SimulationComputeContext::SimulationComputeContext()
 }
 
 void SimulationComputeContext::setBackend(std::unique_ptr<ISimulationComputeBackend> backend) {
+    // The old backend is still alive here: this is the last moment its buffers
+    // can be read. Device-resident particle kinematics exist nowhere else.
+    if (backend_ && backend_change_callback_) {
+        backend_change_callback_(backend_change_owner_, *this);
+    }
     if (backend_) {
         backend_->synchronize();
     }
@@ -283,8 +288,18 @@ SimulationComputeContext::TransferStats* SimulationComputeContext::setTransferPr
     return previous;
 }
 
+void SimulationComputeContext::setBackendChangeCallback(BackendChangeCallback callback,
+                                                        void* owner) {
+    backend_change_callback_ = callback;
+    backend_change_owner_ = owner;
+}
+
 void* SimulationComputeContext::nativeBufferPtr(ComputeBufferHandle handle) const {
     return backend_->nativeBufferPtr(handle);
+}
+
+void* SimulationComputeContext::nativeDevice() const {
+    return backend_->nativeDevice();
 }
 
 uint64_t SimulationComputeContext::bufferDeviceAddress(

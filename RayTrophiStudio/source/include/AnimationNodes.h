@@ -91,8 +91,7 @@ namespace AnimationGraph {
         float blendWeight = 1.0f;
         float normalizedTime = 0.0f;          // 0-1 playback progress
         bool wasUpdated = false;              // NEW: True if the animation actually progressed this frame
-        RootMotionDelta rootMotion;           // Tracks extracted root motion from clips
-        
+
         bool isValid() const { return !trsTransforms.empty() || !boneTransforms.empty(); }
         size_t boneCount() const { return (std::max)(trsTransforms.size(), boneTransforms.size()); }
         
@@ -141,6 +140,12 @@ namespace AnimationGraph {
         float deltaTime = 0.0f;
         float globalTime = 0.0f;
         int currentFrame = 0;
+
+        // Timeline-driven graphs: clips read their time from timelineSeconds
+        // (absolute, derived from the timeline frame) instead of integrating
+        // deltaTime, so a scrub or rewind lands on that frame's pose.
+        bool timelineDriven = false;
+        float timelineSeconds = 0.0f;
         
         // Bone data reference
         const BoneData* boneData = nullptr;
@@ -160,13 +165,13 @@ namespace AnimationGraph {
         std::unordered_map<std::string, int> intParams;
         std::unordered_map<std::string, std::string> triggerParams;
         
-        // Root Motion Settings
+        // Root motion: the root bone gains completed_loops * cycle_travel
+        // (see Animation/RootMotionUnroll.h). Nothing moves the object.
         bool useRootMotion = false;
         std::string rootMotionBone = "RootNode";
-        
+
         // Output
         PoseData outputPose;
-        RootMotionDelta rootMotion;
         
         // Helper methods
         float getFloatParam(const std::string& name, float defaultValue = 0.0f) const {
@@ -307,8 +312,9 @@ namespace AnimationGraph {
         
         // Runtime state
         float currentTime = 0.0f;
+        int64_t loopCycles = 0;     // completed loops before currentTime
         bool isPlaying = true;
-        
+
         AnimClipNode();
         void setupPins();
         
@@ -321,7 +327,7 @@ namespace AnimationGraph {
         // Playback control
         void play() { isPlaying = true; }
         void pause() { isPlaying = false; }
-        void reset() { currentTime = startTime; }
+        void reset() { currentTime = startTime; loopCycles = 0; }
         
         void onSave(nlohmann::json& j) const override {
             j["clipName"] = clipName;
@@ -526,6 +532,7 @@ namespace AnimationGraph {
             std::string clipName;
             float paramValue;
             float currentTime = 0.0f;  // Per-clip playback state
+            int64_t loopCycles = 0;    // completed loops, carried like currentTime
         };
         
         std::vector<BlendPoint> blendPoints;

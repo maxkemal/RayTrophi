@@ -541,10 +541,13 @@ def main():
         return (response or {}).get("result") or {}
 
     stats_result = particle_stats_after_step("particle.stats(phase0 fields)")
-    for key in ("execution_policy", "compute_backend", "gpu_force_status",
-                "forces_on_gpu", "step_blocked", "stage_backends", "gpu_force_ms",
-                "force_upload_bytes", "force_download_bytes",
-                "mirror_upload_bytes", "nonfinite_particles",
+    for key in ("execution_policy", "compute_backend", "gpu_status",
+                "device_resident", "step_blocked", "stage_backends", "gpu_step_ms",
+                "residency", "resident_capacity", "slot_records",
+                "step_upload_bytes", "step_download_bytes", "step_synchronize_calls",
+                "snapshot_sync_count", "snapshot_mirrored_steps",
+                "snapshot_download_bytes", "snapshot_last_reason",
+                "nonfinite_particles", "nonfinite_measured",
                 "grid_deposit_landed", "grid_deposit_dropped_no_domain",
                 "grid_deposit_dropped_no_channel"):
         if key not in stats_result:
@@ -561,12 +564,127 @@ def main():
     run_test("particle.spawn", {"position": [0.0, 3.0, 0.0]}, "particle.spawn(cpu policy)")
     run_test("particle.step", {"dt": 0.016}, "particle.step(cpu policy)")
     stats_result = particle_stats_after_step("particle.stats(cpu policy)")
-    if stats_result.get("gpu_force_status") != "cpu_policy":
-        print(f"  cpu policy not honoured, gpu_force_status="
-              f"{stats_result.get('gpu_force_status')}: FAIL")
+    if stats_result.get("gpu_status") != "cpu_policy" or stats_result.get("device_resident"):
+        print(f"  cpu policy not honoured, gpu_status="
+              f"{stats_result.get('gpu_status')}: FAIL")
         tests_failed += 1
     run_test("particle.set_physics", {"execution_policy": "auto"},
              "particle.set_physics(execution_policy restore)")
+
+    # Particle roadmap Phase 1.5 Batch B: device-resident ballistic step.
+    # Two systems get the SAME particle; one runs the CPU reference, the other
+    # Auto. When Auto went resident, the trajectories must agree (Phase 5
+    # tolerance: ballistic <= 1e-5 m after 16 steps; 1e-4 here for float
+    # force-field noise), and the stats must say how the host got its copy.
+    def b_check(condition, label, detail=""):
+        nonlocal tests_passed, tests_failed
+        if condition:
+            print(f"  {label}: OK")
+            tests_passed += 1
+        else:
+            print(f"  {label}: FAIL {detail}")
+            tests_failed += 1
+
+    def b_result(method, params, label, expect_error=False):
+        return ((run_test(method, params, label, expect_error=expect_error) or {})
+                .get("result") or {})
+
+    b_cpu = b_result("particle.add_system", {"name": "IpcBatchB Cpu"}, "phase1.5B: add cpu system")
+    b_gpu = b_result("particle.add_system", {"name": "IpcBatchB Auto"}, "phase1.5B: add auto system")
+    cpu_id, gpu_id = b_cpu.get("id"), b_gpu.get("id")
+    if cpu_id is not None and gpu_id is not None:
+        run_test("particle.set_physics", {"system_id": cpu_id, "execution_policy": "cpu"},
+                 "phase1.5B: cpu policy")
+        run_test("particle.set_physics", {"system_id": gpu_id, "execution_policy": "auto"},
+                 "phase1.5B: auto policy")
+        for sid in (cpu_id, gpu_id):
+            run_test("particle.spawn", {"system_id": sid, "position": [0.25, 2.0, -0.5],
+                                        "velocity": [1.5, 4.0, 0.75], "lifetime_seconds": 10.0},
+                     f"phase1.5B: spawn into {sid}")
+        for i in range(16):
+            for sid in (cpu_id, gpu_id):
+                run_test("particle.step", {"system_id": sid, "dt": 1.0 / 60.0},
+                         f"phase1.5B: step {sid} #{i}")
+        g_stats = b_result("particle.stats", {"system_id": gpu_id}, "phase1.5B: stats(auto)")
+        status = g_stats.get("gpu_status")
+        b_check(status in ("gpu_resident", "no_compute_context", "backend_not_vulkan",
+                           "no_dispatch_support", "buffers_not_ready", "dispatch_failed"),
+                "phase1.5B: auto status is a known value", f"gpu_status={status}")
+        b_check(bool(g_stats.get("device_resident")) == (status == "gpu_resident"),
+                "phase1.5B: device_resident agrees with gpu_status")
+        if status == "gpu_resident":
+            stages = g_stats.get("stage_backends") or {}
+            b_check(stages.get("forces") == "gpu" and stages.get("integrate") == "gpu",
+                    "phase1.5B: resident stages report gpu", str(stages))
+            b_check(g_stats.get("residency") in ("device", "equal"),
+                    "phase1.5B: kinematics are on the device",
+                    f"residency={g_stats.get('residency')}")
+            b_check(int(g_stats.get("resident_capacity", 0)) >= 1024,
+                    "phase1.5B: device capacity allocated", str(g_stats.get("resident_capacity")))
+        else:
+            print(f"  phase1.5B: Auto did not go resident ({status}); "
+                  "trajectory comparison below is CPU vs CPU")
+        before = b_result("particle.stats", {"system_id": gpu_id}, "phase1.5B: stats before sample")
+        cpu_sample = b_result("particle.get_state_sample", {"system_id": cpu_id, "max_count": 4},
+                              "phase1.5B: sample cpu")
+        gpu_sample = b_result("particle.get_state_sample", {"system_id": gpu_id, "max_count": 4},
+                              "phase1.5B: sample auto")
+        after = b_result("particle.stats", {"system_id": gpu_id}, "phase1.5B: stats after sample")
+        cp = (cpu_sample.get("positions") or [[None] * 3])[0]
+        gp = (gpu_sample.get("positions") or [[None] * 3])[0]
+        if None not in cp and None not in gp:
+            delta = max(abs(float(a) - float(b)) for a, b in zip(cp, gp))
+            b_check(delta <= 1e-4, "phase1.5B: CPU and Auto trajectories agree",
+                    f"max |dp| = {delta:.3e} m (cpu={cp} auto={gp})")
+            b_check(abs(float(cp[1]) - 2.0) > 1e-3, "phase1.5B: the particle actually moved",
+                    f"y={cp[1]}")
+        else:
+            b_check(False, "phase1.5B: both samples returned a particle",
+                    f"cpu={cpu_sample.get('returned')} auto={gpu_sample.get('returned')}")
+        if status == "gpu_resident":
+            snaps = (int(after.get("snapshot_sync_count", 0)) +
+                     int(after.get("snapshot_mirrored_steps", 0)) -
+                     int(before.get("snapshot_sync_count", 0)) -
+                     int(before.get("snapshot_mirrored_steps", 0)))
+            b_check(before.get("residency") == "equal" or snaps >= 1,
+                    "phase1.5B: state_sample is a counted snapshot",
+                    f"residency={before.get('residency')} new snapshots={snaps}")
+            b_check(after.get("residency") == "equal",
+                    "phase1.5B: host equal after the sample", str(after.get("residency")))
+            # A consumer that asked last step makes the next step mirror inside
+            # its own submission.
+            run_test("particle.step", {"system_id": gpu_id, "dt": 1.0 / 60.0},
+                     "phase1.5B: step after demand")
+            mirrored = b_result("particle.stats", {"system_id": gpu_id}, "phase1.5B: stats mirrored")
+            b_check(int(mirrored.get("snapshot_mirrored_steps", 0)) >
+                    int(after.get("snapshot_mirrored_steps", 0)),
+                    "phase1.5B: demand makes the next step mirror",
+                    f"mirrored {after.get('snapshot_mirrored_steps')} -> "
+                    f"{mirrored.get('snapshot_mirrored_steps')}")
+            b_check(bool(mirrored.get("nonfinite_measured")),
+                    "phase1.5B: a mirrored step measures NaN/Inf")
+            # Eligibility: self collision reads host positions mid-step.
+            run_test("particle.set_physics", {"system_id": gpu_id, "self_collision_enabled": True},
+                     "phase1.5B: enable self collision")
+            run_test("particle.step", {"system_id": gpu_id, "dt": 1.0 / 60.0},
+                     "phase1.5B: step with self collision")
+            ineligible = b_result("particle.stats", {"system_id": gpu_id},
+                                  "phase1.5B: stats self collision")
+            b_check(ineligible.get("gpu_status") == "host_consumer_self_collision" and
+                    ineligible.get("residency") == "host",
+                    "phase1.5B: self collision keeps the system on the CPU",
+                    f"gpu_status={ineligible.get('gpu_status')} residency={ineligible.get('residency')}")
+            run_test("particle.set_physics", {"system_id": gpu_id, "execution_policy": "gpu_required"},
+                     "phase1.5B: gpu_required with self collision")
+            run_test("particle.step", {"system_id": gpu_id, "dt": 1.0 / 60.0},
+                     "phase1.5B: step refused")
+            refused = b_result("particle.stats", {"system_id": gpu_id}, "phase1.5B: stats refused")
+            b_check(bool(refused.get("step_blocked")) and
+                    refused.get("gpu_status") == "host_consumer_self_collision",
+                    "phase1.5B: gpu_required refuses an ineligible system",
+                    f"blocked={refused.get('step_blocked')} status={refused.get('gpu_status')}")
+        run_test("particle.remove_system", {"system_id": gpu_id}, "phase1.5B: remove auto system")
+        run_test("particle.remove_system", {"system_id": cpu_id}, "phase1.5B: remove cpu system")
 
     # Particle roadmap Phase 1: explicit system addressing, stable emitter uids,
     # system/render operations. Every write below targets a system that is NOT

@@ -41,6 +41,7 @@
 #include "Fluid/FluidFoam.h"
 #include "Fluid/FluidSplatMaterialPolicy.h"
 #include "globals.h"
+#include "PerfProfile.h"
 
 #include <algorithm>
 #include <array>
@@ -600,6 +601,9 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
         // Dead slots collapse to scale 0 (degenerate -> no GPU intersection). A
         // cheap content hash lets a settled simulation skip all GPU work so the
         // path tracer converges instead of refitting the TLAS for nothing.
+        // Instances are built from host positions: a device-resident system
+        // brings them home first (counted, reason raytrace_instances).
+        system.runtime->syncHostState("raytrace_instances");
         const auto& buf = system.runtime->buffers();
         const std::size_t soa_slots = buf.alive.size();
         const std::size_t cap = particlePoolCapacityFor(soa_slots);
@@ -743,8 +747,14 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
     // (type=Fluid, fluid_render_mode=Particles — the active path) both ride
     // the same instancing machinery. Both run in the same tick.
     syncFluidParticleRenderInstances(enable_rt_geometry);
-    syncDomainFluidParticleInstances(enable_rt_geometry);
-    syncFluidFoamRenderInstances(enable_rt_geometry);
+    {
+        RTPERF_FRAME_SCOPE("render.fluid.splat_instances");
+        syncDomainFluidParticleInstances(enable_rt_geometry);
+    }
+    {
+        RTPERF_FRAME_SCOPE("render.fluid.foam_instances");
+        syncFluidFoamRenderInstances(enable_rt_geometry);
+    }
 }
 
 void SceneData::destroyParticleRenderGroup(ParticleSystemObject& system) {
@@ -943,10 +953,11 @@ void SceneData::syncFluidParticleRenderInstances(bool enable_rt_geometry) {
         }
         // Keep the bounded sphere fallback only until the native LDR SDF
         // pipeline has proved available. After that, sphere instances belong
-        // only to the explicit Splat mode.
+        // only to explicit particle mode.
         const bool needs_raster_sdf_proxy =
             g_solid_viewport_active && !g_material_preview_viewport_active &&
-            !g_native_surface_sdf_viewport_available;
+            !g_native_surface_sdf_viewport_available &&
+            obj.render_mode != RayTrophiSim::Fluid::FluidRenderMode::VolumeFog;
         const bool lifecycle_alive = obj.visible && obj.enabled;
         const bool wants = lifecycle_alive &&
             (obj.render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles ||
@@ -1159,9 +1170,12 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             // Solid, Matcap, Material Preview and RayFusion share the native
             // SurfaceSDF volume allocation. Keep the bounded sphere fallback
             // only until that pipeline has been created successfully.
+            // A fog domain has no surface to stand in for: no proxy spheres.
             const bool needs_raster_sdf_proxy =
                 g_solid_viewport_active && !g_material_preview_viewport_active &&
-                !g_native_surface_sdf_viewport_available;
+                !g_native_surface_sdf_viewport_available &&
+                !(d < domains.size() && domains[d].fluid_render_mode ==
+                      RayTrophiSim::Fluid::FluidRenderMode::VolumeFog);
 
             // Explicit particle/Splat authoring always wins. The compatibility
             // proxy only fills SurfaceSDF in raster modes without a native pass.
@@ -1229,6 +1243,9 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 if (had_visible) {
                     existing->gpu_dirty = true;
                     g_fluid_source_state[group_id].content_hash = 0u;
+                    // Raster keeps every pool slot and masks zero-scale ones
+                    // (syncRasterInstanceTransforms), so hiding is a motion
+                    // update there too -- no raster rebuild is needed.
                     motion_change = true;
                 }
                 continue;
@@ -1276,6 +1293,7 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 group->rendered_rt_excluded = !has_explicit_splats;
                 structural_change = true;
             }
+            group->raster_sphere_candidate = dconfig.fluid_particle_geometry_mode == 0;
 
             // Source rebuild on geometry/material-routing changes. Scene mesh
             // faces keep their authored materials unless an explicit binding
@@ -1391,7 +1409,9 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             for (std::size_t pi = 0; pi < state.particles.size(); ++pi) {
                 const uint32_t tag = pi < state.particles.substance_tag.size()
                     ? state.particles.substance_tag[pi] : RayTrophiSim::Fluid::kSubstanceUntagged;
-                bool splat = dconfig.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles;
+                bool splat =
+                    dconfig.fluid_render_mode ==
+                        RayTrophiSim::Fluid::FluidRenderMode::Particles;
                 std::size_t source_index = 0;
                 for (const auto& b : dconfig.fluid_substance_materials) {
                     if (RayTrophiSim::Fluid::substanceTag(b.substance) != tag) continue;

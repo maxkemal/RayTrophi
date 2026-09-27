@@ -1,4 +1,5 @@
 #include "PostProcess/PostSurface.h"
+#include "Backend/VulkanRecoveryPolicy.h"
 #include "PostProcess/PostService.h"
 #include <SDL_main.h> 
 #include <fstream>
@@ -649,6 +650,7 @@ bool g_vulkan_device_cc_refit_pending = false; // Slice 4: device-resident CC po
 bool g_vulkan_geometry_append_pending = false; // Additive-only mutation (scatter etc.) — try incremental TLAS refit first
 bool g_geometry_deform_pending = false; // Physics body baked new verts — refit only those nodes in place on the active path (raster/OptiX/Vulkan) + CPU Embree refit (vs full rebuild)
 bool g_viewport_raster_rebuild_pending = false; // Interactive raster viewport needs rebuild
+bool g_viewport_raster_cache_invalid = false;   // Raster-only representation change; see globals.h
 bool g_viewport_raster_scatter_update_pending = false; // Foliage-only instance-table refresh
 bool g_vulkan_scatter_refresh_pending = false; // InstanceGroup topology only; preserve BLASes
 bool g_optix_rebuild_pending = false;
@@ -1177,6 +1179,8 @@ static bool viewportRebuildGateOpen() {
 
 static bool initializeViewportBackendIfAvailable() {
     if (g_viewport_backend) return true;
+    if (g_vulkan_device_lost || !viewportRebuildGateOpen() ||
+        g_viewport_recovery_given_up.load()) return false;
     if (!g_hasVulkan) return false;
     try {
         auto backend = std::make_unique<Backend::VulkanViewportBackend>();
@@ -1684,6 +1688,11 @@ bool installPrebuiltOptixBackend(std::unique_ptr<Backend::IBackend> new_backend)
 }
 
 bool initializeVulkanIfAvailable() {
+    if (g_vulkan_device_lost || !viewportRebuildGateOpen()) {
+        SCENE_LOG_WARN("[VulkanTransition] RT initialization deferred: device recovery gate.");
+        return false;
+    }
+    SCENE_LOG_INFO("[VulkanTransition] begin render device initialization");
 #ifdef _WIN32
     HMODULE vulkanDll = Platform::Dll::loadModuleWithPolicy("vulkan-1.dll", Platform::Dll::DllCategory::Driver, false);
     if (!vulkanDll) {
@@ -1702,6 +1711,7 @@ bool initializeVulkanIfAvailable() {
         ray_renderer.setBackend(g_backend.get());
         ui_ctx.backend_ptr = g_backend.get();
         ui_ctx.optix_gpu_ptr = nullptr;
+        SCENE_LOG_INFO("[VulkanTransition] render device initialized; first RT frame pending.");
         return true;
     }
     catch (const std::exception& e) {
@@ -2825,6 +2835,7 @@ int main(int argc, char* argv[]) try {
             if (s_prevShadingMode != -1 && mode != s_prevShadingMode &&
                 g_viewport_recovery_given_up.load(std::memory_order_acquire)) {
                 g_viewport_recovery_given_up.store(false, std::memory_order_release);
+                VulkanRecoveryPolicy::resetAttempts();
                 g_viewport_recovery_consecutive_losses.store(0, std::memory_order_release);
                 g_viewport_rebuild_pending_after_loss.store(true, std::memory_order_release);
                 g_viewport_rebuild_not_before_ms.store(0, std::memory_order_release);
@@ -2852,7 +2863,9 @@ int main(int argc, char* argv[]) try {
             !g_viewport_backend && g_hasVulkan && viewportRebuildGateOpen() &&
             !ui.scene_loading.load() && !g_scene_loading_in_progress.load()) {
             g_viewport_rebuild_attempts.fetch_add(1, std::memory_order_acq_rel);
+            SCENE_LOG_INFO("[VulkanRecovery] begin viewport device initialization");
             if (initializeViewportBackendIfAvailable()) {
+                VulkanRecoveryPolicy::resetAttempts();
                 g_viewport_rebuild_pending_after_loss.store(false, std::memory_order_release);
                 g_viewport_rebuild_not_before_ms.store(0, std::memory_order_release);
                 // ★★ Seri BURADA sifirlanmaz. "Kuruldu" hayatta kaldigi anlamina
@@ -2875,6 +2888,7 @@ int main(int argc, char* argv[]) try {
                 const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
                 g_viewport_rebuild_not_before_ms.store(nowMs + 2500, std::memory_order_release);
+                VulkanRecoveryPolicy::recordFailedAttempt();
             }
         }
 
@@ -2957,19 +2971,20 @@ int main(int argc, char* argv[]) try {
             }
         }
 
-        if (render_settings.backend_changed) {
+        if (render_settings.backend_changed || g_vulkan_device_lost) {
             // Avoid backend destruction/recreation while a scene load thread is active.
             // The switch will be processed immediately after loading completes.
             if (ui.scene_loading.load() || g_scene_loading_in_progress.load()) {
                 SDL_Delay(1);
             } else {
-            resolveRequestedRenderBackend(false, true);
+            if (!g_vulkan_device_lost) resolveRequestedRenderBackend(false, true);
             // If user re-selects the already active backend, skip costly teardown/recreate.
             const bool currentIsVulkan = (dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) != nullptr);
             const bool currentIsOptix  = (dynamic_cast<Backend::OptixBackend*>(g_backend.get()) != nullptr);
             const bool requestedVulkan = render_settings.use_vulkan;
             const bool requestedOptix  = render_settings.use_optix;
-            const bool sameBackendRequested = !g_vulkan_pressure_recreate_forced && (
+            const bool sameBackendRequested = !g_vulkan_device_lost &&
+                !g_vulkan_pressure_recreate_forced && (
                 (requestedVulkan && currentIsVulkan) ||
                 (requestedOptix && currentIsOptix) ||
                 ((!requestedVulkan && !requestedOptix) && !g_backend));
@@ -3016,7 +3031,7 @@ int main(int argc, char* argv[]) try {
             // │ the future is ready (typically <5s post-cache, up to 3min on cold). │
             // └─────────────────────────────────────────────────────────────────────┘
             bool asyncOptixHandled = false;
-            if (requestedOptix && !currentIsOptix) {
+            if (!g_vulkan_device_lost && requestedOptix && !currentIsOptix) {
                 if (g_suspended_optix_backend) {
                     // Reuse the already-compiled OptiX core. Its scene resources
                     // were dropped on suspension and are rebuilt by the full sync.
@@ -3081,6 +3096,7 @@ int main(int argc, char* argv[]) try {
                 g_optix_rebuild_in_progress.store(false, std::memory_order_release);
             }
 
+            if (!g_vulkan_device_lost) {
             // Detach renderer from current backend first to avoid renderer using a destroyed backend
             ray_renderer.setBackend(nullptr);
             ui_ctx.backend_ptr = nullptr;
@@ -3132,9 +3148,12 @@ int main(int argc, char* argv[]) try {
                 success = true;
             }
 
+            } // A lost device goes directly to autosave/teardown/backoff below.
+
             // If Vulkan reported a runtime device loss, ensure the user sees a HUD message
             // and force a CPU fallback immediately.
             if (g_vulkan_device_lost) {
+                VulkanRecoveryPolicy::resetAttempts();
                 try {
                     SCENE_LOG_ERROR(std::string("Vulkan device lost detected: ") + g_vulkan_device_lost_msg);
                 } catch (...) {}
@@ -3211,6 +3230,8 @@ int main(int argc, char* argv[]) try {
                 render_settings.use_vulkan = false;
                 ui_ctx.render_settings.use_vulkan = false;
                 success = false;
+                render_settings.use_optix = false;
+                ui_ctx.render_settings.use_optix = false;
                 // clear the flag so we don't spam messages
                 g_vulkan_device_lost = false;
                 g_vulkan_device_lost_msg.clear();
@@ -6818,12 +6839,12 @@ int main(int argc, char* argv[]) try {
         bool accumulation_done_for_display = false;
         if (!in_rendered_mode) {
             // Solid/Matcap: raster viewport has no progressive accumulation.
-            // Consider "done" whenever we didn't actively render this frame.
-            // Also force is_rendering_active off so idle detection works.
+            // A redraw is complete in the same frame. Keeping the persistent
+            // flag true when did_render_this_frame is true creates a latch:
+            // the frame keeps the loop awake, so another frame is drawn, so
+            // the flag never reaches the old conditional clear.
             accumulation_done_for_display = !did_render_this_frame;
-            if (!did_render_this_frame) {
-                render_settings.is_rendering_active = false;
-            }
+            render_settings.is_rendering_active = false;
         } else if (isActiveRenderBackendGpu()) {
             accumulation_done_for_display = skip_backend_for_anim ? true :
                 (g_backend ? g_backend->isAccumulationComplete() : false);
@@ -7571,6 +7592,10 @@ int main(int argc, char* argv[]) try {
         if (g_viewport_raster_rebuild_pending && active_vulkan_raster_backend && g_hasVulkan && !skip_backend_for_anim) {
             if (auto* vkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(rasterViewportBackend)) {
                 ui.addViewportMessage("Updating Solid View...", 1.0f);
+                if (g_viewport_raster_cache_invalid) {
+                    vkBackend->invalidateRasterGeometryCache("raster_representation_change");
+                    g_viewport_raster_cache_invalid = false;
+                }
                 vkBackend->buildRasterGeometry(scene.world.objects);
                 vkBackend->syncRasterSkinnedVertices(scene.world.objects, ray_renderer.finalBoneMatrices);
                 applyPendingDeleteVisibilityToBackend(scene, vkBackend);

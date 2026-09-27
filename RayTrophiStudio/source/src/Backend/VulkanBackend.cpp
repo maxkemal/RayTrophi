@@ -9,6 +9,8 @@
  * =========================================================================
  */
 #include "Backend/VulkanBackend.h"
+#include "Backend/VulkanFailureReporting.h"
+#include "Backend/VulkanTransitionDiagnostics.h"
 #include <atomic>
 #include "PerfProfile.h"
 #include "TerrainSemanticMap.h"
@@ -114,6 +116,21 @@ VulkanRT::VulkanDevice* newestLiveVulkanDevice() {
     std::lock_guard<std::mutex> lock(liveVulkanDeviceMutex());
     auto& list = liveVulkanDevices();
     return list.empty() ? nullptr : list.back();
+}
+
+// Where a dead pool slot waits: a millimetre-sized copy far below the scene.
+// ★ Identity was the old choice and it is the worst one. Every dead slot of a
+// particle pool then sits on the SAME unit-radius box at the origin, which is
+// where a simulation domain usually is. The instance mask hides them from
+// shading, but the BVH cannot separate identical boxes, so a ray crossing the
+// origin visited every one of those leaves before the mask rejected them: tens
+// of thousands of tests per ray with a large pool's headroom. Keep in step with
+// instance_prepare.comp.
+Matrix4x4 parkedTLASInstanceTransform() {
+    Matrix4x4 m = Matrix4x4::identity();
+    m.m[0][0] = m.m[1][1] = m.m[2][2] = 1.0e-3f;
+    m.m[1][3] = -1.0e4f;
+    return m;
 }
 
 bool isUsableTLASInstanceTransform(const Matrix4x4& m) {
@@ -2482,12 +2499,16 @@ void VulkanDevice::endSingleTimeCommands(VkCommandBuffer cmdBuf) {
         return;
     }
 
-    if (vkQueueSubmit(m_computeQueue, 1, &submitInfo, submitFence) != VK_SUCCESS) {
+    if (reportVulkanDeviceFailure(
+            vkQueueSubmit(m_computeQueue, 1, &submitInfo, submitFence),
+            "endSingleTimeCommands/vkQueueSubmit") != VK_SUCCESS) {
         vkDestroyFence(m_device, submitFence, nullptr);
         vkFreeCommandBuffers(m_device, m_commandPool, 1, &cmdBuf);
         return;
     }
-    vkWaitForFences(m_device, 1, &submitFence, VK_TRUE, UINT64_MAX);
+    reportVulkanDeviceFailure(
+        vkWaitForFences(m_device, 1, &submitFence, VK_TRUE, UINT64_MAX),
+        "endSingleTimeCommands/vkWaitForFences");
     vkDestroyFence(m_device, submitFence, nullptr);
     vkFreeCommandBuffers(m_device, m_commandPool, 1, &cmdBuf);
 }
@@ -3270,6 +3291,8 @@ uint32_t VulkanDevice::createAABB_BLAS(const float aabbMin[3], const float aabbM
 }
 
 void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer externalCmd) {
+    TransitionDiagnostic transition("createTLAS/topology_change",
+        !m_tlas.accel || info.instances.size() != m_tlasInstanceCount);
     if (!hasHardwareRT() || !fpCreateAccelerationStructureKHR) return;
 
     uint32_t instanceCount = (uint32_t)info.instances.size();
@@ -3280,6 +3303,17 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
     // 2. The existing TLAS was built with ALLOW_UPDATE bit (m_tlasSupportsUpdate).
     // 3. The user requested an update in info.allowUpdate.
     // 4. The instance COUNT hasn't changed (Vulkan refit requires identical topology).
+    // ★ "performUpdate" means REUSE THE OBJECT, not refit. The TLAS is rebuilt in
+    // place (MODE_BUILD into the same VkAccelerationStructureKHR): same handle,
+    // same device address, no descriptor rewrite, so it carries none of the
+    // destroy/recreate hazard. A refit keeps the hierarchy of the first build and
+    // only grows its boxes; instances that move far (splat particles born from a
+    // parked dead pool slot, a spreading fluid) inflated those boxes
+    // until traversal visited most of the tree. Rendered mode slowed down the
+    // longer the sim ran and recovered on Solid -> Rendered, the only thing that
+    // forced a fresh build. A TLAS build over instances is small next to tracing a
+    // degraded tree every sample (unmeasured here: see NEXT_BUILD_CHECKS); BLASes
+    // still refit.
     bool performUpdate = false;
     if (m_tlas.accel && m_tlasSupportsUpdate && info.allowUpdate && instanceCount == m_tlasInstanceCount) {
         performUpdate = true;
@@ -3311,10 +3345,10 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
         VkAccelerationStructureInstanceKHR dst{};
         // VkTransformMatrixKHR is 3x4 row-major. Never submit a singular/NaN
         // transform to the driver. Stable scatter pools deliberately retain dead
-        // slots, but those slots must be identity + mask 0, not scale 0.
+        // slots, but those slots must be parked + mask 0, not scale 0.
         const bool transformUsable = isUsableTLASInstanceTransform(src.transform);
         const Matrix4x4 safeTransform =
-            transformUsable ? src.transform : Matrix4x4::identity();
+            transformUsable ? src.transform : parkedTLASInstanceTransform();
         const auto& m = safeTransform;
         dst.transform.matrix[0][0] = m.m[0][0]; dst.transform.matrix[0][1] = m.m[0][1]; dst.transform.matrix[0][2] = m.m[0][2]; dst.transform.matrix[0][3] = m.m[0][3];
         dst.transform.matrix[1][0] = m.m[1][0]; dst.transform.matrix[1][1] = m.m[1][1]; dst.transform.matrix[1][2] = m.m[1][2]; dst.transform.matrix[1][3] = m.m[1][3];
@@ -3384,18 +3418,22 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
    
 
     // --- 4) Setup Build Mode and Query Sizes ---
-    if (performUpdate) {
-        buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
-        buildInfo.srcAccelerationStructure = m_tlas.accel;
-    } else {
-        buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-    }
+    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
 
     VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
     sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
     fpGetAccelerationStructureBuildSizesKHR(m_device,
         VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
         &buildInfo, &instanceCount, &sizeInfo);
+
+    // Same count and flags give the same size, but an in-place build into a
+    // smaller object would be undefined; fall back to a fresh object instead.
+    if (performUpdate && m_tlas.buffer.size < sizeInfo.accelerationStructureSize) {
+        fpDestroyAccelerationStructureKHR(m_device, m_tlas.accel, nullptr);
+        destroyBuffer(m_tlas.buffer);
+        m_tlas = {};
+        performUpdate = false;
+    }
 
     // --- 5) Create TLAS IF NOT UPDATING ---
     if (!performUpdate) {
@@ -3424,7 +3462,7 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
     // The build completes synchronously (endSingleTimeCommands waits), so the same
     // scratch is free to reuse next frame — avoids another per-frame GPU alloc.
     uint64_t scratchAlignment = m_capabilities.minScratchAlignment > 0 ? m_capabilities.minScratchAlignment : 128;
-    uint64_t scratchSize = performUpdate ? sizeInfo.updateScratchSize : sizeInfo.buildScratchSize;
+    uint64_t scratchSize = sizeInfo.buildScratchSize;
     uint64_t alignedScratchSize = (scratchSize + scratchAlignment - 1) & ~(scratchAlignment - 1);
 
     if (m_tlasScratchBuffer.buffer == VK_NULL_HANDLE || m_tlasScratchBuffer.size < alignedScratchSize) {
@@ -3546,8 +3584,10 @@ bool VulkanDevice::recordGpuTLASUpdate(VkCommandBuffer cmd, uint32_t frameSlot,
     VkAccelerationStructureBuildGeometryInfoKHR build{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     build.type=VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
     build.flags=VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR|VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
-    build.mode=m_recordingGpuTlasBuild?VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR:VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
-    build.srcAccelerationStructure=m_recordingGpuTlasBuild?VK_NULL_HANDLE:m_tlas.accel; build.dstAccelerationStructure=m_tlas.accel;
+    // In-place rebuild, never a refit: see the note in createTLAS. Same object,
+    // same address, so the descriptor and the sibling frame slot stay valid.
+    build.mode=VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    build.srcAccelerationStructure=VK_NULL_HANDLE; build.dstAccelerationStructure=m_tlas.accel;
     build.geometryCount=1; build.pGeometries=&geom; build.scratchData.deviceAddress=m_tlasScratchBuffer.deviceAddress;
     VkAccelerationStructureBuildRangeInfoKHR range{}; range.primitiveCount=count;
     const VkAccelerationStructureBuildRangeInfoKHR* pr=&range;
@@ -7320,7 +7360,11 @@ void VulkanDevice::adoptSimComputeContextIfOrphaned() {
         (g_vulkan_sim_compute_ctx.shader_float64_enabled ? "1" : "0") + ").");
 }
 
-void VulkanDevice::waitIdle() { if (m_device) vkDeviceWaitIdle(m_device); }
+void VulkanDevice::waitIdle() {
+    if (m_device) {
+        reportVulkanDeviceFailure(vkDeviceWaitIdle(m_device), "waitIdle/vkDeviceWaitIdle");
+    }
+}
 void VulkanDevice::submitAndWait() { if (m_computeQueue) vkQueueWaitIdle(m_computeQueue); }
 
 // Factory
@@ -7400,7 +7444,9 @@ bool VulkanDevice::waitFrameSlot(uint32_t slot, uint64_t timeoutNs) {
     if (slot >= kFrameSlotCount) return false;
     if (m_frameSlots[slot].fence == VK_NULL_HANDLE) return false;
     if (!m_frameSlots[slot].everSubmitted) return true; // nothing in flight
-    VkResult res = vkWaitForFences(m_device, 1, &m_frameSlots[slot].fence, VK_TRUE, timeoutNs);
+    VkResult res = reportVulkanDeviceFailure(
+        vkWaitForFences(m_device, 1, &m_frameSlots[slot].fence, VK_TRUE, timeoutNs),
+        "waitFrameSlot/vkWaitForFences");
     if (res == VK_SUCCESS) m_exposureMeter.consume(slot);
     return res == VK_SUCCESS;
 }
@@ -7586,7 +7632,9 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
     // Wait for any previous use of this slot's cmd buffer + staging. At steady state
     // this fence is already signaled (we consumed the staging two frames ago).
     if (fs.everSubmitted) {
-        VkResult wr = vkWaitForFences(m_device, 1, &fs.fence, VK_TRUE, UINT64_MAX);
+        VkResult wr = reportVulkanDeviceFailure(
+            vkWaitForFences(m_device, 1, &fs.fence, VK_TRUE, UINT64_MAX),
+            "submitTraceTonemapAsync/vkWaitForFences");
         if (wr != VK_SUCCESS) return false;
     }
     m_exposureMeter.consume(slot);
@@ -10552,6 +10600,7 @@ void VulkanBackendAdapter::recordHairPrepass(VkCommandBuffer cmd) {
 void VulkanBackendAdapter::updateMeshTransform(uint32_t h, const Matrix4x4& t) { (void)h; (void)t; }
 
 void VulkanBackendAdapter::rebuildAccelerationStructure() {
+    VulkanRT::TransitionDiagnostic transition("rebuildAccelerationStructure");
     RTPERF_SCOPE("accel.vulkan_rt.rebuild");
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     m_meshRegistry.clear();
@@ -11086,6 +11135,7 @@ void VulkanBackendAdapter::setVisibilityByNodeName(const std::string& nodeName, 
 // but unused so the approach can be revisited without re-plumbing the pipeline.
 
 void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    VulkanRT::TransitionDiagnostic transition("updateGeometry");
     RTPERF_SCOPE("accel.vulkan_rt.update_geometry");
     if (!m_device || !m_device->isInitialized()) return;
 
@@ -11094,6 +11144,7 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
     // [VULKAN STABILITY] Wait for GPU to finish current frame before destroying/rebuilding resources.
     // This is critical during "Import" where the renderer is already active.
     m_device->waitIdle();
+    if (g_vulkan_device_lost) return;
 
     // A volume whose world bounds are non-finite yields an infinite/NaN instance
     // AABB. Ray traversal against that never terminates: the device TIMES OUT (TDR /
@@ -11822,7 +11873,7 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
                     // exceed the Windows watchdog.
                     vi.mask = group.transient ? 0x04 : 0xFF;
                 } else {
-                    vi.transform = Matrix4x4::identity();
+                    vi.transform = parkedTLASInstanceTransform();
                     vi.mask = 0;
                 }
                 vi.frontFaceCCW = true;
@@ -15334,7 +15385,7 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
                     // Preserve the TLAS slot/index without ever feeding Vulkan a
                     // non-invertible transform. Pause/cache restore commonly
                     // collapses many particle slots at once.
-                    vi.transform = Matrix4x4::identity();
+                    vi.transform = parkedTLASInstanceTransform();
                     vi.mask = 0;
                 }
             }
@@ -16367,17 +16418,24 @@ void VulkanBackendAdapter::destroyInteractiveViewportResourcesImpl(bool keepPipe
     if (m_interactiveViewport.stagingBuffer.buffer) {
         m_device->destroyBuffer(m_interactiveViewport.stagingBuffer);
     }
-    if (m_interactiveViewport.matcapDescSet != VK_NULL_HANDLE) {
-        // descriptor sets are freed when pool is destroyed; just reset handle
-        m_interactiveViewport.matcapDescSet = VK_NULL_HANDLE;
-    }
-    if (m_interactiveViewport.matcapDescPool != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(vkDevice, m_interactiveViewport.matcapDescPool, nullptr);
-        m_interactiveViewport.matcapDescPool = VK_NULL_HANDLE;
-    }
-    if (m_interactiveViewport.matcapDescLayout != VK_NULL_HANDLE) {
-        vkDestroyDescriptorSetLayout(vkDevice, m_interactiveViewport.matcapDescLayout, nullptr);
-        m_interactiveViewport.matcapDescLayout = VK_NULL_HANDLE;
+    // ★★★★ Matcap descriptor layout/pool/set live as long as the PIPELINE
+    //   LAYOUT built from them, so they follow keepPipeline like it does.
+    //   Tearing them down on every resize (keepPipeline) left matcapDescSet
+    //   NULL for good: only the from-scratch pipeline path recreates it.
+    //   Solid geometry binds it behind a != NULL guard and kept drawing, so
+    //   nothing looked wrong -- but the sphere impostor requires it and
+    //   silently stopped drawing every splat after the first panel resize.
+    //   Same defect as VulkanViewportBackend::destroyInteractiveViewportResourcesImpl.
+    if (!keepPipeline) {
+        m_interactiveViewport.matcapDescSet = VK_NULL_HANDLE;  // freed with the pool
+        if (m_interactiveViewport.matcapDescPool != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(vkDevice, m_interactiveViewport.matcapDescPool, nullptr);
+            m_interactiveViewport.matcapDescPool = VK_NULL_HANDLE;
+        }
+        if (m_interactiveViewport.matcapDescLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(vkDevice, m_interactiveViewport.matcapDescLayout, nullptr);
+            m_interactiveViewport.matcapDescLayout = VK_NULL_HANDLE;
+        }
     }
     // Note: matcap images uploaded via uploadTexture2D are tracked in m_uploadedImages
     // and should not be destroyed here to avoid double-free. We keep the ImageHandle
@@ -19098,6 +19156,9 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
                 float mx[3] = { -1e30f, -1e30f, -1e30f };
                 bool any = false;
                 for (const auto& vi : m_vkInstances) {
+                    // Masked-out slots are dead pool entries parked far away
+                    // (parkedTLASInstanceTransform); they would drag the target.
+                    if (vi.mask == 0) continue;
                     auto bit = m_blasMaterialBounds.find(vi.blasIndex);
                     if (bit == m_blasMaterialBounds.end()) continue;
                     for (const auto& entry : bit->second) {

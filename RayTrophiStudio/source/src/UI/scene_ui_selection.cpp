@@ -727,7 +727,13 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 if (auto* vba = dynamic_cast<Backend::VulkanBackendAdapter*>(b))
                     vba->ensureRayFusionSceneAS();
             };
-            tryWarmupAS(ctx.backend_ptr);
+            // Only the backend that serves the viewport. RayFusion builds its
+            // TLAS into the DEVICE's single TLAS slot; on the render backend
+            // that slot is the path tracer's. Warming ctx.backend_ptr rebuilt
+            // it whenever the instance signature changed (e.g. a particle pool
+            // growing), and on the frame of a switch to Rendered that swapped
+            // the path tracer's TLAS out from under in-flight traces: the
+            // device loss seen as "TDR on switching to RT while the sim runs".
             tryWarmupAS(g_viewport_backend.get());
         }
 

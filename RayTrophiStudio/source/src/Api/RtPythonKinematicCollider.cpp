@@ -34,6 +34,7 @@ py::dict setToDict(const RayTrophiSim::KinematicProxySet& set) {
     out["target_character"] = set.target_character;
     out["target_node_id"] = set.target_node_id;
     out["enabled"] = set.enabled;
+    out["viewport_visible"] = set.viewport_visible;
     out["consumer_mask"] = set.consumer_mask;
     out["friction"] = set.friction;
     out["restitution"] = set.restitution;
@@ -56,6 +57,9 @@ py::dict sampleToDict(const RayTrophiSim::KinematicProxySample& sample) {
     out["target_character"] = sample.target_character;
     out["bone"] = sample.bone;
     out["shape"] = RayTrophiSim::kinematicProxyShapeName(sample.shape);
+    out["consumer_mask"] = sample.consumer_mask;
+    out["friction"] = sample.friction;
+    out["restitution"] = sample.restitution;
     out["resolved"] = sample.resolved;
     out["unresolved_reason"] = sample.unresolved_reason;
     out["center"] = vec3ToPython(sample.center);
@@ -91,6 +95,9 @@ void patchSet(const py::kwargs& kwargs,
     }
     if (kwargs.contains("enabled")) {
         set.enabled = py::cast<bool>(kwargs["enabled"]);
+    }
+    if (kwargs.contains("viewport_visible")) {
+        set.viewport_visible = py::cast<bool>(kwargs["viewport_visible"]);
     }
     if (kwargs.contains("consumer_mask")) {
         set.consumer_mask = py::cast<uint32_t>(kwargs["consumer_mask"]);
@@ -201,6 +208,10 @@ void registerKinematicColliderBindings(py::module_& collider_module) {
             options.weighted_bones_only =
                 py::cast<bool>(kwargs["weighted_bones_only"]);
         }
+        if (kwargs.contains("include_detail_bones")) {
+            options.include_detail_bones =
+                py::cast<bool>(kwargs["include_detail_bones"]);
+        }
         if (kwargs.contains("radius_fraction")) {
             options.radius_fraction =
                 py::cast<float>(kwargs["radius_fraction"]);
@@ -263,6 +274,35 @@ void registerKinematicColliderBindings(py::module_& collider_module) {
         }
         return out;
     }, py::arg("set_id"), py::arg("dt") = 1.0f / 24.0f);
+    proxy_set.def("solver_stamps", []() {
+        std::vector<rtapi::KinematicSolverStamps> systems;
+        requireResult(rtapi::getKinematicSolverStamps(systems));
+        py::list out;
+        for (const auto& system : systems) {
+            py::list stamps;
+            for (const auto& stamp : system.stamps) {
+                py::dict row;
+                row["domain"] = stamp.domain;
+                row["consumer_mask"] = stamp.consumer_mask;
+                row["frame"] = stamp.frame;
+                row["set_id"] = stamp.set_id;
+                row["proxy_id"] = stamp.proxy_id;
+                row["proxy_name"] = stamp.proxy_name;
+                row["stamped_cells"] = stamp.stamped_cells;
+                row["linear_velocity"] = vec3ToPython(stamp.linear_velocity);
+                row["angular_velocity"] = vec3ToPython(stamp.angular_velocity);
+                row["velocity_valid"] = stamp.velocity_valid;
+                stamps.append(row);
+            }
+            py::dict entry;
+            entry["system_id"] = system.system_id;
+            entry["system_name"] = system.system_name;
+            entry["steps"] = system.steps;
+            entry["stamps"] = stamps;
+            out.append(entry);
+        }
+        return out;
+    });
 }
 
 } // namespace rtpy

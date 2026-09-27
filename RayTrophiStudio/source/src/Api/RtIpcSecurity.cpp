@@ -251,7 +251,8 @@ uint32_t requiredCapabilities(const std::string& method) {
     if (method == "sim.control_state") return Read;
     if (method == "physics.collider.proxy_set.list" ||
         method == "physics.collider.proxy_set.get" ||
-        method == "physics.collider.proxy_set.sample") return Read;
+        method == "physics.collider.proxy_set.sample" ||
+        method == "physics.collider.proxy_set.solver_stamps") return Read;
     if (method == "rayfusion.core_status" || method == "rayfusion.validate_core" ||
         method == "rayfusion.probe_field" || method == "rayfusion.scene_as") return Read;
     // Choosing the probe producer changes what the viewport renders, so it is

@@ -41,7 +41,10 @@
 #include <fstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+
+#include "globals.h"
 
 namespace RayTrophiSim {
 
@@ -359,6 +362,8 @@ public:
         return reinterpret_cast<void*>(it->second.buffer);
     }
 
+    void* nativeDevice() const override { return reinterpret_cast<void*>(m_device); }
+
     uint64_t bufferDeviceAddress(ComputeBufferHandle h) const override {
         auto it = m_buffers.find(h.id);
         if (it == m_buffers.end() || !it->second.buffer) return 0;
@@ -574,6 +579,19 @@ public:
         auto pit = m_pipelines.find(kernel);
         if (pit == m_pipelines.end()) return false;
         const PipelineEntry& pe = pit->second;
+        // The descriptor set is allocated for cmd.buffer_count bindings, the
+        // pipeline layout for the kernel table's count. A mismatch binds an
+        // incompatible set: undefined behaviour that NVIDIA happens to tolerate
+        // and validation reports as VUID-...-layout-07988. Refuse it by name.
+        if (cmd.buffer_count != pe.buffer_count) {
+            static std::unordered_set<std::string> reported;
+            if (reported.insert(kernel).second) {
+                SCENE_LOG_ERROR("[SimCompute] kernel '" + kernel + "' dispatched with " +
+                                std::to_string(cmd.buffer_count) + " buffers but its table entry declares " +
+                                std::to_string(pe.buffer_count) + "; dispatch refused.");
+            }
+            return false;
+        }
 
         // Ensure command buffer is recording.
         if (!ensureRecording()) return false;
@@ -673,6 +691,7 @@ private:
     struct PipelineEntry {
         VkPipeline       pipeline = VK_NULL_HANDLE;
         VkPipelineLayout layout   = VK_NULL_HANDLE;
+        uint32_t         buffer_count = 0;  // bindings the pipeline layout declares
     };
 
     VkDevice         m_device     = VK_NULL_HANDLE;
@@ -900,7 +919,7 @@ private:
             return false;
         }
 
-        m_pipelines[kernelName] = { pipeline, pipelineLayout };
+        m_pipelines[kernelName] = { pipeline, pipelineLayout, bufferCount };
         return true;
     }
 
@@ -961,11 +980,11 @@ private:
             // this descriptor contract in lockstep with GranularGpuDispatch;
             // the old nine-binding layout leaves damage active while the new
             // fracture-history telemetry remains permanently zero.
-            { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 14, 64 },
+            { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 15, 64 },
             { "sim_fluid_granular_stress_p2g",      "sim_fluid_granular_stress_p2g.spv",    4, 48 },
             { "sim_fluid_granular_settle",          "sim_fluid_granular_settle.spv",        3, 32 },
             { "sim_fluid_advect_tail",              "sim_fluid_advect_tail.spv",           9, 64 },
-            { "sim_fluid_surface_combustion",       "sim_fluid_surface_combustion.spv",    6, 96 },
+            { "sim_fluid_surface_combustion",       "sim_fluid_surface_combustion.spv",    9, 96 },
             // GridProjectionGpuConstants = 13 fields x 4 = 52. The shaders may
             // declare only the leading fields; the pipeline range must cover the
             // full struct the host pushes (old 36 made vkCmdPushConstants exceed
@@ -1036,7 +1055,10 @@ private:
             { "sim_gas_buoyancy",                   "sim_gas_buoyancy.spv",                 3, 44 },
             { "sim_gas_force_evaluate",             "sim_gas_force_evaluate.spv",           7, 48 },
             { "sim_gas_force_gather",               "sim_gas_force_gather.spv",             6, 48 },
-            { "sim_particle_force_integrate",        "sim_particle_force_integrate.spv",      7, 40 },
+            // Device-resident ballistic particles (particle roadmap Phase 1.5 B).
+            // ParticleBallisticGpuConstants = 40 B, ParticleSpawnGpuConstants = 16 B.
+            { "sim_particle_ballistic",              "sim_particle_ballistic.spv",           10, 40 },
+            { "sim_particle_spawn",                  "sim_particle_spawn.spv",               12, 16 },
             { "sim_gas_combustion",                 "sim_gas_combustion.spv",               4, 40 },
             // VelocityMaxAbsGpuConstants = 4 uints = 16
             { "sim_grid_velocity_max_abs",          "sim_grid_velocity_max_abs.spv",        4, 16 },

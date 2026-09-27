@@ -53,7 +53,7 @@ struct FluidObject {
     // particles_per_cell points per voxel, so ~0.45*voxel reads as a tightly
     // packed bead column without overlapping enough to look like a fog.
     float particle_render_radius_factor = 0.45f;
-    int   particle_render_subdivisions = 1;  // icosphere subdivs (0..3)
+    int   particle_render_subdivisions = 0;  // icosphere subdivs (0..3), 20 tris at 0
     bool  particle_render_emissive = false;
     float particle_render_emission = 0.0f;
 

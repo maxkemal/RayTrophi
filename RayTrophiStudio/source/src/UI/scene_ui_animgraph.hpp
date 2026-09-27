@@ -699,6 +699,7 @@ inline void drawNodePropertiesPanel(UIContext& ctx,
                     runtimeGraph->findNodeById(nodeId));
                 if (runtimeClip) {
                     assetClip->currentTime = runtimeClip->currentTime;
+                    assetClip->loopCycles = runtimeClip->loopCycles;
                     assetClip->isPlaying = runtimeClip->isPlaying;
                 }
             }
@@ -726,6 +727,7 @@ inline void drawNodePropertiesPanel(UIContext& ctx,
             syncRuntimeNodeFromAsset(graph, runtimeGraph, node->id);
             if (assetClip && runtimeClip) {
                 runtimeClip->currentTime = assetClip->currentTime;
+                runtimeClip->loopCycles = assetClip->loopCycles;
                 runtimeClip->isPlaying = assetClip->isPlaying;
             }
             
@@ -971,7 +973,7 @@ inline void drawAnimationClipsPanel(UIContext& ctx, float height = 0.0f, bool wr
                             auto* clipNode = dynamic_cast<AnimationGraph::AnimClipNode*>(node.get());
                             if (!clipNode) continue;
                             clipNode->clipName = clip.name;
-                            clipNode->currentTime = clipNode->startTime;
+                            clipNode->reset();
                             clipNode->isPlaying = true;
                             break;
                         }

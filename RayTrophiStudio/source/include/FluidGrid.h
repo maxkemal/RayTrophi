@@ -150,6 +150,13 @@ public:
     // sweep over solid[] (that is what a deserialized or hand-built grid gets).
     std::vector<uint32_t> solid_cells;
     bool solid_cells_valid = false;
+    // Runtime ledger for bone-attached kinematic proxies. Each stamp saves the
+    // cell state it is about to overwrite; the next step restores that exact
+    // state before the ordinary authored-collider pass runs. This prevents
+    // moving limbs from leaving ghost solids or punching holes in static ones.
+    std::vector<uint32_t> kinematic_touched_cells;
+    std::vector<uint8_t> kinematic_previous_solid;
+    std::vector<Vec3> kinematic_previous_velocity;
     // ── Solid-phase substance overlay ────────────────────────────────────────
     // The cells the LAST step's overlay flipped from fluid to solid, and how
     // many entries of solid_cells belong to the collider stamp. The overlay is
@@ -315,6 +322,9 @@ public:
         // the voxelizer rebuilds it.
         std::vector<uint32_t>().swap(solid_cells);
         solid_cells_valid = false;
+        std::vector<uint32_t>().swap(kinematic_touched_cells);
+        std::vector<uint8_t>().swap(kinematic_previous_solid);
+        std::vector<Vec3>().swap(kinematic_previous_velocity);
         std::vector<uint32_t>().swap(substance_solid_cells);
         std::vector<uint32_t>().swap(substance_solid_prev_cells);
         std::vector<Vec3>().swap(substance_solid_prev_vel);

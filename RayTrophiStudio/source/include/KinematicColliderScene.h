@@ -39,6 +39,12 @@ bool inspectKinematicProxySet(const SceneData& scene,
                               std::vector<KinematicProxySample>& samples,
                               std::string& error);
 
+bool inspectAllKinematicProxySets(
+    const SceneData& scene,
+    float dt,
+    std::vector<KinematicProxySample>& samples,
+    std::string& error);
+
 bool sampleAllKinematicProxySets(SceneData& scene,
                                  float dt,
                                  bool discontinuity,

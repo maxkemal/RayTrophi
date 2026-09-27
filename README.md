@@ -191,6 +191,7 @@ A multi-threaded grid- and particle-based FX suite with CPU, CUDA, and Vulkan Co
 - **Phase-aware solidification** — frozen parcels enter the existing solid-phase overlay so deposited layers can accumulate; live minimum/mean/maximum temperature, set/melt/unsupported counts, and viscosity range are exposed through the panel, Python, and IPC
 - **Multi-substance transport** — per-particle substance identity survives advection and reseeding, with per-substance material, representation, viscosity, miscibility, and phase controls
 - **Granular/cohesive material mode** — friction angle, cohesion, dilatancy, elasticity, tensile cutoff, hardening, compaction, fracture/damage, healing/rebonding, and thermal softening, with stability and adaptive-substep telemetry
+- **Splat sphere pools** — fluid, foam and particle splats are never demoted to foliage proxy cards and keep every pool slot resident in the viewport, so particles born mid-simulation appear without a rebuild. Splats default to a 20-triangle icosphere; geometry, subdivision, radius and size are scriptable over Python and IPC (`fluid.set_splat_geometry`)
 - The authoring UI shows effective ambient/birth temperature, rate time constants, phase thresholds, estimated crossing times, and warnings for immediate-freeze or never-freeze setups
 
 ### Liquid surface shading — the isosurface *is* a material surface

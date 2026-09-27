@@ -1704,7 +1704,7 @@ void Renderer::initializeAnimationSystem(SceneData& scene) {
     }
 }
 
-bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool apply_cpu_skinning) {
+bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool apply_cpu_skinning, float timelineSeconds) {
     bool anyChanged = false;
 
     // Resize internal matrix buffer to match scene total bone count
@@ -1825,41 +1825,21 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                         : ctx.animator->findBestRootMotionBone(clips[0].name);
                 }
             }
-            activeGraph->evalContext.rootMotion = RootMotionDelta(); // reset
+            // Timeline-driven clips take the frame's absolute time, so a scrub
+            // or rewind lands on that frame's pose. A paused animator holds.
+            activeGraph->evalContext.timelineDriven = ctx.animGraphFollowTimeline &&
+                timelineSeconds >= 0.0f && !(ctx.animator && ctx.animator->isPaused());
+            activeGraph->evalContext.timelineSeconds = std::max(0.0f, timelineSeconds);
 
             AnimationGraph::PoseData pose = activeGraph->evaluate(graphDeltaTime, scene.boneData);
             RigAuthoring::captureGlobals(scene, ctx.importName, pose.jointGlobalTransforms, "graph");
 
             if (pose.isValid()) {
                 if (pose.wasUpdated) {
+                    // Root motion lives in the pose (RootMotionUnroll); the
+                    // object's transform is never pushed.
                     modelChanged = true;
                     anyChanged = true; 
-                    
-                    // --- APPLY ROOT MOTION FOR ANIM GRAPH ---
-                    if (ctx.useRootMotion && pose.rootMotion.hasPosition && !ctx.members.empty()) {
-                        Vec3 horizontalDelta = pose.rootMotion.positionDelta;
-                        horizontalDelta.y = 0.0f;
-                        std::vector<Transform*> processed;
-                        for (auto& member : ctx.members) {
-                            if (auto tri = std::dynamic_pointer_cast<Triangle>(member)) {
-                                Transform* h = tri->getTransformPtr();
-                                if (h && std::find(processed.begin(), processed.end(), h) == processed.end()) {
-                                    h->position = h->position + horizontalDelta;
-                                    h->updateMatrix();
-                                    h->markDirty();
-                                    processed.push_back(h);
-                                }
-                            } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(member)) {
-                                Transform* h = mesh->transform.get();
-                                if (h && std::find(processed.begin(), processed.end(), h) == processed.end()) {
-                                    h->position = h->position + horizontalDelta;
-                                    h->updateMatrix();
-                                    h->markDirty();
-                                    processed.push_back(h);
-                                }
-                            }
-                        }
-                    }
                 }
                 modelBoneMatrices = pose.boneTransforms;
 
@@ -2095,32 +2075,6 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                 }
 
 
-                // --- ROOT MOTION (Pivot movement) ---
-                if (ctx.useRootMotion && !usedOzzRuntime) {
-                    RootMotionDelta delta = ctx.animator->consumeRootMotion();
-                    if (delta.hasPosition && !ctx.members.empty()) {
-                        Vec3 horizontalDelta = delta.positionDelta;
-                        horizontalDelta.y = 0.0f;
-                        std::vector<Transform*> processed;
-                        for (auto& member : ctx.members) {
-                            if (auto tri = std::dynamic_pointer_cast<Triangle>(member)) {
-                                Transform* h = tri->getTransformPtr();
-                                if (h && std::find(processed.begin(), processed.end(), h) == processed.end()) {
-                                    h->position = h->position + horizontalDelta;
-                                    h->updateMatrix(); h->markDirty();
-                                    processed.push_back(h);
-                                }
-                            } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(member)) {
-                                Transform* h = mesh->transform.get();
-                                if (h && std::find(processed.begin(), processed.end(), h) == processed.end()) {
-                                    h->position = h->position + horizontalDelta;
-                                    h->updateMatrix(); h->markDirty();
-                                    processed.push_back(h);
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
         
@@ -2339,7 +2293,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
         }
 
         // Drive the animation
-        bool changed = updateAnimationWithGraph(scene, deltaTime, apply_cpu_skinning);
+        bool changed = updateAnimationWithGraph(scene, deltaTime, apply_cpu_skinning, current_time);
 
         geometry_changed = changed || timelineScrubbed;
 

@@ -1,6 +1,7 @@
 #include "Api/RtApiKinematicCollider.h"
 
 #include "KinematicColliderScene.h"
+#include "ProjectManager.h"
 #include "RtApiInternal.h"
 
 #include <cmath>
@@ -26,6 +27,7 @@ void invalidateKinematicColliderAuthoring() {
     g_ctx->scene.kinematic_colliders.resetMotionHistory();
     invalidateScriptSimulation();
     g_viewport_raster_rebuild_pending = true;
+    ProjectManager::getInstance().markModified();
 }
 
 } // namespace
@@ -161,6 +163,25 @@ Result sampleKinematicProxySet(
     if (!RayTrophiSim::inspectKinematicProxySet(
             g_ctx->scene, set_id, dt, out_samples, error)) {
         return Result::fail(error);
+    }
+    return Result::success();
+}
+
+Result getKinematicSolverStamps(std::vector<KinematicSolverStamps>& out) {
+    out.clear();
+    if (!g_ctx) {
+        return notBound();
+    }
+    for (const auto& system : g_ctx->scene.particle_systems) {
+        if (!system.runtime) {
+            continue;
+        }
+        KinematicSolverStamps entry;
+        entry.system_id = system.id;
+        entry.system_name = system.name;
+        entry.steps = system.runtime->kinematicStampSteps();
+        entry.stamps = system.runtime->kinematicStampLog();
+        out.push_back(std::move(entry));
     }
     return Result::success();
 }

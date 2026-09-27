@@ -25,6 +25,7 @@
 #include "MeshModifiers.h"
 #include "Paint/PaintLayerStack.h"
 #include "AshDebrisSerialization.h"
+#include "KinematicColliderSerialization.h"
 #include "UI/TemplateHubUI.h"
 #include "json.hpp"
 #include "simdjson.h"
@@ -1788,6 +1789,15 @@ bool ProjectManager::saveProjectImpl(const std::string& filepath, SceneData& sce
             SCENE_LOG_INFO("[ProjectManager] Saved empty particle simulation.");
         }
 
+        // Bone-attached solver-neutral collider producers.
+        root["kinematic_colliders"] =
+            RayTrophiSim::serializeKinematicColliders(
+                scene.kinematic_colliders);
+        SCENE_LOG_INFO(
+            "[ProjectManager] Saved " +
+            std::to_string(scene.kinematic_colliders.sets().size()) +
+            " kinematic collider proxy set(s).");
+
         // Rigid Bodies
         if (progress_callback) progress_callback(84, "Saving rigid bodies...");
         root["rigid_bodies"] = serializeRigidBodies(scene);
@@ -2541,11 +2551,22 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             }
 
             // VDB / Gas / Force Fields / Particle Simulation
-            simdjson::dom::element vdb_el, gas_el, ff_el, particles_el, rigid_el;
+            simdjson::dom::element vdb_el, gas_el, ff_el, particles_el;
+            simdjson::dom::element kinematic_el, rigid_el;
             if (!root["vdb_volumes"].get(vdb_el)) deserializeVDBVolumes(sjsonToNlohmann(vdb_el), scene);
             if (!root["gas_volumes"].get(gas_el)) deserializeGasVolumes(sjsonToNlohmann(gas_el), scene);
             if (!root["force_fields"].get(ff_el)) deserializeForceFields(sjsonToNlohmann(ff_el), scene);
             if (!root["particle_simulation"].get(particles_el)) deserializeParticleSimulation(sjsonToNlohmann(particles_el), scene);
+            if (!root["kinematic_colliders"].get(kinematic_el)) {
+                std::string error;
+                if (!RayTrophiSim::deserializeKinematicColliders(
+                        sjsonToNlohmann(kinematic_el),
+                        scene.kinematic_colliders,
+                        error)) {
+                    throw std::runtime_error(
+                        "Kinematic colliders: " + error);
+                }
+            }
             if (!root["rigid_bodies"].get(rigid_el)) deserializeRigidBodies(sjsonToNlohmann(rigid_el), scene);
 
             // Hair System
@@ -3332,7 +3353,7 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
             // it. Serialize the SoA TriangleMesh DIRECTLY as a mesh group — mirrors the
             // facade→parentMesh branch. Without this, every flat mesh is silently dropped on save
             // (geometry loss on the next round-trip), since the whole flat migration removes facades.
-            if (!tm->geometry) continue;
+            if (!tm->geometry || tm->transient) continue;
             if (tm->nodeName.find("_inst_") != std::string::npos) continue; // foliage via InstanceManager
             if (terrain_meshes.count(tm.get())) continue; // terrain: regenerated from heightmap on load
             TriangleMesh* pm = tm.get();
@@ -5827,6 +5848,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         };
 
         d["fluid_render_mode"] = static_cast<int>(domain.fluid_render_mode);
+        d["fluid_fog_spread_voxels"] = domain.fluid_fog_spread_voxels;
         d["fluid_particle_color"] = vec3ToJson(domain.fluid_particle_color);
         d["fluid_particle_radius_factor"] = domain.fluid_particle_radius_factor;
         d["fluid_particle_size_multiplier"] = domain.fluid_particle_size_multiplier;
@@ -6460,7 +6482,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_surface_cooling = f.value("surface_cooling", domain.fluid_surface_cooling);
         }
 
-        if (item.contains("fluid_render_mode")) domain.fluid_render_mode = static_cast<RayTrophiSim::Fluid::FluidRenderMode>(item["fluid_render_mode"].get<int>());
+        if (item.contains("fluid_render_mode")) domain.fluid_render_mode = RayTrophiSim::Fluid::fluidRenderModeFromStored(item["fluid_render_mode"].get<int>());
+        domain.fluid_fog_spread_voxels = item.value("fluid_fog_spread_voxels", domain.fluid_fog_spread_voxels);
         if (item.contains("fluid_particle_color")) domain.fluid_particle_color = jsonToVec3(item["fluid_particle_color"]);
         domain.fluid_particle_radius_factor = item.value("fluid_particle_radius_factor", domain.fluid_particle_radius_factor);
         domain.fluid_particle_size_multiplier = item.value("fluid_particle_size_multiplier", domain.fluid_particle_size_multiplier);

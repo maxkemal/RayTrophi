@@ -10,6 +10,10 @@ namespace ParticleBillboardBuilder {
 // system and of every fluid domain in Particles render mode. Each particle
 // system contributes one LUT row per appearance profile; each fluid domain one
 // constant row. The profile's blend picks the additive or alpha group.
-void build(const SceneData& scene, ParticleBillboardUpload& out);
+//
+// `viewport_device` is the VkDevice of the backend that will draw. A
+// device-resident system on that same device becomes a pulled draw (no host
+// copy); any other system is expanded into CPU quads from host state.
+void build(const SceneData& scene, void* viewport_device, ParticleBillboardUpload& out);
 
 } // namespace ParticleBillboardBuilder

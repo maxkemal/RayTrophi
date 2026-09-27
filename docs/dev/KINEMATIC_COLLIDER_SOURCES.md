@@ -1,10 +1,17 @@
 # Kinematic Collider Sources — characters and animated bodies as solver input
 
-> **Durum:** AKTİF — 2026-09-25. K0 kaynak katmanı yazıldı; kullanıcı derlemesi
-> ve çalışma zamanı doğrulaması bekliyor. Kalıcılık, authoring UI, viewport
-> çizimi ve solver tüketimi sonraki aşamalardır. Katman, animasyonlu karakterlerin
-> fluid, gas, granular mud/snow ve particles alanlarını aynı collider girdisiyle
-> sürmesini hedefler.
+> **Durum:** AKTİF — 2026-09-26. K0 IPC CRUD/validation smoke testi canlıda
+> geçti. K1 panel/overlay ve body-first auto-fit canlı rig üzerinde 22/22 proxy
+> çözümledi; iki ayağı korudu ve detay kemiklerini dışarıda bıraktı. Dünya/metre
+> auto-fit düzeltmesi canlıda bacaklar için yaklaşık 9.4 cm örnek yarıçap verdi.
+> K2 CPU snapshot/voxel stamp yolu Vulkan APIC su domaininde altı timeline
+> karesi boyunca 6/6 kez çalıştı; hareketli ayakları izlerken 57.800 parçacığı
+> korudu. Kullanıcı viewport'ta ayak proxylerini ve yerel su etkileşimini gördü.
+> Geri sarma denemesi sahnenin seed tarifinin persistent olmadığını
+> (`dropped_seeds`) gösterdiği için ghost-cell kabulü geçerli sayılamadı;
+> kalıcılık round-trip ve gas kabulü de bekliyor. Katman, animasyonlu
+> karakterlerin fluid, gas, granular mud/snow ve particles alanlarını aynı
+> collider girdisiyle sürmesini hedefler.
 
 ## 1. Why this is its own layer
 
@@ -100,6 +107,12 @@ An **auto-fit** helper generates a default proxy set from the skeleton and bind
 pose (capsule per long bone, sphere for head/hands, box for feet). Auto-fit is
 a convenience that writes ordinary proxies; it does not own state.
 
+Auto-fit prioritizes body/limb contact coverage. Finger, eye, skirt, twist and
+terminal `End` bones are detail bones and are excluded by default; callers can
+request them with `include_detail_bones=true`. When details are enabled, body
+bones are still processed first so the proxy budget cannot keep fingers while
+silently dropping a foot.
+
 ### 4.1 Ownership and data flow
 
 ```text
@@ -174,7 +187,18 @@ physics.collider.proxy_set.sample        (read-only: world transform and
 ```
 
 `sample` is the instrument: without it, "did the foot's velocity reach the
-solver?" cannot be answered from outside. Panel editing is required too
+solver?" cannot be answered from outside.
+
+★ 2026-09-26 correction: `sample` answers a different question. Its velocity
+is computed against the solver's motion history at READ time, so it reads 0
+once the frame loop has caught up and a stale delta otherwise, and nothing in
+it says how many cells a proxy occupied. The solver-side instrument is
+`physics.collider.proxy_set.solver_stamps`: per proxy and domain, the cells
+stamped in the last grid step and the velocity written into `solid_vel`. A
+resolved proxy that stamped nothing is listed with `stamped_cells = 0`. The
+live probe below counted voxelize calls, which would have reported PASS for a
+foot stamping zero cells. Probe:
+`scripts/test/rt_probe_kinematic_foot_stamps_ipc.py`. Panel editing is required too
 (reverse of rule 1): proxies are drawn and editable in the viewport.
 
 Four layers + capability + descriptor overlay, as usual.
@@ -190,21 +214,95 @@ Current source surfaces:
 
 | Phase | Scope | State |
 |---|---|---|
-| K0 | Registry, validation, auto-fit, rig sampling, motion history, Python/IPC inspection | Source complete; build/runtime verification pending |
-| K1 | Scene persistence, contextual authoring panel, analytic viewport proxies and selection | Next |
-| K2 | One shared CPU snapshot consumed by APIC, granular and gas; substep interpolation and discontinuity resets | Planned |
+| K0 | Registry, validation, auto-fit, rig sampling, motion history, Python/IPC inspection | IPC CRUD/validation verified live; rig sample pending a rigged scene |
+| K1 | Scene persistence, contextual authoring panel, analytic viewport proxies | Build and live rig scale/follow verified; save/reopen round-trip pending |
+| K2 | One shared CPU snapshot consumed by APIC, granular and gas; exact moving-stamp restore and rewind resets | Vulkan APIC consumption and visual foot/water interaction verified; persistent-seed rewind and gas acceptance pending |
 | K3 | Footprint, compaction, wake, smoke and teleport acceptance scenes with measurable IPC checks | Planned |
 | K4 | Stable snapshot/consumer handoff to the realtime particle system | Planned; particle roadmap owns GPU-side consumption |
 | K5 | Optional hero-quality deforming mesh producer with per-vertex velocity | Future |
 
-Until K4, this work does not modify particle simulation/GPU pipeline files.
-The particle implementation consumes the contract; it must not duplicate rig
-sampling, proxy authoring, or motion history.
+K2 adds only narrow integration wiring to `ParticleSimulationSystem`; proxy
+authoring, rig resolution and motion history remain in the kinematic modules.
+Vulkan gas already uploads the resulting host `solid`/`solid_vel` fields, so
+this CPU producer works with both CPU and Vulkan gas solvers. K4 remains the
+dedicated realtime-particle consumer; it must not duplicate rig sampling,
+proxy authoring or motion history.
 
 K0 resolves targets by character name because the current rig authoring API
 does not expose a scene-wide persistent node identity. `target_node_id` is
 reserved but rejected when non-empty; K1 must implement identity resolution
 before enabling that field. It must never be accepted and silently ignored.
+
+Live IPC probe: `python scripts/test/rt_test_kinematic_collider_ipc.py` from a
+separate terminal while the application is open. It uses a deliberately
+missing character, verifies CRUD/validation/unresolved-target behavior, and
+restores the original registry in a `finally` block. A rigged scene is still
+required for the bone-following and auto-fit acceptance cases.
+
+Rig probe: `python scripts/test/rt_probe_kinematic_rig_ipc.py <character>`.
+2026-09-26 live result on character `1`: 80 bones, 64 proxies, 64 resolved,
+64 moving over 450 ms; left-foot motion 0.0040 m and toe motion 0.0065–0.0077
+m. The same run exposed the old arbitrary-order budget bug because right-foot
+bones arrived after many finger bones. The source now excludes detail bones by
+default and orders all body bones before opt-in details; rebuild verification
+must require both left and right foot proxies.
+
+### Open viewport issue — oversized proxy outlines (reported 2026-09-26)
+
+The live walking-character preview made some bone capsules appear much too
+large. The overlay already projects a world-space radius through the active
+perspective/orthographic camera. Inspection found the concrete unit error:
+auto-fit limits are world metres, while stored proxy dimensions are bone-local.
+Sampling previously published those local values as metres; the first sampling
+fix exposed the inverse authoring error because auto-fit also clamped world
+limits directly in local space. Auto-fit now measures bone lengths and clamps
+radii in world space, converts the result into bone-local dimensions, and
+sampling reapplies the evaluated basis scale. The next build must verify both
+halves before changing projection code. A second independent viewport rect
+issue remains worth checking:
+
+1. projection currently maps into global ImGui `DisplaySize`; it must use the
+   actual viewport content rectangle, including its origin and render extent;
+2. compare authored and sampled dimensions with
+   `scripts/test/rt_inspect_kinematic_scale_ipc.py` and confirm the ratio agrees
+   with the evaluated rig scale.
+
+Acceptance: a sphere of known world radius must cover the same pixels as a
+viewport reference gizmo in perspective and orthographic views; changing panel
+layout must not resize or offset it. Then compare authored radius, sampled
+world radius and the rig scene scale for one thigh and one foot before changing
+the fit heuristic.
+
+Live APIC probe: `python scripts/test/rt_probe_kinematic_fluid_live_ipc.py
+"1 Kinematic Preview" 6`. The 2026-09-26 run advanced frame 0 to 6, observed
+six `sim.fluid.voxelize_colliders` calls in 6.981 ms total, kept all 57,800
+particles, and measured 0.26-0.34 m foot-proxy motion. A call count proves the
+consumer path ran; the user also confirmed visible foot gizmos and local water
+interaction. `rt_probe_kinematic_rewind_ipc.py` must be run only with a
+persistent FillLevel/reseed recipe: it deliberately rejects `dropped_seeds`,
+because an empty/recreated liquid cannot prove ghost-cell cleanup.
+
+### Weak foot interaction — measured 2026-09-26
+
+User report: splat and granular crushing/dispersion under the feet looked very
+weak. Measured on the walking rig (5.88 cm voxels, water ~1 voxel deep, top at
+y ≈ 0.078 m) by replicating the voxelizer's cell-centre test per frame:
+
+- Foot and toe proxies stamped 1-2.4 cells per frame on average, sometimes 0.
+  Leg capsules stamped ~60 but sat above the water (y ≥ 0.13).
+- Cause: foot/toe are `isBodyAnchor` joints, so `fitLeaf` gave a fixed
+  3.75 × 2.5 × 6.25 cm box centred on the ANKLE pivot. On a planted foot its
+  bottom face stayed at y ≈ 0.07, so it grazed the top of the water; heel and
+  sole had no proxy at all. The ankle-to-toe box branch further down `autoFit`
+  was unreachable for the same reason (as was the head sphere branch).
+- Fix: `collectKinematicJointPoses` measures each joint's bone-local bounds
+  over the rest-pose skinned vertices it dominates (weight ≥ 0.5), and
+  `fitLeaf` builds foot/toe boxes from them. The dead branches were removed.
+  Existing sets keep their old boxes until auto-fit is re-run.
+- Not fixed here: a clip loop that teleports the root (observed at frame 61,
+  35-40 m/s on every foot) has no discontinuity reset. It only matters for
+  looping test clips, not for a character that walks on, so it was left open.
+  Water one voxel deep is itself under-resolved; that is a scene choice.
 
 ## 7. Acceptance scenarios
 

@@ -26,6 +26,9 @@ public:
     // Metadata
     std::string nodeName;
     std::shared_ptr<Transform> transform;
+    // Runtime-derived meshes (simulation surfaces, previews) participate in
+    // every renderer but are rebuilt from their authority and never serialized.
+    bool transient = false;
 
     // Terrain ID if this mesh IS a terrain's flat mesh (-1 otherwise). Mirrors the
     // old per-facade Triangle::terrain_id — propagated into HitRecord::terrain_id

@@ -3,8 +3,478 @@
 > **Durum:** CANLI — her partide üzerine yazılır. Önceki sürüm (particle
 > authoring + SSS) git geçmişinde: `git show 220bed8:docs/dev/NEXT_BUILD_CHECKS.md`.
 >
-> ★ En üstteki (kayıt 122 s: doku yeniden kullanımı) YENİ. Altındakiler
-> önceki derlemelere girdi; doğrulanan maddeleri ✔ işaretli, kalanlar açık.
+> ★ En üstteki dört bölüm (sıvı Fog modu; splat havuzu raster'da + Virtual
+> Particles söküldü, 2026-09-27) YENİ. Altındakiler önceki derlemelere girdi; doğrulanan
+> maddeleri ✔ işaretli, kalanlar açık.
+
+## Fog Spread + sisin blackbody'si parçacık sıcaklığından (2026-09-27, 5. parti)
+
+> Ham splat parçacık başına yalnız 8 hücreye değiyor; seyrek sprey tek tek
+> lekelere dönüşüyordu. Eski "geniş bulut" görüntüsü gerçek yoğunluk değil,
+> SDF'nin yüzey yardımcısıydı (siyah küp de ondan). Yeni alan
+> `fluid_fog_spread_voxels` (varsayılan 1.5, 0..6): sis rotası grid yerine
+> Gauss ile yayılmış KOPYAYI yükler (`Fluid::spreadFogDensity`, yeni
+> `FluidFogDensity.cpp` — vcxproj'a eklendi). Çözücü grid'i ve
+> `active_density_cells` DEĞİŞMEZ. IPC/Python: `fluid.set_fog spread_voxels`,
+> okuma `fluid.get fog_spread_voxels`.
+
+1. **Derleme.** Yeni `.cpp` projede; link hatası varsa vcxproj girdisi.
+2. **Script.** `python scripts	estt_test_fluid_fog_mode_ipc.py "Grid Domain 1"`
+   — 4. adım: 2.5 geri okunur, 7 reddedilir.
+3. **Görsel, fog modunda.** Panelde "Volume Material (Fog)" altında
+   "Fog Spread (voxels)". 0 → bugünkü lekeler; 1.5 → sürekli bulut; 3+ →
+   yumuşak, geniş. Kaydırıcı DURAKLATILMIŞ karede de anında etki etmeli.
+   *Etki etmiyorsa:* köprü yeniden yüklemiyor (resync isteği yutuluyor).
+4. **Zemin kenarı.** Havuz domain duvarına kadar sönükleşmeden gitmeli (çekirdek
+   duvarda yeniden normalize ediliyor). *Kenarda koyu şerit:* normalize çalışmıyor.
+5. **Maliyet.** Büyük domain'de (≥200³) spread 6 ile kare süresine bak;
+   ayrılabilir 3 geçiş + OpenMP. *Belirgin takılma:* yayma her karede değil
+   yalnız yükleme karesinde çalışmalı — sık çalışıyorsa bana söyle.
+6. **★ SİNSİ: yoğunluk tepe değeri düşer.** Yayma kütleyi korur ama tepeyi
+   indirir; ince sprey daha soluk görünür. Bu hata değil — Density çarpanıyla
+   dengelenir. Aynı spread'de "önceki kadar yoğun değil" normal.
+7. **★★ SİNSİ: bugün parlayan sıvı sönebilir.** Blackbody/ChannelDriven emisyonlu
+   sis artık PARÇACIK sıcaklığını (Kelvin) okuyor. Önceden sıvıda sıcaklık kanalı
+   yoktu ve shader `temperature <= 0` görünce YOĞUNLUĞU sıcaklık sayıyordu —
+   "sıcak akışkan" görüntüsü o yedekten geliyordu. Oda sıcaklığındaki sıvı
+   (≈293 K) şimdi neredeyse hiç parlamaz (radyans ~ (T/Tmax)⁴). Bu DOĞRU
+   davranış; hata sanma. Sıcak sıvı için Flow Source'ta sıcaklık override'ı ver.
+8. **Sıcaklık verisi.** `fluid.get`: `particle_kelvin_measured: true`,
+   `particle_min_kelvin` / `particle_max_kelvin`. Script'in 4. adımı bunu
+   kontrol eder. *false:* parçacıklar 0 K (yazılmamış) doğuyor — emitter yolu.
+9. **Görsel: lav.** Flow Source sıcaklık override 1400 K, sis modu, Blackbody:
+   kaynaktan çıkan sıvı turuncu-sarı parlar. Termal zinciri aç: soğudukça
+   koyu kırmızıya döner ve söner. *Tüm bulut tek renk:* sıcaklık kanalı
+   yüklenmiyor (köprüde `splatFogTemperatureKelvin` false dönüyor).
+10. **Kenar rengi.** Bulutun ince kenarı çekirdekle aynı sıcaklık rengini
+    taşımalı (kütle ağırlıklı yayma). *Kenarlar kırmızı, çekirdek beyaz ve
+    hepsi aynı sıcaklıktaysa:* sıcaklık yoğunlukla birlikte bulanıklaşıyor.
+
+## ★ Fog düzeltmesi: sıvının yoğunluk sayacı her adımda sıfırlanıyordu (2026-09-27, 4. parti)
+
+> İlk fog derlemesinde sis hiçbir modda çizilmedi; VDB panelindeki Fog seçimi de
+> artık çizmiyordu (o seçim şimdi aynı domain moduna yazıyor). CANLI ÖLÇÜLDÜ:
+> 104k parçacık, splat her adımda çalışıyor (`[FluidGPU DensitySplat]` logu),
+> ama `active_density_cells = 0`. Kök: `stepGridDomains` sonundaki analiz
+> geçişi sayacı HER domain için sıfırlayıp yoğunluğu yalnız gazda yeniden
+> sayıyordu ("fluid domains don't touch grid.density"). Fog kapısı
+> `active_density_cells > 0` istediği için kendini kapattı. Sınırlar
+> (`active_density_min/max`) da sıvıda hiç dolmuyordu. Düzeltme: tarama sıvıya
+> da açıldı (`ParticleSimulation.cpp`, analiz geçişi). Shader değişikliği YOK.
+
+1. **Sayaç.** Fog modunda bir kare ilerlet: `fluid.get` →
+   `active_density_cells > 0`, `max_density` ≈ 1 civarı (hücre başına
+   parçacık/ppc). *Hâlâ 0 ise:* exe eski, ya da sim o karede adım atmadı
+   (önbellekten geldi) — Play ile birkaç adım at.
+2. **Log.** SceneLog'da `[VolumeGate 0] ... route=VolumeFog` satırı artık
+   `RENDERABLE` ve `active_cells>0` demeli. *NOT renderable + active_cells>0:*
+   kapıda başka bir koşul var, bana log'u getir.
+3. Sonra aşağıdaki bölümün 1–7. maddeleri (hepsi bu sayaca bağlıydı).
+
+## Sıvı için Volumetric Fog modu + VDB paneli domain'e yazıyor (2026-09-27, 3. parti)
+
+> Kök neden: VDB panelindeki "Fog ↔ Refractive" combo'su domain'in her karede
+> yeniden ürettiği hacme yazıyordu; köprü onu domain'den geri yazıyordu
+> (`render_as_isosurface = fluid_surface_route`). Sıvı yoğunluk üreticisi zaten
+> her adımda çalışıyor (`sim_fluid_density_splat`), yani Ağustos'taki "sıvı
+> yoğunluk splat'lemez" gerekçesi geçersizdi. Yeni kayıt değeri `VolumeFog = 4`;
+> kayıtlı `Volume = 0` anlamını KORUYOR (sıvıda → SDF), eski sahneler değişmez.
+> Otomatik test: `python scripts\test\rt_test_fluid_fog_mode_ipc.py "Grid Domain 1"`.
+
+1. **Script.** `fluid.set_param render_mode=fog` → `fluid.get` `"fog"`;
+   `active_density_cells > 0`. *0 ise:* üretici sorunu, render değil.
+2. **★ Asıl hata: kare değişince düşme.** Script'in 3. adımı: üç kare boyunca
+   mod `fog` kalır. Elle: VDB panelinde domain hacmini seç — "Owned by liquid
+   domain …" satırı görünmeli; Fog seç, timeline'ı sür: sis kalmalı.
+   *Düşüyorsa:* panel hâlâ hacme yazıyor (`fluidDomainOwningVolume` null
+   dönüyor) ya da başka bir yol domain modunu geri yazıyor.
+3. **Panel.** Liquid Display'de üçüncü seçenek "Volumetric Fog / Gas". Seçince
+   "Volume Material (Fog)" bölümü açılır; slider'lar sisi değiştirir.
+   "Now drawing: Fog volume: untagged".
+4. **Görsel: Material ve Rendered.** Sıvı sis olarak görünür, domain shader'ı
+   (yoğunluk/saçılma/emilim) ile. İlk geçişte `Liquid NanoVDB Preview` preset'i
+   uygulanır (yoğunluk ×50, mavi emilim).
+5. **Eski sahne.** Sıvı için `Volume` (0) kaydedilmiş eski bir .rtp: SDF açılmalı,
+   sis DEĞİL. *Sis açılıyorsa:* dekoder 0'ı yanlış çözüyor.
+6. **★ SİNSİ: SDF override + fog.** Bir maddeye SurfaceSDF override ver, domain
+   fog'da kalsın: sis ÇİZİLMEZ (tek domain hacmi yüzeye gider). Panel bunu
+   turuncu uyarıyla söylemeli; `fluid.get` `effective_representation` "sdf".
+   Uyarı yoksa kullanıcı "sis bozuk" sanır.
+7. **VDB IOR/roughness/foam.** Domain hacminde bu üçü artık domain alanlarını
+   yazar; kare değişince korunur.
+
+## Splat havuzu raster'da, foliage LOD'undan muaf; Virtual Particles söküldü (2026-09-27)
+
+> Kök nedenler canlı sahnede ölçüldü (88k su, granüler kapalı), düzeltmeler
+> derlenmedi. Özet: `docs/dev/GRANULAR_HEIGHTFIELD_GORUNUM.md` "Neden söküldü".
+> Otomatik test: `python scripts	estt_test_fluid_splat_raster_ipc.py "Grid Domain 1"`
+> (domain'de parçacık olmalı; mod/subdiv/shading'i geri yükler).
+
+Sıra: bağımsız ve hızlı olanlar önce; 5–7 birbirini maskeler, 1–4 geçmeden bakma.
+
+1. **Derleme.** Beş `GranularVirtual*` dosyası silindi ve vcxproj/filters'tan
+   çıkarıldı. *Bozuksa:* "cannot open GranularVirtual…" = eski bir include
+   kalmış; bana satırı söyle.
+2. **Eski proje açılışı.** `virtual_particles` ile kaydedilmiş bir projeyi
+   aç (şu anki sahne öyle). `fluid.get` → `render_mode: "particles"`.
+   *Bozuksa:* `"volume"`/`"surface"` = değer 3, `fluidRenderModeFromStored`
+   üzerinden okunmuyor (ProjectManager / SceneSerializer).
+3. **Script reddi.** `fluid.set_param render_mode=virtual_particles` hata
+   döner, mod değişmez. `fluid.set_splat_geometry subdivisions=4` reddedilir.
+   *Bozuksa:* kabul ediyorsa eski exe (zaman damgasına bak).
+4. **Panel.** Liquid Display combo'sunda iki seçenek var. Splat Spheres →
+   "Splat Geometry & Preview" açılır; Smooth Surface → "Surface SDF Settings".
+   Yeni oluşturulan domain'de Sphere Subdivision Detail = 0.
+   *Bozuksa:* Splat seçiliyken SDF ayarları açılıyorsa `current_mode_idx`
+   eşlemesi kaymış (eskiden Virtual seçilince tam olarak bu oluyordu).
+5. **Solid: impostor gerçekten çiziyor mu.** Test script'inin 3. adımı.
+   `viewport.frame_telemetry` → `raster_sphere_groups ≥ 1`,
+   `sphere_impostors_uploaded > 0`, `sphere_impostors_drawn == uploaded`.
+   *Bozuksa:* uploaded>0 ama drawn=0 → çizim kapısı kapalı (pipeline/buffer/
+   matcapDescSet/mod), `recordParticleBillboards`. groups≥1 ama uploaded=0
+   → havuzda görünür parçacık yok ya da builder yüklemiyor.
+   ✔ **Sayaçlar kökü buldu (2026-09-27, 2. derleme):** uploaded=56666,
+   drawn=0, ready=true, Solid ve Matcap'te aynı. Kapalı kapı `matcapDescSet`:
+   teardown onu `keepPipeline`'dan bağımsız yok ediyordu, yani **ilk panel/
+   pencere yeniden boyutlandırmasından sonra** set kalıcı NULL; yalnız
+   pipeline sıfırdan kurulurken yeniden yaratılıyordu. Solid geometri set'i
+   `!= NULL` korumasıyla bağlayıp çizmeye devam ettiği için hiçbir şey bozuk
+   görünmüyordu. Düzeltme her iki backend'de (viewport + base) teardown'ı
+   `!keepPipeline` arkasına aldı. **Doğrulama:** Solid'de splat'ler görünür;
+   sonra bir paneli sürükleyip viewport'u YENİDEN BOYUTLANDIR — hâlâ
+   görünür olmalı ve `sphere_impostors_drawn == uploaded`. Yan etki olarak
+   kullanıcının yüklediği matcap dokusu da resize sonrası artık kaybolmamalı.
+6. **Material / RayFusion: havuz raster listesinde.** Script'in 4. adımı:
+   `full_instances > 1`, `proxy_instances == 0`. Sonra sim'i oynat.
+   ★ `total_instances`'a BAKMA: boş havuz slotları artık maskeli olarak listede
+   duruyor, yani o sayı slot sayar, parçacık değil — boş havuzda da büyük çıkar.
+   *Görmen gereken:* küreler hep görünür, kart/düz şerit yok, oynatırken
+   titreme yok. *Bozuksa:* full_instances=1 → havuz çizilmiyor;
+   log'da `buildRasterGeometry early-out` + `stampedBy` satırına bak.
+7. **★ SİNSİ: yeni doğan parçacıklar.** Boş domain'den emitter ile başlat,
+   Material modunda oynat. Akan su **kesintisiz** görünmeli. Eski kusur
+   tam olarak "seyrek, delikli akış" gibi görünüyordu — kimse bunu bug diye
+   raporlamaz, emisyon ayarı sanılır. Havuz kademesi büyümeden (aynı kapasitede)
+   dolan slotlar artık `mask` ile açılıyor; delik görürsen bu madde bozuk.
+8. **Foliage regresyonu.** Yoğun foliage sahnesi, Auto preset:
+   `proxy_instances > 0` hâlâ olmalı. *Bozuksa:* muafiyet foliage'a da
+   sızmış (`group.transient` yanlış true) — kare maliyeti patlar.
+9. **Boş havuz maliyeti.** Cache temizle (0 parçacık, havuz dolu kalır),
+   Material modunda `frame_ms` ve `visible_triangles`. Havuz slotları artık
+   raster'da duruyor ama `mask=0` → GPU cull atlar. Eski ölçüm: 1M ölü slot
+   = 101,9 ms. *Görmen gereken:* visible_triangles ≈ sahnenin kendisi,
+   frame_ms normal. *Bozuksa:* ölü slotlar çiziliyor → cull bounds `w<0`
+   yazılmıyor (`writeRasterInstanceBound`).
+10. **Vulkan RT (Rendered) değişmedi.** Aynı sahnede RT'ye geç: splat'ler
+    görünür, hız önceki gibi. subdiv 0'ın (20 üçgen) görünümü yakın planda
+    kabul edilebilir mi — değilse Splat Geometry'den 1'e çek; bu yalnız
+    default değişikliği.
+11. **Flat kaynaklı scatter senkronu.** Flat SoA kaynaklı bir foliage grubu
+    olan sahnede bir instance'ı gizmo ile taşı: yerinde kalmalı. Senkron
+    artık `scatterSourceTransform`'u uyguluyor; eskiden ilk senkronda
+    merkezleme ofseti kadar kayıyordu. *Bozuksa:* obje taşıma anında zıplar.
+12. **1M boş slot maliyeti (ÖLÇÜLDÜ, düzeltme derlenmedi).** Canlı ~520k sabitken
+    havuz 524k → 1M olunca Material karesi (sim oynarken) **49 → 91 ms** çıktı.
+    Boş slotlar ücretsiz değilmiş. Düzeltme: transform senkronu boş kalan
+    slotu matris kurmadan atlıyor. *Görmen gereken:* aynı deneyde fark
+    ≲5 ms. *Hâlâ ~40 ms ise:* maliyet CPU senkronu değil GPU/yükleme tarafı
+    (`uploadRasterInstanceBuffer` 1M matris yazıyor) — o zaman dirty aralık
+    yüklemesi gerekir. Deney: domain `surface`→`particles` (havuzu sıfırlar),
+    ~507k tohum, Material, timeline'ı kare kare ilerlet, `frame_ms` izle.
+13. **TDR (591k splat, Material→RT) TEKRARLANAMADI.** IPC ile denenenler, hepsi
+    temiz: RT 65k/135k/270k/540k; Material→RT 540k; RT'de ve Material'da
+    kare kare oynatma; Material'da havuz büyümesi (524k→1M) + hemen RT.
+    Sürücü kaydı: `nvlddmkm` olay 153 (TDR zaman aşımı). Log'da kayıp,
+    RT "yield" satırından ÖNCE gözlendi. Denenemeyen tek koşul **sürekli
+    Play** (IPC'de play yok; set_frame kare kare adım atıyor). *Tekrar
+    ederse:* SceneLog'u koru ve hangi modda Play'e bastığını not et.
+
+## Vulkan RT: çok splat varken oynatmada yavaşlama — TLAS refit + orijindeki ölü slotlar (2026-09-26)
+
+> ✔ **Kullanıcı doğruladı (derlendi):** RT oynatma yavaşlaması kayboldu. Havuz
+> kademesi büyürken tam kurulum kısa bir takılma yapıyor (1M'de kabul edilebilir).
+> ⚠ Aynı derlemede 1M splat ile Solid→Rendered'da **yeni bir TDR** — sessiz
+> render cihazı ölümü, bkz. `GRANULAR_HEIGHTFIELD_GORUNUM.md` "AÇIK" bölümü.
+
+> Kullanıcı gözlemi: RT'de play sırasında (havuz büyüyüp instance sayısı
+> değiştikten sonra) render çok yavaşlıyor, Solid→Rendered yapınca hemen
+> hızlanıyor. İki kök, ikisi de derlenmedi:
+>
+> 1. **TLAS hiç yeniden kurulmuyordu, yalnız refit ediliyordu** (`createTLAS`
+>    + GPU `recordGpuTLASUpdate`, sayı değişmedikçe `MODE_UPDATE`). Refit ilk
+>    kurulumun hiyerarşisini tutar, kutuları büyütür. Havuz kademesi büyüyünce
+>    tam kurulum olur, o anda slotların çoğu ölü; sonraki karelerde onlar domain'de
+>    doğdukça ağaç bozulur. Solid→Rendered tek taze kurulumdu. Artık iki yol da
+>    **aynı nesneye yerinde `MODE_BUILD`** yapıyor: handle/adres/descriptor
+>    değişmez, destroy yok (TDR riski eklemez).
+> 2. **Ölü slotlar `identity + mask 0` idi** = orijinde birim küre, hepsi üst
+>    üste, domain de orijinde. Mask gölgelemeyi eler ama BVH özdeş kutuları
+>    ayıramaz: orijinden geçen her ışın o yaprakları tek tek ziyaret eder. Artık
+>    `parkedTLASInstanceTransform()` (1 mm, y=-10 km) — CPU iki yol + GPU
+>    `instance_prepare.comp`. Kostik hedef kutusu mask 0'ı atlıyor (eskiden
+>    ölü slotları orijinde sayıyordu).
+>
+> ★ Kare atlamalı IPC A/B (build@20 → refit@143) fark göstermedi (~31 ms/örnek
+> her iki kolda) — çünkü atlama havuz kapasitesini değiştirip zaten tam
+> kurulum yaptırıyor. Kullanıcının koşulu **canlı play**; o IPC'den sürülemiyor.
+> Ayrıca: `viewport.status.ms_per_sample` her durumda 0 dönüyor (ölü alan).
+
+1. **`instance_prepare.comp` → `.spv` derlendi mi.** Shader değişti. Eski spv
+   ile GPU yolu ölü slotları hâlâ orijine koyar; CPU yolu park eder. Bozuksa:
+   yavaşlama yalnızca GPU scatter güncellemesi olan karelerde sürer.
+2. **Aynı senaryo: RT'de play, havuz birkaç kademe büyüsün.** Beklenen: hız
+   oynatma boyunca sabit kalır, Solid→Rendered artık fark yaratmaz. Bozuksa
+   (hâlâ Solid'e geçip dönünce hızlanıyor): üçüncü bir kaynak var — BLAS
+   (splat icosphere değil, foam/sphere GAS) veya volume tarafı.
+3. **Görsel: splat'lar, köpük, cam/su kostikleri doğru yerde.** Bozuksa
+   (orijinde ya da -10 km yönünde bir artefakt): park dönüşümü mask 0 olmadan
+   bir yere sızıyor.
+4. **Maliyet: sahne hareketsizken (pause) örnek hızı eskisi kadar.** Her kare
+   BUILD, refit'ten pahalı; ama hareketsiz karede TLAS hiç çağrılmamalı.
+   ★ Sessiz başarısızlık: pause'da da kare süresi birkaç ms yüksekse biri
+   TLAS'ı değişiklik olmadan her kare güncelliyor demektir — bu düzeltmeden
+   önce de öyleydi, sadece refit ucuz olduğu için görünmüyordu.
+5. **TDR yok.** RT'de play + pause + Solid↔Rendered birkaç tur. Yerinde
+   BUILD da bir yazma; önceki refit ile aynı senkronizasyonu kullanıyor.
+
+> OptiX IAS'ında aynı refit deseni duruyor (`OptixAccelManager.cpp` ~1850);
+> OptiX dondurulduğu için dokunulmadı.
+>
+> Ölçüm: `render.fluid.splat_instances` / `render.fluid.foam_instances` perf
+> bölümleri eklendi (splat köprüsünün CPU maliyeti, granüler gösterim kararı
+> için).
+
+## Fluid Particles modu: çift çizim (mavi diskler) söküldü (2026-09-26)
+
+> Particles modundaki fluid domain'leri hem render bridge'in küre
+> instance'larıyla hem de `ParticleBillboardBuilder::appendGridDomainParticles`
+> ile (domain rengi, yani mavi, billboard) iki kez çiziliyordu. Billboard'lar
+> canlı konumu okuyor, instance'lar bir adım geriden geliyordu. Oynatırken her
+> kürenin önüne mavi bir disk çıkıyor, duraklatınca disk kürenin içinde
+> kayboluyordu. IPC ekran görüntüsüyle yeniden üretildi: duraklatılmışta yok,
+> adım sırasında var. Billboard kopyası söküldü.
+
+1. Particles modunda bir su sütunu oynat. Mavi halka/disk **olmamalı**,
+   küreler beyaz/materyal renginde kalmalı. Hâlâ varsa başka bir yol daha
+   çiziyordur (overlay'in debug noktaları: `particle_display_mode`).
+2. Emitter'lı bir particle sistemi (fluid'siz) billboard olarak görünmeye
+   devam etmeli; o yol değişmedi.
+
+## Sim compute: kernel tablosu binding sayısı ≠ shader (validation ile bulundu)
+
+> `RAYTROPHI_VK_VALIDATION=1` açılışta `VUID-VkComputePipelineCreateInfo-layout-07988`
+> bastı. Uyuşmayan iki kernel:
+> - `sim_fluid_granular_stress_update`: tablo 14, shader ve dispatch 15
+>   (`bond_scale`);
+> - `sim_fluid_surface_combustion`: tablo 6, shader ve dispatch 9.
+>
+> Pipeline layout eksik binding'le kurulup üstüne daha büyük bir descriptor
+> set bağlanıyordu. Bu tanımsız davranış; NVIDIA pratikte tolere ettiği için
+> kum testi çalışıyordu. Tablo düzeltildi. `dispatch` artık sayı uyuşmazlığında
+> reddediyor ve kernel adını `[SimCompute] ... dispatch refused` diye bir kez
+> log'a yazıyor.
+> Kalıcı denetim: `python scripts/audit_sim_kernel_bindings.py` (0 uyuşmazlık).
+
+1. Validation açıkken başlat: `07988` artık **hiç** görünmemeli.
+2. Kum testi (granüler) ve yanan sıvı (yüzey yanması) önceki gibi çalışmalı.
+   Log'da `dispatch refused` satırı varsa başka bir kernel'in çağrı yeri
+   tablodan ayrışmış demektir; satır kernel'in adını söyler.
+
+## TDR: sim çalışırken RT'ye geçiş — KÖK BULUNDU, düzeltme derlenmedi (2026-09-26)
+
+> Yeniden üretim: sim canlı moddayken, parçacık havuzu büyürken RT'ye geçiş.
+> Validation açıkken yakalandı; device lost'tan önce **hiç validation hatası
+> yok**. Yani sorun API kullanımı değil, zamanlama.
+>
+> Üç çöküşteki ortak dizi:
+> `RayFusion ... yielded` → `SWITCHING to Vulkan RT` → `RayFusion scene AS built … 11 KB`
+> → device lost. Viewport'un RayFusion build'leri hep 4 KB; 11 KB'lık olanlar
+> başka bir cihazın, yani **render backend'in** build'i.
+>
+> Kök: `scene_ui_procamera.cpp` ve `scene_ui_selection.cpp`'deki "AS ısıtıcıları"
+> `ensureRayFusionSceneAS`'i `ctx.backend_ptr` (render backend) üzerinde de
+> çağırıyordu. RayFusion TLAS'ı cihazın TEK TLAS slotuna kurar
+> (`m_device->createTLAS`). Render backend'de bu slot path tracer'ın TLAS'ıdır.
+> - Parçacık havuzu büyüyünce instance imzası değişiyor ve yeniden kurulum
+>   tetikleniyor.
+> - Bu RT'ye geçiş karesine denk gelirse path tracer'ın TLAS'ı, uçuştaki
+>   trace'ler onu kullanırken 65.536 instance'lık, farklı sıralı bir TLAS ile
+>   değiştiriliyor.
+> - `drainInteractiveViewportInFlight` yalnız viewport karelerini bekliyor,
+>   trace slotlarını beklemiyor.
+>
+> Düzeltme:
+> - Isıtıcılar yalnız `g_viewport_backend`'i ısıtıyor.
+> - Build log'u artık `device=` yazıyor.
+>
+> Ek olarak yan bulgu: iki sim kernel'inin binding sayısı, ayrı bölümde.
+
+1. **Tanıyı doğrula:** RT'ye her geçişte log'da `[RayFusion] scene AS built`
+   satırı varsa `device=` değeri viewport cihazınınki olmalı. Render cihazında
+   bir build görünüyorsa başka bir çağıran kalmış demektir.
+2. **Tekrar dene:** canlı mod, çok parçacık, havuz büyürken RT'ye birkaç kez
+   geç (validation açık kalabilir). Device lost **olmamalı**.
+3. ★ Sinsi başarısızlık: TDR biter ama Solid/MaterialPreview'da gölge ya da
+   RayFusion etkisi kaybolur. O zaman viewport ısıtması başka bir sebeple
+   render backend'e bağımlıymış; bunu `render.probe` ile ölç.
+4. Açık kalan yapısal risk: RayFusion ile path tracer'ın aynı cihazda aynı
+   TLAS slotunu paylaşması. Tek backend'li kurulumda yalnız mod kapısı
+   (`m_viewportMode != Rendered`) koruyor.
+
+## Animasyon: timeline'a bağlı graph zamanı + döngüyü açan root motion (2026-09-26)
+
+> Teşhis (yürüyen Mixamo karakteri, 34 karelik döngü):
+> - Graph klipleri timeline'ı DEĞİL biriken delta'yı izliyordu
+>   (`graph_follows_timeline=true` iken bile). Kare atlayınca poz donuyordu,
+>   geri sarınca aynı kare farklı poz veriyordu.
+> - Root motion, kök kemiğin ötelemesini TAMAMEN sıfırlıyordu; kalça
+>   yüksekliği de sıfırlandığı için karakter yere gömülüyordu. Yatay hareket
+>   de her karede nesnenin transform'una `position += delta` diye kalıcı
+>   yazılıyordu, bu yüzden geri sarınca ve oynatma yolu değişince karakter
+>   son kaldığı konumdan başlıyordu.
+>
+> Yeni model (`Animation/RootMotionUnroll`):
+> - Klip zamanı = (kare − başlangıç) / fps; graph timeline'ı izliyorsa bu
+>   mutlak zaman kullanılır.
+> - Root motion = kök kemiğe `tamamlanan döngü × döngü başına yol` eklenir.
+>   Yol = son konum anahtarı − ilk konum anahtarı; kemiğin ebeveyn uzayında
+>   eklendiği için iskelet ölçeği hiyerarşide kendiliğinden uygulanır.
+> - Kemik sıfırlanmaz, transform'a yazılmaz, nesnenin konum anahtarları
+>   uygulanır.
+>
+> Sökülenler: `RootMotionDelta`, iki çıkarım yolu, iki transform itme bloğu,
+> blend düğümlerindeki root-motion lerp'leri, UI'nin "root motion açıksa konum
+> anahtarını atla" kuralı.
+> Yeni IPC: `anim.set_root_motion {character, enabled, bone?}`. `anim.character`
+> artık `root_motion_resolved_bone`, `root_motion_cycle_travel` ve
+> `root_motion_travel_valid` döndürüyor.
+> Yeni dosyalar: `RootMotionUnroll.h/.cpp` (vcxproj + filters'a eklendi).
+
+1. **Derleme.** `AnimationController::getAnimatedGlobalTransform` imzası
+   değişti (döngü sayaçları). `RootMotionDelta`'yı kullanan başka bir yer
+   kalmışsa derleyici söyler; grep temiz çıktı.
+2. **Root motion kapalıyken** (varsayılan) karakter eskisi gibi yerinde
+   döngü atmalı, döngü sonunda geri sıçramalı. Tek fark: graph timeline'ı
+   izliyorsa artık kare atlamaları doğru poza gidiyor. Kapalıyken bir şey
+   değiştiyse, zaman kaynağı sırası bozulmuştur.
+3. **Probe:** test sahnesini aç, sonra
+   `python scripts/test/rt_probe_root_motion_timeline_ipc.py 1 "1 Kinematic Preview" 110`.
+   Root motion'ı AÇIK bırakır. Görmen gereken:
+   - `bone:` boş olmayan bir kemik, `cycle travel` sıfır olmayan bir vektör ve
+     `valid: True`;
+   - `scrub` satırında her kare tek bir konum;
+   - `walk` satırında ≥ 3 m yatay yol, en büyük kare adımı ~0,05–0,15 m
+     (eski döngü sıçraması 1,6 m idi);
+   - `rewind offset ≈ 0`, sonunda PASS.
+   `valid: False` ise otomatik seçilen kemiğin (Armature/RootNode) konum
+   anahtarı yok: `anim.set_root_motion character=1 enabled=true
+   bone=<Hips'in tam adı>` ile sabitle.
+4. **Görsel:** oynat. Karakter domain boyunca kesintisiz yürümeli ve y'de
+   gömülmemeli. Durdurup 0'a sarınca başa dönmeli; sahnenin kayıtlı
+   transform'u değişmemeli. ★ Sinsi başarısızlık: karakter yürüyor ama
+   bir noktada viewport'tan kayboluyor. Nesnenin sınır kutusu hâlâ başlangıç
+   yerinde kaldığı için culling ediliyor olabilir. Bunu yalnız göz görür.
+5. **Kum/su ile:** `rt_probe_kinematic_foot_stamps_ipc.py "1 Kinematic Preview" 110`.
+   `max` solver speed artık 36–40 m/s sıçrama göstermemeli (döngü ışınlanması
+   bitti); ayak başına sıfır hücreli kare olmamalı.
+6. **Kalan bilinen eksik:** state machine ve blend geçişleri hâlâ delta ile
+   ilerliyor; timeline'a bağlı değiller. Klip değişince (`play`) döngü sayacı
+   sıfırlanır ve karakter o klibin başlangıç konumuna döner.
+
+## Kinematic collider: ayak kutusu mesh'ten + çözücü damga telemetrisi (2026-09-26)
+
+> Teşhis (yürüyen karakter, ~1 voxel su, 5,9 cm voxel): ayak kutusu **bileğe**
+> ortalanmış sabit 3,75×2,5×6,25 cm idi; basan ayakta alt yüzü y≈0,07'de,
+> suyun ancak üstüne değiyordu. Ayaklar karede 1–2 hücre damgalıyordu.
+> `autoFit` içindeki "bilek→parmak kutusu" dalı **ölü koddu**: `isBodyAnchor`
+> foot/toe/head'i daha önce yakalıyor. Değişiklikler:
+> - `collectKinematicJointPoses` her joint için baskın olduğu (ağırlık ≥ 0,5)
+>   rest-pose skin köşelerinin kemik-yerel sınırını ölçer; `fitLeaf` foot/toe
+>   kutusunu bu sınırdan kurar (topuk+taban+parmak). Köşesi olmayan joint eski
+>   sabit kutuya düşer. Ölü foot ve head dalları söküldü.
+> - Yeni `physics.collider.proxy_set.solver_stamps` (+ Python
+>   `proxy_set.solver_stamps()`): son grid adımında proxy×domain başına
+>   `stamped_cells` ve çözücünün `solid_vel`'e yazdığı hız. Sayım zaten dönen
+>   damga döngüsünde bir artırım; ek geçiş yok.
+> - `proxy_set.sample` notuna "hız OKUMA anındaki geçmişe göre, çözücününki
+>   değil" uyarısı eklendi.
+
+1. **Derleme.** Yeni dosya yok; `KinematicColliderVoxelizer.h` artık
+   `ParticleSimulation.h`'ten include ediliyor. `FluidGrid` class/struct ileri
+   bildirimi C4099 uyarısı verirse zararsız (önceden de vardı).
+2. **Telemetri tek başına** (refit ETMEDEN, önce eski kutuyla ölç):
+   `python scripts/test/rt_probe_kinematic_foot_stamps_ipc.py "1 Kinematic Preview" 24`.
+   Görmen gereken: her karede dört ayak satırı, `frames stepped 24/24`, ayak
+   hücreleri ortalama ~1–2,5 (önceki elle ölçümle aynı). Bu, sayacın doğru
+   saydığının kanıtı. `steps` artmıyorsa log hiç dolmuyor — çağrı noktası
+   bağlanmamış.
+3. **Refit** — aynı komut `--refit` ile (set'in proxy'lerini YENİDEN ÜRETİR).
+   Görmen gereken: foot/toe kutularının `local_position`'ı sıfır değil (Mixamo'da
+   kemik ekseninde ileri ve aşağı), `half_extents` ayağın gerçek boyu kadar
+   (ayak ~10+ cm uzunluk). Ardından basan ayakta **hücre sayısı belirgin artar**
+   ve `zero-frames` düşer. Hâlâ ~1–2 ise: kutu yanlış uzayda (placement /
+   globalInverse zinciri) — `local_position`'ı viewport overlay'de gözle kontrol et.
+4. **Viewport overlay** (kinematic preview açık): ayak kutuları topuktan
+   parmak ucuna uzanmalı ve tabana oturmalı. ★ Sinsi başarısızlık: kutu doğru
+   BOYUTTA ama bilekte ya da ayağın üstünde — telemetri hücre sayısını artmış
+   gösterir ama su yine yalnız üstten ezilir. Bunu yalnız overlay gösterir.
+5. **Görsel**: splat ve granüler testinde ezilme/dağılma. Su 1 voxel
+   derinliğindeyse etki yine sınırlı kalır — domain'i yürüme alanına indirip
+   voxel'i küçültmek (sahne ayarı) ayrı bir kol.
+
+## Particle Faz 1.5 Batch B: cihazda kalan balistik adım + vertex pulling (2026-09-26)
+
+> Parçacık ajanının partisi. Tasarım: `PARTICLE_SYSTEM_GPU_ROADMAP.md` Faz 1.5
+> "Batch B design". Faz 0'ın "kısmi GPU" yolu (her adım tüm SoA upload +
+> sync + hız indirme) **silindi**; sistem ya tamamen cihazda ya tamamen CPU
+> referansında koşar. `particle.stats` alanları yeniden adlandırıldı:
+> `gpu_force_status`→`gpu_status` (`gpu_resident`), `forces_on_gpu`→
+> `device_resident`, `force_*`/`mirror_*`/`upload_ms` yok; yeni: `residency`,
+> `step_*`, `snapshot_*` (kümülatif), `nonfinite_measured`.
+> Yeni dosyalar: `ParticleDeviceResidency.cpp`, `sim_particle_ballistic.comp`,
+> `sim_particle_spawn.comp`, `particle_viewport_pull.vert`,
+> `include/particle_appearance_lut.glsl`. Silinen: `sim_particle_force_integrate.*`.
+
+1. **Shader + log.** `compile_shaders.bat` (12:07'de zaten koşmuş, üç yeni
+   `.spv` var). Açılışta konsolda `particle_viewport_pull.spv missing`
+   **olmamalı**. Varsa: pull pipeline yok, cihazdaki her sistem viewport'ta
+   görünmez (sim çalışır).
+2. **IPC testi** `python scripts/ipc_test_client.py` — `phase1.5B:` satırları.
+   Kritik olan: `CPU and Auto trajectories agree` (|dp| ≤ 1e-4 m, 16 adım).
+   Büyükse ballistic kernel ile CPU yolunun işlem sırası ayrışmış.
+   `Auto did not go resident (...)` basıyorsa sebep parantezde — makinede
+   Vulkan compute yoksa beklenen, varsa hata.
+3. **`rt_api_smoke_test.py`** (Python yüzeyi aynı alanlar).
+4. **Panel**: Physics sekmesi → `Last step: GPU (gpu_resident), Vulkan ...,
+   state on device`. Collider ekle → `CPU (host_consumer_colliders)`, kaldır →
+   tekrar GPU. **Parçacıklar geçişte sıçramamalı** (cihaz durumu `cpu_path`
+   snapshot'ıyla eve geliyor).
+5. **Viewport görsel (vertex pulling)**: Campfire/kıvılcım, Auto. Billboard'lar
+   görünür ve **hareket eder**; tek sistemde additive alev + alpha duman
+   ikisi de çizilir (row lookup'taki blend biti).
+   ★ **En sinsi hal: parçacıklar görünür ama doğdukları yerde DONUK.** Bu,
+   builder'ın CPU quad yolundan bayat host pozisyonlarını çizdiği anlamına
+   gelir (pull edilemedi ve snapshot da alınmadı). `particle.stats` →
+   `snapshot_last_reason` = `foreign_device` ve her karede artıyorsa: sim ile
+   viewport **farklı VkDevice** (`render.volume_tables` ile teyit) — o zaman
+   donukluk bir hatadır; artmıyorsa `residentDrawBuffers` false dönüyor.
+6. **Zaman çizelgesi oynat + geri sar**: oynarken `snapshot_mirrored_steps`
+   her karede artmalı, `snapshot_sync_count` yalnızca ilk karede bir kez
+   artmalı (sonrasında önbellek talebi adımın kendi fence'ine biniyor). Her
+   karede artıyorsa talep→ayna mekanizması çalışmıyor: oynatma eski kısmi
+   yol kadar pahalı. Geri sarınca doğru parçacıklar görünmeli
+   (restore → `residency host` → tam upload).
+7. **Politika geçişi oynarken**: Auto → CPU → Auto. Sıçrama yok. `step_blocked`
+   yalnızca GPU Required + collider/self collision'da (sebep `gpu_status`'ta).
+8. **Render in Raytrace açık** sistem: RT instance'ları parçacıkların GÜNCEL
+   yerinde (`snapshot_last_reason` `raytrace_instances`). Debug display
+   (nokta) modu: noktalar hareket eder (`debug_dots`).
+9. **Kapı ölçümü** `.\scripts\ipc\Probe-ParticleBaseline.ps1 -Scenarios
+   ballistic -Counts 1024,8192,32768` (timeline durmuş, sahnede başka
+   render yükü yokken). Auto satırları `step[gpu_resident]`, `down 0 B`.
+   **Faz 5 kapısı: 32k resident < 1,18 ms (Faz 0 CPU).** `down` > 0 ise
+   betik uyarır: bir tüketici her kare host durumu çekiyor (madde 5/8).
+   plane/self_collision satırları bilerek `host_consumer_*` (Faz 6).
 
 ## Particle Faz 1.5 Batch A: görünüm profili + GPU LUT, eski start/end yolu söküldü (2026-09-26)
 
@@ -587,3 +1057,78 @@ Sıra: bağımsız ve hızlı olanlar önce; 6–8 ancak 1–5 temizse anlamlı.
 - `spawn()` her parçacıkta `findDeadSlot()` ile baştan tarıyor (O(kapasite)).
   Büyük burst'lerde `emit_ms`'e bak.
 - Çarpıştırıcılar yalnızca Python'daydı; `collider.*` artık IPC'de.
+## Kinematic Collider Sources K1/K2 — build/live checks (2026-09-26)
+
+> First K1 build live result: IPC CRUD/validation PASS. Character `1` exposed
+> 80 bones; old auto-fit produced 64/64 resolved and moving proxies, but its
+> arbitrary input order kept finger chains before the right lower leg/foot.
+> Body-first + detail-opt-in is a post-build source fix and is the first check
+> for the next build. A cleaned 22-proxy preview set was left in the live scene.
+> The 2026-09-26 scale probe then found a second concrete unit bug: the 1%
+> Mixamo rig turned the nominal 0.025-0.20 m auto-fit limits into 0.0008-0.002 m
+> sampled radii. Auto-fit now evaluates limits and bone lengths in world metres
+> and stores the converted bone-local dimensions; this change needs a rebuild.
+
+1. Build once after the K1 source additions. Open a scene with one evaluated
+   rig visible in `rig.list_characters`.
+2. Open Simulation > Colliders > Kinematic Collider Sources. Select the rig,
+   add a set, then run Auto Fit Skeleton. Confirm the list contains bounded
+   sphere/capsule/box proxies, includes both feet, excludes finger/eye/skirt/
+   twist/end detail bones by default, and no unresolved proxy appears at the
+   world origin. Run `rt_probe_kinematic_rig_ipc.py 1`; expected PASS.
+3. With viewport gizmos enabled, confirm cyan analytic outlines follow the
+   animated bones. Toggle Show in Viewport and confirm the overlay disappears
+   without disabling solver participation. The overlay already projects world
+   dimensions; after rebuilding, rerun
+   `python scripts/test/rt_setup_kinematic_preview_ipc.py 1`. It reuses and
+   refits the exact `1 Kinematic Preview` set instead of accumulating copies.
+4. From a separate terminal run
+   `python scripts/test/rt_test_kinematic_collider_ipc.py`. Expected: `PASS`.
+   In the Codex sandbox the named pipe may require an escalated run; Windows
+   error 5 is not evidence that the app listener is absent.
+5. For the real rig, call `physics.collider.proxy_set.sample` twice across two
+   animation poses. Confirm `resolved=true`, centers follow their bones, and
+   the second sample reports finite velocity. Scrub backwards, then later K2
+   must reset authoritative history before any solver consumes it.
+6. Save to a disposable `.rtp`, reopen it, and verify set/proxy IDs, shapes,
+   local values, consumer mask, contact values and `viewport_visible` survive.
+   A malformed or duplicate ID must reject the kinematic section instead of
+   partially loading it.
+7. Run `python scripts/test/rt_inspect_kinematic_scale_ipc.py` and compare one
+   thigh plus each foot with the viewport. Sampled capsule segment/radius must
+   be in world units. On the live 1% rig, a thigh/leg radius should be on the
+   order of centimetres (roughly 0.09 m for a 0.52 m segment), not the measured
+   0.002 m. Foot boxes must also remain proportional after the refit.
+8. Put a low/medium-resolution Fluid domain around the legs, seed water, keep
+   Fluid + Granular consumers enabled, and play the walk. The leg/foot cells
+   must block liquid and transfer local limb velocity; a moving proxy must not
+   leave solid ghost cells behind it. Scrub backwards and replay: no velocity
+   explosion on the first resumed step. Shortcut:
+   `python scripts/test/rt_setup_kinematic_water_ipc.py`. For an existing
+   scene, run `rt_inspect_kinematic_fluid_scene_ipc.py` first. Do not infer the
+   visible free-surface height from the domain AABB: `fluid.get` currently
+   reports domain bounds and aggregate particle counts, not the particles'
+   world-space height distribution. Confirm water depth in the viewport (or a
+   future particle-bounds diagnostic) before judging foot contact.
+   **2026-09-26 live partial PASS:** on the Vulkan water scene, an IPC-driven
+   frame 0 -> 6 produced 6/6 collider-voxelization calls (6.981 ms total),
+   retained 57,800 particles, and followed 0.26-0.34 m foot motion. The user
+   confirmed visible foot gizmos and local water interaction. Rewind then
+   reported `dropped_seeds=['Grid Domain 1']`; that run is invalid for
+   ghost-cell acceptance. Refill using a persistent FillLevel/reseed recipe,
+   then rerun `rt_probe_kinematic_rewind_ipc.py`. Remaining: moving-stamp ghost
+   check and rewind/replay velocity.
+   **Authoring bug found:** `Seed Fluid Now` always calls the SeedBox service;
+   that service changes the runtime mode to `SeedBox`, even when the panel says
+   `Fill Domain`. With `Recreate Seed on Reset` off, rewind then drops the tank.
+   Until the shared core/API/IPC fix lands, use Fill Domain with Auto Reseed on
+   Edit and do not press Seed Fluid Now, or explicitly arm Recreate Seed on
+   Reset before testing rewind.
+9. Repeat with a smoke-filled Gas domain and Gas enabled. CPU gas and Vulkan
+   gas must both part smoke locally around the moving limbs; Vulkan uses the
+   same host-stamped `solid`/`solid_vel` upload contract. If the whole column
+   follows the character centroid, the old rigid-collider path is being used.
+   Shortcut: `python scripts/test/rt_setup_kinematic_smoke_ipc.py`.
+10. Disable Fluid or Gas in the set consumer mask while leaving Show in
+    Viewport enabled. The outline must stay visible but the disabled solver
+    must ignore the proxies. Re-enable it without recreating the set.

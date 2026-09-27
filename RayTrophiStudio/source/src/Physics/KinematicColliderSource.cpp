@@ -21,12 +21,38 @@ bool finite(const Vec3& value) {
     return finite(value.x) && finite(value.y) && finite(value.z);
 }
 
+bool finite(const Matrix4x4& value) {
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 4; ++column) {
+            if (!finite(value.m[row][column])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 float lengthSquared(const Vec3& value) {
     return value.x * value.x + value.y * value.y + value.z * value.z;
 }
 
 float vectorLength(const Vec3& value) {
     return std::sqrt(lengthSquared(value));
+}
+
+float transformScale(const Matrix4x4& transform, const Vec3& axis) {
+    const float local_length = vectorLength(axis);
+    if (local_length <= kEpsilon) {
+        return 1.0f;
+    }
+    return vectorLength(transform.transform_vector(axis)) / local_length;
+}
+
+float maximumBasisScale(const Matrix4x4& transform) {
+    return std::max({
+        transformScale(transform, Vec3(1.0f, 0.0f, 0.0f)),
+        transformScale(transform, Vec3(0.0f, 1.0f, 0.0f)),
+        transformScale(transform, Vec3(0.0f, 0.0f, 1.0f))});
 }
 
 Vec3 normalized(const Vec3& value, const Vec3& fallback) {
@@ -49,6 +75,29 @@ std::string canonical(std::string text) {
 
 bool containsToken(const std::string& value, const char* token) {
     return canonical(value).find(token) != std::string::npos;
+}
+
+bool isDetailBone(const std::string& name) {
+    return containsToken(name, "thumb") ||
+           containsToken(name, "index") ||
+           containsToken(name, "middle") ||
+           containsToken(name, "ring") ||
+           containsToken(name, "pinky") ||
+           containsToken(name, "eye") ||
+           containsToken(name, "skirt") ||
+           containsToken(name, "hair") ||
+           containsToken(name, "twist") ||
+           containsToken(name, "tongue") ||
+           containsToken(name, "jaw") ||
+           containsToken(name, "breast") ||
+           containsToken(name, "end");
+}
+
+bool isBodyAnchor(const std::string& name) {
+    return containsToken(name, "head") ||
+           containsToken(name, "hand") ||
+           containsToken(name, "foot") ||
+           containsToken(name, "toe");
 }
 
 Matrix4x4 localTransform(const KinematicProxyDesc& proxy) {
@@ -97,21 +146,38 @@ KinematicProxyDesc fitLeaf(const KinematicJointPose& joint,
     KinematicProxyDesc proxy;
     proxy.name = joint.name;
     proxy.bone = joint.name;
+    const float world_scale = std::max(
+        maximumBasisScale(joint.world), kEpsilon);
+    const float minimum_radius_local = options.minimum_radius / world_scale;
+    const float maximum_radius_local = options.maximum_radius / world_scale;
     const bool foot = containsToken(joint.name, "foot") ||
                       containsToken(joint.name, "toe");
-    if (foot) {
+    if (foot && joint.has_mesh_bounds) {
+        // The ankle pivot is not the foot: the box follows the heel, sole and
+        // toes the skin actually has, so a planted foot reaches the ground.
+        proxy.shape = KinematicProxyShape::Box;
+        proxy.local_position =
+            (joint.mesh_bounds_min + joint.mesh_bounds_max) * 0.5f;
+        const Vec3 half =
+            (joint.mesh_bounds_max - joint.mesh_bounds_min) * 0.5f;
+        const float floor_local = minimum_radius_local * 0.5f;
+        proxy.half_extents = Vec3(
+            std::max(half.x, floor_local),
+            std::max(half.y, floor_local),
+            std::max(half.z, floor_local));
+    } else if (foot) {
         proxy.shape = KinematicProxyShape::Box;
         proxy.half_extents = Vec3(
-            options.minimum_radius * 1.5f,
-            options.minimum_radius,
-            options.minimum_radius * 2.5f);
+            minimum_radius_local * 1.5f,
+            minimum_radius_local,
+            minimum_radius_local * 2.5f);
     } else {
         proxy.shape = KinematicProxyShape::Sphere;
         const bool head = containsToken(joint.name, "head");
         proxy.radius = head
-            ? std::min(options.maximum_radius,
-                       options.minimum_radius * 3.0f)
-            : options.minimum_radius * 1.5f;
+            ? std::min(maximum_radius_local,
+                       minimum_radius_local * 3.0f)
+            : minimum_radius_local * 1.5f;
     }
     return proxy;
 }
@@ -393,34 +459,60 @@ bool KinematicColliderRegistry::autoFit(
         }
     }
 
-    std::vector<KinematicProxyDesc> generated;
-    generated.reserve(std::min<std::size_t>(joints.size(), options.maximum_proxies));
+    std::vector<const KinematicJointPose*> ordered_joints;
+    ordered_joints.reserve(joints.size());
     for (const KinematicJointPose& joint : joints) {
+        if (options.weighted_bones_only && !joint.weighted) {
+            continue;
+        }
+        if (!options.include_detail_bones && isDetailBone(joint.name)) {
+            continue;
+        }
+        ordered_joints.push_back(&joint);
+    }
+    std::stable_sort(
+        ordered_joints.begin(),
+        ordered_joints.end(),
+        [](const KinematicJointPose* left, const KinematicJointPose* right) {
+            return isDetailBone(left->name) < isDetailBone(right->name);
+        });
+
+    std::vector<KinematicProxyDesc> generated;
+    generated.reserve(std::min<std::size_t>(
+        ordered_joints.size(), options.maximum_proxies));
+    for (const KinematicJointPose* joint_ptr : ordered_joints) {
+        const KinematicJointPose& joint = *joint_ptr;
         if (generated.size() >= options.maximum_proxies) {
             break;
         }
-        if (options.weighted_bones_only && !joint.weighted) {
+        if (isBodyAnchor(joint.name)) {
+            generated.push_back(fitLeaf(joint, options));
             continue;
         }
         const auto child_it = children.find(joint.name);
         const KinematicJointPose* best_child = nullptr;
-        float best_length = 0.0f;
+        float best_local_length = 0.0f;
+        float best_world_length = 0.0f;
         Vec3 best_local(0.0f);
         if (child_it != children.end()) {
             const Matrix4x4 inverse = joint.world.inverse();
             for (const KinematicJointPose* child : child_it->second) {
                 const Vec3 local = inverse.transform_point(
                     child->world.getTranslation());
-                const float length = vectorLength(local);
-                if (length > best_length) {
+                const float local_length = vectorLength(local);
+                const float world_length = vectorLength(
+                    child->world.getTranslation() -
+                    joint.world.getTranslation());
+                if (world_length > best_world_length) {
                     best_child = child;
-                    best_length = length;
+                    best_local_length = local_length;
+                    best_world_length = world_length;
                     best_local = local;
                 }
             }
         }
 
-        if (!best_child || best_length < options.minimum_bone_length) {
+        if (!best_child || best_world_length < options.minimum_bone_length) {
             generated.push_back(fitLeaf(joint, options));
             continue;
         }
@@ -431,26 +523,18 @@ bool KinematicColliderRegistry::autoFit(
         proxy.shape = KinematicProxyShape::Capsule;
         proxy.local_position = best_local * 0.5f;
         proxy.local_axis = normalized(best_local, Vec3(0.0f, 1.0f, 0.0f));
-        proxy.radius = std::clamp(
-            best_length * options.radius_fraction,
+        const float world_scale = std::max(
+            maximumBasisScale(joint.world), kEpsilon);
+        const float world_radius = std::clamp(
+            best_world_length * options.radius_fraction,
             options.minimum_radius,
             options.maximum_radius);
-        proxy.half_length = std::max(0.0f, best_length * 0.5f - proxy.radius);
+        proxy.radius = world_radius / world_scale;
+        proxy.half_length = std::max(
+            0.0f, best_local_length * 0.5f - proxy.radius);
 
-        if (containsToken(joint.name, "foot") ||
-            containsToken(joint.name, "toe")) {
-            proxy.shape = KinematicProxyShape::Box;
-            proxy.half_extents = Vec3(
-                proxy.radius,
-                std::max(options.minimum_radius, proxy.radius * 0.65f),
-                std::max(proxy.radius, best_length * 0.5f));
-        } else if (containsToken(joint.name, "head")) {
-            proxy.shape = KinematicProxyShape::Sphere;
-            proxy.local_position = Vec3(0.0f);
-            proxy.radius = std::min(
-                options.maximum_radius,
-                std::max(options.minimum_radius, best_length * 0.35f));
-        }
+        // Head, hand, foot and toe joints never reach this point: they are
+        // body anchors, fitted by fitLeaf above.
         generated.push_back(proxy);
     }
 
@@ -510,7 +594,9 @@ bool KinematicColliderRegistry::sampleSet(
         sample.target_character = set->target_character;
         sample.bone = proxy.bone;
         sample.shape = proxy.shape;
-        sample.radius = proxy.radius + set->thickness;
+        sample.consumer_mask = set->consumer_mask;
+        sample.friction = set->friction;
+        sample.restitution = set->restitution;
         sample.half_extents = proxy.half_extents + Vec3(set->thickness);
 
         if (!set->enabled || !proxy.enabled) {
@@ -535,14 +621,25 @@ bool KinematicColliderRegistry::sampleSet(
 
         sample.world_transform = bone_world * localTransform(proxy);
         sample.center = sample.world_transform.getTranslation();
+        sample.radius = proxy.radius * maximumBasisScale(bone_world) +
+                        set->thickness;
         if (proxy.shape == KinematicProxyShape::Capsule) {
+            const Vec3 world_axis = bone_world.transform_vector(proxy.local_axis);
             const Vec3 axis = normalized(
-                bone_world.transform_vector(proxy.local_axis),
+                world_axis,
                 Vec3(0.0f, 1.0f, 0.0f));
-            sample.capsule_start = sample.center - axis * proxy.half_length;
-            sample.capsule_end = sample.center + axis * proxy.half_length;
+            const float world_half_length =
+                proxy.half_length * transformScale(bone_world, proxy.local_axis);
+            sample.capsule_start = sample.center - axis * world_half_length;
+            sample.capsule_end = sample.center + axis * world_half_length;
         }
-        sample.resolved = finite(sample.center);
+        sample.resolved = finite(sample.world_transform) &&
+                          finite(sample.center) &&
+                          finite(sample.radius) &&
+                          sample.radius >= 0.0f &&
+                          (proxy.shape != KinematicProxyShape::Capsule ||
+                           (finite(sample.capsule_start) &&
+                            finite(sample.capsule_end)));
         if (!sample.resolved) {
             sample.unresolved_reason = "nonfinite_proxy_transform";
             motion_history_.erase(proxy.id);
