@@ -31,6 +31,9 @@
 #include "Vec3.h"
 #include "Matrix4x4.h"
 #include "World.h"
+#include "Backend/AtmosphereLutParams.h"
+#include "Backend/AerialFroxelParams.h"
+#include "Backend/CloudParams.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -1202,6 +1205,11 @@ public:
     bool recordBlasCompactionQuery(VkCommandBuffer cmd, VkAccelerationStructureKHR accel);
     void finishPendingBlasCompactions();
     VkDescriptorSet m_rtDescriptorSet = VK_NULL_HANDLE;
+    // Hash of the last full bindRTDescriptors() write batch. A batch that CHANGES
+    // a handle waits for the in-flight trace slots first (descriptor sets must not
+    // be updated while a pending command buffer uses them); an identical batch
+    // rewrites the same values and needs no wait.
+    uint64_t m_rtDescWriteHash = 0;
     // Acceleration structures
     AccelStructHandle m_tlas;
     uint32_t m_tlasInstanceCount = 0;
@@ -1360,6 +1368,105 @@ public:
     VkDescriptorPool m_atmosphereLutDescPool = VK_NULL_HANDLE;
     VkDescriptorSet m_atmosphereLutDescSet = VK_NULL_HANDLE;
     BufferHandle m_atmosphereLutParamsBuffer;
+
+    // ── Aerial perspective froxel (atmosphere_aerial_froxel.comp) ──────────
+    // Air + height fog between the camera and each view depth, 32x32x32,
+    // stored as a 1024x128 atlas (layout: shaders/aerial_froxel.glsl). The
+    // RT raygen reads it through binding 8 slot [3]; the RayFusion post pass
+    // through its own binding 3. Scheduled on the CPU when its inputs change,
+    // RECORDED into the frame's own command buffer -- same rule as the photon
+    // pass: a separate submit would race the previous frame's reads.
+    bool createAerialFroxelPipeline(const std::vector<uint32_t>& computeSPV);
+    bool hasAerialFroxel() const {
+        return m_aerialFroxelPipeline != VK_NULL_HANDLE && m_aerialFroxel.view != VK_NULL_HANDLE;
+    }
+    void scheduleAerialFroxel(const AtmosphereLUTParamsGPU& atmosphere, const AerialFroxelParamsGPU& froxel);
+    void recordAerialFroxelPass(VkCommandBuffer cmd);
+    // Froxel bindings 0/1 <- the current transmittance/sky-view LUTs, or a 1x1
+    // placeholder when there is no LUT (non-Nishita world: fog only).
+    void writeAerialFroxelLutDescriptors();
+    // RT binding 8: [0..2] LUT images, [3] the froxel atlas.
+    void writeRtAtmosphereDescriptors();
+    void destroyAerialFroxel();
+
+    VkPipeline m_aerialFroxelPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_aerialFroxelPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_aerialFroxelDescLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_aerialFroxelDescPool = VK_NULL_HANDLE;
+    VkDescriptorSet m_aerialFroxelDescSet = VK_NULL_HANDLE;
+    ImageHandle m_aerialFroxel;              // RGBA16F atlas, lives in GENERAL layout
+    ImageHandle m_aerialFroxelPlaceholderLut;// 1x1, bound when no LUT exists
+    BufferHandle m_aerialFroxelAtmosphereBuffer; // binding 2, device-local, vkCmdUpdateBuffer
+    BufferHandle m_aerialFroxelParamsBuffer;     // binding 4, device-local, vkCmdUpdateBuffer
+    AtmosphereLUTParamsGPU m_aerialFroxelPendingAtmosphere{};
+    AerialFroxelParamsGPU m_aerialFroxelPendingParams{};
+    bool m_aerialFroxelPending = false;
+    bool m_aerialFroxelBuilt = false;        // the atlas holds a completed dispatch
+    uint64_t m_aerialFroxelDispatchCount = 0;// recorded dispatches (world.atmosphere_stats)
+
+    // ── Clouds (docs/dev/ATMOSPHERE_CLOUDS.md, Faz 3a) ─────────────────────
+    // VulkanDeviceClouds.cpp. Generated noise + weather map on THIS device,
+    // and the synchronous measurement dispatch behind world.sample_clouds.
+    ImageHandle createImage3D(uint32_t w, uint32_t h, uint32_t d, VkFormat format, VkImageUsageFlags usage);
+    bool createCloudPipelines(const std::vector<uint32_t>& noiseSPV, const std::vector<uint32_t>& sampleSPV);
+    bool hasCloudResources() const { return m_cloudNoisePipeline != VK_NULL_HANDLE && m_cloudBase.view != VK_NULL_HANDLE; }
+    // Textures + RT params buffer exist independently of the pipelines: the RT
+    // set binds them (30-35) from its first write, before any SPIR-V is loaded,
+    // so every binding is valid while the clouds are still off.
+    bool ensureCloudTextures();
+    void writeRtCloudDescriptors();
+    void updateCloudRtParams(const Backend::CloudParamsGPU& params);
+    void destroyCloudPipelines();
+    // RayFusion cloud layer (Faz 3c, cloud_raster.comp). Reduced-resolution
+    // march + temporal history (ping-pong) + a stable output the sky pass
+    // samples through material-preview binding 25.
+    bool createCloudRasterPipeline(const std::vector<uint32_t>& spv);
+    bool ensureCloudRasterTargets(uint32_t w, uint32_t h);   // true = (re)created
+    void writeCloudRasterLutDescriptors();
+    void recordCloudRaster(VkCommandBuffer cmd, const Backend::CloudRasterFrameGPU& frame);
+    void destroyCloudRaster();
+    bool createCloudShadowPipeline(const std::vector<uint32_t>& spv);
+    VkPipeline m_cloudShadowPipeline = VK_NULL_HANDLE;
+    ImageHandle m_cloudShadowMap;   // 512^2, y = 0 plane around the camera
+    VkPipeline m_cloudRasterPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_cloudRasterLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_cloudRasterDescLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_cloudRasterPool = VK_NULL_HANDLE;
+    VkDescriptorSet m_cloudRasterSets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    ImageHandle m_cloudHist[2];
+    ImageHandle m_cloudRasterOut;
+    BufferHandle m_cloudRasterFrameBuf;
+    uint32_t m_cloudRasterW = 0, m_cloudRasterH = 0, m_cloudRasterParity = 0;
+    bool generateCloudNoise();   // once per device; the noise is seed-independent
+    bool generateCloudWeather(const Backend::CloudWeatherGenParams& w);  // no-op when unchanged
+    bool sampleClouds(const Backend::CloudParamsGPU& params, uint32_t mode, uint32_t steps,
+                      const std::vector<Backend::CloudQueryGPU>& queries, std::vector<float>& out);
+    void destroyCloudResources();
+    bool dispatchCloudNoise(uint32_t mode, uint32_t size, uint32_t seed, uint32_t cells);
+    VkPipeline m_cloudNoisePipeline = VK_NULL_HANDLE;
+    VkPipeline m_cloudSamplePipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_cloudNoisePipelineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_cloudSamplePipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_cloudNoiseDescLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_cloudSampleDescLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_cloudDescPool = VK_NULL_HANDLE;
+    VkDescriptorSet m_cloudNoiseDescSet = VK_NULL_HANDLE;
+    VkDescriptorSet m_cloudSampleDescSet = VK_NULL_HANDLE;
+    ImageHandle m_cloudBase;     // 128^3 RGBA8, GENERAL
+    ImageHandle m_cloudDetail;   // 32^3 RGBA8
+    ImageHandle m_cloudCurl;     // 128^2 RGBA8
+    ImageHandle m_cloudWeather;  // 2048^2 RGBA8
+    ImageHandle m_cloudMajorant; // 256^2 RGBA8, RT delta-tracking bound
+    BufferHandle m_cloudRtParamsBuffer;      // GPU_ONLY, ordered upload; RT binding 34
+    BufferHandle m_cloudSampleParamsBuffer;  // host-visible; used ONLY by sampleClouds
+    BufferHandle m_cloudQueryBuffer;
+    BufferHandle m_cloudResultBuffer;
+    uint32_t m_cloudQueryCapacity = 0;
+    bool m_cloudNoiseReady = false;
+    uint64_t m_cloudWeatherHash = 0;         // 0 = never generated
+    uint64_t m_cloudNoiseGenerations = 0;    // world.cloud_stats counters
+    uint64_t m_cloudWeatherGenerations = 0;
+    uint64_t m_cloudSampleDispatches = 0;
 
     // Per-slot persistent command buffer + fence for async submit. Lazy-init on first
     // submitTraceTonemapAsync. Cmd buffers are allocated from m_commandPool with
@@ -2043,7 +2150,8 @@ public:
     void waitForCompletion() override;
     void resetAccumulation() override;
     VulkanRT::VolumePerformanceStats getVolumePerformanceStats(bool synchronize = true);
-    void resetVolumePerformanceStats(bool enabled = true);
+    void resetVolumePerformanceStats(bool enabled = true,
+                                     const VulkanRT::VolumeInstrumentationRegion& region = {});
     VulkanRT::InstancePreparationStats getInstancePreparationStats() const;
     float getMillisecondsPerSample() const override;
 
@@ -2088,19 +2196,43 @@ public:
     //   VkDevice'ta oldugu icin ilk uretip bayragi temizleyen otekini bayat
     //   birakiyordu. Cagiran, kisitlama (throttle) kararini verdikten SONRA sorar.
     bool atmosphereLutStale(const WorldData& wd) const;
-    // ★★★★★ Transmittance LUT'unun YALNIZCA 0. SATIRI. Shader
-    //   (`canonicalWorldSunRadiance`) tam olarak `texture(lut, vec2(u, 0.0))`
-    //   okuyor, yani gunes tonu icin gereken tek sey bu satir.
-    // ★★★ Neden isaretci degil KOPYA: LUT'un sahibi `World`, ve backend'in
-    //   omru onunkiyle bagli degil. Bir isaretci saklamak, sahne degisiminde
-    //   sarkan bir okumaya donusurdu -- ve belirtisi cokme degil, YANLIS RENKLI
-    //   dolayli gunes olurdu.
-    std::vector<float> m_atmosphereTransmittanceRow0;  // RGB uclusu, 256 girdi
-    // Dolayli (bounce) gunes icin radyans. Dogrudan aydinlatmanin kullandigi
-    // `canonicalWorldSunRadiance` ile AYNI formul: aksi halde bir yuzeyin
-    // aldigi dogrudan gunes ile ondan sicrayan gunes farkli renkte olurdu.
-    bool worldSunBounceRadiance(float outRgb[3], bool& tintFromLut) const;
+    // Aerial froxel: schedules a rebuild when the camera plane or the medium
+    // (atmosphere block, fog, aerial toggle, LUT availability) changed since the
+    // last one. Returns whether this frame may read the atlas. The caller then
+    // records the dispatch (VulkanDevice::recordAerialFroxelPass) into its
+    // frame command buffer BEFORE the pass that reads it.
+    // world_buffer_reads_flag: the RT raygen reads "froxel readable" from the
+    // world buffer, so a flip re-uploads it. RayFusion passes the flag as a
+    // push constant instead and must not re-upload mid-frame.
+    bool syncAerialFroxel(const CameraImagePlane& plane, bool world_buffer_reads_flag = true);
+    bool aerialFroxelAvailable() const { return m_device && m_device->hasAerialFroxel(); }
+    uint64_t aerialFroxelDispatchCount() const {
+        return m_device ? m_device->m_aerialFroxelDispatchCount : 0;
+    }
+    bool aerialFroxelActive() const { return m_aerialFroxelActive; }
+    bool atmosphereLutReady() const { return m_atmosphereLutReady; }
     static uint64_t atmosphereLutSignature(const WorldData& wd);
+
+    // ── Clouds (docs/dev/ATMOSPHERE_CLOUDS.md) ───────────────────────────
+    // The cloud authority does not live in WorldData (a POD shared with
+    // CUDA), so it arrives through its own call from the same world-sync
+    // funnel (Main.cpp syncVulkanWorldToBackend). Building resources is
+    // lazy: a clear-sky scene generates nothing.
+    void setCloudState(const atmosphere::CloudState& clouds, float time_seconds, const Vec3& drift_m,
+                       const Vec3& wind_mps);
+    Backend::CloudParamsGPU cloudParamsGPU() const;
+    // Synchronous measurement (world.sample_clouds). Builds the textures on
+    // demand, so a query works with clouds off (and measures 0).
+    bool sampleClouds(uint32_t mode, uint32_t steps, const std::vector<Backend::CloudQueryGPU>& queries,
+                      std::vector<float>& out, std::string& why);
+    bool cloudResourcesAvailable() const { return m_device && m_device->hasCloudResources(); }
+    bool cloudNoiseReady() const { return m_device && m_device->m_cloudNoiseReady; }
+    bool cloudWeatherReady() const { return m_device && m_device->m_cloudWeatherHash != 0; }
+    uint64_t cloudNoiseGenerations() const { return m_device ? m_device->m_cloudNoiseGenerations : 0; }
+    uint64_t cloudWeatherGenerations() const { return m_device ? m_device->m_cloudWeatherGenerations : 0; }
+    uint64_t cloudSampleDispatches() const { return m_device ? m_device->m_cloudSampleDispatches : 0; }
+    uint64_t cloudStateRevisionsSeen() const { return m_cloudStateUpdates; }
+    bool cloudRtRendering() const { return m_cloudRtRendering; }
     void setInteractiveViewportMatcap(int64_t textureID);
     void setInteractiveViewportMatcapPreset(int preset);
 
@@ -2114,7 +2246,6 @@ public:
     struct RtShadowCoverage {
         uint32_t primaryLight = 0;    // maskenin meta.w'si; raporlama icin
         uint32_t sceneLightMask = 0;  // bit i = i. GORUNUR sahne isigi kapsandi
-        bool worldSun = false;        // Nishita gunesi (slot kMaxLights) kapsandi
         Vec3 toLight{ 0.0f, 1.0f, 0.0f };
     };
 
@@ -2170,6 +2301,36 @@ protected:
     // Bir kez denenir: dosya yoksa ya da derleme basarisizsa her karede tekrar
     // denemek log'u doldurur ve dosya sistemine bakar.
     bool m_atmosphereLutPipelineAttempted = false;
+    // Independent of the LUT pipeline: height fog needs the froxel in every
+    // world mode, the LUT only in Nishita.
+    bool ensureAerialFroxelPipeline(const std::string& shaderDir);
+    bool m_aerialFroxelPipelineAttempted = false;
+    bool ensureCloudPipelines(const std::string& shaderDir);
+    bool syncCloudResources();
+    bool m_cloudPipelineAttempted = false;
+    atmosphere::CloudState m_cachedClouds;
+    float m_cloudTime = 0.0f;
+    Vec3 m_cloudDrift = Vec3(0.0f, 0.0f, 0.0f);
+    Vec3 m_cloudWind = Vec3(0.0f, 0.0f, 0.0f);
+    bool m_cloudStateSet = false;
+    uint64_t m_cloudStateUpdates = 0;
+    bool m_cloudRtRendering = false;   // last render flag published to the RT params
+    // RayFusion cloud layer bookkeeping (recordCloudRasterPass).
+    bool m_cloudRasterWritten = false;     // sky pass reads binding 25 this frame
+    bool m_cloudShadowBound = false;       // material-preview bindings 26/27 written
+    VkDescriptorSet m_cloudBoundPreviewSet = VK_NULL_HANDLE;   // set that holds 25-27
+    bool m_cloudRasterHistoryValid = false;
+    uint64_t m_cloudRasterKey = 0;
+    uint32_t m_cloudRasterFrame = 0;
+    Backend::CloudRasterFrameGPU m_cloudRasterPrev{};
+    Vec3 m_cloudRasterPrevDrift = Vec3(0.0f, 0.0f, 0.0f);
+public:
+    void recordCloudRasterPass(VkCommandBuffer cmd, uint32_t width, uint32_t height);
+    bool cloudRasterWritten() const { return m_cloudRasterWritten; }
+protected:
+    uint64_t m_aerialFroxelInputHash = 0;    // inputs of the last scheduled build, 0 = none
+    bool m_aerialFroxelActive = false;       // last syncAerialFroxel() answer
+    int m_aerialFroxelFlagUploaded = -1;     // aerialFroxelReady in the last world upload
 
     // Material preview binding 5 (sahne isiklari) + binding 6 (onizleme sahne
     // globalleri).
@@ -2338,7 +2499,6 @@ protected:
         // interactive viewport to redraw immediately instead of waiting for
         // camera motion or a material re-selection.
         m_currentSamples = 0;
-        m_hasPresentedRenderedFrame = false;
         m_interactiveViewport.dirty = true;
         m_forceClearOnNextPresent = true;
     }
@@ -2399,6 +2559,9 @@ protected:
         VkDescriptorSetLayout postDescLayout = VK_NULL_HANDLE;
         VkDescriptorPool postDescPool = VK_NULL_HANDLE;
         VkDescriptorSet postDescSet = VK_NULL_HANDLE;
+        // Binding 3 holds the aerial froxel atlas (not the placeholder): the
+        // post pass may read it. Set only by updateRasterPostDescriptors.
+        bool postFroxelBound = false;
         // ── TAA (raster_taa.comp) ───────────────────────────────────────────
         // ★★★★★ Iki gecmis goruntusu, ping-pong. Tek bir goruntuye hem okuyup
         //   hem yazmak, komsuluk kutusunu okurken baska bir is parcaciginin
@@ -3435,8 +3598,6 @@ private:
     bool  m_hasPrevView = false;
     // When true, clear the UI framebuffer/texture on next renderProgressive call
     bool m_forceClearOnNextPresent = false;
-    // Tracks whether Rendered mode has produced at least one valid host-visible frame.
-    bool m_hasPresentedRenderedFrame = false;
     // [PERF] True after resetAccumulation() already cleared GPU images — skip redundant
     // frame-0 clears in renderProgressiveImpl to avoid double work.
     bool m_imagesCleared = false;

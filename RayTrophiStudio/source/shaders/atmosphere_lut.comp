@@ -8,14 +8,8 @@ layout(binding = 0, rgba32f) uniform image2D transmittanceLUT;
 layout(binding = 1, rgba32f) uniform writeonly image2D skyviewLUT;
 layout(binding = 2, rgba32f) uniform writeonly image2D multiScatterLUT;
 
-layout(std430, binding = 3) readonly buffer AtmosphereParams {
-    vec4 sunDir_intensity;
-    vec4 density_intensity;
-    vec4 physical;
-    vec4 weather;
-    vec4 rayleigh;
-    vec4 mie;
-} params;
+#define ATMOSPHERE_PARAMS_BINDING 3
+#include "atmosphere_common.glsl"
 
 layout(push_constant) uniform PushConstants {
     uint phase;
@@ -24,46 +18,11 @@ layout(push_constant) uniform PushConstants {
     uint pad;
 } pc;
 
-const float PI = 3.14159265359;
-const float INV_PI = 0.31830988618;
-
-float saturate(float x) { return clamp(x, 0.0, 1.0); }
-vec3 saturate(vec3 x) { return clamp(x, vec3(0.0), vec3(1.0)); }
-
-float phaseRayleigh(float cosTheta) {
-    return 3.0 / (16.0 * PI) * (1.0 + cosTheta * cosTheta);
-}
-
-float phaseMie(float cosTheta) {
-    float g = clamp(params.physical.w, -0.95, 0.95);
-    float g2 = g * g;
-    float d = max(1.0 + g2 - 2.0 * g * cosTheta, 0.001);
-    return (1.0 - g2) / (4.0 * PI * pow(d, 1.5));
-}
-
-float raySphereExitDistance(vec3 pos, vec3 dir, float radius) {
-    float b = 2.0 * dot(pos, dir);
-    float c = dot(pos, pos) - radius * radius;
-    float delta = b * b - 4.0 * c;
-    if (delta < 0.0) return -1.0;
-    return (-b + sqrt(delta)) * 0.5;
-}
-
-float temperatureScale() {
-    return max((params.weather.y + 273.15) / 288.15, 0.1);
-}
-
-vec3 ozoneExtinction() {
-    return vec3(0.000000650, 0.000001881, 0.000000085)
-         * max(params.density_intensity.z, 0.0)
-         * max(params.weather.z, 0.0);
-}
-
 vec3 computeTransmittanceInternal(vec3 pos, vec3 dir) {
-    float Rg = max(params.physical.x, 1000.0);
-    float Rt = Rg + max(params.physical.y, 1000.0);
-    float rH = max(params.rayleigh.w * temperatureScale(), 1.0);
-    float mH = max(params.mie.w * temperatureScale(), 1.0);
+    float Rg = atmoPlanetRadius();
+    float Rt = atmoTopRadius();
+    float rH = rayleighScaleHeight();
+    float mH = mieScaleHeight();
     float dist = raySphereExitDistance(pos, dir, Rt);
     if (dist <= 0.0) return vec3(1.0);
 
@@ -78,18 +37,14 @@ vec3 computeTransmittanceInternal(vec3 pos, vec3 dir) {
     }
 
     vec3 tau = max(params.rayleigh.xyz, vec3(0.0)) * max(params.density_intensity.x, 0.0) * oDR
-             + max(params.mie.xyz, vec3(0.0)) * max(params.density_intensity.y, 0.0) * 1.1 * oDM
+             + max(params.mie.xyz, vec3(0.0)) * max(params.density_intensity.y, 0.0) * mieHumidityScale() * 1.1 * oDM
              + ozoneExtinction() * oDR;
     return exp(-tau);
 }
 
 vec3 sampleComputedTransmittance(vec3 pos, vec3 dir) {
-    float Rg = max(params.physical.x, 1000.0);
-    float atmosphereHeight = max(params.physical.y, 1000.0);
-    vec3 up = normalize(pos);
-    float cosTheta = clamp(dot(up, normalize(dir)), -0.2, 1.0);
-    vec2 uv = vec2((cosTheta + 0.2) / 1.2,
-                   clamp((length(pos) - Rg) / atmosphereHeight, 0.0, 1.0));
+    vec2 uv = transmittanceLutUV(dot(normalize(pos), normalize(dir)),
+                                 length(pos) - atmoPlanetRadius());
     ivec2 size = imageSize(transmittanceLUT);
     vec2 texel = uv * vec2(size - ivec2(1));
     ivec2 p0 = ivec2(floor(texel));
@@ -103,14 +58,10 @@ vec3 sampleComputedTransmittance(vec3 pos, vec3 dir) {
 }
 
 vec3 skyRadiance(vec3 dir) {
-    float Rg = max(params.physical.x, 1000.0);
-    float Rt = Rg + max(params.physical.y, 1000.0);
-    float rH = max(params.rayleigh.w * temperatureScale(), 1.0);
-    float mH = max(params.mie.w * temperatureScale(), 1.0);
-    vec3 sunDir = params.sunDir_intensity.xyz;
-    float sunLen = length(sunDir);
-    sunDir = (sunLen > 0.001) ? sunDir / sunLen : vec3(0.0, 1.0, 0.0);
-    vec3 camPos = vec3(0.0, Rg + max(params.physical.z, 0.0), 0.0);
+    float Rg = atmoPlanetRadius();
+    float Rt = atmoTopRadius();
+    vec3 sunDir = atmoSunDirection();
+    vec3 camPos = vec3(0.0, Rg + atmoAltitudeOffset(), 0.0);
     float dist = raySphereExitDistance(camPos, dir, Rt);
     if (dist <= 0.0) return vec3(0.0);
 
@@ -123,18 +74,16 @@ vec3 skyRadiance(vec3 dir) {
     for (int i = 0; i < SKY_VIEW_STEPS; ++i) {
         vec3 p = camPos + dir * (stepSize * (float(i) + 0.5));
         float h = max(length(p) - Rg, 0.0);
-        float hr = exp(-h / rH);
-        float hm = exp(-h / mH);
         vec3 transSun = sampleComputedTransmittance(p, sunDir);
-        vec3 scatR = max(params.rayleigh.xyz, vec3(0.0)) * max(params.density_intensity.x, 0.0) * hr;
-        vec3 scatM = max(params.mie.xyz, vec3(0.0)) * max(params.density_intensity.y, 0.0) * hm;
+        vec3 scatR = atmoRayleighScattering(h);
+        vec3 scatM = atmoMieScattering(h);
         float mu = dot(dir, sunDir);
         vec3 inScat = scatR * phaseRayleigh(mu) + scatM * min(phaseMie(mu), 2.0);
         vec3 currentTrans = exp(-opticalDepth);
         radiance += inScat * transSun * stepSize * currentTrans;
         opticalDepth += (scatR + scatM) * stepSize;
     }
-    return min(max(radiance * max(params.density_intensity.w, 0.0), vec3(0.0)), vec3(128.0));
+    return min(max(radiance * atmoIntensity(), vec3(0.0)), vec3(128.0));
 }
 
 void writeTransmittance(ivec2 p, vec2 uv) {

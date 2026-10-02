@@ -8,8 +8,9 @@ layout(push_constant) uniform PC {
     float gravity_x; float gravity_y; float gravity_z;
     float container_velocity_x; float container_velocity_y; float container_velocity_z;
     float max_velocity;
-    uint force_count; float time_seconds; uint system_mask; uint pad0;
-    uint align_pad0; uint align_pad1; uint align_pad2;
+    uint force_count; float time_seconds; uint system_mask;
+    // Climate wind as one more surface-drag source (Faz 2); zero target = off.
+    float atmo_target_x; float atmo_target_z; float atmo_depth; float atmo_coupling;
     vec4 grid_origin;
     int column_nx; int column_nz; float voxel_size; uint pad1;
 } pc;
@@ -49,6 +50,15 @@ void main(){
                     (f.strength*f.fluid_curl_detail);
             vec3 rel=target*(w*fall)-v;rel.y=0.0;
             a+=rel*(f.fluid_drag_coupling*w*fall);
+        }
+        vec3 at=vec3(pc.atmo_target_x,0.0,pc.atmo_target_z);
+        if(dot(at,at)>1e-10){
+            float depth=surface-p.y;
+            float w=1.0-clamp(depth/max(pc.atmo_depth,1e-4),0.0,1.0);
+            if(w>0.0){
+                vec3 rel=at*w-v;rel.y=0.0;
+                a+=rel*(pc.atmo_coupling*w);
+            }
         }
     }
     v+=a*pc.dt;

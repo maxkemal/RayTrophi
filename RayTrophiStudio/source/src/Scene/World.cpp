@@ -123,11 +123,13 @@ World::World() {
     // ═══════════════════════════════════════════════════════════
     data.nishita.fog_enabled = 0;                // Disabled by default
     data.nishita.fog_density = 0.0001f;         // Light fog, extinction per metre
-    data.nishita.fog_height = 500.0f;            // Fog concentrated below 500m
-    data.nishita.fog_falloff = 0.003f;           // Gradual falloff
+    data.nishita.fog_height = 500.0f;            // Uniform layer up to 500 m
+    data.nishita.fog_falloff = 0.003f;           // Gradual thinning above it
     data.nishita.fog_distance = 10000.0f;        // 10km max distance
-    data.nishita.fog_color = make_float3(0.7f, 0.8f, 0.9f);  // Bluish-white
-    data.nishita.fog_sun_scatter = 0.5f;         // Medium sun scattering
+    // Water droplets barely absorb; the blue/grey tint comes from the sky
+    // that lights the fog, not from the albedo.
+    data.nishita.fog_albedo = make_float3(0.95f, 0.95f, 0.95f);
+    data.nishita.fog_anisotropy = 0.6f;          // Forward-scattering droplets
     
     // ═══════════════════════════════════════════════════════════
     // VOLUMETRIC LIGHT RAYS (GOD RAYS) DEFAULTS
@@ -140,9 +142,6 @@ World::World() {
     data.advanced.multi_scatter_enabled = 1;
     data.advanced.multi_scatter_factor = 0.3f;
     data.advanced.aerial_perspective = 1;
-    data.advanced.aerial_density = 1.0f;
-    data.advanced.aerial_min_distance = 1000.0f;   // Preserve nearby subjects/volumes
-    data.advanced.aerial_max_distance = 10000.0f;  // Full landscape haze at 10km
     data.advanced.env_overlay_enabled = 0;
     data.advanced.env_overlay_intensity = 1.0f;
     data.advanced.env_overlay_rotation = 0.0f;
@@ -152,8 +151,6 @@ World::World() {
     data.weather.type = WEATHER_NONE;
     data.weather.intensity = 0.0f;
     data.weather.density = 0.0f;
-    data.weather.wind_direction = make_float3(1.0f, 0.0f, 0.0f);
-    data.weather.wind_speed = 0.0f;
     data.weather.precipitation_scale = 1.0f;
     data.weather.visibility = 1.0f;
     data.weather.surface_wetness_output = 0.0f;
@@ -164,8 +161,8 @@ World::World() {
     data.weather.surface_response_enabled = 1;
 
     // Physical Defaults
-    data.nishita.humidity = 0.1f;
-    data.nishita.temperature = 15.0f;
+    climate = atmosphere::ClimateState{};
+    syncClimatePacket();
     data.nishita.ozone_absorption_scale = 1.0f;
     data.nishita.godrays_samples = 16;           // Balanced quality
     data.nishita.godrays_samples = 16;           // Balanced quality
@@ -278,12 +275,17 @@ void World::setNishitaParams(const NishitaSkyParams& params) {
     const NishitaSkyParams previous = data.nishita;
     
     data.nishita = params;
-    
+    // `params` is usually a copy taken earlier; its climate packet may be
+    // stale. The climate authority wins, always.
+    syncClimatePacket();
+
     // Restore the texture handle
     if (savedTex != 0) {
         data.advanced.env_overlay_tex = savedTex;
     }
 
+    // Temperature/humidity are NOT compared here: they belong to the climate
+    // and setClimate() dirties the LUT for them.
     const bool lutRelevantChanged =
         previous.atmosphere_intensity != params.atmosphere_intensity ||
         previous.sun_elevation != params.sun_elevation ||
@@ -294,8 +296,6 @@ void World::setNishitaParams(const NishitaSkyParams& params) {
         previous.air_density != params.air_density ||
         previous.dust_density != params.dust_density ||
         previous.ozone_density != params.ozone_density ||
-        previous.humidity != params.humidity ||
-        previous.temperature != params.temperature ||
         previous.ozone_absorption_scale != params.ozone_absorption_scale ||
         previous.altitude != params.altitude ||
         previous.mie_anisotropy != params.mie_anisotropy ||
@@ -740,11 +740,13 @@ void World::reset() {
         cosf(elevRad) * cosf(azimRad)
     ));
     
-    defaults.humidity = 0.1f;
-    defaults.temperature = 15.0f;
     defaults.ozone_absorption_scale = 1.0f;
-    
+
     data.nishita = defaults;
+    climate = atmosphere::ClimateState{};
+    clouds = atmosphere::CloudState{};
+    cloud_time_seconds = 0.0f;
+    ++cloud_revision;
 
     // Clear the Nishita env-overlay HDR — without this it survived reset() and
     // leaked into the next project (and showed even with the overlay disabled,
@@ -764,13 +766,12 @@ void World::reset() {
     data.weather.type = WEATHER_NONE;
     data.weather.intensity = 0.0f;
     data.weather.density = 0.0f;
-    data.weather.wind_direction = make_float3(1.0f, 0.0f, 0.0f);
-    data.weather.wind_speed = 0.0f;
     data.weather.precipitation_scale = 1.0f;
     data.weather.visibility = 1.0f;
     data.weather.surface_wetness_output = 0.0f;
     data.weather.surface_accumulation_output = 0.0f;
-    
+    syncClimatePacket();
+
     // Defer the LUT re-bake instead of precomputing synchronously: reset() runs inside
     // newProject/openProject where a ~1.6s CPU sky bake blocked every project transition —
     // even loads that immediately overwrite these defaults (deserialize) or never render
@@ -795,6 +796,119 @@ WeatherParams World::getWeatherParams() const {
 
 void World::setWeatherParams(const WeatherParams& params) {
     data.weather = params;
+    // Same stale-copy hazard as setNishitaParams: the wind is climate-owned.
+    syncClimatePacket();
+}
+
+void World::syncClimatePacket() {
+    data.nishita.derived_temperature_c = climate.surface_temperature_k - atmosphere::kKelvinOffset;
+    data.nishita.derived_relative_humidity = climate.surface_relative_humidity;
+    data.weather.derived_wind_direction = make_float3(climate.wind_direction.x,
+                                                      climate.wind_direction.y,
+                                                      climate.wind_direction.z);
+    data.weather.derived_wind_speed_mps = climate.wind_speed_mps;
+    // The physics side's copy (Faz 2). Here because every climate AND altitude
+    // write already lands in this function -- one publish site, no lag.
+    atmosphere::publishAmbient(climate, data.nishita.altitude);
+    // Wind drives the cloud drift, and every stale-copy site that needs the
+    // climate packet re-synced needs the cloud packet too. Every climate and
+    // altitude write lands here, so the derived cloud layer follows them too.
+    rederiveClouds();
+    syncCloudPacket();
+}
+
+// Layer 0 from the climate (ATMOSPHERE_WEATHER.md §2). Other enabled layers
+// that would overlap it are switched off (validateClouds forbids overlap).
+// Returns true when anything changed.
+bool World::rederiveClouds() {
+    if (!clouds.derive_from_climate) return false;
+    const atmosphere::DerivedWeather w = atmosphere::deriveWeather(climate, data.nishita.altitude);
+    atmosphere::CloudState c = clouds;
+    atmosphere::CloudLayer& l0 = c.layers[0];
+    l0.enabled = w.cloud_coverage > 0.01f;
+    l0.base_altitude_m = w.cloud_base_m;
+    l0.thickness_m = w.cloud_thickness_m;
+    l0.type = w.cloud_type;
+    l0.coverage = w.cloud_coverage;
+    // Dry sub-cloud air evaporates the shaft before the ground (virga).
+    const float rh = climate.surface_relative_humidity;
+    const float wet = std::min(1.0f, std::max(0.0f, (rh - 0.45f) / 0.35f));
+    c.precipitation.rate_mm_h = w.precipitation_mm_h;
+    c.precipitation.snow = w.snow;
+    c.precipitation.ground_fraction = 0.3f + 0.7f * wet * wet * (3.0f - 2.0f * wet);
+    for (int i = 1; i < atmosphere::kMaxCloudLayers; ++i) {
+        atmosphere::CloudLayer& l = c.layers[i];
+        if (l.enabled && l0.enabled &&
+            l.base_altitude_m < l0.base_altitude_m + l0.thickness_m &&
+            l0.base_altitude_m < l.base_altitude_m + l.thickness_m)
+            l.enabled = false;
+    }
+    const atmosphere::CloudLayer& o = clouds.layers[0];
+    bool changed = o.enabled != l0.enabled || o.base_altitude_m != l0.base_altitude_m ||
+                   o.thickness_m != l0.thickness_m || o.type != l0.type || o.coverage != l0.coverage ||
+                   clouds.precipitation.rate_mm_h != c.precipitation.rate_mm_h ||
+                   clouds.precipitation.snow != c.precipitation.snow ||
+                   clouds.precipitation.ground_fraction != c.precipitation.ground_fraction;
+    for (int i = 1; i < atmosphere::kMaxCloudLayers; ++i)
+        changed = changed || clouds.layers[i].enabled != c.layers[i].enabled;
+    if (!changed) return false;
+    clouds = c;
+    ++cloud_revision;
+    return true;
+}
+
+void World::syncCloudPacket() {
+    const Vec3 drift = cloudWindOffset();
+    atmosphere::cloudsToLegacyPacket(clouds, drift.x, drift.z, data.nishita);
+}
+
+Vec3 World::cloudWindOffset() const {
+    const Vec3 wind = climate.wind_direction * climate.wind_speed_mps;
+    return Vec3(wind.x * cloud_time_seconds, 0.0f, wind.z * cloud_time_seconds);
+}
+
+bool World::setClouds(const atmosphere::CloudState& c, std::string* error) {
+    if (!atmosphere::validateClouds(c, error)) return false;
+    // Unchanged -> no revision bump: a held cloud key re-applied every frame
+    // must not reset accumulation every frame. Compared through the JSON
+    // form (field-exact, no struct padding in the comparison).
+    nlohmann::json before, after;
+    atmosphere::cloudsToJson(clouds, before);
+    atmosphere::cloudsToJson(c, after);
+    if (before == after) return true;
+    clouds = c;
+    ++cloud_revision;
+    rederiveClouds();   // a derived layer 0 stays derived whatever the edit
+    syncCloudPacket();
+    return true;
+}
+
+void World::setCloudTime(float seconds) {
+    if (!std::isfinite(seconds) || seconds == cloud_time_seconds) return;
+    cloud_time_seconds = seconds;
+    ++cloud_revision;
+    syncCloudPacket();
+}
+
+bool World::setClimate(const atmosphere::ClimateState& c, std::string* error) {
+    if (!atmosphere::validateClimate(c, error)) return false;
+    atmosphere::ClimateState next = c;
+    atmosphere::normalizeWindDirection(next);
+
+    // Both feed the sky LUT: temperature scales the scale heights, humidity
+    // grows the aerosol (Mie) extinction.
+    const bool lutRelevantChanged =
+        next.surface_temperature_k != climate.surface_temperature_k ||
+        next.surface_relative_humidity != climate.surface_relative_humidity;
+
+    climate = next;
+    syncClimatePacket();
+    if (lutRelevantChanged) lut_dirty = true;
+    return true;
+}
+
+atmosphere::ClimateSample World::sampleClimate(const Vec3& scene_pos) const {
+    return atmosphere::sampleClimate(climate, scene_pos.y + data.nishita.altitude);
 }
 
 // Serialization
@@ -836,55 +950,17 @@ void World::serialize(nlohmann::json& j) const {
     n["fog_height"] = data.nishita.fog_height;
     n["fog_falloff"] = data.nishita.fog_falloff;
     n["fog_distance"] = data.nishita.fog_distance;
-    n["fog_color"] = { data.nishita.fog_color.x, data.nishita.fog_color.y, data.nishita.fog_color.z };
-    n["fog_sun_scatter"] = data.nishita.fog_sun_scatter;
+    n["fog_albedo"] = { data.nishita.fog_albedo.x, data.nishita.fog_albedo.y, data.nishita.fog_albedo.z };
+    n["fog_anisotropy"] = data.nishita.fog_anisotropy;
     
     n["godrays_enabled"] = data.nishita.godrays_enabled;
     n["godrays_intensity"] = data.nishita.godrays_intensity;
     n["godrays_density"] = data.nishita.godrays_density;
     n["godrays_samples"] = data.nishita.godrays_samples;
-    n["godrays_samples"] = data.nishita.godrays_samples;
-    n["humidity"] = data.nishita.humidity;
-    n["temperature"] = data.nishita.temperature;
     n["ozone_absorption_scale"] = data.nishita.ozone_absorption_scale;
     
-    // Cloud Layer 1
-    n["clouds_enabled"] = data.nishita.clouds_enabled;
-    n["cloud_coverage"] = data.nishita.cloud_coverage;
-    n["cloud_density"] = data.nishita.cloud_density;
-    n["cloud_scale"] = data.nishita.cloud_scale;
-    n["cloud_height_min"] = data.nishita.cloud_height_min;
-    n["cloud_height_max"] = data.nishita.cloud_height_max;
-    n["cloud_offset_x"] = data.nishita.cloud_offset_x;
-    n["cloud_offset_z"] = data.nishita.cloud_offset_z;
-    n["cloud_seed"] = data.nishita.cloud_seed;
-    n["cloud_quality"] = data.nishita.cloud_quality;
-    n["cloud_detail"] = data.nishita.cloud_detail;
-    n["cloud_base_steps"] = data.nishita.cloud_base_steps;
-    
-    // Cloud Layer 2
-    n["cloud_layer2_enabled"] = data.nishita.cloud_layer2_enabled;
-    n["cloud2_coverage"] = data.nishita.cloud2_coverage;
-    n["cloud2_density"] = data.nishita.cloud2_density;
-    n["cloud2_scale"] = data.nishita.cloud2_scale;
-    n["cloud2_height_min"] = data.nishita.cloud2_height_min;
-    n["cloud2_height_max"] = data.nishita.cloud2_height_max;
-    
-    // Cloud Lighting
-    n["cloud_light_steps"] = data.nishita.cloud_light_steps;
-    n["cloud_shadow_strength"] = data.nishita.cloud_shadow_strength;
-    n["cloud_ambient_strength"] = data.nishita.cloud_ambient_strength;
-    n["cloud_silver_intensity"] = data.nishita.cloud_silver_intensity;
-    n["cloud_absorption"] = data.nishita.cloud_absorption;
-    
-    // Cloud Advanced Scattering
-    n["cloud_anisotropy"] = data.nishita.cloud_anisotropy;
-    n["cloud_anisotropy_back"] = data.nishita.cloud_anisotropy_back;
-    n["cloud_lobe_mix"] = data.nishita.cloud_lobe_mix;
-    
-    // Cloud Emissive
-    n["cloud_emissive_intensity"] = data.nishita.cloud_emissive_intensity;
-    n["cloud_emissive_color"] = { data.nishita.cloud_emissive_color.x, data.nishita.cloud_emissive_color.y, data.nishita.cloud_emissive_color.z };
+    // Clouds: atmosphere.clouds (CloudState). The nishita.cloud_* fields are
+    // a packet written from it and are not persisted.
     
     // Physical Constants
     n["planet_radius"] = data.nishita.planet_radius;
@@ -900,9 +976,6 @@ void World::serialize(nlohmann::json& j) const {
     adv["multi_scatter_enabled"] = data.advanced.multi_scatter_enabled;
     adv["multi_scatter_factor"] = data.advanced.multi_scatter_factor;
     adv["aerial_perspective"] = data.advanced.aerial_perspective;
-    adv["aerial_density"] = data.advanced.aerial_density;
-    adv["aerial_min_distance"] = data.advanced.aerial_min_distance;
-    adv["aerial_max_distance"] = data.advanced.aerial_max_distance;
     
     adv["env_overlay_path"] = env_overlay_path;
     adv["env_overlay_enabled"] = data.advanced.env_overlay_enabled;
@@ -916,8 +989,6 @@ void World::serialize(nlohmann::json& j) const {
     weather["type"] = data.weather.type;
     weather["intensity"] = data.weather.intensity;
     weather["density"] = data.weather.density;
-    weather["wind_direction"] = { data.weather.wind_direction.x, data.weather.wind_direction.y, data.weather.wind_direction.z };
-    weather["wind_speed"] = data.weather.wind_speed;
     weather["precipitation_scale"] = data.weather.precipitation_scale;
     weather["visibility"] = data.weather.visibility;
     weather["surface_wetness_output"] = data.weather.surface_wetness_output;
@@ -927,10 +998,30 @@ void World::serialize(nlohmann::json& j) const {
     weather["visual_mode"] = data.weather.visual_mode;
     weather["surface_response_enabled"] = data.weather.surface_response_enabled;
     j["weather"] = weather;
+
+    // Climate authority. Replaces nishita.humidity/temperature and
+    // weather.wind_*; those old keys are NOT read (units changed: C -> K).
+    nlohmann::json atmo;
+    atmosphere::climateToJson(climate, atmo["climate"]);
+    atmosphere::cloudsToJson(clouds, atmo["clouds"]);
+    j["atmosphere"] = atmo;
 }
 
 void World::deserialize(const nlohmann::json& j) {
     if (j.contains("mode")) data.mode = j["mode"];
+
+    // Climate first: the Nishita block below bakes the LUT from the packet.
+    // Projects saved before the climate existed get defaults; their old
+    // nishita.humidity/temperature and weather.wind_* keys are deliberately
+    // ignored (no backward-compat path, and the temperature unit changed).
+    climate = atmosphere::ClimateState{};
+    if (j.contains("atmosphere") && j["atmosphere"].contains("climate")) {
+        std::string error;
+        if (!atmosphere::climateFromJson(j["atmosphere"]["climate"], climate, &error)) {
+            SCENE_LOG_WARN("[World] Invalid atmosphere.climate in project (" + error + ") - using defaults.");
+        }
+    }
+    syncClimatePacket();
     
     if (j.contains("color")) {
         auto c = j["color"];
@@ -973,64 +1064,24 @@ void World::deserialize(const nlohmann::json& j) {
         data.nishita.fog_height = n.value("fog_height", 500.0f);
         data.nishita.fog_falloff = n.value("fog_falloff", 0.003f);
         data.nishita.fog_distance = n.value("fog_distance", 10000.0f);
-        if (n.contains("fog_color")) {
-             auto fc = n["fog_color"];
-             data.nishita.fog_color = make_float3(fc[0], fc[1], fc[2]);
+        // fog_color/fog_sun_scatter (a flat colour mix) are NOT read: the fog
+        // is now a lit medium and those numbers meant something else.
+        if (n.contains("fog_albedo")) {
+             auto fa = n["fog_albedo"];
+             data.nishita.fog_albedo = make_float3(fa[0], fa[1], fa[2]);
         }
-        data.nishita.fog_sun_scatter = n.value("fog_sun_scatter", 0.5f);
+        data.nishita.fog_anisotropy = n.value("fog_anisotropy", 0.6f);
         
         data.nishita.godrays_enabled = n.value("godrays_enabled", 0);
         data.nishita.godrays_intensity = n.value("godrays_intensity", 0.5f);
         data.nishita.godrays_density = n.value("godrays_density", 0.1f);
         data.nishita.godrays_samples = n.value("godrays_samples", 16);
-        data.nishita.godrays_samples = n.value("godrays_samples", 16);
-        
-        // Physical params (Now back in nishita struct)
-        data.nishita.humidity = n.value("humidity", 0.1f);
-        data.nishita.temperature = n.value("temperature", 15.0f);
+
         data.nishita.ozone_absorption_scale = n.value("ozone_absorption_scale", 1.0f);
         // Multi-scatter and other advanced params are now handled in the 'advanced' block below
         
-        // Cloud Layer 1
-        data.nishita.clouds_enabled = n.value("clouds_enabled", 0);
-        data.nishita.cloud_coverage = n.value("cloud_coverage", 0.18f);
-        data.nishita.cloud_density = n.value("cloud_density", 0.35f);
-        data.nishita.cloud_scale = n.value("cloud_scale", 0.45f);
-        data.nishita.cloud_height_min = n.value("cloud_height_min", 2500.0f);
-        data.nishita.cloud_height_max = n.value("cloud_height_max", 4200.0f);
-        data.nishita.cloud_offset_x = n.value("cloud_offset_x", 0.0f);
-        data.nishita.cloud_offset_z = n.value("cloud_offset_z", 0.0f);
-        data.nishita.cloud_seed = n.value("cloud_seed", 0);
-        data.nishita.cloud_quality = n.value("cloud_quality", 1.0f);
-        data.nishita.cloud_detail = n.value("cloud_detail", 0.55f);
-        data.nishita.cloud_base_steps = n.value("cloud_base_steps", 8);
-        
-        // Cloud Layer 2
-        data.nishita.cloud_layer2_enabled = n.value("cloud_layer2_enabled", 0);
-        data.nishita.cloud2_coverage = n.value("cloud2_coverage", 0.16f);
-        data.nishita.cloud2_density = n.value("cloud2_density", 0.18f);
-        data.nishita.cloud2_scale = n.value("cloud2_scale", 0.25f);
-        data.nishita.cloud2_height_min = n.value("cloud2_height_min", 7000.0f);
-        data.nishita.cloud2_height_max = n.value("cloud2_height_max", 8500.0f);
-        
-        // Cloud Lighting
-        data.nishita.cloud_light_steps = n.value("cloud_light_steps", 0);
-        data.nishita.cloud_shadow_strength = n.value("cloud_shadow_strength", 0.35f);
-        data.nishita.cloud_ambient_strength = n.value("cloud_ambient_strength", 1.0f);
-        data.nishita.cloud_silver_intensity = n.value("cloud_silver_intensity", 0.25f);
-        data.nishita.cloud_absorption = n.value("cloud_absorption", 1.0f);
-        
-        // Cloud Advanced Scattering
-        data.nishita.cloud_anisotropy = n.value("cloud_anisotropy", 0.55f);
-        data.nishita.cloud_anisotropy_back = n.value("cloud_anisotropy_back", -0.2f);
-        data.nishita.cloud_lobe_mix = n.value("cloud_lobe_mix", 0.75f);
-        
-        // Cloud Emissive
-        data.nishita.cloud_emissive_intensity = n.value("cloud_emissive_intensity", 0.0f);
-        if (n.contains("cloud_emissive_color")) {
-            auto ec = n["cloud_emissive_color"];
-            data.nishita.cloud_emissive_color = make_float3(ec[0], ec[1], ec[2]);
-        }
+        // Old flat cloud_* keys are not read: syncCloudPacket overwrites the packet;
+        // they are no longer the authority.
 
         data.nishita.cloud_coverage = (std::max)(0.0f, (std::min)(0.6f, data.nishita.cloud_coverage));
         data.nishita.cloud_density = (std::max)(0.0f, (std::min)(1.5f, data.nishita.cloud_density));
@@ -1057,11 +1108,6 @@ void World::deserialize(const nlohmann::json& j) {
         // data.nishita.env_overlay_rotation = n.value("env_overlay_rotation", 0.0f); // Moved to advanced
         // data.nishita.env_overlay_blend_mode = n.value("env_overlay_blend_mode", 0); // Moved to advanced
         
-        // Advanced Physics - These are now handled by the 'advanced' block below
-        // data.nishita.humidity = n.value("humidity", 0.1f);
-        // data.nishita.temperature = n.value("temperature", 15.0f);
-        // data.nishita.ozone_absorption_scale = n.value("ozone_absorption_scale", 1.0f);
-        
         // Multi-scattering - These are now handled by the 'advanced' block below
         // data.nishita.multi_scatter_enabled = n.value("multi_scatter_enabled", 1);
         // data.nishita.multi_scatter_factor = n.value("multi_scatter_factor", 0.3f);
@@ -1071,9 +1117,6 @@ void World::deserialize(const nlohmann::json& j) {
             data.advanced.multi_scatter_enabled = a.value("multi_scatter_enabled", 1);
             data.advanced.multi_scatter_factor = a.value("multi_scatter_factor", 0.3f);
             data.advanced.aerial_perspective = a.value("aerial_perspective", 1);
-            data.advanced.aerial_density = a.value("aerial_density", 1.0f);
-            data.advanced.aerial_min_distance = a.value("aerial_min_distance", 1000.0f);
-            data.advanced.aerial_max_distance = a.value("aerial_max_distance", 10000.0f);
             
             // Env Overlay
             data.advanced.env_overlay_enabled = a.value("env_overlay_enabled", 0);
@@ -1121,11 +1164,6 @@ void World::deserialize(const nlohmann::json& j) {
         data.weather.type = w.value("type", WEATHER_NONE);
         data.weather.intensity = w.value("intensity", 0.0f);
         data.weather.density = w.value("density", 0.0f);
-        if (w.contains("wind_direction")) {
-            auto wd = w["wind_direction"];
-            data.weather.wind_direction = make_float3(wd[0], wd[1], wd[2]);
-        }
-        data.weather.wind_speed = w.value("wind_speed", 0.0f);
         data.weather.precipitation_scale = w.value("precipitation_scale", 1.0f);
         data.weather.visibility = w.value("visibility", 1.0f);
         data.weather.surface_wetness_output = w.value("surface_wetness_output", 0.0f);
@@ -1135,4 +1173,19 @@ void World::deserialize(const nlohmann::json& j) {
         data.weather.visual_mode = w.value("visual_mode", WEATHER_VISUAL_OVERLAY);
         data.weather.surface_response_enabled = w.value("surface_response_enabled", 1);
     }
+    // Clouds: the authority if saved, else defaults (layer 0 derived from the
+    // climate; the old flat nishita.cloud_* keys are not read).
+    clouds = atmosphere::CloudState{};
+    if (j.contains("atmosphere") && j["atmosphere"].contains("clouds")) {
+        std::string error;
+        if (!atmosphere::cloudsFromJson(j["atmosphere"]["clouds"], clouds, &error)) {
+            SCENE_LOG_WARN("[World] Invalid atmosphere.clouds in project (" + error + ") - clouds off.");
+        }
+    }
+    ++cloud_revision;
+
+    // Again, now that nishita.altitude (read above, after the first sync) and
+    // the weather block are final: the published ambient snapshot must not
+    // carry the pre-load altitude. Also writes the cloud packet.
+    syncClimatePacket();
 }

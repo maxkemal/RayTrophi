@@ -27,31 +27,32 @@ def _remove_collider(name):
 
 def add_burning_fuel_spill():
     """Create the proven finite oil-surface combustion reference setup."""
-    fluid_name = "Addon Burning Fuel Liquid"
-    gas_name = "Addon Burning Fuel Gas"
-    _remove_domain(fluid_name)
-    _remove_domain(gas_name)
+    domain_name = "Addon Burning Fuel Matter"
+    # Remove names produced by the former two-domain version as well.
+    _remove_domain("Addon Burning Fuel Liquid")
+    _remove_domain("Addon Burning Fuel Gas")
+    _remove_domain(domain_name)
 
     rt.fluid.create_domain(
-        fluid_name,
+        domain_name,
         domain_min=(-2.5, 0.0, -2.5),
-        domain_max=(2.5, 1.8, 2.5),
+        domain_max=(2.5, 5.0, 2.5),
         voxel_size=0.10,
-        type="fluid",
+        type="matter",
     )
     rt.fluid.set_param(
-        fluid_name, backend="vulkan", boundary="closed",
+        domain_name, backend="vulkan", boundary="closed",
         preset="oil", render_mode="surface",
     )
     rt.fluid.seed(
-        fluid_name,
+        domain_name,
         seed_min=(-1.8, 0.15, -1.8),
         seed_max=(1.8, 0.55, 1.8),
         particles_per_cell=6,
         replace=True,
     )
     rt.fluid.set_combustion(
-        fluid_name,
+        domain_name,
         enabled=True,
         auto_ignite=True,
         ignition_temperature=0.65,
@@ -62,17 +63,8 @@ def add_burning_fuel_spill():
         surface_cooling=0.30,
     )
 
-    rt.gas.create_domain(
-        gas_name,
-        domain_min=(-2.5, 0.0, -2.5),
-        domain_max=(2.5, 5.0, 2.5),
-        voxel_size=0.10,
-    )
-    rt.gas.set_param(
-        gas_name, backend="vulkan", boundary="open", render_mode="volume",
-    )
     rt.gas.set_settings(
-        gas_name,
+        domain_name,
         fire_enabled=True,
         ignition_temperature=0.30,
         burn_rate=1.35,

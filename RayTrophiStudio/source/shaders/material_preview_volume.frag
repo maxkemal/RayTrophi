@@ -314,15 +314,6 @@ void main(){
                 }
                 light+=rad*phaseDual(dot(rd,l),vi)*cachedShadows[li];
             }
-            if(pc.materialMeta.z==3u && worldMode==2u && worldSun.w>0.0){
-                vec3 l=normalize(worldSun.xyz);
-                if((s%stride)==0 || cachedShadows[8]<0.0){
-                    bool deep=(sceneFlags&1u)!=0u && deepMeta.z!=0u && shadowRecords[32].meta.x!=0u;
-                    cachedShadows[8]=rtPreviewShadow(32u,p,vec3(0),l,vec3(0),quality);
-                    if(!deep)cachedShadows[8]*=selfShadow(vi,p,l,1e30);
-                }
-                light+=vec3(1.0,0.95,0.86)*worldSun.w*phaseDual(dot(rd,l),vi)*cachedShadows[8];
-            }
             vec3 emis=emissionAt(vi,p,density);
             accum+=trans*(scatterWeight*light + oneMinusT*emis);
             trans*=sampleT;

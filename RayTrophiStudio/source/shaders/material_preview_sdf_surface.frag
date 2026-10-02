@@ -560,23 +560,8 @@ void main() {
         direct += (kd * diffuseAlbedo / PI + spec) * radiance * ndl * shadow;
     }
 
-    // Physical Sky's sun is not duplicated in the scene-light SSBO. It owns
-    // the reserved shadow record after the 32 scene-light slots.
-    if (pc.materialMeta.z == 3u && worldMode == 2u && worldSun.w > 0.0) {
-        vec3 l = normalize(worldSun.xyz);
-        float ndl = max(dot(n, l), 0.0);
-        if (ndl > 0.0) {
-            vec3 h = normalize(v + l);
-            vec3 f = fresnelSchlick(max(dot(v, h), 0.0), f0);
-            vec3 spec = distributionGGX(max(dot(n, h), 0.0), max(roughness, 0.035)) *
-                        geometrySmith(ndv, ndl, max(roughness, 0.035)) * f /
-                        max(4.0 * ndv * ndl, 1e-5);
-            vec3 kd = (vec3(1.0) - f) * (1.0 - metallic) * (1.0 - transmission);
-            float shadow = evaluateShadow(PREVIEW_MAX_LIGHTS, 1, vec3(0.0), p, n, l);
-            direct += (kd * diffuseAlbedo / PI + spec) *
-                      vec3(1.0, 0.95, 0.86) * worldSun.w * ndl * shadow;
-        }
-    }
+    // No Physical Sky sun term: direct sun is a directional scene light only
+    // (same rule as Vulkan RT and material_preview_frag).
 
     vec3 reflected = reflect(rd, n);
     vec3 refracted = refract(rd, n, 1.0 / ior);

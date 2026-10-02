@@ -566,15 +566,13 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 liquid.fluid_combustion_heat_release=2.4f;
                 liquid.fluid_combustion_smoke_yield=0.55f;
                 liquid.fluid_surface_cooling=0.30f;
-                rt->addGridDomain(liquid);
-
                 RayTrophiSim::SimulationGridDomainDesc gas;
-                gas.name="Burning Fuel Gas";
-                gas.type=RayTrophiSim::SimulationDomainType::Gas;
+                gas.name="Burning Fuel Matter";
+                gas.type=RayTrophiSim::SimulationDomainType::Matter;
                 gas.backend=
                     RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
                 gas.boundary_mode=
-                    RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
+                    RayTrophiSim::SimulationGridDomainBoundaryMode::Closed;
                 gas.bounds_min=Vec3(-2.5f,0.0f,-2.5f);
                 gas.bounds_max=Vec3(2.5f,5.0f,2.5f);
                 gas.voxel_size=0.10f;
@@ -595,6 +593,24 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 gas.turbulence_octaves=4;
                 gas.shader=VolumeShader::createFirePreset();
                 gas.shader->name="Burning Fuel Fire";
+                gas.fluid_fog_shader = gas.shader;
+                gas.shader = liquid.shader;
+                gas.fluid_params = liquid.fluid_params;
+                gas.fluid_render_mode = liquid.fluid_render_mode;
+                gas.fluid_seed_min = liquid.fluid_seed_min;
+                gas.fluid_seed_max = liquid.fluid_seed_max;
+                gas.fluid_seed_particles_per_cell = liquid.fluid_seed_particles_per_cell;
+                gas.fluid_replace_on_seed = liquid.fluid_replace_on_seed;
+                gas.fluid_reseed_on_reset = liquid.fluid_reseed_on_reset;
+                gas.fluid_pending_seed = liquid.fluid_pending_seed;
+                gas.fluid_flammable = liquid.fluid_flammable;
+                gas.fluid_auto_ignite = liquid.fluid_auto_ignite;
+                gas.fluid_ignition_temperature = liquid.fluid_ignition_temperature;
+                gas.fluid_evaporation_rate = liquid.fluid_evaporation_rate;
+                gas.fluid_surface_fuel_capacity = liquid.fluid_surface_fuel_capacity;
+                gas.fluid_combustion_heat_release = liquid.fluid_combustion_heat_release;
+                gas.fluid_combustion_smoke_yield = liquid.fluid_combustion_smoke_yield;
+                gas.fluid_surface_cooling = liquid.fluid_surface_cooling;
                 rt->addGridDomain(gas);
 
                 // The coupled domains provide the render geometry/volume.
@@ -614,7 +630,7 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
 
                 RayTrophiSim::SimulationGridDomainDesc liquid;
                 liquid.name = "Ignited Fuel Jet Liquid" + suffix;
-                liquid.type = RayTrophiSim::SimulationDomainType::Fluid;
+                liquid.type = RayTrophiSim::SimulationDomainType::Matter;
                 liquid.backend =
                     RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
                 liquid.boundary_mode =
@@ -662,17 +678,14 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 liquid.shader->absorption.color =
                     Vec3(0.10f, 0.42f, 0.92f);
                 liquid.shader->absorption.coefficient = 0.42f;
-                rt->addGridDomain(liquid);
-
-                const int gas_index =
-                    static_cast<int>(rt->gridDomains().size());
+                const int gas_index = liquid_index;
                 RayTrophiSim::SimulationGridDomainDesc gas;
-                gas.name = "Ignited Fuel Jet Gas" + suffix;
-                gas.type = RayTrophiSim::SimulationDomainType::Gas;
+                gas.name = "Ignited Fuel Jet Matter" + suffix;
+                gas.type = RayTrophiSim::SimulationDomainType::Matter;
                 gas.backend =
                     RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
                 gas.boundary_mode =
-                    RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
+                    RayTrophiSim::SimulationGridDomainBoundaryMode::Closed;
                 gas.bounds_min = Vec3(-1.0f, 0.0f, -2.0f);
                 gas.bounds_max = Vec3(7.0f, 5.5f, 2.0f);
                 gas.voxel_size = 0.10f;
@@ -712,11 +725,33 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 gas.shader->emission.blackbody_intensity = 5.8f;
                 gas.shader->emission.temperature_min = 720.0f;
                 gas.shader->emission.temperature_max = 1850.0f;
+                gas.fluid_fog_shader = gas.shader;
+                gas.shader = liquid.shader;
+                gas.fluid_params = liquid.fluid_params;
+                gas.fluid_max_particles = liquid.fluid_max_particles;
+                gas.fluid_render_mode = liquid.fluid_render_mode;
+                gas.fluid_pending_seed = liquid.fluid_pending_seed;
+                gas.fluid_reseed_on_reset = liquid.fluid_reseed_on_reset;
+                gas.fluid_replace_on_seed = liquid.fluid_replace_on_seed;
+                gas.fluid_surface_ior = liquid.fluid_surface_ior;
+                gas.fluid_surface_roughness = liquid.fluid_surface_roughness;
+                gas.fluid_surface_foam = liquid.fluid_surface_foam;
+                gas.fluid_foam_params = liquid.fluid_foam_params;
+                gas.fluid_flammable = liquid.fluid_flammable;
+                gas.fluid_auto_ignite = liquid.fluid_auto_ignite;
+                gas.fluid_ignition_temperature = liquid.fluid_ignition_temperature;
+                gas.fluid_evaporation_rate = liquid.fluid_evaporation_rate;
+                gas.fluid_surface_fuel_capacity = liquid.fluid_surface_fuel_capacity;
+                gas.fluid_combustion_heat_release = liquid.fluid_combustion_heat_release;
+                gas.fluid_combustion_smoke_yield = liquid.fluid_combustion_smoke_yield;
+                gas.fluid_surface_cooling = liquid.fluid_surface_cooling;
                 rt->addGridDomain(gas);
 
                 RayTrophiSim::SimulationFlowSourceDesc liquid_jet;
                 liquid_jet.name = "Fuel Nozzle" + suffix;
                 liquid_jet.domain_index = liquid_index;
+                liquid_jet.phase =
+                    RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid;
                 liquid_jet.source_mode =
                     RayTrophiSim::SimulationFlowSourceMode::Point;
                 liquid_jet.position = Vec3(0.0f, 1.45f, 0.0f);
@@ -737,6 +772,7 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 RayTrophiSim::SimulationFlowSourceDesc pilot;
                 pilot.name = "Fuel Jet Pilot" + suffix;
                 pilot.domain_index = gas_index;
+                pilot.phase = RayTrophiSim::SimulationFlowSourceDesc::Phase::Gas;
                 pilot.position = Vec3(1.35f, 0.28f, 0.0f);
                 // Cover the nozzle/floor contact band.  A narrow pilot could
                 // heat a gas cell beside the exposed liquid surface while

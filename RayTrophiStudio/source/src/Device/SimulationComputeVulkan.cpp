@@ -958,6 +958,9 @@ private:
             { "sim_fluid_p2g_normalize",            "sim_fluid_p2g_normalize.spv",         5, 36 },
             { "sim_fluid_density_clear",            "sim_fluid_density_clear.spv",         1, 36 },
             { "sim_fluid_density_splat",            "sim_fluid_density_splat.spv",         2, 36 },
+            { "sim_fluid_label_bin_clear",          "sim_fluid_label_bin_clear.spv",       2, 80 },
+            { "sim_fluid_label_bin_scatter",        "sim_fluid_label_bin_scatter.spv",     5, 80 },
+            { "sim_fluid_label_classify",           "sim_fluid_label_classify.spv",        6, 80 },
             // Whitewater spawn potentials. The bucket-grid bin replaces the serial
             // CSR bin on the host; only INTEGER atomics are used, so these do not
             // depend on the shaderAtomicFloat support the P2G/splat pair needs.
@@ -983,7 +986,7 @@ private:
             { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 15, 64 },
             { "sim_fluid_granular_stress_p2g",      "sim_fluid_granular_stress_p2g.spv",    4, 48 },
             { "sim_fluid_granular_settle",          "sim_fluid_granular_settle.spv",        3, 32 },
-            { "sim_fluid_advect_tail",              "sim_fluid_advect_tail.spv",           9, 64 },
+            { "sim_fluid_advect_tail",              "sim_fluid_advect_tail.spv",           9, 80 },
             { "sim_fluid_surface_combustion",       "sim_fluid_surface_combustion.spv",    9, 96 },
             // GridProjectionGpuConstants = 13 fields x 4 = 52. The shaders may
             // declare only the leading fields; the pipeline range must cover the
@@ -1057,7 +1060,7 @@ private:
             { "sim_gas_force_gather",               "sim_gas_force_gather.spv",             6, 48 },
             // Device-resident ballistic particles (particle roadmap Phase 1.5 B).
             // ParticleBallisticGpuConstants = 40 B, ParticleSpawnGpuConstants = 16 B.
-            { "sim_particle_ballistic",              "sim_particle_ballistic.spv",           10, 40 },
+            { "sim_particle_ballistic",              "sim_particle_ballistic.spv",           10, 56 },
             { "sim_particle_spawn",                  "sim_particle_spawn.spv",               12, 16 },
             { "sim_gas_combustion",                 "sim_gas_combustion.spv",               4, 40 },
             // VelocityMaxAbsGpuConstants = 4 uints = 16

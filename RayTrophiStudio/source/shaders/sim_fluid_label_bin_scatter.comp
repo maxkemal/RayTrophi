@@ -1,0 +1,28 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC {
+    ivec4 bin_dim_count; ivec4 bin_min_cap;
+    int bin_count; float radius; uint label_mask; uint label_shift;
+    uint frozen_mask; uint body_label; uint spray_label; uint frozen_label;
+    float mist_mass_fraction; uint mist_label; uvec2 padding;
+} pc;
+layout(set=0,binding=0) readonly buffer Positions { float positions[]; };
+layout(set=0,binding=1) buffer Counts { uint counts[]; };
+layout(set=0,binding=2) buffer Items { uint items[]; };
+layout(set=0,binding=3) buffer Stats { uint stats[]; };
+layout(set=0,binding=4) readonly buffer MassFraction { float mass_fraction[]; };
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= uint(pc.bin_dim_count.w) || !(pc.radius > 0.0)) return;
+    float mass = mass_fraction[id];
+    if (mass > 0.0 && mass <= pc.mist_mass_fraction) return;
+    vec3 p = vec3(positions[id*3u], positions[id*3u+1u], positions[id*3u+2u]);
+    if (any(isnan(p)) || any(isinf(p))) return;
+    ivec3 b = ivec3(floor(p / pc.radius)) - pc.bin_min_cap.xyz;
+    if (any(lessThan(b, ivec3(0))) || any(greaterThanEqual(b, pc.bin_dim_count.xyz))) return;
+    uint bi = uint(b.x + b.y*pc.bin_dim_count.x + b.z*pc.bin_dim_count.x*pc.bin_dim_count.y);
+    uint slot = atomicAdd(counts[bi], 1u);
+    if (slot == 0u) atomicAdd(stats[1], 1u);
+    if (slot >= uint(pc.bin_min_cap.w)) { atomicAdd(stats[0], 1u); return; }
+    items[bi*uint(pc.bin_min_cap.w)+slot] = id;
+}

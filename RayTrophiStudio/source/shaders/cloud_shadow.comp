@@ -1,0 +1,48 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// RayFusion cloud shadow map (docs/dev/ATMOSPHERE_CLOUDS.md §3.3, Faz 3c).
+//
+// Transmittance of the cloud field toward the sun from points on the y = 0
+// plane, over a camera-centred square (texel-snapped, so it does not swim).
+// A receiver at height y looks it up at its own sun-ray's y = 0 crossing
+// (material_preview_frag.frag: previewCloudShadow) -- exact for any height
+// below the clouds. Same cloud_rt.glsl optical depth as the RT surface NEE.
+// Shares the descriptor set of cloud_raster.comp (binding 11 = this map).
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct CloudWorldLite {
+    vec3  sunDir;
+    float sunIntensity;
+    float atmosphereHeight;
+    int   _pad5;
+    float shadowCenterX;   // texel-snapped camera x
+    float shadowCenterZ;
+};
+layout(set = 0, binding = 7, std430) readonly buffer CloudRasterFrame {
+    CloudWorldLite w;
+} worldData;
+
+#define CLOUD_SET 0
+#define CLOUD_BINDING_BASE 0
+#define CLOUD_MAJORANT_BINDING 5
+#include "cloud_rt.glsl"
+
+layout(set = 0, binding = 11, rgba16f) uniform writeonly image2D cloudShadowMap;
+
+const float CLOUD_SHADOW_EXTENT_M = 32000.0;   // material_preview_frag.frag mirrors it
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(cloudShadowMap);
+    if (px.x >= sz.x || px.y >= sz.y) return;
+    vec3 s = normalize(worldData.w.sunDir);
+    float T = 1.0;
+    if (cloudRtEnabled() && s.y > 0.02) {
+        vec2 uv = (vec2(px) + 0.5) / vec2(sz);
+        vec3 g = vec3(worldData.w.shadowCenterX + (uv.x - 0.5) * CLOUD_SHADOW_EXTENT_M, 0.0,
+                      worldData.w.shadowCenterZ + (uv.y - 0.5) * CLOUD_SHADOW_EXTENT_M);
+        T = exp(-cloudOpticalDepth(g, s, CLOUD_RT_MAX_DIST, 32, 0.5, false));
+    }
+    imageStore(cloudShadowMap, px, vec4(T, 0.0, 0.0, 1.0));
+}

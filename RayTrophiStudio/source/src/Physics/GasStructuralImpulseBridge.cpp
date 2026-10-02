@@ -50,7 +50,7 @@ void SceneData::emitCombustionStructuralImpulses(float dt) {
         for (std::size_t i = 0; i < domains.size() && i < states.size(); ++i) {
             const auto& desc = domains[i];
             const auto& state = states[i];
-            if (desc.type != RayTrophiSim::SimulationDomainType::Gas) continue;
+            if (!RayTrophiSim::simulationDomainHasGas(desc.type)) continue;
             if (!desc.fire_enabled || !desc.structural_coupling_enabled) continue;
             if (!state.valid || state.grid.interaction.empty()) continue;
 

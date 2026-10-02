@@ -8,11 +8,14 @@
  */
 
 #include "Fluid/APICFluidSolver.h"
+#include "Atmosphere/AtmosphereClimate.h"
+#include "Fluid/FluidParticleRedistribution.h"
 #include "Fluid/SubstanceTag.h"   // kSubstanceUntagged (solid-phase resolution)
 #include "GridFluidSolver.h"
 #include "SimulationWorld.h"
 #include "ForceField.h"
 #include "Fluid/GranularConstitutive.h"
+#include "MaterialStateField.h"
 
 #include <algorithm>
 #include <chrono>
@@ -36,6 +39,58 @@
 
 namespace RayTrophiSim {
 namespace Fluid {
+
+namespace {
+
+const char* chemistrySubstanceName(FluidChemistryPreset preset) {
+    switch (preset) {
+        case FluidChemistryPreset::Water: return "Water";
+        case FluidChemistryPreset::Gasoline: return "Gasoline";
+        case FluidChemistryPreset::Alcohol: return "Alcohol";
+        case FluidChemistryPreset::Oil: return "Oil";
+        case FluidChemistryPreset::Plastic: return "Plastic (PE)";
+        case FluidChemistryPreset::Wax: return "Wax";
+        default: return nullptr;
+    }
+}
+
+} // namespace
+
+void APICSolverParams::applySubstanceProfile(
+    const SubstanceProfile& profile,
+    const MaterialTemperatureScale& scale) {
+    fuel_profile = {};
+    fuel_profile.flammable = profile.fluid_flammable;
+    fuel_profile.extinguishing = profile.fluid_extinguishing;
+    fuel_profile.flash_temperature = profile.flash_kelvin > 0.0f
+        ? scale.toNormalized(profile.flash_kelvin) : 0.0f;
+    fuel_profile.autoignition_temperature = profile.autoignition_kelvin > 0.0f
+        ? scale.toNormalized(profile.autoignition_kelvin) : 0.0f;
+    fuel_profile.vaporization_rate = profile.vaporization_rate;
+    fuel_profile.heat_capacity = profile.specific_heat * 1.0e-3f;
+    fuel_profile.latent_heat = profile.latent_heat_vaporization * 1.0e-6f;
+    fuel_profile.cooling_power = profile.cooling_power;
+    fuel_profile.oxygen_dilution = profile.oxygen_dilution;
+    fuel_profile.flame_persistence = profile.flame_persistence;
+}
+
+void APICSolverParams::applyChemistryProfile(FluidChemistryPreset preset) {
+    applyChemistryProfile(preset, MaterialTemperatureScale{});
+}
+
+void APICSolverParams::applyChemistryProfile(
+    FluidChemistryPreset preset,
+    const MaterialTemperatureScale& scale) {
+    chemistry_preset = preset;
+    const char* substance_name = chemistrySubstanceName(preset);
+    const SubstanceProfile* profile = substance_name
+        ? tryFindSubstance(substance_name) : nullptr;
+    if (!profile) {
+        fuel_profile = {};
+        return;
+    }
+    applySubstanceProfile(*profile, scale);
+}
 
 // Shared static storage exposed by getLastFlipPreSnapshot*().
 // The post-P2G MAC velocity field, published by every Fluid::step that runs the
@@ -2545,17 +2600,6 @@ static int advectParticles(FluidParticles& parts,
     return substeps;
 }
 
-// Per-cell particle redistribution. Maintains the seed-time particle count
-// invariant: cells whose population has drifted out of [min_per, max_per]
-// are pulled back toward `target`. Without this, FLIP-style energy injection
-// and pressure-driven motion eventually pile particles up in low-pressure
-// pockets and starve high-pressure ones, producing visible density bands
-// and apparent volume loss.
-//
-// Removal is in-place (write-cursor compaction; no per-particle erase).
-// Addition samples grid velocity at the new particle's position — this is
-// the post-projection (incompressible) field, so injected particles do not
-// re-introduce divergence.
 // ── Particle-to-particle heat conduction ─────────────────────────────────────
 // Relax every particle toward the mean temperature of its grid cell. That is
 // diffusion at exactly the resolution the simulation already has, and it costs
@@ -2628,300 +2672,8 @@ void diffuseParticleTemperature(FluidParticles& parts,
     }
 }
 
-static void redistributeParticles(FluidParticles& parts,
-                                  const FluidSim::FluidGrid& grid,
-                                  const APICSolverParams& params,
-                                  uint32_t step_seed,
-                                  std::size_t* added_out,
-                                  std::size_t* removed_out) {
-    if (added_out) *added_out = 0u;
-    if (removed_out) *removed_out = 0u;
-    // Granular particles carry persistent stress/plastic history and represent
-    // material points. Liquid reseeding invents/removes samples and therefore
-    // destroys both mass and constitutive history; never run it for sand.
-    if (params.granular_enabled) return;
-    if (!params.reseed_enabled || parts.empty()) return;
-    if (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0) return;
-
-    const int  ppc    = std::max(1, params.particles_per_cell);
-    const int  target = (params.reseed_target_per_cell > 0)
-        ? params.reseed_target_per_cell
-        : ppc;
-    const int  min_per = std::clamp(params.reseed_min_per_cell, 1, target);
-    const int  max_per = std::max(target + 1, params.reseed_max_per_cell);
-
-    // ★★ Reseed CREATES particles (parts.emit below); it does not move them.
-    // Topping a starved cell from 1 up to `target` invents 7 particles' worth of
-    // liquid. That is fine for the drift it was written to correct — INTERIOR
-    // cells whose sample count wandered — but catastrophic at a free surface.
-    //
-    // A spreading sheet (a spill hitting the floor, a jet flattening out) is a
-    // moving frontier of cells holding 1-2 particles, each with a healthy
-    // neighbour behind it. Every step that whole frontier is amplified 4-8x, the
-    // now-denser sheet spreads further, and a new frontier appears. The result
-    // is exponential growth that is bounded by nothing but max_particles: the
-    // liquid looks like it "suddenly dumps its entire budget" a moment after it
-    // lands, and lowering the emitter's rate changes nothing because the emitter
-    // is not what is producing the particles.
-    //
-    // The primary guard is GEOMETRIC and lives in the loop: a surface cell is
-    // lifted only to `min_per`, never to the bulk `target`. That alone bounds a
-    // spreading film at ~min_per particles per wetted cell — a finite number set
-    // by the floor area — instead of letting the frontier reach full bulk
-    // density, push further, and compound.
-    // Particle count is mass in the current unit-mass P2G formulation. This
-    // budget starts empty and is funded only by crowded-cell removals below;
-    // reseeding may redistribute samples but cannot increase total mass.
-    std::size_t reseed_budget = 0u;
-
-    const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
-    const float h = grid.voxel_size;
-    const float invH = 1.0f / h;
-    const std::size_t total = static_cast<std::size_t>(nx) *
-                              static_cast<std::size_t>(ny) *
-                              static_cast<std::size_t>(nz);
-
-    // 1. Map each particle to its containing cell (or -1 if outside / solid).
-    //    Function-static buffers — per-call vector<int> would stall under
-    //    contention (see feedback_persistent_per_step_buffers.md).
-    static std::vector<int> particle_cell_buf;
-    static std::vector<int> cell_count_buf;
-    static std::vector<int> cell_cursor_buf;
-    static std::vector<int> cell_seed_particle_buf;
-    static std::vector<uint8_t> remove_mask_buf;
-
-    particle_cell_buf.assign(parts.size(), -1);
-    if (cell_count_buf.size() < total) cell_count_buf.assign(total, 0);
-    else std::fill(cell_count_buf.begin(), cell_count_buf.begin() + total, 0);
-    if (cell_cursor_buf.size() < total) cell_cursor_buf.assign(total, 0);
-    else std::fill(cell_cursor_buf.begin(), cell_cursor_buf.begin() + total, 0);
-    if (cell_seed_particle_buf.size() < total) cell_seed_particle_buf.assign(total, -1);
-    else std::fill(cell_seed_particle_buf.begin(), cell_seed_particle_buf.begin() + total, -1);
-    remove_mask_buf.assign(parts.size(), 0u);
-
-    for (std::size_t pi = 0; pi < parts.size(); ++pi) {
-        const Vec3 gp = (parts.position[pi] - grid.origin) * invH;
-        const int i = static_cast<int>(std::floor(gp.x));
-        const int j = static_cast<int>(std::floor(gp.y));
-        const int k = static_cast<int>(std::floor(gp.z));
-        if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
-        const std::size_t c = grid.cellIndex(i, j, k);
-        if (grid.solid[c]) continue; // particle is inside a solid; wall path handles it
-        particle_cell_buf[static_cast<int>(pi)] = static_cast<int>(c);
-        if (cell_seed_particle_buf[c] < 0)
-            cell_seed_particle_buf[c] = static_cast<int>(pi);
-        ++cell_count_buf[c];
-    }
-
-    // 2. Mark surplus particles for removal. Walk in particle order; within
-    //    each over-populated cell (count > max_per), keep the first `max_per`
-    //    and flag the rest. (Order-agnostic — particle SoA has no persistent
-    //    identity beyond the current step.)
-    //
-    //    Trim threshold is `max_per`, NOT `target`. The previous code trimmed
-    //    over-populated cells all the way back to `target` (= particles_per_cell
-    //    = 8 by default), which made accumulating fluid (e.g. water piling at
-    //    the domain floor) literally disappear: as particles compressed and
-    //    hit count > max_per, the reseed culled 22 out of 30 in one tick.
-    //    Trimming only to max_per preserves natural accumulation up to that
-    //    cap (16 by default) while still removing pathological spikes.
-    int removed = 0;
-    for (std::size_t pi = 0; pi < parts.size(); ++pi) {
-        const int c = particle_cell_buf[static_cast<int>(pi)];
-        if (c < 0) continue;
-        if (cell_count_buf[c] <= max_per) continue;
-        const int seen = cell_cursor_buf[c]++;
-        if (seen >= max_per) {
-            remove_mask_buf[pi] = 1u;
-            ++removed;
-        }
-    }
-
-    if (removed_out) *removed_out = static_cast<std::size_t>(removed);
-    reseed_budget = static_cast<std::size_t>(removed);
-    if (removed == 0) return;
-
-    // 3. Compact in place. Write cursor advances only for kept particles.
-    //
-    // ★★★ EVERY per-particle array moves together, and that is why this is one
-    // call into FluidParticles instead of a list of arrays written out here.
-    // The list written out here used to cover position/velocity/uvw and the
-    // chemistry sidecars but NOT the granular state, so after a trim
-    // `granular_damage[i]` belonged to a different particle than `position[i]`.
-    // The comment that used to sit on the uvw lines gave the exact reason —
-    // "compacting one and not the other would misalign them by the number of
-    // removed particles" — and the granular arrays were the ones it missed.
-    if (removed > 0) parts.compact(remove_mask_buf);
-
-    // Compaction changes particle indices. Rebuild the per-cell chemistry donor
-    // map before any reseed emits children; using the pre-compaction index can
-    // copy an unrelated substance or read past the shortened sidecars.
-    std::fill(cell_seed_particle_buf.begin(), cell_seed_particle_buf.begin() + total, -1);
-    for (std::size_t pi = 0; pi < parts.size(); ++pi) {
-        const Vec3 gp = (parts.position[pi] - grid.origin) * invH;
-        const int i = static_cast<int>(std::floor(gp.x));
-        const int j = static_cast<int>(std::floor(gp.y));
-        const int k = static_cast<int>(std::floor(gp.z));
-        if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
-        const std::size_t c = grid.cellIndex(i, j, k);
-        if (!grid.solid[c] && cell_seed_particle_buf[c] < 0)
-            cell_seed_particle_buf[c] = static_cast<int>(pi);
-    }
-
-    // 4. Top up starved fluid cells. An empty cell (count == 0) is treated
-    //    as AIR and left untouched — adding particles there would create
-    //    mass from nothing. New particles inherit grid-sampled velocity, no
-    //    affine history (AffineC default = zero); the next P2G rebuilds C.
-    std::mt19937 rng(step_seed ^ 0x9E3779B9u);
-    std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
-
-    for (int k = 0; k < nz; ++k) {
-        for (int j = 0; j < ny; ++j) {
-            for (int i = 0; i < nx; ++i) {
-                const std::size_t c = grid.cellIndex(i, j, k);
-                if (grid.solid[c]) continue;
-                const int count = cell_count_buf[c];
-                if (count == 0) continue;            // air — do not seed
-                if (count >= min_per) continue;       // healthy
-
-                // To prevent stray spray/droplets from multiplying exponentially into dense water chunks:
-                // We only reseed if there is a minimum collective particle presence in the 3x3x3 neighborhood,
-                // or if at least one direct neighbor is a healthy fluid cell.
-                int neighborhood_sum = count;
-                bool has_healthy_neighbor = false;
-                for (int dk = -1; dk <= 1; ++dk) {
-                    for (int dj = -1; dj <= 1; ++dj) {
-                        for (int di = -1; di <= 1; ++di) {
-                            if (di == 0 && dj == 0 && dk == 0) continue;
-                            int ni = i + di, nj = j + dj, nk = k + dk;
-                            if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
-                                size_t nc = grid.cellIndex(ni, nj, nk);
-                                int n_count = cell_count_buf[nc];
-                                neighborhood_sum += n_count;
-                                if (n_count >= min_per) {
-                                    has_healthy_neighbor = true;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // If this is an isolated spray cell (fewer than min_per + 2 particles in 3x3x3 neighborhood)
-                // and has no healthy neighbors, bypass reseeding (treat as isolated spray to preserve mass!).
-                // NOTE: this only catches DETACHED droplets. A spreading sheet
-                // always has healthy neighbours behind it, so it sails straight
-                // through — which is exactly the runaway case the surface test
-                // below exists to stop.
-                if (neighborhood_sum < std::max(4, min_per + 2) && !has_healthy_neighbor) {
-                    continue;
-                }
-
-                // ★ Free-surface test: a face neighbour that is in-bounds, not
-                // solid and EMPTY means this cell borders air, so it is surface,
-                // not interior. Out-of-bounds and solid neighbours are walls, not
-                // air — a cell resting on the floor is still interior.
-                bool borders_air = false;
-                const int face[6][3] = { {-1,0,0}, {1,0,0}, {0,-1,0},
-                                         {0,1,0},  {0,0,-1}, {0,0,1} };
-                for (const auto& f : face) {
-                    const int ni = i + f[0], nj = j + f[1], nk = k + f[2];
-                    if (ni < 0 || ni >= nx || nj < 0 || nj >= ny ||
-                        nk < 0 || nk >= nz) {
-                        continue;                       // wall
-                    }
-                    const std::size_t nc = grid.cellIndex(ni, nj, nk);
-                    if (grid.solid[nc]) continue;       // wall
-                    if (cell_count_buf[nc] == 0) { borders_air = true; break; }
-                }
-
-                // ★★ Surface cells are never topped up. Every particle this
-                // function emits is INVENTED liquid (P2G is unit-mass and never
-                // reads mass_fraction, so there is no way to split instead), and
-                // at a free surface a low count is the truth: a sheet one cell
-                // deep really does hold a couple of particles per cell. Filling
-                // those cells is what made a spill gain mass the moment it
-                // landed — drops hit the floor, spread into fresh cells, and
-                // each fresh cell was inflated to bulk density.
-                //
-                // Interior cells are a different question and keep the original
-                // behaviour: they are enclosed, they cannot form an expanding
-                // frontier, and a count that has drifted there really is drift.
-                //
-                // ★ This is only safe because the air-drag stage no longer keys
-                // off `reseed_min_per_cell`. It used to, so starving the surface
-                // also classified the whole outer layer as spray — the two
-                // faults hid each other. Air drag now tests ISOLATION (3x3x3
-                // neighbourhood) instead; keep them decoupled.
-                if (borders_air) continue;
-
-                const int need = target - count;
-                if (parts.size() >= params.max_particles) {
-                    continue;
-                }
-                if (reseed_budget == 0u) continue;
-                const int actual_need = std::min<int>(
-                    std::min<int>(need, static_cast<int>(params.max_particles - parts.size())),
-                    static_cast<int>(reseed_budget));
-                if (actual_need <= 0) continue;
-                reseed_budget -= static_cast<std::size_t>(actual_need);
-
-                const Vec3 cell_min = grid.origin + Vec3(static_cast<float>(i) * h,
-                                                          static_cast<float>(j) * h,
-                                                          static_cast<float>(k) * h);
-                for (int n = 0; n < actual_need; ++n) {
-                    const Vec3 p = cell_min + Vec3(dist01(rng), dist01(rng), dist01(rng)) * h;
-                    const Vec3 v = grid.sampleVelocity(p);
-                    const int parent = cell_seed_particle_buf[c];
-                    const float temperature = parent >= 0 &&
-                        static_cast<std::size_t>(parent) < parts.temperature.size()
-                        ? parts.temperature[static_cast<std::size_t>(parent)] : 0.0f;
-                    const float combustible = parent >= 0 &&
-                        static_cast<std::size_t>(parent) < parts.combustible_fraction.size()
-                        ? parts.combustible_fraction[static_cast<std::size_t>(parent)] : 0.0f;
-                    const uint32_t substance = parent >= 0 &&
-                        static_cast<std::size_t>(parent) < parts.substance_tag.size()
-                        ? parts.substance_tag[static_cast<std::size_t>(parent)] : 0u;
-                    // ★ Reseed does not TRANSPORT liquid, it CREATES particles —
-                    // and a created particle with no material coordinate is a
-                    // hole in the texture. Inherit the donor's, carrying the
-                    // spawn OFFSET across so the child lands at the coordinate
-                    // its own position implies rather than stacking every child
-                    // of one donor onto a single texel (which would show as a
-                    // smeared blob wherever the top-up is busy).
-                    //
-                    // No donor means no continuity to inherit: fall through to
-                    // emit's default (uvw = birth position). That is a seam, but
-                    // it is an HONEST one — there is no neighbour to be
-                    // continuous with — and it can only happen in a cell whose
-                    // only particles left the grid this step.
-                    //
-                    // ★ BOTH generations are inherited, each from its own donor
-                    // value. They were reset at different times, so the donor's
-                    // two coordinates genuinely differ; copying one into both
-                    // would fuse the pair into a single generation for every
-                    // reseeded particle — the stretch cure would keep reporting
-                    // as enabled while quietly not applying in splashes.
-                    Vec3 child_uvw, child_uvw_b;
-                    const Vec3* child_uvw_ptr = nullptr;
-                    const Vec3* child_uvw_b_ptr = nullptr;
-                    if (parent >= 0 &&
-                        static_cast<std::size_t>(parent) < parts.uvw.size()) {
-                        const std::size_t pidx = static_cast<std::size_t>(parent);
-                        const Vec3 offset = p - parts.position[pidx];
-                        child_uvw = parts.uvw[pidx] + offset;
-                        child_uvw_ptr = &child_uvw;
-                        if (pidx < parts.uvw_b.size()) {
-                            child_uvw_b = parts.uvw_b[pidx] + offset;
-                            child_uvw_b_ptr = &child_uvw_b;
-                        }
-                    }
-                    parts.emit(p, v, temperature, combustible, substance,
-                               child_uvw_ptr, child_uvw_b_ptr);
-                }
-                if (added_out) *added_out += static_cast<std::size_t>(actual_need);
-            }
-        }
-    }
+Vec3 atmosphereAirVelocity(const APICSolverParams& params) {
+    return params.inherit_atmosphere ? atmosphere::ambientWindMps() : Vec3(0.0f, 0.0f, 0.0f);
 }
 
 void applyExternalForces(FluidParticles& particles,
@@ -2973,7 +2725,15 @@ void applyExternalForces(FluidParticles& particles,
     const int cnz = std::max(1, grid.nz);
     const float inv_h = grid.voxel_size > 1e-6f ? 1.0f / grid.voxel_size : 0.0f;
     std::vector<float> column_top_y;
-    const bool wind_drag_active = !wind_drag_fields.empty() && inv_h > 0.0f;
+    // The climate wind joins as one more surface-drag source (Faz 2). Its
+    // target is the wind-driven CURRENT (kAtmosphereSurfaceDrift x wind), not
+    // the wind itself: a Wind field's strength is authored as surface speed,
+    // the climate's is real 10 m wind.
+    const Vec3 air = atmosphereAirVelocity(params);
+    const Vec3 global_surface_target(air.x * kAtmosphereSurfaceDrift, 0.0f,
+                                     air.z * kAtmosphereSurfaceDrift);
+    const bool global_wind = (air.x * air.x + air.z * air.z) > 1e-8f;
+    const bool wind_drag_active = (!wind_drag_fields.empty() || global_wind) && inv_h > 0.0f;
     if (wind_drag_active) {
         column_top_y.assign(static_cast<size_t>(cnx) * static_cast<size_t>(cnz),
                             -std::numeric_limits<float>::max());
@@ -3016,6 +2776,15 @@ void applyExternalForces(FluidParticles& particles,
             rel.y = 0.0f;  // horizontal only — never fight gravity/buoyancy
             a = a + rel * (f->fluid_drag_coupling * w * fall);
         }
+        if (global_wind) {
+            const float depth = surf - pos.y;
+            const float w = 1.0f - std::clamp(depth / kAtmosphereSurfaceDepth, 0.0f, 1.0f);
+            if (w > 0.0f) {
+                Vec3 rel = global_surface_target * w - v;
+                rel.y = 0.0f;
+                a = a + rel * (kAtmosphereSurfaceCoupling * w);
+            }
+        }
         return a;
     };
 
@@ -3038,9 +2807,11 @@ void applyExternalForces(FluidParticles& particles,
                 if (f->type == Physics::ForceFieldType::Wind && f->fluid_surface_drag) continue;
                 acceleration = acceleration + f->evaluate(pos, time_seconds, v);
             }
-            if (wind_drag_active)
-                acceleration = acceleration + windDragAccel(pos, v);
         }
+        // Outside the field block: the climate wind drags the surface even in
+        // a scene with no force field at all.
+        if (wind_drag_active)
+            acceleration = acceleration + windDragAccel(pos, v);
         v = v + acceleration * dt;
         clampVelocity(v);
     }
@@ -3472,6 +3243,7 @@ void step(FluidParticles& particles,
         const float invH = (grid.voxel_size > 1e-6f) ? (1.0f / grid.voxel_size) : 0.0f;
         const int air_threshold = std::max(1, params.reseed_min_per_cell);
         const float air_k = params.air_drag;
+        const Vec3 air_wind = atmosphereAirVelocity(params);
 
         // Build per-cell particle counts (fresh from post-G2P positions —
         // pre-advect). Function-static to avoid heap stalls under contention.
@@ -3539,12 +3311,16 @@ void step(FluidParticles& particles,
             }
             if (neighbourhood >= isolation_threshold) continue; // sheet/film — bulk
 
+            // Drag acts on the velocity RELATIVE to the air (Faz 2): with a
+            // climate wind a droplet is carried downwind, not braked to rest.
+            // air_wind is zero when not inheriting, which is the old formula.
             Vec3& v = particles.velocity[pi];
-            const float speed_sq = v.x * v.x + v.y * v.y + v.z * v.z;
+            const Vec3 rel = v - air_wind;
+            const float speed_sq = rel.x * rel.x + rel.y * rel.y + rel.z * rel.z;
             if (speed_sq < 1e-8f) continue;
             const float speed = std::sqrt(speed_sq);
             const float decay = 1.0f / (1.0f + air_k * speed * dt);
-            v = v * decay;
+            v = air_wind + rel * decay;
         }
     }
 
@@ -3576,16 +3352,11 @@ void step(FluidParticles& particles,
     stage_end = SolverClock::now();
     out_stats.advect_ms = elapsedMs(stage_begin, stage_end);
 
-    // 8. Per-cell redistribution. Cull over-populated cells and top up
-    //    starved ones so the seed-time particle density stays bounded. Uses
-    //    the post-advect positions and the post-projection grid (sampled by
-    //    new particles for their initial velocity).
+    // 8. Conservative local redistribution; no particles are added or removed.
     const uint32_t reseed_seed =
         static_cast<uint32_t>(out_stats.particle_count) * 2654435761u ^
         static_cast<uint32_t>(std::llround(time_seconds * 1000.0));
-    redistributeParticles(particles, grid, params, reseed_seed,
-                          &out_stats.reseed_added_particles,
-                          &out_stats.reseed_removed_particles);
+    redistributeFluidParticles(particles, grid, params, reseed_seed);
     out_stats.particle_count = particles.size();
 
     // 9. Advance the material-coordinate refresh schedule and reset whichever

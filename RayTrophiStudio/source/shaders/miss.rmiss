@@ -35,6 +35,7 @@ layout(push_constant) uniform CameraPC {
 // Payload — shared ABI, single source of truth
 // ============================================================
 #include "rt_payload.glsl"
+#include "sky_sun_corona.glsl"
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
 
@@ -71,31 +72,6 @@ struct VkWorldDataExtended {
     int   multiScatterEnabled;
     float multiScatterFactor;
     
-    // ════════════════════════════ CLOUD LAYER 1 PARAMETERS (64 bytes)
-    int   cloudsEnabled;
-    float cloudCoverage;
-    float cloudDensity;
-    float cloudScale;
-    float cloudHeightMin;
-    float cloudHeightMax;
-    float cloudOffsetX;
-    float cloudOffsetZ;
-    float cloudQuality;
-    float cloudDetail;
-    int   cloudBaseSteps;
-    int   cloudLightSteps;
-    float cloudShadowStrength;
-    float cloudAmbientStrength;
-    float cloudSilverIntensity;
-    float cloudAbsorption;
-    
-    // ════════════════════════════ ADVANCED CLOUD SCATTERING (32 bytes)
-    float cloudAnisotropy;
-    float cloudAnisotropyBack;
-    float cloudLobeMix;
-    float cloudEmissiveIntensity;
-    vec3  cloudEmissiveColor;
-    float _pad3;
     
     // ════════════════════════════ FOG PARAMETERS (40 bytes)
     int   fogEnabled;
@@ -103,9 +79,9 @@ struct VkWorldDataExtended {
     float fogHeight;
     float fogFalloff;
     float fogDistance;
-    float fogSunScatter;
-    vec3  fogColor;
-    float _pad4;   // padding — aligns fogColor[3]+pad to 16 bytes, matches C++ struct
+    float fogAnisotropy;
+    vec3  fogAlbedo;
+    float _pad4;   // padding — aligns fogAlbedo[3]+pad to 16 bytes, matches C++ struct
     
     // ════════════════════════════ GOD RAYS (16 bytes)
     int   godRaysEnabled;
@@ -114,10 +90,10 @@ struct VkWorldDataExtended {
     int   godRaysSamples;
     
     // ════════════════════════════ AERIAL PERSPECTIVE (16 bytes) — matches OptiX AtmosphereAdvanced
-    int   aerialEnabled;        // 1 = apply aerial perspective
-    float aerialMinDistance;    // No haze below this (meters)
-    float aerialMaxDistance;    // Full haze at this (meters)
-    float aerialDensity;        // Independent haze density/strength multiplier
+    int   aerialFroxelReady;    // 1 = raygen applies the aerial froxel (binding 8 slot 3)
+    float _aerialPad0;
+    float _aerialPad1;
+    float _aerialPad2;
 
     // Weather payload (passive until weather rendering is enabled)
     int   weatherEnabled;
@@ -153,6 +129,9 @@ struct VkWorldDataExtended {
 layout(set = 0, binding = 7, scalar) readonly buffer WorldBuffer { VkWorldDataExtended w; } worldData;
 // Atmosphere LUT samplers: [0]=transmittance, [1]=skyview, [2]=multi_scatter, [3]=aerial_perspective
 layout(set = 0, binding = 8) uniform sampler2D atmosphereLUTs[4];
+
+#define CLOUD_RT_LIGHTING
+#include "cloud_rt.glsl"
 
 // ============================================================
 // Sabitler
@@ -245,7 +224,8 @@ vec3 sampleEnvironmentLatLong(int envSlot, vec3 dir, float rotationRad) {
     return texture(materialTextures[nonuniformEXT(envSlot)], vec2(u, v)).rgb;
 }
 
-vec3 skyColor(vec3 dir) {
+// withSun = false: sky light only (cloud lighting gets the sun through NEE).
+vec3 skyColorImpl(vec3 dir, bool withSun) {
     int   mode   = worldData.w.mode;
     float cosAlt = dir.y;
 
@@ -317,7 +297,7 @@ vec3 skyColor(vec3 dir) {
     }
 
     // Procedural sun disk — matches World::calculateNishitaSky exactly
-    if (worldData.w.sunIntensity > 0.0) {
+    if (withSun && worldData.w.sunIntensity > 0.0) {
         float sunSizeDeg = worldData.w.sunSize;
 
         // Elevation broadening near horizon
@@ -357,24 +337,13 @@ vec3 skyColor(vec3 dir) {
                  * limbDarkening * edgeSoft;
         }
 
-        // ── Excess-phase corona (matches CPU verbatim) ────────────────────────
-        // CPU: excessPhase = max(0, phaseM - 2.0)   (LUT clamps phaseM at 2.0)
-        //      mieScat = mie_scattering * (mie_density * 0.15)
-        //      sky += transSun * (mieScat * excessPhase * atmosphere_intensity)
-        float g           = clamp(worldData.w.mieAnisotropy, 0.0, 0.99);
-        float phaseM_full = (1.0 - g*g) / (4.0 * PI * pow(max(1.0 + g*g - 2.0*g*mu, 0.0001), 1.5));
-        float excessPhase = max(0.0, phaseM_full - 2.0);
-
-        if (excessPhase > 0.0 && hasAtmosLUTs) {
+        // ── Excess-phase corona (sky_sun_corona.glsl, shared with RayFusion) ──
+        if (hasAtmosLUTs) {
             float cosSun  = max(0.01, worldData.w.sunDir.y);
             float u_trans = (cosSun + 0.2) / 1.2;
             vec3  transSun = texture(atmosphereLUTs[0], vec2(u_trans, v_trans)).rgb;
-
-            // mie_scattering default = vec3(3.996e-6) — physical Mie coefficient,
-            // hardcoded since it is not stored in VkWorldDataExtended yet.
-            const float MIE_SCAT = 3.996e-6;
-            vec3 mieScat = vec3(MIE_SCAT) * (worldData.w.mieDensity * 0.15);
-            sky += transSun * (mieScat * excessPhase * worldData.w.atmosphereIntensity);
+            sky += skyMieCorona(mu, worldData.w.mieAnisotropy, worldData.w.mieDensity,
+                                worldData.w.atmosphereIntensity, transSun);
         }
 
         // NOTE: No air/dust post-tint here when LUT is loaded — LUT already has
@@ -392,6 +361,9 @@ vec3 skyColor(vec3 dir) {
 
     return applyWeatherSky(sky, dir);
 }
+
+vec3 skyColor(vec3 dir) { return skyColorImpl(dir, true); }
+vec3 cloudSkyAmbient(vec3 dir) { return skyColorImpl(dir, false); }
 
 // ============================================================
 // Main
@@ -413,5 +385,16 @@ void main() {
     // ----------------------------------------------------------
     // Sky radiance — raygen: radiance += throughput * payload.radiance
     // ----------------------------------------------------------
-    payload.radiance = skyColor(dir);
+    vec3 sky = skyColor(dir);
+    // Clouds (Faz 3b): only the Nishita sky has them; the adapter clears the
+    // render flag in every other world mode and while the textures build.
+    if (worldData.w.mode == 2 && cloudRtEnabled() &&
+        (payload.primaryMeta & PL_NO_SKY_RADIANCE) == 0u) {
+        bool cameraRay = (payload.primaryMeta & PL_CAMERA_SEGMENT) != 0u;
+        vec3 inscatter;
+        float T, depth;
+        cloudRender(gl_WorldRayOriginEXT, dir, cameraRay, payload.seed, inscatter, T, depth);
+        sky = sky * T + inscatter;
+    }
+    payload.radiance = sky;
 }

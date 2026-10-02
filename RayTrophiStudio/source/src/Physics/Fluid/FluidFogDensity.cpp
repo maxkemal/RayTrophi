@@ -102,10 +102,77 @@ void spreadFogDensity(const float* src, int nx, int ny, int nz,
         if (v < kFogDensityFloor) v = 0.0f;
 }
 
+namespace {
+bool selected(const FluidParticles& particles, std::size_t p,
+              const FluidViewSelection* selection) {
+    return !selection || selection->keeps(particles, p);
+}
+} // namespace
+
+bool splatFogDensityForSelection(const FluidParticles& particles,
+                                 int nx, int ny, int nz,
+                                 const Vec3& origin, float voxel_size,
+                                 int particles_per_cell,
+                                 const FluidViewSelection& selection,
+                                 std::vector<float>& out) {
+    const std::size_t n = particles.position.size();
+    if (nx <= 0 || ny <= 0 || nz <= 0 || voxel_size <= 0.0f || n == 0) {
+        out.clear();
+        return false;
+    }
+    const std::size_t cells = static_cast<std::size_t>(nx) *
+                              static_cast<std::size_t>(ny) *
+                              static_cast<std::size_t>(nz);
+    out.assign(cells, 0.0f);
+    const float inv_h = 1.0f / voxel_size;
+    const float particle_density = 1.0f / static_cast<float>((std::max)(1, particles_per_cell));
+    bool any = false;
+    for (std::size_t p = 0; p < n; ++p) {
+        if (!selected(particles, p, &selection)) continue;
+        const float mass = p < particles.mass_fraction.size()
+            ? std::clamp(particles.mass_fraction[p], 0.0f, 1.0f)
+            : 1.0f;
+        if (!(mass > 0.0f)) continue;
+        const Vec3& pos = particles.position[p];
+        if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z)) continue;
+        const Vec3 local = (pos - origin) * inv_h - Vec3(0.5f, 0.5f, 0.5f);
+        const int i0 = static_cast<int>(std::floor(local.x));
+        const int j0 = static_cast<int>(std::floor(local.y));
+        const int k0 = static_cast<int>(std::floor(local.z));
+        const float fx = local.x - static_cast<float>(i0);
+        const float fy = local.y - static_cast<float>(j0);
+        const float fz = local.z - static_cast<float>(k0);
+        for (int dz = 0; dz <= 1; ++dz) {
+            const int k = k0 + dz;
+            if (k < 0 || k >= nz) continue;
+            const float wz = dz ? fz : (1.0f - fz);
+            for (int dy = 0; dy <= 1; ++dy) {
+                const int j = j0 + dy;
+                if (j < 0 || j >= ny) continue;
+                const float wy = dy ? fy : (1.0f - fy);
+                for (int dx = 0; dx <= 1; ++dx) {
+                    const int i = i0 + dx;
+                    if (i < 0 || i >= nx) continue;
+                    const float w = (dx ? fx : (1.0f - fx)) * wy * wz;
+                    const std::size_t c = static_cast<std::size_t>(i) +
+                        static_cast<std::size_t>(j) * static_cast<std::size_t>(nx) +
+                        static_cast<std::size_t>(k) * static_cast<std::size_t>(nx) *
+                            static_cast<std::size_t>(ny);
+                    out[c] += particle_density * mass * w;
+                    any = true;
+                }
+            }
+        }
+    }
+    if (!any) out.clear();
+    return any;
+}
+
 bool splatFogTemperatureKelvin(const FluidParticles& particles,
                                int nx, int ny, int nz,
                                const Vec3& origin, float voxel_size,
-                               float sigma_voxels, std::vector<float>& out) {
+                               float sigma_voxels, std::vector<float>& out,
+                               const FluidViewSelection* selection) {
     const std::size_t n = particles.position.size();
     if (nx <= 0 || ny <= 0 || nz <= 0 || voxel_size <= 0.0f || n == 0 ||
         particles.temperature.size() < n) {
@@ -121,6 +188,7 @@ bool splatFogTemperatureKelvin(const FluidParticles& particles,
     // Same trilinear footprint as splatFluidDensityCPU / sim_fluid_density_splat,
     // so the temperature lands exactly where the density does.
     for (std::size_t p = 0; p < n; ++p) {
+        if (!selected(particles, p, selection)) continue;
         const Vec3& pos = particles.position[p];
         const float t = particles.temperature[p];
         // 0 K is an unwritten parcel (see FluidParticles::temperature), not a

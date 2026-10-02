@@ -33,6 +33,7 @@
 
 #include "../FluidGrid.h"
 #include "FluidParticles.h"
+#include "FluidViewResolver.h"
 #include <vector>
 #include <cstddef>
 
@@ -129,7 +130,7 @@ bool buildLevelSet(const FluidParticles& particles,
                    const LevelSetParams& params,
                    std::vector<float>& sdf_out,
                    LevelSetStats* stats = nullptr,
-                   const std::vector<uint32_t>* excluded_substance_tags = nullptr);
+                   const FluidViewSelection* selection = nullptr);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MATERIAL COORDINATE (UVW) GRID
@@ -158,8 +159,8 @@ bool buildLevelSet(const FluidParticles& particles,
 // clears the buffer) when nothing was supported, which callers must treat as
 // "no coordinate available" and fall back to the world-anchored projection —
 // never as "the coordinate is zero".
-// ★★★ `excluded_substance_tags` MUST be the SAME list buildLevelSet was given.
-// A substance routed to splat has no isosurface, so letting its particles vote
+// ★★★ `selection` MUST be the SAME one buildLevelSet was given. A parcel
+// routed to splat (by substance OR by state label) has no isosurface, so letting its particles vote
 // here drags the coordinate of a surface they are not part of. Symmetry between
 // the three gathers is the invariant: they describe one surface, so they must
 // agree about which particles that surface is made of.
@@ -167,7 +168,7 @@ bool buildMaterialCoordinateGrid(const FluidParticles& particles,
                                  const FluidSim::FluidGrid& grid,
                                  const LevelSetParams& params,
                                  std::vector<float>& uvw_out,
-                                 const std::vector<uint32_t>* excluded_substance_tags = nullptr);
+                                 const FluidViewSelection* selection = nullptr);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // COMPOSITION FIELD — which materials the liquid is made of, per cell.
@@ -232,7 +233,7 @@ bool buildCompositionGrid(const FluidParticles& particles,
                           // mixture of the SDF surface, so the surface tints
                           // toward a material that has no surface there. That
                           // reads as plausible wetness rather than as a bug.
-                          const std::vector<uint32_t>* excluded_substance_tags = nullptr);
+                          const FluidViewSelection* selection = nullptr);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SUBSTANCE VISCOSITY FIELD — a PHYSICS field, not a surface field.
@@ -244,11 +245,11 @@ bool buildCompositionGrid(const FluidParticles& particles,
 // ★★★ THIS GATHER TAKES NO EXCLUSION LIST, AND THAT IS THE POINT.
 // Its three neighbours above (level set, material coordinate, composition) all
 // describe ONE ISOSURFACE, so they must agree about which particles that
-// surface is made of and each takes `excluded_substance_tags`. This one
+// surface is made of and each takes a `selection`. This one
 // describes the LIQUID. A substance rendered as splat spheres still has mass,
 // still occupies cells and still resists shear; dropping it here would make the
 // flow change when someone edited a RENDER setting. If a later reader "fixes
-// the inconsistency" by passing the exclusion list in, that is the bug.
+// the inconsistency" by passing a selection in, that is the bug.
 //
 // ★★ Trilinear P2G weights, not the level-set kernel. The viscous stencil
 // relaxes faces the FLUID MASK calls fluid, and that mask is built with the

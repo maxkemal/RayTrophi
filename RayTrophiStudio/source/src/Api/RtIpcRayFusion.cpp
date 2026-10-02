@@ -232,8 +232,6 @@ bool dispatchRayFusionIpc(const std::string& method, const nlohmann::json& param
                 {"bounce_prepare_upload_ms", p.bounce.prepareUploadMs},
                 {"bounce_upload_skipped", p.bounce.uploadSkipped},
                 {"bounce_emissive_cached", p.bounce.emissiveCached},
-                {"bounce_sun_included", p.bounce.sunInBounce},
-                {"bounce_sun_tint_from_lut", p.bounce.sunTintFromLut},
                 {"producer_traced_requested", p.producer_traced_requested},
                 {"producer_reason", p.producer_reason},
                 {"hit_fraction", p.hit_fraction},

@@ -185,7 +185,7 @@ public:
     void selectGasVolume(std::shared_ptr<GasVolume> gas, int index = -1, const std::string& name = "Gas Volume");
     void selectForceField(std::shared_ptr<Physics::ForceField> field, int index = -1, const std::string& name = "Force Field");
     void selectParticleSystem(int index, const std::string& name = "Particle System");
-    void selectSimulationDomain(int particle_system_index, int domain_index, const std::string& name = "Grid Domain");
+    void selectSimulationDomain(int particle_system_index, int domain_index, const std::string& name = "Physics Domain");
     void selectParticleEmitter(int particle_system_index, int emitter_index, const std::string& name = "Particle Emitter");
     void selectCamera(std::shared_ptr<Camera> camera);
     void selectCameraTarget(std::shared_ptr<Camera> camera);

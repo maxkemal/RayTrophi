@@ -1322,6 +1322,7 @@ static const MethodRegistration reg_editor_set_sim_graph_scope(desc_editor_set_s
 static const MethodParam params_flow_source_create[] = {
     {"name", "string", false, "Emitter name", nullptr, nullptr},
     {"domain", "string", false, "Target fluid or gas domain name", nullptr, nullptr},
+    {"phase", "string", false, "Target phase inside a matter domain", nullptr, "gas|liquid"},
     {"source_mode", "string", false, "Emission shape/source kind", nullptr, nullptr},
     {"source_object", "string", false, "Object whose surface or volume emits", nullptr, nullptr},
     {"parent_object", "string", false, "Object the emitter follows", nullptr, nullptr},
@@ -1333,6 +1334,7 @@ static const MethodParam params_flow_source_create[] = {
     {"fuel", "float", false, "Injected fuel density", nullptr, nullptr},
     {"density", "float", false, "Injected smoke or liquid density", nullptr, nullptr},
     {"fluid_substance", "string", false, "Substance id emitted into a liquid domain", nullptr, nullptr},
+    {"initial_constitutive_model", "string", false, "Optional birth-state override; auto resolves through the Substance", nullptr, "auto|fluid|granular|elastic"},
     {"fluid_particles_per_second", "float", false, "Liquid particle emission rate", nullptr, nullptr},
     {"enabled", "bool", false, "Emitter active", nullptr, nullptr},
     {"end_time", "any", false, "", nullptr, nullptr},
@@ -1351,12 +1353,12 @@ static const MethodParam params_flow_source_create[] = {
 static const MethodDescriptor desc_flow_source_create = {
     "flow_source.create", "flow_source",
     "Create an emitter that feeds a fluid or gas domain with mass, heat, fuel or particles",
-    "An emitter belongs to a domain by name. With a parent_object it follows that object, and velocity_space decides whether its velocity is read in world or parent-local space.",
+    "An emitter belongs to a domain by name. phase selects gas or liquid emission inside a unified matter domain; legacy single-phase domains ignore it. With a parent_object it follows that object, and velocity_space decides whether its velocity is read in world or parent-local space.",
     "write", "SceneWrite", false, "FlowSourceInfo",
     "flow_source|flow|source|create|simulation|emitter|inject|pour|jet|flame|inflow",
     "flow_source.update|flow_source.list|fluid.create_domain|gas.set_settings",
     nullptr, nullptr, nullptr, nullptr,
-    params_flow_source_create, 27,
+    params_flow_source_create, 29,
     true
 };
 static const MethodRegistration reg_flow_source_create(desc_flow_source_create);
@@ -1421,8 +1423,10 @@ static const MethodParam params_flow_source_update[] = {
     {"fluid_velocity_spread", "any", false, "", nullptr, nullptr},
     {"fuel", "any", false, "", nullptr, nullptr},
     {"inherit_velocity", "any", false, "", nullptr, nullptr},
+    {"initial_constitutive_model", "any", false, "", nullptr, nullptr},
     {"max_emitted_particles", "any", false, "", nullptr, nullptr},
     {"parent_object", "any", false, "", nullptr, nullptr},
+    {"phase", "any", false, "", nullptr, nullptr},
     {"position", "any", false, "", nullptr, nullptr},
     {"radius", "any", false, "", nullptr, nullptr},
     {"source_mode", "any", false, "", nullptr, nullptr},
@@ -1443,7 +1447,7 @@ static const MethodDescriptor desc_flow_source_update = {
     "flow_source|flow|source|update|simulation|emitter|configure",
     "flow_source.create|flow_source.get",
     nullptr, nullptr, nullptr, nullptr,
-    params_flow_source_update, 27,
+    params_flow_source_update, 29,
     true
 };
 static const MethodRegistration reg_flow_source_update(desc_flow_source_update);
@@ -1467,15 +1471,15 @@ static const MethodRegistration reg_fluid_clear(desc_fluid_clear);
 
 static const MethodParam params_fluid_create_domain[] = {
     {"name", "string", false, "Domain name; also the object name in the scene", nullptr, nullptr},
-    {"type", "string", false, "Solver family", nullptr, "fluid|gas"},
+    {"type", "string", false, "Solver family", nullptr, "fluid|gas|matter"},
     {"domain_min", "vec3", false, "World-space AABB minimum in metres", nullptr, nullptr},
     {"domain_max", "vec3", false, "World-space AABB maximum in metres", nullptr, nullptr},
     {"voxel_size", "float", false, "Grid cell size in metres. Drives resolution, cost and the smallest feature the solver can resolve.", "0.05", nullptr},
 };
 static const MethodDescriptor desc_fluid_create_domain = {
     "fluid.create_domain", "fluid",
-    "Create an APIC liquid or gas grid domain over a world-space box",
-    "voxel_size sets both resolution and cost: halving it multiplies cell count by eight. A liquid domain does nothing until fluid.seed or a flow_source fills it. Changing voxel_size later invalidates the bake.",
+    "Create a liquid, gas, or unified matter domain over a world-space box",
+    "type=matter runs APIC liquid/granular and Euler gas phases under one identity and shared bounds; the returned phases list reports the active phases. voxel_size sets both resolution and cost: halving it multiplies cell count by eight. A liquid phase does nothing until fluid.seed or a liquid flow_source fills it. Changing voxel_size later invalidates the bake.",
     "write", "SceneWrite", false, "FluidDomainInfo",
     "fluid|create|domain|simulation|liquid|water|smoke|fire|grid",
     "fluid.seed|fluid.set_param|flow_source.create|fluid.list_domains",
@@ -1491,7 +1495,7 @@ static const MethodParam params_fluid_get[] = {
 static const MethodDescriptor desc_fluid_get = {
     "fluid.get", "fluid",
     "Return one fluid or gas domain's complete settings and live counters",
-    nullptr,
+    "views[] is the view resolver's decision (sdf | splat | fog): which substances each view draws, whether any live parcel resolves there, and the vdb_id it is published on. One domain can hold an sdf AND a fog volume at once; match vdb_id against render.volume_slots domains[].vdb_id / fog_vdb_id. substance_materials[].effective_representation comes from the same resolver. particle_labels reports simulation-owned primary labels and separate spray/foam/bubble secondary counts. Sum(primary) equals primary_particles; sum(secondary) equals secondary_particles. Secondary whitewater carries no liquid mass. unknown includes new particles, old disk cache and unsupported granular/solid states. The neighborhood_v1 classifier runs after simulation, with 1.5-voxel radius and 2/6-neighbor hysteresis; last_step reports its timing and changed count. Mist is routed to fog, entrained by overlapping gas and then transferred into gas-phase physical inventory. gas_phase_mass_kg/energy_j report totals; gas_phase_active_cells and gas_phase_mass_centroid expose spatial transport. Missing domains retain the existing API error; gas or missing live state reports available=false.",
     "read", "Read", false, "FluidDomainInfo",
     "fluid|get|simulation",
     nullptr,
@@ -1517,10 +1521,74 @@ static const MethodDescriptor desc_fluid_get_combustion = {
 };
 static const MethodRegistration reg_fluid_get_combustion(desc_fluid_get_combustion);
 
+static const MethodParam params_fluid_get_environment[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_get_environment = {
+    "fluid.get_environment", "fluid",
+    "Read a gas or liquid domain's thermal environment: its override and the effective ambient/oxygen the solvers read",
+    "effective_* come from the solvers' own rule (fluidDomainAmbientKelvin): the domain value when override_enabled, else the world default (world.get_thermal).",
+    "read", "Read", false, "any",
+    "fluid|get|environment|gas|thermal|ambient|oxygen",
+    "fluid.set_environment|world.get_thermal",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_get_environment, 1,
+    true
+};
+static const MethodRegistration reg_fluid_get_environment(desc_fluid_get_environment);
+
+static const MethodParam params_fluid_get_fog_shader[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_get_fog_shader = {
+    "fluid.get_fog_shader", "fluid",
+    "Read the fog-view medium (density, scattering, absorption, march quality) of a liquid domain",
+    "created=false means no fog has drawn yet and the values are the default recipe the fog sync will install.",
+    "read", "Read", false, "any",
+    "fluid|get|fog|shader|volume|appearance",
+    "fluid.set_fog_shader|fluid.set_fog|fluid.get",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_get_fog_shader, 1,
+    true
+};
+static const MethodRegistration reg_fluid_get_fog_shader(desc_fluid_get_fog_shader);
+
+static const MethodParam params_fluid_get_surface_interior[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_get_surface_interior = {
+    "fluid.get_surface_interior", "fluid",
+    "Read the liquid body behind a SurfaceSDF isosurface: depth absorption and the built-in dielectric's refraction tint",
+    "These are the only three fields of the surface volume shader the iso walk reads. Absorption applies under a bound surface material too; refraction_tint only while tint_active (no surface material bound). created=false means the render sync has not drawn the surface yet and the values are the SDF recipe.",
+    "read", "Read", false, "any",
+    "fluid|get|surface|interior|sdf|absorption|tint|appearance",
+    "fluid.set_surface_interior|fluid.set_param",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_get_surface_interior, 1,
+    true
+};
+static const MethodRegistration reg_fluid_get_surface_interior(desc_fluid_get_surface_interior);
+
+static const MethodParam params_fluid_get_whitewater[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_get_whitewater = {
+    "fluid.get_whitewater", "fluid",
+    "Read a liquid domain's whitewater (Ihmsen spray/foam/bubble) settings plus live counts and step timings",
+    "stats.alive/spray/foam/bubble count the secondary massless particles; stats.live false means no live state. views {spray, foam, bubble} is where each type is drawn (sdf|splat|fog|hidden), decided by the label routes; stats.in_sdf/in_splat/in_fog/hidden count live whitewater per view.",
+    "read", "Read", false, "any",
+    "fluid|get|whitewater|foam|spray|bubble|measure",
+    "fluid.set_whitewater|fluid.get",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_get_whitewater, 1,
+    true
+};
+static const MethodRegistration reg_fluid_get_whitewater(desc_fluid_get_whitewater);
+
 static const MethodDescriptor desc_fluid_list_domains = {
     "fluid.list_domains", "fluid",
     "List every fluid and gas domain with its full settings",
-    nullptr,
+    "particle_labels has the same schema and semantics as fluid.get; primary and secondary populations are counted separately.",
     "read", "Read", false, "FluidDomainInfo[]",
     "fluid|list|domains|simulation|inventory",
     "fluid.get",
@@ -1605,6 +1673,25 @@ static const MethodDescriptor desc_fluid_set_combustion = {
 };
 static const MethodRegistration reg_fluid_set_combustion(desc_fluid_set_combustion);
 
+static const MethodParam params_fluid_set_environment[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"ambient_kelvin", "float", false, "", nullptr, nullptr},
+    {"override_enabled", "bool", false, "", nullptr, nullptr},
+    {"oxygen", "float", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_set_environment = {
+    "fluid.set_environment", "fluid",
+    "Override the world ambient temperature (K) and oxygen (0..1) inside one gas or liquid domain; omitted keys are unchanged",
+    "The panel's Environment tab edits the same three fields. The liquid's thermal cooling and an emitter using Domain Ambient read the override; ambient_kelvin outside [0, 3000] is rejected, oxygen is clamped.",
+    "write", "SceneWrite", false, "any",
+    "fluid|set|environment|gas|thermal|ambient|oxygen",
+    "fluid.get_environment|world.set_thermal",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_set_environment, 4,
+    true
+};
+static const MethodRegistration reg_fluid_set_environment(desc_fluid_set_environment);
+
 static const MethodParam params_fluid_set_fog[] = {
     {"domain", "string", true, "", nullptr, nullptr},
     {"spread_voxels", "any", false, "", nullptr, nullptr},
@@ -1621,6 +1708,52 @@ static const MethodDescriptor desc_fluid_set_fog = {
     true
 };
 static const MethodRegistration reg_fluid_set_fog(desc_fluid_set_fog);
+
+static const MethodParam params_fluid_set_fog_shader[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"absorption_coefficient", "float", false, "", nullptr, nullptr},
+    {"absorption_color", "vec3", false, "", nullptr, nullptr},
+    {"anisotropy", "float", false, "", nullptr, nullptr},
+    {"density_cutoff", "float", false, "", nullptr, nullptr},
+    {"density_multiplier", "float", false, "", nullptr, nullptr},
+    {"max_steps", "int", false, "", nullptr, nullptr},
+    {"scattering_coefficient", "float", false, "", nullptr, nullptr},
+    {"scattering_color", "vec3", false, "", nullptr, nullptr},
+    {"shadow_steps", "int", false, "", nullptr, nullptr},
+    {"shadow_strength", "float", false, "", nullptr, nullptr},
+    {"shadow_stride", "int", false, "", nullptr, nullptr},
+    {"voxel_step_multiplier", "float", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_set_fog_shader = {
+    "fluid.set_fog_shader", "fluid",
+    "Edit the fog-view medium of a liquid domain; omitted keys are unchanged",
+    "The shader the panel's 'Edit Fog Medium...' opens. Edited in place and republished, so it repaints a paused frame without a simulation step. density_multiplier scales the splatted density (a packed cell is ~1); colors are 0..1.",
+    "write", "SceneWrite", false, "any",
+    "fluid|set|fog|shader|volume|appearance|density",
+    "fluid.get_fog_shader|fluid.set_fog",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_set_fog_shader, 13,
+    true
+};
+static const MethodRegistration reg_fluid_set_fog_shader(desc_fluid_set_fog_shader);
+
+static const MethodParam params_fluid_set_label_views[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"reset", "bool", false, "", nullptr, nullptr},
+    {"routes", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_set_label_views = {
+    "fluid.set_label_views", "fluid",
+    "Route a liquid's particle STATE labels to views: routes {label: follow|sdf|splat|fog|hidden}; reset restores the design table",
+    "Labels: unknown body spray foam bubble mist frozen. Defaults: spray/foam/bubble -> splat, mist -> fog, the rest follow their substance. The substance (binding representation or domain default) still decides where 'follow' parcels go. The spray/foam/bubble rows ALSO route the domain's whitewater (massless secondary particles): for whitewater, sdf = a white medium in the surface volume, fog = deposited into the fog volume. Read back with fluid.get: label_routes, views[].labels, views[].particles, views[].whitewater, hidden_particles; fluid.get_whitewater views. Render only; unknown names fail the whole call.",
+    "write", "SceneWrite", false, "any",
+    "fluid|set|label|views|view|spray|splat|render|appearance",
+    "fluid.get|fluid.set_substance_material",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_set_label_views, 3,
+    true
+};
+static const MethodRegistration reg_fluid_set_label_views(desc_fluid_set_label_views);
 
 static const MethodParam params_fluid_set_param[] = {
     {"domain", "string", true, "", nullptr, nullptr},
@@ -1655,6 +1788,7 @@ static const MethodParam params_fluid_set_param[] = {
     {"granular_young_modulus", "any", false, "", nullptr, nullptr},
     {"kernel_radius_voxels", "any", false, "", nullptr, nullptr},
     {"kinematic_viscosity", "any", false, "", nullptr, nullptr},
+    {"max_particles", "any", false, "", nullptr, nullptr},
     {"narrow_band_voxels", "any", false, "", nullptr, nullptr},
     {"particle_radius_voxels", "any", false, "", nullptr, nullptr},
     {"pore_amount", "any", false, "", nullptr, nullptr},
@@ -1690,7 +1824,7 @@ static const MethodDescriptor desc_fluid_set_param = {
     "fluid|set|param|simulation|configure|viscosity|granular|render-mode|backend",
     "fluid.get|fluid.set_substance_material",
     "fluid.create_domain", "timeline.set_frame", "fluid.get|render.probe", "simulation_cache",
-    params_fluid_set_param, 58,
+    params_fluid_set_param, 59,
     true
 };
 static const MethodRegistration reg_fluid_set_param(desc_fluid_set_param);
@@ -1736,8 +1870,9 @@ static const MethodRegistration reg_fluid_set_splat_material(desc_fluid_set_spla
 static const MethodParam params_fluid_set_substance_material[] = {
     {"domain", "string", true, "Fluid domain name", nullptr, nullptr},
     {"substance", "string", true, "Substance id from msf.substances", nullptr, nullptr},
-    {"phase", "string", false, "Physical phase", nullptr, "liquid|solid|gas"},
-    {"representation", "string", false, "How the substance is solved and rendered", nullptr, nullptr},
+    {"phase", "string", false, "Physical phase", nullptr, "liquid|solid"},
+    {"representation", "string", false, "How the substance is rendered", nullptr, nullptr},
+    {"constitutive_model", "string", false, "Solver regime carried by parcels of this Substance", nullptr, "auto|fluid|granular|elastic"},
     {"kinematic_viscosity", "any", false, "", nullptr, nullptr},
     {"material", "string", false, "", "", nullptr},
     {"miscibility", "any", false, "", nullptr, nullptr},
@@ -1745,15 +1880,91 @@ static const MethodParam params_fluid_set_substance_material[] = {
 static const MethodDescriptor desc_fluid_set_substance_material = {
     "fluid.set_substance_material", "fluid",
     "Bind a substance (its physical identity, phase and representation) to a fluid domain",
-    "Phase is what the matter IS; representation is how it is solved and drawn. They are separate axes - setting one does not imply the other.",
+    "Phase, constitutive model and representation are separate axes: phase is thermodynamic state, constitutive_model selects fluid/granular/elastic stress response, and representation selects inherit|splat|sdf|fog drawing.",
     "write", "SceneWrite", false, "any",
     "fluid|set|substance|material|simulation|phase|msf",
     "msf.substances|fluid.set_splat_material|fluid.set_param",
     nullptr, nullptr, nullptr, nullptr,
-    params_fluid_set_substance_material, 7,
+    params_fluid_set_substance_material, 8,
     true
 };
 static const MethodRegistration reg_fluid_set_substance_material(desc_fluid_set_substance_material);
+
+static const MethodParam params_fluid_set_surface_interior[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"absorption_coefficient", "float", false, "", nullptr, nullptr},
+    {"absorption_color", "vec3", false, "", nullptr, nullptr},
+    {"refraction_tint", "vec3", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_set_surface_interior = {
+    "fluid.set_surface_interior", "fluid",
+    "Set a liquid body's depth absorption (color x coefficient per world unit) and built-in refraction tint; omitted keys are unchanged",
+    "The panel's 'Liquid Body' block edits the same fields. Fails until the surface has been drawn once (the sync creates and tunes the shader; an untuned preset renders the body black). Colors are clamped to 0..1.",
+    "write", "SceneWrite", false, "any",
+    "fluid|set|surface|interior|sdf|absorption|tint|appearance",
+    "fluid.get_surface_interior|fluid.set_param",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_set_surface_interior, 4,
+    true
+};
+static const MethodRegistration reg_fluid_set_surface_interior(desc_fluid_set_surface_interior);
+
+static const MethodParam params_fluid_set_whitewater[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"bubble_min_neighbors", "int", false, "", nullptr, nullptr},
+    {"buoyancy", "float", false, "", nullptr, nullptr},
+    {"crest_cos", "float", false, "", nullptr, nullptr},
+    {"enabled", "bool", false, "", nullptr, nullptr},
+    {"fluid_drag", "float", false, "", nullptr, nullptr},
+    {"ke_max", "float", false, "", nullptr, nullptr},
+    {"ke_min", "float", false, "", nullptr, nullptr},
+    {"lifetime", "float", false, "", nullptr, nullptr},
+    {"max_foam", "int", false, "", nullptr, nullptr},
+    {"neighbor_radius_voxels", "float", false, "", nullptr, nullptr},
+    {"render_mode", "any", false, "", nullptr, nullptr},
+    {"spawn_jitter_voxels", "float", false, "", nullptr, nullptr},
+    {"spray_drag", "float", false, "", nullptr, nullptr},
+    {"spray_max_neighbors", "int", false, "", nullptr, nullptr},
+    {"ta_max", "float", false, "", nullptr, nullptr},
+    {"ta_min", "float", false, "", nullptr, nullptr},
+    {"trapped_air_rate", "float", false, "", nullptr, nullptr},
+    {"volume_bubble_strength", "float", false, "", nullptr, nullptr},
+    {"volume_color", "vec3", false, "", nullptr, nullptr},
+    {"volume_density", "float", false, "", nullptr, nullptr},
+    {"volume_opacity", "float", false, "", nullptr, nullptr},
+    {"volume_spray_strength", "float", false, "", nullptr, nullptr},
+    {"wave_crest_rate", "float", false, "", nullptr, nullptr},
+    {"wc_max", "float", false, "", nullptr, nullptr},
+    {"wc_min", "float", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_set_whitewater = {
+    "fluid.set_whitewater", "fluid",
+    "Edit whitewater settings by key (enabled, rates, potential ranges, thresholds, dynamics, max_foam, volume_*); omitted keys are unchanged",
+    "Validated as a whole before writing. Generation/dynamics changes drop the RAM timeline cache (foam is simulated state); render-only keys repaint. render_mode was removed and is rejected: where each type is drawn is fluid.set_label_views (spray/foam/bubble rows).",
+    "write", "SceneWrite", false, "any",
+    "fluid|set|whitewater|foam|spray|bubble|simulation",
+    "fluid.get_whitewater|fluid.set_label_views",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_set_whitewater, 26,
+    true
+};
+static const MethodRegistration reg_fluid_set_whitewater(desc_fluid_set_whitewater);
+
+static const MethodParam params_fluid_state_digest[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_state_digest = {
+    "fluid.state_digest", "fluid",
+    "Bit-exact fingerprint of a liquid domain's live particle state: count, FNV position/velocity hashes, centroid, mean speed, whitewater count/hash",
+    "For determinism probes (Faz 2-W gate: enabling whitewater must leave the primary hashes unchanged). Hashes are hex strings; centroid/mean_speed are the tolerant view when runs are not bit-identical.",
+    "write", "SceneWrite", false, "any",
+    "fluid|state|digest|determinism|measure|verify|whitewater",
+    "fluid.get|fluid.step|fluid.reset",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_state_digest, 1,
+    true
+};
+static const MethodRegistration reg_fluid_state_digest(desc_fluid_state_digest);
 
 static const MethodParam params_fluid_step[] = {
     {"dt", "float", false, "", "0.0166667", nullptr},
@@ -1776,8 +1987,8 @@ static const MethodParam params_fluid_step_stats[] = {
 };
 static const MethodDescriptor desc_fluid_step_stats = {
     "fluid.step_stats", "fluid",
-    "Read the last fluid step's requested GPU transfer bytes, call times, and actual GPU path",
-    "Read measured first. Bytes are requested transfers in the fluid domain step, including fluid coupling. upload_call_ms, download_call_ms, batch_end_ms, synchronize_ms and dispatch_call_ms are host call times; dispatch_call_ms is not kernel time. Cached-frame reads do not run the solver or refresh these counters.",
+    "Read the last fluid step's total time, requested GPU transfer bytes, call times, and actual GPU path",
+    "Read measured first. total_ms is the complete liquid-domain wall time, including APIC, labels, whitewater and the density bridge. Bytes are requested transfers in the fluid domain step, including fluid coupling. upload_call_ms, download_call_ms, batch_end_ms, synchronize_ms and dispatch_call_ms are host call times; dispatch_call_ms is not kernel time. Cached-frame reads do not run the solver or refresh these counters.",
     "write", "SceneWrite", false, "any",
     "fluid|step|stats|simulation|performance|transfer|measurement",
     "fluid.step|particle.stats|perf.get_gpu_memory",
@@ -2133,6 +2344,7 @@ static const MethodParam params_gas_set_param[] = {
     {"granular_young_modulus", "any", false, "", nullptr, nullptr},
     {"kernel_radius_voxels", "any", false, "", nullptr, nullptr},
     {"kinematic_viscosity", "any", false, "", nullptr, nullptr},
+    {"max_particles", "any", false, "", nullptr, nullptr},
     {"narrow_band_voxels", "any", false, "", nullptr, nullptr},
     {"particle_radius_voxels", "any", false, "", nullptr, nullptr},
     {"pore_amount", "any", false, "", nullptr, nullptr},
@@ -2168,7 +2380,7 @@ static const MethodDescriptor desc_gas_set_param = {
     "gas|set|param|simulation|configure",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_gas_set_param, 58,
+    params_gas_set_param, 59,
     true
 };
 static const MethodRegistration reg_gas_set_param(desc_gas_set_param);
@@ -2190,6 +2402,7 @@ static const MethodParam params_gas_set_settings[] = {
     {"fire_max_temperature", "float", false, "", nullptr, nullptr},
     {"flame_dissipation", "float", false, "", nullptr, nullptr},
     {"fuel_dissipation", "float", false, "", nullptr, nullptr},
+    {"inherit_atmosphere", "bool", false, "", nullptr, nullptr},
     {"pressure_iterations", "int", false, "", nullptr, nullptr},
     {"quality_profile", "string", false, "", nullptr, nullptr},
     {"render_to_nanovdb", "bool", false, "", nullptr, nullptr},
@@ -2222,7 +2435,7 @@ static const MethodDescriptor desc_gas_set_settings = {
     "gas|set|settings|simulation|fire|smoke|ignite|burn|buoyancy|turbulence",
     "gas.get_settings|gas.set_shader|flow_source.create",
     "gas.create_domain", "gas.set_shader|flow_source.create|timeline.set_frame", "gas.get_settings|render.probe", "simulation_cache",
-    params_gas_set_settings, 39,
+    params_gas_set_settings, 40,
     true
 };
 static const MethodRegistration reg_gas_set_settings(desc_gas_set_settings);
@@ -2277,8 +2490,8 @@ static const MethodParam params_gas_step_stats[] = {
 };
 static const MethodDescriptor desc_gas_step_stats = {
     "gas.step_stats", "gas",
-    "Per-stage timing breakdown of the last gas solver step: every GPU stage, the host residual, the field analysis scan, plus grid size, CFL and field peaks",
-    "Read `measured` FIRST - every timing is 0.0 both for a free stage and for a step that never ran, so an idle domain otherwise records as a 0 ms step, which in an optimisation A/B reads as a total win. Times are HOST WALL TIME around each call, so a GPU row includes the submit/fence the host waited on; that is the cost the frame pays, not isolated kernel time, and reading it as kernel time makes a transfer-bound stage look compute-bound. cfl above 1 means the semi-Lagrangian trace jumps more than one cell per step and smears detail.",
+    "Per-stage timing breakdown of the last gas solver step, including physical inventory advection, grid size, CFL and field peaks",
+    "Read `measured` FIRST - every timing is 0.0 both for a free stage and for a step that never ran, so an idle domain otherwise records as a 0 ms step, which in an optimisation A/B reads as a total win. inventory_advection_ms is the host transport of liquid-to-gas kg/J sidecars. Times are HOST WALL TIME around each call, so a GPU row includes the submit/fence the host waited on; that is the cost the frame pays, not isolated kernel time. cfl above 1 means the semi-Lagrangian trace jumps more than one cell per step and smears detail. liquid_boundary_cells and liquid_boundary_mean_velocity report the overlapping liquid cells imposed on gas as moving walls.",
     "write", "SceneWrite", false, "any",
     "gas|step|stats|simulation|performance|timing|profiling|optimisation|cfl",
     "particle.stats|gas.get_settings|gas.measure_plume|perf.get_gpu_memory",
@@ -3243,6 +3456,19 @@ static const MethodDescriptor desc_material_textures = {
 };
 static const MethodRegistration reg_material_textures(desc_material_textures);
 
+static const MethodDescriptor desc_matter_exchanges = {
+    "matter.exchanges", "matter",
+    "Report physical matter transfers that ran in the latest simulation step",
+    "Mass uses kg, energy uses joules and momentum uses kg*m/s. Empty with traced=true means the solver stepped without a transfer.",
+    "read", "Read", false, "any",
+    "matter|exchanges|exchange|mass|energy|momentum|conservation|phase|melting|mist",
+    "sim_graph.couplings|msf.fields|msf.substances",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_matter_exchanges(desc_matter_exchanges);
+
 static const MethodParam params_mesh_asset_validate[] = {
     {"object", "string", false, "", "", nullptr},
 };
@@ -3827,6 +4053,22 @@ static const MethodDescriptor desc_msf_fields = {
     true
 };
 static const MethodRegistration reg_msf_fields(desc_msf_fields);
+
+static const MethodParam params_msf_substance[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_msf_substance = {
+    "msf.substance", "msf",
+    "Read one substance's canonical physical properties",
+    "Temperatures use Kelvin, energy values use J/kg and kinematic viscosity uses m^2/s.",
+    "read", "Read", false, "any",
+    "msf|substance|physical|properties|density|viscosity|temperature|combustion",
+    "msf.substances|fluid.set_substance_material",
+    nullptr, nullptr, nullptr, nullptr,
+    params_msf_substance, 1,
+    true
+};
+static const MethodRegistration reg_msf_substance(desc_msf_substance);
 
 static const MethodDescriptor desc_msf_substances = {
     "msf.substances", "msf",
@@ -4965,6 +5207,7 @@ static const MethodParam params_particle_set_physics[] = {
     {"grid_deposit_fade_with_age", "bool", false, "", nullptr, nullptr},
     {"grid_fuel_deposit", "float", false, "", nullptr, nullptr},
     {"grid_temperature_deposit", "float", false, "", nullptr, nullptr},
+    {"inherit_atmosphere", "bool", false, "", nullptr, nullptr},
     {"max_neighbors_per_particle", "int", false, "", nullptr, nullptr},
     {"mode", "string", false, "", nullptr, nullptr},
     {"particle_radius", "float", false, "", nullptr, nullptr},
@@ -4986,7 +5229,7 @@ static const MethodDescriptor desc_particle_set_physics = {
     "particle|set|physics|particles|solver|configure|sph",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_particle_set_physics, 20,
+    params_particle_set_physics, 21,
     true
 };
 static const MethodRegistration reg_particle_set_physics(desc_particle_set_physics);
@@ -5954,7 +6197,7 @@ static const MethodRegistration reg_rayfusion_core_status(desc_rayfusion_core_st
 static const MethodDescriptor desc_rayfusion_probe_field = {
     "rayfusion.probe_field", "rayfusion",
     "RayFusion probe field as it actually reaches the GPU: grid, fill progress and which producer filled it.",
-    "Step 1a. 'producer' is 'sky_bake' while the field is filled from the baked sky irradiance, which means the rendered image is meant to look IDENTICAL to the direct sky read - the counters, not the picture, are what show the pipe is live. 'uploaded' false with 'configured' true means the CPU field exists but no slot has reached the GPU, so shading still falls back to the global sky texture. 'valid' climbs toward 'total' over several frames because scheduling is budget-limited by 'budget_preset'. 'rejected' counts stale or duplicate tickets and should stay flat once the field is full; a climbing 'rejected' means results are arriving against a revision that has already been invalidated. Real indirect light needs probe rays, which need an acceleration structure in the raster viewport - until then this reports a working pipe, not GI. STEP 1b: 'producer' reports what actually ran - 'traced' (rays), 'sky_bake' (the step-1a bake), or 'none' - never the request; 'producer_traced_requested' is the request and 'producer_reason' explains any refusal. 'hit_fraction' is the share of probe rays that hit anything: if it stays 0.0 while geometry is clearly within range, the rays are not seeing the scene at all, and the result then looks EXACTLY like the sky-only producer - a correct-looking image that measures nothing. 'rejected_inside' counts probes born inside geometry; those publish with alpha 0 so the slot stops being re-traced while the shader falls back to the global read instead of going black. 'trace_ms' is the GPU dispatch plus readback for the last batch. Switch producers with rayfusion.set_probe_producer. STEP 1b-beta bounce keys: 'bounce_supported_materials' is the number of materials actually inside the single-diffuse-bounce subset, and it is the one to read first - 'bounce_unsupported_materials' alone cannot be checked against the scene, because a fully textured scene and a gate that rejects everything print the same number. When supported is 0 the bounce cannot change a single pixel and the image is identical to 1b-alpha, which is why 'bounce_reason' says so in words. 'bounce_rejected_textured', 'bounce_rejected_transparent', 'bounce_rejected_layered' and 'bounce_rejected_flagged' name the clause that rejected each material and overlap (a material can trip several), so they do not sum to the unsupported count. 'bounce_rejected_flag_bits' is the OR of the material flags that tripped the flag clause: its low bits are packed texture-channel selectors rather than material features, so a material that looks plain in the material panel can still be rejected here, and this field is what names the bit. STEP 1b-beta TEXTURE slice: 'bounce_shaded_hits' is the acceptance number and the only one measured on the GPU rather than counted off the CPU table -- how many probe rays actually landed on a material this slice could shade, during the last dispatch. 'bounce_hits' greater than zero with 'bounce_shaded_hits' at zero means every ray met an occluder and the published field is byte-identical to the bounce being off; the material counts cannot report that, because they describe what the slice COULD shade, not what it DID. 'bounce_alpha_tested' and 'bounce_alpha_occluded' measure the alpha cutout: shadow and primary rays no longer carry the opaque flag, so a masked leaf or curtain lets light through instead of shadowing like a solid sheet, and the candidate loop that costs is reported rather than assumed. Albedo, emission, opacity, metallic and specular textures are read at the bounce hit through the SAME bindless array and the same packed-channel policy the RT closest-hit uses, with the same UV transform; roughness, normal and height maps are deliberately not read (a diffuse lobe never reads roughness, and a probe texel is a hemisphere average, below the frequency of a normal map). transmission_tex, scalar opacity below 1 and transmission above 0 still fall outside the slice. INDIRECT SUN: 'bounce_sun_included' says whether the Physical Sky sun is carried as a directional bounce light. Until 2026-09-15 it was NOT, and the bounce could therefore only carry SKY light: an interior lit through a window went blue instead of taking the warm bounce off the sunlit floor. Measured against the RT reference on the same scene and settings, the ceiling ratio was 3.2/7.0/12.0 in R/G/B -- a blue-weighted excess, not a scalar gain, which is the signature of missing sun transport rather than a double-applied intensity. 'bounce_sun_tint_from_lut' says whether the sun tint came from the real transmittance LUT or from the shader's constant fallback; the fallback is visibly less warm at low sun elevations, so it is reported rather than applied silently. PER-FRAME CPU COST: 'bounce_prepare_ms' is how long the hit/material/light tables took to rebuild on the CPU. The emissive triangle scan behind it is now gated on an INPUT signature (geometry + instances + materials): measured 2026-09-15 it was 8.89 ms of a 9.21 ms total, every frame, in a scene with zero emissive triangles. 'bounce_emissive_cached' distinguishes 'the cache hit' from 'the scan never ran', which a bare 0.00 ms cannot. Read it beside rayfusion.scene_as 'signature_ms' (the AS change gate, also per frame): together they are what RayFusion spends before a single ray is cast. Measured 2026-09-08 in a foliage scene, the table build re-hashed each mesh's whole material-ID stream once per PLACEMENT, so the cost was multiplied by the instance count and one core sat at 100% while the GPU idled -- on a 16-thread machine that reads as '6% CPU', which is why the number has to be here rather than inferred from task-manager totals. WHY A HIT WAS NOT SHADED: 'bounce_shaded_hits' at zero is true but useless on its own, because five different exits produce the same zero. The named counters split it, and bounce_skipped_disabled + bounce_rejected_unresolved + bounce_rejected_unsupported_hit + bounce_rejected_degenerate + bounce_shaded_hits must equal bounce_hits -- if they do not, there is an unnamed exit left. 'bounce_backface_shaded' is NOT part of that sum: it is a SUBSET of the shaded hits, not an exit. RENAMED 2026-09-15 from 'bounce_skipped_backface' because the behaviour changed, not just the label: the front-face gate was REMOVED. Measured in a closed interior, 681 of 806 hits (84.5%) were back faces and every one of them returned black, so enabling the bounce cost CPU and changed almost nothing. The RT reference never rejected them (closesthit.rchit flips the normal on a back face) and rfBounceRadiance already flipped the normal toward the incoming ray, so the gate was discarding hits the shading function could handle correctly. A high value here now just means the scene is an interior, not that anything is wrong. 'bounce_rejected_unresolved' means the hit instance/index/material address could not be resolved at all -- a table problem, not a material one, and the CPU material counts cannot see it. 'bounce_rejected_unsupported_hit' is the per-RAY twin of the CPU-side material counts: it says the material the ray actually landed on is outside the slice, which is a different question from how many materials in the scene are.",
+    "Step 1a. 'producer' is 'sky_bake' while the field is filled from the baked sky irradiance, which means the rendered image is meant to look IDENTICAL to the direct sky read - the counters, not the picture, are what show the pipe is live. 'uploaded' false with 'configured' true means the CPU field exists but no slot has reached the GPU, so shading still falls back to the global sky texture. 'valid' climbs toward 'total' over several frames because scheduling is budget-limited by 'budget_preset'. 'rejected' counts stale or duplicate tickets and should stay flat once the field is full; a climbing 'rejected' means results are arriving against a revision that has already been invalidated. Real indirect light needs probe rays, which need an acceleration structure in the raster viewport - until then this reports a working pipe, not GI. STEP 1b: 'producer' reports what actually ran - 'traced' (rays), 'sky_bake' (the step-1a bake), or 'none' - never the request; 'producer_traced_requested' is the request and 'producer_reason' explains any refusal. 'hit_fraction' is the share of probe rays that hit anything: if it stays 0.0 while geometry is clearly within range, the rays are not seeing the scene at all, and the result then looks EXACTLY like the sky-only producer - a correct-looking image that measures nothing. 'rejected_inside' counts probes born inside geometry; those publish with alpha 0 so the slot stops being re-traced while the shader falls back to the global read instead of going black. 'trace_ms' is the GPU dispatch plus readback for the last batch. Switch producers with rayfusion.set_probe_producer. STEP 1b-beta bounce keys: 'bounce_supported_materials' is the number of materials actually inside the single-diffuse-bounce subset, and it is the one to read first - 'bounce_unsupported_materials' alone cannot be checked against the scene, because a fully textured scene and a gate that rejects everything print the same number. When supported is 0 the bounce cannot change a single pixel and the image is identical to 1b-alpha, which is why 'bounce_reason' says so in words. 'bounce_rejected_textured', 'bounce_rejected_transparent', 'bounce_rejected_layered' and 'bounce_rejected_flagged' name the clause that rejected each material and overlap (a material can trip several), so they do not sum to the unsupported count. 'bounce_rejected_flag_bits' is the OR of the material flags that tripped the flag clause: its low bits are packed texture-channel selectors rather than material features, so a material that looks plain in the material panel can still be rejected here, and this field is what names the bit. STEP 1b-beta TEXTURE slice: 'bounce_shaded_hits' is the acceptance number and the only one measured on the GPU rather than counted off the CPU table -- how many probe rays actually landed on a material this slice could shade, during the last dispatch. 'bounce_hits' greater than zero with 'bounce_shaded_hits' at zero means every ray met an occluder and the published field is byte-identical to the bounce being off; the material counts cannot report that, because they describe what the slice COULD shade, not what it DID. 'bounce_alpha_tested' and 'bounce_alpha_occluded' measure the alpha cutout: shadow and primary rays no longer carry the opaque flag, so a masked leaf or curtain lets light through instead of shadowing like a solid sheet, and the candidate loop that costs is reported rather than assumed. Albedo, emission, opacity, metallic and specular textures are read at the bounce hit through the SAME bindless array and the same packed-channel policy the RT closest-hit uses, with the same UV transform; roughness, normal and height maps are deliberately not read (a diffuse lobe never reads roughness, and a probe texel is a hemisphere average, below the frequency of a normal map). transmission_tex, scalar opacity below 1 and transmission above 0 still fall outside the slice. PER-FRAME CPU COST: 'bounce_prepare_ms' is how long the hit/material/light tables took to rebuild on the CPU. The emissive triangle scan behind it is now gated on an INPUT signature (geometry + instances + materials): measured 2026-09-15 it was 8.89 ms of a 9.21 ms total, every frame, in a scene with zero emissive triangles. 'bounce_emissive_cached' distinguishes 'the cache hit' from 'the scan never ran', which a bare 0.00 ms cannot. Read it beside rayfusion.scene_as 'signature_ms' (the AS change gate, also per frame): together they are what RayFusion spends before a single ray is cast. Measured 2026-09-08 in a foliage scene, the table build re-hashed each mesh's whole material-ID stream once per PLACEMENT, so the cost was multiplied by the instance count and one core sat at 100% while the GPU idled -- on a 16-thread machine that reads as '6% CPU', which is why the number has to be here rather than inferred from task-manager totals. WHY A HIT WAS NOT SHADED: 'bounce_shaded_hits' at zero is true but useless on its own, because five different exits produce the same zero. The named counters split it, and bounce_skipped_disabled + bounce_rejected_unresolved + bounce_rejected_unsupported_hit + bounce_rejected_degenerate + bounce_shaded_hits must equal bounce_hits -- if they do not, there is an unnamed exit left. 'bounce_backface_shaded' is NOT part of that sum: it is a SUBSET of the shaded hits, not an exit. RENAMED 2026-09-15 from 'bounce_skipped_backface' because the behaviour changed, not just the label: the front-face gate was REMOVED. Measured in a closed interior, 681 of 806 hits (84.5%) were back faces and every one of them returned black, so enabling the bounce cost CPU and changed almost nothing. The RT reference never rejected them (closesthit.rchit flips the normal on a back face) and rfBounceRadiance already flipped the normal toward the incoming ray, so the gate was discarding hits the shading function could handle correctly. A high value here now just means the scene is an interior, not that anything is wrong. 'bounce_rejected_unresolved' means the hit instance/index/material address could not be resolved at all -- a table problem, not a material one, and the CPU material counts cannot see it. 'bounce_rejected_unsupported_hit' is the per-RAY twin of the CPU-side material counts: it says the material the ray actually landed on is outside the slice, which is a different question from how many materials in the scene are.",
     "read", "Read", false, "any",
     "rayfusion|probe|field|gi|grid|status|development",
     "rayfusion.core_status|rayfusion.validate_core|viewport.preview_lighting",
@@ -6191,6 +6434,19 @@ static const MethodDescriptor desc_render_cancel_sequence = {
 };
 static const MethodRegistration reg_render_cancel_sequence(desc_render_cancel_sequence);
 
+static const MethodDescriptor desc_render_get_settings = {
+    "render.get_settings", "render",
+    "Read the path tracer bounce budget and the active Debug Visualizer view",
+    nullptr,
+    "render", "Render", false, "any",
+    "render|get|settings|bounces|budget|debug|visualizer",
+    "render.set_settings|render.volume_stats",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_render_get_settings(desc_render_get_settings);
+
 static const MethodDescriptor desc_render_optix_accum_status = {
     "render.optix_accum_status", "render",
     "Counts how often the OptiX accumulation buffer was WIPED, independently of the sample counter.",
@@ -6236,6 +6492,25 @@ static const MethodDescriptor desc_render_sequence_status = {
     true
 };
 static const MethodRegistration reg_render_sequence_status(desc_render_sequence_status);
+
+static const MethodParam params_render_set_settings[] = {
+    {"debug_view", "int", false, "", nullptr, nullptr},
+    {"diffuse_bounces", "int", false, "", nullptr, nullptr},
+    {"max_bounces", "int", false, "", nullptr, nullptr},
+    {"transmission_bounces", "int", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_render_set_settings = {
+    "render.set_settings", "render",
+    "Set the path tracer bounce budget (total, diffuse, transmission; 1..64) and/or the Debug Visualizer view (0..14, 6 = Bounce Count)",
+    "Writes the same settings the panel edits; the main loop resets accumulation on change. diffuse/transmission are clamped to max_bounces like the panel does. Raising max_bounces also raises the free-pass cap (max_bounces + 32), so a fix by 'more bounces' does not by itself tell which budget was short -- read render.volume_stats paths_bounce_capped vs paths_pass_capped.",
+    "render", "Render", false, "any",
+    "render|set|settings|bounces|budget|debug|visualizer|quality",
+    "render.get_settings|render.volume_counters",
+    nullptr, nullptr, nullptr, nullptr,
+    params_render_set_settings, 4,
+    true
+};
+static const MethodRegistration reg_render_set_settings(desc_render_set_settings);
 
 static const MethodParam params_render_start[] = {
     {"output_path", "string", true, "Absolute path of the image file to write", nullptr, nullptr},
@@ -6288,16 +6563,17 @@ static const MethodRegistration reg_render_status(desc_render_status);
 
 static const MethodParam params_render_volume_counters[] = {
     {"enabled", "bool", true, "", nullptr, nullptr},
+    {"region", "any", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_render_volume_counters = {
     "render.volume_counters", "render",
-    "Enable or disable volume instrumentation counters",
-    nullptr,
+    "Enable or disable volume instrumentation counters (zeroes them), optionally restricted to a pixel region",
+    "region = [x0, y0, x1, y1] normalized to the image; every counter then counts only launches inside it, so a small dark patch is not drowned by background rays. Omitted = whole image. The counters also cover the path tracer's bounce budget (see render.volume_stats).",
     "render", "Render", false, "any",
-    "render|volume|counters|diagnostics|performance",
-    nullptr,
+    "render|volume|counters|diagnostics|performance|bounce|budget|region",
+    "render.volume_stats|render.set_settings",
     nullptr, nullptr, nullptr, nullptr,
-    params_render_volume_counters, 1,
+    params_render_volume_counters, 2,
     true
 };
 static const MethodRegistration reg_render_volume_counters(desc_render_volume_counters);
@@ -6317,11 +6593,11 @@ static const MethodRegistration reg_render_volume_slots(desc_render_volume_slots
 
 static const MethodDescriptor desc_render_volume_stats = {
     "render.volume_stats", "render",
-    "Return volume traversal counters for the last frame",
-    nullptr,
+    "Return volume traversal and path-budget counters accumulated since render.volume_counters",
+    "paths_bounce_capped / paths_traced is the share of paths that were still scattering when the bounce budget ran out: a black surface with a high share is budget-starved, not unlit. paths_pass_capped counts the free-pass cap (maxBounces + 32) instead. charged_* partition every bounce spent by kind; medium_passes counts straight gas/fog continuations; they are FREE (inside free_passes) -- ~1 per box crossed is healthy, many per path is short-hop re-entry. arbiter_started_inside / arbiter_inside_found: the gas->liquid arbiter began inside a liquid and whether it found the exit.",
     "render", "Render", false, "any",
-    "render|volume|stats|diagnostics|performance",
-    nullptr,
+    "render|volume|stats|diagnostics|performance|bounce|budget",
+    "render.volume_counters|render.get_settings",
     nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
@@ -8142,6 +8418,22 @@ static const MethodDescriptor desc_scatter_fill = {
 };
 static const MethodRegistration reg_scatter_fill(desc_scatter_fill);
 
+static const MethodParam params_scatter_get_wind[] = {
+    {"group", "string", true, "Scatter group id or name", nullptr, nullptr},
+};
+static const MethodDescriptor desc_scatter_get_wind = {
+    "scatter.get_wind", "scatter",
+    "Return a scatter group's wind animation settings and the wind it actually runs with",
+    "With inherit_atmosphere the direction is the climate's and speed/strength are the group's RESPONSE at reference_wind_mps (sway speed x v/v_ref, bend x (v/v_ref)^2); effective_* is what the animation uses. A calm world leaves an inheriting group still. wind_source says 'atmosphere' or 'local'.",
+    "read", "Read", false, "any",
+    "scatter|get|wind|foliage|atmosphere",
+    "scatter.set_wind|world.set_climate",
+    nullptr, nullptr, nullptr, nullptr,
+    params_scatter_get_wind, 1,
+    true
+};
+static const MethodRegistration reg_scatter_get_wind(desc_scatter_get_wind);
+
 static const MethodDescriptor desc_scatter_list_assets = {
     "scatter.list_assets", "scatter",
     nullptr,
@@ -8196,6 +8488,29 @@ static const MethodDescriptor desc_scatter_set_settings = {
     true
 };
 static const MethodRegistration reg_scatter_set_settings(desc_scatter_set_settings);
+
+static const MethodParam params_scatter_set_wind[] = {
+    {"group", "string", true, "Scatter group id or name", nullptr, nullptr},
+    {"direction", "vec3", false, "", nullptr, nullptr},
+    {"enabled", "any", false, "", nullptr, nullptr},
+    {"inherit_atmosphere", "any", false, "", nullptr, nullptr},
+    {"speed", "any", false, "", nullptr, nullptr},
+    {"strength", "any", false, "", nullptr, nullptr},
+    {"turbulence", "any", false, "", nullptr, nullptr},
+    {"wave_size", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_scatter_set_wind = {
+    "scatter.set_wind", "scatter",
+    "Set a scatter group's wind animation (enabled, inherit_atmosphere, speed, strength, turbulence, wave_size, direction)",
+    "Partial update: omitted keys are left alone; a rejected call changes nothing. Disabling wind restores the rest pose. direction uses its horizontal (x/z) part and is ignored while inherit_atmosphere is on.",
+    "write", "SceneWrite", false, "any",
+    "scatter|set|wind|foliage|atmosphere",
+    "scatter.get_wind",
+    nullptr, nullptr, nullptr, nullptr,
+    params_scatter_set_wind, 8,
+    true
+};
+static const MethodRegistration reg_scatter_set_wind(desc_scatter_set_wind);
 
 static const MethodParam params_scene_add_primitive[] = {
     {"type", "string", true, "Primitive shape", nullptr, "cube|sphere|plane|cylinder|torus"},
@@ -8727,15 +9042,18 @@ static const MethodDescriptor desc_sim_cache_bake = {
 };
 static const MethodRegistration reg_sim_cache_bake(desc_sim_cache_bake);
 
+static const MethodParam params_sim_cache_clear[] = {
+    {"ram_only", "bool", false, "", nullptr, nullptr},
+};
 static const MethodDescriptor desc_sim_cache_clear = {
     "sim_cache.clear", "sim_cache",
     "Clear the simulation cache",
-    nullptr,
+    "ram_only:true drops the RAM timeline frames but keeps the disk bake bound, so the next timeline read streams from disk. Playback prefers RAM (which carries more state than the disk format), so a disk-format test must use it.",
     "write", "SceneWrite", false, "any",
     "sim_cache|sim|cache|clear|simulation|reset",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    nullptr, 0,
+    params_sim_cache_clear, 1,
     true
 };
 static const MethodRegistration reg_sim_cache_clear(desc_sim_cache_clear);
@@ -10701,6 +11019,96 @@ static const MethodDescriptor desc_viewport_taa = {
 };
 static const MethodRegistration reg_viewport_taa(desc_viewport_taa);
 
+static const MethodParam params_water_get_wind[] = {
+    {"surface", "string", true, "Water surface id or name", nullptr, nullptr},
+};
+static const MethodDescriptor desc_water_get_wind = {
+    "water.get_wind", "water",
+    "Return an ocean/lake surface's wind (authored and effective, speed in m/s, direction in degrees)",
+    "With inherit_atmosphere the water shader receives the climate's wind (speed floored at 0.1 m/s; a dead-calm climate keeps the authored direction). Rivers have no wind: flow is authored. Direction: 0 = +X, 90 = +Z.",
+    "read", "Read", false, "any",
+    "water|get|wind|ocean|atmosphere",
+    "water.set_wind|world.set_climate",
+    nullptr, nullptr, nullptr, nullptr,
+    params_water_get_wind, 1,
+    true
+};
+static const MethodRegistration reg_water_get_wind(desc_water_get_wind);
+
+static const MethodParam params_water_set_wind[] = {
+    {"surface", "string", true, "Water surface id or name", nullptr, nullptr},
+    {"direction_degrees", "any", false, "", nullptr, nullptr},
+    {"inherit_atmosphere", "any", false, "", nullptr, nullptr},
+    {"speed_mps", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_water_set_wind = {
+    "water.set_wind", "water",
+    "Set an ocean/lake surface's wind (inherit_atmosphere, speed_mps, direction_degrees)",
+    "Partial update. Rejects inherit_atmosphere on a river. Pushes the GPU material like a panel edit.",
+    "write", "SceneWrite", false, "any",
+    "water|set|wind|ocean|atmosphere",
+    "water.get_wind",
+    nullptr, nullptr, nullptr, nullptr,
+    params_water_set_wind, 4,
+    true
+};
+static const MethodRegistration reg_water_set_wind(desc_water_set_wind);
+
+static const MethodParam params_world_apply_cloud_preset[] = {
+    {"preset", "string", true, "Preset name", nullptr, nullptr},
+};
+static const MethodDescriptor desc_world_apply_cloud_preset = {
+    "world.apply_cloud_preset", "world",
+    "Replace the clouds with a named preset (keeps quality settings)",
+    "Names: clear, fair_weather_cumulus, scattered, broken, overcast_stratus, storm, high_cirrus, sunset_altocumulus (also listed by world.get_clouds presets).",
+    "write", "SceneWrite", false, "any",
+    "world|apply|cloud|preset|environment|sky|clouds",
+    "world.get_clouds|world.set_clouds",
+    nullptr, nullptr, nullptr, nullptr,
+    params_world_apply_cloud_preset, 1,
+    true
+};
+static const MethodRegistration reg_world_apply_cloud_preset(desc_world_apply_cloud_preset);
+
+static const MethodDescriptor desc_world_atmosphere_stats = {
+    "world.atmosphere_stats", "world",
+    "Per Vulkan device (render / viewport): LUT ready, aerial froxel available/active and its rebuild count",
+    "froxel_dispatches counts froxel rebuilds recorded into frame command buffers. It must climb when the camera moves or the medium changes and stay FLAT while nothing changes -- a counter that climbs on a still camera means a rebuild every frame. froxel_active=false with froxel_available=true means the world wants no aerial/fog (both off) or the view is orthographic. Two rows even when both roles are one object.",
+    "read", "Read", false, "AtmosphereStatsInfo",
+    "world|atmosphere|stats|environment|aerial|fog|diagnostics",
+    "world.get_aerial|world.set_aerial|render.probe",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_world_atmosphere_stats(desc_world_atmosphere_stats);
+
+static const MethodDescriptor desc_world_cloud_stats = {
+    "world.cloud_stats", "world",
+    "Per-backend cloud resource counters: textures built, noise/weather generations, sample dispatches",
+    "Lazy by design: with every layer off, noise_ready/weather_ready stay false and nothing is generated. weather_generations must stay flat while only the wind/time moves (drift moves the lookup, not the map); it climbs only on seed/extent/cluster-size changes. `renderer` names what draws the picture (legacy_volume until Faz 3b).",
+    "read", "Read", false, "any",
+    "world|cloud|stats|clouds|measure|diagnostics|atmosphere",
+    "world.sample_clouds|world.get_clouds",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_world_cloud_stats(desc_world_cloud_stats);
+
+static const MethodDescriptor desc_world_ensure_sun_light = {
+    "world.ensure_sun_light", "world",
+    "Add a 'Sun' directional light aligned with the world sun if the scene has no directional light",
+    "The Physical Sky sun reaches surfaces ONLY through a directional scene light, in both Vulkan backends. A hidden directional counts as present. created=false, name='' when one already exists. Undoable. Sun sync then keeps the light and the sky sun aligned.",
+    "write", "SceneWrite", false, "any",
+    "world|ensure|sun|light|environment|sky",
+    "world.set_mode|lights.list|world.set_sun_elevation",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_world_ensure_sun_light(desc_world_ensure_sun_light);
+
 static const MethodDescriptor desc_world_get = {
     "world.get", "world",
     "Return world mode, background colour, sun angles and atmosphere settings",
@@ -10713,6 +11121,19 @@ static const MethodDescriptor desc_world_get = {
     true
 };
 static const MethodRegistration reg_world_get(desc_world_get);
+
+static const MethodDescriptor desc_world_get_aerial = {
+    "world.get_aerial", "world",
+    "Return aerial perspective + height fog settings (air toggle, fog density/height/falloff/distance/albedo/anisotropy)",
+    "One medium, integrated into the aerial froxel by both Vulkan backends (docs/dev/ATMOSPHERE_SYSTEM.md Faz 1b). The air haze has no strength or distance knob: its amount is the atmosphere's (world.set_atmosphere air/dust density, world.set_climate humidity). Fog density profile: sigma(y) = fog_density * exp(-fog_falloff * max(y - fog_height, 0)) in 1/m, scene Y in metres, only within fog_distance of the camera.",
+    "read", "Read", false, "WorldAerialInfo",
+    "world|get|aerial|environment|atmosphere|fog|haze",
+    "world.set_aerial|world.atmosphere_stats|world.get_atmosphere|world.get_climate",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_world_get_aerial(desc_world_get_aerial);
 
 static const MethodDescriptor desc_world_get_atmosphere = {
     "world.get_atmosphere", "world",
@@ -10727,10 +11148,36 @@ static const MethodDescriptor desc_world_get_atmosphere = {
 };
 static const MethodRegistration reg_world_get_atmosphere(desc_world_get_atmosphere);
 
+static const MethodDescriptor desc_world_get_climate = {
+    "world.get_climate", "world",
+    "Return the world climate: surface temperature (K), lapse rate, humidity, pressure and wind",
+    "The climate is the single owner of ambient temperature, humidity, pressure and wind (docs/dev/ATMOSPHERE_SYSTEM.md). Renderers read a packet mirrored from it. applied_mie_humidity_scale and applied_temperature_c are read back from that RENDER PACKET, not from the climate: if they disagree with surface_relative_humidity / surface_temperature_k the mirror stopped syncing. applied_mie_humidity_scale is what the sky LUT multiplies aerosol (Mie) extinction by, (1-RH)^-0.5 with RH capped at 0.95; 1.0 = dry aerosol.",
+    "read", "Read", false, "WorldClimateInfo",
+    "world|get|climate|environment|atmosphere|temperature|humidity|wind",
+    "world.set_climate|world.sample_climate|world.get_atmosphere",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_world_get_climate(desc_world_get_climate);
+
+static const MethodDescriptor desc_world_get_clouds = {
+    "world.get_clouds", "world",
+    "Return the cloud authority (layers, cirrus, weather map, quality) plus drift, time and preset names",
+    "Schema = atmosphere::cloudsToJson (docs/dev/ATMOSPHERE_CLOUDS.md). Physical units: base_altitude_m / thickness_m (m, above sea level), extinction_per_m (1/m; cumulus ~0.05 -> a 1 km column is opaque), droplet_diameter_um (5..50, drives the phase), coverage 0..1 (fraction of sky), type 0 stratus .. 0.5 cumulus .. 1 cumulonimbus. Read-only extras: time_seconds, wind_offset_m (drift from the CLIMATE wind -- wind is not a cloud field), revision, any_enabled, presets. The legacy nishita.cloud_* fields are a packet derived from this and are not writable.",
+    "read", "Read", false, "any",
+    "world|get|clouds|environment|sky|atmosphere|weather",
+    "world.set_clouds|world.apply_cloud_preset|world.sample_clouds|world.cloud_stats|world.set_climate",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_world_get_clouds(desc_world_get_clouds);
+
 static const MethodDescriptor desc_world_get_thermal = {
     "world.get_thermal", "world",
     "Return the ambient thermal condition every uncoupled substance relaxes toward",
-    "Distinct from world.get: that is the render sky, this is WorldThermalState -- the room temperature (ambient_kelvin), the Kelvin-per-normalized-unit calibration a substance's MSF temperature is read against (kelvin_per_unit), the passive-cooling multiplier (convection_coefficient) and the pyrolysis rate scale (oxygen_availability). Formerly no scripting surface existed for any of this -- see docs/dev/SIMULATION_NODE_OBJECT_MODEL.md section 7 item 1.",
+    "Distinct from world.get: that is the render sky, this is WorldThermalState -- the room temperature (ambient_kelvin), the Kelvin-per-normalized-unit calibration a substance's MSF temperature is read against (kelvin_per_unit), the passive-cooling multiplier (convection_coefficient) and the pyrolysis rate scale (oxygen_availability). Formerly no scripting surface existed for any of this -- see docs/dev/SIMULATION_NODE_OBJECT_MODEL.md section 7 item 1. ATMOSPHERE (Faz 2): with inherit_atmosphere the room is the world climate's temperature at the scene origin -- read effective_ambient_kelvin / ambient_source ('atmosphere'|'local'), NOT ambient_kelvin, which then only holds the kept local value. reference_kelvin is the calibration zero (normalized 0 == this many Kelvin), deliberately separate from the ambient so a keyed climate cannot re-interpret stored temperatures. drying_scale is (1 - RH) when inheriting, else 1.",
     "read", "Read", false, "WorldThermalInfo",
     "world|get|thermal|simulation|ambient|msf",
     "world.set_thermal|sim_graph.list",
@@ -10740,13 +11187,83 @@ static const MethodDescriptor desc_world_get_thermal = {
 };
 static const MethodRegistration reg_world_get_thermal(desc_world_get_thermal);
 
+static const MethodDescriptor desc_world_get_weather = {
+    "world.get_weather", "world",
+    "Return the weather derived from the climate: cloud base (LCL), genus, coverage, depth, freezing level, precipitation mm/h, snow, lightning rate",
+    "Read-only (docs/dev/ATMOSPHERE_WEATHER.md §2). Inputs: world.set_climate (surface_temperature_k, surface_relative_humidity, lapse_rate_k_per_m, instability 0..1) and world.set_clouds {derive_from_climate}. While derive_from_climate is true, cloud layer 0 base/thickness/type/coverage follow these values; a cloud preset turns it off.",
+    "read", "Read", false, "any",
+    "world|get|weather|environment|sky|clouds|atmosphere|climate",
+    "world.set_climate|world.get_clouds|world.set_clouds",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_world_get_weather(desc_world_get_weather);
+
+static const MethodParam params_world_sample_climate[] = {
+    {"position", "vec3", true, "Scene position [x, y, z] in metres.", nullptr, nullptr},
+};
+static const MethodDescriptor desc_world_sample_climate = {
+    "world.sample_climate", "world",
+    "Sample the climate at a scene position: temperature, humidity, pressure, air density, wind",
+    "ISA model: temperature falls by the lapse rate up to the 11 km tropopause and is constant above; pressure follows the barometric formula; air density = p / (287.05 * T). altitude_m = position.y + the sky's altitude offset (world.get_atmosphere altitude), scene units are metres. Humidity and wind do not vary with altitude yet. Pure read, does not dirty anything. This is the entry point physics systems will read ambient conditions through.",
+    "read", "Read", false, "ClimateSampleInfo",
+    "world|sample|climate|environment|atmosphere|physics",
+    "world.get_climate|world.set_climate",
+    nullptr, nullptr, nullptr, nullptr,
+    params_world_sample_climate, 1,
+    true
+};
+static const MethodRegistration reg_world_sample_climate(desc_world_sample_climate);
+
+static const MethodParam params_world_sample_clouds[] = {
+    {"backend", "string", false, "", nullptr, nullptr},
+    {"mode", "string", false, "", nullptr, nullptr},
+    {"points", "any", false, "", nullptr, nullptr},
+    {"segments", "any", false, "", nullptr, nullptr},
+    {"steps", "int", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_world_sample_clouds = {
+    "world.sample_clouds", "world",
+    "Measure the cloud field on the GPU: density (1/m) or precipitation (mm/h) at points, or transmittance along segments",
+    "Runs the SAME cloudDensity() the renderers use (shaders/cloud_common.glsl) -- no CPU mirror. mode density|base_density need points [[x,y,z],...] in scene metres; transmittance needs segments [[[ax,ay,az],[bx,by,bz]],...] and integrates with `steps` midpoint samples. mode precipitation returns the local rain/snow rate (mm/h, cloudPrecipAt: layer 0 weather-map B channel under cloud, slanted by wind, virga cut) at points. backend render|viewport picks the device (both must agree: same shader, same packet). Works with clouds off (measures 0).",
+    "read", "Read", false, "any",
+    "world|sample|clouds|measure|verify|atmosphere",
+    "world.cloud_stats|world.get_clouds",
+    nullptr, nullptr, nullptr, nullptr,
+    params_world_sample_clouds, 5,
+    true
+};
+static const MethodRegistration reg_world_sample_clouds(desc_world_sample_clouds);
+
+static const MethodParam params_world_set_aerial[] = {
+    {"aerial_perspective", "bool", false, "Air scattering between the camera and surfaces on/off.", "true", nullptr},
+    {"fog_enabled", "bool", false, "Height fog on/off.", "false", nullptr},
+    {"fog_density", "float", false, "Fog extinction per METRE at and below fog_height (0.0001 light, 0.001 dense over km views). >= 0.", "0.0", nullptr},
+    {"fog_height", "float", false, "Top of the uniform fog layer, scene Y in metres.", "0.0", nullptr},
+    {"fog_falloff", "float", false, "Exponential thinning above fog_height, per metre. >= 0.", "0.0", nullptr},
+    {"fog_distance", "float", false, "Fog only exists within this many metres of the camera; sky pixels are fogged out to here. > 0.", "0.0", nullptr},
+    {"fog_albedo", "vec3", false, "Single-scattering albedo [r, g, b], each 0..1.", nullptr, nullptr},
+    {"fog_anisotropy", "float", false, "Henyey-Greenstein g of the fog droplets, within (-0.95, 0.95); higher = brighter around the sun.", "0.0", nullptr},
+};
+static const MethodDescriptor desc_world_set_aerial = {
+    "world.set_aerial", "world",
+    "Set aerial perspective toggle and height fog (density 1/m, height m, falloff 1/m, distance m, albedo, anisotropy)",
+    "Every field optional. Out-of-range values are REJECTED, not clamped. The retired keys aerial_density, aerial_min_distance, aerial_max_distance, fog_color and fog_sun_scatter are rejected with an error: the artistic haze ramp is gone and the fog is now a lit medium. With the Nishita sky the fog is lit by the sun (transmittance LUT, Henyey-Greenstein fog_anisotropy) and the sky; in other world modes fog_albedo is used as the fog radiance. Does not dirty the sky LUT; it rebuilds the froxel (verify with world.atmosphere_stats froxel_dispatches).",
+    "write", "SceneWrite", false, "any",
+    "world|set|aerial|environment|atmosphere|fog|haze",
+    "world.get_aerial|world.atmosphere_stats",
+    nullptr, nullptr, nullptr, nullptr,
+    params_world_set_aerial, 8,
+    true
+};
+static const MethodRegistration reg_world_set_aerial(desc_world_set_aerial);
+
 static const MethodParam params_world_set_atmosphere[] = {
     {"air_density", "any", false, "Rayleigh scattering multiplier (Blender 'Air'). 1 = Earth. Must be >= 0.", nullptr, nullptr},
     {"dust_density", "any", false, "Mie/aerosol scattering multiplier (Blender 'Dust'). Must be >= 0.", nullptr, nullptr},
     {"ozone_density", "any", false, "Ozone column multiplier; drives blue-hour saturation. Must be >= 0.", nullptr, nullptr},
     {"ozone_absorption_scale", "any", false, "Scales the ozone absorption coefficients on top of ozone_density. Must be >= 0.", nullptr, nullptr},
-    {"humidity", "any", false, "0..1, dry to hazy. Rejected outside that range.", nullptr, nullptr},
-    {"temperature", "any", false, "Air temperature in CELSIUS. Scales BOTH Rayleigh and Mie scale heights by (T+273.15)/288.15, so it moves the whole atmosphere profile, not just a tint.", nullptr, nullptr},
     {"altitude", "any", false, "Viewer height above sea level in METRES; the SkyView LUT is baked from this camera altitude.", nullptr, nullptr},
     {"mie_anisotropy", "any", false, "Henyey-Greenstein g for the Mie phase function; forward scattering as it approaches 1. Must be within (-1, 1).", nullptr, nullptr},
     {"planet_radius", "any", false, "Ground sphere radius in METRES (Earth = 6360000). Must be >= 1000.", nullptr, nullptr},
@@ -10755,16 +11272,17 @@ static const MethodParam params_world_set_atmosphere[] = {
     {"mie_scattering", "vec3", false, "Per-channel Mie scattering coefficients as [r, g, b], in 1/metre.", nullptr, nullptr},
     {"rayleigh_density", "any", false, "Rayleigh SCALE HEIGHT in metres (Earth = 8000). The name says density, the unit is a height. Must be >= 1.", nullptr, nullptr},
     {"mie_density", "any", false, "Mie SCALE HEIGHT in metres (Earth = 1200). Same naming trap as rayleigh_density. Must be >= 1.", nullptr, nullptr},
+    {"literal", "any", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_world_set_atmosphere = {
     "world.set_atmosphere", "world",
     "Set the physical atmosphere parameters of the Nishita sky",
-    "Every field optional: omit a key to leave it unchanged. Out-of-range values are REJECTED, not clamped, because a silently clamped planet radius or scale height reads as 'the sky looks odd' rather than as an error. Any changed field marks the atmosphere LUT dirty; the runtime rebuilds it on the GPU compute path (throttled to about 15 Hz while a value is being dragged) and falls back to a CPU bake only when that pipeline is missing. UNITS ARE ABSOLUTE: planet_radius/atmosphere_height/altitude are METRES, rayleigh_density and mie_density are SCALE HEIGHTS in metres (NOT densities, despite the field names), temperature is CELSIUS and scales both scale heights.",
+    "Every field optional: omit a key to leave it unchanged. Out-of-range values are REJECTED, not clamped, because a silently clamped planet radius or scale height reads as 'the sky looks odd' rather than as an error. Any changed field marks the atmosphere LUT dirty; the runtime rebuilds it on the GPU compute path (throttled to about 15 Hz while a value is being dragged) and falls back to a CPU bake only when that pipeline is missing. UNITS ARE ABSOLUTE: planet_radius/atmosphere_height/altitude are METRES, rayleigh_density and mie_density are SCALE HEIGHTS in metres (NOT densities, despite the field names). humidity and temperature are NOT accepted here any more: they are climate state, set them with world.set_climate (temperature in KELVIN); passing the old keys is an error, not a silent no-op.",
     "write", "SceneWrite", false, "any",
     "world|set|atmosphere|environment|sky|nishita|scattering",
     "world.get_atmosphere|world.set_atmosphere_intensity|world.set_sun_elevation",
     nullptr, nullptr, nullptr, nullptr,
-    params_world_set_atmosphere, 14,
+    params_world_set_atmosphere, 13,
     true
 };
 static const MethodRegistration reg_world_set_atmosphere(desc_world_set_atmosphere);
@@ -10801,13 +11319,51 @@ static const MethodDescriptor desc_world_set_background_color = {
 };
 static const MethodRegistration reg_world_set_background_color(desc_world_set_background_color);
 
+static const MethodParam params_world_set_climate[] = {
+    {"surface_temperature_k", "any", false, "Surface air temperature in KELVIN (15 C = 288.15). Must be within 150..400.", nullptr, nullptr},
+    {"lapse_rate_k_per_m", "any", false, "Temperature drop per METRE of altitude (ISA = 0.0065). Negative = inversion. Must be within -0.02..0.02 and must not cool the air below 100 K by 11 km.", nullptr, nullptr},
+    {"surface_relative_humidity", "any", false, "Relative humidity 0..1.", nullptr, nullptr},
+    {"surface_pressure_pa", "any", false, "Surface pressure in PASCAL (sea level 101325). Must be within 30000..120000.", nullptr, nullptr},
+    {"wind_direction", "vec3", false, "Direction the wind blows TOWARD as [x, y, z]; projected onto the horizontal plane and normalized. Must have an x/z component.", nullptr, nullptr},
+    {"wind_speed_mps", "any", false, "Surface wind speed in m/s, 0..150.", nullptr, nullptr},
+    {"instability", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_world_set_climate = {
+    "world.set_climate", "world",
+    "Set the world climate (temperature in KELVIN, humidity 0..1, pressure Pa, wind m/s)",
+    "Every field optional; omit a key to leave it unchanged. Out-of-range values are REJECTED, not clamped. Replaces the old world.set_atmosphere humidity/temperature (which was CELSIUS). Humidity and temperature feed the sky LUT (humidity grows aerosol haze, temperature scales both scale heights), so changing either dirties the LUT; wind feeds the weather shaders. Verify with world.get_climate applied_* fields, which read the render packet.",
+    "write", "SceneWrite", false, "any",
+    "world|set|climate|environment|atmosphere|temperature|humidity|wind",
+    "world.get_climate|world.sample_climate",
+    nullptr, nullptr, nullptr, nullptr,
+    params_world_set_climate, 7,
+    true
+};
+static const MethodRegistration reg_world_set_climate(desc_world_set_climate);
+
+static const MethodParam params_world_set_clouds[] = {
+    {"layers", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_world_set_clouds = {
+    "world.set_clouds", "world",
+    "Patch the cloud authority: layers (element-wise), cirrus, weather, quality",
+    "Partial: objects merge, and layers merges per element, so {layers:[{},{coverage:0.4}]} edits layer 1 only. Invalid values (range, overlapping enabled layers) are REJECTED, never clamped, and leave the state untouched. Read-only keys from world.get_clouds are ignored, so get -> edit -> set round-trips.",
+    "write", "SceneWrite", false, "any",
+    "world|set|clouds|environment|sky|atmosphere",
+    "world.get_clouds|world.apply_cloud_preset",
+    nullptr, nullptr, nullptr, nullptr,
+    params_world_set_clouds, 1,
+    true
+};
+static const MethodRegistration reg_world_set_clouds(desc_world_set_clouds);
+
 static const MethodParam params_world_set_mode[] = {
     {"mode", "string", true, "Background model", nullptr, "solid|hdri|nishita"},
 };
 static const MethodDescriptor desc_world_set_mode = {
     "world.set_mode", "world",
     "Switch the world background between flat colour, HDRI and physical sky",
-    nullptr,
+    "Switching INTO nishita calls world.ensure_sun_light: the sky sun never lights surfaces by itself (Vulkan RT and RayFusion alike), so a scene without a directional light gets an undoable 'Sun' directional aligned with the world sun. Only on the switch -- a Sun deleted afterwards stays deleted.",
     "write", "SceneWrite", false, "any",
     "world|set|mode|environment|sky|background|hdri",
     nullptr,
@@ -10886,6 +11442,8 @@ static const MethodParam params_world_set_thermal[] = {
     {"kelvin_per_unit", "any", false, "Kelvin per normalized solver unit -- the calibration MSF temperature reads through. Must be positive.", nullptr, nullptr},
     {"convection_coefficient", "any", false, "Scales every substance's passive cooling toward ambient: 1 = authored, higher = draughty, 0 = a perfect thermos.", nullptr, nullptr},
     {"oxygen_availability", "any", false, "0..1, scales pyrolysis burn rate; 0 smothers combustion entirely. Clamped, not rejected, if out of range.", nullptr, nullptr},
+    {"inherit_atmosphere", "any", false, "true: the ambient follows world.set_climate (default false = the local ambient_kelvin). Turning it on moves the room from 293 K to the climate temperature.", nullptr, nullptr},
+    {"reference_kelvin", "any", false, "Calibration zero: normalized temperature 0 == this many Kelvin. Must be positive. Changing it re-interprets every stored normalized temperature -- a calibration edit, like kelvin_per_unit.", nullptr, nullptr},
 };
 static const MethodDescriptor desc_world_set_thermal = {
     "world.set_thermal", "world",
@@ -10895,7 +11453,7 @@ static const MethodDescriptor desc_world_set_thermal = {
     "world|set|thermal|simulation|ambient|msf",
     "world.get_thermal",
     nullptr, nullptr, nullptr, nullptr,
-    params_world_set_thermal, 4,
+    params_world_set_thermal, 6,
     true
 };
 static const MethodRegistration reg_world_set_thermal(desc_world_set_thermal);

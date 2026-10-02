@@ -129,8 +129,6 @@ void registerRayFusionBindings(pybind11::module_& root) {
         out["bounce_prepare_upload_ms"] = p.bounce.prepareUploadMs;
         out["bounce_upload_skipped"] = p.bounce.uploadSkipped;
         out["bounce_emissive_cached"] = p.bounce.emissiveCached;
-        out["bounce_sun_included"] = p.bounce.sunInBounce;
-        out["bounce_sun_tint_from_lut"] = p.bounce.sunTintFromLut;
         out["producer_traced_requested"] = p.producer_traced_requested;
         out["producer_reason"] = p.producer_reason;
         out["hit_fraction"] = p.hit_fraction;

@@ -735,8 +735,45 @@ static RayTrophiSim::SimulationGridDomainBoundaryMode simulationGridDomainBounda
     return RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
 }
 
+static json domainVolumeShaderToJson(const VolumeShader& shader) {
+    json s;
+    s["name"] = shader.name;
+    s["density"] = shader.density.toJson();
+    s["scattering"] = shader.scattering.toJson();
+    s["absorption"] = shader.absorption.toJson();
+    s["emission"] = shader.emission.toJson();
+    s["quality"] = shader.quality.toJson();
+    s["material_program"] = shader.material_program.toJson();
+    s["material_graph"] = shader.material_graph;
+    s["motion_blur"] = {
+        {"enabled", shader.motion_blur.enabled},
+        {"velocity_channel", shader.motion_blur.velocity_channel},
+        {"scale", shader.motion_blur.scale}
+    };
+    return s;
+}
+
+static std::shared_ptr<VolumeShader> domainVolumeShaderFromJson(const json& js) {
+    auto shader = std::make_shared<VolumeShader>();
+    shader->name = js.value("name", std::string("Volume Shader"));
+    if (js.contains("density")) shader->density.fromJson(js["density"]);
+    if (js.contains("scattering")) shader->scattering.fromJson(js["scattering"]);
+    if (js.contains("absorption")) shader->absorption.fromJson(js["absorption"]);
+    if (js.contains("emission")) shader->emission.fromJson(js["emission"]);
+    if (js.contains("quality")) shader->quality.fromJson(js["quality"]);
+    if (js.contains("material_program")) shader->material_program.fromJson(js["material_program"]);
+    shader->material_graph = js.value("material_graph", std::string());
+    if (js.contains("motion_blur")) {
+        shader->motion_blur.enabled = js["motion_blur"].value("enabled", false);
+        shader->motion_blur.velocity_channel = js["motion_blur"].value("velocity_channel", std::string("vel"));
+        shader->motion_blur.scale = js["motion_blur"].value("scale", 1.0f);
+    }
+    return shader;
+}
+
 static const char* simulationDomainTypeToString(RayTrophiSim::SimulationDomainType type) {
     switch (type) {
+        case RayTrophiSim::SimulationDomainType::Matter: return "Matter";
         case RayTrophiSim::SimulationDomainType::Fluid: return "Fluid";
         case RayTrophiSim::SimulationDomainType::Gas:
         default: return "Gas";
@@ -744,6 +781,7 @@ static const char* simulationDomainTypeToString(RayTrophiSim::SimulationDomainTy
 }
 
 static RayTrophiSim::SimulationDomainType simulationDomainTypeFromString(const std::string& value) {
+    if (value == "Matter") return RayTrophiSim::SimulationDomainType::Matter;
     if (value == "Fluid") return RayTrophiSim::SimulationDomainType::Fluid;
     return RayTrophiSim::SimulationDomainType::Gas;
 }
@@ -5661,6 +5699,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         f["source_mode"] = static_cast<int>(source.source_mode);
         f["source_name"] = source.source_name;
         f["domain_index"] = source.domain_index;
+        f["phase"] = static_cast<int>(source.phase);
         f["enabled"] = source.enabled;
         f["parent_object"] = source.parent_object;
         f["velocity_space"] = static_cast<int>(source.velocity_space);
@@ -5677,6 +5716,9 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         f["fluid_velocity_spread"] = source.fluid_velocity_spread;
         f["fluid_emit_along_normal"] = source.fluid_emit_along_normal;
         f["fluid_substance"] = source.fluid_substance;
+        f["initial_constitutive_model"] =
+            RayTrophiSim::Fluid::matterConstitutiveModelName(
+                source.initial_constitutive_model);
         f["fluid_temperature_override"] = source.fluid_temperature_override;
         f["fluid_temperature_kelvin"] = source.fluid_temperature_kelvin;
         f["use_time_limit"] = source.use_time_limit;
@@ -5788,6 +5830,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"uvw_refresh_period", domain.fluid_params.uvw_refresh_period},
             {"internal_friction", domain.fluid_params.internal_friction},
             {"air_drag", domain.fluid_params.air_drag},
+            {"inherit_atmosphere", domain.fluid_params.inherit_atmosphere},
             {"density_correction", domain.fluid_params.density_correction},
             // ★ Granular rheology. These were absent here while SceneSerializer
             // wrote all of them, so a domain authored as Wet Sand saved to .rtp
@@ -5849,6 +5892,12 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
 
         d["fluid_render_mode"] = static_cast<int>(domain.fluid_render_mode);
         d["fluid_fog_spread_voxels"] = domain.fluid_fog_spread_voxels;
+        {
+            json routes = json::object();
+            for (const auto& kv : RayTrophiSim::Fluid::labelRoutesToNames(domain.fluid_label_routes))
+                routes[kv.first] = kv.second;
+            d["fluid_label_routes"] = routes;
+        }
         d["fluid_particle_color"] = vec3ToJson(domain.fluid_particle_color);
         d["fluid_particle_radius_factor"] = domain.fluid_particle_radius_factor;
         d["fluid_particle_size_multiplier"] = domain.fluid_particle_size_multiplier;
@@ -5897,6 +5946,9 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
                                  // half a definition.
                                  {"kinematic_viscosity", b.kinematic_viscosity},
                                  {"miscibility", b.miscibility},
+                                 {"constitutive_model",
+                                  RayTrophiSim::Fluid::matterConstitutiveModelName(
+                                      b.constitutive_model)},
                                  // ★ Written as a STRING, unlike representation
                                  // next to it. Phase decides whether matter
                                  // blocks flow, and a bare 0/1 in a project file
@@ -5936,16 +5988,14 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"max_foam", static_cast<uint64_t>(fo.max_foam)},
             {"render_radius_voxels", fo.render_radius_voxels},
             {"foam_sphere_subdivisions", fo.foam_sphere_subdivisions},
-            {"render_mode", static_cast<int>(fo.render_mode)},
             {"volume_density", fo.volume_density},
+            {"volume_color", { fo.volume_color.x, fo.volume_color.y, fo.volume_color.z }},
+            {"volume_opacity", fo.volume_opacity},
+            {"volume_bubble_strength", fo.volume_bubble_strength},
+            {"volume_spray_strength", fo.volume_spray_strength},
             {"foam_material_id", fo.foam_material_id},
             {"spray_material_id", fo.spray_material_id},
-            {"bubble_material_id", fo.bubble_material_id},
-            {"surface_kernel_radius_voxels", fo.surface_kernel_radius_voxels},
-            {"surface_particle_radius_voxels", fo.surface_particle_radius_voxels},
-            {"surface_band_voxels", fo.surface_band_voxels},
-            {"surface_smoothing_iterations", fo.surface_smoothing_iterations},
-            {"surface_resolution_multiplier", fo.surface_resolution_multiplier}
+            {"bubble_material_id", fo.bubble_material_id}
         };
         d["fire_enabled"] = domain.fire_enabled;
         d["ignition_temperature"] = domain.ignition_temperature;
@@ -5962,6 +6012,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["gas_buoyancy_heat"] = domain.gas_buoyancy_heat;
         d["gas_buoyancy_density"] = domain.gas_buoyancy_density;
         d["gas_ambient_stratification"] = domain.gas_ambient_stratification;
+        d["gas_inherit_atmosphere"] = domain.gas_inherit_atmosphere;
         d["gas_pressure_iterations"] = domain.gas_pressure_iterations;
         d["gas_surface_dust_enabled"] = domain.gas_surface_dust_enabled;
         d["gas_surface_dust_threshold"] = domain.gas_surface_dust_threshold;
@@ -5982,21 +6033,10 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["turbulence_persistence"] = domain.turbulence_persistence;
         d["turbulence_speed"] = domain.turbulence_speed;
         if (domain.shader) {
-            json s;
-            s["name"] = domain.shader->name;
-            s["density"] = domain.shader->density.toJson();
-            s["scattering"] = domain.shader->scattering.toJson();
-            s["absorption"] = domain.shader->absorption.toJson();
-            s["emission"] = domain.shader->emission.toJson();
-            s["quality"] = domain.shader->quality.toJson();
-            s["material_program"] = domain.shader->material_program.toJson();
-            s["material_graph"] = domain.shader->material_graph;
-            s["motion_blur"] = {
-                {"enabled", domain.shader->motion_blur.enabled},
-                {"velocity_channel", domain.shader->motion_blur.velocity_channel},
-                {"scale", domain.shader->motion_blur.scale}
-            };
-            d["shader"] = s;
+            d["shader"] = domainVolumeShaderToJson(*domain.shader);
+        }
+        if (domain.fluid_fog_shader) {
+            d["fluid_fog_shader"] = domainVolumeShaderToJson(*domain.fluid_fog_shader);
         }
         return d;
     };
@@ -6011,6 +6051,8 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             // project load, so a scene tuned to ignite came back not igniting.
             {"world_thermal", {
                 {"ambient_kelvin", thermal.ambient_kelvin},
+                {"reference_kelvin", thermal.reference_kelvin},
+                {"inherit_atmosphere", thermal.inherit_atmosphere},
                 {"kelvin_per_unit", thermal.kelvin_per_unit},
                 {"convection_coefficient", thermal.convection_coefficient},
                 {"oxygen_availability", thermal.oxygen_availability}
@@ -6028,6 +6070,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
                 {"solver_iterations", physics.solver_iterations},
                 {"max_neighbors_per_particle", physics.max_neighbors_per_particle},
                 {"viscosity", physics.viscosity},
+                {"inherit_atmosphere", physics.inherit_atmosphere},
                 {"cohesion", physics.cohesion},
                 {"pressure_stiffness", physics.pressure_stiffness},
                 {"rest_density", physics.rest_density},
@@ -6215,6 +6258,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         source.source_mode = static_cast<RayTrophiSim::SimulationFlowSourceMode>(item.value("source_mode", static_cast<int>(source.source_mode)));
         source.source_name = item.value("source_name", source.source_name);
         source.domain_index = item.value("domain_index", source.domain_index);
+        source.phase = static_cast<RayTrophiSim::SimulationFlowSourceDesc::Phase>(
+            item.value("phase", static_cast<int>(source.phase)));
         source.enabled = item.value("enabled", source.enabled);
         source.parent_object = item.value("parent_object", source.parent_object);
         source.velocity_space =
@@ -6236,6 +6281,12 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         // Absent in older files -> empty -> untagged -> the domain material, i.e.
         // exactly how the scene rendered before substances existed.
         source.fluid_substance = item.value("fluid_substance", source.fluid_substance);
+        {
+            const std::string model = item.value(
+                "initial_constitutive_model", std::string("auto"));
+            RayTrophiSim::Fluid::parseMatterConstitutiveModel(
+                model, source.initial_constitutive_model);
+        }
         source.fluid_temperature_override = item.value("fluid_temperature_override", source.fluid_temperature_override);
         source.fluid_temperature_kelvin = std::max(1.0f, item.value("fluid_temperature_kelvin", source.fluid_temperature_kelvin));
         source.use_time_limit = item.value("use_time_limit", source.use_time_limit);
@@ -6375,6 +6426,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.uvw_refresh_period = f.value("uvw_refresh_period", domain.fluid_params.uvw_refresh_period);
             domain.fluid_params.internal_friction = f.value("internal_friction", domain.fluid_params.internal_friction);
             domain.fluid_params.air_drag = f.value("air_drag", domain.fluid_params.air_drag);
+            domain.fluid_params.inherit_atmosphere = f.value("inherit_atmosphere", true);
             domain.fluid_params.density_correction = f.value("density_correction", domain.fluid_params.density_correction);
             // ★ Read BEFORE current_preset, not after. A project written before
             // the rheology rework has no granular keys at all, so these are
@@ -6484,6 +6536,13 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
 
         if (item.contains("fluid_render_mode")) domain.fluid_render_mode = RayTrophiSim::Fluid::fluidRenderModeFromStored(item["fluid_render_mode"].get<int>());
         domain.fluid_fog_spread_voxels = item.value("fluid_fog_spread_voxels", domain.fluid_fog_spread_voxels);
+        if (item.contains("fluid_label_routes") && item["fluid_label_routes"].is_object()) {
+            for (auto it = item["fluid_label_routes"].begin(); it != item["fluid_label_routes"].end(); ++it) {
+                if (it.value().is_string())
+                    RayTrophiSim::Fluid::setLabelRouteByName(
+                        domain.fluid_label_routes, it.key(), it.value().get<std::string>());
+            }
+        }
         if (item.contains("fluid_particle_color")) domain.fluid_particle_color = jsonToVec3(item["fluid_particle_color"]);
         domain.fluid_particle_radius_factor = item.value("fluid_particle_radius_factor", domain.fluid_particle_radius_factor);
         domain.fluid_particle_size_multiplier = item.value("fluid_particle_size_multiplier", domain.fluid_particle_size_multiplier);
@@ -6540,7 +6599,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
                 entry.substance = b.value("substance", std::string());
                 entry.material_id = b.value("material_id", -1);
                 int representation = b.value("representation", 0);
-                if (representation < 0 || representation > 2) representation = 0;
+                if (representation < 0 || representation > 3) representation = 0;
                 entry.representation = static_cast<RayTrophiSim::Fluid::SubstanceRepresentation>(representation);
                 // ★ Default -1 = INHERIT the domain viscosity, not 0. Reading a
                 // missing key as 0 would turn every substance in every project
@@ -6548,6 +6607,12 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
                 // opens thinner than it was saved, with nothing to point at.
                 entry.kinematic_viscosity = b.value("kinematic_viscosity", -1.0f);
                 entry.miscibility = std::clamp(b.value("miscibility", 1.0f), 0.0f, 1.0f);
+                {
+                    const std::string model = b.value(
+                        "constitutive_model", std::string("auto"));
+                    RayTrophiSim::Fluid::parseMatterConstitutiveModel(
+                        model, entry.constitutive_model);
+                }
                 // ★ Missing key = LIQUID, and that is the only safe default: a
                 // project saved before phases existed described liquid, so
                 // reading anything else would freeze scenes that never asked to
@@ -6597,16 +6662,19 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             fo.max_foam = fo_js.value("max_foam", fo.max_foam);
             fo.render_radius_voxels = fo_js.value("render_radius_voxels", fo.render_radius_voxels);
             fo.foam_sphere_subdivisions = fo_js.value("foam_sphere_subdivisions", fo.foam_sphere_subdivisions);
-            fo.render_mode = static_cast<RayTrophiSim::Fluid::FoamRenderMode>(fo_js.value("render_mode", static_cast<int>(fo.render_mode)));
             fo.volume_density = fo_js.value("volume_density", fo.volume_density);
+            if (fo_js.contains("volume_color") && fo_js["volume_color"].is_array() &&
+                fo_js["volume_color"].size() == 3) {
+                fo.volume_color = Vec3(fo_js["volume_color"][0].get<float>(),
+                                       fo_js["volume_color"][1].get<float>(),
+                                       fo_js["volume_color"][2].get<float>());
+            }
+            fo.volume_opacity = fo_js.value("volume_opacity", fo.volume_opacity);
+            fo.volume_bubble_strength = fo_js.value("volume_bubble_strength", fo.volume_bubble_strength);
+            fo.volume_spray_strength = fo_js.value("volume_spray_strength", fo.volume_spray_strength);
             fo.foam_material_id = fo_js.value("foam_material_id", fo.foam_material_id);
             fo.spray_material_id = fo_js.value("spray_material_id", fo.spray_material_id);
             fo.bubble_material_id = fo_js.value("bubble_material_id", fo.bubble_material_id);
-            fo.surface_kernel_radius_voxels = fo_js.value("surface_kernel_radius_voxels", fo.surface_kernel_radius_voxels);
-            fo.surface_particle_radius_voxels = fo_js.value("surface_particle_radius_voxels", fo.surface_particle_radius_voxels);
-            fo.surface_band_voxels = fo_js.value("surface_band_voxels", fo.surface_band_voxels);
-            fo.surface_smoothing_iterations = fo_js.value("surface_smoothing_iterations", fo.surface_smoothing_iterations);
-            fo.surface_resolution_multiplier = fo_js.value("surface_resolution_multiplier", fo.surface_resolution_multiplier);
         }
         domain.fire_enabled = item.value("fire_enabled", domain.fire_enabled);
         domain.ignition_temperature = item.value("ignition_temperature", domain.ignition_temperature);
@@ -6623,6 +6691,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         domain.gas_buoyancy_heat = item.value("gas_buoyancy_heat", domain.gas_buoyancy_heat);
         domain.gas_buoyancy_density = item.value("gas_buoyancy_density", domain.gas_buoyancy_density);
         domain.gas_ambient_stratification = item.value("gas_ambient_stratification", domain.gas_ambient_stratification);
+        domain.gas_inherit_atmosphere = item.value("gas_inherit_atmosphere", false);
         domain.gas_pressure_iterations =
             item.value("gas_pressure_iterations", domain.gas_pressure_iterations);
         domain.gas_surface_dust_enabled = item.value("gas_surface_dust_enabled", domain.gas_surface_dust_enabled);
@@ -6646,22 +6715,17 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         domain.turbulence_persistence = item.value("turbulence_persistence", domain.turbulence_persistence);
         domain.turbulence_speed = item.value("turbulence_speed", domain.turbulence_speed);
         if (item.contains("shader")) {
-            const auto& js = item["shader"];
-            auto shader = std::make_shared<VolumeShader>();
-            shader->name = js.value("name", std::string("Volume Shader"));
-            if (js.contains("density")) shader->density.fromJson(js["density"]);
-            if (js.contains("scattering")) shader->scattering.fromJson(js["scattering"]);
-            if (js.contains("absorption")) shader->absorption.fromJson(js["absorption"]);
-            if (js.contains("emission")) shader->emission.fromJson(js["emission"]);
-            if (js.contains("quality")) shader->quality.fromJson(js["quality"]);
-            if (js.contains("material_program")) shader->material_program.fromJson(js["material_program"]);
-            shader->material_graph = js.value("material_graph", std::string());
-            if (js.contains("motion_blur")) {
-                shader->motion_blur.enabled = js["motion_blur"].value("enabled", false);
-                shader->motion_blur.velocity_channel = js["motion_blur"].value("velocity_channel", std::string("vel"));
-                shader->motion_blur.scale = js["motion_blur"].value("scale", 1.0f);
-            }
-            domain.shader = shader;
+            domain.shader = domainVolumeShaderFromJson(item["shader"]);
+        }
+        if (item.contains("fluid_fog_shader")) {
+            domain.fluid_fog_shader = domainVolumeShaderFromJson(item["fluid_fog_shader"]);
+        } else if (RayTrophiSim::simulationDomainHasLiquid(domain.type) &&
+                   domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::VolumeFog &&
+                   domain.shader) {
+            // Saved before the fog view had its own shader: a fog-mode liquid
+            // kept its fog look in `shader`. Carry it over instead of letting the
+            // fog volume start from the preset.
+            domain.fluid_fog_shader = std::make_shared<VolumeShader>(*domain.shader);
         }
         return domain;
     };
@@ -6688,6 +6752,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             physics.solver_iterations = p.value("solver_iterations", physics.solver_iterations);
             physics.max_neighbors_per_particle = p.value("max_neighbors_per_particle", physics.max_neighbors_per_particle);
             physics.viscosity = p.value("viscosity", physics.viscosity);
+            physics.inherit_atmosphere = p.value("inherit_atmosphere", true);
             physics.cohesion = p.value("cohesion", physics.cohesion);
             physics.pressure_stiffness = p.value("pressure_stiffness", physics.pressure_stiffness);
             physics.rest_density = p.value("rest_density", physics.rest_density);
@@ -6707,6 +6772,9 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             const auto& t = settings["world_thermal"];
             auto& thermal = runtime.worldThermal();
             thermal.ambient_kelvin = t.value("ambient_kelvin", thermal.ambient_kelvin);
+            // Saved before the zero/ambient split: the ambient WAS the zero.
+            thermal.reference_kelvin = t.value("reference_kelvin", thermal.ambient_kelvin);
+            thermal.inherit_atmosphere = t.value("inherit_atmosphere", false);
             thermal.kelvin_per_unit = t.value("kelvin_per_unit", thermal.kelvin_per_unit);
             thermal.convection_coefficient =
                 t.value("convection_coefficient", thermal.convection_coefficient);

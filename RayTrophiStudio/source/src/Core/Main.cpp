@@ -2251,6 +2251,13 @@ int main(int argc, char* argv[]) try {
         }
 
         vulkanBackend->setWorldData(&wd);
+        // The cloud authority is not in WorldData (CUDA-shared POD); same
+        // funnel, own call. After setWorldData: the packet needs this sync's
+        // planet radius / altitude.
+        vulkanBackend->setCloudState(ray_renderer.world.getClouds(),
+                                     ray_renderer.world.getCloudTime(),
+                                     ray_renderer.world.cloudWindOffset(),
+                                     ray_renderer.world.cloudWindVelocity());
     };
 
     auto syncWorldDataToBackend = [&](Backend::IBackend* backend, bool allowLutRegen = true) {
@@ -3021,6 +3028,7 @@ int main(int argc, char* argv[]) try {
                 g_deferred_render_backend_prepare_delay_frames = 0;
                 continue;
             }
+
 
             // ┌─────────────────────────────────────────────────────────────────────┐
             // │ Async path: user switching TO OptiX from a different live backend.  │
@@ -4519,6 +4527,33 @@ int main(int argc, char* argv[]) try {
         if (ui.scene_loading.load() || g_scene_loading_in_progress.load()) {
             ImGui::EndFrame();
             continue;
+        }
+
+        // Cloud time (Faz 3) is a function of the CORE timeline frame, derived
+        // here -- not in TimelineWidget::draw, which runs only while that panel is
+        // drawn (IPC set_frame, a hidden timeline or a sequence save never moved
+        // the sky). The world-sync gates do not run on every playback frame
+        // either, so the state is pushed straight to both Vulkan adapters when
+        // the time or the cloud revision changed. setCloudState resets their
+        // accumulation, which also marks RayFusion for a redraw.
+        {
+            const float fps = static_cast<float>(std::max(1, render_settings.animation_fps));
+            const float cloudTime = static_cast<float>(scene.timeline.current_frame) / fps;
+            ray_renderer.world.setCloudTime(cloudTime);
+            static float s_pushedCloudTime = -1.0f;
+            static uint64_t s_pushedCloudRevision = ~0ull;
+            const uint64_t cloudRevision = ray_renderer.world.cloudRevision();
+            if (cloudTime != s_pushedCloudTime || cloudRevision != s_pushedCloudRevision) {
+                s_pushedCloudTime = cloudTime;
+                s_pushedCloudRevision = cloudRevision;
+                for (Backend::IBackend* b : {g_backend.get(), static_cast<Backend::IBackend*>(g_viewport_backend.get())}) {
+                    if (auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(b)) {
+                        vk->setCloudState(ray_renderer.world.getClouds(), cloudTime,
+                                          ray_renderer.world.cloudWindOffset(),
+                                          ray_renderer.world.cloudWindVelocity());
+                    }
+                }
+            }
         }
 
         // Raster invalidation is event-driven and must wake presentation even
@@ -6675,6 +6710,12 @@ int main(int argc, char* argv[]) try {
                     // No animation data: playhead can move without invalidating the scene.
                     last_playback_frame = current_playback_frame;
                     // FAST PATH: Skip all expensive work below
+                    // ...except the sky: RT clouds are a function of the frame
+                    // (cloud time + wind drift). setCloudState already reset the
+                    // accumulation, but auto-progressive is off while playing, so
+                    // without this a clouds-only scene never re-rendered in play.
+                    auto* vkRender = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
+                    if (vkRender && vkRender->cloudRtRendering()) start_render = true;
                 }
                 else {
                     // We have some animation data - process accordingly

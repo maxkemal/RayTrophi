@@ -303,18 +303,12 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         return;
     }
 
-    // Build id->source map for fast O(1) lookup. Procedural volumes do not have
-    // stable VDB ids (sky cloud uses -1), so keep them out of the id map; a
-    // shared -1 key can corrupt the TLAS customIndex -> SSBO slot mapping when
-    // Nishita sky clouds coexist with live grid-domain volumes.
+    // Build id->source map for fast O(1) lookup. Procedural volumes (the
+    // OptiX-only legacy sky cloud, vdb_id -1) never get a Vulkan TLAS slot.
     std::unordered_map<int, const GpuVDBVolume*> volByID;
-    std::vector<const GpuVDBVolume*> proceduralVols;
-    proceduralVols.reserve(vols.size());
     for (const auto& v : vols) {
         if (v.vdb_id >= 0) {
             volByID[v.vdb_id] = &v;
-        } else if (v.source_type == 3) {
-            proceduralVols.push_back(&v);
         }
     }
 
@@ -400,22 +394,15 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
     std::vector<const GpuVDBVolume*> orderedVols;
     bool packetOrder = false;  // fallback: no TLAS mapping, slots follow the packet
     if (!m_orderedVDBInstances.empty()) {
-        std::size_t proceduralIndex = 0;
         for (const auto& hittable : m_orderedVDBInstances) {
             auto vdb = std::dynamic_pointer_cast<VDBVolume>(hittable);
             int volume_id = -1;
             if (vdb) {
                 volume_id = vdb->getVDBVolumeID();
-                if (volume_id < 0 && vdb->isProceduralVolume()) {
-                    orderedVols.push_back(proceduralIndex < proceduralVols.size()
-                        ? proceduralVols[proceduralIndex++]
-                        : nullptr);
-                    continue;
-                }
             } else if (auto gas = std::dynamic_pointer_cast<GasVolume>(hittable)) {
                 volume_id = gas->live_vdb_id;
             }
-            if (volume_id < 0 && !(vdb && vdb->isProceduralVolume())) { orderedVols.push_back(nullptr); continue; }
+            if (volume_id < 0) { orderedVols.push_back(nullptr); continue; }
             auto it = volByID.find(volume_id);
             orderedVols.push_back(it != volByID.end() ? it->second : nullptr);
         }
@@ -488,7 +475,9 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         // harmless HERE precisely because nothing indexes this buffer yet — there
         // is no customIndex to disagree with, and the branch above now guarantees
         // that "no mapping" really does mean "no TLAS volume slots either".
-        for (const auto& v : vols) orderedVols.push_back(&v);
+        for (const auto& v : vols) {
+            if (v.source_type != 3) orderedVols.push_back(&v);  // 3 = OptiX-only sky cloud
+        }
         packetOrder = true;
     }
     // Never leave the published count disagreeing with the buffer contents: if
@@ -706,14 +695,6 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         if (dst.source_type != 4) {
             dst._ext_reserved[6] = src.emission_pad;
         }
-        dst.cloud_coverage = src.cloud_coverage;
-        dst.cloud_detail = src.cloud_detail;
-        dst.cloud_erosion = src.cloud_erosion;
-        dst.cloud_base_scale = src.cloud_base_scale;
-        dst.cloud_edge_fade = src.cloud_edge_fade;
-        dst.cloud_offset_x = src.cloud_offset_x;
-        dst.cloud_offset_z = src.cloud_offset_z;
-        dst.cloud_seed = src.cloud_seed;
 
         // VDB native (original file) world-space AABB — used by the shader to remap
         // localPos [-0.5,0.5] → VDB world space before NanoVDB index lookup.
@@ -1060,13 +1041,8 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst.shadow_strength = src.shadow_strength;
 
         // Flags
-        // volume_type = 3 is an explicit procedural cloud source. Otherwise use
         // NanoVDB when uploaded, with the existing procedural-noise fallback.
-        dst.volume_type = liveDenseGas
-            ? 4
-            : ((src.source_type == 3)
-                ? 3
-                : ((dst.vdb_grid_address != 0) ? 2 : 1));
+        dst.volume_type = liveDenseGas ? 4 : ((dst.vdb_grid_address != 0) ? 2 : 1);
         dst.is_active = 1;
         dst.voxel_size = src.voxel_size;
 

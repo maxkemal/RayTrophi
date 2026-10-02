@@ -195,7 +195,7 @@ void main() {
 
     // per-path hero channel cleared (like raygen); PRIMARY_DONE pre-set so
     // closesthit skips the primary-AOV work for photon paths.
-    payload.primaryMeta = plMetaReset(0u) | PL_PRIMARY_DONE;
+    payload.primaryMeta = plMetaReset(0u) | PL_PRIMARY_DONE | PL_NO_SKY_RADIANCE;
     payload.skipVolumeAABBs = false;
     payload.skipGasVolumes = false;
     payload.volumeTraversalMask = 0x01u; // photon trace below excludes domain volumes
@@ -212,7 +212,7 @@ void main() {
         payload.primaryABT    = 0u;
         payload.primaryNrm    = 0u;
         // keep dispersion bits, keep "past-primary" flag
-        payload.primaryMeta   = plMetaReset(payload.primaryMeta) | PL_PRIMARY_DONE;
+        payload.primaryMeta   = plMetaReset(payload.primaryMeta) | PL_PRIMARY_DONE | PL_NO_SKY_RADIANCE;
         payload.bounceType    = BOUNCE_SPECULAR;
 
         // mask 0x01 = triangles only (volumes invisible to photons in Dilim 1);

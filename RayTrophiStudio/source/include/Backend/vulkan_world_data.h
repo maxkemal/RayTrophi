@@ -5,7 +5,6 @@
  * This header provides an enhanced GPU-compatible world data structure that supports:
  * - Complete Nishita Atmosphere Sky Model
  * - Atmosphere LUT (Look-Up Table) references
- * - Cloud parameters (single & multi-layer)
  * - Fog and God Rays
  * - Anisotropic material properties
  * 
@@ -62,39 +61,6 @@ struct VkWorldDataExtended {
     int   multiScatterEnabled;  // 1 = apply analytic 2nd/3rd-order scatter (matches CPU AtmosphereAdvanced::multi_scatter_enabled)
     float multiScatterFactor;   // Strength multiplier for multi-scatter (matches AtmosphereAdvanced::multi_scatter_factor)
     
-    // ═══════════════════════════════════════════════════════════════════════════════
-    // CLOUD LAYER 1 PARAMETERS (64 bytes) - Cache Line 3-5
-    // ═══════════════════════════════════════════════════════════════════════════════
-    int   cloudsEnabled;    // 1 = render clouds
-    float cloudCoverage;    // 0.0-1.0 (sky coverage)
-    float cloudDensity;     // Opacity multiplier
-    float cloudScale;       // Noise frequency (larger = bigger clouds)
-    
-    float cloudHeightMin;   // Cloud bottom altitude (meters)
-    float cloudHeightMax;   // Cloud top altitude (meters)
-    float cloudOffsetX;     // X offset for wind/animation
-    float cloudOffsetZ;     // Z offset for wind/animation
-    
-    float cloudQuality;     // Quality multiplier for steps
-    float cloudDetail;      // Detail level (0.5 low, 1.0 normal, 2.0 high)
-    int   cloudBaseSteps;   // Base ray marching steps (e.g., 48)
-    int   cloudLightSteps;  // Light marching steps (0-disabled, 4-8 recommended)
-    
-    float cloudShadowStrength; // Shadow darkness (0-2.0)
-    float cloudAmbientStrength; // Ambient contribution (0.5-2.0)
-    float cloudSilverIntensity; // Silver lining (0-2.0)
-    float cloudAbsorption;     // Light absorption rate (0.5-2.0)
-    
-    // ═══════════════════════════════════════════════════════════════════════════════
-    // ADVANCED CLOUD SCATTERING (32 bytes) - Cache Line 6
-    // ═══════════════════════════════════════════════════════════════════════════════
-    float cloudAnisotropy;      // Forward scattering g-factor (0.0-0.99)
-    float cloudAnisotropyBack;  // Backward scattering (-0.99-0.0)
-    float cloudLobeMix;         // Blend forward/backward (0.0-1.0)
-    float cloudEmissiveIntensity; // Emission strength
-    
-    float cloudEmissiveColor[3]; // Emission color (RGB)
-    float _pad3;                 // Padding
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // FOG PARAMETERS (40 bytes) - Cache Line 7
@@ -105,9 +71,9 @@ struct VkWorldDataExtended {
     float fogFalloff;       // Exponential falloff (0.001-0.01)
     
     float fogDistance;      // Max fog distance (meters)
-    float fogSunScatter;    // Sun scattering in fog
-    float fogColor[3];      // Fog tint color (RGB)
-    float _pad4;            // Padding (fogColor[3] + pad4 = 16 bytes)
+    float fogAnisotropy;    // Height fog Henyey-Greenstein g (NishitaSkyParams::fog_anisotropy)
+    float fogAlbedo[3];     // Height fog single-scattering albedo (RGB)
+    float _pad4;            // Padding (fogAlbedo[3] + pad4 = 16 bytes)
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // VOLUMETRIC GOD RAYS (16 bytes)
@@ -118,12 +84,12 @@ struct VkWorldDataExtended {
     int   godRaysSamples;   // Quality steps (8-32)
     
     // ═══════════════════════════════════════════════════════════════════════════════
-    // AERIAL PERSPECTIVE (matches OptiX world.advanced) (16 bytes)
+    // AERIAL FROXEL (16 bytes) -- raygen reads the froxel atlas in binding 8 slot 3
     // ═══════════════════════════════════════════════════════════════════════════════
-    int   aerialEnabled;        // 1 = enable aerial perspective (matches AtmosphereAdvanced::aerial_perspective)
-    float aerialMinDistance;    // No haze below this (meters, matches aerial_min_distance)
-    float aerialMaxDistance;    // Full haze at this (meters, matches aerial_max_distance)
-    float aerialDensity;        // Independent haze density/strength multiplier
+    int   aerialFroxelReady;  // 1 = binding 8 slot 3 holds a froxel built for this frame's air/fog state
+    float _aerialPad0;        // (was aerial_min_distance: the artistic distance ramp is gone)
+    float _aerialPad1;
+    float _aerialPad2;
 
     // Weather payload (passive until weather rendering is enabled)
     int   weatherEnabled;

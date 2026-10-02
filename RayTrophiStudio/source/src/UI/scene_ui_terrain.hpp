@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -1977,8 +1977,25 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         
                         if (group.wind_settings.enabled) {
                             bool changed = false;
-                            changed |= ImGui::DragFloat("Speed", &group.wind_settings.speed, 0.05f, 0.0f, 10.0f);
-                            changed |= ImGui::DragFloat("Strength", &group.wind_settings.strength, 0.1f, 0.0f, 45.0f, "%.1f deg");
+                            changed |= ImGui::Checkbox("Wind from atmosphere", &group.wind_settings.inherit_atmosphere);
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("On: direction from the world climate wind (World panel -> Climate),"
+                                                  "and Speed/Strength become this group's response at a %.0f m/s breeze:"
+                                                  "sway speed x v/%.0f, bend x (v/%.0f)^2. A calm world keeps it still.",                                                  InstanceGroup::kFoliageReferenceWindMps,
+                                                  InstanceGroup::kFoliageReferenceWindMps,
+                                                  InstanceGroup::kFoliageReferenceWindMps);
+                            }
+                            const bool inherits = group.wind_settings.inherit_atmosphere;
+                            if (inherits) {
+                                // What the animation runs with -- not the authored
+                                // response values, which would read as the motion.
+                                const auto eff = FoliageWindSystem::effectiveSettings(group.wind_settings);
+                                ImGui::TextDisabled("Effective: speed %.2f, strength %.2f, direction %.0f deg",
+                                                    eff.speed, eff.strength,
+                                                    atan2(eff.direction.z, eff.direction.x) * 57.2958f);
+                            }
+                            changed |= ImGui::DragFloat(inherits ? "Speed @5 m/s" : "Speed", &group.wind_settings.speed, 0.05f, 0.0f, 10.0f);
+                            changed |= ImGui::DragFloat(inherits ? "Strength @5 m/s" : "Strength", &group.wind_settings.strength, 0.1f, 0.0f, 45.0f, "%.1f deg");
                             changed |= ImGui::DragFloat("Turbulence", &group.wind_settings.turbulence, 0.05f, 0.0f, 5.0f);
                             changed |= ImGui::DragFloat("Wave Size", &group.wind_settings.wave_size, 1.0f, 1.0f, 500.0f);
                             changed |= ImGui::Checkbox("Use Source Profiles", &group.wind_settings.use_source_profiles);
@@ -1988,7 +2005,8 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             
                             // Direction Logic
                             float current_angle = atan2(group.wind_settings.direction.z, group.wind_settings.direction.x) * 57.2958f;
-                            if (ImGui::DragFloat("Direction", &current_angle, 1.0f, -180.0f, 180.0f, "%.0f deg")) {
+                            if (!inherits &&
+                                ImGui::DragFloat("Direction", &current_angle, 1.0f, -180.0f, 180.0f, "%.0f deg")) {
                                 float rad = current_angle / 57.2958f;
                                 group.wind_settings.direction = Vec3(cos(rad), 0, sin(rad));
                                 changed = true;

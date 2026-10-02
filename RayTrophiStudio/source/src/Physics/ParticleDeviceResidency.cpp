@@ -39,9 +39,12 @@ struct ParticleBallisticGpuConstants {
     float time_seconds = 0.0f;
     uint32_t system_mask = 0u;
     uint32_t force_count = 0u;
+    // Climate wind the drag relaxes toward (Faz 2); zero = the old formula.
+    float air_wind_x = 0.0f, air_wind_y = 0.0f, air_wind_z = 0.0f;
+    float _pad0 = 0.0f;
 };
-static_assert(sizeof(ParticleBallisticGpuConstants) == 40,
-              "sim_particle_ballistic push constants: shader, kernel table (40) and this "
+static_assert(sizeof(ParticleBallisticGpuConstants) == 56,
+              "sim_particle_ballistic push constants: shader, kernel table (56) and this "
               "struct must change together");
 
 // shaders/sim_particle_spawn.comp declares only record_count; the kernel table
@@ -331,7 +334,8 @@ void ParticleSimulationSystem::onComputeBackendChanging(SimulationComputeContext
 // ── The resident step ───────────────────────────────────────────────────────
 
 bool ParticleSimulationSystem::stepDeviceResident(const SimulationContext& context,
-                                                  float drag_factor) {
+                                                  float drag_factor,
+                                                  const Vec3& air_wind) {
     const auto start = std::chrono::steady_clock::now();
     SimulationComputeContext& compute = *context.compute;
     SimulationTransferProbeScope probe(&compute, stats_.step_transfer);
@@ -443,6 +447,9 @@ bool ParticleSimulationSystem::stepDeviceResident(const SimulationContext& conte
         constants.buoyancy =
             physics_settings_.mode == ParticlePhysicsMode::Gas ? physics_settings_.buoyancy : 0.0f;
         constants.drag_factor = drag_factor;
+        constants.air_wind_x = air_wind.x;
+        constants.air_wind_y = air_wind.y;
+        constants.air_wind_z = air_wind.z;
         constants.time_seconds = context.time_seconds;
         constants.system_mask = toSimulationSystemMask(SimulationSystemKind::Particle);
         const bool has_fields =

@@ -1,18 +1,17 @@
-"""Vulkan APIC liquid <-> Gas combustion coupling test preset.
+"""Vulkan Matter-domain liquid <-> gas combustion test preset.
 
 Run from RayTrophi's embedded Python console after compiling the shaders:
     exec(open("scripts/test_burning_fuel_spill.py", encoding="utf-8").read())
 
-The preset intentionally uses overlapping domains. The liquid surface owns a
-finite fuel reservoir; its exposed cells inject fuel/heat/smoke into the gas
-grid, while gas temperature feeds ignition back into the liquid surface state.
+One Matter domain owns the liquid particles/SDF and gas fields. The liquid
+surface owns a finite fuel reservoir and injects fuel/heat/smoke into its gas
+phase, while gas temperature feeds ignition back into the liquid phase.
 """
 
 import rt
 
 
-FLUID = "Test_BurningFuel_Fluid"
-GAS = "Test_BurningFuel_Gas"
+DOMAIN = "Test_BurningFuel_Matter"
 
 
 def remove_if_present(name):
@@ -22,32 +21,33 @@ def remove_if_present(name):
         pass
 
 
-remove_if_present(FLUID)
-remove_if_present(GAS)
+remove_if_present("Test_BurningFuel_Fluid")
+remove_if_present("Test_BurningFuel_Gas")
+remove_if_present(DOMAIN)
 
 rt.fluid.create_domain(
-    FLUID,
+    DOMAIN,
     domain_min=(-2.5, 0.0, -2.5),
-    domain_max=(2.5, 1.8, 2.5),
+    domain_max=(2.5, 5.0, 2.5),
     voxel_size=0.10,
-    type="fluid",
+    type="matter",
 )
 rt.fluid.set_param(
-    FLUID,
+    DOMAIN,
     backend="vulkan",
     boundary="closed",
     preset="oil",
     render_mode="surface",
 )
 rt.fluid.seed(
-    FLUID,
+    DOMAIN,
     seed_min=(-1.8, 0.15, -1.8),
     seed_max=(1.8, 0.55, 1.8),
     particles_per_cell=6,
     replace=True,
 )
 rt.fluid.set_combustion(
-    FLUID,
+    DOMAIN,
     enabled=True,
     auto_ignite=True,
     ignition_temperature=0.65,
@@ -58,20 +58,8 @@ rt.fluid.set_combustion(
     surface_cooling=0.30,
 )
 
-rt.gas.create_domain(
-    GAS,
-    domain_min=(-2.5, 0.0, -2.5),
-    domain_max=(2.5, 5.0, 2.5),
-    voxel_size=0.10,
-)
-rt.gas.set_param(
-    GAS,
-    backend="vulkan",
-    boundary="open",
-    render_mode="volume",
-)
 rt.gas.set_settings(
-    GAS,
+    DOMAIN,
     fire_enabled=True,
     ignition_temperature=0.30,
     burn_rate=1.35,
@@ -87,13 +75,16 @@ rt.gas.set_settings(
     turbulence_octaves=4,
 )
 
-coupling = rt.fluid.get_combustion(FLUID)
+coupling = rt.fluid.get_combustion(DOMAIN)
 assert coupling["enabled"] is True, coupling
 assert coupling["auto_ignite"] is True, coupling
-assert rt.fluid.get(FLUID)["backend"] == "vulkan"
-assert rt.gas.get(GAS)["backend"] == "vulkan"
+domain = rt.fluid.get(DOMAIN)
+assert domain["backend"] == "vulkan"
+assert domain["type"] == "matter"
+assert domain["phases"] == ["gas", "liquid"]
+assert rt.gas.get(DOMAIN)["backend"] == "vulkan"
 
-print("[burning-fuel-spill] fluid:", rt.fluid.get(FLUID))
+print("[burning-fuel-spill] matter:", domain)
 print("[burning-fuel-spill] coupling:", coupling)
-print("[burning-fuel-spill] gas:", rt.gas.get_settings(GAS))
+print("[burning-fuel-spill] gas:", rt.gas.get_settings(DOMAIN))
 print("[burning-fuel-spill] PASS - Play timeline to inspect surface fire.")

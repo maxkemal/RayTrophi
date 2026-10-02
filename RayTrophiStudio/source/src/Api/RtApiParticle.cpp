@@ -954,6 +954,9 @@ Result getParticlePhysics(ParticlePhysicsInfo& out, const ParticleSystemRef& sys
     out.grid_temperature_deposit = s.grid_temperature_deposit;
     out.grid_fuel_deposit = s.grid_fuel_deposit;
     out.grid_deposit_fade_with_age = s.grid_deposit_fade_with_age;
+    out.inherit_atmosphere = s.inherit_atmosphere;
+    out.effective_air_wind = s.inherit_atmosphere ? atmosphere::ambientWindMps()
+                                                  : Vec3(0.0f, 0.0f, 0.0f);
     return Result::success();
 }
 
@@ -1003,6 +1006,7 @@ Result updateParticlePhysics(const ParticlePhysicsInfo& info, const ParticleSyst
     s.grid_density_deposit = info.grid_density_deposit;
     s.grid_temperature_deposit = info.grid_temperature_deposit;
     s.grid_fuel_deposit = info.grid_fuel_deposit;
+    s.inherit_atmosphere = info.inherit_atmosphere;
     s.grid_deposit_fade_with_age = info.grid_deposit_fade_with_age;
     invalidateScriptSimulation();
     return Result::success();
@@ -1177,7 +1181,7 @@ Result getFluidStepStats(const std::string& domain_id_or_name, FluidStepStats& o
             return Result::fail("grid domain not found: " + domain_id_or_name);
         }
     }
-    if (domains[index].type != RayTrophiSim::SimulationDomainType::Fluid) {
+    if (!RayTrophiSim::simulationDomainHasLiquid(domains[index].type)) {
         return Result::fail("domain is not fluid: " + domain_id_or_name);
     }
     if (index >= states.size()) return Result::fail("domain has no live state yet");
@@ -1198,6 +1202,7 @@ Result getFluidStepStats(const std::string& domain_id_or_name, FluidStepStats& o
     out.pressure_on_gpu = fluid.pressure_on_gpu;
     out.g2p_on_gpu = fluid.g2p_on_gpu;
     out.density_on_gpu = fluid.density_on_gpu;
+    out.total_ms = fluid.total_ms;
     out.p2g_ms = fluid.p2g_ms;
     out.pressure_ms = fluid.pressure_ms;
     out.g2p_ms = fluid.g2p_ms;
@@ -1256,11 +1261,12 @@ Result getGasStepStats(const std::string& domain_id_or_name, GasStepStats& out) 
     out.cell_count = gs.cell_count;
     out.active_blocks = gs.active_blocks;
     out.total_blocks = gs.total_blocks;
-    out.active_density_cells = state.active_density_cells;
+    out.active_density_cells = gs.active_density_cells;
     out.grid_memory_bytes = gs.grid_memory_bytes;
 
     out.total_ms = gs.total_ms;
     out.voxelize_ms = gs.voxelize_ms;
+    out.inventory_advection_ms = gs.inventory_advection_ms;
     out.analysis_ms = gs.analysis_ms;
 
     out.gpu_collider_source_ms = gs.gpu_collider_source_ms;
@@ -1292,12 +1298,14 @@ Result getGasStepStats(const std::string& domain_id_or_name, GasStepStats& out) 
     out.cpu_dissipation_ms = gs.cpu.dissipation_ms;
     out.cpu_pressure_ms = gs.cpu.pressure_ms;
 
-    out.max_density = state.max_density;
+    out.max_density = gs.max_density;
     out.max_temperature = gs.max_temperature;
     out.max_speed = gs.max_speed;
     out.cfl = gs.cfl;
     out.burning_cells = gs.burning_cells;
     out.solid_cells = gs.solid_cells;
+    out.liquid_boundary_cells = gs.liquid_boundary_cells;
+    out.liquid_boundary_mean_velocity = gs.liquid_boundary_mean_velocity;
     return Result::success();
 }
 

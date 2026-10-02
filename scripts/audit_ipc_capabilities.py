@@ -191,8 +191,11 @@ def required(method, namespaces):
                   "rig.weight_stats", "rig.suggest_joint_profile",
                   "rig.preview_envelope_weights",
                   "anim.source_clips", "anim.source_channels", "msf.substances",
-                  "msf.fields", "templates.refresh", "templates.validate",
-                  "templates.prepare"):
+                  "msf.substance", "msf.fields", "matter.exchanges",
+                  "templates.refresh", "templates.validate",
+                  "templates.prepare",
+                  "world.atmosphere_stats", "world.sample_climate",
+                  "world.cloud_stats", "world.sample_clouds"):
         return "Read"
     # agent.chat_send posts into the user's chat panel under a sender name the
     # caller chooses, and agent.send_prompt queues work for another agent, so

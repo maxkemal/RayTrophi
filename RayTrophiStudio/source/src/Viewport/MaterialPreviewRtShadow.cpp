@@ -170,14 +170,6 @@ bool VulkanBackendAdapter::rtShadowCoveredLight(RtShadowCoverage& coverage,
         if(!std::isfinite(length) || length<1e-6f)return false;
         out=v*(1.0f/length);return true;
     };
-    Vec3 sunDir{};
-    const bool haveWorldSun =
-        m_cachedWorld.mode==WORLD_MODE_NISHITA &&
-        m_cachedWorld.nishita.sun_intensity>0.0f &&
-        normalized(Vec3(m_cachedWorld.nishita.sun_direction.x,
-                        m_cachedWorld.nishita.sun_direction.y,
-                        m_cachedWorld.nishita.sun_direction.z),sunDir);
-
     // The scene light index the shading shader uses. Invisible lights are
     // skipped WITHOUT advancing it, exactly as the GPU light packer and the
     // cascade builder do -- all three walk m_cachedLights the same way, and a
@@ -195,23 +187,18 @@ bool VulkanBackendAdapter::rtShadowCoveredLight(RtShadowCoverage& coverage,
         }
         ++index;
     }
-    // Birincil yon: ilk kullanilabilir directional, yoksa dunya gunesi. Sira
-    // eskisiyle ayni tutuldu -- maskenin meta.w'si ve `reason` metinleri bu
-    // secime bagli ve bir onceki olcumlerle karsilastirilabilir kalmali.
-    if(!directionals.empty()) {
-        coverage.primaryLight=directionals.front().index;
-        coverage.toLight=directionals.front().toLight;
-    } else if(haveWorldSun) {
-        coverage.primaryLight=kWorldSunSlot;
-        coverage.toLight=sunDir;
-    } else {
-        reason="no valid directional light or world sun";return false;
+    // Primary direction: the first usable directional. The Physical Sky sun is
+    // not a light of its own any more (it reaches surfaces only through a
+    // directional, see rtapi::ensureWorldSunLight), so it is never a fallback.
+    if(directionals.empty()) {
+        reason="no valid directional light";return false;
     }
+    coverage.primaryLight=directionals.front().index;
+    coverage.toLight=directionals.front().toLight;
     for(const auto& candidate:directionals) {
         if(Vec3::dot(candidate.toLight,coverage.toLight)>=kAlignDot)
             coverage.sceneLightMask|=(1u<<candidate.index);
     }
-    coverage.worldSun = haveWorldSun && Vec3::dot(sunDir,coverage.toLight)>=kAlignDot;
     return true;
 }
 
@@ -361,7 +348,7 @@ void VulkanBackendAdapter::recordRtShadowPass(VkCommandBuffer cmd,const Matrix4x
         VK_ACCESS_TRANSFER_WRITE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_TRANSFER_BIT);
     const uint32_t header[]={0x52545348u,width,height,s.coverage.primaryLight,
-                            s.coverage.sceneLightMask,s.coverage.worldSun?1u:0u,0u,0u};
+                            s.coverage.sceneLightMask,0u,0u,0u};
     vkCmdUpdateBuffer(cmd,s.mask.buffer,0,sizeof(header),header);
     bufferBarrier(cmd,s.mask.buffer,VK_ACCESS_TRANSFER_WRITE_BIT,
         VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,

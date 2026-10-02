@@ -38,6 +38,7 @@ inline std::atomic<bool> g_cancel_sdf_bakes{false};
 inline std::atomic<int> g_active_sdf_bakes{0};
 #include "Fluid/FluidObject.h"
 #include "Fluid/FluidFogDensity.h"
+#include "Fluid/FluidViewResolver.h"
 #include "Fluid/FluidSimulationSystem.h"
 #include "Fluid/SubstanceTag.h"
 #include "RigidBodySystem.h"
@@ -598,15 +599,6 @@ struct SceneData {
         return nullptr;
     }
     
-    // Update VDB volumes from timeline (for animation)
-    void updateVDBVolumesFromTimeline(int frame) {
-        for (auto& vol : vdb_volumes) {
-            if (vol && vol->isLinkedToTimeline()) {
-                vol->updateFromTimeline(frame);
-            }
-        }
-    }
-
     // =========================================================================
     // Gas Simulation Volumes (Real-time/Baked Gas/Smoke)
     // =========================================================================
@@ -1545,8 +1537,12 @@ struct SceneData {
                 for (auto& sys : particle_systems) {
                     if (!sys.runtime) continue;
                     for (const auto& gd : sys.runtime->gridDomainStates()) {
-                        if (gd.type != RayTrophiSim::SimulationDomainType::Fluid || !gd.valid) continue;
-                        build_for(gd.particles, gd.grid, kDomainLevelSet);
+                        if (!RayTrophiSim::simulationDomainHasLiquid(gd.type) || !gd.valid) continue;
+                        const auto& liquid_grid =
+                            gd.type == RayTrophiSim::SimulationDomainType::Matter
+                                ? gd.matter_liquid_grid
+                                : gd.grid;
+                        build_for(gd.particles, liquid_grid, kDomainLevelSet);
                     }
                 }
             });
@@ -2101,11 +2097,15 @@ struct SceneData {
         // Transient VDBVolume hittable per grid domain, bound to the live id so
         // the existing VDB render path (TLAS + volume pass) draws the gas.
         std::vector<std::shared_ptr<VDBVolume>> domain_volumes;
-        // Whitewater Volume render mode: a SECOND live VDB per domain — foam
-        // splatted to a white scattering density. Separate id/volume/buffer so
-        // it composites independently of the liquid volume/surface.
-        std::vector<int> domain_foam_vdb_ids;
-        std::vector<std::shared_ptr<VDBVolume>> domain_foam_volumes;
+        // Liquid FOG view: a SECOND live VDB per domain, so a surface and a fog
+        // of the same liquid draw at once (FluidViewResolver). Its own id,
+        // hittable and shader (desc.fluid_fog_shader). The gas/fog vs SurfaceSDF
+        // TLAS mask split makes the pair a solved layering case
+        // (VULKAN_GAS_FLUID_LAYERING.md). These slots once held a separate foam
+        // volume that was never allocated; foam rides the surface volume.
+        std::vector<int> domain_fog_vdb_ids;
+        std::vector<std::shared_ptr<VDBVolume>> domain_fog_volumes;
+        // Foam splat scratch for the SURFACE volume's temperature channel.
         std::vector<std::vector<float>> domain_foam_density;
         // Transient InstanceManager group id per grid domain for explicit
         // particles. Parallel-indexed to gridDomainStates().
@@ -2593,8 +2593,13 @@ struct SceneData {
             for (std::size_t d = live_domain_count; d < system.domain_vdb_ids.size(); ++d) {
                 removeDomainVolume(system, d);
             }
+            for (std::size_t d = live_domain_count; d < system.domain_fog_vdb_ids.size(); ++d) {
+                removeFogDomainVolume(system, d);
+            }
             system.domain_vdb_ids.resize(live_domain_count, -1);
             system.domain_volumes.resize(live_domain_count);
+            system.domain_fog_vdb_ids.resize(live_domain_count, -1);
+            system.domain_fog_volumes.resize(live_domain_count);
             system.domain_sdf_buffers.resize(live_domain_count);
             system.domain_uvw_buffers.resize(live_domain_count);
             system.domain_composition_buffers.resize(live_domain_count);
@@ -2622,7 +2627,7 @@ struct SceneData {
                 // handled entirely by ParticleRenderBridge — the volume route
                 // must tear its contribution down or the two paths fight.
                 const bool is_fluid_domain =
-                    state.type == RayTrophiSim::SimulationDomainType::Fluid;
+                    RayTrophiSim::simulationDomainHasLiquid(state.type);
                 RayTrophiSim::Fluid::FluidRenderMode fluid_mode =
                     (is_fluid_domain && d < domains.size())
                         ? domains[d].fluid_render_mode
@@ -2654,29 +2659,36 @@ struct SceneData {
                         std::to_string(d) + "' had the invalid liquid render mode "
                         "'Volume'; normalised to SurfaceSDF.");
                 }
-                bool has_sdf_override = false;
+                // ★ THE view decision (FluidViewResolver). This slot carries only
+                // the SURFACE view for a liquid; its fog view has its own volume,
+                // published by syncDomainFogVolume from the same plan. Nothing
+                // below may re-derive a view from fluid_render_mode or a binding.
+                RayTrophiSim::Fluid::FluidViewPlan view_plan;
                 if (is_fluid_domain && d < domains.size()) {
-                    for (const auto& b : domains[d].fluid_substance_materials)
-                        has_sdf_override |= b.representation ==
-                            RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF;
+                    view_plan = RayTrophiSim::Fluid::resolveFluidViews(
+                        domains[d],
+                        RayTrophiSim::Fluid::distinctViewKeys(state.particles));
+                    // A Matter domain uses the secondary volume slot for its
+                    // gas grid while the primary slot remains the liquid
+                    // surface. The fog publisher recognizes Matter and reads
+                    // the gas density directly instead of particle fog.
+                    if (domains[d].type == RayTrophiSim::SimulationDomainType::Matter) {
+                        view_plan.fog = true;
+                    }
+                    syncDomainFogVolume(system, d, state, domains[d], view_plan, mgr,
+                                        frame, force_sync, domain_render_enabled);
                 }
-                const bool fluid_surface_route = is_fluid_domain &&
-                    (fluid_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF || has_sdf_override);
-                // VolumeFog raymarches the splatted density with the domain
-                // shader -- the same producer->NanoVDB path a gas domain uses.
-                const bool fluid_fog_route = is_fluid_domain && !fluid_surface_route &&
-                    fluid_mode == RayTrophiSim::Fluid::FluidRenderMode::VolumeFog;
-                const bool fluid_skip_volume =
-                    is_fluid_domain && !fluid_surface_route && !fluid_fog_route;
-                // Volume whitewater: foam rides THIS surface volume's temperature
-                // channel (single volume → no coincident-volume drop). Only on the
-                // surface route (that is the volume it rides) and only when the foam
-                // panel's render mode is Volume.
+                const bool fluid_surface_route = is_fluid_domain && view_plan.surface;
+                const bool fluid_skip_volume = is_fluid_domain && !fluid_surface_route;
+                // Whitewater routed to sdf rides THIS surface volume's temperature
+                // channel as a white medium (single volume → no coincident-volume
+                // drop). Which types: the label routes (viewForWhitewater).
+                const auto ww_surface_types =
+                    view_plan.whitewaterTypesIn(RayTrophiSim::Fluid::FluidView::Surface);
                 const bool volume_foam_active =
                     fluid_surface_route && d < domains.size() &&
                     domains[d].fluid_foam_params.enabled &&
-                    domains[d].fluid_foam_params.render_mode ==
-                        RayTrophiSim::Fluid::FoamRenderMode::Volume;
+                    (ww_surface_types[0] || ww_surface_types[1] || ww_surface_types[2]);
 
                 const bool renderable =
                     domain_render_enabled && system.visible && state.valid &&
@@ -2699,9 +2711,9 @@ struct SceneData {
                     std::string("[VolumeGate 0] domain '") + system.name + " D" +
                     std::to_string(d) + "' " + (renderable ? "RENDERABLE" : "NOT renderable") +
                     " | fluid=" + (is_fluid_domain ? "1" : "0") +
-                    " route=" + (fluid_skip_volume ? "Particles"
-                                 : (fluid_surface_route ? "SurfaceSDF"
-                                    : (fluid_fog_route ? "VolumeFog" : "Volume"))) +
+                    " route=" + (fluid_skip_volume ? "NoSurface"
+                                 : (fluid_surface_route ? "SurfaceSDF" : "Volume")) +
+                    " fog_view=" + (view_plan.fog ? "1" : "0") +
                     " render_enabled=" + (domain_render_enabled ? "1" : "0") +
                     " sys_visible=" + (system.visible ? "1" : "0") +
                     " valid=" + (state.valid ? "1" : "0") +
@@ -2791,7 +2803,13 @@ struct SceneData {
                 // crosses a boundary (or on first sight). Otherwise the user's
                 // live UI edits would be stomped by the preset every frame.
                 if (is_fluid_domain && domain_shader && d < system.domain_last_fluid_render_mode.size()) {
-                    const int cur_mode = static_cast<int>(fluid_mode);
+                    // A liquid reaches this slot only for its SURFACE view, so the
+                    // slot is always tuned as a surface — whatever the domain
+                    // default is. (A fog-default domain with one SDF substance
+                    // used to tune this shader with the FOG preset and draw its
+                    // surface with it.) The fog view tunes desc.fluid_fog_shader.
+                    const int cur_mode =
+                        static_cast<int>(RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF);
                     const bool had_previous_render_mode =
                         system.domain_last_fluid_render_mode[d] != -1;
                     const bool mode_changed =
@@ -2852,27 +2870,7 @@ struct SceneData {
                                 system.domain_vdb_upload_signatures[d] = 0;
                             }
                         }
-                        switch (fluid_mode) {
-                            case RayTrophiSim::Fluid::FluidRenderMode::VolumeFog:
-                                // Fluid splat density is in [0,1] (per-particle
-                                // = 1/8 with default ppc=8, trilinear-spread
-                                // across 8 cells = 0.125 max per particle).
-                                // Gas presets assume density 1..10, so the
-                                // fluid Volume mode needs a much higher
-                                // multiplier to read at all — ~50 makes a
-                                // packed cell fully opaque, partial cells
-                                // tint as fog. Absorption is pumped + tinted
-                                // so accumulated water reads blue.
-                                domain_shader->name = "Liquid NanoVDB Preview";
-                                domain_shader->density.multiplier = 50.0f;
-                                domain_shader->density.cutoff_threshold = 0.01f;
-                                domain_shader->scattering.color = Vec3(0.55f, 0.74f, 0.92f);
-                                domain_shader->scattering.coefficient = 1.0f;
-                                domain_shader->scattering.anisotropy = 0.0f;
-                                domain_shader->absorption.color = Vec3(0.15f, 0.42f, 0.78f);
-                                domain_shader->absorption.coefficient = 2.0f;
-                                domain_shader->emission.mode = VolumeEmissionMode::None;
-                                break;
+                        switch (static_cast<RayTrophiSim::Fluid::FluidRenderMode>(cur_mode)) {
                             case RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF:
                                 // Refractive water surface. In isosurface mode
                                 // the shader interprets these fields as:
@@ -2900,9 +2898,10 @@ struct SceneData {
                                 break;
                             case RayTrophiSim::Fluid::FluidRenderMode::Particles:
                             case RayTrophiSim::Fluid::FluidRenderMode::Volume:
-                                // Particles: volume is torn down anyway. Volume is
-                                // normalised to SurfaceSDF above for liquids and
-                                // never reaches this switch. Leave shader as-is.
+                            case RayTrophiSim::Fluid::FluidRenderMode::VolumeFog:
+                            default:
+                                // Unreachable for a liquid (cur_mode is always
+                                // SurfaceSDF above). Leave the shader as-is.
                                 break;
                         }
                         system.domain_last_fluid_render_mode[d] = cur_mode;
@@ -2993,9 +2992,21 @@ struct SceneData {
                         // cannot change it. A solid chunk is still drawn by
                         // whatever `representation` says, which IS hashed.
                     }
+                    // Label routes decide which parcels the surface is made of,
+                    // exactly like a binding's representation above.
+                    for (const auto route : domains[d].fluid_label_routes)
+                        sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(route));
                     for (std::size_t particle_index = 0;
                          particle_index < state.particles.position.size(); ++particle_index) {
                         const auto& p = state.particles.position[particle_index];
+                        // ★ The STATE LABEL too: a parcel that turns from body to
+                        // spray leaves the surface without moving, so positions
+                        // alone would keep the stale surface on a paused frame.
+                        if (particle_index < state.particles.flags.size()) {
+                            sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(
+                                state.particles.flags[particle_index] &
+                                RayTrophiSim::Fluid::kParticleLabelMask));
+                        }
                         sdf_sig = hash_combine_local(sdf_sig, quantize_local(p.x));
                         sdf_sig = hash_combine_local(sdf_sig, quantize_local(p.y));
                         sdf_sig = hash_combine_local(sdf_sig, quantize_local(p.z));
@@ -3014,32 +3025,18 @@ struct SceneData {
                         system.domain_sdf_signatures[d] != sdf_sig ||
                         sdf_buf.empty();
                     if (needs_sdf_rebuild) {
-                        std::vector<uint32_t> excluded_splat_tags;
-                        if (fluid_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) {
-                            for (uint32_t tag : state.particles.substance_tag) {
-                                bool explicit_sdf = false;
-                                for (const auto& b : domains[d].fluid_substance_materials) {
-                                    if (RayTrophiSim::Fluid::substanceTag(b.substance) == tag &&
-                                        b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF) {
-                                        explicit_sdf = true; break;
-                                    }
-                                }
-                                if (!explicit_sdf && std::find(excluded_splat_tags.begin(),
-                                        excluded_splat_tags.end(), tag) == excluded_splat_tags.end())
-                                    excluded_splat_tags.push_back(tag);
-                            }
-                        }
-                        for (const auto& b : domains[d].fluid_substance_materials) {
-                            bool exclude = b.representation ==
-                                RayTrophiSim::Fluid::SubstanceRepresentation::Splat;
-                            if (fluid_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles)
-                                exclude = false; // handled from live tags above
-                            if (exclude) excluded_splat_tags.push_back(
-                                RayTrophiSim::Fluid::substanceTag(b.substance));
-                        }
+                        // Every live tag the resolver does NOT draw as a surface,
+                        // untagged parcels included. The old per-route loops only
+                        // excluded Splat bindings, so in a fog-default domain with
+                        // one SDF override the untagged fog parcels were built
+                        // into the surface too.
+                        // Parcel by parcel: a body parcel of a surface substance
+                        // is kept, its spray (label route) is not.
+                        const RayTrophiSim::Fluid::FluidViewSelection surface_selection{
+                            &view_plan, RayTrophiSim::Fluid::FluidView::Surface};
                         RayTrophiSim::Fluid::buildLevelSet(
                             state.particles, state.grid,
-                            lsp, sdf_buf, &sdf_stats, &excluded_splat_tags);
+                            lsp, sdf_buf, &sdf_stats, &surface_selection);
                         if (d < system.domain_sdf_signatures.size()) {
                             system.domain_sdf_signatures[d] = sdf_sig;
                         }
@@ -3055,7 +3052,7 @@ struct SceneData {
                                 RayTrophiSim::Fluid::buildMaterialCoordinateGrid(
                                     state.particles, state.grid, lsp,
                                     system.domain_uvw_buffers[d],
-                                    &excluded_splat_tags);
+                                    &surface_selection);
                         }
                         // Composition rides the SAME rebuild gate, for the same
                         // reason the coordinate does: it is gathered from the
@@ -3087,7 +3084,7 @@ struct SceneData {
                                     // they must agree about which particles it
                                     // is made of; a splat substance voting here
                                     // tints a surface it has no part in.
-                                    &excluded_splat_tags);
+                                    &surface_selection);
                             // ★★★ The post-pass that used to live here — collapse
                             // every cell's pair to its dominant slot when the
                             // domain flag `fluid_blend_substance_materials` was
@@ -3159,7 +3156,7 @@ struct SceneData {
                 }
                 const std::string volume_name =
                     system.name + " Domain " + std::to_string(d) +
-                    (state.type == RayTrophiSim::SimulationDomainType::Fluid
+                    (RayTrophiSim::simulationDomainHasLiquid(state.type)
                          ? " [Fluid NanoVDB]"
                          : " [Gas NanoVDB]");
 
@@ -3175,6 +3172,11 @@ struct SceneData {
                     system.runtime->gasGpuFieldView(d, simulation_world.compute());
                 const bool use_live_dense_gpu =
                     !render_settings.use_optix &&
+                    // The primary slot of a Matter domain is its liquid SDF.
+                    // Publishing the gas device addresses on that id changes
+                    // the viewport's interpretation of the SDF to live gas and
+                    // makes the surface disappear on the next simulation frame.
+                    // Matter gas owns the secondary fog slot instead.
                     state.type == RayTrophiSim::SimulationDomainType::Gas &&
                     dense_gpu_view.valid();
                 // Live Render Update OFF freezes the volume so the path tracer can
@@ -3206,6 +3208,8 @@ struct SceneData {
                             quantize_local(domains[d].fluid_foam_params.volume_bubble_strength));
                         upload_sig = hash_combine_local(upload_sig,
                             quantize_local(domains[d].fluid_foam_params.volume_spray_strength));
+                        for (const bool routed : ww_surface_types)
+                            upload_sig = hash_combine_local(upload_sig, routed ? 1ull : 0ull);
                     }
                 }
                 const bool upload_changed =
@@ -3235,7 +3239,7 @@ struct SceneData {
                     // (the thermal-liquid chain writes it); grid.temperature is
                     // the GAS heat channel and its x3000 scale is gas-only.
                     const bool wants_temp =
-                        wants_emission_temp && !fluid_fog_route &&
+                        wants_emission_temp && !is_fluid_domain &&
                         !state.grid.temperature.empty();
                     if (wants_temp) {
                         constexpr float kHeatToKelvin = 3000.0f;
@@ -3244,39 +3248,11 @@ struct SceneData {
                             scaled_temp[ci] = state.grid.temperature[ci] * kHeatToKelvin;
                         }
                         temp_ptr = scaled_temp.data();
-                    } else if (wants_emission_temp && fluid_fog_route &&
-                               d < domains.size() &&
-                               RayTrophiSim::Fluid::splatFogTemperatureKelvin(
-                                   state.particles,
-                                   state.grid.nx, state.grid.ny, state.grid.nz,
-                                   state.grid.origin, state.grid.voxel_size,
-                                   domains[d].fluid_fog_spread_voxels, scaled_temp)) {
-                        // Same grid and spread as the fog density, so a hot
-                        // parcel glows exactly where it is drawn. Nothing is
-                        // cut off: the shader's T^4 radiance is what keeps an
-                        // ambient (~293 K) liquid dark and dims it as it cools.
-                        temp_ptr = scaled_temp.data();
                     }
 
                     const float* density_ptr = density_ptr_override
                         ? density_ptr_override
                         : state.grid.density.data();
-                    // VolumeFog draws a Gaussian-spread copy of the splat: the
-                    // raw trilinear splat reaches 8 cells per particle and shows
-                    // spray as isolated dots. Sim resolution, so the temperature
-                    // channel below still lines up.
-                    std::vector<float> fog_density;
-                    if (fluid_fog_route && !density_ptr_override &&
-                        d < domains.size() &&
-                        domains[d].fluid_fog_spread_voxels > 0.0f &&
-                        state.grid.density.size() ==
-                            static_cast<std::size_t>(state.grid.getCellCount())) {
-                        RayTrophiSim::Fluid::spreadFogDensity(
-                            state.grid.density.data(),
-                            state.grid.nx, state.grid.ny, state.grid.nz,
-                            domains[d].fluid_fog_spread_voxels, fog_density);
-                        density_ptr = fog_density.data();
-                    }
                     // The SurfaceSDF proxy may be on a refined grid; upload at its
                     // effective resolution. Same origin/extent, finer voxels. The
                     // sim-sized temperature array can't ride a refined upload, so
@@ -3308,11 +3284,14 @@ struct SceneData {
                         constexpr float kFoamTempScale = 10000.0f; // MUST match FOAM_TEMP_SCALE in volume_closesthit.rchit
                         const float dpp = std::max(0.01f,
                             domains[d].fluid_foam_params.volume_density);
+                        const bool routed[3] = { ww_surface_types[0], ww_surface_types[1],
+                                                 ww_surface_types[2] };
+                        float weights[3];
+                        RayTrophiSim::Fluid::whitewaterTypeWeights(
+                            domains[d].fluid_foam_params, routed, weights);
                         RayTrophiSim::Fluid::splatFoamDensity(
                             state.foam, up_nx, up_ny, up_nz, up_voxel, state.grid.origin,
-                            foam_density, dpp,
-                            domains[d].fluid_foam_params.volume_bubble_strength,
-                            domains[d].fluid_foam_params.volume_spray_strength);
+                            foam_density, dpp, weights);
                         for (float& v : foam_density) v *= kFoamTempScale;
                         up_temp = foam_density.data();
                     } else if (!foam_density.empty()) {
@@ -3588,51 +3567,10 @@ struct SceneData {
         }
 
         syncFluidRenderVolumes(mgr, frame, force_sync);
-        syncFluidFoamVolumes(mgr, frame, force_sync);
 
         force_simulation_render_sync_ = false;
     }
 
-    // The old whitewater "Volume" mode used a SEPARATE foam NanoVDB volume that sat
-    // coincident with the fluid surface volume and got dropped by the Vulkan
-    // integrator (black cube). The Volume mode is back, but it now rides the fluid
-    // SURFACE volume's TEMPERATURE channel instead (single volume → no coincidence;
-    // see volume_foam_active in syncSimulationRenderVolumes). This routine therefore
-    // only TEARS DOWN any leftover SEPARATE foam volumes (domain_foam_volumes) from
-    // an older session/save; it does NOT touch the surface-volume temp-channel foam.
-    // (domain_foam_density is a transient splat scratch refilled per frame, safe to
-    // clear here.)
-    void syncFluidFoamVolumes(VDBVolumeManager& mgr, int frame, bool force_sync) {
-        (void)frame; (void)force_sync;
-        for (auto& system : particle_systems) {
-            bool removed_any = false;
-            for (std::size_t d = 0; d < system.domain_foam_volumes.size(); ++d) {
-                if (system.domain_foam_volumes[d]) {
-                    auto vol = system.domain_foam_volumes[d];
-                    removeVDBVolume(vol);
-                    auto it = std::find(world.objects.begin(), world.objects.end(),
-                                        std::static_pointer_cast<Hittable>(vol));
-                    if (it != world.objects.end()) world.objects.erase(it);
-                    system.domain_foam_volumes[d].reset();
-                    removed_any = true;
-                }
-                if (d < system.domain_foam_vdb_ids.size() && system.domain_foam_vdb_ids[d] >= 0) {
-                    mgr.unloadVDB(system.domain_foam_vdb_ids[d]);
-                    system.domain_foam_vdb_ids[d] = -1;
-                }
-            }
-            if (!system.domain_foam_density.empty()) {
-                system.domain_foam_density.clear();
-                system.domain_foam_density.shrink_to_fit();
-            }
-            if (removed_any) {
-                g_geometry_dirty = true;
-                g_vulkan_rebuild_pending = true;
-                g_optix_rebuild_pending = true;
-                g_gas_volumes_dirty = true;
-            }
-        }
-    }
 
     // ── Discrete-particle render bridge (defined in ParticleRenderBridge.cpp) ──
     // Mirrors each visible system's alive SoA into a transient InstanceManager
@@ -3822,7 +3760,7 @@ struct SceneData {
         for (const auto& s : particle_systems) {
             if (!s.runtime) continue;
             for (const auto& d : s.runtime->gridDomains()) {
-                if (d.type != RayTrophiSim::SimulationDomainType::Fluid) continue;
+                if (!RayTrophiSim::simulationDomainHasLiquid(d.type)) continue;
                 if (can_move) return true;        // dynamic/kinematic + any fluid => coupled
                 if (!have_sphere) return true;    // unresolved static pose => conservative
                 // Closest point on the domain AABB to the rest-sphere centre.
@@ -3888,7 +3826,7 @@ struct SceneData {
             std::memcpy(&bits, &f, sizeof(bits));
             return static_cast<uint64_t>(bits);
         };
-        if (d.type != RayTrophiSim::SimulationDomainType::Fluid) return h;
+        if (!RayTrophiSim::simulationDomainHasLiquid(d.type)) return h;
         h = mix(h, d.enabled ? 1ull : 0ull);
         h = mix(h, static_cast<uint64_t>(d.backend));
         h = mix(h, static_cast<uint64_t>(d.boundary_mode));
@@ -3923,6 +3861,12 @@ struct SceneData {
         h = mix(h, fb(fp.density_correction));
         h = mix(h, fb(fp.internal_friction));
         h = mix(h, fb(fp.air_drag));
+        // Climate wind is an input to the step once inherited (Faz 2).
+        h = mix(h, fp.inherit_atmosphere ? 1ull : 0ull);
+        {
+            const Vec3 air = RayTrophiSim::Fluid::atmosphereAirVelocity(fp);
+            h = mix(h, fb(air.x)); h = mix(h, fb(air.z));
+        }
         h = mix(h, fp.reseed_enabled ? 1ull : 0ull);
         h = mix(h, static_cast<uint64_t>(fp.reseed_target_per_cell));
         h = mix(h, static_cast<uint64_t>(fp.reseed_min_per_cell));
@@ -4046,6 +3990,7 @@ struct SceneData {
             h = mix(h, fb(b.kinematic_viscosity));
             h = mix(h, fb(b.miscibility));
             h = mix(h, static_cast<uint64_t>(b.phase));
+            h = mix(h, static_cast<uint64_t>(b.constitutive_model));
         }
         return h;
     }
@@ -4142,7 +4087,14 @@ struct SceneData {
             // room must not replay as one baked in a sealed hot one.
             {
                 const auto& wt = s.runtime->worldThermal();
-                h = mix(h, qf(wt.ambient_kelvin));
+                // The EFFECTIVE ambient (climate when inheriting) plus the
+                // calibration zero: either one moves what a stored normalized
+                // temperature means. A climate keyed over time is sampled at
+                // signature time only -- such a cache replays the ambient it
+                // was baked with.
+                h = mix(h, qf(wt.ambientKelvin()));
+                h = mix(h, qf(wt.reference_kelvin));
+                h = mix(h, wt.inherit_atmosphere ? 1ull : 0ull);
                 h = mix(h, qf(wt.kelvin_per_unit));
                 h = mix(h, qf(wt.convection_coefficient));
                 h = mix(h, qf(wt.oxygen_availability));
@@ -4184,6 +4136,8 @@ struct SceneData {
                 // sequence baked under the old name no longer describes it.
                 h = mix(h, static_cast<uint64_t>(
                     RayTrophiSim::Fluid::substanceTag(f.fluid_substance)));
+                h = mix(h, static_cast<uint64_t>(
+                    f.initial_constitutive_model));
                 h = mix(h, f.use_time_limit ? 1ull : 0ull);
                 h = mix(h, qf(f.start_time)); h = mix(h, qf(f.end_time));
                 h = mix(h, f.use_particle_limit ? 1ull : 0ull);
@@ -4394,7 +4348,9 @@ struct SceneData {
                 h = mix(h, bf(gd.fire_expansion));
                 h = mix(h, bf(gd.gas_buoyancy_heat));
                 h = mix(h, bf(gd.gas_buoyancy_density));
-                h = mix(h, bf(gd.gas_ambient_stratification));
+                h = mix(h, bf(RayTrophiSim::gasEffectiveStratification(
+                                  gd, s.runtime->worldThermal())));
+                h = mix(h, gd.gas_inherit_atmosphere ? 1ull : 0ull);
                 h = mix(h, bf(gd.gas_vorticity));
                 h = mix(h, gd.gas_maccormack_advection ? 1ull : 0ull);
                 h = mix(h, bf(gd.turbulence_strength));
@@ -4502,7 +4458,14 @@ struct SceneData {
             // room must not replay as one baked in a sealed hot one.
             {
                 const auto& wt = s.runtime->worldThermal();
-                h = mix(h, qf(wt.ambient_kelvin));
+                // The EFFECTIVE ambient (climate when inheriting) plus the
+                // calibration zero: either one moves what a stored normalized
+                // temperature means. A climate keyed over time is sampled at
+                // signature time only -- such a cache replays the ambient it
+                // was baked with.
+                h = mix(h, qf(wt.ambientKelvin()));
+                h = mix(h, qf(wt.reference_kelvin));
+                h = mix(h, wt.inherit_atmosphere ? 1ull : 0ull);
                 h = mix(h, qf(wt.kelvin_per_unit));
                 h = mix(h, qf(wt.convection_coefficient));
                 h = mix(h, qf(wt.oxygen_availability));
@@ -4540,6 +4503,8 @@ struct SceneData {
                 h = mix(h, qf(f.fluid_temperature_kelvin));
                 h = mix(h, static_cast<uint64_t>(
                     RayTrophiSim::Fluid::substanceTag(f.fluid_substance)));
+                h = mix(h, static_cast<uint64_t>(
+                    f.initial_constitutive_model));
                 h = mix(h, f.use_time_limit ? 1ull : 0ull);
                 h = mix(h, qf(f.start_time)); h = mix(h, qf(f.end_time));
                 h = mix(h, f.use_particle_limit ? 1ull : 0ull);
@@ -6211,7 +6176,7 @@ struct SceneData {
             const auto& states = system.runtime->gridDomainStates();
             for (std::size_t i = 0; i < domains.size(); ++i) {
                 const auto& dom = domains[i];
-                if (dom.type != RayTrophiSim::SimulationDomainType::Fluid) continue;
+                if (!RayTrophiSim::simulationDomainHasLiquid(dom.type)) continue;
                 const bool has_recipe =
                     dom.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel ||
                     dom.fluid_reseed_on_reset;
@@ -6235,7 +6200,7 @@ struct SceneData {
                 // only refilled a couple of frames in and its SurfaceSDF volume
                 // wasn't built/raymarched until ~frame 2 (the reported bug).
                 for (auto& dom : system.runtime->gridDomains()) {
-                    if (dom.type == RayTrophiSim::SimulationDomainType::Fluid &&
+                    if (RayTrophiSim::simulationDomainHasLiquid(dom.type) &&
                         (dom.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel ||
                          dom.fluid_reseed_on_reset)) {
                         dom.fluid_pending_seed = true;
@@ -6328,9 +6293,10 @@ struct SceneData {
             const std::size_t n = std::min(domains.size(), system.domain_volumes.size());
             for (std::size_t d = 0; d < n; ++d) {
                 if (!system.domain_volumes[d]) continue;
-                if (domains[d].type != RayTrophiSim::SimulationDomainType::Fluid) continue;
-                if (domains[d].fluid_render_mode !=
-                    RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) continue;
+                if (!RayTrophiSim::simulationDomainHasLiquid(domains[d].type)) continue;
+                // The volume says whether it is a surface; the mode no longer
+                // does (a fog-default domain can carry an SDF substance).
+                if (!system.domain_volumes[d]->render_as_isosurface) continue;
                 system.domain_volumes[d]->render_isosurface_ior = domains[d].fluid_surface_ior;
                 system.domain_volumes[d]->render_isosurface_roughness = domains[d].fluid_surface_roughness;
                 system.domain_volumes[d]->render_isosurface_foam = domains[d].fluid_surface_foam;
@@ -6360,9 +6326,7 @@ struct SceneData {
                 // g_gas_volumes_dirty into the volume table). Foam Density is NOT
                 // here: it changes the deposited temp grid and needs a re-upload
                 // (the UI routes it through requestSimulationTimelineRenderResync).
-                if (domains[d].fluid_foam_params.enabled &&
-                    domains[d].fluid_foam_params.render_mode ==
-                        RayTrophiSim::Fluid::FoamRenderMode::Volume) {
+                if (domains[d].fluid_foam_params.enabled) {
                     system.domain_volumes[d]->render_isosurface_foam_color =
                         domains[d].fluid_foam_params.volume_color;
                     system.domain_volumes[d]->render_isosurface_foam_opacity =
@@ -7432,6 +7396,14 @@ private:
     bool hasAuthoritativeGridFluidDomain(const std::string& name) const;
     void retireDomainSurfaceRepresentation(ParticleSystemObject& system,
                                            std::size_t domain_index);
+    // Publishes (or retires) a liquid domain's FOG view on its own volume slot,
+    // from the same FluidViewPlan the surface slot uses. FluidDomainFogVolume.cpp.
+    void syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
+                             const RayTrophiSim::SimulationGridDomainState& state,
+                             RayTrophiSim::SimulationGridDomainDesc& desc,
+                             const RayTrophiSim::Fluid::FluidViewPlan& plan,
+                             VDBVolumeManager& mgr, int frame, bool force_sync,
+                             bool render_enabled);
 
     void invalidateSimulationRenderBindings(ParticleSystemObject& system) {
         // Invalidates NanoVDB host/GPU bindings so the next syncSimulationRenderVolumes
@@ -7475,6 +7447,18 @@ private:
                 system.domain_vdb_upload_signatures[d] = 0;
             }
         }
+        // The fog view's volume follows the same rule, for the same reason: the
+        // id at -1 is what forces its next publish to upload the restored frame.
+        for (std::size_t d = 0; d < system.domain_fog_vdb_ids.size(); ++d) {
+            if (system.domain_fog_vdb_ids[d] >= 0) {
+                mgr.unloadVDB(system.domain_fog_vdb_ids[d]);
+                system.domain_fog_vdb_ids[d] = -1;
+            }
+            if (d < system.domain_fog_volumes.size() && system.domain_fog_volumes[d]) {
+                system.domain_fog_volumes[d]->setVDBVolumeID(-1);
+                system.domain_fog_volumes[d]->awaiting_live_rebind = true;
+            }
+        }
         g_gas_volumes_dirty = true;
     }
 
@@ -7511,19 +7495,20 @@ private:
         }
     }
 
-    void removeFoamDomainVolume(ParticleSystemObject& system, std::size_t d) {
+    // Tears down a domain's liquid FOG view (its second live volume).
+    void removeFogDomainVolume(ParticleSystemObject& system, std::size_t d) {
         auto& mgr = VDBVolumeManager::getInstance();
-        if (d < system.domain_foam_vdb_ids.size() && system.domain_foam_vdb_ids[d] >= 0) {
-            mgr.unloadVDB(system.domain_foam_vdb_ids[d]);
-            system.domain_foam_vdb_ids[d] = -1;
+        if (d < system.domain_fog_vdb_ids.size() && system.domain_fog_vdb_ids[d] >= 0) {
+            mgr.unloadVDB(system.domain_fog_vdb_ids[d]);
+            system.domain_fog_vdb_ids[d] = -1;
         }
-        if (d < system.domain_foam_volumes.size() && system.domain_foam_volumes[d]) {
-            auto vol = system.domain_foam_volumes[d];
+        if (d < system.domain_fog_volumes.size() && system.domain_fog_volumes[d]) {
+            auto vol = system.domain_fog_volumes[d];
             removeVDBVolume(vol);
             auto it = std::find(world.objects.begin(), world.objects.end(),
                                 std::static_pointer_cast<Hittable>(vol));
             if (it != world.objects.end()) world.objects.erase(it);
-            system.domain_foam_volumes[d].reset();
+            system.domain_fog_volumes[d].reset();
             g_geometry_dirty = true;
             g_vulkan_rebuild_pending = true;
             g_optix_rebuild_pending = true;
@@ -7536,13 +7521,13 @@ private:
         for (std::size_t d = 0; d < system.domain_volumes.size(); ++d) {
             removeDomainVolume(system, d);
         }
-        for (std::size_t d = 0; d < system.domain_foam_volumes.size(); ++d) {
-            removeFoamDomainVolume(system, d);
+        for (std::size_t d = 0; d < system.domain_fog_volumes.size(); ++d) {
+            removeFogDomainVolume(system, d);
         }
         system.domain_vdb_ids.clear();
         system.domain_volumes.clear();
-        system.domain_foam_vdb_ids.clear();
-        system.domain_foam_volumes.clear();
+        system.domain_fog_vdb_ids.clear();
+        system.domain_fog_volumes.clear();
         system.domain_foam_density.clear();
         // Surface-route render artifacts share the per-domain lifetime.
         system.domain_sdf_buffers.clear();
@@ -8131,15 +8116,22 @@ public:
     // The volume is a per-frame PRODUCT of the domain: its render mode and
     // surface fields are rewritten from the domain every sync, so a panel that
     // edits them on the volume is overwritten on the next frame. Edits go here.
-    RayTrophiSim::SimulationGridDomainDesc* fluidDomainOwningVolume(const VDBVolume* vol) {
+    // `is_fog_view` (optional) tells which of the domain's two volumes this is:
+    // the surface slot or the fog slot (FluidDomainFogVolume.cpp).
+    RayTrophiSim::SimulationGridDomainDesc* fluidDomainOwningVolume(const VDBVolume* vol,
+                                                                    bool* is_fog_view = nullptr) {
         if (!vol) return nullptr;
         for (auto& system : particle_systems) {
             if (!system.runtime) continue;
             auto& domains = system.runtime->gridDomains();
-            const std::size_t n = std::min(domains.size(), system.domain_volumes.size());
-            for (std::size_t d = 0; d < n; ++d) {
-                if (system.domain_volumes[d].get() == vol &&
-                    domains[d].type == RayTrophiSim::SimulationDomainType::Fluid) {
+            for (std::size_t d = 0; d < domains.size(); ++d) {
+                if (!RayTrophiSim::simulationDomainHasLiquid(domains[d].type)) continue;
+                const bool surface = d < system.domain_volumes.size() &&
+                                     system.domain_volumes[d].get() == vol;
+                const bool fog = d < system.domain_fog_volumes.size() &&
+                                 system.domain_fog_volumes[d].get() == vol;
+                if (surface || fog) {
+                    if (is_fog_view) *is_fog_view = fog;
                     return &domains[d];
                 }
             }
@@ -9291,7 +9283,7 @@ public:
         // First detach every RT/NanoVDB consumer while the compute buffers are
         // still valid. The caller drains in-flight rendering before entering.
         removeDomainVolume(system, domain_index);
-        removeFoamDomainVolume(system, domain_index);
+        removeFogDomainVolume(system, domain_index);
 
         auto erase_index = [domain_index](auto& values) {
             if (domain_index < values.size()) {
@@ -9301,8 +9293,8 @@ public:
         };
         erase_index(system.domain_vdb_ids);
         erase_index(system.domain_volumes);
-        erase_index(system.domain_foam_vdb_ids);
-        erase_index(system.domain_foam_volumes);
+        erase_index(system.domain_fog_vdb_ids);
+        erase_index(system.domain_fog_volumes);
         erase_index(system.domain_foam_density);
         erase_index(system.domain_sdf_buffers);
         erase_index(system.domain_uvw_buffers);
@@ -9340,7 +9332,7 @@ public:
 
     RayTrophiSim::SimulationGridDomainDesc& addSimulationGridDomainFromObject(const std::string& node_name) {
         RayTrophiSim::SimulationGridDomainDesc desc;
-        desc.name = node_name.empty() ? "Grid Domain" : node_name + " Domain";
+        desc.name = node_name.empty() ? "Physics Domain" : node_name + " Domain";
         desc.source_mode = RayTrophiSim::SimulationGridDomainSourceMode::ManualBox;
         desc.source_name.clear();
         // Same rule as the panel's "Add Grid Domain": start on the fastest solver

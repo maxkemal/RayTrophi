@@ -7,51 +7,13 @@
 
 namespace Backend {
 
-// ★★★★★ DOLAYLI GUNES. Bu fonksiyona kadar sicrama isik tablosu yalnizca
-//   `m_cachedLights` uzerinde donuyordu, yani Physical Sky GUNESI dolayli
-//   aydinlatmaya HIC katilmiyordu -- durum metni bunu zaten soyluyordu:
-//   "No ... analytic sky-sun bounce".
-//
-// ★★★★ Olculdu 2026-09-15, ayni sahne ayni ayar, lineer uzay:
-//     tavan  RayFusion 0.44/0.71/0.90  vs  RT 0.14/0.10/0.08
-//   Oran R/G/B = 3.2 / 7.0 / 12.0 -- KANALLAR ARASI ESIT DEGIL. Skaler bir
-//   cift uygulama uc kanalda da ayni sayiyi verirdi; kirmizidan maviye buyuyen
-//   bu profil Rayleigh imzasidir. RT'de tavan SICAK (gunesli zeminden sicrayan
-//   isik), RayFusion'da MAVI (yalnizca gokyuzu). Eksik olan tam olarak buydu.
-//
-// ★★★ Ton, dogrudan aydinlatmanin kullandigi `canonicalWorldSunRadiance` ile
-//   AYNI formulden gelir. Ayri bir formul, bir yuzeyin aldigi dogrudan gunes
-//   ile ondan sicrayan gunesi farkli renk yapardi ve kimse buna "iki farkli
-//   gunes" demezdi -- "GI biraz soguk" derdi.
-bool VulkanBackendAdapter::worldSunBounceRadiance(float outRgb[3], bool& tintFromLut) const {
-    tintFromLut = false;
-    outRgb[0] = outRgb[1] = outRgb[2] = 0.0f;
-    if (m_cachedWorld.mode != WORLD_MODE_NISHITA) return false;
-    const float intensity = m_cachedWorld.nishita.sun_intensity;
-    if (!(intensity > 0.0f)) return false;
-    const auto& d = m_cachedWorld.nishita.sun_direction;
-    const float len = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
-    if (!(len > 1e-4f)) return false;
-    const float sunY = d.y / len;
-
-    // Shader ile BIREBIR ayni u: clamp((max(0.01, sunDir.y) + 0.2) / 1.2, 0, 1)
-    float tint[3] = {1.0f, 0.95f, 0.86f};   // shader'in LUT'suz yedegi
-    if (m_atmosphereTransmittanceRow0.size() >= static_cast<size_t>(TRANSMITTANCE_LUT_W) * 3u) {
-        const float u = std::min(std::max(((std::max)(0.01f, sunY) + 0.2f) / 1.2f, 0.0f), 1.0f);
-        // Bilinear, cunku GPU ornekleyicisi de bilinear: en yakin texel'i almak
-        // alcak gunes acilarinda gorunur bir renk basamagi uretirdi.
-        const float x = u * static_cast<float>(TRANSMITTANCE_LUT_W - 1);
-        const int i0 = static_cast<int>(x);
-        const int i1 = std::min(i0 + 1, TRANSMITTANCE_LUT_W - 1);
-        const float f = x - static_cast<float>(i0);
-        for (int c = 0; c < 3; ++c)
-            tint[c] = m_atmosphereTransmittanceRow0[i0 * 3 + c] * (1.0f - f) +
-                      m_atmosphereTransmittanceRow0[i1 * 3 + c] * f;
-        tintFromLut = true;
-    }
-    for (int c = 0; c < 3; ++c) outRgb[c] = (std::max)(tint[c], 0.0f) * intensity;
-    return true;
-}
+// The Physical Sky sun is NOT a bounce light of its own. It was added here
+// on 2026-09-15 after measuring a blue RayFusion ceiling against a warm RT
+// one -- in a scene with NO directional light (directionals were always in
+// the table below). With a directional present and sun sync on, that entry
+// counted the sun twice. The sun now reaches surfaces only through a
+// directional scene light, as in Vulkan RT (closesthit.rchit), and switching
+// to Nishita adds one when missing (rtapi::ensureWorldSunLight).
 
 class RayFusionBounceResources {
 public:
@@ -337,8 +299,6 @@ uint64_t VulkanBackendAdapter::prepareRayFusionBounce() {
     }
     std::vector<RayFusion::BounceLight> lights;
     status.unsupportedLights = 0;
-    status.sunInBounce = false;
-    status.sunTintFromLut = false;
     for (const auto& light : m_cachedLights) {
         if (!light || !light->visible) continue;
         const bool directional = light->type() == LightType::Directional;
@@ -358,33 +318,6 @@ uint64_t VulkanBackendAdapter::prepareRayFusionBounce() {
         packed.direction[1] = -light->direction.y;
         packed.direction[2] = -light->direction.z;
         lights.push_back(packed);
-    }
-    // ★★★★★ Physical Sky gunesi tabloya YONLU bir isik olarak girer. Sicrama
-    //   shader'i zaten `position.w > 0.5` ile yonlu isigi ve golge isinini
-    //   dogru isliyor; eksik olan sey isigin KENDISIYDI, yolu degil.
-    {
-        float sunRgb[3];
-        bool fromLut = false;
-        if (lights.size() < 64u && worldSunBounceRadiance(sunRgb, fromLut)) {
-            const auto& sd = m_cachedWorld.nishita.sun_direction;
-            const float len = std::sqrt(sd.x * sd.x + sd.y * sd.y + sd.z * sd.z);
-            RayFusion::BounceLight packed{};
-            packed.position[0] = packed.position[1] = packed.position[2] = 0.0f;
-            packed.position[3] = 1.0f;   // yonlu
-            packed.radiance[0] = sunRgb[0];
-            packed.radiance[1] = sunRgb[1];
-            packed.radiance[2] = sunRgb[2];
-            // `direction` alani sahne isiklarinda `-light->direction` olarak
-            // paketleniyor (isiga DOGRU vektor). worldSun.xyz zaten gunese
-            // dogru baktigi icin burada isaret cevirmesi YOK -- bu iki farkli
-            // sozlesme ve karistirmak golgeyi ters cevirirdi.
-            packed.direction[0] = sd.x / len;
-            packed.direction[1] = sd.y / len;
-            packed.direction[2] = sd.z / len;
-            lights.push_back(packed);
-            status.sunInBounce = true;
-            status.sunTintFromLut = fromLut;
-        }
     }
     status.instances = static_cast<uint32_t>(instances.size());
     status.materials = static_cast<uint32_t>(materials.size());
@@ -457,9 +390,7 @@ uint64_t VulkanBackendAdapter::prepareRayFusionBounce() {
             "so no covered hit returns bounced light. Cutout holes still pass rays. "
             "Supported: textured opaque and thin cutout diffuse/emission.";
     } else {
-        status.reason = status.sunInBounce
-            ? "Textured opaque and two-sided cutout diffuse/emission; cutout SSS approximated by diffuse, translucency by a thin diffuse lobe, coat by energy attenuation. The Physical Sky sun IS carried as a directional bounce light. No refractive transmission, volumes, terrain layers, or area/spot bounce."
-            : "Textured opaque and two-sided cutout diffuse/emission; cutout SSS approximated by diffuse, translucency by a thin diffuse lobe, coat by energy attenuation. No refractive transmission, volumes, terrain layers, area/spot or analytic sky-sun bounce.";
+        status.reason = "Textured opaque and two-sided cutout diffuse/emission; cutout SSS approximated by diffuse, translucency by a thin diffuse lobe, coat by energy attenuation. No refractive transmission, volumes, terrain layers or area/spot bounce.";
     }
     status.prepareMs = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - prepareStart).count();

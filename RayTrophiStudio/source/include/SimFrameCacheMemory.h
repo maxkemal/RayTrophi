@@ -54,6 +54,7 @@ inline std::size_t metaAllocationBytes(const SimulationGridDomainState& state) {
     bytes += allocationBytes(particles.temperature);
     bytes += allocationBytes(particles.combustible_fraction);
     bytes += allocationBytes(particles.substance_tag);
+    bytes += allocationBytes(particles.constitutive_model);
     bytes += allocationBytes(particles.granular_deformation_col0);
     bytes += allocationBytes(particles.granular_deformation_col1);
     bytes += allocationBytes(particles.granular_deformation_col2);

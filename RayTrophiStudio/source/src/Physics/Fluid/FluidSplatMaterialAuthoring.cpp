@@ -27,7 +27,7 @@ SplatMaterialAuthoringResult setFluidSplatMaterial(
     const std::string& material_name) {
     for (auto& domain : simulation.gridDomains()) {
         if (domain.name != domain_name ||
-            domain.type != SimulationDomainType::Fluid) {
+            !simulationDomainHasLiquid(domain.type)) {
             continue;
         }
 

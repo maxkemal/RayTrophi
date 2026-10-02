@@ -10,6 +10,7 @@
 #include "ui_modern.h"
 #include "imgui.h"
 #include "scene_data.h"
+#include "Api/RtApi.h"
 #include <algorithm>
 #include <cmath>
 
@@ -120,11 +121,10 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         BackgroundColor, BackgroundStrength, HDRIRotation,
         SunElevation, SunAzimuth, SunIntensity, SunSize,
         AirDensity, DustDensity, OzoneDensity, Altitude, MieAnisotropy,
-        Humidity, Temperature, OzoneStrength,
+        Climate, OzoneStrength,
         FogParams, GodRaysParams,
-        CloudDensity, CloudCoverage, CloudScale, CloudOffset,
-        CloudLighting, CloudLayer2, CloudLayer2Params,
-        AerialPerspectiveParams, MultiScatterFactor, WeatherParams
+        Clouds,
+        MultiScatterFactor, WeatherParams
     };
     
     auto isWorldKeyed = [&](WorldProp prop) -> bool {
@@ -146,18 +146,11 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     case WorldProp::OzoneDensity: return kf.world.has_ozone_density;
                     case WorldProp::Altitude: return kf.world.has_altitude;
                     case WorldProp::MieAnisotropy: return kf.world.has_mie_anisotropy;
-                    case WorldProp::CloudDensity: return kf.world.has_cloud_density;
-                    case WorldProp::CloudCoverage: return kf.world.has_cloud_coverage;
-                    case WorldProp::CloudScale: return kf.world.has_cloud_scale;
-                    case WorldProp::CloudOffset: return kf.world.has_cloud_offset;
-                    case WorldProp::Humidity: return kf.world.has_humidity;
-                    case WorldProp::Temperature: return kf.world.has_temperature;
+                    case WorldProp::Clouds: return kf.world.has_clouds;
+                    case WorldProp::Climate: return kf.world.has_climate;
                     case WorldProp::OzoneStrength: return kf.world.has_ozone_absorption_scale;
                     case WorldProp::FogParams: return kf.world.has_fog_params;
                     case WorldProp::GodRaysParams: return kf.world.has_godrays_params;
-                    case WorldProp::CloudLighting: return kf.world.has_cloud_lighting;
-                    case WorldProp::CloudLayer2Params: return kf.world.has_cloud_layer2_params;
-                    case WorldProp::AerialPerspectiveParams: return kf.world.has_aerial_params;
                     case WorldProp::MultiScatterFactor: return kf.world.has_multi_scatter;
                     case WorldProp::WeatherParams: return kf.world.has_weather_params;
                 }
@@ -172,7 +165,18 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         NishitaSkyParams np = w.getNishitaParams();
         AtmosphereAdvanced adv = w.getAdvancedParams();
         WeatherParams weather = w.getWeatherParams();
-        
+        // Keys read the climate AUTHORITY, never the derived render packet.
+        const atmosphere::ClimateState clim = w.getClimate();
+        auto writeClimateKey = [&clim](WorldKeyframe& k) {
+            k.has_climate = true;
+            k.climate_temperature_k = clim.surface_temperature_k;
+            k.climate_lapse_rate_k_per_m = clim.lapse_rate_k_per_m;
+            k.climate_relative_humidity = clim.surface_relative_humidity;
+            k.climate_pressure_pa = clim.surface_pressure_pa;
+            k.climate_wind_direction = clim.wind_direction;
+            k.climate_wind_speed_mps = clim.wind_speed_mps;
+        };
+
         auto& track = ctx.scene.timeline.tracks["World"];
         bool found = false;
         
@@ -192,18 +196,11 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 case WorldProp::OzoneDensity: return kf.world.has_ozone_density;
                 case WorldProp::Altitude: return kf.world.has_altitude;
                 case WorldProp::MieAnisotropy: return kf.world.has_mie_anisotropy;
-                case WorldProp::CloudDensity: return kf.world.has_cloud_density;
-                case WorldProp::CloudCoverage: return kf.world.has_cloud_coverage;
-                case WorldProp::CloudScale: return kf.world.has_cloud_scale;
-                case WorldProp::CloudOffset: return kf.world.has_cloud_offset;
-                case WorldProp::Humidity: return kf.world.has_humidity;
-                case WorldProp::Temperature: return kf.world.has_temperature;
+                case WorldProp::Clouds: return kf.world.has_clouds;
+                case WorldProp::Climate: return kf.world.has_climate;
                 case WorldProp::OzoneStrength: return kf.world.has_ozone_absorption_scale;
                 case WorldProp::FogParams: return kf.world.has_fog_params;
                 case WorldProp::GodRaysParams: return kf.world.has_godrays_params;
-                case WorldProp::CloudLighting: return kf.world.has_cloud_lighting;
-                case WorldProp::CloudLayer2Params: return kf.world.has_cloud_layer2_params;
-                case WorldProp::AerialPerspectiveParams: return kf.world.has_aerial_params;
                 case WorldProp::MultiScatterFactor: return kf.world.has_multi_scatter;
                 case WorldProp::WeatherParams: return kf.world.has_weather_params;
             }
@@ -225,18 +222,11 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 case WorldProp::OzoneDensity: kf.world.has_ozone_density = false; break;
                 case WorldProp::Altitude: kf.world.has_altitude = false; break;
                 case WorldProp::MieAnisotropy: kf.world.has_mie_anisotropy = false; break;
-                case WorldProp::CloudDensity: kf.world.has_cloud_density = false; break;
-                case WorldProp::CloudCoverage: kf.world.has_cloud_coverage = false; break;
-                case WorldProp::CloudScale: kf.world.has_cloud_scale = false; break;
-                case WorldProp::CloudOffset: kf.world.has_cloud_offset = false; break;
-                case WorldProp::Humidity: kf.world.has_humidity = false; break;
-                case WorldProp::Temperature: kf.world.has_temperature = false; break;
+                case WorldProp::Clouds: kf.world.has_clouds = false; break;
+                case WorldProp::Climate: kf.world.has_climate = false; break;
                 case WorldProp::OzoneStrength: kf.world.has_ozone_absorption_scale = false; break;
                 case WorldProp::FogParams: kf.world.has_fog_params = false; break;
                 case WorldProp::GodRaysParams: kf.world.has_godrays_params = false; break;
-                case WorldProp::CloudLighting: kf.world.has_cloud_lighting = false; break;
-                case WorldProp::CloudLayer2Params: kf.world.has_cloud_layer2_params = false; break;
-                case WorldProp::AerialPerspectiveParams: kf.world.has_aerial_params = false; break;
                 case WorldProp::MultiScatterFactor: kf.world.has_multi_scatter = false; break;
                 case WorldProp::WeatherParams: kf.world.has_weather_params = false; break;
             }
@@ -255,11 +245,10 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                                       wk.has_hdri_rotation || wk.has_sun_elevation || 
                                       wk.has_sun_azimuth || wk.has_sun_intensity || wk.has_sun_size ||
                                       wk.has_air_density || wk.has_dust_density || wk.has_ozone_density ||
-                                      wk.has_altitude || wk.has_mie_anisotropy || wk.has_cloud_density ||
-                                      wk.has_cloud_coverage || wk.has_cloud_scale || wk.has_cloud_offset ||
-                                      wk.has_humidity || wk.has_temperature || wk.has_ozone_absorption_scale ||
-                                      wk.has_fog_params || wk.has_godrays_params || wk.has_cloud_lighting ||
-                                      wk.has_cloud_layer2_params || wk.has_aerial_params || wk.has_multi_scatter ||
+                                      wk.has_altitude || wk.has_mie_anisotropy || wk.has_clouds ||
+                                      wk.has_climate || wk.has_ozone_absorption_scale ||
+                                      wk.has_fog_params || wk.has_godrays_params ||
+                                      wk.has_multi_scatter ||
                                       wk.has_weather_params;
                     
                     if (!hasAnyProp) {
@@ -325,30 +314,12 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         it->world.has_mie_anisotropy = true;
                         it->world.mie_anisotropy = np.mie_anisotropy;
                         break;
-                    case WorldProp::CloudDensity:
-                        it->world.has_cloud_density = true;
-                        it->world.cloud_density = np.cloud_density;
+                    case WorldProp::Clouds:
+                        it->world.has_clouds = true;
+                        it->world.clouds = w.getClouds();
                         break;
-                    case WorldProp::CloudCoverage:
-                        it->world.has_cloud_coverage = true;
-                        it->world.cloud_coverage = np.cloud_coverage;
-                        break;
-                    case WorldProp::CloudScale:
-                        it->world.has_cloud_scale = true;
-                        it->world.cloud_scale = np.cloud_scale;
-                        break;
-                    case WorldProp::CloudOffset:
-                        it->world.has_cloud_offset = true;
-                        it->world.cloud_offset_x = np.cloud_offset_x;
-                        it->world.cloud_offset_z = np.cloud_offset_z;
-                        break;
-                    case WorldProp::Humidity:
-                        it->world.has_humidity = true;
-                        it->world.humidity = np.humidity;
-                        break;
-                    case WorldProp::Temperature:
-                        it->world.has_temperature = true;
-                        it->world.temperature = np.temperature;
+                    case WorldProp::Climate:
+                        writeClimateKey(it->world);
                         break;
                     case WorldProp::OzoneStrength:
                         it->world.has_ozone_absorption_scale = true;
@@ -360,33 +331,14 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         it->world.fog_height = np.fog_height;
                         it->world.fog_falloff = np.fog_falloff;
                         it->world.fog_distance = np.fog_distance;
-                        it->world.fog_color = Vec3(np.fog_color.x, np.fog_color.y, np.fog_color.z);
-                        it->world.fog_sun_scatter = np.fog_sun_scatter;
+                        it->world.fog_albedo = Vec3(np.fog_albedo.x, np.fog_albedo.y, np.fog_albedo.z);
+                        it->world.fog_anisotropy = np.fog_anisotropy;
                         break;
                     case WorldProp::GodRaysParams:
                         it->world.has_godrays_params = true;
                         it->world.godrays_intensity = np.godrays_intensity;
                         it->world.godrays_density = np.godrays_density;
                        
-                        break;
-                    case WorldProp::CloudLighting:
-                        it->world.has_cloud_lighting = true;
-                        it->world.cloud_shadow_strength = np.cloud_shadow_strength;
-                        it->world.cloud_ambient_strength = np.cloud_ambient_strength;
-                        it->world.cloud_silver_intensity = np.cloud_silver_intensity;
-                        it->world.cloud_absorption = np.cloud_absorption;
-                        break;
-                    case WorldProp::CloudLayer2Params:
-                        it->world.has_cloud_layer2_params = true;
-                        it->world.cloud2_coverage = np.cloud2_coverage;
-                        it->world.cloud2_density = np.cloud2_density;
-                        it->world.cloud2_scale = np.cloud2_scale;
-                        break;
-                    case WorldProp::AerialPerspectiveParams:
-                        it->world.has_aerial_params = true;
-                        it->world.aerial_density = adv.aerial_density;
-                        it->world.aerial_min_distance = adv.aerial_min_distance;
-                        it->world.aerial_max_distance = adv.aerial_max_distance;
                         break;
                     case WorldProp::MultiScatterFactor:
                         it->world.has_multi_scatter = true;
@@ -398,8 +350,6 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         it->world.weather_type = weather.type;
                         it->world.weather_intensity = weather.intensity;
                         it->world.weather_density = weather.density;
-                        it->world.weather_wind_direction = Vec3(weather.wind_direction.x, weather.wind_direction.y, weather.wind_direction.z);
-                        it->world.weather_wind_speed = weather.wind_speed;
                         it->world.weather_precipitation_scale = weather.precipitation_scale;
                         it->world.weather_visibility = weather.visibility;
                         it->world.weather_surface_wetness = weather.surface_wetness_output;
@@ -471,30 +421,12 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     wk.has_mie_anisotropy = true;
                     wk.mie_anisotropy = np.mie_anisotropy;
                     break;
-                case WorldProp::CloudDensity:
-                    wk.has_cloud_density = true;
-                    wk.cloud_density = np.cloud_density;
+                case WorldProp::Clouds:
+                    wk.has_clouds = true;
+                    wk.clouds = w.getClouds();
                     break;
-                case WorldProp::CloudCoverage:
-                    wk.has_cloud_coverage = true;
-                    wk.cloud_coverage = np.cloud_coverage;
-                    break;
-                case WorldProp::CloudScale:
-                    wk.has_cloud_scale = true;
-                    wk.cloud_scale = np.cloud_scale;
-                    break;
-                case WorldProp::CloudOffset:
-                    wk.has_cloud_offset = true;
-                    wk.cloud_offset_x = np.cloud_offset_x;
-                    wk.cloud_offset_z = np.cloud_offset_z;
-                    break;
-                case WorldProp::Humidity:
-                    wk.has_humidity = true;
-                    wk.humidity = np.humidity;
-                    break;
-                case WorldProp::Temperature:
-                    wk.has_temperature = true;
-                    wk.temperature = np.temperature;
+                case WorldProp::Climate:
+                    writeClimateKey(wk);
                     break;
                 case WorldProp::OzoneStrength:
                     wk.has_ozone_absorption_scale = true;
@@ -506,33 +438,14 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     wk.fog_height = np.fog_height;
                     wk.fog_falloff = np.fog_falloff;
                     wk.fog_distance = np.fog_distance;
-                    wk.fog_color = Vec3(np.fog_color.x, np.fog_color.y, np.fog_color.z);
-                    wk.fog_sun_scatter = np.fog_sun_scatter;
+                    wk.fog_albedo = Vec3(np.fog_albedo.x, np.fog_albedo.y, np.fog_albedo.z);
+                    wk.fog_anisotropy = np.fog_anisotropy;
                     break;
                 case WorldProp::GodRaysParams:
                     wk.has_godrays_params = true;
                     wk.godrays_intensity = np.godrays_intensity;
                     wk.godrays_density = np.godrays_density;
                    
-                    break;
-                case WorldProp::CloudLighting:
-                    wk.has_cloud_lighting = true;
-                    wk.cloud_shadow_strength = np.cloud_shadow_strength;
-                    wk.cloud_ambient_strength = np.cloud_ambient_strength;
-                    wk.cloud_silver_intensity = np.cloud_silver_intensity;
-                    wk.cloud_absorption = np.cloud_absorption;
-                    break;
-                case WorldProp::CloudLayer2Params:
-                    wk.has_cloud_layer2_params = true;
-                    wk.cloud2_coverage = np.cloud2_coverage;
-                    wk.cloud2_density = np.cloud2_density;
-                    wk.cloud2_scale = np.cloud2_scale;
-                    break;
-                case WorldProp::AerialPerspectiveParams:
-                    wk.has_aerial_params = true;
-                    wk.aerial_density = adv.aerial_density;
-                    wk.aerial_min_distance = adv.aerial_min_distance;
-                    wk.aerial_max_distance = adv.aerial_max_distance;
                     break;
                 case WorldProp::MultiScatterFactor:
                     wk.has_multi_scatter = true;
@@ -544,8 +457,6 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     wk.weather_type = weather.type;
                     wk.weather_intensity = weather.intensity;
                     wk.weather_density = weather.density;
-                    wk.weather_wind_direction = Vec3(weather.wind_direction.x, weather.wind_direction.y, weather.wind_direction.z);
-                    wk.weather_wind_speed = weather.wind_speed;
                     wk.weather_precipitation_scale = weather.precipitation_scale;
                     wk.weather_visibility = weather.visibility;
                     wk.weather_surface_wetness = weather.surface_wetness_output;
@@ -570,7 +481,12 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         
         ImGui::PushItemWidth(-1);
         if (ImGui::Combo("##SkyModel", &mode_idx, modes, IM_ARRAYSIZE(modes))) {
-            world.setMode(static_cast<WorldMode>(mode_idx));
+            // Same path as world.set_mode: entering nishita adds a "Sun"
+            // directional when the scene has none (the sky sun never lights
+            // surfaces by itself).
+            if (!rtapi::setWorldMode(mode_idx == WORLD_MODE_NISHITA ? "nishita"
+                                     : mode_idx == WORLD_MODE_HDRI ? "hdri" : "solid"))
+                world.setMode(static_cast<WorldMode>(mode_idx));
             changed = true;
         }
         ImGui::PopItemWidth();
@@ -716,6 +632,21 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             } else if (sync_sun_with_light && worldSunDrivenByTimeline) {
                 ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Timeline controls sun");
             }
+            // The sky sun never lights surfaces by itself (both Vulkan backends):
+            // without a directional the scene gets sky light only. Switching into
+            // this mode adds one; this covers projects opened already in it.
+            // Same call as world.ensure_sun_light.
+            bool hasDirectional = false;
+            for (const auto& light : ctx.scene.lights)
+                if (light && light->type() == LightType::Directional) { hasDirectional = true; break; }
+            if (!hasDirectional) {
+                if (ImGui::Button("Add Sun Light")) {
+                    bool created = false;
+                    std::string name;
+                    rtapi::ensureWorldSunLight(created, name);
+                }
+                UIWidgets::HelpMarker("The sky sun is drawn but does not light the scene.\nAdds a directional 'Sun' light aligned with it.");
+            }
             UIWidgets::EndSection();
         }
         
@@ -792,20 +723,9 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             }
             ImGui::SameLine(); UIWidgets::HelpMarker("Mie scattering (base dust density)");
             
-            // Humidity (Advanced Mie)
-            bool humKeyed = isWorldKeyed(WorldProp::Humidity);
-            if (SceneUI::DrawSmartFloat("shum", "Humidity", &params.humidity, 0.0f, 1.0f, "%.2f", humKeyed, [&]{ insertWorldKey("Humidity", WorldProp::Humidity); }, 16)) {
-                changed = true;
-            }
-            ImGui::SameLine(); UIWidgets::HelpMarker("Atmospheric moisture - increases haze and sunlight glow");
-            
-            // Temperature
-            bool tempKeyed = isWorldKeyed(WorldProp::Temperature);
-            if (SceneUI::DrawSmartFloat("stmp", "Temperature", &params.temperature, -50.0f, 50.0f, "%.1f C", tempKeyed, [&]{ insertWorldKey("Temperature", WorldProp::Temperature); }, 16)) {
-                changed = true;
-            }
-            ImGui::SameLine(); UIWidgets::HelpMarker("Ambient temperature - affects Rayleigh scattering purity");
-            
+            // Humidity and temperature moved to the Climate section: they are
+            // climate state, not sky parameters, and the sky only reads them.
+
             // Ozone
             bool ozoKeyed = isWorldKeyed(WorldProp::OzoneDensity);
             if (SceneUI::DrawSmartFloat("sozn", "Ozone Density", &params.ozone_density, 0.0f, 10.0f, "%.2f", ozoKeyed, [&]{ insertWorldKey("Ozone", WorldProp::OzoneDensity); }, 16)) {
@@ -935,12 +855,12 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 if (SceneUI::DrawSmartFloat("fogh", "Fog Height", &params.fog_height, 10.0f, 2000.0f, "%.0f m", fogKeyed, [&]{ insertWorldKey("Fog", WorldProp::FogParams); }, 16)) {
                     changed = true;
                 }
-                UIWidgets::HelpMarker("Fog is concentrated below this height");
+                UIWidgets::HelpMarker("Top of the uniform fog layer (scene Y, metres).\nBelow it the density is constant; above it the fog thins out by Fog Falloff.");
                 
                 if (SceneUI::DrawSmartFloat("fogf", "Fog Falloff", &params.fog_falloff, 0.0005f, 0.02f, "%.4f", fogKeyed, [&]{ insertWorldKey("Fog", WorldProp::FogParams); }, 16)) {
                     changed = true;
                 }
-                UIWidgets::HelpMarker("Rate at which fog decreases with height");
+                UIWidgets::HelpMarker("How fast the fog thins above Fog Height (per metre).");
                 
                 float fogDistKm = params.fog_distance / 1000.0f;
                 if (SceneUI::DrawSmartFloat("fogD", "Fog Distance", &fogDistKm, 0.1f, 50.0f, "%.1f km", fogKeyed, [&]{ insertWorldKey("Fog", WorldProp::FogParams); }, 16)) {
@@ -949,17 +869,18 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 }
                 UIWidgets::HelpMarker("Maximum distance for fog effect");
                 
-                float fogColor[3] = { params.fog_color.x, params.fog_color.y, params.fog_color.z };
-                if (ImGui::ColorEdit3("Fog Color", fogColor)) {
-                    params.fog_color = make_float3(fogColor[0], fogColor[1], fogColor[2]);
+                float fogAlbedo[3] = { params.fog_albedo.x, params.fog_albedo.y, params.fog_albedo.z };
+                if (ImGui::ColorEdit3("Fog Albedo", fogAlbedo)) {
+                    params.fog_albedo = make_float3(fogAlbedo[0], fogAlbedo[1], fogAlbedo[2]);
                     changed = true;
                     if (fogKeyed) insertWorldKey("Fog", WorldProp::FogParams);
                 }
+                UIWidgets::HelpMarker("Fraction of the light the fog scatters instead of absorbing.\nWith the physical sky the fog is lit by the sun and sky, so its\ncolour follows the time of day. Other world modes use this as the fog colour.");
                 
-                if (SceneUI::DrawSmartFloat("ssss", "Sun Scatter", &params.fog_sun_scatter, 0.0f, 2.0f, "%.2f", fogKeyed, [&]{ insertWorldKey("Fog", WorldProp::FogParams); }, 16)) {
+                if (SceneUI::DrawSmartFloat("fogg", "Anisotropy", &params.fog_anisotropy, 0.0f, 0.95f, "%.2f", fogKeyed, [&]{ insertWorldKey("Fog", WorldProp::FogParams); }, 16)) {
                     changed = true;
                 }
-                UIWidgets::HelpMarker("How much fog glows when looking towards sun");
+                UIWidgets::HelpMarker("Forward scattering of the fog droplets (Henyey-Greenstein g).\nHigher = brighter glow around the sun, darker away from it.");
                 
                 ImGui::Unindent();
             }
@@ -1047,36 +968,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 adv.aerial_perspective = apEnabled ? 1 : 0;
                 changed = true;
             }
-            UIWidgets::HelpMarker("Adds atmospheric haze to distant objects.\nObjects fade into sky color with distance.");
-            
-            if (adv.aerial_perspective) {
-                ImGui::Indent();
-                
-                bool apKeyed = isWorldKeyed(WorldProp::AerialPerspectiveParams);
-                if (SceneUI::DrawSmartFloat("apden", "Density", &adv.aerial_density, 0.0f, 10.0f, "%.2f", apKeyed, [&]{ insertWorldKey("Aerial Persp", WorldProp::AerialPerspectiveParams); }, 16)) {
-                    adv.aerial_density = std::clamp(adv.aerial_density, 0.0f, 10.0f);
-                    changed = true;
-                }
-                UIWidgets::HelpMarker("Independent aerial haze density.\nDistance controls where haze ramps; density controls how strongly it accumulates.");
-
-                // Min Distance (km) - Flexible range for different scene scales
-                float minDistKm = adv.aerial_min_distance / 1000.0f;
-                if (SceneUI::DrawSmartFloat("apmin", "Min Distance", &minDistKm, 0.0f, 5.0f, "%.2f km", apKeyed, [&]{ insertWorldKey("Aerial Persp", WorldProp::AerialPerspectiveParams); }, 16)) {
-                    adv.aerial_min_distance = minDistKm * 1000.0f;
-                    changed = true;
-                }
-                UIWidgets::HelpMarker("Objects closer than this distance have NO haze.\nCtrl+Click for manual input. 0 = haze everywhere.");
-                
-                // Max Distance (km)
-                float maxDistKm = adv.aerial_max_distance / 1000.0f;
-                if (SceneUI::DrawSmartFloat("apmax", "Full Haze Distance", &maxDistKm, 0.1f, 50.0f, "%.1f km", apKeyed, [&]{ insertWorldKey("Aerial Persp", WorldProp::AerialPerspectiveParams); }, 16)) {
-                    adv.aerial_max_distance = maxDistKm * 1000.0f;
-                    changed = true;
-                }
-                UIWidgets::HelpMarker("Full aerial perspective effect at this distance.\nObjects beyond this are fully hazed.");
-                
-                ImGui::Unindent();
-            }
+            UIWidgets::HelpMarker("Air scattering between the camera and distant surfaces.\nThe amount comes from the atmosphere itself (air and dust density,\nclimate humidity) -- the same medium the sky is drawn from.");
             
             UIWidgets::EndSection();
         }
@@ -1127,6 +1019,77 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
     }
     
     // ═══════════════════════════════════════════════════════════
+    // Climate (atmosphere::ClimateState) — the world's single owner of ambient
+    // temperature, humidity, pressure and wind. Shown in every world mode: the
+    // climate is not a sky parameter, the sky merely reads it.
+    // Edits go through World::setClimate (rejects, never clamps silently), so
+    // what this panel shows is exactly what the renderers receive.
+    // ═══════════════════════════════════════════════════════════
+    ImGui::Spacing();
+    if (UIWidgets::BeginSection("Climate", ImVec4(0.45f, 0.65f, 0.85f, 1.0f))) {
+        const atmosphere::ClimateState current = world.getClimate();
+        atmosphere::ClimateState edit = current;
+        bool climateChanged = false;
+        const bool climateKeyed = isWorldKeyed(WorldProp::Climate);
+        auto keyClimate = [&]{ insertWorldKey("Climate", WorldProp::Climate); };
+
+        float temperatureC = edit.surface_temperature_k - atmosphere::kKelvinOffset;
+        if (SceneUI::DrawSmartFloat("ctmp", "Temperature", &temperatureC, -50.0f, 50.0f, "%.1f C", climateKeyed, keyClimate, 16)) {
+            edit.surface_temperature_k = temperatureC + atmosphere::kKelvinOffset;
+            climateChanged = true;
+        }
+        ImGui::SameLine(); UIWidgets::HelpMarker("Surface air temperature. Stored in Kelvin; scales the sky's scale heights.");
+
+        float humidityPct = edit.surface_relative_humidity * 100.0f;
+        if (SceneUI::DrawSmartFloat("chum", "Rel. Humidity", &humidityPct, 0.0f, 100.0f, "%.0f %%", climateKeyed, keyClimate, 16)) {
+            edit.surface_relative_humidity = humidityPct / 100.0f;
+            climateChanged = true;
+        }
+        ImGui::SameLine(); UIWidgets::HelpMarker("Relative humidity. Wet aerosol swells and scatters more: haze grows as (1-RH)^-0.5.");
+
+        float lapseKPerKm = edit.lapse_rate_k_per_m * 1000.0f;
+        if (SceneUI::DrawSmartFloat("clps", "Lapse Rate", &lapseKPerKm, -5.0f, 10.0f, "%.2f K/km", climateKeyed, keyClimate, 16)) {
+            edit.lapse_rate_k_per_m = lapseKPerKm / 1000.0f;
+            climateChanged = true;
+        }
+        ImGui::SameLine(); UIWidgets::HelpMarker("Temperature drop per km of altitude (ISA 6.5). Negative = inversion.");
+
+        float pressureHpa = edit.surface_pressure_pa / 100.0f;
+        if (SceneUI::DrawSmartFloat("cprs", "Pressure", &pressureHpa, 500.0f, 1085.0f, "%.0f hPa", climateKeyed, keyClimate, 16)) {
+            edit.surface_pressure_pa = pressureHpa * 100.0f;
+            climateChanged = true;
+        }
+        ImGui::SameLine(); UIWidgets::HelpMarker("Surface pressure (sea level 1013 hPa).");
+
+        if (SceneUI::DrawSmartFloat("cwsp", "Wind Speed", &edit.wind_speed_mps, 0.0f, 60.0f, "%.1f m/s", climateKeyed, keyClimate, 16)) {
+            climateChanged = true;
+        }
+        // Azimuth uses the sun's convention: direction = (sin az, 0, cos az).
+        float windAzimuthDeg = std::atan2(edit.wind_direction.x, edit.wind_direction.z) * 180.0f / 3.14159265f;
+        if (windAzimuthDeg < 0.0f) windAzimuthDeg += 360.0f;
+        if (SceneUI::DrawSmartFloat("cwaz", "Wind Toward", &windAzimuthDeg, 0.0f, 360.0f, "%.0f deg", climateKeyed, keyClimate, 16)) {
+            const float az = windAzimuthDeg * 3.14159265f / 180.0f;
+            edit.wind_direction = Vec3(std::sin(az), 0.0f, std::cos(az));
+            climateChanged = true;
+        }
+        ImGui::SameLine(); UIWidgets::HelpMarker("Direction the wind blows TOWARD, same azimuth convention as the sun.");
+        if (ImGui::SliderFloat("Instability", &edit.instability, 0.0f, 1.0f, "%.2f")) {
+            climateChanged = true;
+        }
+        ImGui::SameLine(); UIWidgets::HelpMarker("Convective potential (0 stable -> stratiform sky,\n1 violently unstable -> cumulonimbus).\nWith 'Derive from climate' on, the low cloud layer follows it.");
+
+        if (climateChanged) {
+            std::string climateError;
+            if (world.setClimate(edit, &climateError)) {
+                changed = true;
+            } else {
+                SCENE_LOG_WARN("[World] Climate edit rejected: " + climateError);
+            }
+        }
+        UIWidgets::EndSection();
+    }
+
+    // ═══════════════════════════════════════════════════════════
     // Weather Controls (shared payload for CPU/OptiX/Vulkan)
     // ═══════════════════════════════════════════════════════════
     ImGui::Spacing();
@@ -1158,14 +1121,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         if (SceneUI::DrawSmartFloat("wden", "Density", &weather.density, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
             weatherChanged = true;
         }
-        if (SceneUI::DrawSmartFloat("wwsp", "Wind Speed", &weather.wind_speed, 0.0f, 100.0f, "%.1f m/s", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
-            weatherChanged = true;
-        }
-
-        Vec3 wind(weather.wind_direction.x, weather.wind_direction.y, weather.wind_direction.z);
-        if (SceneUI::DrawSmartFloat("wwdx", "Wind X", &wind.x, -1.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) weatherChanged = true;
-        if (SceneUI::DrawSmartFloat("wwdy", "Wind Y", &wind.y, -1.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) weatherChanged = true;
-        if (SceneUI::DrawSmartFloat("wwdz", "Wind Z", &wind.z, -1.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) weatherChanged = true;
+        // Wind is climate state now (Climate section); weather reads it.
 
         if (SceneUI::DrawSmartFloat("wpsc", "Precip Scale", &weather.precipitation_scale, 0.1f, 10.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
             weatherChanged = true;
@@ -1228,13 +1184,6 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         }
 
         if (weatherChanged) {
-            float len = std::sqrt(wind.x * wind.x + wind.y * wind.y + wind.z * wind.z);
-            if (len > 1e-5f) {
-                wind = Vec3(wind.x / len, wind.y / len, wind.z / len);
-            } else {
-                wind = Vec3(1.0f, 0.0f, 0.0f);
-            }
-            weather.wind_direction = make_float3(wind.x, wind.y, wind.z);
             weather.intensity = std::clamp(weather.intensity, 0.0f, 1.0f);
             weather.density = std::clamp(weather.density, 0.0f, 1.0f);
             weather.visibility = std::clamp(weather.visibility, 0.0f, 1.0f);
@@ -1254,421 +1203,137 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
     // Global Atmosphere (Clouds)
     // ═══════════════════════════════════════════════════════════
     ImGui::Spacing();
-    if (UIWidgets::BeginSection("Global Atmosphere (Clouds)", ImVec4(0.5f, 0.6f, 0.7f, 1.0f))) {
-        NishitaSkyParams cloudParams = world.getNishitaParams();
-        bool cloudParamsChanged = false;
+    if (UIWidgets::BeginSection("Clouds", ImVec4(0.5f, 0.6f, 0.7f, 1.0f))) {
+        // Edits a copy of the AUTHORITY (atmosphere::CloudState) and commits it
+        // through setClouds, which validates. The legacy nishita.cloud_* packet
+        // is derived from it and never edited here.
+        atmosphere::CloudState clouds = world.getClouds();
+        bool cloudsChanged = false;
+        static std::string cloudError;
 
-        bool cloudsEnabled = cloudParams.clouds_enabled != 0;
-        if (ImGui::Checkbox("Enable Volumetric Clouds", &cloudsEnabled)) {
-            cloudParams.clouds_enabled = cloudsEnabled ? 1 : 0;
-            cloudParamsChanged = true;
-        }
-        UIWidgets::HelpMarker("Render volumetric clouds over any sky model.\nNote: High Performance Cost!");
+        const bool cloudsKeyed = isWorldKeyed(WorldProp::Clouds);
+        if (KeyframeButton("##WClouds", cloudsKeyed, "Clouds")) { insertWorldKey("Clouds", WorldProp::Clouds); }
+        ImGui::SameLine();
+        ImGui::TextDisabled("Key all cloud settings as one block");
 
-        if (cloudParams.clouds_enabled) {
-            ImGui::Spacing();
-            
-            // === CLOUD QUALITY (Performance) ===
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "Quality:");
-            static int quality_preset = 0; // Normal
-            const char* quality_presets[] = { "Fast Preview", "Low", "Normal", "High", "Ultra" };
-            float quality_values[] = { 0.25f, 0.5f, 1.0f, 1.5f, 2.5f };
-            
-            ImGui::PushItemWidth(120);
-            if (ImGui::Combo("##CloudQuality", &quality_preset, quality_presets, IM_ARRAYSIZE(quality_presets))) {
-                cloudParams.cloud_quality = quality_values[quality_preset];
-                cloudParamsChanged = true;
-            }
-            ImGui::PopItemWidth();
-            ImGui::SameLine();
-            ImGui::TextDisabled("(%.0f-%.0f steps)", 
-                48.0f * cloudParams.cloud_quality, 
-                96.0f * cloudParams.cloud_quality);
-            UIWidgets::HelpMarker("Lower quality = faster render\nHigher quality = better details");
-            
-            ImGui::Spacing();
-            
-            // === WEATHER PRESETS (Combo Box) ===
-            static int weather_preset_index = 7; // Default to Custom
-            const char* weather_presets[] = { 
-                "Clear Sky", 
-                "Cirrus (Wispy)",
-                "Cumulus (Puffy)",
-                "Stratocumulus",
-                "Overcast", 
-                "Cumulonimbus (Storm)",
-                "Fog/Low Clouds",
-                "Custom" 
-            };
-            
-            ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Weather Type:");
-            ImGui::PushItemWidth(-1);
-            if (ImGui::Combo("##WeatherType", &weather_preset_index, weather_presets, IM_ARRAYSIZE(weather_presets))) {
-                switch (weather_preset_index) {
-                    case 0: // Clear Sky
-                        cloudParams.clouds_enabled = 0;
-                        cloudParamsChanged = true;
-                        break;
-                    case 1: // Cirrus (Wispy high clouds)
-                        cloudParams.clouds_enabled = 1;
-                        cloudParams.cloud_height_min = 8000.0f;
-                        cloudParams.cloud_height_max = 8800.0f;
-                        cloudParams.cloud_scale = 0.25f;
-                        cloudParams.cloud_coverage = 0.16f;
-                        cloudParams.cloud_density = 0.22f;
-                        cloudParams.cloud_detail = 0.75f;
-                        cloudParams.cloud_shadow_strength = 0.1f;
-                        cloudParamsChanged = true;
-                        break;
-                    case 2: // Cumulus (Classic puffy clouds)
-                        cloudParams.clouds_enabled = 1;
-                        cloudParams.cloud_height_min = 1000.0f;
-                        cloudParams.cloud_height_max = 3600.0f;
-                        cloudParams.cloud_scale = 0.48f;
-                        cloudParams.cloud_coverage = 0.28f;
-                        cloudParams.cloud_density = 0.82f;
-                        cloudParams.cloud_detail = 0.42f;
-                        cloudParams.cloud_shadow_strength = 0.28f;
-                        cloudParams.cloud_absorption = 0.75f;
-                        cloudParams.cloud_ambient_strength = 1.2f;
-                        cloudParams.cloud_silver_intensity = 0.35f;
-                        cloudParamsChanged = true;
-                        break;
-                    case 3: // Stratocumulus (Layered puffy)
-                        cloudParams.clouds_enabled = 1;
-                        cloudParams.cloud_height_min = 800.0f;
-                        cloudParams.cloud_height_max = 1800.0f;
-                        cloudParams.cloud_scale = 0.42f;
-                        cloudParams.cloud_coverage = 0.42f;
-                        cloudParams.cloud_density = 0.85f;
-                        cloudParams.cloud_detail = 0.45f;
-                        cloudParams.cloud_shadow_strength = 0.32f;
-                        cloudParams.cloud_absorption = 0.85f;
-                        cloudParams.cloud_ambient_strength = 1.15f;
-                        cloudParamsChanged = true;
-                        break;
-                    case 4: // Overcast (Stratus)
-                        cloudParams.clouds_enabled = 1;
-                        cloudParams.cloud_height_min = 400.0f;
-                        cloudParams.cloud_height_max = 1000.0f;
-                        cloudParams.cloud_scale = 0.28f;
-                        cloudParams.cloud_coverage = 0.58f;
-                        cloudParams.cloud_density = 0.92f;
-                        cloudParams.cloud_detail = 0.35f;
-                        cloudParams.cloud_shadow_strength = 0.38f;
-                        cloudParams.cloud_absorption = 0.9f;
-                        cloudParams.cloud_ambient_strength = 1.1f;
-                        cloudParamsChanged = true;
-                        break;
-                    case 5: // Cumulonimbus (Storm/Rain clouds)
-                        cloudParams.clouds_enabled = 1;
-                        cloudParams.cloud_height_min = 600.0f;
-                        cloudParams.cloud_height_max = 12000.0f;
-                        cloudParams.cloud_scale = 0.65f;
-                        cloudParams.cloud_coverage = 0.52f;
-                        cloudParams.cloud_density = 1.2f;
-                        cloudParams.cloud_detail = 0.72f;
-                        cloudParams.cloud_shadow_strength = 0.55f;
-                        cloudParams.cloud_absorption = 1.2f;
-                        cloudParams.cloud_ambient_strength = 0.95f;
-                        cloudParams.cloud_silver_intensity = 0.45f;
-                        cloudParamsChanged = true;
-                        break;
-                    case 6: // Fog/Low Clouds
-                        cloudParams.clouds_enabled = 1;
-                        cloudParams.cloud_height_min = 0.0f;
-                        cloudParams.cloud_height_max = 350.0f;
-                        cloudParams.cloud_scale = 0.18f;
-                        cloudParams.cloud_coverage = 0.55f;
-                        cloudParams.cloud_density = 0.9f;
-                        cloudParams.cloud_detail = 0.25f;
-                        cloudParamsChanged = true;
-                        break;
-                    case 7: // Custom
-                        break;
-                }
-            }
-            ImGui::PopItemWidth();
-            UIWidgets::HelpMarker("Cloud type presets:\n"
-                "- Cirrus: High wispy clouds\n"
-                "- Cumulus: Classic puffy clouds\n"
-                "- Stratocumulus: Layered clouds\n"
-                "- Overcast: Gray flat sky\n"
-                "- Cumulonimbus: Towering storm clouds\n"
-                "- Fog: Ground-level clouds");
-            
-            ImGui::Spacing();
-            ImGui::Separator();
-            
-            // Show detailed controls in a collapsible section or when Custom is selected
-            bool show_details = (weather_preset_index == 7); // Custom mode
-            
-            if (show_details || UIWidgets::CollapsingHeader("Cloud Details")) {
-                // Coverage
-                bool covKeyed = isWorldKeyed(WorldProp::CloudCoverage);
-                if (SceneUI::DrawSmartFloat("clcov", "Coverage", &cloudParams.cloud_coverage, 0.0f, 0.6f, "%.2f", covKeyed, [&]{ insertWorldKey("Cloud Cov", WorldProp::CloudCoverage); }, 16)) {
-                    cloudParamsChanged = true;
-                    weather_preset_index = 7;
-                }
-                ImGui::SameLine(); UIWidgets::HelpMarker("0 = clear, 0.3 = broken cumulus, 0.6 = near overcast");
-
-                // Density
-                bool denKeyed = isWorldKeyed(WorldProp::CloudDensity);
-                if (SceneUI::DrawSmartFloat("clden", "Density", &cloudParams.cloud_density, 0.0f, 1.5f, "%.2f", denKeyed, [&]{ insertWorldKey("Cloud Den", WorldProp::CloudDensity); }, 16)) {
-                    cloudParamsChanged = true;
-                    weather_preset_index = 7;
-                }
-                ImGui::SameLine(); UIWidgets::HelpMarker("Cloud opacity");
-                
-                // Scale
-                bool sclKeyed = isWorldKeyed(WorldProp::CloudScale);
-                if (SceneUI::DrawSmartFloat("clscl", "Scale", &cloudParams.cloud_scale, 0.1f, 1.0f, "%.2f", sclKeyed, [&]{ insertWorldKey("Cloud Scale", WorldProp::CloudScale); }, 16)) {
-                    cloudParamsChanged = true;
-                    weather_preset_index = 7;
-                }
-                ImGui::SameLine(); UIWidgets::HelpMarker("Cloud feature size. Lower = broader layers, higher = smaller puffs.");
-
-                // Detail
-                if (ImGui::SliderFloat("Noise Detail", &cloudParams.cloud_detail, 0.0f, 1.0f, "%.2f")) {
-                    cloudParamsChanged = true;
-                    weather_preset_index = 7;
-                }
-                UIWidgets::HelpMarker("Richness of high-frequency noise.");
-
-                // Base Steps
-                if (ImGui::SliderInt("Base Steps", &cloudParams.cloud_base_steps, 4, 96)) {
-                    cloudParamsChanged = true;
-                    weather_preset_index = 7;
-                }
-                UIWidgets::HelpMarker("Base number of ray-marching steps.\nLower = Faster preview\nHigher = Cinematic quality (128+ recommended for horizon)");
-
-                // Wind / Seed Offsets
-                bool offKeyed = isWorldKeyed(WorldProp::CloudOffset);
-                if (KeyframeButton("##WOffX", offKeyed, "Offset X")) { 
-                    insertWorldKey("Cloud OffX", WorldProp::CloudOffset); 
-                }
-                ImGui::SameLine();
-                if (ImGui::DragFloat("Offset X", &cloudParams.cloud_offset_x, 10.0f, -100000.0f, 100000.0f, "%.0f m")) {
-                    cloudParamsChanged = true;
-                }
-                
-                if (KeyframeButton("##WOffZ", offKeyed, "Offset Z")) { 
-                    insertWorldKey("Cloud OffZ", WorldProp::CloudOffset); 
-                }
-                ImGui::SameLine();
-                if (ImGui::DragFloat("Offset Z", &cloudParams.cloud_offset_z, 10.0f, -100000.0f, 100000.0f, "%.0f m")) {
-                    cloudParamsChanged = true;
-                }
-                ImGui::SameLine(); UIWidgets::HelpMarker("Wind animation");
-
-                int cloudSeed = cloudParams.cloud_seed;
-                if (ImGui::DragInt("Seed", &cloudSeed, 1.0f, 0, 1000000)) {
-                    cloudParams.cloud_seed = cloudSeed;
-                    cloudParamsChanged = true;
-                    weather_preset_index = 7;
-                }
-                UIWidgets::HelpMarker("Changes the procedural cloud pattern while keeping coverage, scale, and wind offsets intact.");
-            }
-            
-            // ═══════════════════════════════════════════════════════════
-            // CLOUD LIGHTING SETTINGS
-            // ═══════════════════════════════════════════════════════════
-            if (UIWidgets::CollapsingHeader("Cloud Lighting")) {
-                bool lightKeyed = isWorldKeyed(WorldProp::CloudLighting);
-                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Self-Shadowing:");
-                
-                // Light Steps (0 = disabled for performance)
-                if (ImGui::SliderInt("Light Steps", &cloudParams.cloud_light_steps, 0, 24)) {
-                    cloudParamsChanged = true;
-                }
-                UIWidgets::HelpMarker("Number of light marching steps.\n0 = Disabled (fast)\n4-6 = Normal\n8-12 = High quality");
-                
-                // Shadow Strength
-                if (SceneUI::DrawSmartFloat("cshd", "Shadow Strength", &cloudParams.cloud_shadow_strength, 0.0f, 1.0f, "%.2f", lightKeyed, [&]{ insertWorldKey("Cloud Light", WorldProp::CloudLighting); }, 16)) {
-                    cloudParamsChanged = true;
-                }
-                UIWidgets::HelpMarker("Cloud self-shadowing intensity.\n0 = No shadows\n1 = Normal\n2 = Dark, dramatic shadows");
-                
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Lighting Effects:");
-                
-                // Silver Lining
-                if (SceneUI::DrawSmartFloat("csil", "Silver Lining", &cloudParams.cloud_silver_intensity, 0.0f, 1.0f, "%.2f", lightKeyed, [&]{ insertWorldKey("Cloud Light", WorldProp::CloudLighting); }, 16)) {
-                    cloudParamsChanged = true;
-                }
-                UIWidgets::HelpMarker("Bright rim effect when backlit by sun.\n0 = Off\n1 = Normal\n2+ = Strong glow");
-                
-                // Ambient Strength
-                if (SceneUI::DrawSmartFloat("camb", "Ambient Light", &cloudParams.cloud_ambient_strength, 0.0f, 2.0f, "%.2f", lightKeyed, [&]{ insertWorldKey("Cloud Light", WorldProp::CloudLighting); }, 16)) {
-                    cloudParamsChanged = true;
-                }
-                UIWidgets::HelpMarker("Sky ambient light contribution.\nLower = Darker shadows\nHigher = Softer look");
-                
-                // Absorption
-                if (SceneUI::DrawSmartFloat("cabs", "Absorption", &cloudParams.cloud_absorption, 0.1f, 3.0f, "%.2f", lightKeyed, [&]{ insertWorldKey("Cloud Light", WorldProp::CloudLighting); }, 16)) {
-                    cloudParamsChanged = true;
-                }
-                UIWidgets::HelpMarker("Light absorption rate.\n0.5 = Thin, transparent\n1.0 = Normal\n2.0 = Thick, opaque");
-
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Advanced Scattering (Anisotropy):");
-                
-                // Scattering Anisotropy (Forward)
-                if (ImGui::SliderFloat("Anisotropy (Forward)", &cloudParams.cloud_anisotropy, 0.0f, 0.85f, "%.2f")) {
-                    cloudParamsChanged = true;
-                }
-                UIWidgets::HelpMarker("Forward scattering intensity (g-factor).\n0.0 = Uniform light\n0.9 = Strong forward glow (silver lining)");
-
-                // Scattering Anisotropy (Back)
-                if (ImGui::SliderFloat("Anisotropy (Back)", &cloudParams.cloud_anisotropy_back, -0.6f, 0.0f, "%.2f")) {
-                    cloudParamsChanged = true;
-                }
-                UIWidgets::HelpMarker("Back scattering intensity.\nControls how much light 'bounces back' toward the sun.");
-
-                // Lobe Mix
-                if (ImGui::SliderFloat("Lobe Mix", &cloudParams.cloud_lobe_mix, 0.0f, 1.0f, "%.2f")) {
-                    cloudParamsChanged = true;
-                }
-                UIWidgets::HelpMarker("Blend between forward and back scattering.\n0.5 = Balanced volumetric look");
-
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Cloud Emission (Glow):");
-                
-                // Emissive Intensity
-                if (ImGui::SliderFloat("Emission Intensity", &cloudParams.cloud_emissive_intensity, 0.0f, 1.0f, "%.2f")) {
-                    cloudParamsChanged = true;
-                }
-                UIWidgets::HelpMarker("Internal cloud glow brightness.");
-
-                // Emissive Color
-                float emissiveColor[3] = { cloudParams.cloud_emissive_color.x, cloudParams.cloud_emissive_color.y, cloudParams.cloud_emissive_color.z };
-                if (ImGui::ColorEdit3("Emission Color", emissiveColor)) {
-                    cloudParams.cloud_emissive_color = make_float3(emissiveColor[0], emissiveColor[1], emissiveColor[2]);
-                    cloudParamsChanged = true;
-                }
-            }
-
-            // === LAYER 1 ALTITUDE ===
-            if (ImGui::TreeNode("Layer 1 Altitude")) {
-                ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "Layer 1: %.0f - %.0f m (%.0f m thick)", 
-                    cloudParams.cloud_height_min, cloudParams.cloud_height_max,
-                    cloudParams.cloud_height_max - cloudParams.cloud_height_min);
-                
-                if (SceneUI::DrawSmartFloat("cmnh", "Min Height##L1", &cloudParams.cloud_height_min, 500.0f, 12000.0f, "%.0f m", false, nullptr, 16)) {
-                    cloudParamsChanged = true;
-                }
-                if (SceneUI::DrawSmartFloat("cmxh", "Max Height##L1", &cloudParams.cloud_height_max, 1000.0f, 16000.0f, "%.0f m", false, nullptr, 16)) {
-                    cloudParamsChanged = true;
-                }
-                ImGui::TreePop();
-            }
-            
-            ImGui::Spacing();
-            ImGui::Separator();
-            
-            // ==================================================================
-            // CLOUD LAYER 2 (Secondary/High Altitude)
-            // ==================================================================
-            bool layer2Enabled = cloudParams.cloud_layer2_enabled != 0;
-            if (ImGui::Checkbox("Enable Cloud Layer 2", &layer2Enabled)) {
-                cloudParams.cloud_layer2_enabled = layer2Enabled ? 1 : 0;
-                cloudParamsChanged = true;
-            }
-            UIWidgets::HelpMarker("Enable a second cloud layer.\nUseful for high cirrus above low cumulus.");
-            
-            if (cloudParams.cloud_layer2_enabled) {
-                ImGui::Indent();
-                ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "Layer 2 Settings:");
-                
-                // Layer 2 presets
-                static int layer2_preset = 0;
-                const char* layer2_presets[] = { "Custom", "High Cirrus", "Mid Stratus", "Low Fog" };
-                if (ImGui::Combo("Layer 2 Preset", &layer2_preset, layer2_presets, IM_ARRAYSIZE(layer2_presets))) {
-                    switch (layer2_preset) {
-                        case 1: // High Cirrus
-                            cloudParams.cloud2_height_min = 8000.0f;
-                            cloudParams.cloud2_height_max = 9000.0f;
-                            cloudParams.cloud2_scale = 0.25f;
-                            cloudParams.cloud2_coverage = 0.14f;
-                            cloudParams.cloud2_density = 0.18f;
-                            cloudParamsChanged = true;
-                            break;
-                        case 2: // Mid Stratus
-                            cloudParams.cloud2_height_min = 2500.0f;
-                            cloudParams.cloud2_height_max = 3500.0f;
-                            cloudParams.cloud2_scale = 0.35f;
-                            cloudParams.cloud2_coverage = 0.35f;
-                            cloudParams.cloud2_density = 0.65f;
-                            cloudParamsChanged = true;
-                            break;
-                        case 3: // Low Fog
-                            cloudParams.cloud2_height_min = 0.0f;
-                            cloudParams.cloud2_height_max = 150.0f;
-                            cloudParams.cloud2_scale = 0.15f;
-                            cloudParams.cloud2_coverage = 0.5f;
-                            cloudParams.cloud2_density = 0.8f;
-                            cloudParamsChanged = true;
-                            break;
-                    }
-                }
-                
-                bool l2pKeyed = isWorldKeyed(WorldProp::CloudLayer2Params);
-                if (SceneUI::DrawSmartFloat("ccov2", "Coverage##L2", &cloudParams.cloud2_coverage, 0.0f, 0.6f, "%.2f", l2pKeyed, [&]{ insertWorldKey("Cloud L2", WorldProp::CloudLayer2Params); }, 16)) {
-                    cloudParamsChanged = true;
-                    layer2_preset = 0;
-                }
-                if (SceneUI::DrawSmartFloat("cden2", "Density##L2", &cloudParams.cloud2_density, 0.0f, 1.5f, "%.2f", l2pKeyed, [&]{ insertWorldKey("Cloud L2", WorldProp::CloudLayer2Params); }, 16)) {
-                    cloudParamsChanged = true;
-                    layer2_preset = 0;
-                }
-                if (SceneUI::DrawSmartFloat("cscl2", "Scale##L2", &cloudParams.cloud2_scale, 0.1f, 1.0f, "%.2f", l2pKeyed, [&]{ insertWorldKey("Cloud L2", WorldProp::CloudLayer2Params); }, 16)) {
-                    cloudParamsChanged = true;
-                    layer2_preset = 0;
-                }
-                
-                ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "Layer 2: %.0f - %.0f m", 
-                    cloudParams.cloud2_height_min, cloudParams.cloud2_height_max);
-                if (SceneUI::DrawSmartFloat("cmnh2", "Min Height##L2", &cloudParams.cloud2_height_min, 500.0f, 12000.0f, "%.0f m", l2pKeyed, [&]{ insertWorldKey("Cloud L2", WorldProp::CloudLayer2Params); }, 16)) {
-                    cloudParamsChanged = true;
-                    layer2_preset = 0;
-                }
-                if (SceneUI::DrawSmartFloat("cmxh2", "Max Height##L2", &cloudParams.cloud2_height_max, 1000.0f, 16000.0f, "%.0f m", l2pKeyed, [&]{ insertWorldKey("Cloud L2", WorldProp::CloudLayer2Params); }, 16)) {
-                    cloudParamsChanged = true;
-                    layer2_preset = 0;
-                }
-                
-                ImGui::Unindent();
-            }
-            
-            ImGui::Spacing();
-            
-            // Camera altitude info
-            if (ImGui::TreeNode("Camera Altitude Info")) {
-                ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.5f, 1.0f), "Camera Y: %.0f m", cloudParams.altitude);
-                
-                if (cloudParams.altitude >= cloudParams.cloud_height_min && 
-                    cloudParams.altitude <= cloudParams.cloud_height_max) {
-                    ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Camera is INSIDE Layer 1!");
-                }
-              
-                
-                ImGui::TreePop();
+        // Presets replace the whole state; edit afterwards.
+        static int presetIndex = 0;
+        const std::vector<std::string> presets = atmosphere::cloudPresetNames();
+        std::vector<const char*> presetLabels;
+        for (const auto& s : presets) presetLabels.push_back(s.c_str());
+        ImGui::PushItemWidth(180);
+        ImGui::Combo("##CloudPreset", &presetIndex, presetLabels.data(), static_cast<int>(presetLabels.size()));
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        if (ImGui::Button("Apply Preset")) {
+            atmosphere::CloudState preset;
+            if (atmosphere::cloudPreset(presets[static_cast<size_t>(presetIndex)], preset)) {
+                preset.quality = clouds.quality;   // a look preset does not change quality
+                clouds = preset;
+                cloudsChanged = true;
             }
         }
+
+        // Weather derived from the climate (ATMOSPHERE_WEATHER.md §2).
+        cloudsChanged |= ImGui::Checkbox("Derive from climate", &clouds.derive_from_climate);
+        ImGui::SameLine(); UIWidgets::HelpMarker("Layer 1 base (condensation level), type, coverage and\ndepth follow temperature, humidity and instability.\nApplying a preset turns this off.");
+        {
+            const atmosphere::DerivedWeather dw = world.derivedWeather();
+            ImGui::TextDisabled("Base %.0f m  Type %.2f  Cover %.2f  Depth %.0f m",
+                                dw.cloud_base_m, dw.cloud_type, dw.cloud_coverage, dw.cloud_thickness_m);
+            ImGui::TextDisabled("Precip %.1f mm/h (%s)  Freezing %.0f m  Lightning %.1f/min",
+                                dw.precipitation_mm_h, dw.snow ? "snow" : "rain",
+                                dw.freezing_level_m, dw.lightning_per_minute);
+        }
+
+        static const char* kLayerNames[atmosphere::kMaxCloudLayers] = { "Layer 1 (low)", "Layer 2 (mid)", "Layer 3" };
+        for (int i = 0; i < atmosphere::kMaxCloudLayers; ++i) {
+            atmosphere::CloudLayer& l = clouds.layers[i];
+            ImGui::PushID(i);
+            if (ImGui::TreeNodeEx(kLayerNames[i], l.enabled ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+                // Layer 1's shape fields are the climate's while deriving: shown,
+                // not editable (an edit would be overwritten on the next sync).
+                const bool derived = (i == 0) && clouds.derive_from_climate;
+                ImGui::BeginDisabled(derived);
+                cloudsChanged |= ImGui::Checkbox("Enabled", &l.enabled);
+                cloudsChanged |= ImGui::DragFloat("Base (m)", &l.base_altitude_m, 10.0f, -500.0f, 20000.0f, "%.0f");
+                cloudsChanged |= ImGui::DragFloat("Thickness (m)", &l.thickness_m, 10.0f, 10.0f, 15000.0f, "%.0f");
+                cloudsChanged |= ImGui::SliderFloat("Coverage", &l.coverage, 0.0f, 1.0f, "%.2f");
+                UIWidgets::HelpMarker("Fraction of the sky this layer covers.");
+                cloudsChanged |= ImGui::SliderFloat("Type", &l.type, 0.0f, 1.0f, "%.2f");
+                UIWidgets::HelpMarker("0 = stratus (flat sheet)\n0.5 = cumulus (heaped)\n1 = cumulonimbus (towering)");
+                ImGui::EndDisabled();
+                cloudsChanged |= ImGui::DragFloat("Extinction (1/m)", &l.extinction_per_m, 0.001f, 0.0f, 2.0f, "%.3f");
+                UIWidgets::HelpMarker("Physical density. Cumulus ~0.05: a 1 km column is opaque.\nStratus ~0.03-0.04, storm cores ~0.1+.");
+                cloudsChanged |= ImGui::SliderFloat("Droplet (um)", &l.droplet_diameter_um, 5.0f, 50.0f, "%.1f");
+                UIWidgets::HelpMarker("Droplet diameter. Drives the phase function:\nlarger drops -> brighter silver lining toward the sun.");
+                cloudsChanged |= ImGui::SliderFloat("Erosion", &l.erosion, 0.0f, 1.0f, "%.2f");
+                cloudsChanged |= ImGui::DragFloat("Cell size (m)", &l.cell_size_m, 10.0f, 50.0f, 50000.0f, "%.0f");
+                cloudsChanged |= ImGui::DragFloat("Detail size (m)", &l.detail_size_m, 1.0f, 5.0f, 5000.0f, "%.0f");
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+
+        // Precipitation shafts under layer 1 (climate-owned while deriving).
+        if (ImGui::TreeNodeEx("Precipitation", clouds.precipitation.rate_mm_h > 0.0f ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+            ImGui::BeginDisabled(clouds.derive_from_climate);
+            cloudsChanged |= ImGui::DragFloat("Rate (mm/h)##precip", &clouds.precipitation.rate_mm_h, 0.1f, 0.0f, 200.0f, "%.1f");
+            cloudsChanged |= ImGui::Checkbox("Snow##precip", &clouds.precipitation.snow);
+            cloudsChanged |= ImGui::SliderFloat("Reaches ground##precip", &clouds.precipitation.ground_fraction, 0.0f, 1.0f, "%.2f");
+            UIWidgets::HelpMarker("Share of the base-to-ground column the shaft survives;\nbelow 1 it evaporates on the way down (virga).");
+            ImGui::EndDisabled();
+            ImGui::TreePop();
+        }
+        if (ImGui::TreeNodeEx("Cirrus (high)", clouds.cirrus.enabled ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+            cloudsChanged |= ImGui::Checkbox("Enabled##cirrus", &clouds.cirrus.enabled);
+            cloudsChanged |= ImGui::DragFloat("Altitude (m)##cirrus", &clouds.cirrus.altitude_m, 10.0f, 3000.0f, 20000.0f, "%.0f");
+            cloudsChanged |= ImGui::SliderFloat("Coverage##cirrus", &clouds.cirrus.coverage, 0.0f, 1.0f, "%.2f");
+            cloudsChanged |= ImGui::SliderFloat("Optical depth##cirrus", &clouds.cirrus.opacity, 0.0f, 5.0f, "%.2f");
+            cloudsChanged |= ImGui::DragFloat("Streak scale (m)##cirrus", &clouds.cirrus.scale_m, 50.0f, 100.0f, 100000.0f, "%.0f");
+            ImGui::TextDisabled("Rendered from Faz 3c.");
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Weather map")) {
+            int seed = static_cast<int>(clouds.weather.seed);
+            if (ImGui::DragInt("Seed", &seed, 1.0f, 0, 1000000)) {
+                clouds.weather.seed = static_cast<uint32_t>(std::max(0, seed));
+                cloudsChanged = true;
+            }
+            cloudsChanged |= ImGui::DragFloat("Extent (m)", &clouds.weather.extent_m, 1000.0f, 5000.0f, 1000000.0f, "%.0f");
+            cloudsChanged |= ImGui::DragFloat("Cluster size (m)", &clouds.weather.feature_size_m, 100.0f, 500.0f, 200000.0f, "%.0f");
+            cloudsChanged |= ImGui::SliderFloat("Type variation", &clouds.weather.type_variation, 0.0f, 1.0f, "%.2f");
+            cloudsChanged |= ImGui::DragFloat("Evolution speed", &clouds.weather.evolution_speed, 0.0001f, 0.0f, 1.0f, "%.4f");
+            const Vec3 drift = world.cloudWindOffset();
+            ImGui::TextDisabled("Drift from climate wind: (%.0f, %.0f) m at t=%.1f s",
+                                drift.x, drift.z, world.getCloudTime());
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Quality")) {
+            cloudsChanged |= ImGui::DragInt("RT march steps", &clouds.quality.rt_steps, 1.0f, 16, 1024);
+            cloudsChanged |= ImGui::Checkbox("RT reference path tracer (slow)", &clouds.quality.rt_reference_path_trace);
+            cloudsChanged |= ImGui::DragInt("RT max bounces", &clouds.quality.rt_max_bounces, 1.0f, 1, 1024);
+            cloudsChanged |= ImGui::DragInt("Realtime steps", &clouds.quality.realtime_steps, 1.0f, 8, 512);
+            cloudsChanged |= ImGui::SliderInt("Realtime res divisor", &clouds.quality.realtime_resolution_divisor, 1, 8);
+            cloudsChanged |= ImGui::Checkbox("RT secondary rays: full march", &clouds.quality.rt_secondary_full_march);
+            UIWidgets::HelpMarker("Off (default): reflected/bounce rays see the cloud-aware sky\npanorama (fast, measured bias). On: full march (slow, unbiased).");
+            ImGui::TreePop();
+        }
+
+        // Stated, not hidden: until Faz 3b the Vulkan RT image still comes
+        // from the legacy cloud volume, driven by the packet derived above.
+        ImGui::TextDisabled("Vulkan RT: path traced. OptiX: legacy volume. Realtime: Faz 3c.");
+        if (!cloudError.empty()) ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "%s", cloudError.c_str());
+
         UIWidgets::EndSection();
 
-        if (cloudParamsChanged) {
-            cloudParams.cloud_coverage = (std::max)(0.0f, (std::min)(0.6f, cloudParams.cloud_coverage));
-            cloudParams.cloud_density = (std::max)(0.0f, (std::min)(1.5f, cloudParams.cloud_density));
-            cloudParams.cloud_scale = (std::max)(0.1f, (std::min)(1.0f, cloudParams.cloud_scale));
-            cloudParams.cloud_seed = (std::max)(0, (std::min)(1000000, cloudParams.cloud_seed));
-            cloudParams.cloud_detail = (std::max)(0.0f, (std::min)(1.0f, cloudParams.cloud_detail));
-            cloudParams.cloud_base_steps = (std::max)(4, (std::min)(96, cloudParams.cloud_base_steps));
-            cloudParams.cloud2_coverage = (std::max)(0.0f, (std::min)(0.6f, cloudParams.cloud2_coverage));
-            cloudParams.cloud2_density = (std::max)(0.0f, (std::min)(1.5f, cloudParams.cloud2_density));
-            cloudParams.cloud2_scale = (std::max)(0.1f, (std::min)(1.0f, cloudParams.cloud2_scale));
-            world.setNishitaParams(cloudParams);
-            changed = true;
+        if (cloudsChanged) {
+            if (world.setClouds(clouds, &cloudError)) {
+                cloudError.clear();
+                changed = true;
+            }
         }
     }
 

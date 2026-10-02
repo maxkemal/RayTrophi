@@ -225,7 +225,7 @@ bool buildLevelSet(const FluidParticles& particles,
                    const LevelSetParams& params,
                    std::vector<float>& sdf_out,
                    LevelSetStats* stats,
-                   const std::vector<uint32_t>* excluded_substance_tags)
+                   const FluidViewSelection* selection)
 {
     using clock = std::chrono::steady_clock;
     const auto t_start = clock::now();
@@ -299,9 +299,7 @@ bool buildLevelSet(const FluidParticles& particles,
 
     const float inv_h = 1.0f / voxel;
     for (std::size_t p = 0; p < particle_count; ++p) {
-        if (excluded_substance_tags && p < particles.substance_tag.size() &&
-            std::find(excluded_substance_tags->begin(), excluded_substance_tags->end(),
-                      particles.substance_tag[p]) != excluded_substance_tags->end()) continue;
+        if (selection && !selection->keeps(particles, p)) continue;
         // Depleted fuel particles remain in the stable APIC pool until the
         // lifecycle compaction pass. Do not let an already evaporated slot
         // keep the rendered SurfaceSDF artificially thick.
@@ -681,7 +679,7 @@ bool buildMaterialCoordinateGrid(const FluidParticles& particles,
                                  const FluidSim::FluidGrid& grid,
                                  const LevelSetParams& params,
                                  std::vector<float>& uvw_out,
-                                 const std::vector<uint32_t>* excluded_substance_tags)
+                                 const FluidViewSelection* selection)
 {
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
     const float voxel = grid.voxel_size;
@@ -761,9 +759,7 @@ bool buildMaterialCoordinateGrid(const FluidParticles& particles,
         // one — the three gathers have to agree about which particles the
         // surface is made of, or the surface takes on the look of liquid that
         // is not there. That reads as plausible wetness, not as a bug.
-        if (excluded_substance_tags && p < particles.substance_tag.size() &&
-            std::find(excluded_substance_tags->begin(), excluded_substance_tags->end(),
-                      particles.substance_tag[p]) != excluded_substance_tags->end()) continue;
+        if (selection && !selection->keeps(particles, p)) continue;
         const Vec3& wp = particles.position[p];
         if (!std::isfinite(wp.x) || !std::isfinite(wp.y) || !std::isfinite(wp.z)) continue;
         const Vec3 local = (wp - grid.origin) * inv_h;
@@ -1038,7 +1034,7 @@ bool buildCompositionGrid(const FluidParticles& particles,
                           std::size_t substance_material_count,
                           int fallback_material,
                           std::vector<float>& composition_out,
-                          const std::vector<uint32_t>* excluded_substance_tags)
+                          const FluidViewSelection* selection)
 {
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
     const float voxel = grid.voxel_size;
@@ -1139,9 +1135,7 @@ bool buildCompositionGrid(const FluidParticles& particles,
         // one — the three gathers have to agree about which particles the
         // surface is made of, or the surface takes on the look of liquid that
         // is not there. That reads as plausible wetness, not as a bug.
-        if (excluded_substance_tags && p < particles.substance_tag.size() &&
-            std::find(excluded_substance_tags->begin(), excluded_substance_tags->end(),
-                      particles.substance_tag[p]) != excluded_substance_tags->end()) continue;
+        if (selection && !selection->keeps(particles, p)) continue;
         const Vec3& wp = particles.position[p];
         if (!std::isfinite(wp.x) || !std::isfinite(wp.y) || !std::isfinite(wp.z)) continue;
         const Vec3 local = (wp - grid.origin) * inv_h;

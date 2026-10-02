@@ -1,6 +1,6 @@
 """Sample a fluid domain's per-step host<->device traffic while the sim plays.
 
-Usage: python scripts/test/probe_granular_transfer.py ["Grid Domain 1"] [seconds]
+Usage: python scripts/test/probe_granular_transfer.py ["Physics Domain 1"] [seconds]
 
 Prints one row per distinct step (upload/download MB, transfer calls, p2g/g2p ms,
 granular substeps). Start timeline playback in the app first; the reader does
@@ -24,7 +24,7 @@ MB = 1024.0 * 1024.0
 
 
 def main() -> int:
-    domain = sys.argv[1] if len(sys.argv) > 1 else "Grid Domain 1"
+    domain = sys.argv[1] if len(sys.argv) > 1 else "Physics Domain 1"
     seconds = float(sys.argv[2]) if len(sys.argv) > 2 else 10.0
     c = RtIpc()
     info = None

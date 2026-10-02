@@ -178,10 +178,21 @@ inline bool SceneUI::drawWaterSurfaceMaterialEditor(UIContext& ctx, WaterSurface
         changed |= SceneUI::DrawSmartFloat("shared_w_frequency", "Wave Frequency", &surf.params.wave_frequency, 0.02f, 8.0f, "%.2f", false, nullptr, 16);
 
         if (surf.type != WaterSurface::Type::River) {
-            float directionDegrees = surf.params.fft_wind_direction * 180.0f / 3.14159265f;
-            if (SceneUI::DrawSmartFloat("shared_w_direction", "Travel Direction", &directionDegrees, 0.0f, 360.0f, "%.0f deg", false, nullptr, 16)) {
-                surf.params.fft_wind_direction = directionDegrees * 3.14159265f / 180.0f;
-                changed = true;
+            changed |= ImGui::Checkbox("Wind from atmosphere##waterwind", &surf.params.inherit_atmosphere);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("On: ocean wind speed and direction follow the world climate wind\n"
+                                  "(World panel -> Climate). Off: the authored direction below.");
+            }
+            if (surf.params.inherit_atmosphere) {
+                ImGui::TextDisabled("Wind: %.1f m/s, %.0f deg",
+                                    surf.params.effectiveWindSpeed(),
+                                    surf.params.effectiveWindDirection() * 180.0f / 3.14159265f);
+            } else {
+                float directionDegrees = surf.params.fft_wind_direction * 180.0f / 3.14159265f;
+                if (SceneUI::DrawSmartFloat("shared_w_direction", "Travel Direction", &directionDegrees, 0.0f, 360.0f, "%.0f deg", false, nullptr, 16)) {
+                    surf.params.fft_wind_direction = directionDegrees * 3.14159265f / 180.0f;
+                    changed = true;
+                }
             }
         }
         EndWaterSection();

@@ -115,7 +115,39 @@ std::string buildMetricsReport(const VulkanRT::VolumePerformanceStats& stats) {
         100.0f * safeRatio(stats.extinctionTerminations, stats.volumeRays),
         100.0f * safeRatio(stats.stepBudgetExhausted, stats.volumeRays),
         100.0f * safeRatio(stats.temporalAccepted, temporalTotal));
-    return report;
+
+    // Path budget accounting (v9). Kept in a second buffer so the v8 block
+    // above stays byte-identical for anyone diffing old reports.
+    char budget[900];
+    std::snprintf(
+        budget, sizeof(budget),
+        "paths_traced: %u\n"
+        "paths_bounce_capped: %u\n"
+        "paths_pass_capped: %u\n"
+        "charged_specular: %u\n"
+        "charged_diffuse: %u\n"
+        "charged_transmission: %u\n"
+        "charged_other: %u\n"
+        "free_passes: %u\n"
+        "medium_passes: %u\n"
+        "arbiter_started_inside: %u\n"
+        "arbiter_inside_found: %u\n"
+        "bounce_capped_percent: %.3f\n"
+        "region: %.3f %.3f %.3f %.3f\n",
+        stats.pathsTraced,
+        stats.pathsBounceCapped,
+        stats.pathsPassCapped,
+        stats.chargedSpecular,
+        stats.chargedDiffuse,
+        stats.chargedTransmission,
+        stats.chargedOther,
+        stats.freePasses,
+        stats.mediumPasses,
+        stats.arbiterStartedInside,
+        stats.arbiterInsideFound,
+        100.0f * safeRatio(stats.pathsBounceCapped, stats.pathsTraced),
+        stats.regionMinX, stats.regionMinY, stats.regionMaxX, stats.regionMaxY);
+    return std::string(report) + budget;
 }
 
 } // namespace

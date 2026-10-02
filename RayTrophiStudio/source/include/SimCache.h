@@ -65,7 +65,20 @@ constexpr uint32_t kMagic   = 0x43465452u; // 'RTFC'
 //    on a single, ever-more-distorted map — i.e. exactly the smearing the second
 //    generation exists to remove, and visible ONLY on playback. Rejecting v4
 //    forces a re-bake, which is honest: the file does not contain the data.
-constexpr uint32_t kVersion = 5u;
+// 6: fluid particles carry their persistent STATE bits: the simulation label
+//    (flags bits 8..11, body/spray/frozen...) and the thermal frozen bit (3).
+//    The reader used to zero the whole flags word, so every replayed frame
+//    reported `unknown` - and once the view resolver routes by label, a replay
+//    would draw differently from the live run it recorded. Same class as v5's
+//    substance tag: correct live, erased at the cache boundary. The outflow
+//    bit (1) is a per-step advection mark and stays out.
+// 7: fluid particles preserve mass_fraction and physical rest_mass_kg. Phase
+//    exchange debits their product, so reconstructing either value on playback
+//    would change the kg inventory and break a resumed conservation ledger.
+// 8: gas domains preserve the physical kg/J phase sidecars introduced by the
+//    liquid-to-gas exchange. Dimensionless render tracers cannot reconstruct
+//    this inventory on resume.
+constexpr uint32_t kVersion = 9u;
 
 // Absolute path of the per-system, per-frame binary file inside cache_dir.
 std::string frameFilePath(const std::string& cache_dir, uint32_t system_id, int frame);
@@ -73,9 +86,9 @@ std::string frameFilePath(const std::string& cache_dir, uint32_t system_id, int 
 // True if a frame file for (system_id, frame) exists in cache_dir.
 bool frameExists(const std::string& cache_dir, uint32_t system_id, int frame);
 
-// Write one system's domain states (render-only fields) for `frame`, plus its
-// Material State Field damage. Creates cache_dir if needed. Returns false on any
-// I/O failure.
+// Write one system's domain states needed by rendering or a safe live resume for
+// `frame`, plus its Material State Field damage. Creates cache_dir if needed.
+// Returns false on any I/O failure.
 //
 // ★ MSF is a SIBLING of the domain list, not a member of it. Burn damage is
 // per-object and an object outside every domain is still simulated, so it cannot

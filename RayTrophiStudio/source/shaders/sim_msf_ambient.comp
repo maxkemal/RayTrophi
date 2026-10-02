@@ -22,8 +22,8 @@ layout(local_size_x = 256) in;
 
 layout(push_constant) uniform PC {
     ivec4 counts;   // element_count, source_count, zone_count, unused
-    vec4  params;   // dt, relax_rate, world_ambient_K, inv_kelvin_per_unit
-    vec4  params2;  // max_temperature, dry_rate, boil_normalized, unused
+    vec4  params;   // dt, relax_rate, reference_K (normalized 0), inv_kelvin_per_unit
+    vec4  params2;  // max_temperature, dry_rate, boil_normalized, world_ambient_K
 } pc;
 
 layout(set=0, binding=0) readonly buffer Centers { vec4 centers[]; };  // xyz world, w area
@@ -73,7 +73,9 @@ void main() {
 
     // 1. World ambient is the floor: it is defined everywhere, which is what
     //    makes an object outside every domain still a physical object.
-    float ambient_k = pc.params.z;
+    // ★ params2.w, NOT params.z: since Faz 2 the world ambient can follow the
+    //   climate while the calibration zero (params.z) stays put.
+    float ambient_k = pc.params2.w;
 
     // 2. Domain override, if this element is inside one. Last match wins — the
     //    test is per ELEMENT, not per object, because one object can genuinely
@@ -102,8 +104,9 @@ void main() {
         ambient_k += b.y * w;
     }
 
-    // Kelvin -> normalized. Normalized 0 is DEFINED as the world ambient, so an
-    // untouched scene relaxes to exactly 0 and nothing changes for it.
+    // Kelvin -> normalized against the CALIBRATION zero. For a scene whose
+    // ambient equals its reference (every scene saved before Faz 2 and every
+    // non-inheriting one) an untouched element still relaxes to exactly 0.
     float ambient = (ambient_k - pc.params.z) * pc.params.w;
 
     vec4 st = state[id * 2u];

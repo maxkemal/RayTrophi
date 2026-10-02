@@ -1308,8 +1308,13 @@ Result simBake(const std::string& cache_dir, int start_frame, int end_frame,
     return Result::success();
 }
 
-Result simClearCache() {
+Result simClearCache(bool ram_only) {
     if (!g_ctx) return notBound();
+    if (ram_only) {
+        if (g_ctx->scene.simBakeActive()) return Result::fail("a bake is running");
+        g_ctx->scene.clearSimFrameCache();
+        return Result::success();
+    }
     // Same call the panel's "Clear the bake cache" makes: drops the RAM timeline
     // cache and unbinds the disk bake, returning to free-run preview.
     g_ctx->scene.invalidateRigidBodySimulationCache();

@@ -5,6 +5,7 @@
 #include "InstanceManager.h"
 #include "globals.h"
 #include "scene_data.h"
+#include "Atmosphere/AtmosphereClimate.h"
 #include <cmath>
 #include <limits>
 
@@ -28,6 +29,23 @@ static bool nearlyEqualVec3(const Vec3& a, const Vec3& b, float epsilon = 1e-3f)
            nearlyEqual(a.y, b.y, epsilon) &&
            nearlyEqual(a.z, b.z, epsilon);
 }
+
+} // namespace
+
+InstanceGroup::WindSettings FoliageWindSystem::effectiveSettings(
+    const InstanceGroup::WindSettings& authored) {
+    if (!authored.inherit_atmosphere) return authored;
+    InstanceGroup::WindSettings s = authored;
+    const Vec3 wind = atmosphere::ambientWindMps();
+    const float v = std::sqrt(wind.x * wind.x + wind.z * wind.z);
+    const float ratio = v / InstanceGroup::kFoliageReferenceWindMps;
+    if (v > 1e-4f) s.direction = Vec3(wind.x / v, 0.0f, wind.z / v);
+    s.speed = authored.speed * ratio;
+    s.strength = authored.strength * ratio * ratio;
+    return s;
+}
+
+namespace {
 
 static WindSignature makeSignature(const InstanceGroup::WindSettings& settings) {
     WindSignature signature;
@@ -95,7 +113,9 @@ static bool applyCpuWindToGroup(
     float time,
     Backend::IBackend* backend)
 {
-    if (!group.wind_settings.enabled || group.instances.empty()) {
+    // One read of the authored settings, resolved against the climate.
+    const InstanceGroup::WindSettings wind = FoliageWindSystem::effectiveSettings(group.wind_settings);
+    if (!wind.enabled || group.instances.empty()) {
         return false;
     }
 
@@ -106,11 +126,11 @@ static bool applyCpuWindToGroup(
         group.initial_instances = group.instances;
     }
 
-    const float speed = group.wind_settings.speed;
-    const float strength = group.wind_settings.strength;
-    const float turbulence = group.wind_settings.turbulence;
-    const float wave = group.wind_settings.wave_size > 0.1f ? group.wind_settings.wave_size : 50.0f;
-    const Vec3 dir = group.wind_settings.direction.normalize();
+    const float speed = wind.speed;
+    const float strength = wind.strength;
+    const float turbulence = wind.turbulence;
+    const float wave = wind.wave_size > 0.1f ? wind.wave_size : 50.0f;
+    const Vec3 dir = wind.direction.normalize();
 
     if (dir.length() < 0.001f) {
         return false;
@@ -126,7 +146,7 @@ static bool applyCpuWindToGroup(
         const auto& init = group.initial_instances[i];
         auto& curr = group.instances[i];
         const ScatterSource::SourceSettings* source_settings = nullptr;
-        if (group.wind_settings.use_source_profiles &&
+        if (wind.use_source_profiles &&
             init.source_index >= 0 &&
             init.source_index < static_cast<int>(group.sources.size())) {
             source_settings = &group.sources[static_cast<size_t>(init.source_index)].settings;
@@ -221,7 +241,8 @@ FoliageWindUpdateStats FoliageWindSystem::update(SceneData& scene, float time, B
         }
 
         ++stats.enabled_group_count;
-        const WindSignature signature = makeSignature(group.wind_settings);
+        const WindSignature signature =
+            makeSignature(FoliageWindSystem::effectiveSettings(group.wind_settings));
         if (!shared_signature_initialized) {
             shared_signature = signature;
             shared_signature_initialized = true;

@@ -64,10 +64,14 @@ constexpr std::size_t kMaxFluidSubstanceMaterials = 8;
 // Per-substance render routing. Inherit keeps old scenes on the domain-wide
 // visualization mode; the explicit values allow one APIC domain to feed both
 // the reconstructed level set and discrete splat spheres.
+// Fog draws the substance as a participating medium from its splatted density,
+// in its own volume, so one domain can show a surface AND a fog at once.
+// Resolved by resolveFluidViews (FluidViewResolver.h), never read directly.
 enum class SubstanceRepresentation : uint8_t {
     Inherit = 0,
     Splat   = 1,
-    SurfaceSDF = 2
+    SurfaceSDF = 2,
+    Fog     = 3
 };
 
 // ═══════════════════════════════════════════════════════════════════════════

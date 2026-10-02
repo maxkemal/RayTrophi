@@ -115,7 +115,7 @@ layout(set = 0, binding = 5, std430) readonly buffer PreviewLightBuffer {
 // kayitlarda tutulur; ana material push ABI'si bu nedenle degismez.
 layout(set = 0, binding = 6, std430) readonly buffer PreviewSceneGlobalsBuffer {
     uint sceneLightCount;
-    uint sceneFlags;       // bit0=shadow, bit1=env, bit2=overlay, bit3=atmos LUT, bit4=sun shadow, bit5=HDRI IBL
+    uint sceneFlags;       // bit0=shadow, bit1=env, bit2=overlay, bit3=atmos LUT, bit4=unused (was sky-sun shadow), bit5=HDRI IBL, bit6=cloud shadow (26/27)
     uint shadowedLightCount;
     uint worldMode;        // 0=color, 1=HDRI, 2=Nishita
     vec4 worldColor;       // rgb + color intensity
@@ -197,6 +197,31 @@ uint previewDrawPhase()   { return (pc.materialMeta.y >> 8u) & 0x3u; }
 // ★ Yonlu isikte direction.xyz ISIGA DOGRU bakar: yukleme tarafi
 //   (VulkanBackend setLights) yonu zaten negatifliyor. Burada bir kez daha
 //   negatiflemek sahneyi ters taraftan aydinlatirdi.
+// Cloud shadow (Faz 3c, cloud_shadow.comp): transmittance toward the sun on
+// the y = 0 plane around the camera. Read only with sceneFlags bit 64 (the
+// adapter bound bindings 26/27). Directional light = the sun (sun rule).
+layout(set = 0, binding = 26) uniform sampler2D cloudShadowMap;
+layout(set = 0, binding = 27, std430) readonly buffer CloudShadowFrame {
+    vec3  sunDir;
+    float sunIntensity;
+    float atmosphereHeight;
+    int   lutReady;
+    float centerX;
+    float centerZ;
+} cloudShadowFrame;
+const float CLOUD_SHADOW_EXTENT_M = 32000.0;   // cloud_shadow.comp
+
+float previewCloudShadow(vec3 P) {
+    if ((sceneFlags & 64u) == 0u) return 1.0;
+    vec3 s = normalize(cloudShadowFrame.sunDir);
+    if (s.y <= 0.02) return 1.0;
+    // Where this point's sun ray crosses y = 0 (the map's plane).
+    vec2 g = P.xz - s.xz * (P.y / s.y);
+    vec2 uv = (g - vec2(cloudShadowFrame.centerX, cloudShadowFrame.centerZ)) / CLOUD_SHADOW_EXTENT_M + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return 1.0;
+    return texture(cloudShadowMap, uv).r;
+}
+
 bool evalSceneLight(uint idx, vec3 P, out vec3 L, out vec3 radiance) {
     LightData lt = sceneLights[idx];
     int type = int(lt.position.w + 0.5);
@@ -204,7 +229,7 @@ bool evalSceneLight(uint idx, vec3 P, out vec3 L, out vec3 radiance) {
 
     if (type == 1) {                       // Directional
         L = normalize(lt.direction.xyz);
-        radiance = base;
+        radiance = base * previewCloudShadow(P);
         return true;
     }
 
@@ -282,15 +307,6 @@ vec3 samplePhysicalSkyFiltered(vec3 axis, float roughness) {
         weight += tapWeight;
     }
     return sum / max(weight, 1e-5);
-}
-
-vec3 canonicalWorldSunRadiance(vec3 sunDir) {
-    vec3 tint = vec3(1.0, 0.95, 0.86);
-    if ((sceneFlags & 8u) != 0u) {
-        float u = clamp((max(0.01, sunDir.y) + 0.2) / 1.2, 0.0, 1.0);
-        tint = texture(atmosphereTransmittance, vec2(u, 0.0)).rgb;
-    }
-    return tint * max(worldSun.w, 0.0);
 }
 
 bool validTexture(uint textureId) {
@@ -1076,9 +1092,13 @@ void main() {
     //   kullanmasi demektir.
     int sceneLoopCount = (lightingPreset == 3u)
         ? int(min(sceneLightCount, kPreviewMaxSceneLights)) : 0;
-    bool useWorldSun = lightingPreset == 3u && worldMode == 2u && worldSun.w > 0.0;
-    int lightLoopCount = (lightingPreset == 3u)
-        ? sceneLoopCount + (useWorldSun ? 1 : 0) : 3;
+    // ★★★ The Physical Sky sun is NOT a light here, exactly as in Vulkan RT
+    //   (closesthit.rchit): direct sun comes only from a directional scene
+    //   light. This used to add worldSun as an extra light on top of the scene
+    //   lights -- with sun sync on, that directional IS the sun, so RayFusion
+    //   lit it twice. Switching to Nishita now adds a "Sun" directional when
+    //   the scene has none (rtapi::ensureWorldSunLight).
+    int lightLoopCount = (lightingPreset == 3u) ? sceneLoopCount : 3;
 
     for (int i = 0; i < lightLoopCount; ++i) {
         vec3 L;
@@ -1087,16 +1107,8 @@ void main() {
             // Koninin disinda / arkasinda kalan isik KATKI VERMEZ, sifir
             // katkiyla toplanmaz -- aksi halde alan isiginin arkasi da
             // NdotL uzerinden hafifce aydinlanirdi.
-            if (i < sceneLoopCount) {
-                if (!evalSceneLight(uint(i), vWorldPos, L, radiance)) continue;
-                radiance *= evaluatePreviewShadow(uint(i), vWorldPos, N, L);
-            } else {
-                L = dot(worldSun.xyz, worldSun.xyz) > 1e-8
-                    ? normalize(worldSun.xyz) : vec3(0.0, 1.0, 0.0);
-                radiance = canonicalWorldSunRadiance(L);
-                radiance *= evaluatePreviewShadow(kPreviewMaxSceneLights,
-                                                  vWorldPos, N, L);
-            }
+            if (!evalSceneLight(uint(i), vWorldPos, L, radiance)) continue;
+            radiance *= evaluatePreviewShadow(uint(i), vWorldPos, N, L);
         } else {
             L        = lightDirs[i];
             radiance = lightColors[i] * lightIntensities[i];

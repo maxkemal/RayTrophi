@@ -1,6 +1,10 @@
 # Birleşik madde domain'i — gaz/sıvı ayrımı olmayan simülasyon ve render
 
-> **Durum:** TASLAK — 2026-09-27. Uygulanmadı; tasarım değişebilir. Hedef: tek
+> **Durum:** AŞAMALI UYGULAMA — 2026-09-28. Faz 0 ve ilk görünüm/UI adımları
+> mevcut; simülasyon etiketleri, dönüşüm defteri ve gerçek mist→gaz faz
+> aktarımı canlı çalışıyor. Faz 4 domain birleşmesi canlı kabulden geçti.
+> İleri aşamaların
+> tasarımı değişebilir. Hedef: tek
 > domain bir fizik-kimya sistemi gibi davranır — madde (granül, sıvı, gaz,
 > yanan katı) kendi özelliklerine göre erir, donar, buharlaşır, yanar, kütle
 > kaybeder; çözücüler bu dönüşümlerde birbirini besler. İlk somut senaryo
@@ -15,14 +19,14 @@
 
 | | |
 |---|---|
-| **Son güncelleme** | 2026-09-27 |
-| **Kodda ne var** | Hiçbir faz başlamadı. Ön hazırlık olarak sıvıda fog modu (gerçek yoğunluk + Gauss yayma + parçacık Kelvin'i ile blackbody) yazıldı; derlendi ve kullanıcı testiyle doğrulandı (commit 77acbbb + doğrulama) |
+| **Son güncelleme** | 2026-10-01 — C0 ve C1 canlı PASS. C1, 100k sıvıda yinelenen 1.200.000 byte velocity indirmesini ve bir batch fence'ini kaldırdı (9.430.584 byte, 12 batch); fiziksel digest farkı 1e-9 altı. C4 parçacık constitutive kimlik temeli de canlı kabul edildi. |
+| **Kodda ne var** | `SimulationDomainType::Matter`, tek descriptor/kimlik altında ayrı gaz alanı (`state.grid`) + APIC alanı (`matter_liquid_grid`) taşıyor; iki çözücü sıralı çalışıyor. Mist/yanma aktarımı, hareketli sıvı sınırı ve ayrı SDF/gaz render slotları bağlı. Burning Fuel Spill'de gaz görünümü, SDF sürekliliği ve yüzeyden kademeli yanma canlı doğrulandı. Boş gaz fazı uyuyor. Matter faz başına ayrı kalıcı GPU buffer takımı taşıyor. Burning Fuel Spill 12 karede 65.664 sıvı parçacığı + 9.693 aktif gaz hücresiyle geçti; sıvı kare başına ~17 MB yükleyip ~11 MB indirirken gaz toplamı 98,45 ms idi. Bu toplamın görünmeyen ortak maliyetlerinden biri bulundu: fiziksel gaz kütle/enerji sidecar'ları tüm gaz domainlerinde boşken bile tam grid üzerinde CPU'da iki kez taşınıyordu. Sidecar artık ilk gerçek faz aktarımına kadar ayrılmıyor; dolu alan yalnız pozitif destek AABB'si ve güvenlik bandında advect ediliyor. `gas.step_stats.inventory_advection_ms` ve `fluid.step_stats.total_ms` eklendi. Splat havuzu iki spray için 256 slot açtı ve RT geçişi TDR'siz geçti. Son optimizasyonlar henüz derlenmedi; shader değişmedi; commit edilmedi. |
 | **Faz 0 durumu** | 1. tur (koddan) + 2. tur (canlı) BİTTİ — §8b. Kısıt: `density`/sıcaklık/hız faza göre farklı ANLAM taşıyor → ortak grid ≠ ortak alan. Canlı: Vulkan matrisi 9/9 çiziyor (fog Material ≈ siyah); gaz+SDF katmanı 3 yolda tutuyor; sim VRAM'i izlenmiyor (519 MB). IPC render_mode resync düzeltmesi ✔ derlendi ve doğrulandı (exe 22:21) |
-| **Sıradaki iş** | (0) `render.volume_slots` ✔ derlendi; kimlik testi `solid` + `rendered` PASS. (1) Test geçince Faz 0 kapısı: `fluid.get` görünüm listesi (Faz 1'in tek karar noktasıyla birlikte, ayrı kopya olarak DEĞİL). (2) UI mock'u |
-| **Karar verilmiş** | §3 ilkeleri; kimlik+depolama birleşir, çözücü değerlendirmesi birleşmez; önce zayıf bağlama; ayrı "1. adım refactor"u YOK (Faz 1 doğrudan görünüm çözücüsü) |
-| **Açık karar** | §8 açık sorular; §4.6 materyal sözleşmesinin ayrıntısı; OptiX farkının kullanıcıya gösterimi |
-| **Kullanıcıyla konuşulan** | Hedef fizik-kimya sistemi (§4.5); şelale ilk senaryo; UI modelden türemeli, kod öncesi mock |
-| **Dikkat** | `GAZ_DERSLERI_VE_FLUID_DEVRI.md` koddan geride; bir AKTİF planın "sıradaki"sine güvenmeden commit'lere ve koda bak |
+| **Sıradaki iş** | C2 aktif sıvı çalışma penceresi, sonra C3 faza özgü grid. Ardından C4 parçacık başına constitutive model ve çok malzemeli P2G/contact, C5 korunumlu su emilim-drenajı, C6 doygunluğun kum fiziği ve materyalini sürmesi, C7 performans/fizik kabulü. |
+| **Karar verilmiş** | UI: ayrı DCC ekranı yok, mevcut Domain paneli altı sekme (§8b); panel materyal bağlar, düzenlemez; ad "Physics Domain" (✔ doğrulandı); tüm UI metni İngilizce, genel tema. §3 ilkeleri; kimlik+depolama birleşir, çözücü değerlendirmesi birleşmez. Emitter çözücü seçmez: `substance + başlangıç durumu + kütle/enerji/bileşim` yatırır; domain anlık durumdan constitutive model/çözücü seçer. Granular bir termodinamik faz adı değil, constitutive rejimdir. Kimya emitter özelliği değil, substance bileşimi ile domain reaksiyon kurallarının sonucudur. |
+| **Açık karar** | Su+kumun aynı Matter adımında doğru etkileşmesi artık kapanış şartıdır. Temel sözleşme §8d'de sabit: serbest su kütlesi ile granül gözenek suyu ayrı ve korunumludur; domain-geneli `granular_enabled` fizik otoritesi olmaktan çıkar; görünüm fiziksel doygunluğu okur. Gaz-sıvı ortak basınç, materyal editörü, OptiX ve RT/SDF kusurları ayrı kalır. |
+| **Kullanıcıyla konuşulan** | Hedef TAM akışkan fiziği: gaz, sıvı, granül (2026-09-28). Whitewater kütlesiz alt-ızgara yer tutucusu, fizik gibi sunulmaz; etiketle yalnız GÖRÜNÜMDE birleşir (§8c). Fizik-kimya sistemi (§4.5); şelale ilk senaryo; UI modelden türemeli, kod öncesi mock. |
+| **Dikkat** | `GAZ_DERSLERI_VE_FLUID_DEVRI.md` koddan geride; bir AKTİF planın "sıradaki"sine güvenmeden koda bak. Eski sahnelerde whitewater artık küre çizilir (varsayılan tablo splat; eski "Volume" = foam/bubble → Isosurface; göç yok). Canlı test pahalı: sayıyla doğrula, en fazla bir görüntü. Testler: scripts/test/rt_test_whitewater_label_routes_ipc.py, rt_probe_whitewater_determinism_ipc.py, rt_test_fluid_label_views_ipc.py, rt_test_fluid_labels_cache_ipc.py. |
 
 ---
 
@@ -172,9 +176,9 @@ seçim etiket başınadır, domain başına değil.
 
 | Yön | Terim | Bugün |
 |---|---|---|
-| sıvı → gaz | buharlaşma, yanma ürünü, `mist` aktarımı | yanma var; mist yok |
-| gaz → sıvı | rüzgar/gaz hızıyla sürükleme (sprey, mist) | rüzgar sürüklemesi var |
-| sıvı → gaz | sıvı hücreleri gaz için hareketli sınır | yok |
+| sıvı → gaz | buharlaşma, yanma ürünü, `mist` aktarımı | yanma ve mist→gaz 27C canlı PASS |
+| gaz → sıvı | rüzgar/gaz hızıyla sürükleme (sprey, mist) | rüzgar + düşük kütleli mist gaz sürüklemesi var |
+| sıvı → gaz | sıvı hücreleri gaz için hareketli sınır | 27D kodda; canlı kabul bekliyor |
 | ısı | sıvı ↔ gaz ↔ katı iletim | termal zincir kısmen |
 | sıvı ↔ katı | donma / erime | var (donma), erime MSF'de |
 | dış → domain | `Domain Deposit` (partikül sistemi, Flow Source, sahne emitter'ı) | kısmen |
@@ -214,6 +218,15 @@ tanımlı olabilir ve bunu hiçbir şey fark etmez.
    hedef çözücü kendi temsiline çevirir → **korunum kontrolü** (kütle ve
    enerji; giren = çıkan + birikim).
 
+   **27A uygulama notu (canlı PASS):** APIC'in `mass_fraction` alanı tek
+   başına kg değildir. Her parsele yaşamı boyunca sabit kalan `rest_mass_kg`
+   eklendi; mevcut kütle `rest_mass_kg * mass_fraction` olarak tanımlandı.
+   Normal tohum/emitter parselleri kanonik sıvı yoğunluğundan `ρ·h³/ppc` ile,
+   MSF eriyik parselleri ise aktarımın kesin `spawn_mass/spawn_count` değeriyle
+   başlar. İki alan SimCache v7'de birlikte saklanır. 27B bu kg değerini APIC
+   kaynak kaybı, gaz hedef envanteri ve defter olayı arasında birebir bağladı;
+   cache biçimi fiziksel gaz yan alanları için v8'e çıktı.
+
 | Dönüşüm | Kaynak → hedef | Bugün |
 |---|---|---|
 | Erime | katı mesh / MSF → sıvı parçacık | var (`MoltenMassTransfer`, MSF 6b/6c) |
@@ -223,7 +236,7 @@ tanımlı olabilir ve bunu hiçbir şey fark etmez.
 | Yanma / piroliz | katı → gaz + char (MSF) | kısmen (yangın → yapı, MSF char) |
 | Yumuşama / sinterleme | granül ↔ katı / sıvı | kısmen (granül termal zinciri) |
 | Yoğuşma | gaz → sıvı | yok |
-| Sis aktarımı | sıvı `mist` → gaz | yok (Faz 3) |
+| Sis aktarımı | sıvı `mist` → gaz | 27C canlı PASS; fiziksel kg/J + defter + uzamsal taşıma |
 
 ★ Enerji de defterdedir: erime ve buharlaşma gizli ısıyı kaynaktan çeker.
 Bugün erime ısı tüketmiyorsa, erime sonsuz hızda ve bedava olur — sonuç
@@ -311,13 +324,14 @@ diğerine mi başvurur? Faz 0'da ikisi okunup karar verilmeli — iki ayrı
 
 ## 5. Çözücü birleştirme: iki seviye
 
-### A) Zayıf bağlama, ortak grid (hedef)
+### A) Zayıf bağlama, tek mantıksal domain ve faz gridleri (hedef)
 
-İki çözücü aynı seyrek grid'de sırayla adım atar, birbirini sınır koşulu ve
-kaynak terimi olarak görür (§4.4). Şelale sisi, lav dumanı, yanan sıvı,
-rüzgarda sprey için fiziksel olarak yeterli. Maliyet bugünkü iki
-simülasyonun toplamından DÜŞÜK olmalı: grid, transferler ve collider
-voksellemesi bir kez yapılır. Mevcut çözücülerin kararlılığı riske girmez.
+İki çözücü tek Matter kimliği altında kendi fiziksel grid'inde sırayla adım
+atar; dönüşüm defteri, kaynak eşleme ve hareketli sınır ile birbirini görür
+(§4.4). Şelale sisi, lav dumanı, yanan sıvı ve rüzgarda sprey için fiziksel
+olarak yeterli. Gazın geniş/kaba, sıvının dar/ince çalışma alanı korunur.
+Collider kaynağı ortaktır ama her fazın grid'ine kendi koordinatlarında
+damgalanır. Mevcut çözücülerin kararlılığı riske girmez.
 
 ### B) Güçlü iki fazlı projeksiyon (isteğe bağlı, sonra)
 
@@ -325,14 +339,15 @@ Tek hız alanı, tek basınç denklemi, değişken yoğunluk (su ≈ 1000, hava 
 Kabarcık, hava karışması, lıkırdama kendiliğinden çıkar. Hipotez: açık
 "mühürlü basınç cebi" savrulması hava gerçek faz olunca kaybolabilir —
 DOĞRULANMADI. Engeli: 1000:1 oran basınç sistemini kötü koşullar; güçlü
-önkoşullayıcı ister ve GPU MGPCG taşıması duraklatılmış durumda. A'nın ortak
-grid'i B'nin de temelidir, iş boşa gitmez.
+önkoşullayıcı ister ve GPU MGPCG taşıması duraklatılmış durumda. A'nın fazlar
+arası eşleme ve korunum sözleşmesi B'nin de temelidir, iş boşa gitmez.
 
 ### Çözünürlük politikası
 
-Gaz geniş/kaba, sıvı dar/ince ister. Ortak grid **seyrek** olmalı (seyrek gaz
-çözücü var): yalnız bir fazın bulunduğu bölgeler aktif. Sıvının yüzey detayı
-grid'den ayrılmış kalır (SDF çözünürlük çarpanı zaten böyle).
+Gaz geniş/kaba, sıvı dar/ince ister. Tek mantıksal domain iki fiziksel faz
+grid'ini taşır; bounds ve voxel boyutu faz başına belirlenir. Her grid ayrıca
+yalnız etkin hücre penceresinde çalışır. Sıvının yüzey detayı fizik grid'inden
+ayrılmış kalır (SDF çözünürlük çarpanı zaten böyle).
 
 ---
 
@@ -346,9 +361,10 @@ hazırlar. Her kapı IPC'den ölçülür.
 | **0** | Bu not + ölçü aletleri: etiket sayaçları, görünüm başına kaynak listesi IPC'de | `fluid.get` görünüm listesini ve etiket sayılarını döndürür |
 | **1** | Görünüm çözücü + görünüm başına kaynak (§4.3). Tek karar noktası. Etiket henüz yoksa bugünkü mod tek etiket gibi davranır | Aynı domain'de SDF + fog **aynı anda**; panel, köprü ve API aynı listeyi raporlar |
 | **2** | Parçacık etiketleri simülasyonda (§4.2); köpük etikete katlanır | Etiket sayıları; şelale sahnesinde gövde SDF + sprey splat + köpük Solid/Material/RT'de |
+| **1-UI** | Domain paneli altı sekmeye taşınır (§8b UI KARARI): Domain · Matter · Environment · Solvers · Output · Measure; Gas/Fluid düğmeleri → salt okunur Contents; "Unified Volume Shader Properties" ve gömülü köpük editörü kalkar; `SelectableType::Material` + Output'ta Edit… (Material Properties) / Volume… (hacim nesnesi). Tüm UI metni İngilizce, genel tema, renkli buton yok. Faz 1 ile birlikte | Her alan tek sekmede düzenlenir; bir BSDF nesneye atanmadan Material Properties'te açılır; panelde materyal editörü kalmaz |
 | **K** | Madde özellik tablosu (§4.5.1); çözücüler tablodan okur, ad tahmini kalkar. Faz 1–2 ile PARALEL yürür | Aynı maddenin her çözücüde aynı sayıları kullandığı IPC'den okunur; eski sahneler aynı davranır |
-| **3** | Zayıf bağlama A + dönüşüm defteri (§4.5.2): sıvı hareketli sınır, gaz sürüklemesi, `mist` → gaz aktarımı; mevcut dönüşümler (erime, donma, yanma) deftere taşınır | Kütle VE enerji korunum sayaçları: kaynaktan çıkan = hedefe giren (tolerans içinde) |
-| **4** | Domain birleşmesi: Gas/Fluid tipleri fazlara dönüşür; eski sahne göçü | Eski gaz ve sıvı sahneleri aynı görüntüyle açılır; faz listesi IPC'de |
+| **3** | Zayıf bağlama A + dönüşüm defteri (§4.5.2): faz gridleri arasında sıvı hareketli sınır, gaz sürüklemesi, `mist` → gaz aktarımı; mevcut dönüşümler (erime, donma, yanma) deftere taşınır | Kütle VE enerji korunum sayaçları: kaynaktan çıkan = hedefe giren (tolerans içinde) |
+| **4 ✔** | Domain birleşmesi: Gas/Fluid tipleri fazlara dönüşür; eski sahne göçü | PASS: tek Matter domain, `phases=[gas, liquid]`, 120 sıvı parçacığı + 67 aktif gaz hücresi |
 | **5** | (İsteğe bağlı) Güçlü iki fazlı projeksiyon B | Kabarcık sahnesi; basınç iterasyon sayısı ve süre ölçülür |
 
 ### 1. adım neden ayrı bir ön-refactor DEĞİL
@@ -369,33 +385,45 @@ modelin görünüm çözücüsü olarak kurulur, mevcut modun etrafına değil.
   tarafının (§7b) büyük ölçüde ilerlediğini gösteriyor. 2026-09-27'de kodda
   bakıldı: `SimulationComputeVulkan.cpp` tahsislerini VRAM muhasebesine
   kaydetmiyor, yani §7a (simülasyon tamponlarının `perf.get_gpu_memory`'de
-  görünmesi) muhtemelen AÇIK — canlı ölçülemedi. Faz 3'ün ön koşulu yalnız
-  bu: ortak grid'e iki çözücü koyarken VRAM'in nereye gittiği görünmeli.
+  görünmesi) muhtemelen AÇIK — canlı ölçülemedi. Faz gridlerinin gerçek VRAM
+  maliyeti C3 kabulünde faz başına görünür olmalı.
 - [PARTICLE_SYSTEM_GPU_ROADMAP.md](PARTICLE_SYSTEM_GPU_ROADMAP.md) (AKTİF):
   `Domain Deposit` bu modelin dış üretici sözleşmesidir; `Surface State
   Deposit` MSF'ye yazımdır. Çelişki yok; partikül sistemi domain'e dönüşmez.
 - [KINEMATIC_COLLIDER_SOURCES.md](KINEMATIC_COLLIDER_SOURCES.md): collider
-  kaynağı her faza aynı `grid.solid`'i verir.
+  kaynağı ortaktır; C3'ten sonra her faz grid'ine kendi koordinatlarında
+  damgalanır.
 - [VULKAN_GAS_FLUID_LAYERING.md](VULKAN_GAS_FLUID_LAYERING.md): render
   değişmezleri bu modelde de bağlayıcı (ayrı maske bitleri, gerçek geçişte
   devir, devrin GI sekmesi yememesi).
+- ★★ [ATMOSPHERE_SYSTEM.md](ATMOSPHERE_SYSTEM.md) §3.4 (karar 2026-09-30):
+  birleşik domain'in **tek bir ORTAM AŞAMASI** olur. Atmosfer yalnız ortak
+  veri üretir (`atmosphere::sampleAmbient(pos)`: sıcaklık, nem, basınç,
+  rüzgâr); domain başına tek kapı (atmosfer / yerel override), domain içindeki
+  bütün çözücüler (APIC, Euler, MSF) çözülmüş ortamı buradan alır — açık
+  sınırda rüzgâr girişi, havada sürüklemenin hava hızı, ortam sıcaklığı,
+  kuruma için nem. Faz 2'nin çözücü başına `inherit_atmosphere` bayrakları
+  (APIC params, partikül ayarları, gaz stratification) bu aşama gelince
+  **sökülür**. Kalibrasyon sıfırı (`WorldThermalState.reference_kelvin`)
+  ortamdan ayrı kalır — domain'e taşınırken de ayrı kalmalı.
 
 ---
 
-## 8. Açık sorular
+## 8. Çözülen veya kapsam dışına ayrılan sorular
 
-1. **Etiket kriterlerinin eşikleri** mutlak birimde mi (m, m/s) voksel
-   biriminde mi? Kural: fiziksel eşik mutlak birimde — ama komşu sayısı
-   çözünürlüğe bağlı. Faz 2'de ölçülerek seçilecek.
-2. **`mist` aktarımında kütle ölçeği:** sıvı parçacığı (kg) → gaz yoğunluğu
-   (birimsiz alan). Tüketicinin BİRİMİ okunmalı; dönüşüm tek yerde.
-3. **Kristalleşme verisi:** `frozen` bugün ikili. Kristal boyutu için
-   donma süresi ve soğuma hızı parçacığa yazılmalı — Faz 2 sonrası ayrı iş.
-4. **Ortak grid'in hareketi:** domain hareketi/çalkalanma iki faz için aynı
-   referans çerçevesini kullanmalı.
-5. **CPU referansı:** her alışveriş teriminin CPU karşılığı olacak mı, yoksa
-   yalnız GPU mu? Partikül yol haritasının "açık CPU referansı" ilkesiyle
-   hizalanmalı.
+Bu başlık artık karar bekleyen bir liste değildir. Son durum:
+
+1. **Etiket kriterlerinin eşikleri:** fiziksel hız/kütle eşikleri mutlak
+   birimde; komşuluk yarıçapı voxel biriminde ve IPC'de raporlanır. GPU/CPU
+   sınıflandırma aynı sözleşmeyi kullanır.
+2. **`mist` aktarımında kütle ölçeği:** fiziksel kg/J sidecar ile görsel gaz
+   tracer'ı ayrıldı; dönüşüm tek transfer servisinde ve ledger'da kayıtlıdır.
+3. **Kristalleşme verisi:** `frozen` bugün ikili kalır. Kristal boyutu, donma
+   süresi ve soğuma hızı ayrı madde-fiziği işidir; çekirdek kapanışına dahil değil.
+4. **Domain hareketi:** tek mantıksal domain referans çerçevesi ortaktır; C3'te
+   faz gridleri bu çerçeveden kendi bounds/origin'ini türetir.
+5. **CPU referansı:** faz alışverişinin otoritesi host/CPU servisleridir; GPU
+   yolları aynı sonuçları hızlandırır ve başarısızlıkta açık fallback uygular.
 
 ---
 
@@ -503,9 +531,10 @@ doğrulandı): `scene_data.h` ~2663 (`fluid_surface_route` /
 `fluid_fog_route`), köprü ~1400 (parçacık başına splat mı), `RtApiFluid.cpp`
 ~196 (`effective_representation`, yorumu "exactly the way the render bridge
 resolves it" diyor — yani elle kopya), UI ~2651 ("Now drawing", combo
-indeksinden). Dördü bugün tutarlı görünüyor; Faz 1 bunları tek fonksiyona
-indirir. **Doğrulanmadı:** fog + SDF override durumunda SDF'nin untagged /
-Inherit parçacıkları da içerip içermediği (UI ve API "sdf" diyor).
+indeksinden). ✔ Faz 1 / 1. parti bunları `resolveFluidViews`'a indirdi (köprünün
+köpük bölümü ve `refreshFluidSurfaceMaterial` da aynı soruyu ayrıca soruyordu).
+**Cevaplandı (koddan):** fog + SDF override'da SDF etiketsiz fog parçacıklarını da
+İÇERİYORDU (yalnız Splat bağlamaları dışlanıyordu) — çözücüyle kapandı.
 
 **6. Materyal envanteri (§4.6):**
 - Splat instance'ı yalnız `InstanceTransform` + `source_index` taşır; instance
@@ -576,7 +605,62 @@ viewport `0` kaldı; sökülen SDF render tarafında slotunu tutuyor olabilir
 muhasebesine kaydolmuyor" tahmini **canlıda doğrulandı** — Faz 3'ün ön koşulu
 açık. 16 hacim tavanı ölçülmedi (bu sahnede en çok 2 hacim).
 
-**Kalan:** UI mock'u.
+**★ UI KARARI (2026-09-27, kullanıcı): ayrı DCC ekranı YOK; mevcut Domain
+alt panelinin SEKMELERİ yeniden düzenlenir.** Fizik paneli (field / particle /
+domain / collider / bodies) ve node graph olduğu gibi kalır. Bugünkü üç sekme
+(Setup & Grid · Solver & Physics · Shading & Rendering) ve üstteki Gas/Fluid
+tip düğmeleri yerine altı sekme:
+
+| Sekme | Soru | İçerik |
+|---|---|---|
+| **Domain** | Nerede, hangi çözünürlükte, nereden madde giriyor? | Contents (salt okunur, faz başına sayı) · sınırlar ve davranış · çözünürlük/voksel · cihaz/backend · Kaynaklar (seeding, Flow Sources, emisyon sınırları) |
+| **Matter** | Madde ne, nasıl davranır, neye dönüşür? | madde listesi; madde başına faz, yoğunluk, reoloji, granül, termal sınırlar (K), gizli ısı, yanma; faz dönüşüm anahtarları (§4.5 tablosu) |
+| **Environment** | Maddeyi çevreleyen koşullar? | ortam sıcaklığı (`world.get_thermal`), yerçekimi, ortam hava yoğunluğu/kaldırma referansı; domain'i etkileyen force field'lar (salt okunur liste, düzenleme Fields panelinde) |
+| **Solvers** | Hangi çözücü, hangi ayarla? YALNIZ var olan faz için | Sıvı: APIC/FLIP, dissipation, coupling, reseed, etiket üretimi (Ihmsen eşikleri) · Gaz: kanallar, hareket, türbülans |
+| **Output** | Hangi veri hangi materyalle çıkar? (§4.3 + §4.6) | etiket → görünüm → materyal tablosu; Now drawing (görünüm çözücüsünden); görünüm başına ayarlar: SDF yüzeyi, splat geometrisi, fog/medium shader, köpük görünümü |
+| **Measure** | Ne oldu, kanıtı ne? | istatistikler, step stats, etiket sayaçları, dönüşüm defteri + korunum, önbellek/bake, VDB export |
+
+Bugünkü bölüm → yeni yer:
+
+| Bugün (sekme / bölüm) | Yeni sekme |
+|---|---|
+| Setup: Compute Device & Backend · Grid Resolution & Scaling · Domain Bounds & Behaviors | Domain |
+| Setup: Simulation & Collision Statistics | Measure |
+| Solver: Simulation Solver Channels · Turbulence | Solvers (gaz) |
+| Solver: Buoyancy & Gas Motion | Solvers (gaz); ortam referansı → Environment |
+| Solver: Combustion & Fire Physics | Matter (yanma madde özelliğidir) |
+| Solver: Fluid Seeding & Capacity | Domain (Kaynaklar) |
+| Solver: APIC/FLIP → Dissipation, Coupling | Solvers (sıvı) |
+| Solver: APIC/FLIP → Rheology · Granular Material (+Damage, Thermal Softening) | Matter |
+| Solver: Dynamic Particle Reseeding | Solvers (sıvı) |
+| Shading: Flow Sources Registry · Flow Control & Emission Limits | Domain (Kaynaklar) — bugün yanlış sekmede |
+| Shading: Liquid Display → "Physics (re-bakes the sim)" | Matter — bugün görüntü bölümünün içinde |
+| Shading: Liquid Display → "Look" · Splat Geometry · Surface SDF · Unified Volume Shader | Output |
+| Shading: Whitewater | üretim eşikleri → Solvers (sıvı, etiketler); görünüm → Output |
+| sekme dışı: Fluid Step Stats · VDB Export · VDB Cache & Baking | Measure |
+
+Kurallar: (1) Bir alan TEK sekmede düzenlenir; başka sekmede görünüyorsa salt
+okunurdur. (2) Faz yoksa o fazın bölümü gizlenir, sekme boş kalırsa "bu
+domain'de gaz yok" yazar. (3) Her alanın IPC karşılığı vardır (CLAUDE.md §1);
+sekme adı IPC namespace'i DEĞİLDİR, alanın sahibi olan veri modelidir.
+(4) Taşıma Faz 1 ile yapılır, ayrı bir UI turu açılmaz. (5) **Domain paneli
+materyal DÜZENLEMEZ, yalnız BAĞLAR** (kullanıcı, 2026-09-27): BSDF'ler (SDF
+yüzeyi, splat) Material Properties'te, fog `VolumeShader`'ı sahibi olan hacim
+nesnesinin panelinde düzenlenir — kod zaten böyle: `VolumeShader` materyal
+kütüphanesinde değil, sahibinde yaşar (domain / GasVolume / VDBVolume). Domain
+panelindeki "Unified Volume Shader Properties" kalkar (aynı shader'ın ikinci
+editörü). Yönlendirme (koddan, 2026-09-27): Material Properties, Properties panelinin
+bir bölümüdür ve yalnız `SelectableType::Object` seçiliyken çizilir
+(`scene_ui_hierarchy.cpp` ~3284). Domain panelindeki gömülü köpük editörü
+(`drawInlineMatEditor`, `scene_ui_simulation_domains.cpp` ~3644) bu kısıtın
+YAMASI olarak yazılmış. Karar: **"Edit…" → seçim `SelectableType::Material`
+(yeni; seçim = materyal id) → Properties > Material Properties aynı
+`drawPrincipledBSDFEditor` ile açılır.** **"Volume…" → domain'in `VDBVolume`'u
+seçilir** (mevcut seçim tipi; hacim paneli zaten "Owned by liquid domain"
+diyor). Kök çözülünce gömülü köpük editörü kalkar. Terrain paneli de aynı yamayı
+taşıyor (`scene_ui_terrain.hpp` ~721) — fırsatçı temizlik, bu işin parçası değil. (6) Tema:
+genel ImGui teması, standart combo/buton — renkli (durum kodlu) buton YOK. Mock (sekmeler):
+https://claude.ai/artifact/XQUkjRKwhdYX2UyM7fAVmG
 
 **★★ Faz 1 riski — raster viewport'ta hacim KİMLİĞİ yok (2026-09-27, ölçüldü).**
 Viewport backend'i TLAS kurmaz; hacim SSBO'sunu paket sırasıyla yayımlar ve
@@ -622,6 +706,200 @@ tıklanabilir bir mock (artifact) ile üzerinde anlaşılır; her panel alanın�
 IPC karşılığı mock'ta işaretlenir.
 
 ---
+
+## 8c. Faz 2-W: whitewater — görünümde TEK otorite, depoda AYRI (2026-09-28)
+
+**Kullanıcı kararı (revize, 2026-09-28):** Hedef tam akışkan fiziği (gaz, sıvı,
+granül). Whitewater bu hedefin parçası DEĞİL, çözülemeyen ölçeğin yer tutucusu.
+Bu yüzden birleşme **görünüm katmanında** yapılır, depoda yapılmaz. İlk plan
+("tam birleşme": kütlesiz parçacıkları `FluidParticles`'a taşımak) iptal.
+
+**Neden (tartışmanın özeti):**
+- "spray" iki farklı şeyin adıydı:
+  - **Etiketli birincil parcel:** kütleli, çözücünün taşıdığı su. Etiket fiziği
+    sınıflar, üretmez.
+  - **Whitewater (Ihmsen):** kütlesiz, tek yönlü. Izgaranın çözemediği ölçeğin
+    istatistiksel vekili (hapsolmuş hava, dalga tepesi, kinetik enerji).
+- Ölçüm bunu doğruladı: kırılan dalgada birincil spray 0–3 parçacık. İnce jet
+  voksel altına inince basınç alanı yok (bkz. "su sıçramıyor" bulgusu), beyaz
+  suyu whitewater üretiyor. İkisi aynı işi değil, farklı ölçekleri yapıyor.
+- Depo birleşmesi "spray" etiketini bazen kütleli bazen kütlesiz yapardı. P2G,
+  basınç, kütle sayımı, kota ve cache'in her biri "bu gerçek mi?" diye sormak
+  zorunda kalırdı. Bunun için bir determinizm kapısı tasarlanmış olması,
+  tasarımın yanlış yöne gittiğinin işaretiydi.
+
+**Gerçek fizik yolu (uzun vade, ayrı iş):**
+- **Kabarcık** = sıvı içindeki hava = iki fazlı akış. Doğal evi birleşik madde
+  domain'i (gaz + sıvı aynı alanda, §4.4 fazlar arası alışveriş). O gelince
+  whitewater bubble'ın yerini alır.
+- **Spray** = çözünürlük / ince jet çözümü.
+- O güne kadar whitewater dürüst bir yer tutucu: panel ve API onu "massless,
+  subgrid stand-in" diye anlatır, fizik gibi sunmaz.
+
+**Fazlar:**
+- **W0 — ön koşullar (19. parti, derlendi ve IPC'de doğrulandı).** `fluid.get/set_whitewater`,
+  `set_param max_particles`, `fluid.state_digest`, determinizm probu
+  (`rt_probe_whitewater_determinism_ipc.py`). Depo birleşmesi iptal olsa da prob
+  geçerli: whitewater ana suyu etkiliyorsa bu bir sızıntıdır.
+  - GPU etiket fizibilitesi: EVET. `sim_foam_bin_scatter` bin'leri tamsayı
+    atomikleriyle kuruyor; etiket yarıçapı 1,5 voksel = 27 hücre stencil. Yeni
+    `sim_fluid_label_count.comp` + n baytlık geri okuma (100k ≈ 100 KB);
+    histerezis host'ta. Ön koşul: bin koşulsuz kurulmalı. (Ayrı iş, park.)
+- **W1 — tek otorite (20. parti, derlendi ve IPC'de doğrulandı).** Yapıldı:
+  - `FoamRenderMode` ve `FoamParams::render_mode` söküldü. Whitewater tipi
+    (`secondaryParticleLabel`) aynı label routes ile çözülüyor:
+    `FluidViewPlan::viewForWhitewater`, `whitewaterTypesIn`,
+    `countWhitewaterPerView`.
+  - Görünüm anlamı: **splat** = tip başına küre instance (havuz yalnız splat'e
+    yönlenen partikülleri tutar); **sdf** = yüzey hacminin sıcaklık kanalında
+    beyaz ortam (eski "Volume"); **fog** = domain fog yoğunluğuna eklenir
+    (1 partikül = `volume_density` parcel); **hidden** = çizilmez. Follow =
+    untagged girişin görünümü (whitewater'ın maddesi yok).
+  - Panel: Render combo yerine "Spray: …, foam: …, bubbles: …" satırı; görünüm
+    kontrolleri kullanılan görünüme göre. "Now drawing" satırları
+    "N particles + M whitewater", Hidden satırı ikisini ayrı sayar.
+  - API: `fluid.get_whitewater` → `views {spray, foam, bubble}` +
+    `stats.in_sdf/in_splat/in_fog/hidden`; `fluid.get` → `views[].whitewater`;
+    `set_whitewater render_mode` reddedilir.
+  - Ölü metaball köpük yüzeyi (`FoamSurface.cpp/.h`, `surface_*` alanları)
+    söküldü; çağıranı yoktu.
+  - ProjectManager `volume_color/opacity/bubble/spray_strength` kaydetmiyordu
+    (yalnız SceneSerializer); eklendi.
+  - **Eski sahne:** `render_mode` artık okunmuyor. Varsayılan tablo whitewater'ı
+    splat'e gönderir. Eski "Volume" görünümü isteyen sahne foam/bubble'ı "sdf"e
+    yönlendirir. Göç yok (geriye uyum yükü yok kuralı), alan adı gitti, anlam
+    sessizce değişmedi.
+  - Test: `rt_test_whitewater_label_routes_ipc.py`.
+- **W2 — İPTAL** (depo birleşmesi).
+- **W3 — küçüldü:** yalnız ölü yol sökümü; W1 içinde yapıldı. Kalan: yok.
+
+**Zorunlu yol haritası tamamlandı:** 27D ve Faz 4 domain birleşmesi canlı
+kabulden geçti. Tek Matter domain aynı adım zincirinde 120 sıvı parçacığı ve
+67 aktif gaz hücresi üretti. Ortak madde özellik tablosu, dönüşüm defteri, yanıcı APIC→gaz korunumu
+ve gerçek mist→gaz aktarımı 27C’ye kadar tamamlandı ve canlı kabulden geçti.
+GPU etiketleme performans kapısı 23. partide geçti. Kapalı tank korunumu 21.
+partide geçti.
+Determinizm 22. partide CPU/Vulkan olarak ayrıldı; strict tekrar için CPU yolu
+var, Vulkan float-atomik P2G toleranslıdır. RT bloklaşması kullanıcı kararıyla
+ertelendi. Faz 5 güçlü iki-fazlı projeksiyon isteğe bağlıdır.
+
+## 8d. Tek-domain çekirdeği kapanış planı (2026-10-01)
+
+Tek kimlik ve gaz/sıvı dönüşüm yolu çalışıyor; fakat bu henüz tam madde sistemi
+değildir. Mevcut `granular_enabled` domain'in bütün APIC parçacıklarını aynı
+constitutive modele geçirir. Bu nedenle aynı domain'de su ve kum doğru biçimde
+birlikte çözülemez. `WetSand` de su emmiş kum değil, sabit cohesion değerli bir
+presettir. Kapanış hem birleşmenin yapısal maliyetini kaldırmalı hem de serbest
+su ile granül iskeleti aynı Matter adımında korunumlu bağlamalıdır.
+
+### C4 için bağlayıcı veri modeli
+
+`Substance`, fizik ile görünümü bir araya getiren otoriter **madde kimliğidir**;
+çözücü sınıfının kendisi değildir. Tanım yoğunluk, viskozite, yüzey gerilimi,
+porosity/permeability, granular parametreler, termal ve kimyasal özellikler ile
+varsayılan görünüm bağını taşır. Anlık parçacık/hücre durumu ayrıca tutulur:
+termodinamik faz (`gas/liquid/solid`), constitutive rejim
+(`fluid/granular/elastic/...`), sıcaklık, bileşim ve doygunluk.
+
+Emitter'ın kanonik çıktısı bir `MatterDeposit` paketidir:
+
+- `substance_id` ve gerekirse bileşim/species oranları,
+- kg cinsinden kütle, hız ve sıcaklık/enerji,
+- substance varsayılanından farklıysa başlangıç durum override'ı,
+- hedef Matter domain kimliği ve uzamsal dağılım.
+
+Emitter doğrudan “APIC”, “Euler” veya “MPM” seçmez. Domain her adımda anlık
+durumu gruplar ve solver registry üzerinden sıvıyı APIC/FLIP'e, gazı Euler'e,
+granül iskeleti Drucker–Prager MPM'e yollar. Aynı substance ısı veya reaksiyonla
+durum değiştirdiğinde emitter'a dönmeden başka çözücü yoluna geçebilir. Kimya
+da emitter'ın “chemistry” modu değildir: emitter bileşim yatırır; domain'in
+reaction/phase-transition kuralları ürün, ısı ve yeni durumu ledger üzerinden
+üretir.
+
+UI bunun doğrudan görünümüdür:
+
+1. Emitter satırında önce **Substance**, sonra **Initial State** bulunur. Initial
+   State varsayılan olarak `From Substance`tır; ileri kullanıcı gas/liquid veya
+   constitutive başlangıcını yalnız geçerli seçenekler arasından override eder.
+   Ayrıntılı kimya gerektiğinde emitter **Composition/Mixture**, saflık veya
+   konsantrasyon ve başlangıç sıcaklığı taşır. Reaksiyon sabitleri emitter'a
+   kopyalanmaz; **Edit Substance…** merkezi tanımı, **Reaction Rules** ise domain
+   içindeki reaksiyon/ürün sözleşmesini açar.
+2. Matter Domain paneli tek bir gas/liquid/granular modu göstermez. **Active
+   Matter** tablosu substance, durum, kütle ve çalışan solver'ı salt-okunur
+   raporlar; **Solver Policy** faza/rejime özgü kalite ve grid ayarlarını taşır.
+3. Substance görünüm materyalini ve fizik özelliklerini aynı kimlikle bağlar,
+   fakat görünüm physics state'i değiştirmez. Islak kum görünümü doygunluğu okur.
+4. Node sistemi aynı `MatterDeposit` ve reaction sözleşmesini kullanır. Gelecekte
+   birleşik domain'e taşınırken UI, IPC ve node için ikinci bir iş mantığı yazılmaz.
+
+Bu ayrım, “Sand” adlı substance'ın kuru granül başlayıp su emerek nemli/doygun
+granüle dönüşmesini; “H2O”nun liquid başlayıp mist/gas durumuna geçmesini aynı
+domain kimliğinde ifade eder. `granular_enabled` yalnız eski sahne/preset göçü
+için geçici uyumluluk girdisi olabilir; yeni sahnelerde fizik otoritesi olamaz.
+
+### Kapanış kapsamı
+
+Tek-domain çekirdeği şu koşullarda **tamamlandı** sayılır:
+
+1. Tek mantıksal Matter kimliği gaz ve sıvıyı aynı dönüşüm defteri içinde taşır;
+   her fazın alanı, GPU buffer'ı, fiziksel bounds'u ve voxel boyutu bağımsızdır.
+2. Olmayan faz çözücü, tahsis, tam-grid tarama veya render slotu maliyeti üretmez.
+3. Yalnız gaz taşıyan Matter, eşdeğer Gas domain'inden; yalnız sıvı taşıyan
+   Matter, eşdeğer Fluid domain'inden 12 ısınmış karenin medyanında %10'dan
+   fazla yavaş olmaz.
+4. İki aktif fazlı Matter'ın sim süresi, aynı sahnenin ayrı Gas + Fluid toplamını
+   %10'dan fazla aşmaz. Bu kapı fizik sonucunu ucuzlatmak için kalite düşürerek
+   geçilemez; voxel, basınç iterasyonu, parçacık ve kaynak sayıları eşit tutulur.
+5. Kütle/enerji ledger hatası mevcut toleranslarda kalır; kapalı tank korunumu,
+   CPU/Vulkan determinizm politikası, SDF + gaz slot kimliği ve cache geri dönüşü
+   mevcut testlerden geçer.
+6. Burning Fuel Spill ve Ignited Fuel Jet tek Matter reçetesiyle çalışır.
+   Flamethrower saf gaz reçetesi tek gaz fazı olarak kalabilir; yardımcı sıvı
+   domain üretmez. Eski sahne yükleme yolu korunur, yeni karma presetler ayrık
+   Gas + Fluid çifti üretmez.
+7. Aynı Matter domain'de sıvı ve granül parçacıklar kendi constitutive modeliyle
+   aynı zaman adımında çözülür. Domain-geneli `granular_enabled`, parçacığın su
+   mu kum mu olduğuna karar veren fizik otoritesi değildir.
+8. Kuma emilen su, serbest sıvıdan kg cinsinden düşülüp granül gözenek suyuna
+   eklenir. Drenaj ters kaydı üretir; `MatterExchangeLedger` ve toplam envanter
+   kapalı sahnede tolerans içinde kütle korur.
+9. Doygunluk kumun efektif gerilme, sürtünme, kohezyon, dilatasyon, yoğunluk ve
+   geçirgenliğini sürer. Kısmi doygunlukta kapiler kohezyon artabilir; yüksek
+   doygunlukta gözenek basıncı iskeleti zayıflatabilir. Tek yönlü, her koşulda
+   “daha ıslak = daha yapışkan” eğrisi kabul edilmez.
+10. Görünüm aynı otoriter doygunluk alanını okur; ıslak renk/roughness karışımı
+    render tarafında yeniden tahmin edilmez. Cache, serializer, UI, scripting ve
+    IPC aynı su-kum durumunu taşıyıp raporlar.
+
+### Kalan sekiz kapanış partisi
+
+| Parti | Kod işi | Ölçülebilir kapı |
+|---|---|---|
+| **C0 — sayaç kabulü** | Lazy gaz kg/J sidecar, aktif-support advection ve gerçek sıvı-domain `total_ms` | Flamethrower hızlanması korunur; düz gazda `inventory_advection_ms≈0`; 100k/40³ tek sıvıda `total_ms`, `sim.timeline.step` ile aynı maliyet sınıfında |
+| **C1 — sıvı residency** | G2P velocity+affine ile hemen sonraki device advect-tail position+velocity geri okumalarını tek submit/readback sınırında birleştir; device-tail başarısızlığında doğru host fallback | Referansta batch sonu 13'ten en az 12'ye iner; 100k parçacıkta tekrar indirilen velocity kaldırıldığı için download en az 1,2 MB/kare azalır; parçacık digest ve kapalı-tank sonucu değişmez |
+| **C2 — aktif sıvı çalışma penceresi** | Parçacık AABB + CFL/pressure halo üret; P2G clear/normalize, fluid mask ve MGPCG yalnız bu hücre aralığında çalışır; tam grid fallback kalır | `active_liquid_cells/full_cells` IPC'de görünür; yerel sıvıda dispatch edilen hücre sayısı küçülür; sınır/çarpışma ve açık outflow testleri aynı sonucu verir |
+| **C3 — faz grid sözleşmesi** | Tek descriptor altında `gas_bounds/voxel` ve `liquid_bounds/voxel`; core + UI + scripting + IPC + serializer/cache aynı servisi kullanır. Varsayılan mantıksal bounds'a düşer; presetler eski gaz/sıvı kutularını faz alanlarına taşır | Geniş/kaba gaz ve dar/ince sıvı aynı Matter domain'de raporlanır; kaynak, hareketli sınır ve render koordinatları doğru eşlenir; bütçe hesabı faz başına gerçek hücre sayısını kullanır |
+| **C4 — çok malzemeli MPM çekirdeği** | `substance_tag`/madde özelliklerinden parçacık başına liquid veya granular constitutive model seç; ortak zaman adımında faz başına kütle/momentum P2G ve iki yönlü grid contact/drag çöz. Granülü sıvı pressure projection'a, suyu Drucker–Prager gerilmesine sokma | Aynı kutudaki su ve kuru kum eşzamanlı ilerler; her iki sınıfın parçacık/kütle/momentum sayaçları IPC'de ayrıdır; ayrı çalıştırılan su ve kum referansından sapma tanımlı toleranstadır |
+| **C5 — emilim ve drenaj** | Granül parçacığa `pore_water_mass_kg`, porosity/capacity ve saturation sidecar'ı ekle. Temas alanı, geçirgenlik, basınç farkı ve dt ile sınırlı emilim; kapasite üst sınırı; yerçekimi/basınçla drenaj ve serbest suya geri dönüş. Her transfer tek ledger kaydıdır | Kapalı su+kum testinde serbest su kaybı = gözenek suyu kazancı; doygunluk 0..1; kuru kum uzakta kuru kalır; doygun kum drenajla ölçülebilir su geri verir |
+| **C6 — ıslak kum fiziği ve görünümü** | Doygunluktan efektif stress/pore pressure, friction, cohesion, dilatancy ve kütle türet; aynı alanı kuru/ıslak materyal karışımına bağla. Core servisini UI/API/IPC/Python, serializer ve cache yüzeylerine taşı | Kuru, nemli ve doygun kumun angle-of-repose/çökme sonucu farklıdır; nemli bölgede ıslak görünüm mekânsal olarak fizik ile çakışır; cache dönüşünde doygunluk ve görüntü korunur |
+| **C7 — son kabul ve kesim** | Üçlü performans A/B matrisi ile su-kum fizik matrisini çalıştır; preset göçü, cache/ledger/render regresyonu; geçici uyumluluk dallarını ve bayat plan metnini temizle | %10 tek-faz/iki-faz kapıları geçer. Su jeti/kum yatağı, ıslanma cephesi, drenaj, kuru-nemli-doygun yığın ve kapalı kütle testleri PASS; belge `TAMAMLANDI` olur |
+
+C0 tek derleme ve canlı ölçüm turudur. C1–C3 ayrı derlenebilir partilerdir;
+C4–C6 tam madde fiziğinin uygulama partileridir. C7 kod ekleme turu değil,
+kabul ve temizlik turudur. Performans temeli önce kurulur; aksi halde su-kum
+teması zaten pahalı olan tam-grid ve readback yolunun maliyetini katlar.
+
+### Bilerek kapanış dışında
+
+- Gaz-sıvı güçlü tek basınç projeksiyonu ve fiziksel kabarcık çözümü. Granül-sıvı
+  contact, emilim ve gözenek basıncı bunun dışında değildir; C4–C6'da zorunludur.
+- RT SDF bloklaşması, splat materyal editörü ve Solid mod splat/gaz sırası.
+- OptiX'e yeni Matter katmanlarının taşınması.
+- Whitewater deposunu ana APIC parçacıklarıyla birleştirmek; W2 iptal kararı sürer.
+
+Bu işler tek-domain çekirdeğini yeniden açmaz; kendi plan ve kabul kapılarıyla
+ilerler.
 
 ## 9. ★ Sinsi başarısızlıklar (şimdiden işaretli)
 

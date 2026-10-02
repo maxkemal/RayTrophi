@@ -1,0 +1,54 @@
+#version 460
+// Measurement entry point for the cloud field (world.sample_clouds). Evaluates
+// the SAME cloudDensity() the renderers use (cloud_common.glsl) at query
+// points, so a script measures the field the picture is made of -- there is
+// no CPU mirror to drift from it.
+//
+// mode 0: density (1/m) at query.a
+// mode 1: transmittance exp(-integral sigma) along query.a -> query.b,
+//         `steps` midpoint samples with full detail
+// mode 2: base-shape density (no detail) at query.a
+// mode 3: precipitation rate (mm/h) at query.a (cloudPrecipAt)
+
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+
+#define CLOUD_SET 0
+#define CLOUD_BINDING_BASE 0
+#include "cloud_common.glsl"
+
+struct CloudQuery { vec4 a; vec4 b; };
+layout(set = 0, binding = 5, std430) readonly buffer Queries { CloudQuery queries[]; };
+layout(set = 0, binding = 6, std430) writeonly buffer Results { float results[]; };
+
+layout(push_constant) uniform PC {
+    uint mode;
+    uint count;
+    uint steps;
+    uint pad;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    vec3 a = queries[i].a.xyz;
+    vec3 b = queries[i].b.xyz;
+    if (pc.mode == 0u) {
+        results[i] = cloudDensity(a, true);
+    } else if (pc.mode == 2u) {
+        results[i] = cloudDensity(a, false);
+    } else if (pc.mode == 3u) {
+        results[i] = cloudPrecipAt(a);
+    } else {
+        uint n = max(pc.steps, 1u);
+        float len = length(b - a);
+        float dt = len / float(n);
+        vec3 dir = len > 0.0 ? (b - a) / len : vec3(0.0);
+        float tau = 0.0;
+        for (uint k = 0u; k < n; ++k) {
+            vec3 p = a + dir * ((float(k) + 0.5) * dt);
+            tau += cloudDensity(p, true) * dt;
+        }
+        results[i] = exp(-tau);
+    }
+}

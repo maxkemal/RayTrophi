@@ -1,4 +1,4 @@
-#include "PostProcess/Exposure.h"
+﻿#include "PostProcess/Exposure.h"
 #include "Viewport/AutomaticCutout.h"
 /*
  * =========================================================================
@@ -60,6 +60,7 @@
 #include "TextureCompressionCache.h"
 #include "World.h"
 #include "AtmosphereLUT.h"
+#include "Backend/AtmosphereLutParams.h"
 #include "CameraPresets.h"
 #include "Camera.h"
 #include "InstanceManager.h"
@@ -180,45 +181,6 @@ bool triangleDataHasEffectiveSkinData(const Backend::TriangleData& tri) {
     return false;
 }
 
-struct AtmosphereLUTParamsGPU {
-    float sunDir_intensity[4];
-    float density_intensity[4];
-    float physical[4];
-    float weather[4];
-    float rayleigh[4];
-    float mie[4];
-};
-
-static AtmosphereLUTParamsGPU makeAtmosphereLUTParamsGPU(const WorldData& world) {
-    const NishitaSkyParams& n = world.nishita;
-    AtmosphereLUTParamsGPU p{};
-    p.sunDir_intensity[0] = n.sun_direction.x;
-    p.sunDir_intensity[1] = n.sun_direction.y;
-    p.sunDir_intensity[2] = n.sun_direction.z;
-    p.sunDir_intensity[3] = n.sun_intensity;
-    p.density_intensity[0] = n.air_density;
-    p.density_intensity[1] = n.dust_density;
-    p.density_intensity[2] = n.ozone_density;
-    p.density_intensity[3] = n.atmosphere_intensity;
-    p.physical[0] = n.planet_radius;
-    p.physical[1] = n.atmosphere_height;
-    p.physical[2] = n.altitude;
-    p.physical[3] = n.mie_anisotropy;
-    p.weather[0] = n.humidity;
-    p.weather[1] = n.temperature;
-    p.weather[2] = n.ozone_absorption_scale;
-    p.weather[3] = 0.0f;
-    p.rayleigh[0] = n.rayleigh_scattering.x;
-    p.rayleigh[1] = n.rayleigh_scattering.y;
-    p.rayleigh[2] = n.rayleigh_scattering.z;
-    p.rayleigh[3] = n.rayleigh_density;
-    p.mie[0] = n.mie_scattering.x;
-    p.mie[1] = n.mie_scattering.y;
-    p.mie[2] = n.mie_scattering.z;
-    p.mie[3] = n.mie_density;
-    return p;
-}
-
 bool materialCanUseOpaqueFastPath(uint32_t materialId) {
     if (materialId == MaterialManager::INVALID_MATERIAL_ID) return true;
     Material* mat = MaterialManager::getInstance().getMaterial(static_cast<uint16_t>(materialId));
@@ -268,6 +230,26 @@ bool parseScatterNodeName(const std::string& nodeName, int& groupId, uint32_t& i
     }
 }
 
+// Point an RT storage-buffer binding at the always-present material buffer.
+// Used when its real buffer was just destroyed and there is nothing to replace
+// it with (empty scene): the empty scene is traced now, so a binding left
+// pointing at a destroyed buffer would be live, not dormant.
+static void bindRtStorageFallback(VulkanRT::VulkanDevice* device, uint32_t binding) {
+    if (device->m_rtDescriptorSet == VK_NULL_HANDLE || !device->m_materialBuffer.buffer) return;
+    VkDescriptorBufferInfo info{};
+    info.buffer = device->m_materialBuffer.buffer;
+    info.offset = 0;
+    info.range = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet w{};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = device->m_rtDescriptorSet;
+    w.dstBinding = binding;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w.descriptorCount = 1;
+    w.pBufferInfo = &info;
+    vkUpdateDescriptorSets(device->m_device, 1, &w, 0, nullptr);
+}
+
 bool refreshVulkanGeometryDataBinding(VulkanRT::VulkanDevice* device) {
     if (!device) return false;
 
@@ -275,7 +257,10 @@ bool refreshVulkanGeometryDataBinding(VulkanRT::VulkanDevice* device) {
         device->destroyBuffer(device->m_geometryDataBuffer);
     }
 
-    if (device->m_blasList.empty()) return true;
+    if (device->m_blasList.empty()) {
+        bindRtStorageFallback(device, 4);
+        return true;
+    }
 
     std::vector<VulkanRT::VkGeometryData> geoData;
     geoData.reserve(device->m_blasList.size());
@@ -338,7 +323,10 @@ bool refreshVulkanInstanceDataBinding(VulkanRT::VulkanDevice* device,
         device->destroyBuffer(device->m_instanceDataBuffer);
     }
 
-    if (instData.empty()) return true;
+    if (instData.empty()) {
+        bindRtStorageFallback(device, 5);
+        return true;
+    }
 
     VulkanRT::BufferCreateInfo ci;
     ci.size = static_cast<uint64_t>(instData.size()) * sizeof(VulkanRT::VkInstanceData);
@@ -425,6 +413,16 @@ ExternC const PfnDliHook __pfnDliFailureHook2 = DelayLoadFailureHook;
 
 // Structs moved to VulkanBackend.h for namespace consistency
 
+// Escape hatch for hardware nobody has tested: RT_VK_LEGACY=1 skips the
+// validation-driven additions (extra device features, extra buffer usage bits).
+static bool vulkanLegacyMode() {
+    static const bool legacy = [] {
+        const char* v = std::getenv("RT_VK_LEGACY");
+        return v && v[0] == '1';
+    }();
+    return legacy;
+}
+
 static VKAPI_ATTR VkBool32 VKAPI_CALL vulkanDebugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT severity,
     VkDebugUtilsMessageTypeFlagsEXT type,
@@ -434,6 +432,8 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL vulkanDebugCallback(
     (void)type; (void)pUserData;
     if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
         VK_ERROR() << "[Vulkan] " << pCallbackData->pMessage << std::endl;
+        // SceneLog survives a crash; the console does not.
+        SCENE_LOG_ERROR(std::string("[VulkanValidation] ") + pCallbackData->pMessage);
     }
     return VK_FALSE;
 }
@@ -785,6 +785,16 @@ VulkanDevice::~VulkanDevice() {
 bool VulkanDevice::initialize(bool preferHardwareRT, bool validationLayers) {
     VK_INFO() << "[VulkanDevice] Initializing..." << std::endl;
 
+    // RT_VK_VALIDATION=1 turns the Khronos validation layer on for a repro run
+    // (needs the Vulkan SDK installed); release builds never enable it otherwise.
+    // Hunt-time switch (RayFusion -> Rendered device-lost, fixed 2026-10-01): keep
+    // false -- validation slows every frame. RT_VK_VALIDATION=1 still enables it.
+    constexpr bool kForceValidationForDeviceLostHunt = false;
+    if (kForceValidationForDeviceLostHunt) validationLayers = true;
+    if (const char* v = std::getenv("RT_VK_VALIDATION"); v && v[0] == '1') {
+        validationLayers = true;
+        SCENE_LOG_INFO("[VulkanDevice] RT_VK_VALIDATION=1: validation layer requested.");
+    }
     if (!createInstance(validationLayers)) return false;
     if (validationLayers) setupDebugMessenger();
     if (!selectPhysicalDevice(preferHardwareRT)) return false;
@@ -897,6 +907,9 @@ void VulkanDevice::shutdown() {
         if (m_stylizeDescLayout)     { vkDestroyDescriptorSetLayout(m_device, m_stylizeDescLayout, nullptr); m_stylizeDescLayout = VK_NULL_HANDLE; }
         if (m_stylizeDescPool)       { vkDestroyDescriptorPool(m_device, m_stylizeDescPool, nullptr); m_stylizeDescPool = VK_NULL_HANDLE; }
         m_tonemapDescSet = VK_NULL_HANDLE;
+
+        destroyAerialFroxel();
+        destroyCloudResources();
 
         // Destroy atmosphere LUT compute resources.
         if (m_atmosphereLutPipeline)       { vkDestroyPipeline(m_device, m_atmosphereLutPipeline, nullptr); m_atmosphereLutPipeline = VK_NULL_HANDLE; }
@@ -1099,7 +1112,20 @@ bool VulkanDevice::createInstance(bool validationLayers) {
 
     std::vector<const char*> layers;
     if (validationLayers) {
-        layers.push_back("VK_LAYER_KHRONOS_validation");
+        // Without the Vulkan SDK the layer is absent and vkCreateInstance would fail.
+        uint32_t layerCount = 0;
+        vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+        std::vector<VkLayerProperties> avail(layerCount);
+        if (layerCount) vkEnumerateInstanceLayerProperties(&layerCount, avail.data());
+        bool present = false;
+        for (const auto& l : avail)
+            if (std::string(l.layerName) == "VK_LAYER_KHRONOS_validation") present = true;
+        if (present) {
+            layers.push_back("VK_LAYER_KHRONOS_validation");
+        } else {
+            SCENE_LOG_WARN("[VulkanDevice] Validation layer not installed (Vulkan SDK missing); running without it.");
+            validationLayers = false;
+        }
     }
 
     std::vector<const char*> extensions;
@@ -1381,7 +1407,11 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     supportedAccelFeatures.pNext = &supportedRtPipelineFeatures;
     supportedRtPipelineFeatures.pNext = &supportedRayQueryFeatures;
     supportedRayQueryFeatures.pNext = &supportedDescIdxFeatures;
+    VkPhysicalDeviceScalarBlockLayoutFeatures supportedScalarFeatures{};
+    supportedScalarFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES;
+
     supportedDescIdxFeatures.pNext = &supportedAtomicFloatFeatures;
+    supportedAtomicFloatFeatures.pNext = &supportedScalarFeatures;
     vkGetPhysicalDeviceFeatures2(m_physicalDevice, &supportedFeatures);
 
     const bool canUseBDA = hasBDA && supportedBdaFeatures.bufferDeviceAddress == VK_TRUE;
@@ -1473,6 +1503,13 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     VkPhysicalDeviceFeatures2 features2{};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.features.samplerAnisotropy = canUseSamplerAnisotropy ? VK_TRUE : VK_FALSE;
+    // Validation: pipelines use a geometry stage, fragment-stage storage writes and
+    // per-attachment blend, none of which were enabled. Enabled when supported.
+    if (!vulkanLegacyMode()) {
+        features2.features.geometryShader = supportedFeatures.features.geometryShader;
+        features2.features.fragmentStoresAndAtomics = supportedFeatures.features.fragmentStoresAndAtomics;
+        features2.features.independentBlend = supportedFeatures.features.independentBlend;
+    }
     features2.features.shaderFloat64 = canUseShaderFloat64 ? VK_TRUE : VK_FALSE;
     features2.features.shaderInt64 = canUseShaderInt64 ? VK_TRUE : VK_FALSE;
 
@@ -1519,6 +1556,20 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     atomicFloatFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
     atomicFloatFeatures.shaderBufferFloat32AtomicAdd = canUseAtomicFloat ? VK_TRUE : VK_FALSE;
 
+    // The RT/preview shaders are compiled with GL_EXT_scalar_block_layout
+    // (raygen.rgen, closesthit.rchit, ...): vec3 members straddle 16-byte
+    // boundaries. Validation reported spirv-val errors for exactly that because
+    // the feature was never enabled on the device.
+    VkPhysicalDeviceScalarBlockLayoutFeatures scalarFeatures{};
+    scalarFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES;
+    // BISECT: enabling this coincided with the driver stalling inside
+    // vkCreateRayTracingPipelinesKHR (createRTPipeline, >1 min). Off until that is
+    // separated from the stageFlags fix; validation still reports the missing
+    // feature as spirv-val noise, which the driver tolerated before.
+    constexpr bool kEnableScalarBlockLayout = false;
+    scalarFeatures.scalarBlockLayout =
+        kEnableScalarBlockLayout ? supportedScalarFeatures.scalarBlockLayout : VK_FALSE;
+
     // Build pNext chain conservatively.
     void** nextLink = &features2.pNext;
     if (canUseBDA) {
@@ -1544,6 +1595,10 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     if (canUseAtomicFloat) {
         *nextLink = &atomicFloatFeatures;
         nextLink = &atomicFloatFeatures.pNext;
+    }
+    if (scalarFeatures.scalarBlockLayout) {
+        *nextLink = &scalarFeatures;
+        nextLink = &scalarFeatures.pNext;
     }
     *nextLink = nullptr;
 
@@ -1661,7 +1716,7 @@ bool VulkanDevice::createDescriptorPool() {
     VkDescriptorPoolSize poolSizes[] = {
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,              256 },
         { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                32 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     Backend::VULKAN_TEXTURE_CAPACITY },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     Backend::VULKAN_TEXTURE_CAPACITY + 64 },  // + RT LUT/cloud singles
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,               32 },
         { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   8 },
     };
@@ -2080,7 +2135,18 @@ VkBufferUsageFlags VulkanDevice::translateBufferUsage(BufferUsage usage) {
     if ((uint32_t)usage & (uint32_t)BufferUsage::STORAGE) flags |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     if ((uint32_t)usage & (uint32_t)BufferUsage::TRANSFER_SRC) flags |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     if ((uint32_t)usage & (uint32_t)BufferUsage::TRANSFER_DST) flags |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    if ((uint32_t)usage & (uint32_t)BufferUsage::ACCELERATION) flags |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+    if ((uint32_t)usage & (uint32_t)BufferUsage::ACCELERATION) {
+        // The same flag is used for AS backing storage, which needs its own bit
+        // (VUID-VkAccelerationStructureCreateInfoKHR-buffer-03614).
+        flags |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        if (!vulkanLegacyMode()) flags |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
+    }
+    // Raster vertex/index buffers are also BLAS build inputs (RayFusion scene AS,
+    // VUID-vkCmdBuildAccelerationStructuresKHR-geometry-03673).
+    if (!vulkanLegacyMode() && m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR &&
+        ((uint32_t)usage & ((uint32_t)BufferUsage::VERTEX | (uint32_t)BufferUsage::INDEX))) {
+        flags |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+    }
     if ((uint32_t)usage & (uint32_t)BufferUsage::SHADER_BINDING) flags |= VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
     if ((uint32_t)usage & (uint32_t)BufferUsage::INDIRECT) flags |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     return flags;
@@ -2328,8 +2394,11 @@ BufferHandle VulkanDevice::createExportableBuffer(const BufferCreateInfo& info,
 }
 
 void* VulkanDevice::mapBuffer(const BufferHandle& buffer) {
-    void* data;
-    vkMapMemory(m_device, buffer.memory, 0, buffer.size, 0, &data);
+    // Callers test the result for null; an uninitialised pointer on failure
+    // (device-local memory, lost device) turned that test into a wild write.
+    void* data = nullptr;
+    if (!buffer.memory ||
+        vkMapMemory(m_device, buffer.memory, 0, buffer.size, 0, &data) != VK_SUCCESS) return nullptr;
     return data;
 }
 
@@ -3324,12 +3393,11 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
             m_tlas = {};
         }
     }
-    
-    // Safety check: if scene is empty, stop here after potentially clearing old TLAS
-    if (instanceCount == 0) {
-        m_tlasInstanceCount = 0;
-        return;
-    }
+
+    // An empty scene still gets a TLAS (built over zero instances): every ray
+    // misses and the sky comes from the miss shader on the GPU. Returning without
+    // one used to leave the adapter with no traceable scene, and it painted the
+    // sky per pixel on the CPU every frame without ever converging.
 
     // NOTE: the previous instance buffer is intentionally NOT freed here — it is
     // reused in place below when large enough (see PERF note). Freeing+reallocating
@@ -3365,10 +3433,13 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
         vkInstances.push_back(dst);
     }
 
-    if (vkInstances.empty()) {
-        VK_WARN() << "[VulkanDevice] createTLAS: No valid instances provided." << std::endl;
-        return;
+    if (vkInstances.size() != info.instances.size()) {
+        VK_WARN() << "[VulkanDevice] createTLAS: dropped "
+                  << (info.instances.size() - vkInstances.size())
+                  << " instance(s) with an invalid BLAS index." << std::endl;
     }
+    // The build range must count what was uploaded, not what was requested.
+    instanceCount = (uint32_t)vkInstances.size();
 
     // --- 2) Upload instance data to GPU ---
     // PERF: reuse the persistent instance buffer in place when it is large enough.
@@ -3378,21 +3449,28 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
     // stall. The buffer is CPU_TO_GPU (host-visible), so a map+memcpy refreshes it.
     const VkDeviceSize neededInstBytes =
         (VkDeviceSize)vkInstances.size() * sizeof(VkAccelerationStructureInstanceKHR);
+    // Never allocate zero bytes: the empty-scene build still needs a valid
+    // instance-data device address.
+    const VkDeviceSize allocInstBytes =
+        (std::max)(neededInstBytes, (VkDeviceSize)sizeof(VkAccelerationStructureInstanceKHR));
     if (m_tlasInstanceBuffer.buffer != VK_NULL_HANDLE &&
         m_tlasInstanceBuffer.memory != VK_NULL_HANDLE &&
-        m_tlasInstanceBuffer.size >= neededInstBytes) {
-        uploadBuffer(m_tlasInstanceBuffer, vkInstances.data(), neededInstBytes, 0);
+        m_tlasInstanceBuffer.size >= allocInstBytes) {
+        if (neededInstBytes > 0)
+            uploadBuffer(m_tlasInstanceBuffer, vkInstances.data(), neededInstBytes, 0);
     } else {
         // First build, or the instance count grew past the buffer: (re)allocate.
         if (m_tlasInstanceBuffer.buffer) destroyBuffer(m_tlasInstanceBuffer);
         BufferCreateInfo instBufInfo;
-        instBufInfo.size = neededInstBytes;
+        instBufInfo.size = allocInstBytes;
         instBufInfo.usage = BufferUsage::ACCELERATION | BufferUsage::STORAGE;
         instBufInfo.location = MemoryLocation::CPU_TO_GPU;
-        instBufInfo.initialData = vkInstances.data();
+        instBufInfo.initialData = nullptr;
         instBufInfo.category = VramCategory::AccelStruct;
         m_tlasInstanceBuffer = createBuffer(instBufInfo);
         if (!m_tlasInstanceBuffer.buffer) return;
+        if (neededInstBytes > 0)
+            uploadBuffer(m_tlasInstanceBuffer, vkInstances.data(), neededInstBytes, 0);
     }
     const BufferHandle& instanceBuffer = m_tlasInstanceBuffer;
 
@@ -3653,6 +3731,8 @@ void VulkanDevice::traceRays(uint32_t w, uint32_t h, uint32_t d) {
 
     VkCommandBuffer cmd = beginSingleTimeCommands();
     if (cmd == VK_NULL_HANDLE) return;
+
+    recordAerialFroxelPass(cmd);
 
     // Bind RT pipeline
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtPipeline);
@@ -4126,7 +4206,7 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     // Binding 18: Foam sphere SSBO (intersection + closest-hit)
     // Binding 19: Photon caustic hash grid SSBO (photon raygen writes, camera
     //             raygen debug-reads, closesthit gathers in Dilim 2)
-    VkDescriptorSetLayoutBinding bindings[30] = {};
+    VkDescriptorSetLayoutBinding bindings[36] = {};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[0].descriptorCount = 1;
@@ -4171,7 +4251,9 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     bindings[8].binding = 8;
     bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[8].descriptorCount = 4;
-    bindings[8].stageFlags = VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    // closesthit.rchit also samples the atmosphere LUTs (binding 8); a stage missing
+    // from stageFlags reads an undefined descriptor (validation: layout-07988).
+    bindings[8].stageFlags = VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
 
     bindings[9].binding = 9;
     bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -4275,7 +4357,8 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     bindings[24].binding = 24;
     bindings[24].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[24].descriptorCount = 1;
-    bindings[24].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    // shadow_anyhit.rahit reads MaterialExt too (same validation rule as binding 8).
+    bindings[24].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
 
     // Bindings 25-28: fixed temporal ping-pong slots. Their descriptors never
     // swap while an asynchronous frame is in flight; raygen selects read/write
@@ -4292,9 +4375,22 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     bindings[29].stageFlags =
         VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
 
+    // Bindings 30-35: cloud field (cloud_rt.glsl / cloud_common.glsl) --
+    // 30 base noise 3D, 31 detail 3D, 32 curl, 33 weather map, 34 CloudParams,
+    // 35 majorant map. Miss draws the clouds; closest-hit reads them for the
+    // sun's cloud shadow. Always written (writeRtCloudDescriptors).
+    for (uint32_t i = 30; i <= 35; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = (i == 34) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                                               : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+                                 VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    }
+
     VkDescriptorSetLayoutCreateInfo dslCI{};
     dslCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslCI.bindingCount = 30;
+    dslCI.bindingCount =  36;
     dslCI.pBindings = bindings;
     vkCreateDescriptorSetLayout(m_device, &dslCI, nullptr, &m_rtDescriptorSetLayout);
 
@@ -4604,6 +4700,7 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
                return;
            }
            VK_INFO() << "[VulkanDevice] Allocated RT descriptor set: " << (void*)m_rtDescriptorSet << std::endl;
+           m_rtDescWriteHash = 0;
     }
 
     // binding 0: output storage image
@@ -4636,9 +4733,10 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
     lightInfo.offset = 0;
     lightInfo.range = VK_WHOLE_SIZE;
 
-    // binding 4: Geometry Data
+    // binding 4: Geometry Data (fallback to the material buffer in an empty scene:
+    // no BLAS means no geometry buffer, and a null buffer is not a valid write)
     VkDescriptorBufferInfo geoInfo{};
-    geoInfo.buffer = m_geometryDataBuffer.buffer;
+    geoInfo.buffer = m_geometryDataBuffer.buffer ? m_geometryDataBuffer.buffer : m_materialBuffer.buffer;
     geoInfo.offset = 0;
     geoInfo.range = VK_WHOLE_SIZE;
 
@@ -4649,10 +4747,11 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
         instInfo.offset = 0;
         instInfo.range = VK_WHOLE_SIZE;
     } else {
-        // Fallback to material buffer if instance data is missing (to avoid null binding)
+        // Fallback to material buffer if instance data is missing (to avoid null binding).
+        // range must be > 0 or VK_WHOLE_SIZE (VUID-VkDescriptorBufferInfo-range-00341).
         instInfo.buffer = m_materialBuffer.buffer;
         instInfo.offset = 0;
-        instInfo.range = 0;
+        instInfo.range = VK_WHOLE_SIZE;
     }
 
     std::vector<VkWriteDescriptorSet> writes;
@@ -5050,6 +5149,41 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
 
     // Update bindings immediately (safe local buffers)
     if (!writes.empty()) {
+        // VUID-vkUpdateDescriptorSets-None-03047: validation counted ~44k writes to
+        // this set while an earlier trace was still pending. Identical rewrites are
+        // harmless, so only a batch whose handles actually changed drains the
+        // in-flight slots (rare: resize, scene rebuild); steady state pays a hash.
+        uint64_t batchHash = 1469598103934665603ull;
+        auto mix = [&batchHash](uint64_t v) { batchHash = (batchHash ^ v) * 1099511628211ull; };
+        for (const VkWriteDescriptorSet& w : writes) {
+            mix(w.dstBinding); mix(w.dstArrayElement); mix(w.descriptorType); mix(w.descriptorCount);
+            for (uint32_t i = 0; i < w.descriptorCount; ++i) {
+                if (w.pBufferInfo) {
+                    mix(reinterpret_cast<uint64_t>(w.pBufferInfo[i].buffer));
+                    mix(w.pBufferInfo[i].offset); mix(w.pBufferInfo[i].range);
+                }
+                if (w.pImageInfo) {
+                    mix(reinterpret_cast<uint64_t>(w.pImageInfo[i].sampler));
+                    mix(reinterpret_cast<uint64_t>(w.pImageInfo[i].imageView));
+                    mix(w.pImageInfo[i].imageLayout);
+                }
+            }
+            if (w.descriptorType == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR && w.pNext) {
+                const auto* as = static_cast<const VkWriteDescriptorSetAccelerationStructureKHR*>(w.pNext);
+                for (uint32_t i = 0; i < as->accelerationStructureCount; ++i)
+                    mix(reinterpret_cast<uint64_t>(as->pAccelerationStructures[i]));
+            }
+        }
+        if (batchHash != m_rtDescWriteHash) {
+            for (FrameSlot& fs : m_frameSlots) {
+                if (fs.everSubmitted && fs.fence != VK_NULL_HANDLE) {
+                    reportVulkanDeviceFailure(
+                        vkWaitForFences(m_device, 1, &fs.fence, VK_TRUE, 2000000000ull),   // bounded: never hang the frame
+                        "bindRTDescriptors/vkWaitForFences");
+                }
+            }
+            m_rtDescWriteHash = batchHash;
+        }
         vkUpdateDescriptorSets(m_device, (uint32_t)writes.size(), writes.data(), 0, nullptr);
     }
 
@@ -5102,48 +5236,10 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
         }
     }
 
-    // Binding 8: Atmosphere LUT Samplers (4 textures)
-    // Only update if at least one LUT is valid (avoid null descriptor updates)
-    bool hasValidLUT = false;
-    for (int i = 0; i < 4; i++) {
-        if (m_lutImages[i].view != VK_NULL_HANDLE) {
-            hasValidLUT = true;
-            break;
-        }
-    }
-    
-    if (hasValidLUT) {
-        std::vector<VkDescriptorImageInfo> lutInfos;
-        std::vector<VkWriteDescriptorSet> lutWrites;
-        lutInfos.reserve(4);
-        lutWrites.reserve(4);
-
-        for (uint32_t i = 0; i < 4; ++i) {
-            if (m_lutImages[i].sampler == VK_NULL_HANDLE || m_lutImages[i].view == VK_NULL_HANDLE) {
-                continue;
-            }
-
-            VkDescriptorImageInfo ii{};
-            ii.sampler = m_lutImages[i].sampler;
-            ii.imageView = m_lutImages[i].view;
-            ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            lutInfos.push_back(ii);
-
-            VkWriteDescriptorSet w8{};
-            w8.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            w8.dstSet = m_rtDescriptorSet;
-            w8.dstBinding = 8;
-            w8.dstArrayElement = i;
-            w8.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            w8.descriptorCount = 1;
-            w8.pImageInfo = &lutInfos.back();
-            lutWrites.push_back(w8);
-        }
-
-        if (!lutWrites.empty()) {
-            vkUpdateDescriptorSets(m_device, (uint32_t)lutWrites.size(), lutWrites.data(), 0, nullptr);
-        }
-    }
+    // Binding 8: atmosphere LUT samplers [0..2] + aerial froxel atlas [3].
+    writeRtAtmosphereDescriptors();
+    // Bindings 30-35: cloud field (textures exist before any cloud is on).
+    writeRtCloudDescriptors();
 }
 
 // Update a single combined image sampler entry in the RT descriptor set (binding 6)
@@ -6284,7 +6380,9 @@ void VulkanDevice::updateHairMaterialBuffer(const std::vector<VulkanRT::HairGpuM
 void VulkanDevice::updateAtmosphereLUTs(const ImageHandle* lutImages) {
     if (!lutImages) return;
 
-    // Store the LUT image handles
+    // Store the LUT image handles. Slot [3] of binding 8 is the aerial froxel
+    // atlas, owned separately (m_aerialFroxel): the LUT rebuild loops destroy
+    // all four m_lutImages, and the atlas must survive a LUT rebuild.
     for (int i = 0; i < 4; i++) {
         m_lutImages[i] = lutImages[i];
     }
@@ -6293,50 +6391,45 @@ void VulkanDevice::updateAtmosphereLUTs(const ImageHandle* lutImages) {
     // flag for the images IT created, so the compute path can never reuse a
     // sampled-only image as an imageStore target.
     m_lutImagesStorageCapable = false;
-    // Stored LUT handles updated
-    
-    // If RT descriptor set already exists, update binding 8 with LUT samplers
-    if (m_rtDescriptorSet != VK_NULL_HANDLE) {
-        // Check if at least one LUT is valid
-        bool hasValidLUT = false;
-        for (int i = 0; i < 4; i++) {
-            if (m_lutImages[i].view != VK_NULL_HANDLE) {
-                hasValidLUT = true;
-                break;
-            }
-        }
-        
-        if (hasValidLUT) {
-            // Use stack allocation (fixed-size array) to ensure lifetime safety
-            VkDescriptorImageInfo lutImageInfos[4] = {};
-            for (int i = 0; i < 4; i++) {
-                if (m_lutImages[i].view != VK_NULL_HANDLE) {
-                    lutImageInfos[i].sampler = m_lutImages[i].sampler;
-                    lutImageInfos[i].imageView = m_lutImages[i].view;
-                    lutImageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                } else {
-                    lutImageInfos[i].sampler = VK_NULL_HANDLE;
-                    lutImageInfos[i].imageView = VK_NULL_HANDLE;
-                    lutImageInfos[i].imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-                }
-            }
-            
-            uint32_t validCount = 0;
-            for (int i = 0; i < 4; ++i) if (lutImageInfos[i].imageView != VK_NULL_HANDLE) ++validCount;
-            // validCount LUT(s) will be updated
-            if (validCount > 0) {
-                VkWriteDescriptorSet w8{};
-                w8.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                w8.dstSet = m_rtDescriptorSet;
-                w8.dstBinding = 8;
-                w8.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                w8.descriptorCount = validCount;
-                w8.pImageInfo = lutImageInfos;
-                vkUpdateDescriptorSets(m_device, 1, &w8, 0, nullptr);
-            }
-        }
-    }
+
+    writeRtAtmosphereDescriptors();
+    // The froxel samples the transmittance + sky-view LUTs. Both callers reach
+    // here after a device idle when the images changed, so no frame is using
+    // the froxel's descriptor set.
+    writeAerialFroxelLutDescriptors();
 }
+
+// Binding 8 of the RT set: [0..2] = LUT images, [3] = aerial froxel atlas.
+// ★ One element per write. The former single write of `validCount` contiguous
+//   elements put the atlas into slot [2] whenever an earlier LUT was missing --
+//   raygen would then have sampled the atlas as the multi-scatter LUT.
+void VulkanDevice::writeRtAtmosphereDescriptors() {
+    if (m_rtDescriptorSet == VK_NULL_HANDLE) return;
+    VkDescriptorImageInfo infos[4] = {};
+    VkWriteDescriptorSet writes[4] = {};
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < 4; ++i) {
+        const ImageHandle& img = (i == 3) ? m_aerialFroxel : m_lutImages[i];
+        if (img.view == VK_NULL_HANDLE || img.sampler == VK_NULL_HANDLE) continue;
+        infos[count].sampler = img.sampler;
+        infos[count].imageView = img.view;
+        // The atlas never leaves GENERAL (compute writes it every camera move).
+        infos[count].imageLayout = (i == 3) ? VK_IMAGE_LAYOUT_GENERAL
+                                            : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        writes[count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[count].dstSet = m_rtDescriptorSet;
+        writes[count].dstBinding = 8;
+        writes[count].dstArrayElement = i;
+        writes[count].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[count].descriptorCount = 1;
+        writes[count].pImageInfo = &infos[count];
+        ++count;
+    }
+    if (count > 0) vkUpdateDescriptorSets(m_device, count, writes, 0, nullptr);
+    // RayFusion cloud layer samples the same LUTs (same idle precondition).
+    writeCloudRasterLutDescriptors();
+}
+
 void VulkanDevice::clearImage(const ImageHandle& image, float r, float g, float b, float a) {
     if (!image.image) return;
 
@@ -6898,8 +6991,9 @@ bool VulkanDevice::traceRaysAndReadback(uint32_t w, uint32_t h,
     VkCommandBuffer cmd = beginSingleTimeCommands();
     if (cmd == VK_NULL_HANDLE) return false;
 
-    // ── 0. Photon caustic pass (if scheduled) — same-buffer recording, see
-    //       recordPhotonPass for the race rationale.
+    // ── 0. Aerial froxel + photon caustic pass (if scheduled) — same-buffer
+    //       recording, see recordPhotonPass for the race rationale.
+    recordAerialFroxelPass(cmd);
     recordPhotonPass(cmd);
 
     // ── 1. Bind pipeline + descriptors + push constants ───────────────────────
@@ -7668,7 +7762,9 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
 
         // ── 0. Photon caustic pass (if scheduled) — must precede the camera trace
         //       in the SAME command buffer so the grid clear/fill cannot race the
-        //       previous frame's in-flight camera reads.
+        //       previous frame's in-flight camera reads. The aerial froxel
+        //       follows the same rule (raygen samples it; so did the last frame).
+        recordAerialFroxelPass(cmd);
         recordPhotonPass(cmd);
 
         // ── 1. Trace ─────────────────────────────────────────────────────────
@@ -8322,7 +8418,6 @@ bool VulkanBackendAdapter::initialize() {
 
     if (ok) {
         m_forceClearOnNextPresent = true;
-        m_hasPresentedRenderedFrame = false;
         m_currentSamples = 0;
         m_testInitialized = false;
         m_device->m_rtPipelineReady = false;
@@ -10169,10 +10264,11 @@ void VulkanBackendAdapter::clearHairGeometry(bool rebuild_tlas) {
             tlasInfo.allowUpdate = false; // full rebuild when topology changes
             m_device->createTLAS(tlasInfo);
         } else {
-            // If the scene is completely empty, potentially clear TLAS and disable RT.
+            // Completely empty scene: an empty TLAS is still traceable (all rays
+            // miss -> GPU sky), so RT stays enabled.
             VulkanRT::TLASCreateInfo tlasInfo; // empty
             m_device->createTLAS(tlasInfo);
-            m_device->m_rtPipelineReady = false; 
+            m_device->m_rtPipelineReady = (m_device->m_rtPipeline != VK_NULL_HANDLE);
         }
         resetAccumulation();
     }
@@ -10450,10 +10546,11 @@ uint32_t VulkanBackendAdapter::uploadHairStrands(const std::vector<HairStrandDat
         tlasInfo.allowUpdate = false; // full rebuild when topology changes
         m_device->createTLAS(tlasInfo);
     } else {
-        // [VULKAN FIX] Even if empty, we MUST clear the TLAS and stop dispatcher
-        VulkanRT::TLASCreateInfo tlasInfo; 
+        // Empty scene: build an empty TLAS; it is still traceable (all rays
+        // miss -> GPU sky), so RT stays enabled.
+        VulkanRT::TLASCreateInfo tlasInfo;
         m_device->createTLAS(tlasInfo);
-        m_device->m_rtPipelineReady = false;
+        m_device->m_rtPipelineReady = (m_device->m_rtPipeline != VK_NULL_HANDLE);
     }
     resetAccumulation();
 
@@ -11495,6 +11592,9 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
             // slot: it is expecting a rebind, not gone. The slot publishes as
             // inactive until the grid returns, which costs nothing and cannot
             // show another volume's data.
+            // The only procedural VDB is the legacy sky-cloud volume, kept for OptiX/CPU
+            // (frozen). Vulkan draws clouds from CloudParams (bindings 30-35) instead.
+            if (vdb->isProceduralVolume()) return;
             const bool slot_worthy = vdb->isLoaded() || vdb->awaiting_live_rebind;
             // GATE 4 of 4 — no TLAS slot is created at all this rebuild.
             SCENE_LOG_ON_CHANGE("volslot." + vdb->name,
@@ -12060,10 +12160,17 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
 
     } else {
         SCENE_LOG_WARN("[Vulkan] updateGeometry: No valid geometry found in the scene.");
-        // [VULKAN FIX] Also clear TLAS and disable RT when empty to prevent crash
+        // Empty scene is traced, not skipped: an empty TLAS makes every ray miss,
+        // so the sky comes from the miss shader and accumulation converges. The
+        // old "disable RT" branch sent the adapter to a per-pixel CPU sky
+        // (presentBackgroundOnly, removed) that re-ran every frame: measured
+        // 161 ms/frame vs 2.5 ms with a single plane. Geometry/instance bindings
+        // are re-pointed at a live fallback so no descriptor names a freed buffer.
         VulkanRT::TLASCreateInfo emptyTlas;
         m_device->createTLAS(emptyTlas);
-        m_device->m_rtPipelineReady = false;
+        refreshVulkanGeometryDataBinding(m_device.get());
+        refreshVulkanInstanceDataBinding(m_device.get(), m_vkInstances);
+        m_device->m_rtPipelineReady = (m_device->m_rtPipeline != VK_NULL_HANDLE);
         resetAccumulation();
     }
 
@@ -15999,7 +16106,6 @@ bool VulkanBackendAdapter::refreshRasterScatterInstances() {
     // object never appeared in Solid until an unrelated path forced a rebuild.
     // The token means "generation of the last FULL build"; only a full build writes it.
     m_interactiveViewport.dirty = true;
-    m_hasPresentedRenderedFrame = false;
     m_lastCameraHash = 0;
     m_instancePreparationStats.gpuPathAvailable = true;
     m_instancePreparationStats.gpuPathUsedLastFrame = true;
@@ -16479,6 +16585,8 @@ void VulkanBackendAdapter::destroyInteractiveViewportResourcesImpl(bool keepPipe
 // asiri maliyetli", ikincisi VK_ERROR_DEVICE_LOST demekti.
 bool VulkanBackendAdapter::ensureAtmosphereLUTPipeline(const std::string& shaderDir) {
     if (!m_device || !m_device->isInitialized()) return false;
+    ensureAerialFroxelPipeline(shaderDir);
+    ensureCloudPipelines(shaderDir);
     if (m_device->hasAtmosphereLUTPipeline()) return true;
     if (m_atmosphereLutPipelineAttempted) return false;
     m_atmosphereLutPipelineAttempted = true;
@@ -16496,6 +16604,279 @@ bool VulkanBackendAdapter::ensureAtmosphereLUTPipeline(const std::string& shader
     SCENE_LOG_INFO("[Vulkan] Atmosphere LUT compute pipeline ready (" +
                    std::string(sceneTextureOwnerScope()) + ").");
     return true;
+}
+
+// Aerial froxel compute pipeline + atlas (one attempt per adapter). Separate
+// from the LUT pipeline on purpose: height fog needs the froxel in every world
+// mode; only the Nishita air term needs the LUTs.
+bool VulkanBackendAdapter::ensureAerialFroxelPipeline(const std::string& shaderDir) {
+    if (!m_device || !m_device->isInitialized()) return false;
+    if (m_device->hasAerialFroxel()) return true;
+    if (m_aerialFroxelPipelineAttempted) return false;
+    m_aerialFroxelPipelineAttempted = true;
+
+    const std::string spvPath = shaderDir + "/atmosphere_aerial_froxel.spv";
+    if (!std::filesystem::exists(spvPath)) {
+        SCENE_LOG_WARN("[Vulkan] atmosphere_aerial_froxel.spv not found: no aerial perspective or "
+                       "height fog on this device. Run compile_shaders.bat.");
+        return false;
+    }
+    std::vector<std::uint32_t> spv = loadSPV(spvPath);
+    if (spv.empty() || !m_device->createAerialFroxelPipeline(spv)) {
+        SCENE_LOG_ERROR("[Vulkan] Failed to create the aerial froxel pipeline: no aerial "
+                        "perspective or height fog on this device.");
+        return false;
+    }
+    m_aerialFroxelInputHash = 0;
+    m_aerialFroxelFlagUploaded = -1; // world buffer still says "no froxel"
+    SCENE_LOG_INFO("[Vulkan] Aerial froxel pipeline ready (" +
+                   std::string(sceneTextureOwnerScope()) + ").");
+    return true;
+}
+
+// ── Clouds (Faz 3a) ─────────────────────────────────────────────────────────
+bool VulkanBackendAdapter::ensureCloudPipelines(const std::string& shaderDir) {
+    if (!m_device || !m_device->isInitialized()) return false;
+    if (m_device->hasCloudResources()) return true;
+    if (m_cloudPipelineAttempted) return false;
+    m_cloudPipelineAttempted = true;
+
+    const std::string noisePath = shaderDir + "/cloud_noise.spv";
+    const std::string samplePath = shaderDir + "/cloud_sample.spv";
+    if (!std::filesystem::exists(noisePath) || !std::filesystem::exists(samplePath)) {
+        SCENE_LOG_WARN("[Vulkan] cloud_noise.spv / cloud_sample.spv not found: no cloud field on "
+                       "this device. Run compile_shaders.bat.");
+        return false;
+    }
+    std::vector<std::uint32_t> noise = loadSPV(noisePath);
+    std::vector<std::uint32_t> sample = loadSPV(samplePath);
+    if (noise.empty() || sample.empty() || !m_device->createCloudPipelines(noise, sample)) {
+        SCENE_LOG_ERROR("[Vulkan] Failed to create the cloud pipelines: no cloud field on this device.");
+        return false;
+    }
+    SCENE_LOG_INFO("[Vulkan] Cloud pipelines ready (" + std::string(sceneTextureOwnerScope()) + ").");
+    // RayFusion layer: optional -- RT clouds work without it.
+    const std::string rasterPath = shaderDir + "/cloud_raster.spv";
+    std::vector<std::uint32_t> raster = std::filesystem::exists(rasterPath) ? loadSPV(rasterPath)
+                                                                            : std::vector<std::uint32_t>{};
+    if (raster.empty() || !m_device->createCloudRasterPipeline(raster)) {
+        SCENE_LOG_WARN("[Vulkan] cloud_raster pipeline unavailable: RayFusion draws no clouds.");
+    } else {
+        const std::string shadowPath = shaderDir + "/cloud_shadow.spv";
+        std::vector<std::uint32_t> shadow = std::filesystem::exists(shadowPath) ? loadSPV(shadowPath)
+                                                                                : std::vector<std::uint32_t>{};
+        if (shadow.empty() || !m_device->createCloudShadowPipeline(shadow))
+            SCENE_LOG_WARN("[Vulkan] cloud_shadow pipeline unavailable: RayFusion clouds cast no shadow.");
+    }
+    // Re-publish the last state: the render flag can only turn on now that
+    // the textures can be generated, and a static world sends no new sync.
+    if (m_cloudStateSet) {
+        const atmosphere::CloudState clouds = m_cachedClouds;
+        setCloudState(clouds, m_cloudTime, m_cloudDrift, m_cloudWind);
+    }
+    return true;
+}
+
+void VulkanBackendAdapter::setCloudState(const atmosphere::CloudState& clouds, float time_seconds,
+                                         const Vec3& drift_m, const Vec3& wind_mps) {
+    // Cloud time is not part of WorldData, so a playing timeline changes the
+    // sky without changing the world block: progressive accumulation must be
+    // reset here, or the RT image keeps the old sky (clouds look frozen).
+    const bool skyMoved = m_cloudRtRendering &&
+        (time_seconds != m_cloudTime || drift_m.x != m_cloudDrift.x || drift_m.z != m_cloudDrift.z);
+    m_cachedClouds = clouds;
+    m_cloudTime = time_seconds;
+    m_cloudDrift = drift_m;
+    m_cloudWind = wind_mps;
+    if (skyMoved) resetAccumulation();
+    m_cloudStateSet = true;
+    ++m_cloudStateUpdates;
+    syncCloudResources();
+    if (!m_device || !m_device->isInitialized()) return;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // RT render flag: only a Nishita sky has clouds, and only once this
+    // device's textures hold the current field (never uninitialised memory).
+    Backend::CloudParamsGPU p = cloudParamsGPU();
+    const bool render = m_cachedWorld.mode == WORLD_MODE_NISHITA && m_cachedClouds.anyEnabled() &&
+                        m_device->m_cloudNoiseReady && m_device->m_cloudWeatherHash != 0;
+    p.misc[3] += render ? 1.0f : 0.0f;
+    m_device->updateCloudRtParams(p);
+    if (render != m_cloudRtRendering) {
+        m_cloudRtRendering = render;
+        resetAccumulation();
+    }
+}
+
+// RayFusion cloud layer (Faz 3c). Recorded OUTSIDE the render pass, before
+// the sky pass that composites it (binding 25 of the material-preview set).
+void VulkanBackendAdapter::recordCloudRasterPass(VkCommandBuffer cmd, uint32_t width, uint32_t height) {
+    m_cloudRasterWritten = false;
+    if (!m_device || cmd == VK_NULL_HANDLE || width == 0 || height == 0 || !m_cloudRtRendering ||
+        m_camera.orthographic || m_viewportMode != ViewportMode::MaterialPreview ||
+        m_device->m_cloudRasterPipeline == VK_NULL_HANDLE ||
+        m_interactiveViewport.materialPreviewDescSet == VK_NULL_HANDLE)
+        return;
+    const uint32_t div = static_cast<uint32_t>(std::clamp(m_cachedClouds.quality.realtime_resolution_divisor, 1, 8));
+    const uint32_t w = (std::max)(1u, width / div), h = (std::max)(1u, height / div);
+    const bool targetsRecreated = m_device->ensureCloudRasterTargets(w, h);
+    // ★ The material-preview set is REALLOCATED when the viewport pipeline is
+    //   rebuilt (a gas/fluid domain entering the scene does it). A new set has
+    //   no bindings 25-27: the sky then read an unwritten descriptor and went
+    //   black for the rest of the session. Rebind on either change.
+    if (m_device->m_cloudRasterW != 0 &&
+        (targetsRecreated || m_cloudBoundPreviewSet != m_interactiveViewport.materialPreviewDescSet)) {
+        m_cloudShadowBound = false;
+        // The material-preview set is shared with frames in flight.
+        drainInteractiveViewportInFlight();
+        VkDescriptorImageInfo ii{m_device->m_cloudRasterOut.sampler, m_device->m_cloudRasterOut.view,
+                                 VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet wr{};
+        wr.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wr.dstSet = m_interactiveViewport.materialPreviewDescSet;
+        wr.dstBinding = 25;
+        wr.descriptorCount = 1;
+        wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wr.pImageInfo = &ii;
+        vkUpdateDescriptorSets(m_device->getDevice(), 1, &wr, 0, nullptr);
+        // 26/27: cloud shadow map + the frame block (sun, map centre).
+        if (m_device->m_cloudShadowMap.view) {
+            VkDescriptorImageInfo si{m_device->m_cloudShadowMap.sampler, m_device->m_cloudShadowMap.view,
+                                     VK_IMAGE_LAYOUT_GENERAL};
+            VkDescriptorBufferInfo fb{m_device->m_cloudRasterFrameBuf.buffer, 0,
+                                      sizeof(Backend::CloudRasterFrameGPU)};
+            VkWriteDescriptorSet sw[2]{};
+            for (int i = 0; i < 2; ++i) {
+                sw[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                sw[i].dstSet = m_interactiveViewport.materialPreviewDescSet;
+                sw[i].dstBinding = 26u + uint32_t(i);
+                sw[i].descriptorCount = 1;
+            }
+            sw[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            sw[0].pImageInfo = &si;
+            sw[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            sw[1].pBufferInfo = &fb;
+            vkUpdateDescriptorSets(m_device->getDevice(), 2, sw, 0, nullptr);
+            m_cloudShadowBound = true;
+        }
+        m_cloudBoundPreviewSet = m_interactiveViewport.materialPreviewDescSet;
+        m_cloudRasterHistoryValid = false;
+    }
+    if (m_device->m_cloudRasterW == 0) return;
+
+    Backend::CloudRasterFrameGPU f{};
+    const auto& n = m_cachedWorld.nishita;
+    f.sunDir[0] = n.sun_direction.x; f.sunDir[1] = n.sun_direction.y; f.sunDir[2] = n.sun_direction.z;
+    f.sunIntensity = n.sun_intensity;
+    f.atmosphereHeight = n.atmosphere_height;
+    f.lutReady = (m_atmosphereLutReady && m_device->m_lutImages[0].view && m_device->m_lutImages[1].view) ? 1 : 0;
+    {
+        const float texel = Backend::kCloudShadowExtentM / static_cast<float>(Backend::kCloudShadowMapSize);
+        f.shadowCenter[0] = std::floor(m_camera.origin.x / texel) * texel;
+        f.shadowCenter[1] = std::floor(m_camera.origin.z / texel) * texel;
+    }
+    const Vec3 fwd = (m_camera.lookAt - m_camera.origin).normalize();
+    const Vec3 right = Vec3::cross(fwd, m_camera.up).normalize();
+    const Vec3 up = Vec3::cross(right, fwd);
+    const float fov = std::clamp(static_cast<float>(m_camera.fov), 1.0f, 179.0f);
+    auto put = [](float* o, const Vec3& v, float w4) { o[0] = v.x; o[1] = v.y; o[2] = v.z; o[3] = w4; };
+    put(f.camPos, m_camera.origin, std::tan(fov * 0.5f * 3.14159265358979f / 180.0f));
+    put(f.camRight, right, static_cast<float>(width) / static_cast<float>(height));
+    // Clouds move with the wind: the history must be fetched where the cloud
+    // WAS, or a drifting sky reads as frozen under long accumulation.
+    const float driftDx = m_cloudDrift.x - m_cloudRasterPrevDrift.x;
+    const float driftDz = m_cloudDrift.z - m_cloudRasterPrevDrift.z;
+    m_cloudRasterPrevDrift = m_cloudDrift;
+    put(f.camUp, up, driftDx);
+    // History is dropped when the clouds or the sun change (not for drift:
+    // reprojection follows it closely enough between frames).
+    Backend::CloudParamsGPU key = cloudParamsGPU();
+    key.wind[0] = key.wind[1] = 0.0f;
+    key.weather[2] = 0.0f;
+    uint64_t hsh = 1469598103934665603ull;
+    auto mix = [&](const void* p, size_t bytes) {
+        const unsigned char* c = static_cast<const unsigned char*>(p);
+        for (size_t i = 0; i < bytes; ++i) { hsh ^= c[i]; hsh *= 1099511628211ull; }
+    };
+    mix(&key, sizeof(key));
+    mix(f.sunDir, sizeof(f.sunDir) + sizeof(f.sunIntensity));
+    if (hsh != m_cloudRasterKey) { m_cloudRasterKey = hsh; m_cloudRasterHistoryValid = false; }
+    put(f.camFwd, fwd, m_cloudRasterHistoryValid ? 1.0f : 0.0f);
+    std::memcpy(f.prevPos, m_cloudRasterPrev.camPos, sizeof(float) * 16);
+    f.prevUp[3] = driftDz;
+    f.info[0] = w; f.info[1] = h; f.info[2] = m_cloudRasterFrame++;
+    f.info[3] = static_cast<uint32_t>(std::clamp(m_cachedClouds.quality.realtime_steps, 16, 512));
+    m_device->recordCloudRaster(cmd, f);
+    std::memcpy(m_cloudRasterPrev.camPos, f.camPos, sizeof(float) * 16);
+    m_cloudRasterHistoryValid = true;
+    m_cloudRasterWritten = true;
+}
+
+bool VulkanBackendAdapter::syncCloudResources() {
+    if (!m_device || !m_device->hasCloudResources() || !m_cloudStateSet) return false;
+    // A clear sky builds nothing: ~20 MB of textures and a few ms of compute
+    // are not paid by scenes that never turn a layer on.
+    if (!m_cachedClouds.anyEnabled()) return false;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    return m_device->generateCloudNoise() &&
+           m_device->generateCloudWeather(Backend::makeCloudWeatherGenParams(m_cachedClouds));
+}
+
+Backend::CloudParamsGPU VulkanBackendAdapter::cloudParamsGPU() const {
+    return Backend::makeCloudParamsGPU(m_cachedClouds, m_cloudTime, m_cloudDrift, m_cloudWind,
+                                       m_cachedWorld.nishita.planet_radius,
+                                       m_cachedWorld.nishita.altitude);
+}
+
+bool VulkanBackendAdapter::sampleClouds(uint32_t mode, uint32_t steps,
+                                        const std::vector<Backend::CloudQueryGPU>& queries,
+                                        std::vector<float>& out, std::string& why) {
+    out.clear();
+    if (!m_device || !m_device->isInitialized()) { why = "no Vulkan device"; return false; }
+    if (!m_device->hasCloudResources()) {
+        why = "cloud pipelines unavailable on this device (compile_shaders.bat?)";
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_device->generateCloudNoise() ||
+        !m_device->generateCloudWeather(Backend::makeCloudWeatherGenParams(m_cachedClouds))) {
+        why = "cloud texture generation failed";
+        return false;
+    }
+    if (!m_device->sampleClouds(cloudParamsGPU(), mode, steps, queries, out)) {
+        why = "cloud sample dispatch failed";
+        return false;
+    }
+    return true;
+}
+
+bool VulkanBackendAdapter::syncAerialFroxel(const CameraImagePlane& plane, bool world_buffer_reads_flag) {
+    m_aerialFroxelActive = false;
+    if (!m_device || !m_device->isInitialized() || !m_device->hasAerialFroxel()) return false;
+
+    const WorldData& wd = m_cachedWorld;
+    if (aerialFroxelWanted(wd)) {
+        // Air needs this adapter's own LUTs (two devices, two LUT sets); without
+        // them the froxel still carries the fog, lit flat.
+        const bool lutLit = wd.mode == WORLD_MODE_NISHITA && m_atmosphereLutReady &&
+                            m_device->m_lutImages[0].view != VK_NULL_HANDLE &&
+                            m_device->m_lutImages[1].view != VK_NULL_HANDLE;
+        const AtmosphereLUTParamsGPU atmosphere = makeAtmosphereLUTParamsGPU(wd);
+        const AerialFroxelParamsGPU froxel = makeAerialFroxelParamsGPU(wd, plane, lutLit);
+        const uint64_t inputs = hashAerialFroxelInputs(&atmosphere, sizeof(atmosphere),
+                                                       &froxel, sizeof(froxel));
+        if (inputs != m_aerialFroxelInputHash || !m_device->m_aerialFroxelBuilt) {
+            m_device->scheduleAerialFroxel(atmosphere, froxel);
+            m_aerialFroxelInputHash = inputs;
+        }
+        m_aerialFroxelActive = true;
+    }
+    // The RT raygen reads the "froxel readable" flag from the world buffer.
+    // It flips rarely (pipeline created, fog/aerial toggled), so re-uploading
+    // the world on a flip is cheap; not doing it leaves raygen blind to a
+    // froxel that exists, or reading one that does not.
+    const int wanted = m_aerialFroxelActive ? 1 : 0;
+    if (world_buffer_reads_flag && wanted != m_aerialFroxelFlagUploaded) setWorldData(&m_cachedWorld);
+    return m_aerialFroxelActive;
 }
 
 bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::string& shaderDir, int width, int height) {
@@ -16881,7 +17262,7 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                         : 1u;
                     m_interactiveViewport.materialPreviewTextureArrayLen = mpTextureArrayLen;
 
-                    VkDescriptorSetLayoutBinding mpDslBindings[25]{};
+                    VkDescriptorSetLayoutBinding mpDslBindings[28]{};
                     mpDslBindings[0].binding = 0;
                     mpDslBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[0].descriptorCount = 1;
@@ -16969,6 +17350,22 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                         mpDslBindings[binding].descriptorCount = 1;
                         mpDslBindings[binding].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
                     }
+                    // binding 25: RayFusion cloud layer (cloud_raster.comp output: rgb
+                    // in-scatter, a transmittance). Partially bound -- the sky pass reads
+                    // it only when the push flag says it was written this session.
+                    mpDslBindings[25].binding = 25;
+                    mpDslBindings[25].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    mpDslBindings[25].descriptorCount = 1;
+                    mpDslBindings[25].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    // 26/27: RayFusion cloud shadow map + its frame block (sun, centre).
+                    mpDslBindings[26].binding = 26;
+                    mpDslBindings[26].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    mpDslBindings[26].descriptorCount = 1;
+                    mpDslBindings[26].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[27].binding = 27;
+                    mpDslBindings[27].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[27].descriptorCount = 1;
+                    mpDslBindings[27].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
                     // Guard: check device push-constant limit before touching descriptor/pipeline layout.
                     // Some older drivers crash inside vkCreateDescriptorSetLayout or vkCreatePipelineLayout
@@ -16984,18 +17381,21 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
 
                     VkDescriptorSetLayoutCreateInfo mpDslci{};
                     mpDslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-                    mpDslci.bindingCount = 25;
+                    mpDslci.bindingCount = 28;
                     mpDslci.pBindings = mpDslBindings;
-                    VkDescriptorBindingFlags mpBindingFlags[25] = {
+                    VkDescriptorBindingFlags mpBindingFlags[28] = {
                         0,
                         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,
                         0,
                         0,
                         0
                     };
+                    mpBindingFlags[25] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+                    mpBindingFlags[26] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+                    mpBindingFlags[27] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
                     VkDescriptorSetLayoutBindingFlagsCreateInfo mpBindingFlagsCI{};
                     mpBindingFlagsCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-                    mpBindingFlagsCI.bindingCount = 25;
+                    mpBindingFlagsCI.bindingCount = 28;
                     mpBindingFlagsCI.pBindingFlags = mpBindingFlags;
                     mpDslci.pNext = &mpBindingFlagsCI;
                     if (mpPushOk) {
@@ -17010,9 +17410,9 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     // + 5 (sahne isiklari) + 6 (onizleme sahne globalleri)
                     // + 7 (shadow records) + 16 (material graph program)
                     // + 20 (volume table) + 21/22 (RayFusion probe alani + izgara)
-                    mpPoolSizes[0].descriptorCount = 12;
+                    mpPoolSizes[0].descriptorCount = 13;
                     mpPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                    mpPoolSizes[1].descriptorCount = mpTextureArrayLen + 12u;
+                    mpPoolSizes[1].descriptorCount = mpTextureArrayLen + 14u;
                     mpPoolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
                     mpPoolSizes[2].descriptorCount = 1;
                     VkDescriptorPoolCreateInfo mpDpci{};
@@ -17584,6 +17984,9 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
         return;
     }
     recordMaterialPreviewShadowPass(cmd);
+    // Clouds (Faz 3c): compute, so before the render pass; the sky pass
+    // composites the result.
+    recordCloudRasterPass(cmd, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
 
     VkClearValue clearValues[2]{};
     // Use World's solid background color for the raster viewport clear
@@ -17811,10 +18214,14 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
             static_cast<uint32_t>(height));
     } else if (m_viewportMode == ViewportMode::Solid ||
                m_viewportMode == ViewportMode::Matcap) {
-        recordMaterialPreviewVolumePass(
+        // Surface FIRST: it writes depth, and the volume pass depth-tests its
+        // first-contribution depth (gl_FragDepth) against it. Drawn the other
+        // way round the volume writes no depth, so the SDF/proxy surface
+        // painted over gas standing in front of it.
+        recordMaterialPreviewSdfSurfacePass(
             cmd, viewProj, view, static_cast<uint32_t>(width),
             static_cast<uint32_t>(height), false);
-        recordMaterialPreviewSdfSurfacePass(
+        recordMaterialPreviewVolumePass(
             cmd, viewProj, view, static_cast<uint32_t>(width),
             static_cast<uint32_t>(height), false);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -18280,94 +18687,6 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
     s_idlePresentValid = false;      // actively accumulating — every frame repaints
     m_tonemapRefreshPending = false; // still accumulating: normal frames repaint anyway
 
-    auto presentBackgroundOnly = [&]() {
-        std::vector<uint32_t>* framebuffer = static_cast<std::vector<uint32_t>*>(fb);
-        const size_t count = (size_t)width * (size_t)height;
-        if (framebuffer->size() != count) {
-            framebuffer->resize(count);
-        }
-
-        static SDL_PixelFormat* fmt = SDL_AllocFormat(SDL_PIXELFORMAT_RGBA32);
-        static std::unique_ptr<World> fallbackWorld;
-        static uint64_t fallbackWorldHash = 0;
-        auto hashWorld = [](const WorldData& wd) -> uint64_t {
-            const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&wd);
-            uint64_t h = 1469598103934665603ull;
-            for (size_t i = 0; i < sizeof(WorldData); ++i) {
-                h ^= bytes[i];
-                h *= 1099511628211ull;
-            }
-            return h;
-        };
-        uint64_t currentHash = hashWorld(m_cachedWorld);
-        if (!fallbackWorld || fallbackWorldHash != currentHash) {
-            fallbackWorld = std::make_unique<World>();
-            fallbackWorld->data = m_cachedWorld;
-            if (fallbackWorld->data.mode == WORLD_MODE_NISHITA) {
-                fallbackWorld->initializeLUT();
-            }
-            fallbackWorldHash = currentHash;
-        }
-
-        float aspect = (height > 0) ? ((float)width / (float)height) : 1.0f;
-        float fov = this->m_camera.fov > 1.0f ? this->m_camera.fov : 60.0f;
-        float h_half = tanf(fov * 0.5f * 3.14159f / 180.0f);
-        float viewport_h = 2.0f * h_half;
-        float viewport_w = aspect * viewport_h;
-
-        Vec3 lookFrom = this->m_camera.origin;
-        Vec3 lookAt = this->m_camera.lookAt;
-        if ((lookFrom - lookAt).length() < 0.0001f) {
-            lookAt = lookFrom + Vec3(0.0f, 0.0f, -1.0f);
-        }
-        Vec3 camW = (lookFrom - lookAt).normalize();
-        Vec3 camU = Vec3::cross(this->m_camera.up, camW).normalize();
-        if (camU.length() < 0.0001f) camU = Vec3(1.0f, 0.0f, 0.0f);
-        Vec3 camV = Vec3::cross(camW, camU);
-        float focus_dist = this->m_camera.focusDistance > 0.001f ? this->m_camera.focusDistance : 1.0f;
-        Vec3 horizontal = focus_dist * viewport_w * camU;
-        Vec3 vertical = focus_dist * viewport_h * camV;
-        Vec3 lowerLeft = lookFrom - horizontal * 0.5f - vertical * 0.5f - focus_dist * camW;
-
-        auto sanitize = [](float v) -> float {
-            if (std::isnan(v)) return 0.0f;
-            if (std::isinf(v)) return (v > 0.0f) ? 65504.0f : 0.0f;
-            return std::max(v, 0.0f);
-        };
-
-        uint32_t* fbData = framebuffer->data();
-        for (int j = 0; j < height; ++j) {
-            for (int i = 0; i < width; ++i) {
-                float u = ((float)i + 0.5f) / (float)width;
-                float v = 1.0f - (((float)j + 0.5f) / (float)height);
-                Vec3 dir = (lowerLeft + u * horizontal + v * vertical - lookFrom).normalize();
-                Vec3 c = fallbackWorld->evaluate(dir, lookFrom) * m_cachedWorld.color_intensity;
-                float rr = sanitize(c.x);
-                float gg = sanitize(c.y);
-                float bb = sanitize(c.z);
-                rr = rr / (rr + 1.0f);
-                gg = gg / (gg + 1.0f);
-                bb = bb / (bb + 1.0f);
-                const uint8_t ri = linearToSRGB8Fast(rr);
-                const uint8_t gi = linearToSRGB8Fast(gg);
-                const uint8_t bi = linearToSRGB8Fast(bb);
-                size_t idx = (size_t)j * (size_t)width + (size_t)i;
-                fbData[idx] = SDL_MapRGB(fmt, ri, gi, bi);
-            }
-        }
-
-        // Bulk copy framebuffer → SDL surface (single memcpy instead of per-pixel write)
-        if (s) {
-            SDL_Surface* outSurf = static_cast<SDL_Surface*>(s);
-            if (outSurf && outSurf->pixels && outSurf->w == width && outSurf->h == height) {
-                std::memcpy(outSurf->pixels, fbData, count * sizeof(uint32_t));
-            }
-        }
-        if (tex) {
-            SDL_UpdateTexture(static_cast<SDL_Texture*>(tex), nullptr, fbData, width * 4);
-        }
-    };
-
     // If a reset requested immediate UI clear, wipe the provided framebuffer/texture now.
     // In RT Rendered mode this can cause a white/blank viewport if the next frame
     // temporarily skips tracing (for example while TLAS/RT readiness catches up after
@@ -18421,7 +18740,6 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
 
     // 1. Recreate output image if size changed
     if (m_imageWidth != width || m_imageHeight != height) {
-        m_hasPresentedRenderedFrame = false;
         if (m_outputImage.image) m_device->destroyImage(m_outputImage);
         if (m_varianceImage.image) m_device->destroyImage(m_varianceImage);
         if (m_stagingBuffer.buffer) m_device->destroyBuffer(m_stagingBuffer);
@@ -18819,14 +19137,9 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
     // Safety: ensure pipeline is actually built and TLAS exist before proceeding to trace.
     // Preserve the last valid host-side frame while RT resources catch up after
     // camera/backend changes.
+    // An empty scene is NOT this case: it has an empty TLAS and is traced.
     if (!m_device->isRTReady() || !m_device->hasTLAS()) {
-        // [FIX] Render world/sky background so the user sees the environment
-        // instead of stale Solid-mode grey pixels while the RT pipeline builds.
-        if (m_hasPresentedRenderedFrame) {
-            rePresentCachedFrame();
-        } else {
-            presentBackgroundOnly();
-        }
+        rePresentCachedFrame();
         return;
     }
     if (m_forceClearOnNextPresent && !allowImmediateHostClear) {
@@ -18899,34 +19212,19 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
 
     CameraPushConstants pushConst{};
     
-    // Calculate camera vectors from m_camera
-    float fov = this->m_camera.fov > 1.0f ? this->m_camera.fov : 60.0f;
-    float aspect = (float)width / (float)height;
-    float h_half = tanf(fov * 0.5f * 3.14159f / 180.0f);
-    float viewport_height = 2.0f * h_half;
-    float viewport_width = aspect * viewport_height;
-
-    // Use stored camera vectors or defaults
-    Vec3 lookFrom = this->m_camera.origin;
-    Vec3 lookAt = this->m_camera.lookAt;
-    Vec3 vup = this->m_camera.up;
-
-    // Safety fallback for empty/default camera
-    if ((lookFrom - lookAt).length() < 0.0001f) {
-        lookFrom = Vec3(0, 0, 5);
-        lookAt = Vec3(0, 0, 0);
-        vup = Vec3(0, 1, 0);
-    }
-
-    Vec3 camW = (lookFrom - lookAt).normalize();
-    Vec3 camU = vup.cross(camW).normalize();
-    Vec3 camV = camW.cross(camU);
-
-    // [FOCUS FIX] Vectors must be scaled by focusDistance for correct DOF projection
-    float focus_dist = this->m_camera.focusDistance > 0.001f ? this->m_camera.focusDistance : 1.0f;
-    Vec3 horizontal = camU * viewport_width * focus_dist;
-    Vec3 vertical = camV * viewport_height * focus_dist;
-    Vec3 lower_left_corner = lookFrom - horizontal * 0.5f - vertical * 0.5f - camW * focus_dist;
+    // Camera image plane from m_camera. ★ ONE formula (AerialFroxelParams.h),
+    // shared with the RayFusion aerial froxel: raygen projects hit directions
+    // back onto THIS plane to read the froxel, so a second plane formula would
+    // put the two backends' haze in different cells off-centre.
+    // [FOCUS FIX] The plane sits at the focus distance for correct DOF projection.
+    const float aspect = (float)width / (float)height;
+    const float focus_dist = this->m_camera.focusDistance > 0.001f ? this->m_camera.focusDistance : 1.0f;
+    const CameraImagePlane camPlane = makeCameraImagePlane(this->m_camera, aspect, focus_dist);
+    const Vec3 lookFrom = camPlane.origin;
+    const Vec3 horizontal = camPlane.horizontal;
+    const Vec3 vertical = camPlane.vertical;
+    const Vec3 lower_left_corner = camPlane.lowerLeft;
+    const Vec3 lookAt = lower_left_corner + horizontal * 0.5f + vertical * 0.5f; // on the view axis
 
     pushConst.origin[0] = lookFrom.x; pushConst.origin[1] = lookFrom.y; pushConst.origin[2] = lookFrom.z; pushConst.origin[3] = 1.0f;
     pushConst.horizontal[0] = horizontal.x; pushConst.horizontal[1] = horizontal.y; pushConst.horizontal[2] = horizontal.z; pushConst.horizontal[3] = 0.0f;
@@ -19094,6 +19392,10 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
     this->m_hasPrevView = true;
 
     m_device->setPushConstants(&pushConst, sizeof(CameraPushConstants));
+
+    // Aerial froxel: rebuilt only when the plane or the medium changed; the
+    // dispatch itself is recorded into this frame's trace command buffer.
+    syncAerialFroxel(camPlane);
 
     // 3. Trace Rays
         if (m_device->isRTReady() && m_device->hasTLAS()) {
@@ -19328,29 +19630,19 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             m_tonemappedFrameSlot = consumeSlot;
 
             if (!submitted && !consumed) {
-                // First-call seed failed or both slots empty — present background.
-                if (m_hasPresentedRenderedFrame) {
-                    rePresentCachedFrame();
-                } else {
-                    presentBackgroundOnly();
-                }
+                // First-call seed failed or both slots empty — keep last frame.
+                rePresentCachedFrame();
                 return;
             }
             if (!consumed) {
                 // First successful submit but nothing to display yet — keep last frame.
-                if (m_hasPresentedRenderedFrame) {
-                    rePresentCachedFrame();
-                } else {
-                    presentBackgroundOnly();
-                }
+                rePresentCachedFrame();
                 this->m_currentSamples++;
-                m_hasPresentedRenderedFrame = true;
                 return;
             }
             // Fast path complete — staging consumed, surface/texture updated. Skip the
             // legacy HDR processing chain entirely.
             this->m_currentSamples++;
-            m_hasPresentedRenderedFrame = true;
             return;
         }
 
@@ -19358,11 +19650,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         // is unavailable (shader load failed, alloc failed, etc).
         bool traceOK = m_device->traceRaysAndReadback(width, height, m_outputImage, m_stagingBuffer);
         if (!traceOK) {
-            if (m_hasPresentedRenderedFrame) {
-                rePresentCachedFrame();
-            } else {
-                presentBackgroundOnly();
-            }
+            rePresentCachedFrame();
             return;
         }
         m_volumeTemporal.advance();
@@ -19443,20 +19731,15 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         }
 
         this->m_currentSamples++;
-        m_hasPresentedRenderedFrame = true;
 
        
         if (m_statusCallback) {
            // m_statusCallback("Vulkan Progressive Rendering (" + std::to_string(m_currentSamples) + " samples)", m_currentSamples);
         }
     } else {
-        // [FIX] RT pipeline or TLAS not ready yet — show background (sky) instead
-        // of returning without writing anything (which caused black screen).
-        if (m_hasPresentedRenderedFrame) {
-            rePresentCachedFrame();
-        } else {
-            presentBackgroundOnly();
-        }
+        // RT pipeline or TLAS not ready yet (device init / BLAS teardown) —
+        // re-present the last frame (deterministic black before the first one).
+        rePresentCachedFrame();
     }
 }
 
@@ -20171,19 +20454,6 @@ void VulkanBackendAdapter::setSkyParams() {}
 
 void VulkanBackendAdapter::uploadAtmosphereLUT(const AtmosphereLUT* lut) {
     if (!m_device || !m_device->isInitialized()) return;
-    // Gunes tonu icin gereken tek satiri KOPYALA (bkz. VulkanBackend.h).
-    if (lut) {
-        const auto& host = lut->getHostTransmittance();
-        if (host.size() >= static_cast<size_t>(TRANSMITTANCE_LUT_W)) {
-            m_atmosphereTransmittanceRow0.resize(static_cast<size_t>(TRANSMITTANCE_LUT_W) * 3u);
-            for (int i = 0; i < TRANSMITTANCE_LUT_W; ++i) {
-                m_atmosphereTransmittanceRow0[i * 3 + 0] = host[i].x;
-                m_atmosphereTransmittanceRow0[i * 3 + 1] = host[i].y;
-                m_atmosphereTransmittanceRow0[i * 3 + 2] = host[i].z;
-            }
-        }
-    }
-
     // ★★★ Ucustaki bir raster karesi bu goruntuleri hala ornekliyor olabilir ve
     //   descriptor'lari (binding 8 / material preview LUT slotlari) hala onlara
     //   isaret ediyor. Once yok edip sonra yenisini kurmak, GPU'nun altindan
@@ -20269,7 +20539,7 @@ void VulkanBackendAdapter::uploadAtmosphereLUT(const AtmosphereLUT* lut) {
     lutImgs[1] = upload2D(lut->getHostSkyView(), SKYVIEW_LUT_W, SKYVIEW_LUT_H, true);
     lutImgs[2] = upload2D(lut->getHostMultiScatter(), MULTI_SCATTER_LUT_RES, MULTI_SCATTER_LUT_RES, false);
 
-    // Currently skipping 3D aerial perspective LUT upload
+    // Slot [3] is the aerial froxel atlas, not an uploaded LUT (m_aerialFroxel).
 
     m_device->updateAtmosphereLUTs(lutImgs);
     // Updated device with new LUT images
@@ -20423,8 +20693,8 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
     gw.rayleighDensity = wd->nishita.rayleigh_density;
     gw.mieDensity = wd->nishita.mie_density;
     
-    gw.humidity = wd->nishita.humidity;
-    gw.temperature = wd->nishita.temperature;
+    gw.humidity = wd->nishita.derived_relative_humidity;
+    gw.temperature = wd->nishita.derived_temperature_c;
     gw.ozoneAbsorptionScale = wd->nishita.ozone_absorption_scale;
     gw.atmosphereIntensity = wd->nishita.atmosphere_intensity;
 
@@ -20442,44 +20712,6 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
     // (AERIAL PERSPECTIVE bloğunun altında) yapılıyor.
 
     // ═════════════════════════════════════════════════════════════════
-    // CLOUD LAYER 1 PARAMETERS
-    // ═════════════════════════════════════════════════════════════════
-    // Legacy sky-shader clouds are disabled. Sky cloud UI now drives an internal
-    // procedural VDBVolume, so Vulkan sees clouds through the volume pipeline.
-    gw.cloudsEnabled = 0;
-    gw.cloudCoverage = wd->nishita.cloud_coverage;
-    gw.cloudDensity = wd->nishita.cloud_density;
-    gw.cloudScale = wd->nishita.cloud_scale;
-    
-    gw.cloudHeightMin = wd->nishita.cloud_height_min;
-    gw.cloudHeightMax = wd->nishita.cloud_height_max;
-    gw.cloudOffsetX = wd->nishita.cloud_offset_x;
-    gw.cloudOffsetZ = wd->nishita.cloud_offset_z;
-    
-    gw.cloudQuality = wd->nishita.cloud_quality;
-    gw.cloudDetail = wd->nishita.cloud_detail;
-    gw.cloudBaseSteps = wd->nishita.cloud_base_steps;
-    gw.cloudLightSteps = wd->nishita.cloud_light_steps;
-    
-    gw.cloudShadowStrength = wd->nishita.cloud_shadow_strength;
-    gw.cloudAmbientStrength = wd->nishita.cloud_ambient_strength;
-    gw.cloudSilverIntensity = wd->nishita.cloud_silver_intensity;
-    gw.cloudAbsorption = wd->nishita.cloud_absorption;
-
-    // ═════════════════════════════════════════════════════════════════
-    // ADVANCED CLOUD SCATTERING
-    // ═════════════════════════════════════════════════════════════════
-    gw.cloudAnisotropy = wd->nishita.cloud_anisotropy;
-    gw.cloudAnisotropyBack = wd->nishita.cloud_anisotropy_back;
-    gw.cloudLobeMix = wd->nishita.cloud_lobe_mix;
-    gw.cloudEmissiveIntensity = wd->nishita.cloud_emissive_intensity;
-    
-    gw.cloudEmissiveColor[0] = wd->nishita.cloud_emissive_color.x;
-    gw.cloudEmissiveColor[1] = wd->nishita.cloud_emissive_color.y;
-    gw.cloudEmissiveColor[2] = wd->nishita.cloud_emissive_color.z;
-    gw._pad3 = 0.0f;
-
-    // ═════════════════════════════════════════════════════════════════
     // FOG PARAMETERS
     // ═════════════════════════════════════════════════════════════════
     gw.fogEnabled = wd->nishita.fog_enabled ? 1 : 0;
@@ -20488,10 +20720,10 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
     gw.fogFalloff = wd->nishita.fog_falloff;
     
     gw.fogDistance = wd->nishita.fog_distance;
-    gw.fogSunScatter = wd->nishita.fog_sun_scatter;
-    gw.fogColor[0] = wd->nishita.fog_color.x;
-    gw.fogColor[1] = wd->nishita.fog_color.y;
-    gw.fogColor[2] = wd->nishita.fog_color.z;
+    gw.fogAnisotropy = wd->nishita.fog_anisotropy;
+    gw.fogAlbedo[0] = wd->nishita.fog_albedo.x;
+    gw.fogAlbedo[1] = wd->nishita.fog_albedo.y;
+    gw.fogAlbedo[2] = wd->nishita.fog_albedo.z;
     gw._pad4 = 0.0f;
 
     // ═════════════════════════════════════════════════════════════════
@@ -20505,10 +20737,13 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
     // ═════════════════════════════════════════════════════════════════
     // AERIAL PERSPECTIVE (matches OptiX world.advanced)
     // ═════════════════════════════════════════════════════════════════
-    gw.aerialEnabled     = wd->advanced.aerial_perspective ? 1 : 0;
-    gw.aerialMinDistance = wd->advanced.aerial_min_distance;
-    gw.aerialMaxDistance = wd->advanced.aerial_max_distance;
-    gw.aerialDensity     = wd->advanced.aerial_density;
+    // Raygen reads binding 8 slot [3] only under this flag. "Built or about to
+    // be built in this frame's command buffer" -- never an atlas that no
+    // dispatch has written (its contents would be undefined).
+    const bool froxelReadable = m_device->hasAerialFroxel() && aerialFroxelWanted(*wd) &&
+                                (m_device->m_aerialFroxelBuilt || m_device->m_aerialFroxelPending);
+    gw.aerialFroxelReady = froxelReadable ? 1 : 0;
+    m_aerialFroxelFlagUploaded = gw.aerialFroxelReady;
 
     // Multi-scatter (analytic, matches World::calculateNishitaSky)
     gw.multiScatterEnabled = wd->advanced.multi_scatter_enabled ? 1 : 0;
@@ -20521,10 +20756,10 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
     gw.weatherType = wd->weather.type;
     gw.weatherIntensity = wd->weather.intensity;
     gw.weatherDensity = wd->weather.density;
-    gw.weatherWindDirection[0] = wd->weather.wind_direction.x;
-    gw.weatherWindDirection[1] = wd->weather.wind_direction.y;
-    gw.weatherWindDirection[2] = wd->weather.wind_direction.z;
-    gw.weatherWindSpeed = wd->weather.wind_speed;
+    gw.weatherWindDirection[0] = wd->weather.derived_wind_direction.x;
+    gw.weatherWindDirection[1] = wd->weather.derived_wind_direction.y;
+    gw.weatherWindDirection[2] = wd->weather.derived_wind_direction.z;
+    gw.weatherWindSpeed = wd->weather.derived_wind_speed_mps;
     gw.weatherPrecipitationScale = wd->weather.precipitation_scale;
     gw.weatherVisibility = wd->weather.visibility;
     gw.weatherSurfaceWetness = wd->weather.surface_wetness_output;
@@ -20585,14 +20820,15 @@ VulkanRT::InstancePreparationStats VulkanBackendAdapter::getInstancePreparationS
     return stats;
 }
 
-void VulkanBackendAdapter::resetVolumePerformanceStats(bool enabled) {
+void VulkanBackendAdapter::resetVolumePerformanceStats(
+        bool enabled, const VulkanRT::VolumeInstrumentationRegion& region) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_device) {
         return;
     }
     // Host writes must not race closest-hit/raygen atomics from an in-flight frame.
     m_device->waitIdle();
-    m_volumeInstrumentation.reset(*m_device, enabled);
+    m_volumeInstrumentation.reset(*m_device, enabled, region);
 }
 
 void VulkanBackendAdapter::resetAccumulation() {
@@ -20607,7 +20843,6 @@ void VulkanBackendAdapter::resetAccumulation() {
     // redundant synchronous GPU round-trips during camera movement.
     const bool needsImageClear = (m_currentSamples > 0);
     m_currentSamples = 0;
-    m_hasPresentedRenderedFrame = false;
     m_interactiveViewport.dirty = true;
     if (needsImageClear && m_device) {
         std::vector<VulkanRT::VulkanDevice::ImageClearRequest> clears;

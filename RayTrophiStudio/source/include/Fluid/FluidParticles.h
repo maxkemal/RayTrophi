@@ -22,6 +22,7 @@
 #pragma once
 
 #include "../Vec3.h"
+#include "MatterConstitutive.h"
 #include <vector>
 #include <cstdint>
 #include <cmath>
@@ -42,6 +43,8 @@ struct AffineC {
 
 // Bits of FluidParticles::flags. Bit 1 is the advection pass's outflow mark
 // (APICFluidSolver.cpp, FLAG_OUTFLOW); keep new bits clear of it.
+// Bits 8..11 hold the simulation label (FluidParticleLabels.h). Copy/compact
+// the complete flags word so labels follow their parcels.
 //
 // FROZEN: a thermal-liquid parcel that cooled below the freeze temperature
 // while touching a support (collider, closed domain wall or another frozen
@@ -62,6 +65,12 @@ public:
     // evaporate or burn a liquid without changing APIC momentum until the
     // hysteresis-based lifecycle pass safely compacts particles.
     std::vector<float>    mass_fraction;
+    // Physical mass represented by this parcel when mass_fraction == 1.
+    // Unlike APIC's normalized particle weight, this is measured in kg and is
+    // stable for the parcel's lifetime. Phase exchanges debit
+    // rest_mass_kg * delta(mass_fraction), so the source loss and target gain
+    // can be recorded as the same MatterExchangeLedger event.
+    std::vector<float>    rest_mass_kg;
     // ★★★ KELVIN, ABSOLUTE. Not the gas grid's convention.
     //
     // The gas grid stores temperature in EITHER normalised 0..1 OR Kelvin and
@@ -79,6 +88,9 @@ public:
     std::vector<float>    temperature;
     std::vector<float>    combustible_fraction;
     std::vector<uint32_t> substance_tag;
+    // Per-parcel solver regime. Auto exists only for legacy/unresolved data;
+    // emitters resolve it from the substance before creating new matter.
+    std::vector<uint8_t> constitutive_model;
     // Granular-only state. Liquid particles keep identity deformation and zero
     // hardening; the Vulkan constitutive pass consumes these flat SoA arrays.
     std::vector<Vec3> granular_deformation_col0;
@@ -211,9 +223,11 @@ public:
         affine.clear();
         flags.clear();
         mass_fraction.clear();
+        rest_mass_kg.clear();
         temperature.clear();
         combustible_fraction.clear();
         substance_tag.clear();
+        constitutive_model.clear();
         granular_deformation_col0.clear(); granular_deformation_col1.clear();
         granular_deformation_col2.clear(); granular_plastic_volume.clear();
         granular_softening.clear();
@@ -254,9 +268,11 @@ public:
         affine.reserve(n);
         flags.reserve(n);
         mass_fraction.reserve(n);
+        rest_mass_kg.reserve(n);
         temperature.reserve(n);
         combustible_fraction.reserve(n);
         substance_tag.reserve(n);
+        constitutive_model.reserve(n);
         granular_deformation_col0.reserve(n); granular_deformation_col1.reserve(n);
         granular_deformation_col2.reserve(n); granular_plastic_volume.reserve(n);
         granular_softening.reserve(n);
@@ -287,15 +303,19 @@ public:
     void emit(const Vec3& p, const Vec3& v, float temp = 0.0f,
               float combustible = 0.0f, uint32_t material = 0u,
               const Vec3* birth_uvw = nullptr,
-              const Vec3* birth_uvw_b = nullptr) {
+              const Vec3* birth_uvw_b = nullptr,
+              float physical_rest_mass_kg = 0.0f,
+              MatterConstitutiveModel model = MatterConstitutiveModel::Auto) {
         position.push_back(p);
         velocity.push_back(v);
         affine.emplace_back();
         flags.push_back(0u);
         mass_fraction.push_back(1.0f);
+        rest_mass_kg.push_back(physical_rest_mass_kg);
         temperature.push_back(temp);
         combustible_fraction.push_back(combustible);
         substance_tag.push_back(material);
+        constitutive_model.push_back(static_cast<uint8_t>(model));
         granular_deformation_col0.emplace_back(1,0,0);
         granular_deformation_col1.emplace_back(0,1,0);
         granular_deformation_col2.emplace_back(0,0,1);
@@ -326,9 +346,11 @@ public:
             affine[i]   = affine[last];
             flags[i]    = flags[last];
             mass_fraction[i] = mass_fraction[last];
+            rest_mass_kg[i] = rest_mass_kg[last];
             temperature[i] = temperature[last];
             combustible_fraction[i] = combustible_fraction[last];
             substance_tag[i] = substance_tag[last];
+            constitutive_model[i] = constitutive_model[last];
             granular_deformation_col0[i] = granular_deformation_col0[last];
             granular_deformation_col1[i] = granular_deformation_col1[last];
             granular_deformation_col2[i] = granular_deformation_col2[last];
@@ -351,9 +373,11 @@ public:
         affine.pop_back();
         flags.pop_back();
         mass_fraction.pop_back();
+        rest_mass_kg.pop_back();
         temperature.pop_back();
         combustible_fraction.pop_back();
         substance_tag.pop_back();
+        constitutive_model.pop_back();
         granular_deformation_col0.pop_back(); granular_deformation_col1.pop_back();
         granular_deformation_col2.pop_back(); granular_plastic_volume.pop_back();
         granular_softening.pop_back();
@@ -403,9 +427,11 @@ private:
         affine[dst]   = affine[src];
         flags[dst]    = flags[src];
         mass_fraction[dst] = mass_fraction[src];
+        rest_mass_kg[dst] = rest_mass_kg[src];
         temperature[dst] = temperature[src];
         combustible_fraction[dst] = combustible_fraction[src];
         substance_tag[dst] = substance_tag[src];
+        constitutive_model[dst] = constitutive_model[src];
         uvw[dst] = uvw[src];
         if (src < uvw_b.size() && dst < uvw_b.size()) uvw_b[dst] = uvw_b[src];
         auto move = [&](auto& v) { if (src < v.size() && dst < v.size()) v[dst] = v[src]; };
@@ -434,9 +460,11 @@ private:
         affine.resize(n);
         flags.resize(n);
         mass_fraction.resize(n);
+        rest_mass_kg.resize(n);
         temperature.resize(n);
         combustible_fraction.resize(n);
         substance_tag.resize(n);
+        constitutive_model.resize(n);
         uvw.resize(n);
         auto shrink = [&](auto& v) { if (!v.empty()) v.resize(n); };
         shrink(uvw_b);

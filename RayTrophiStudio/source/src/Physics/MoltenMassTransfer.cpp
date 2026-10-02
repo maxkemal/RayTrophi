@@ -17,33 +17,13 @@ bool contains(const SimulationGridDomainState& d, const Vec3& p) {
            p.x <= d.bounds_max.x && p.y <= d.bounds_max.y && p.z <= d.bounds_max.z;
 }
 
-// Kinematic viscosity in m²/s of the melt, near its melting point. These were
-// artistic 0..30 numbers on the old dial, which had no physical unit at all;
-// the solver now integrates ν·dt/h², so they had to be restated as real
-// quantities rather than rescaled.
-//   molten plastic/wax are extremely viscous (10² … 10³ Pa·s over ~10³ kg/m³);
-//   molten iron is famously RUNNIER than water in kinematic terms (~7e-7),
-//   because its enormous density divides out its dynamic viscosity.
-float moltenViscosity(const std::string& substance) {
-    if (substance.find("Plastic") != std::string::npos) return 0.30f;
-    if (substance.find("Wax") != std::string::npos) return 5.0e-3f;
-    if (substance == "Iron" || substance == "Steel") return 1.0e-6f;
-    if (substance == "Ice") return 0.0f;
-    return 5.0e-3f;
-}
-
-Fluid::FluidChemistryPreset moltenChemistry(const std::string& substance) {
-    if (substance.find("Plastic") != std::string::npos)
-        return Fluid::FluidChemistryPreset::Plastic;
-    if (substance.find("Wax") != std::string::npos)
-        return Fluid::FluidChemistryPreset::Wax;
-    if (substance == "Ice") return Fluid::FluidChemistryPreset::Water;
-    return Fluid::FluidChemistryPreset::Inert;
-}
-
+// Copy the canonical substance chemistry into the domain-facing compatibility
+// fields. The physical values themselves stay owned by SubstanceProfile.
 void applyMoltenChemistry(SimulationGridDomainDesc& desc,
-                          const std::string& substance) {
-    desc.fluid_params.applyChemistryProfile(moltenChemistry(substance));
+                          const SubstanceProfile& substance,
+                          const MaterialTemperatureScale& scale) {
+    desc.fluid_params.chemistry_preset = Fluid::FluidChemistryPreset::Custom;
+    desc.fluid_params.applySubstanceProfile(substance, scale);
     const auto& chemistry = desc.fluid_params.fuel_profile;
     desc.fluid_flammable = chemistry.flammable;
     desc.fluid_extinguishing = chemistry.extinguishing;
@@ -150,6 +130,7 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
             ++molten_mass_transfer_stats_.dropped;
             continue;
         }
+        const SubstanceProfile& profile = findSubstance(field->substance_name);
 
         Vec3 center(0.0f);
         double total_area = 0.0;
@@ -183,7 +164,7 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
         for (std::size_t i = 0; i < grid_domains_.size() && i < grid_domain_states_.size(); ++i) {
             const auto& desc = grid_domains_[i];
             const auto& state = grid_domain_states_[i];
-            if (!desc.enabled || desc.type != SimulationDomainType::Fluid ||
+            if (!desc.enabled || !simulationDomainHasLiquid(desc.type) ||
                 !state.valid || !contains(state, center)) continue;
             if (!request.preferred_domain.empty() && desc.name != request.preferred_domain) continue;
             domain_index = i;
@@ -192,7 +173,8 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
         if (domain_index == grid_domains_.size() && !request.preferred_domain.empty() &&
             !request.configure_domain_chemistry) {
             for (std::size_t i = 0; i < grid_domains_.size() && i < grid_domain_states_.size(); ++i) {
-                if (grid_domains_[i].enabled && grid_domains_[i].type == SimulationDomainType::Fluid &&
+                if (grid_domains_[i].enabled &&
+                    simulationDomainHasLiquid(grid_domains_[i].type) &&
                     grid_domain_states_[i].valid && contains(grid_domain_states_[i], center)) {
                     domain_index = i;
                     break;
@@ -236,7 +218,7 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
             if (state.particles.empty()) {
                 if (desc.fluid_params.kinematic_viscosity <= 0.0f)
                     desc.fluid_params.kinematic_viscosity =
-                        moltenViscosity(field->substance_name);
+                        profile.liquid_kinematic_viscosity;
                 // Sweeps track how stiff the implicit system is: ν·dt/h² grows
                 // with viscosity, and an under-converged solve under-applies it.
                 desc.fluid_params.viscosity_sweeps =
@@ -248,7 +230,7 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
                     Fluid::APICSolverParams::FluidPreset::Custom;
                 desc.fluid_render_mode = Fluid::FluidRenderMode::SurfaceSDF;
             }
-            applyMoltenChemistry(desc, field->substance_name);
+            applyMoltenChemistry(desc, profile, world_thermal_.scale());
         }
         const std::size_t capacity = desc.fluid_max_particles > state.particles.size()
             ? desc.fluid_max_particles - state.particles.size() : 0u;
@@ -264,7 +246,6 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
         const std::size_t spawn_count = std::min({desired, capacity, batch_limit});
         const float spawn_mass = request.requested_mass *
             static_cast<float>(spawn_count) / static_cast<float>(desired);
-        const SubstanceProfile& profile = findSubstance(field->substance_name);
         const float combustible = profile.combustible ? 1.0f : 0.0f;
         const float h = std::max(state.voxel_size, 1.0e-3f) * 0.35f;
 
@@ -333,6 +314,7 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
             }
         }
         const std::size_t old_size = state.particles.size();
+        const float parcel_mass_kg = spawn_mass / static_cast<float>(spawn_count);
         for (std::size_t i = 0; i < spawn_count; ++i) {
             const float x = (static_cast<float>((i * 17u) % 11u) / 10.0f - 0.5f) * h;
             const float y = (static_cast<float>((i * 29u) % 13u) / 12.0f - 0.5f) * h;
@@ -354,7 +336,10 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
             p.x = std::clamp(p.x, state.bounds_min.x + h, state.bounds_max.x - h);
             p.y = std::clamp(p.y, state.bounds_min.y + h, state.bounds_max.y - h);
             p.z = std::clamp(p.z, state.bounds_min.z + h, state.bounds_max.z - h);
-            state.particles.emit(p, request.velocity, temperature_kelvin, combustible, tag);
+            state.particles.emit(
+                p, request.velocity, temperature_kelvin, combustible, tag,
+                nullptr, nullptr, parcel_mass_kg,
+                Fluid::MatterConstitutiveModel::Fluid);
         }
 
         float consumed = 0.0f;
@@ -375,6 +360,15 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
             deferred.push_back(request);
             continue;
         }
+        // The reservoir debit is authoritative. It may differ from the request
+        // within the accepted transfer tolerance, so make the live APIC parcel
+        // inventory equal the exact kg recorded in the exchange ledger.
+        const float consumed_parcel_mass_kg = consumed /
+            static_cast<float>(spawn_count);
+        for (std::size_t particle = old_size;
+             particle < state.particles.size(); ++particle) {
+            state.particles.rest_mass_kg[particle] = consumed_parcel_mass_kg;
+        }
         ++state.version;
         ++molten_mass_transfer_stats_.completed;
         molten_mass_transfer_stats_.requested_mass += request.requested_mass;
@@ -385,6 +379,31 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
         molten_mass_transfer_stats_.last_substance = field->substance_name;
         molten_mass_transfer_stats_.last_temperature_kelvin = temperature_kelvin;
         molten_mass_transfer_stats_.last_combustible_fraction = combustible;
+
+        MatterExchangeRecord exchange;
+        exchange.event_id = request.sequence;
+        exchange.kind = MatterExchangeKind::Melting;
+        exchange.source = request.object_key;
+        exchange.target = desc.name;
+        exchange.substance = field->substance_name;
+        exchange.source_mass_kg = consumed;
+        exchange.target_mass_kg = consumed;
+        const double sensible_energy = static_cast<double>(consumed) *
+            static_cast<double>(profile.specific_heat) *
+            static_cast<double>(temperature_kelvin);
+        exchange.source_energy_j = sensible_energy;
+        exchange.target_energy_j = sensible_energy;
+        exchange.latent_required_j = static_cast<double>(consumed) *
+            static_cast<double>(profile.latent_heat_fusion);
+        // The MSF melt fraction is already enthalpy-budgeted in
+        // sim_msf_gather.comp; transfer only moves mass whose latent heat was
+        // paid while the reservoir formed.
+        exchange.latent_accounted_j = exchange.latent_required_j;
+        exchange.source_momentum_kg_m_s = request.velocity * consumed;
+        exchange.target_momentum_kg_m_s = exchange.source_momentum_kg_m_s;
+        matter_exchange_ledger_.record(std::move(exchange));
+        noteCoupling("melting_mass_transfer", "msf", "fluid",
+                     request.object_key, desc.name);
         if (spawn_count < desired && request.requested_mass > consumed) {
             MoltenMassTransferRequest remainder = request;
             remainder.requested_mass -= consumed;

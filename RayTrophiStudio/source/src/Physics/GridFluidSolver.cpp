@@ -329,7 +329,13 @@ void advectScalar(FluidGrid& grid,
                   const SolverParams& params,
                   std::vector<float>& field,
                   float background,
-                  float dt) {
+                  float dt,
+                  int min_i,
+                  int min_j,
+                  int min_k,
+                  int max_i,
+                  int max_j,
+                  int max_k) {
     if (field.empty()) {
         return;
     }
@@ -337,10 +343,11 @@ void advectScalar(FluidGrid& grid,
     const Boundary boundary = params.boundary;
 
     // Forward trace: phi^ = A(phi, +dt).
-    std::vector<float> forward(field.size(), 0.0f);
-    for (int k = 0; k < nz; ++k)
-        for (int j = 0; j < ny; ++j)
-            for (int i = 0; i < nx; ++i) {
+    static thread_local std::vector<float> forward;
+    forward.assign(field.size(), 0.0f);
+    for (int k = min_k; k <= max_k; ++k)
+        for (int j = min_j; j <= max_j; ++j)
+            for (int i = min_i; i <= max_i; ++i) {
                 const Vec3 p = grid.gridToWorld(i, j, k);
                 const Vec3 back = p - grid.sampleVelocity(p) * dt;
                 forward[grid.cellIndex(i, j, k)] =
@@ -355,10 +362,11 @@ void advectScalar(FluidGrid& grid,
     // Reverse trace of the forward result + limited correction. The reverse
     // sample uses the ORIGINAL velocity field, which the scalar pass never
     // touches, so no extra velocity copy is needed.
-    std::vector<float> next(field.size(), 0.0f);
-    for (int k = 0; k < nz; ++k)
-        for (int j = 0; j < ny; ++j)
-            for (int i = 0; i < nx; ++i) {
+    static thread_local std::vector<float> next;
+    next.assign(field.size(), 0.0f);
+    for (int k = min_k; k <= max_k; ++k)
+        for (int j = min_j; j <= max_j; ++j)
+            for (int i = min_i; i <= max_i; ++i) {
                 const std::size_t c = grid.cellIndex(i, j, k);
                 const Vec3 p = grid.gridToWorld(i, j, k);
                 const Vec3 vel = grid.sampleVelocity(p);
@@ -1314,13 +1322,16 @@ void step(FluidGrid& grid,
         mark(cursor, stats ? &stats->advect_velocity_ms : nullptr);
     }
     if (params.channel_density && !params.skip_scalar_advection) {
-        advectScalar(grid, params, grid.density, 0.0f, dt);
+        advectScalar(grid, params, grid.density, 0.0f, dt,
+                     0, 0, 0, grid.nx - 1, grid.ny - 1, grid.nz - 1);
     }
     if (params.channel_temperature && !params.skip_scalar_advection) {
-        advectScalar(grid, params, grid.temperature, params.ambient_temperature, dt);
+        advectScalar(grid, params, grid.temperature, params.ambient_temperature, dt,
+                     0, 0, 0, grid.nx - 1, grid.ny - 1, grid.nz - 1);
     }
     if (params.channel_fuel && !params.skip_scalar_advection) {
-        advectScalar(grid, params, grid.fuel, 0.0f, dt);
+        advectScalar(grid, params, grid.fuel, 0.0f, dt,
+                     0, 0, 0, grid.nx - 1, grid.ny - 1, grid.nz - 1);
     }
     mark(cursor, stats ? &stats->advect_scalar_ms : nullptr);
 
@@ -1721,6 +1732,65 @@ void advectVelocityField(FluidGrid& grid, const SolverParams& params, float dt) 
         return;
     }
     advectVelocity(grid, params, dt);
+}
+
+void advectPassiveScalarField(FluidGrid& grid,
+                              const SolverParams& params,
+                              std::vector<float>& field,
+                              float background,
+                              float dt) {
+    if (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 ||
+        !(dt > 0.0f) || !std::isfinite(dt) ||
+        field.size() != grid.getCellCount()) {
+        return;
+    }
+    int min_i = grid.nx;
+    int min_j = grid.ny;
+    int min_k = grid.nz;
+    int max_i = -1;
+    int max_j = -1;
+    int max_k = -1;
+    for (int k = 0; k < grid.nz; ++k) {
+        for (int j = 0; j < grid.ny; ++j) {
+            for (int i = 0; i < grid.nx; ++i) {
+                float& value = field[grid.cellIndex(i, j, k)];
+                if (!std::isfinite(value) || value < 0.0f) {
+                    value = 0.0f;
+                }
+                if (value == 0.0f) continue;
+                min_i = std::min(min_i, i);
+                min_j = std::min(min_j, j);
+                min_k = std::min(min_k, k);
+                max_i = std::max(max_i, i);
+                max_j = std::max(max_j, j);
+                max_k = std::max(max_k, k);
+            }
+        }
+    }
+    if (max_i < min_i || max_j < min_j || max_k < min_k) return;
+
+    if (params.boundary == Boundary::Periodic) {
+        min_i = min_j = min_k = 0;
+        max_i = grid.nx - 1;
+        max_j = grid.ny - 1;
+        max_k = grid.nz - 1;
+    } else {
+        const float travel_cells =
+            std::max(0.0f, params.max_velocity) * dt /
+            std::max(grid.voxel_size, 1e-6f);
+        // MacCormack traces backward and forward, so reserve two trips plus
+        // the trilinear stencil. Semi-Lagrange safely gets the same bound.
+        const int padding = std::max(
+            static_cast<int>(std::ceil(2.0f * travel_cells)) + 2, 2);
+        min_i = std::max(0, min_i - padding);
+        min_j = std::max(0, min_j - padding);
+        min_k = std::max(0, min_k - padding);
+        max_i = std::min(grid.nx - 1, max_i + padding);
+        max_j = std::min(grid.ny - 1, max_j + padding);
+        max_k = std::min(grid.nz - 1, max_k + padding);
+    }
+    advectScalar(grid, params, field, background, dt,
+                 min_i, min_j, min_k, max_i, max_j, max_k);
 }
 
 } // namespace GridFluid

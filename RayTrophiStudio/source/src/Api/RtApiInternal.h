@@ -31,6 +31,7 @@ extern bool g_vulkan_rebuild_pending;
 extern bool g_viewport_raster_rebuild_pending;
 
 class PrincipledBSDF;
+class InstanceGroup;
 
 namespace rtapi {
 
@@ -41,6 +42,8 @@ extern RenderJobInfo g_render_job;
 inline Result notBound() { return Result::fail("rtapi is not bound to a UIContext"); }
 inline bool renderJobActive() { return g_render_job.state == RenderJobState::Rendering; }
 bool objectExists(const std::string& name);
+// Scatter group by numeric id or name. Defined in RtApi.cpp.
+InstanceGroup* findScatterGroupHelper(const std::string& key);
 void pollTerrainEvaluations();
 
 // Distinct material ids referenced by an object's flat meshes, in first-seen

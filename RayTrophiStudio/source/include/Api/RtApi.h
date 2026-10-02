@@ -31,7 +31,9 @@
 #include "Api/RtApiRigEditing.h"
 #include "Api/RtApiClipBinding.h"
 #include "Api/RtApiKinematicCollider.h"
+#include "Fluid/FluidParticleLabels.h"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -39,6 +41,10 @@
 #include <vector>
 #include "Matrix4x4.h"
 #include "Vec3.h"
+
+// Whitewater settings are passed by reference only; the full type lives in
+// Fluid/FluidFoam.h, which the implementation files include.
+namespace RayTrophiSim { namespace Fluid { struct FoamParams; } }
 
 struct UIContext;
 class SceneHistory;
@@ -792,6 +798,14 @@ std::vector<LightInfo> listLights();
 Result getLight(int index, LightInfo& out);
 Result addLight(const std::string& type, const Vec3& position, std::string& out_name);
 Result deleteLight(int index);
+// The Nishita sun lights surfaces ONLY through a directional light (Vulkan RT
+// never adds the sky sun as a light, and RayFusion no longer does either). If
+// the scene has no directional light (a hidden one counts), add one aligned with the world
+// sun (direction, intensity, angular size) as an undoable "Sun" light.
+// created=false and name="" when one already exists. setWorldMode calls this
+// on the switch INTO nishita only -- a sun the user deletes afterwards stays
+// deleted.
+Result ensureWorldSunLight(bool& created, std::string& out_name);
 Result setLightPosition(int index, const Vec3& position);
 
 // Geometric edits below reuse LightState + TransformLightCommand (the viewport
@@ -1091,8 +1105,8 @@ struct WorldAtmosphereInfo {
     float dust_density = 1.0f;            // Mie/aerosol multiplier
     float ozone_density = 1.0f;
     float ozone_absorption_scale = 1.0f;  // "blue hour" strength
-    float humidity = 0.1f;                // 0..1
-    float temperature = 15.0f;            // Celsius; scales BOTH scale heights
+    // humidity/temperature moved to WorldClimateInfo (they are climate, the
+    // sky only reads them).
     float altitude = 0.0f;                // camera height, metres
     float mie_anisotropy = 0.8f;          // g
     float planet_radius = 6360000.0f;     // metres
@@ -1108,8 +1122,6 @@ struct WorldAtmosphereUpdate {
     const float* dust_density = nullptr;
     const float* ozone_density = nullptr;
     const float* ozone_absorption_scale = nullptr;
-    const float* humidity = nullptr;
-    const float* temperature = nullptr;
     const float* altitude = nullptr;
     const float* mie_anisotropy = nullptr;
     const float* planet_radius = nullptr;
@@ -1124,6 +1136,106 @@ Result getWorldAtmosphere(WorldAtmosphereInfo& out);
 Result updateWorldAtmosphere(const WorldAtmosphereUpdate& update);
 
 // ---------------------------------------------------------------------------
+// Climate (docs/dev/ATMOSPHERE_SYSTEM.md §2-3). The world's single owner of
+// ambient temperature, humidity, pressure and wind; renderers read a packet
+// mirrored from it, and physics will read it through sampleWorldClimate.
+//
+// ★ Units are in the names. Temperature is KELVIN here (the old sky field was
+//   Celsius); the rename is deliberate so an old caller fails loudly.
+// ★ Invalid input is REJECTED, never clamped: a clamped value is a panel that
+//   shows one number while the renderer uses another.
+// ---------------------------------------------------------------------------
+struct WorldClimateInfo {
+    float surface_temperature_k = 288.15f;
+    float lapse_rate_k_per_m = 0.0065f;       // ISA 0.0065; negative = inversion
+    float surface_relative_humidity = 0.1f;   // 0..1
+    float surface_pressure_pa = 101325.0f;
+    Vec3  wind_direction;                     // horizontal unit vector (toward)
+    float wind_speed_mps = 0.0f;
+    float instability = 0.0f;              // 0 stable .. 1 violently unstable
+    // Read back from the RENDER PACKET, not from the climate: proves the value
+    // reached the sky LUT input (hygroscopic Mie scale; 1.0 = dry aerosol).
+    float applied_mie_humidity_scale = 1.0f;
+    float applied_temperature_c = 15.0f;
+};
+
+struct WorldClimateUpdate {
+    const float* surface_temperature_k = nullptr;
+    const float* lapse_rate_k_per_m = nullptr;
+    const float* surface_relative_humidity = nullptr;
+    const float* surface_pressure_pa = nullptr;
+    const Vec3*  wind_direction = nullptr;    // any horizontal vector; normalized
+    const float* wind_speed_mps = nullptr;
+    const float* instability = nullptr;
+};
+
+struct ClimateSampleInfo {
+    float altitude_m = 0.0f;                  // scene Y + sky altitude offset
+    float temperature_k = 288.15f;
+    float relative_humidity = 0.1f;
+    float pressure_pa = 101325.0f;
+    float air_density_kg_m3 = 1.225f;
+    Vec3  wind_mps;
+};
+
+Result getWorldClimate(WorldClimateInfo& out);
+Result updateWorldClimate(const WorldClimateUpdate& update);
+// scene_pos in scene metres. Pure read; does not dirty anything.
+Result sampleWorldClimate(const Vec3& scene_pos, ClimateSampleInfo& out);
+
+// ---------------------------------------------------------------------------
+// Aerial perspective + height fog (docs/dev/ATMOSPHERE_SYSTEM.md Faz 1b).
+// One medium integrated into the aerial froxel by both Vulkan backends. The air
+// part has no knobs of its own -- its amount is the atmosphere's (air/dust
+// density, climate humidity); only the on/off toggle lives here. The fog is a
+// height layer: sigma(y) = fog_density * exp(-fog_falloff * max(y - fog_height, 0)).
+// ---------------------------------------------------------------------------
+struct WorldAerialInfo {
+    bool  aerial_perspective = true;   // air scattering toward the camera
+    bool  fog_enabled = false;
+    float fog_density = 0.0001f;       // extinction 1/m at and below fog_height
+    float fog_height = 500.0f;         // scene Y, metres
+    float fog_falloff = 0.003f;        // 1/m above fog_height
+    float fog_distance = 10000.0f;     // metres from the camera
+    Vec3  fog_albedo;                  // 0..1 per channel
+    float fog_anisotropy = 0.6f;       // Henyey-Greenstein g, -0.95..0.95
+};
+
+struct WorldAerialUpdate {
+    const bool*  aerial_perspective = nullptr;
+    const bool*  fog_enabled = nullptr;
+    const float* fog_density = nullptr;
+    const float* fog_height = nullptr;
+    const float* fog_falloff = nullptr;
+    const float* fog_distance = nullptr;
+    const Vec3*  fog_albedo = nullptr;
+    const float* fog_anisotropy = nullptr;
+};
+
+Result getWorldAerial(WorldAerialInfo& out);
+// Rejects out-of-range values (no clamping): a clamped value is a script that
+// "worked" and set something else.
+Result updateWorldAerial(const WorldAerialUpdate& update);
+
+// Per Vulkan device (render = Vulkan RT, viewport = RayFusion): is the froxel
+// there, is this device reading it, how many times was it rebuilt. The
+// dispatch counter is the proof the froxel follows the camera and the medium
+// -- and ONLY them: a counter that climbs while nothing moves is a rebuild
+// every frame.
+struct AtmosphereStatsRow {
+    std::string role;                  // "render" | "viewport"
+    bool     is_vulkan = false;
+    bool     lut_ready = false;        // this device's transmittance/sky-view LUTs
+    bool     froxel_available = false; // pipeline + atlas exist
+    bool     froxel_active = false;    // last frame read the froxel
+    uint64_t froxel_dispatches = 0;
+};
+struct AtmosphereStatsInfo {
+    std::vector<AtmosphereStatsRow> backends;
+};
+AtmosphereStatsInfo atmosphereStats();
+
+// ---------------------------------------------------------------------------
 // World thermal ambient (docs/dev/SIMULATION_NODE_OBJECT_MODEL.md section 7
 // item 1). Distinct from WorldState above: that one is the render sky, this
 // is the ambient condition every uncoupled substance relaxes toward. Mirrors
@@ -1132,7 +1244,17 @@ Result updateWorldAtmosphere(const WorldAtmosphereUpdate& update);
 // ever had.
 // ---------------------------------------------------------------------------
 struct WorldThermalInfo {
-    float ambient_kelvin = 293.0f;
+    float ambient_kelvin = 293.0f;            // the LOCAL value (used when not inheriting)
+    // Faz 2. inherit_atmosphere: the ambient follows world.set_climate. The
+    // solvers read effective_ambient_kelvin; `ambient_source` names where it
+    // came from ("atmosphere" | "local") so a script never has to re-derive it.
+    bool  inherit_atmosphere = false;
+    float effective_ambient_kelvin = 293.0f;
+    std::string ambient_source = "local";
+    // Calibration zero: normalized 0 == this many Kelvin. Separate from the
+    // ambient so a keyed climate cannot re-interpret stored temperatures.
+    float reference_kelvin = 293.0f;
+    float drying_scale = 1.0f;                // (1 - RH) when inheriting, else 1
     float kelvin_per_unit = 350.0f;
     float convection_coefficient = 1.0f;
     float oxygen_availability = 1.0f;
@@ -1144,7 +1266,9 @@ Result getWorldThermal(WorldThermalInfo& out);
 Result setWorldThermal(const float* ambient_kelvin = nullptr,
                        const float* kelvin_per_unit = nullptr,
                        const float* convection_coefficient = nullptr,
-                       const float* oxygen_availability = nullptr);
+                       const float* oxygen_availability = nullptr,
+                       const bool* inherit_atmosphere = nullptr,
+                       const float* reference_kelvin = nullptr);
 
 // ---------------------------------------------------------------------------
 // Post-processing (Faz 5.1d). Exposure, tonemapping, color adjustment,
@@ -1282,9 +1406,70 @@ struct VolumeInstrumentationInfo {
     uint32_t arbiter_no_box = 0;
     uint32_t arbiter_empty_range = 0;
     uint32_t arbiter_no_crossing = 0;
+    // Normalized pixel region the counters were restricted to ([min, max)).
+    float region_min_x = 0.0f, region_min_y = 0.0f;
+    float region_max_x = 1.0f, region_max_y = 1.0f;
+    // ★★ Path budget accounting (raygen). A surface whose paths die on the
+    // bounce cap renders black exactly like an unlit one; paths_bounce_capped /
+    // paths_traced is the fraction that ran out of budget still scattering.
+    // paths_pass_capped means the FREE passes (transparent/handoff, cap
+    // maxBounces + 32) ran out first. charged_* partition every bounce spent;
+    // medium_passes counts straight gas/fog continuations, which are FREE
+    // (inside free_passes): ~1 per box crossed is healthy, many per path is
+    // short-hop re-entry.
+    uint32_t paths_traced = 0;
+    uint32_t paths_bounce_capped = 0;
+    uint32_t paths_pass_capped = 0;
+    uint32_t charged_specular = 0;
+    uint32_t charged_diffuse = 0;
+    uint32_t charged_transmission = 0;
+    uint32_t charged_other = 0;
+    uint32_t free_passes = 0;
+    uint32_t medium_passes = 0;
+    // The arbiter began inside a liquid (a refracted ray looking for the exit)
+    // and whether it found that exit.
+    uint32_t arbiter_started_inside = 0;
+    uint32_t arbiter_inside_found = 0;
+    // Per-device breakdown behind the summed numbers above. Diagnostic for the
+    // instrument itself: a region that is written before a render and reads
+    // back as 0,0,1,1 after it is visible here as WHICH device lost it.
+    struct DeviceRow {
+        std::string role;          // "render" (g_backend) | "viewport" | "active"
+        bool enabled = false;
+        float region[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+        uint32_t paths_traced = 0;
+        uint32_t volume_rays = 0;
+    };
+    std::vector<DeviceRow> devices;
 };
 VolumeInstrumentationInfo volumeStats();
-Result setVolumeInstrumentation(bool enabled);  // also zeroes the counters
+// Also zeroes the counters. `region` is a normalized [x0, y0, x1, y1] pixel
+// rectangle; counters count only launches inside it (default: whole image).
+Result setVolumeInstrumentation(bool enabled,
+                                const std::array<float, 4>& region = {0.0f, 0.0f, 1.0f, 1.0f});
+
+// ---------------------------------------------------------------------------
+// Path tracer budget + Debug Visualizer (render.get_settings / set_settings).
+//
+// ★ These were panel-only. A black surface caused by paths dying on the bounce
+// cap could only be diagnosed by a human dragging "Total Bounces" and reading
+// the "Bounce Count" view; an agent could see the black but not test the cause.
+// Writes go to the same RenderSettings the panel edits; the main loop's change
+// detection resets accumulation, exactly as for a panel edit.
+struct RenderBudgetInfo {
+    int max_bounces = 0;
+    int diffuse_bounces = 0;
+    int transmission_bounces = 0;
+    int debug_view = 0;           // 0 = off, 6 = Bounce Count; see globals.h
+    std::string debug_view_name;
+};
+RenderBudgetInfo renderBudget();
+// Unset optionals are left alone. diffuse/transmission are clamped to
+// [1, max_bounces] the same way the panel clamps them.
+Result setRenderBudget(std::optional<int> max_bounces,
+                       std::optional<int> diffuse_bounces,
+                       std::optional<int> transmission_bounces,
+                       std::optional<int> debug_view);
 
 // ---------------------------------------------------------------------------
 // Per-backend volume TABLE state (render.volume_tables).
@@ -1372,9 +1557,13 @@ struct DomainVolumeRow {
     std::string domain;
     std::string type;            // "gas" | "fluid"
     std::string render_mode;     // liquid only: "particles" | "surface" | "fog"
-    int vdb_id = -1;
+    int vdb_id = -1;             // SURFACE volume (gas: its only volume)
     bool has_volume = false;
     std::string volume_name;
+    // Liquid FOG view, on its own volume (FluidDomainFogVolume.cpp).
+    int fog_vdb_id = -1;
+    bool has_fog_volume = false;
+    std::string fog_volume_name;
 };
 struct VolumeSlotsInfo {
     bool available = false;
@@ -2354,6 +2543,39 @@ struct SimCouplingReport {
 };
 SimCouplingReport simGraphCouplings();
 
+// Per-step physical transfer ledger. Mass is kg, energy is joules and momentum
+// is kg*m/s. It reports what the solver actually transferred, never authored
+// intent.
+struct MatterExchangeEntry {
+    uint64_t event_id = 0;
+    std::string kind;
+    std::string source;
+    std::string target;
+    std::string substance;
+    double source_mass_kg = 0.0;
+    double target_mass_kg = 0.0;
+    double source_energy_j = 0.0;
+    double target_energy_j = 0.0;
+    double latent_required_j = 0.0;
+    double latent_accounted_j = 0.0;
+    Vec3 source_momentum_kg_m_s;
+    Vec3 target_momentum_kg_m_s;
+};
+struct MatterExchangeReport {
+    bool traced = false;
+    uint64_t step = 0;
+    std::vector<MatterExchangeEntry> exchanges;
+    double source_mass_kg = 0.0;
+    double target_mass_kg = 0.0;
+    double mass_error_kg = 0.0;
+    double source_energy_j = 0.0;
+    double target_energy_j = 0.0;
+    double latent_required_j = 0.0;
+    double latent_accounted_j = 0.0;
+    double energy_error_j = 0.0;
+};
+MatterExchangeReport matterExchangeReport();
+
 // ── Measured interaction: which forces/colliders geometrically reach a domain
 //
 // Decision record: SIMULATION_NODE_OBJECT_MODEL.md section 9.6 stage 3 (and
@@ -2416,7 +2638,11 @@ Result simCacheStatus(SimCacheStatus& out);
 // it. The interactive UI uses the cooperative begin/tick path instead.
 Result simBake(const std::string& cache_dir, int start_frame, int end_frame,
                float fps);
-Result simClearCache();
+// ram_only drops the RAM timeline frames but keeps the disk bake bound, so the
+// next timeline read comes FROM DISK. Playback prefers RAM, which carries more
+// state than the disk format; without this a test of the disk path would read
+// the RAM frame and pass whatever the file contains.
+Result simClearCache(bool ram_only = false);
 
 // ---------------------------------------------------------------------------
 // Project and timeline. Project loading is synchronous and clears selection +
@@ -2969,6 +3195,81 @@ Result setScatterGroupSettings(const std::string& group_id_or_name,
 Result fillScatterGroup(const std::string& group_id_or_name, int& out_spawned);
 Result addScatterInstance(const std::string& group_id_or_name, Vec3 pos, Vec3 rot, Vec3 scale, int source_index = 0);
 
+// Foliage wind (Faz 2; implemented in RtApiAtmosphere.cpp). With
+// inherit_atmosphere the direction follows world.set_climate's wind and
+// speed/strength are the group's RESPONSE at reference_wind_mps: sway speed
+// x v/v_ref, bend x (v/v_ref)^2. effective_* is what the animation runs with.
+struct ScatterWindInfo {
+    bool enabled = false;
+    bool inherit_atmosphere = false;
+    std::string wind_source = "local";   // "atmosphere" | "local"
+    float speed = 1.0f;
+    float strength = 0.1f;
+    float turbulence = 1.5f;
+    float wave_size = 50.0f;
+    Vec3 direction = Vec3(1, 0, 0);
+    float reference_wind_mps = 5.0f;
+    float effective_speed = 1.0f;
+    float effective_strength = 0.1f;
+    Vec3 effective_direction = Vec3(1, 0, 0);
+};
+struct ScatterWindPatch {
+    std::optional<bool> enabled;
+    std::optional<bool> inherit_atmosphere;
+    std::optional<float> speed;
+    std::optional<float> strength;
+    std::optional<float> turbulence;
+    std::optional<float> wave_size;
+    std::optional<Vec3> direction;        // horizontal part is used, normalized
+};
+Result getScatterWind(const std::string& group_id_or_name, ScatterWindInfo& out);
+
+// Ocean / lake wind (Faz 2). `surface` is a numeric id or the surface name.
+// With inherit_atmosphere the ocean's wind is the climate's; effective_* is
+// what the water shader receives (speed floored at 0.1 m/s), direction in
+// degrees (0 = +X, 90 = +Z). Rivers have no wind: their flow is authored.
+struct WaterWindInfo {
+    std::string surface;
+    std::string type;                  // plane | river | custom | lake
+    bool inherit_atmosphere = false;
+    std::string wind_source = "local"; // "atmosphere" | "local"
+    float speed_mps = 10.0f;           // authored
+    float direction_degrees = 0.0f;    // authored
+    float effective_speed_mps = 10.0f;
+    float effective_direction_degrees = 0.0f;
+};
+struct WaterWindPatch {
+    std::optional<bool> inherit_atmosphere;
+    std::optional<float> speed_mps;
+    std::optional<float> direction_degrees;
+};
+Result getWaterWind(const std::string& surface, WaterWindInfo& out);
+
+// Clouds (Faz 3; RtApiClouds.cpp). JSON in/out; the schema is
+// atmosphere::cloudsToJson. get adds read-only context (time_seconds,
+// wind_offset_m, revision, any_enabled, presets). set takes a PARTIAL patch:
+// objects merge, `layers` merges element-wise; invalid values are rejected,
+// never clamped.
+// Weather derived from the climate (docs/dev/ATMOSPHERE_WEATHER.md §2):
+// {climate, derived: {cloud_base_m, cloud_type, precipitation_mm_h, ...},
+//  derive_from_climate}. Read-only; inputs are world.set_climate
+// (instability) and world.set_clouds (derive_from_climate).
+Result getWeatherJson(std::string& out_json);
+Result getCloudsJson(std::string& out_json);
+Result setCloudsJson(const std::string& patch_json);
+Result applyCloudPreset(const std::string& name);
+// Per-backend cloud resource counters (JSON): textures built, generations,
+// sample dispatches. `renderer` says which renderer draws the picture.
+Result cloudStatsJson(std::string& out_json);
+// Measures the SAME density function the renderers use, on the GPU.
+// Request: {"mode":"density"|"transmittance"|"base_density",
+//           "points":[[x,y,z],...] | "segments":[[[a],[b]],...],
+//           "steps":256, "backend":"render"|"viewport"}
+// Reply: {"values":[...]} -- 1/m for density, 0..1 for transmittance.
+Result sampleCloudsJson(const std::string& request_json, std::string& out_json);
+Result setWaterWind(const std::string& surface, const WaterWindPatch& patch);
+Result setScatterWind(const std::string& group_id_or_name, const ScatterWindPatch& patch);
+
 // ---------------------------------------------------------------------------
 // Physics Engine (Faz 5.3a). Rigid Body, Soft Body, and Cloth simulation.
 // ---------------------------------------------------------------------------
@@ -3385,6 +3686,10 @@ struct ParticlePhysicsInfo {
     float grid_temperature_deposit = 0.0f;
     float grid_fuel_deposit = 0.0f;
     bool grid_deposit_fade_with_age = true;
+    // Faz 2: drag relaxes toward the climate wind. Read-only report of what
+    // that wind is right now (zero when not inheriting).
+    bool inherit_atmosphere = true;
+    Vec3 effective_air_wind = Vec3(0, 0, 0);
 };
 
 // Counts are read live from the runtime, so they are correct the instant an
@@ -3493,6 +3798,7 @@ struct FluidStepStats {
     bool pressure_on_gpu = false;
     bool g2p_on_gpu = false;
     bool density_on_gpu = false;
+    float total_ms = 0.0f;
     float p2g_ms = 0.0f;
     float pressure_ms = 0.0f;
     float g2p_ms = 0.0f;
@@ -3543,6 +3849,7 @@ struct GasStepStats {
 
     float total_ms = 0.0f;
     float voxelize_ms = 0.0f;
+    float inventory_advection_ms = 0.0f;
     float analysis_ms = 0.0f;
 
     // Device stages, in execution order.
@@ -3583,6 +3890,8 @@ struct GasStepStats {
     float cfl = 0.0f;            // > 1: the semi-Lagrangian trace smears detail
     std::size_t burning_cells = 0;
     std::size_t solid_cells = 0;
+    std::size_t liquid_boundary_cells = 0;
+    Vec3 liquid_boundary_mean_velocity;
 };
 Result getGasStepStats(const std::string& domain_id_or_name, GasStepStats& out);
 
@@ -3797,15 +4106,24 @@ Result stepParticleSimulation(float dt = 0.0166667f, const ParticleSystemRef& sy
 struct FluidDomainInfo {
     uint32_t id = 0;
     std::string name;
-    std::string type;        // "fluid" (liquid) or "gas" (smoke/fire)
+    std::string type;        // "fluid", "gas", or unified "matter"
+    std::vector<std::string> phases; // Active physical phases in this domain.
     Vec3 domain_min;
     Vec3 domain_max;
     float voxel_size = 0.05f;
     size_t particle_count = 0;
+    size_t fluid_model_particles = 0;
+    size_t granular_model_particles = 0;
+    size_t elastic_model_particles = 0;
+    size_t unresolved_model_particles = 0;
     // Density grid the liquid splats every step (the Volume render mode's
     // input). Valid only when live_state is true, like particle_count.
     size_t active_density_cells = 0;
     float  max_density = 0.0f;
+    double gas_phase_mass_kg = 0.0;
+    double gas_phase_energy_j = 0.0;
+    size_t gas_phase_active_cells = 0;
+    Vec3 gas_phase_mass_centroid;
     // ★★★ particle_count is only a MEASUREMENT when this is true.
     //
     // Measured 2026-08-16: fluid.get reported particle_count = 0 for a domain
@@ -3951,8 +4269,37 @@ struct FluidDomainInfo {
         // `representation` above because they are separate axes: a solid can be
         // drawn as splat spheres or reconstructed into the isosurface.
         std::string phase;
+        std::string constitutive_model;
     };
     std::vector<SubstanceMaterialBinding> substance_materials;
+    // What the view resolver decided, one entry per view this domain holds a
+    // resource for ("sdf" | "splat" | "fog"). `live`: some parcel present now
+    // resolves there. `vdb_id`: the volume the view is published on (-1 for
+    // splat, or before the first publish). Same plan the renderer and the
+    // panel's "Now drawing" read; compare it with render.volume_slots.
+    struct ViewInfo {
+        std::string view;
+        std::vector<std::string> substances;  // named bindings resolving here
+        bool untagged = false;                // untagged parcels resolve here
+        bool live = false;
+        int  vdb_id = -1;
+        // State labels (body, spray, ...) of live parcels resolving here, and
+        // how many parcels are drawn in this view (countParticlesPerView).
+        std::vector<std::string> labels;
+        uint64_t particles = 0;
+        // Whitewater particles drawn in this view (routed by the same labels).
+        uint64_t whitewater = 0;
+    };
+    std::vector<ViewInfo> views;
+    bool views_measured = false;  // false: no live state, views are authored only
+    // Parcels routed to no view (a label route set to "hidden").
+    uint64_t hidden_particles = 0;
+    // Particle budget: seeding and emitters stop here (fluid.set_param max_particles).
+    uint64_t max_particles = 0;
+    // Where each state label is drawn: (label, route) with route one of
+    // follow | sdf | splat | fog | hidden. fluid.set_label_views edits it.
+    std::vector<std::pair<std::string, std::string>> label_routes;
+    RayTrophiSim::Fluid::ParticleLabelReport particle_labels;
     bool  uvw_available = false;   // the domain published a coordinate field
     int   uvw_dim[3] = { 0, 0, 0 };
     // World placement of that grid, as the SHADER will index it. Reported so a
@@ -4169,6 +4516,11 @@ struct GasDomainSettings {
     // h* = anomaly / ambient_stratification instead of climbing to the lid, so
     // this is the knob that gives a mushroom cap an altitude the author owns.
     float ambient_stratification = 0.0f;
+    // Faz 2: derive the stratification from the climate lapse rate. The
+    // authored value above is then ignored; effective_ambient_stratification
+    // is what the solver runs with (normalized heat units per metre).
+    bool  inherit_atmosphere = false;
+    float effective_ambient_stratification = 0.0f;   // read-only
     // Red-black SOR sweeps in the pressure projection. A convergence dial:
     // too few and the field stops being divergence-free, which reads as gas
     // leaking and losing its swirl rather than as a softer image.
@@ -4248,6 +4600,7 @@ Result moveSimulationDomain(const std::string& domain_name, const Vec3& delta,
 struct SimulationFlowSourceInfo {
     std::string name;
     std::string domain;
+    std::string phase = "gas";
     std::string source_mode = "point"; // point|object_bounds|mesh_surface
     std::string source_object;
     bool enabled = true;
@@ -4268,6 +4621,7 @@ struct SimulationFlowSourceInfo {
     bool fluid_emit_along_normal = false;
     // Substance this source pours; empty = untagged (domain material).
     std::string fluid_substance;
+    std::string initial_constitutive_model = "auto";
     // Kelvin the emitted liquid is born at. Off = the domain ambient. NOT the
     // `temperature` above, which is the gas solver's normalised unit.
     bool  fluid_temperature_override = false;
@@ -4364,8 +4718,167 @@ Result getGasShaderSettings(const std::string& domain_id_or_name,
                             GasShaderSettings& out_settings);
 Result updateGasShaderSettings(const std::string& domain_id_or_name,
                                const GasShaderSettings& settings);
+
+// The FOG view's medium of a liquid domain (desc.fluid_fog_shader), the shader
+// the panel's "Edit Fog Medium..." opens. Was panel-only: a black region inside
+// fog could not be A/B'd against "less fog" without a human dragging a slider.
+// Reading a domain whose fog has not drawn yet reports the default recipe
+// (makeLiquidFogShader) and `created: false`; writing creates it from that
+// recipe first, exactly as the fog sync would.
+struct FluidFogShaderSettings {
+    bool  created = false;   // false: no fog drawn yet, values are the default recipe
+    float density_multiplier = 50.0f;
+    float density_cutoff = 0.01f;
+    float scattering_coefficient = 1.0f;
+    Vec3  scattering_color = Vec3(0.55f, 0.74f, 0.92f);
+    float anisotropy = 0.0f;
+    float absorption_coefficient = 2.0f;
+    Vec3  absorption_color = Vec3(0.15f, 0.42f, 0.78f);
+    float voxel_step_multiplier = 1.0f;
+    int   max_steps = 256;
+    int   shadow_steps = 8;
+    int   shadow_stride = 1;
+    float shadow_strength = 1.0f;
+};
+// A domain's thermal environment (gas OR liquid): the world ambient/oxygen, or
+// the domain's own override inside its bounds. The panel's Environment tab
+// edits the same three fields. The liquid's cooling reads the override too
+// (fluidDomainAmbientKelvin) although the panel used to offer it on gas only.
+struct DomainEnvironmentInfo {
+    bool  override_enabled = false;
+    float ambient_kelvin = 293.0f;      // the domain's own value (used when overriding)
+    float oxygen = 1.0f;                // 0..1, the domain's own value
+    float effective_ambient_kelvin = 293.0f;   // what the solvers read
+    float effective_oxygen = 1.0f;
+    float world_ambient_kelvin = 293.0f;
+    float world_oxygen = 1.0f;
+};
+Result getDomainEnvironment(const std::string& domain_id_or_name, DomainEnvironmentInfo& out);
+// Unset optionals are left alone. ambient_kelvin is rejected outside [0, 3000]
+// (the panel's range); oxygen is clamped to 0..1 like world.set_thermal.
+Result setDomainEnvironment(const std::string& domain_id_or_name,
+                            std::optional<bool> override_enabled,
+                            std::optional<float> ambient_kelvin,
+                            std::optional<float> oxygen);
+
+Result getFluidFogShaderSettings(const std::string& domain_id_or_name,
+                                 FluidFogShaderSettings& out_settings);
+Result updateFluidFogShaderSettings(const std::string& domain_id_or_name,
+                                    const FluidFogShaderSettings& settings);
+// The liquid BODY behind a SurfaceSDF isosurface. The iso walk reads exactly
+// three fields of the domain's surface volume shader (desc.shader):
+//   absorption_color x absorption_coefficient — Beer-Lambert depth absorption
+//     of the body, applied under a bound surface material too;
+//   refraction_tint — the colour cast of the BUILT-IN dielectric's refracted
+//     lobe only; a bound material owns its own transmission colour
+//     (tint_active reports which case holds).
+// Density, emission and the rest of that shader are fog controls and do not
+// reach the surface, which is why this is not a full shader editor.
+// The shader is created and tuned by the render sync on the first surface
+// draw; writing before that fails instead of installing an untuned preset
+// (an untuned gas preset walks 16 steps and renders the body black).
+struct FluidSurfaceInteriorSettings {
+    bool  created = false;
+    bool  tint_active = true;
+    Vec3  absorption_color = Vec3(0.85f, 0.40f, 0.12f);
+    float absorption_coefficient = 2.5f;     // per world unit of depth
+    Vec3  refraction_tint = Vec3(0.92f, 0.96f, 1.0f);
+};
+// Route parcels of a state label to a view: `routes` maps label name
+// (unknown, body, spray, foam, bubble, mist, frozen) to follow | sdf | splat |
+// fog | hidden. reset_defaults first restores the design table. Unknown
+// names fail the whole call and change nothing. Render only: never re-simulates.
+Result setFluidLabelRoutes(const std::string& domain_id_or_name,
+                           const std::vector<std::pair<std::string, std::string>>& routes,
+                           bool reset_defaults);
+Result getFluidSurfaceInterior(const std::string& domain_id_or_name,
+                               FluidSurfaceInteriorSettings& out);
+
+// Fingerprint of a liquid domain's live particle state, for determinism
+// probes. The hashes are over the exact float BITS (FNV-1a), so two runs
+// match only if every parcel is bit-identical in the same order; the
+// centroid and mean speed are the tolerant view of the same state.
+// Whitewater (massless secondary) particles are reported separately: the
+// Faz 2-W gate is that enabling whitewater leaves the PRIMARY hashes intact.
+struct FluidStateDigest {
+    bool     live = false;
+    uint64_t particles = 0;
+    uint64_t position_hash = 0, velocity_hash = 0;
+    double   centroid[3] = { 0.0, 0.0, 0.0 };
+    double   mean_speed = 0.0;
+    uint64_t whitewater_particles = 0;
+    uint64_t whitewater_position_hash = 0;
+};
+Result getFluidStateDigest(const std::string& domain_id_or_name, FluidStateDigest& out);
+
+// A liquid domain's particle budget (the panel's Max Particles). Seeding and
+// emitters stop at it. Clamped to [1000, 10,000,000] like the panel.
+Result setFluidMaxParticles(const std::string& domain_id_or_name, uint64_t max_particles);
+
+// Whitewater (Ihmsen spray / foam / bubbles): the secondary, massless particle
+// layer, a stand-in for what the solver cannot resolve. `params` is the
+// domain's FoamParams. WHERE each type is drawn is not a whitewater setting:
+// the domain's label routes decide it (fluid.set_label_views), the same rows
+// that route the solver's own spray / foam / bubble parcels.
+struct WhitewaterStats {
+    bool     live = false;          // the domain has a live state to count
+    uint64_t alive = 0, spray = 0, foam = 0, bubble = 0, spawned = 0;
+    float    gen_ms = 0.0f, advect_ms = 0.0f;
+    bool     crit_on_gpu = false, neigh_on_gpu = false;
+    // Resolved view per type ("sdf" | "splat" | "fog" | "hidden"): the answer
+    // of the label routes, not live content.
+    std::string spray_view, foam_view, bubble_view;
+    // Live whitewater per resolved view (0 without a live state).
+    uint64_t in_sdf = 0, in_splat = 0, in_fog = 0, hidden = 0;
+};
+Result getFluidWhitewater(const std::string& domain_id_or_name,
+                          RayTrophiSim::Fluid::FoamParams& params,
+                          WhitewaterStats& stats);
+// Validates everything before writing: a range with min >= max, a bubble
+// threshold not above the spray threshold or a negative rate fails the call
+// and changes nothing. A change to generation or
+// dynamics drops the RAM timeline cache (the foam is simulated state); a
+// render-only change just repaints.
+Result setFluidWhitewater(const std::string& domain_id_or_name,
+                          const RayTrophiSim::Fluid::FoamParams& params);
+// Unset optionals are left alone. Colours are clamped to 0..1, the
+// coefficient to >= 0.
+Result setFluidSurfaceInterior(const std::string& domain_id_or_name,
+                               std::optional<Vec3> absorption_color,
+                               std::optional<float> absorption_coefficient,
+                               std::optional<Vec3> refraction_tint);
 // Names in the built-in substance library, for scripts and UI pickers.
 Result listMaterialSubstances(std::vector<std::string>& out_names);
+
+// Physical, read-only view of one canonical substance. Temperatures are Kelvin,
+// energy values are J/kg and viscosity is m^2/s.
+struct SubstanceProfileInfo {
+    std::string name;
+    std::string default_constitutive_model;
+    float density = 0.0f;
+    float liquid_density = 0.0f;
+    float specific_heat = 0.0f;
+    float conductivity = 0.0f;
+    float liquid_kinematic_viscosity = 0.0f;
+    bool combustible = false;
+    bool fluid_flammable = false;
+    bool fluid_extinguishing = false;
+    bool meltable = false;
+    float ignition_kelvin = 0.0f;
+    float flash_kelvin = 0.0f;
+    float autoignition_kelvin = 0.0f;
+    float melt_kelvin = 0.0f;
+    float boiling_kelvin = 0.0f;
+    float latent_heat_fusion = 0.0f;
+    float latent_heat_vaporization = 0.0f;
+    float vaporization_rate = 0.0f;
+    float cooling_power = 0.0f;
+    float oxygen_dilution = 0.0f;
+    float flame_persistence = 0.0f;
+    float granular_friction_degrees = 0.0f;
+    float granular_cohesion = 0.0f;
+};
+Result getMaterialSubstance(const std::string& name, SubstanceProfileInfo& out_info);
 
 struct MaterialFieldInfo {
     std::string object_key;
@@ -4586,7 +5099,8 @@ Result setFluidSubstanceMaterial(const std::string& domain_id_or_name,
                                  const std::string* representation = nullptr,
                                  const float* kinematic_viscosity = nullptr,
                                  const float* miscibility = nullptr,
-                                 const std::string* phase = nullptr);
+                                 const std::string* phase = nullptr,
+                                 const std::string* constitutive_model = nullptr);
 
 Result getGasDomainSettings(const std::string& domain_id_or_name, GasDomainSettings& out_settings);
 Result updateGasDomainSettings(const std::string& domain_id_or_name, const GasDomainSettings& settings);

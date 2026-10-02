@@ -1259,7 +1259,6 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
 
     m_rasterGeometryDirty = false;
     m_interactiveViewport.dirty = true;
-    m_hasPresentedRenderedFrame = false;
     m_lastCameraHash = 0;
 
     // Stamp current scene generation so we can skip redundant rebuilds later.

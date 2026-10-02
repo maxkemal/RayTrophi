@@ -487,6 +487,10 @@ void registerParticleBindings(py::module_& module) {
         d["grid_temperature_deposit"] = info.grid_temperature_deposit;
         d["grid_fuel_deposit"] = info.grid_fuel_deposit;
         d["grid_deposit_fade_with_age"] = info.grid_deposit_fade_with_age;
+        d["inherit_atmosphere"] = info.inherit_atmosphere;
+        d["effective_air_wind"] = py::make_tuple(info.effective_air_wind.x,
+                                                 info.effective_air_wind.y,
+                                                 info.effective_air_wind.z);
         return d;
     }, py::arg("system") = py::none(), py::arg("system_id") = -1);
 
@@ -520,6 +524,7 @@ void registerParticleBindings(py::module_& module) {
         flt("grid_temperature_deposit", info.grid_temperature_deposit);
         flt("grid_fuel_deposit", info.grid_fuel_deposit);
         boolean("grid_deposit_fade_with_age", info.grid_deposit_fade_with_age);
+        boolean("inherit_atmosphere", info.inherit_atmosphere);
         requireResult(rtapi::updateParticlePhysics(info, ref));
     });
 

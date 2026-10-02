@@ -16,6 +16,7 @@
 */
 #include "MaterialStateField.h"
 #include "MaterialDamagePattern.h"
+#include "Fluid/SubstanceTag.h"
 
 #include <algorithm>
 #include <chrono>
@@ -61,8 +62,8 @@ static_assert(sizeof(MsfResolveConstants) == 32,
 // Phase 4 ambient pass. Must match sim_msf_ambient.comp's PC block exactly.
 struct MsfAmbientConstants {
     int   counts[4] = {};   // element_count, source_count, zone_count, unused
-    float params[4] = {};   // dt, relax_rate, world_ambient_K, inv_kelvin_per_unit
-    float params2[4] = {};  // max_temperature, dry_rate, boil_normalized, unused
+    float params[4] = {};   // dt, relax_rate, reference_K (normalized 0), inv_kelvin_per_unit
+    float params2[4] = {};  // max_temperature, dry_rate, boil_normalized, world_ambient_K
 };
 static_assert(sizeof(MsfAmbientConstants) == 48,
               "sim_msf_ambient push-constant ABI changed");
@@ -302,6 +303,9 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
             p.meltable = true;
             p.melt_kelvin = 1811.0f; p.boiling_kelvin = 3134.0f;
             p.latent_heat_fusion = 2.72e5f; p.melt_viscosity = 0.35f;
+            p.liquid_density = 6980.0f;
+            p.liquid_kinematic_viscosity = 1.0e-6f;
+            p.latent_heat_vaporization = 6.09e6f;
             p.molten_emission = 1.4f;
             add(p);
         }
@@ -316,6 +320,9 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
             p.meltable = true;
             p.melt_kelvin = 1698.0f; p.boiling_kelvin = 3134.0f;
             p.latent_heat_fusion = 2.6e5f; p.melt_viscosity = 0.4f;
+            p.liquid_density = 7000.0f;
+            p.liquid_kinematic_viscosity = 1.0e-6f;
+            p.latent_heat_vaporization = 6.0e6f;
             p.molten_emission = 1.4f;
             add(p);
         }
@@ -330,6 +337,9 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
             p.meltable = true;
             p.melt_kelvin = 1358.0f; p.boiling_kelvin = 2835.0f;
             p.latent_heat_fusion = 2.05e5f; p.melt_viscosity = 0.25f;
+            p.liquid_density = 8020.0f;
+            p.liquid_kinematic_viscosity = 5.0e-7f;
+            p.latent_heat_vaporization = 4.73e6f;
             p.molten_emission = 1.3f;
             add(p);
         }
@@ -375,6 +385,12 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
             p.meltable = true;
             p.melt_kelvin = 403.0f; p.boiling_kelvin = 673.0f;
             p.latent_heat_fusion = 2.0e5f; p.melt_viscosity = 0.75f;
+            p.liquid_density = 760.0f;
+            p.liquid_kinematic_viscosity = 0.30f;
+            p.fluid_flammable = true;
+            p.flash_kelvin = 615.0f; p.autoignition_kelvin = 678.0f;
+            p.latent_heat_vaporization = 1.35e6f;
+            p.vaporization_rate = 0.18f; p.flame_persistence = 1.10f;
             add(p);
         }
         {
@@ -391,6 +407,108 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
             p.meltable = true;
             p.melt_kelvin = 330.0f; p.boiling_kelvin = 643.0f;
             p.latent_heat_fusion = 2.1e5f; p.melt_viscosity = 0.15f;
+            p.liquid_density = 760.0f;
+            p.liquid_kinematic_viscosity = 5.0e-3f;
+            p.fluid_flammable = true;
+            p.flash_kelvin = 524.0f; p.autoignition_kelvin = 601.0f;
+            p.latent_heat_vaporization = 1.45e6f;
+            p.vaporization_rate = 0.12f; p.flame_persistence = 0.95f;
+            add(p);
+        }
+        {
+            SubstanceProfile p;
+            p.name = "Water";
+            p.density = 997.0f; p.liquid_density = 997.0f;
+            p.specific_heat = 4180.0f; p.conductivity = 0.60f;
+            p.liquid_kinematic_viscosity = 1.0e-6f;
+            p.meltable = true;
+            p.melt_kelvin = 273.15f; p.boiling_kelvin = 373.15f;
+            p.latent_heat_fusion = 3.34e5f;
+            p.latent_heat_vaporization = 2.26e6f;
+            p.fluid_extinguishing = true;
+            p.cooling_power = 1.0f; p.oxygen_dilution = 0.35f;
+            p.molten_emission = 0.0f;
+            add(p);
+        }
+        {
+            SubstanceProfile p;
+            p.name = "Sand";
+            p.default_constitutive_model =
+                Fluid::MatterConstitutiveModel::Granular;
+            p.density = 1600.0f;
+            p.specific_heat = 830.0f;
+            p.conductivity = 0.27f;
+            p.absorbency = 0.35f;
+            p.dry_rate = 0.015f;
+            p.granular_friction_degrees = 34.0f;
+            p.granular_cohesion = 0.0f;
+            add(p);
+        }
+        {
+            SubstanceProfile p;
+            p.name = "Gravel";
+            p.default_constitutive_model =
+                Fluid::MatterConstitutiveModel::Granular;
+            p.density = 1750.0f;
+            p.specific_heat = 800.0f;
+            p.conductivity = 0.35f;
+            p.absorbency = 0.12f;
+            p.dry_rate = 0.03f;
+            p.granular_friction_degrees = 40.0f;
+            p.granular_cohesion = 0.0f;
+            add(p);
+        }
+        {
+            SubstanceProfile p;
+            p.name = "Soil";
+            p.default_constitutive_model =
+                Fluid::MatterConstitutiveModel::Granular;
+            p.density = 1450.0f;
+            p.specific_heat = 900.0f;
+            p.conductivity = 0.25f;
+            p.absorbency = 0.70f;
+            p.dry_rate = 0.01f;
+            p.granular_friction_degrees = 30.0f;
+            p.granular_cohesion = 800.0f;
+            add(p);
+        }
+        {
+            SubstanceProfile p;
+            p.name = "Gasoline";
+            p.density = 740.0f; p.liquid_density = 740.0f;
+            p.specific_heat = 1700.0f; p.conductivity = 0.13f;
+            p.liquid_kinematic_viscosity = 6.0e-7f;
+            p.fluid_flammable = true;
+            p.flash_kelvin = 415.5f; p.autoignition_kelvin = 573.0f;
+            p.boiling_kelvin = 470.0f;
+            p.latent_heat_vaporization = 9.0e5f;
+            p.vaporization_rate = 0.85f; p.flame_persistence = 0.55f;
+            add(p);
+        }
+        {
+            SubstanceProfile p;
+            p.name = "Alcohol";
+            p.density = 789.0f; p.liquid_density = 789.0f;
+            p.specific_heat = 2400.0f; p.conductivity = 0.17f;
+            p.liquid_kinematic_viscosity = 1.5e-6f;
+            p.fluid_flammable = true;
+            p.flash_kelvin = 391.0f; p.autoignition_kelvin = 545.0f;
+            p.boiling_kelvin = 351.5f;
+            p.latent_heat_vaporization = 8.5e5f;
+            p.vaporization_rate = 1.20f; p.flame_persistence = 0.35f;
+            add(p);
+        }
+        {
+            SubstanceProfile p;
+            p.name = "Oil";
+            p.density = 850.0f; p.liquid_density = 850.0f;
+            p.specific_heat = 1700.0f; p.conductivity = 0.15f;
+            p.liquid_kinematic_viscosity = 5.0e-5f;
+            p.fluid_flammable = true;
+            p.flash_kelvin = 520.5f; p.autoignition_kelvin = 678.0f;
+            p.boiling_kelvin = 650.0f;
+            p.latent_heat_vaporization = 1.2e6f;
+            p.vaporization_rate = 0.28f; p.flame_persistence = 0.90f;
             add(p);
         }
         {
@@ -404,6 +522,11 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
             p.meltable = true;
             p.melt_kelvin = 273.15f; p.boiling_kelvin = 373.15f;
             p.latent_heat_fusion = 3.34e5f; p.melt_viscosity = 0.02f;
+            p.liquid_density = 997.0f;
+            p.liquid_kinematic_viscosity = 0.0f;
+            p.latent_heat_vaporization = 2.26e6f;
+            p.fluid_extinguishing = true;
+            p.cooling_power = 1.0f; p.oxygen_dilution = 0.35f;
             p.molten_emission = 0.0f;
             add(p);
         }
@@ -439,11 +562,30 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
     return library;
 }
 
-const SubstanceProfile& findSubstance(const std::string& name) {
+const SubstanceProfile* tryFindSubstance(const std::string& name) {
     const auto& library = substanceLibrary();
     for (const SubstanceProfile& p : library) {
-        if (p.name == name) return p;
+        if (p.name == name) return &p;
     }
+    return nullptr;
+}
+
+const SubstanceProfile* tryFindSubstanceByTag(uint32_t tag) {
+    if (tag == Fluid::kSubstanceUntagged) return nullptr;
+    static const std::unordered_map<uint32_t, const SubstanceProfile*> by_tag = [] {
+        std::unordered_map<uint32_t, const SubstanceProfile*> result;
+        for (const SubstanceProfile& profile : substanceLibrary()) {
+            result.emplace(Fluid::substanceTag(profile.name), &profile);
+        }
+        return result;
+    }();
+    const auto it = by_tag.find(tag);
+    return it != by_tag.end() ? it->second : nullptr;
+}
+
+const SubstanceProfile& findSubstance(const std::string& name) {
+    if (const SubstanceProfile* profile = tryFindSubstance(name)) return *profile;
+    const auto& library = substanceLibrary();
     // Unknown name (project authored against a newer build, or an empty string
     // from a collider that predates substances): fall back to the default rather
     // than refusing to load.
@@ -957,6 +1099,9 @@ bool MaterialStateFieldSystem::stepAmbient(SimulationComputeContext& compute,
     const auto start = Clock::now();
     const float kelvin_per_unit = std::max(1e-3f, world.kelvin_per_unit);
     const float convection = std::max(0.0f, world.convection_coefficient);
+    // Resolved ONCE per pass: with inheritance on it reads the climate
+    // snapshot, and every field of this frame must see the same room.
+    const float world_ambient_kelvin = world.ambientKelvin();
     bool all_ok = true;
 
     for (auto& entry : fields_) {
@@ -988,15 +1133,16 @@ bool MaterialStateFieldSystem::stepAmbient(SimulationComputeContext& compute,
         pc.counts[2] = static_cast<int>(zones.size());
         pc.params[0] = dt;
         pc.params[1] = std::max(0.0f, profile.cooling_rate) * convection;
-        pc.params[2] = world.ambient_kelvin;
+        pc.params[2] = world.reference_kelvin;
         pc.params[3] = 1.0f / kelvin_per_unit;
         pc.params2[0] = std::max(1.0f, max_temperature);
         // ★ Drying lives HERE and nowhere else. Moisture has exactly one sink,
         // for the same reason cooling now has exactly one: a process split across
         // the per-frame pass and the per-domain gather runs once per gas domain
         // and silently scales with domain count.
-        pc.params2[1] = std::max(0.0f, profile.dry_rate);
+        pc.params2[1] = std::max(0.0f, profile.dry_rate) * world.dryingScale();
         pc.params2[2] = scale.toNormalized(kWaterBoilingKelvin);
+        pc.params2[3] = world_ambient_kelvin;
 
         ComputeBufferHandle bufs[4] = {
             field.gpu_centers, field.gpu_state,

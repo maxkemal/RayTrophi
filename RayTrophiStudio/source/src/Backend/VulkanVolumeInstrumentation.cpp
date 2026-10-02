@@ -39,12 +39,17 @@ void VulkanVolumeInstrumentation::destroy(VulkanDevice& device) {
     m_impl->buffer = {};
 }
 
-void VulkanVolumeInstrumentation::reset(VulkanDevice& device, bool enabled) {
+void VulkanVolumeInstrumentation::reset(VulkanDevice& device, bool enabled,
+                                        const VolumeInstrumentationRegion& region) {
     if (!ensure(device)) {
         return;
     }
     VolumePerformanceStats cleared{};
     cleared.enabled = enabled ? 1u : 0u;
+    cleared.regionMinX = region.minX;
+    cleared.regionMinY = region.minY;
+    cleared.regionMaxX = region.maxX;
+    cleared.regionMaxY = region.maxY;
     if (void* mapped = device.mapBuffer(m_impl->buffer)) {
         std::memcpy(mapped, &cleared, sizeof(cleared));
         device.unmapBuffer(m_impl->buffer);

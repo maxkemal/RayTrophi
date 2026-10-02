@@ -1125,13 +1125,15 @@ __device__ float3 apply_atmospheric_fog(
         world.nishita.fog_falloff
     );
     
-    // Base fog color
-    float3 fogColor = world.nishita.fog_color;
-    
+    // FROZEN mapping: OptiX keeps the flat fog mix. fog_albedo is read as the
+    // fog colour and fog_anisotropy as the sun-glow gain (the Vulkan froxel
+    // treats them as a lit medium; ATMOSPHERE_SYSTEM.md Faz 1b).
+    float3 fogColor = world.nishita.fog_albedo;
+
     // Sun scattering in fog (makes fog glow towards sun)
     float3 sunDir = normalize(world.nishita.sun_direction);
     float sunDot = fmaxf(0.0f, dot(rayDir, sunDir));
-    float sunScatter = powf(sunDot, 8.0f) * world.nishita.fog_sun_scatter;
+    float sunScatter = powf(sunDot, 8.0f) * world.nishita.fog_anisotropy;
     
     // Add sun color to fog when looking towards sun
     float3 sunColor = make_float3(1.0f, 0.9f, 0.7f) * world.nishita.sun_intensity * 0.1f;
@@ -1198,8 +1200,8 @@ __device__ float3 rc_apply_weather_atmosphere(
         tint *= 1.12f;
     }
 
-    float windLen2 = dot(weather.wind_direction, weather.wind_direction);
-    float3 windDir = (windLen2 > 1e-8f) ? normalize(weather.wind_direction) : make_float3(1.0f, 0.0f, 0.0f);
+    float windLen2 = dot(weather.derived_wind_direction, weather.derived_wind_direction);
+    float3 windDir = (windLen2 > 1e-8f) ? normalize(weather.derived_wind_direction) : make_float3(1.0f, 0.0f, 0.0f);
     float forward = powf(fmaxf(0.0f, dot(normalize(rayDir), windDir)), 4.0f);
     amount = fminf(0.90f, amount + forward * weather.intensity * weather.density * 0.08f);
     return color * (1.0f - amount) + tint * amount;
@@ -1298,11 +1300,11 @@ __device__ float3 rc_apply_weather_precipitation_overlay(
     float scale = fmaxf(weather.precipitation_scale, 0.25f);
     float depthFade = rc_precip_smoothstep(0.6f, 18.0f, fmaxf(distance, 0.0f));
     float horizonFade = fmaxf(0.35f, fminf(1.0f, 1.0f - fmaxf(rayDir.y, 0.0f) * 0.35f));
-    float windLen2 = weather.wind_direction.x * weather.wind_direction.x + weather.wind_direction.z * weather.wind_direction.z;
+    float windLen2 = weather.derived_wind_direction.x * weather.derived_wind_direction.x + weather.derived_wind_direction.z * weather.derived_wind_direction.z;
     float invWindLen = windLen2 > 1e-8f ? rsqrtf(windLen2) : 0.0f;
-    float windAmount = fmaxf(0.0f, fminf(1.0f, weather.wind_speed / 35.0f));
-    float windX = (windLen2 > 1e-8f ? weather.wind_direction.x * invWindLen : 1.0f) * windAmount;
-    float windY = (windLen2 > 1e-8f ? weather.wind_direction.z * invWindLen : 0.0f) * windAmount;
+    float windAmount = fmaxf(0.0f, fminf(1.0f, weather.derived_wind_speed_mps / 35.0f));
+    float windX = (windLen2 > 1e-8f ? weather.derived_wind_direction.x * invWindLen : 1.0f) * windAmount;
+    float windY = (windLen2 > 1e-8f ? weather.derived_wind_direction.z * invWindLen : 0.0f) * windAmount;
     float windVisual = 0.65f + windAmount * 0.9f;
     float amount = 0.0f;
     float3 tint = rc_weather_tint_color(weather.type);
@@ -1574,11 +1576,14 @@ __device__ float3 gpu_get_aerial_perspective(const WorldData& world, float3 colo
     float4 trans4 = tex2D<float4>(world.lut.transmittance_lut, u, v);
     float3 transmittance = make_float3(trans4.x, trans4.y, trans4.z);
     
-    const float min_dist = world.advanced.aerial_min_distance;
-    const float max_dist = world.advanced.aerial_max_distance;
+    // FROZEN mapping (docs/dev/ATMOSPHERE_SYSTEM.md, Faz 1b): Vulkan replaced this
+    // artistic ramp with the aerial froxel and the ramp fields are gone. This path
+    // keeps their former defaults so its output does not move.
+    const float min_dist = 1000.0f;
+    const float max_dist = 10000.0f;
     float ramp = (dist < min_dist) ? 0.0f : fminf(1.0f, (dist - min_dist) / fmaxf(1.0f, max_dist - min_dist));
     
-    float aerialDensity = fmaxf(0.0f, world.advanced.aerial_density);
+    float aerialDensity = 1.0f;
     float atmosphereDensity = fmaxf(0.001f, world.nishita.air_density * 0.60f + world.nishita.dust_density * 0.40f);
     float enabledFogDensity = world.nishita.fog_enabled
         ? fmaxf(world.nishita.fog_density, 0.0f) : 0.0f;
@@ -1606,7 +1611,7 @@ __device__ float3 gpu_get_aerial_perspective(const WorldData& world, float3 colo
             world.nishita.fog_height,
             world.nishita.fog_falloff
         );
-        res = lerp(res, world.nishita.fog_color, fAmount);
+        res = lerp(res, world.nishita.fog_albedo, fAmount);
     }
 
     return res;
@@ -3467,10 +3472,10 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
             world.nishita.fog_falloff
         );
         
-        float3 fogColor = world.nishita.fog_color;
+        float3 fogColor = world.nishita.fog_albedo;
         float3 sunDir = normalize(world.nishita.sun_direction);
         float sunDot = fmaxf(0.0f, dot(rayDir, sunDir));
-        float sunScatter = powf(sunDot, 8.0f) * world.nishita.fog_sun_scatter;
+        float sunScatter = powf(sunDot, 8.0f) * world.nishita.fog_anisotropy;
         float3 sunColor = make_float3(1.0f, 0.9f, 0.7f) * world.nishita.sun_intensity * 0.05f;
         fogColor = fogColor + sunColor * sunScatter;
         color = lerp(color, fogColor, fogFactor);

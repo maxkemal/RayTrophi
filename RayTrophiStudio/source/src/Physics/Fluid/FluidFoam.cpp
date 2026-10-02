@@ -470,27 +470,28 @@ void stepFoam(const FluidParticles& fluid,
     }
 }
 
-void splatFoamDensity(const FoamParticles& foam,
-                      const FluidSim::FluidGrid& grid,
-                      std::vector<float>& density_out,
-                      float density_per_particle)
+void whitewaterTypeWeights(const FoamParams& params, const bool (&routed)[3],
+                           float (&out)[3])
 {
-    splatFoamDensity(foam, grid.nx, grid.ny, grid.nz, grid.voxel_size, grid.origin,
-                     density_out, density_per_particle);
+    out[static_cast<int>(FoamType::Spray)]  = routed[static_cast<int>(FoamType::Spray)]
+        ? params.volume_spray_strength : 0.0f;
+    out[static_cast<int>(FoamType::Foam)]   = routed[static_cast<int>(FoamType::Foam)] ? 1.0f : 0.0f;
+    out[static_cast<int>(FoamType::Bubble)] = routed[static_cast<int>(FoamType::Bubble)]
+        ? params.volume_bubble_strength : 0.0f;
 }
 
-void splatFoamDensity(const FoamParticles& foam,
-                      int nx, int ny, int nz, float voxel, const Vec3& origin,
-                      std::vector<float>& density_out,
-                      float density_per_particle,
-                      float bubble_weight,
-                      float spray_weight)
+std::size_t splatFoamDensity(const FoamParticles& foam,
+                             int nx, int ny, int nz, float voxel, const Vec3& origin,
+                             std::vector<float>& density_out,
+                             float density_per_particle,
+                             const float (&type_weight)[3])
 {
     const std::size_t cells = (nx > 0 && ny > 0 && nz > 0)
         ? static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) * static_cast<std::size_t>(nz)
         : 0;
     density_out.assign(cells, 0.0f);
-    if (nx <= 0 || ny <= 0 || nz <= 0 || voxel <= 0.0f || foam.empty() || cells == 0) return;
+    std::size_t deposited = 0;
+    if (nx <= 0 || ny <= 0 || nz <= 0 || voxel <= 0.0f || foam.empty() || cells == 0) return 0;
 
     const float inv_h = 1.0f / voxel;
     auto idx = [nx, ny](int i, int j, int k) -> std::size_t {
@@ -504,16 +505,12 @@ void splatFoamDensity(const FoamParticles& foam,
     for (std::size_t p = 0; p < n; ++p) {
         const Vec3& x = foam.position[p];
         if (!std::isfinite(x.x) || !std::isfinite(x.y) || !std::isfinite(x.z)) continue;
-        // Per-class deposit weight: surface FOAM full, BUBBLE/SPRAY scaled. Bubbles
-        // ride the same channel but are depth-tinted by the water for free → distinct
-        // subsurface froth without a second volume.
-        float dpp = density_per_particle;
-        if (has_type) {
-            const uint8_t t = foam.type[p];
-            if (t == static_cast<uint8_t>(FoamType::Bubble))      dpp *= bubble_weight;
-            else if (t == static_cast<uint8_t>(FoamType::Spray))  dpp *= spray_weight;
-        }
-        if (dpp <= 0.0f) continue;  // class fully suppressed
+        // Per-type weight: 0 = not routed to this view (or fully suppressed).
+        // An untyped array counts as foam.
+        const uint8_t t = has_type ? foam.type[p] : static_cast<uint8_t>(FoamType::Foam);
+        const float dpp = t < 3 ? density_per_particle * type_weight[t] : 0.0f;
+        if (dpp <= 0.0f) continue;
+        ++deposited;
         // Cell-centred coords (shift by -0.5 so trilinear weights span cell centres).
         const float gx = (x.x - origin.x) * inv_h - 0.5f;
         const float gy = (x.y - origin.y) * inv_h - 0.5f;
@@ -531,6 +528,7 @@ void splatFoamDensity(const FoamParticles& foam,
             density_out[idx(i, j, k)] += dpp * w;
         }
     }
+    return deposited;
 }
 
 } // namespace Fluid

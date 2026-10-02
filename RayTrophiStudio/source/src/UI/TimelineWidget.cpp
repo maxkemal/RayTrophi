@@ -1057,61 +1057,20 @@ void TimelineWidget::draw(UIContext& ctx) {
                 if (evaluated.world.has_air_density) { nishita.air_density = evaluated.world.air_density; changed = true; }
                 if (evaluated.world.has_dust_density) { nishita.dust_density = evaluated.world.dust_density; changed = true; }
                 if (evaluated.world.has_ozone_density) { nishita.ozone_density = evaluated.world.ozone_density; changed = true; }
-                if (evaluated.world.has_humidity) { nishita.humidity = evaluated.world.humidity; changed = true; }
-                if (evaluated.world.has_temperature) { nishita.temperature = evaluated.world.temperature; changed = true; }
                 if (evaluated.world.has_ozone_absorption_scale) { nishita.ozone_absorption_scale = evaluated.world.ozone_absorption_scale; changed = true; }
                 if (evaluated.world.has_altitude) { nishita.altitude = evaluated.world.altitude; changed = true; }
                 if (evaluated.world.has_mie_anisotropy) { nishita.mie_anisotropy = evaluated.world.mie_anisotropy; changed = true; }
-                if (evaluated.world.has_cloud_density) { nishita.cloud_density = evaluated.world.cloud_density; changed = true; }
-                if (evaluated.world.has_cloud_coverage) { nishita.cloud_coverage = evaluated.world.cloud_coverage; changed = true; }
-                if (evaluated.world.has_cloud_scale) { nishita.cloud_scale = evaluated.world.cloud_scale; changed = true; }
-                if (evaluated.world.has_cloud_offset) { 
-                    nishita.cloud_offset_x = evaluated.world.cloud_offset_x; 
-                    nishita.cloud_offset_z = evaluated.world.cloud_offset_z; 
-                    changed = true; 
-                }
-                if (evaluated.world.has_cloud_lighting) {
-                    nishita.cloud_light_steps = evaluated.world.cloud_light_steps;
-                    nishita.cloud_shadow_strength = evaluated.world.cloud_shadow_strength;
-                    nishita.cloud_ambient_strength = evaluated.world.cloud_ambient_strength;
-                    nishita.cloud_silver_intensity = evaluated.world.cloud_silver_intensity;
-                    nishita.cloud_absorption = evaluated.world.cloud_absorption;
-                    nishita.cloud_anisotropy = evaluated.world.cloud_anisotropy;
-                    nishita.cloud_anisotropy_back = evaluated.world.cloud_anisotropy_back;
-                    nishita.cloud_lobe_mix = evaluated.world.cloud_lobe_mix;
-                    nishita.cloud_emissive_intensity = evaluated.world.cloud_emissive_intensity;
-                    nishita.cloud_emissive_color = make_float3(
-                        evaluated.world.cloud_emissive_color.x,
-                        evaluated.world.cloud_emissive_color.y,
-                        evaluated.world.cloud_emissive_color.z);
-                    changed = true;
-                }
-                if (evaluated.world.has_cloud_layer2) {
-                    nishita.cloud_layer2_enabled = evaluated.world.cloud_layer2_enabled;
-                    changed = true;
-                }
-                if (evaluated.world.has_cloud_layer2_params) {
-                    nishita.cloud2_coverage = evaluated.world.cloud2_coverage;
-                    nishita.cloud2_density = evaluated.world.cloud2_density;
-                    nishita.cloud2_scale = evaluated.world.cloud2_scale;
-                    changed = true;
-                }
-                if (evaluated.world.has_cloud_layer2_heights) {
-                    nishita.cloud2_height_min = evaluated.world.cloud2_height_min;
-                    nishita.cloud2_height_max = evaluated.world.cloud2_height_max;
-                    changed = true;
-                }
                 if (evaluated.world.has_fog) { nishita.fog_enabled = evaluated.world.fog_enabled; changed = true; }
                 if (evaluated.world.has_fog_params) {
                     nishita.fog_density = evaluated.world.fog_density;
                     nishita.fog_height = evaluated.world.fog_height;
                     nishita.fog_falloff = evaluated.world.fog_falloff;
                     nishita.fog_distance = evaluated.world.fog_distance;
-                    nishita.fog_color = make_float3(
-                        evaluated.world.fog_color.x,
-                        evaluated.world.fog_color.y,
-                        evaluated.world.fog_color.z);
-                    nishita.fog_sun_scatter = evaluated.world.fog_sun_scatter;
+                    nishita.fog_albedo = make_float3(
+                        evaluated.world.fog_albedo.x,
+                        evaluated.world.fog_albedo.y,
+                        evaluated.world.fog_albedo.z);
+                    nishita.fog_anisotropy = evaluated.world.fog_anisotropy;
                     changed = true;
                 }
                 if (evaluated.world.has_godrays) { nishita.godrays_enabled = evaluated.world.godrays_enabled; changed = true; }
@@ -1129,12 +1088,6 @@ void TimelineWidget::draw(UIContext& ctx) {
                 }
                 if (evaluated.world.has_aerial_perspective) {
                     advanced.aerial_perspective = evaluated.world.aerial_perspective;
-                    advancedChanged = true;
-                }
-                if (evaluated.world.has_aerial_params) {
-                    advanced.aerial_density = evaluated.world.aerial_density;
-                    advanced.aerial_min_distance = evaluated.world.aerial_min_distance;
-                    advanced.aerial_max_distance = evaluated.world.aerial_max_distance;
                     advancedChanged = true;
                 }
                 if (evaluated.world.has_overlay) {
@@ -1165,11 +1118,6 @@ void TimelineWidget::draw(UIContext& ctx) {
                     weather.type = evaluated.world.weather_type;
                     weather.intensity = evaluated.world.weather_intensity;
                     weather.density = evaluated.world.weather_density;
-                    weather.wind_direction = make_float3(
-                        evaluated.world.weather_wind_direction.x,
-                        evaluated.world.weather_wind_direction.y,
-                        evaluated.world.weather_wind_direction.z);
-                    weather.wind_speed = evaluated.world.weather_wind_speed;
                     weather.precipitation_scale = evaluated.world.weather_precipitation_scale;
                     weather.visibility = evaluated.world.weather_visibility;
                     weather.surface_wetness_output = evaluated.world.weather_surface_wetness;
@@ -1217,6 +1165,40 @@ void TimelineWidget::draw(UIContext& ctx) {
                 }
                 if (weatherChanged) {
                     ctx.renderer.world.setWeatherParams(weather);
+                }
+
+                // Climate block: through setClimate, which owns validation and
+                // the LUT dirtying for temperature/humidity.
+                bool climateChanged = false;
+                if (evaluated.world.has_climate) {
+                    const atmosphere::ClimateState before = ctx.renderer.world.getClimate();
+                    const atmosphere::ClimateState keyed = atmosphere::climateFromKeyed(
+                        before,
+                        evaluated.world.climate_temperature_k, evaluated.world.climate_lapse_rate_k_per_m,
+                        evaluated.world.climate_relative_humidity, evaluated.world.climate_pressure_pa,
+                        evaluated.world.climate_wind_direction, evaluated.world.climate_wind_speed_mps);
+                    std::string climateError;
+                    if (ctx.renderer.world.setClimate(keyed, &climateError)) {
+                        const atmosphere::ClimateState& after = ctx.renderer.world.getClimate();
+                        climateChanged = std::memcmp(&before, &after, sizeof(atmosphere::ClimateState)) != 0;
+                    } else {
+                        SCENE_LOG_WARN("[Timeline] Climate key rejected: " + climateError);
+                    }
+                }
+                // The climate packet feeds the sky (temperature/humidity) and the
+                // weather shaders (wind): treat it like both.
+                changed = changed || climateChanged;
+                weatherChanged = weatherChanged || climateChanged;
+
+                // Clouds block: through setClouds (validation, packet, revision).
+                if (evaluated.world.has_clouds) {
+                    std::string cloudError;
+                    const uint64_t before = ctx.renderer.world.cloudRevision();
+                    if (!ctx.renderer.world.setClouds(evaluated.world.clouds, &cloudError)) {
+                        SCENE_LOG_WARN("[Timeline] Cloud key rejected: " + cloudError);
+                    } else if (ctx.renderer.world.cloudRevision() != before) {
+                        changed = true;
+                    }
                 }
 
                 if (changed || advancedChanged || environmentChanged || weatherChanged) {

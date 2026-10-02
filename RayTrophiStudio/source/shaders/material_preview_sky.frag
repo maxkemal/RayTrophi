@@ -7,6 +7,7 @@ layout(location = 0) out vec4 outColor;
 //   Eskiden gokyuzu ACES + pow(1/2.2), nesneler ACES + pow(1/2.2) idi ama
 //   ikisi ayri kopyalardi ve biri degistiginde oteki sessizce geride kalirdi.
 #include "post_chain.glsl"
+#include "sky_sun_corona.glsl"
 
 layout(set = 0, binding = 6, std430) readonly buffer PreviewSceneGlobalsBuffer {
     uint sceneLightCount;
@@ -44,6 +45,9 @@ layout(set = 0, binding = 9) uniform sampler2D worldEnvironment;
 layout(set = 0, binding = 10) uniform sampler2D atmosphereTransmittance;
 layout(set = 0, binding = 11) uniform sampler2D atmosphereSkyView;
 layout(set = 0, binding = 12) uniform sampler2D atmosphereMultiScatter;
+// RayFusion cloud layer (cloud_raster.comp): rgb in-scatter, a transmittance.
+// Read only when pc.materialMeta.x == 1 (the adapter wrote it this frame).
+layout(set = 0, binding = 25) uniform sampler2D cloudLayer;
 
 layout(push_constant) uniform MaterialPreviewPushConstants {
     mat4 viewProj;
@@ -105,20 +109,25 @@ vec3 nishitaSky(vec3 d) {
         sunSize *= 1.0 + (15.0 - max(elevation, -10.0)) * 0.04;
     float radius = radians(sunSize * 0.5);
     float mu = dot(d, sunDir);
+    bool lutReady = (sceneFlags & 8u) != 0u;
+    vec3 transSun = vec3(1.0);
+    if (lutReady) {
+        float u = clamp((max(0.01, sunDir.y) + 0.2) / 1.2, 0.0, 1.0);
+        float planetRadius = max(atmosphereB.x, 1.0);
+        float altitude = max(0.0, length(pc.cameraPos.xyz + vec3(0.0, planetRadius, 0.0)) - planetRadius);
+        float v = clamp(altitude / max(atmosphereB.y, 1.0), 0.0, 1.0);
+        transSun = texture(atmosphereTransmittance, vec2(u, v)).rgb;
+    }
     if (mu > cos(radius) && worldSun.w > 0.0) {
         float radial = acos(clamp(mu, -1.0, 1.0)) / max(radius, 1e-6);
         float limb = 1.0 - 0.6 * (1.0 - sqrt(max(0.0, 1.0 - radial * radial)));
         float edge = 1.0 - smoothstep(0.85, 1.0, radial);
-        vec3 transSun = vec3(1.0);
-        if ((sceneFlags & 8u) != 0u) {
-            float u = clamp((max(0.01, sunDir.y) + 0.2) / 1.2, 0.0, 1.0);
-            float planetRadius = max(atmosphereB.x, 1.0);
-            float altitude = max(0.0, length(pc.cameraPos.xyz + vec3(0.0, planetRadius, 0.0)) - planetRadius);
-            float v = clamp(altitude / max(atmosphereB.y, 1.0), 0.0, 1.0);
-            transSun = texture(atmosphereTransmittance, vec2(u, v)).rgb;
-        }
         sky += transSun * worldSun.w * 80000.0 * limb * edge;
     }
+    // Sharp Mie core the LUT's phase clamp cuts off -- same term and gates as
+    // miss.rmiss (sun on, LUT present). Without it only the broad halo showed.
+    if (lutReady && worldSun.w > 0.0)
+        sky += skyMieCorona(mu, atmosphereA.z, atmosphereA.w, worldParams.z, transSun);
     if ((sceneFlags & 4u) != 0u)
         sky = blendOverlay(sky, texture(worldEnvironment, environmentUV(d, worldParams.x)).rgb);
     return sky;
@@ -133,8 +142,13 @@ void main() {
     vec3 sky;
     if (worldMode == 1u && (sceneFlags & 2u) != 0u)
         sky = texture(worldEnvironment, environmentUV(d, worldParams.x)).rgb * max(worldParams.y, 0.0);
-    else if (worldMode == 2u)
+    else if (worldMode == 2u) {
         sky = nishitaSky(d);
+        if (pc.materialMeta.x == 1u) {
+            vec4 c = texture(cloudLayer, vNdc * 0.5 + 0.5);
+            sky = sky * c.a + c.rgb;
+        }
+    }
     else
         sky = max(worldColor.rgb * worldColor.w, vec3(0.0));
 

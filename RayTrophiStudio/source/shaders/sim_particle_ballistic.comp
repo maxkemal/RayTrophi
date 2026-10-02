@@ -8,7 +8,7 @@
 // the host can allocate spawn slots without reading anything back. Keep the
 // order of operations identical to the CPU reference in
 // ParticleSimulationSystem::step: age += dt, kill if age >= lifetime, then
-// v = (v + a*dt) * drag, p += v*dt.
+// v = W + (v + a*dt - W) * drag, p += v*dt  (W = climate wind, 0 = old formula).
 #extension GL_GOOGLE_include_directive : require
 #include "include/sim_force_fields.glsl"
 layout(local_size_x=256) in;
@@ -17,6 +17,7 @@ layout(push_constant) uniform PC {
     float gravity_x; float gravity_y; float gravity_z;
     float buoyancy; float drag_factor; float time_seconds;
     uint system_mask; uint force_count;
+    float air_wind_x; float air_wind_y; float air_wind_z; float _pad0;
 } pc;
 layout(set=0,binding=0) buffer PX {float px[];};
 layout(set=0,binding=1) buffer PY {float py[];};
@@ -38,7 +39,8 @@ void main(){
     vec3 a=vec3(pc.gravity_x,pc.gravity_y+pc.buoyancy,pc.gravity_z);
     for(uint i=0u;i<pc.force_count;++i)
         a+=simEvaluateForceField(fields[i],p,v,pc.time_seconds,pc.system_mask);
-    v=(v+a*pc.dt)*pc.drag_factor;
+    vec3 air=vec3(pc.air_wind_x,pc.air_wind_y,pc.air_wind_z);
+    v=air+(v+a*pc.dt-air)*pc.drag_factor;
     p+=v*pc.dt;
     px[id]=p.x;py[id]=p.y;pz[id]=p.z;
     vx[id]=v.x;vy[id]=v.y;vz[id]=v.z;

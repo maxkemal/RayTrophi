@@ -1,6 +1,6 @@
 # Volumetric Cloud Layer Roadmap
 
-> **Durum:** AKTIF — Katmanli procedural cloud gocunun yasayan yol haritasi.
+> **Durum:** ARŞİV — 2026-09-29, yerini `ATMOSPHERE_SYSTEM.md` aldı. ★ Aşağıdaki "Güncel Durum" bölümü KODLA UYUŞMUYOR: `CloudLayerParams`/`layers[2]` depoda yok, düz `cloud_*` alanları `World.h`'de duruyor, tek iç hacim var (ikinci katman sessizce düşüyor) ve hacim `world.objects`'e ekleniyor. Ayrıntı ve dayanaklar: `ATMOSPHERE_SYSTEM.md` §0.1. Bu metni durum kaynağı olarak alıntılama.
 
 Bu not, world cloud sisteminin eski flat parametrelerden gercek katmanli procedural volume mimarisine tasinmasi icin yasayan yol haritasidir.
 

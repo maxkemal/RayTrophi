@@ -73,6 +73,49 @@ layout(set = 0, binding = 29, scalar) buffer VolumeInstrumentationBuffer {
     uint arbiterNoBox;
     uint arbiterEmptyRange;
     uint arbiterNoCrossing;
+    // ── Pixel region (normalized launch coordinates, [min, max)) ─────────────
+    // Every counter below AND above only counts launches inside this rectangle.
+    // Whole-image totals drown a 2% dark patch in background rays; a region
+    // turns "what happens on THAT surface" into a measurement. Host writes
+    // 0,0,1,1 when no region was asked for.
+    float regionMinX;
+    float regionMinY;
+    float regionMaxX;
+    float regionMaxY;
+    // ── Path budget accounting (raygen) ──────────────────────────────────────
+    // Why a path ENDED, and which bounce kind SPENT the budget. A surface that
+    // renders black because its paths die on the bounce cap looks exactly like
+    // one that is genuinely unlit; these separate the two.
+    //   pathsBounceCapped - loop left with the path still scattering because
+    //                       `bounce` reached maxBounces
+    //   pathsPassCapped   - loop left with the path still scattering because
+    //                       totalPasses reached maxBounces + 32 (free passes
+    //                       ran out before the bounce budget did)
+    // charged* partition every `bounce++` by the payload's bounceType;
+    // freePasses counts traces that were NOT charged (transparent passes and
+    // volume handoffs). Specular includes the gas march continuation, whose
+    // bounceType is left at its default.
+    uint pathsTraced;
+    uint pathsBounceCapped;
+    uint pathsPassCapped;
+    uint chargedSpecular;
+    uint chargedDiffuse;
+    uint chargedTransmission;
+    uint chargedOther;
+    uint freePasses;
+    // ── Volume-side attribution (volume closest-hit) ─────────────────────────
+    //   mediumPasses         - straight gas/fog continuations (BOUNCE_MEDIUM_PASS).
+    //                          FREE in the bounce budget, counted in freePasses.
+    //                          ~1 per box crossed is healthy; many per path is
+    //                          short-hop re-entry. (Was gasSegmentsCharged when
+    //                          these still cost a bounce; renamed, not reused.)
+    //   arbiterStartedInside - nearestSurfaceSDFCrossing began its walk already
+    //                          inside the liquid (d0 > ISO): the ray came from
+    //                          a refraction and is looking for the EXIT.
+    //   arbiterInsideFound   - ...and found that exit.
+    uint mediumPasses;
+    uint arbiterStartedInside;
+    uint arbiterInsideFound;
 } volumeInstrumentation;
 
 const uint VOLUME_MARCH_COMPLETED = 0u;
@@ -80,7 +123,36 @@ const uint VOLUME_MARCH_EXTINCTION = 1u;
 const uint VOLUME_MARCH_STEP_BUDGET = 2u;
 
 bool volumeInstrumentationEnabled() {
-    return volumeInstrumentation.enabled != 0u;
+    if (volumeInstrumentation.enabled == 0u) return false;
+    vec2 p = (vec2(gl_LaunchIDEXT.xy) + 0.5) / vec2(gl_LaunchSizeEXT.xy);
+    return p.x >= volumeInstrumentation.regionMinX &&
+           p.y >= volumeInstrumentation.regionMinY &&
+           p.x <  volumeInstrumentation.regionMaxX &&
+           p.y <  volumeInstrumentation.regionMaxY;
+}
+
+// Path budget accounting, called from raygen only.
+void volumeRecordPathEnd(bool bounceCapped, bool passCapped) {
+    if (!volumeInstrumentationEnabled()) return;
+    atomicAdd(volumeInstrumentation.pathsTraced, 1u);
+    if (bounceCapped) atomicAdd(volumeInstrumentation.pathsBounceCapped, 1u);
+    if (passCapped) atomicAdd(volumeInstrumentation.pathsPassCapped, 1u);
+}
+// kind: 0 specular, 1 diffuse, 2 transmission (incl. glass reflect), 3 other,
+// 4 free (not charged).
+void volumeRecordPass(uint kind) {
+    if (!volumeInstrumentationEnabled()) return;
+    if (kind == 0u)      atomicAdd(volumeInstrumentation.chargedSpecular, 1u);
+    else if (kind == 1u) atomicAdd(volumeInstrumentation.chargedDiffuse, 1u);
+    else if (kind == 2u) atomicAdd(volumeInstrumentation.chargedTransmission, 1u);
+    else if (kind == 3u) atomicAdd(volumeInstrumentation.chargedOther, 1u);
+    else                 atomicAdd(volumeInstrumentation.freePasses, 1u);
+}
+void volumeRecordMediumPass() { if (volumeInstrumentationEnabled()) atomicAdd(volumeInstrumentation.mediumPasses, 1u); }
+void volumeRecordArbiterStartedInside(bool found) {
+    if (!volumeInstrumentationEnabled()) return;
+    atomicAdd(volumeInstrumentation.arbiterStartedInside, 1u);
+    if (found) atomicAdd(volumeInstrumentation.arbiterInsideFound, 1u);
 }
 
 // Embedded-solid probe accounting. A surface standing INSIDE an active volume
