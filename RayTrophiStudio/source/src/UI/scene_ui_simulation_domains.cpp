@@ -1,10 +1,13 @@
 ﻿#include "scene_ui_forcefield.hpp"
 #include "scene_ui_fluid_thermal.hpp"
+#include "scene_ui_fluid_labels.h"
 #include "ui_modern.h"
 
 #include "Api/RtApi.h"
 #include "Fluid/FluidSplatMaterialAuthoring.h"
 #include "Fluid/FluidFogDensity.h"
+#include "Fluid/FluidGridResourceBudget.h"
+#include "Fluid/FluidViewResolver.h"
 
 namespace ForceFieldUI {
 
@@ -63,23 +66,19 @@ void drawSimulationDomainControls(
         const float btn3_w = std::max(60.0f, (avail_w - 10.0f) / 3.0f);
 
         // --- Row 1: Primary Simulation & Creation Actions ---
-        const auto& cur_theme = ThemeManager::instance().current();
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(cur_theme.colors.accent.x * 0.40f + cur_theme.colors.surface.x * 0.60f,
-                                                      cur_theme.colors.accent.y * 0.40f + cur_theme.colors.surface.y * 0.60f,
-                                                      cur_theme.colors.accent.z * 0.40f + cur_theme.colors.surface.z * 0.60f, 0.85f));
+        // General theme only: no state-coloured buttons in this panel.
         if (ImGui::Button("Reset Sim##SimResetTop", ImVec2(btn3_w, 24))) {
             resetSimulationNow();
         }
-        ImGui::PopStyleColor();
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Clear the bake cache and return to live free-run preview.");
         }
         ImGui::SameLine();
 
-        if (ImGui::Button("+ Add Grid##SimulationPanel", ImVec2(btn3_w, 24))) {
+        if (ImGui::Button("+ Add Domain##SimulationPanel", ImVec2(btn3_w, 24))) {
             RayTrophiSim::SimulationGridDomainDesc desc;
             const std::size_t domain_count = particles ? particles->gridDomains().size() : 0;
-            desc.name = "Grid Domain " + std::to_string(domain_count + 1);
+            desc.name = "Physics Domain " + std::to_string(domain_count + 1);
             desc.source_mode = RayTrophiSim::SimulationGridDomainSourceMode::ManualBox;
             desc.bounds_min = center + Vec3(-2.5f, -2.5f, -2.5f);
             desc.bounds_max = center + Vec3(2.5f, 2.5f, 2.5f);
@@ -98,7 +97,7 @@ void drawSimulationDomainControls(
             }
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Add a new empty 3D Simulation Grid Domain.");
+            ImGui::SetTooltip("Add a new empty physics domain.");
         }
         ImGui::SameLine();
 
@@ -204,7 +203,7 @@ void drawSimulationDomainControls(
             selected_domain_index = 0;
         }
 
-        ImGui::SeparatorText("Grid Domain List");
+        ImGui::SeparatorText("Physics Domains");
         if (ImGui::BeginListBox("##SimulationGridDomainListStandalone", ImVec2(-1, 110))) {
             for (int i = 0; i < static_cast<int>(domains.size()); ++i) {
                 char label[256];
@@ -212,7 +211,8 @@ void drawSimulationDomainControls(
                 // the name — so it follows a Gas<->Fluid switch automatically and
                 // the user can still rename the domain freely.
                 const char* type_tag =
-                    (domains[i].type == RayTrophiSim::SimulationDomainType::Fluid) ? "Fluid" : "Gas";
+                    domains[i].type == RayTrophiSim::SimulationDomainType::Matter ? "Matter" :
+                    (domains[i].type == RayTrophiSim::SimulationDomainType::Fluid ? "Fluid" : "Gas");
                 std::snprintf(label, sizeof(label), "%s  [%s]##domain_standalone%d",
                               domains[i].name.c_str(), type_tag, i);
                 if (ImGui::Selectable(label, selected_domain_index == i)) {
@@ -233,6 +233,27 @@ void drawSimulationDomainControls(
         }
 
         auto& domain = domains[static_cast<std::size_t>(selected_domain_index)];
+        // The one view decision (FluidViewResolver). Every "what is drawn" line
+        // and every per-view section below reads this; none re-derives it from
+        // the mode combo or the bindings.
+        RayTrophiSim::Fluid::FluidViewPlan view_plan;
+        if (RayTrophiSim::simulationDomainHasLiquid(domain.type)) {
+            std::vector<RayTrophiSim::Fluid::FluidViewKey> live_keys;
+            const auto& states = particles->gridDomainStates();
+            const std::size_t di = static_cast<std::size_t>(selected_domain_index);
+            if (di < states.size() && states[di].valid)
+                live_keys = RayTrophiSim::Fluid::distinctViewKeys(states[di].particles);
+            view_plan = RayTrophiSim::Fluid::resolveFluidViews(domain, live_keys);
+        }
+        // The domain's fog volume, for the "edit fog medium" route (the medium
+        // is edited on the volume that draws it, not in this panel).
+        std::shared_ptr<VDBVolume> fog_volume;
+        if (scene.active_particle_system_index >= 0 &&
+            scene.active_particle_system_index < static_cast<int>(scene.particle_systems.size())) {
+            const auto& sys = scene.particle_systems[static_cast<std::size_t>(scene.active_particle_system_index)];
+            const std::size_t di = static_cast<std::size_t>(selected_domain_index);
+            if (di < sys.domain_fog_volumes.size()) fog_volume = sys.domain_fog_volumes[di];
+        }
         ImGui::SeparatorText("Selected Domain");
         ImGui::Checkbox("Domain Enabled", &domain.enabled);
 
@@ -240,91 +261,77 @@ void drawSimulationDomainControls(
         // frame sets `seed_settled`. The toggle checkbox lives in the Fluid
         // Seeding header; the actual reseed (rewind to frame 0 + re-seed all fluid
         // domains) runs once at the very end of this panel so it covers BOTH the
-        // Setup&Grid tab (resolution/voxel/bounds) and the Fluid seeding tab.
+        // grid shape (resolution/voxel/bounds) and the fluid seeding, both in the
+        // Domain tab.
         static bool s_fluid_auto_reseed = true;
         bool seed_settled = false;
 
-        // Solver type (Gas vs. Fluid Segmented Buttons)
-        {
-            ImGui::Text("Domain Solver Type:");
-            ImGui::Spacing();
-            
-            const float button_width = std::max(100.0f, (ImGui::GetContentRegionAvail().x - 6.0f) * 0.5f);
-            const ImVec4 active_color = ImVec4(cur_theme.colors.accent.x, cur_theme.colors.accent.y, cur_theme.colors.accent.z, 0.90f);
-            const ImVec4 inactive_color = ImGui::GetStyleColorVec4(ImGuiCol_Button);
-            
-            const bool is_gas = (domain.type == RayTrophiSim::SimulationDomainType::Gas);
-            const bool is_fluid = (domain.type == RayTrophiSim::SimulationDomainType::Fluid);
-            
-            // --- Gas Button ---
-            if (is_gas) {
-                ImGui::PushStyleColor(ImGuiCol_Button, active_color);
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.12f, 0.54f, 0.94f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.06f, 0.42f, 0.82f, 1.00f));
-            } else {
-                ImGui::PushStyleColor(ImGuiCol_Button, inactive_color);
-            }
-            if (ImGui::Button("Gas (Smoke/Fire)##TypeGas", ImVec2(button_width, 30))) {
-                if (!is_gas) {
-                    domain.type = RayTrophiSim::SimulationDomainType::Gas;
-                    ui_ctx.start_render = true;
-                    if (scene.active_particle_system_index >= 0 &&
-                        scene.active_particle_system_index < static_cast<int>(scene.particle_systems.size())) {
-                        auto& active_sys = scene.particle_systems[static_cast<size_t>(scene.active_particle_system_index)];
-                        if (selected_domain_index >= 0 &&
-                            selected_domain_index < static_cast<int>(active_sys.domain_last_fluid_render_mode.size())) {
-                            active_sys.domain_last_fluid_render_mode[static_cast<size_t>(selected_domain_index)] = -1;
-                        }
-                    }
-                }
-            }
-            ImGui::PopStyleColor(is_gas ? 3 : 1);
-            
-            ImGui::SameLine(0.0f, 10.0f);
-            
-            // --- Fluid Button ---
-            if (is_fluid) {
-                ImGui::PushStyleColor(ImGuiCol_Button, active_color);
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.12f, 0.54f, 0.94f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.06f, 0.42f, 0.82f, 1.00f));
-            } else {
-                ImGui::PushStyleColor(ImGuiCol_Button, inactive_color);
-            }
-            if (ImGui::Button("Fluid (Liquid)##TypeFluid", ImVec2(button_width, 30))) {
-                if (!is_fluid) {
-                    domain.type = RayTrophiSim::SimulationDomainType::Fluid;
-                    // Liquid wants a sealed box by default so it pools/settles;
-                    // open walls would silently drain it. Only override the
-                    // gas-default Open — leave an already-chosen Closed/Periodic.
-                    if (domain.boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Open) {
-                        domain.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Closed;
-                    }
-                    ui_ctx.start_render = true;
-                    if (scene.active_particle_system_index >= 0 &&
-                        scene.active_particle_system_index < static_cast<int>(scene.particle_systems.size())) {
-                        auto& active_sys = scene.particle_systems[static_cast<size_t>(scene.active_particle_system_index)];
-                        if (selected_domain_index >= 0 &&
-                            selected_domain_index < static_cast<int>(active_sys.domain_last_fluid_render_mode.size())) {
-                            active_sys.domain_last_fluid_render_mode[static_cast<size_t>(selected_domain_index)] = -1;
-                        }
-                    }
-                }
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Simulates realistic fluids like water, honey, or viscous liquids using APIC/FLIP algorithms.");
-            }
-            ImGui::PopStyleColor(is_fluid ? 3 : 1);
-            ImGui::Spacing();
-        }
-        const bool is_fluid_domain = domain.type == RayTrophiSim::SimulationDomainType::Fluid;
-        const bool is_gas_domain  = !is_fluid_domain;
+        const bool is_fluid_domain = RayTrophiSim::simulationDomainHasLiquid(domain.type);
+        const bool is_gas_domain = RayTrophiSim::simulationDomainHasGas(domain.type);
 
         ImGui::Separator();
         // ── SUB-TABS FOR DOMAIN ──
         if (ImGui::BeginTabBar("DomainSubTabBar", ImGuiTabBarFlags_None)) {
 
-            if (ImGui::BeginTabItem("Setup & Grid")) {
+            if (ImGui::BeginTabItem("Domain")) {
                 ImGui::Spacing();
+                // What the domain holds. The unified matter domain will derive this from
+                // its contents; until then it is the solver switch. A standard combo: the
+                // panel uses the general theme, no state-coloured buttons.
+                {
+                    int phase_idx = domain.type == RayTrophiSim::SimulationDomainType::Matter
+                        ? 2
+                        : (is_fluid_domain ? 1 : 0);
+                    const char* phase_items[] = {
+                        "Gas (smoke / fire)",
+                        "Liquid (APIC / FLIP)",
+                        "Matter (gas + liquid / granular)"
+                    };
+                    ImGui::SetNextItemWidth(-FLT_MIN);
+                    if (ImGui::Combo("Contents##DomainPhase", &phase_idx, phase_items,
+                                     IM_ARRAYSIZE(phase_items))) {
+                        const auto new_type = phase_idx == 2
+                            ? RayTrophiSim::SimulationDomainType::Matter
+                            : (phase_idx == 1
+                                ? RayTrophiSim::SimulationDomainType::Fluid
+                                : RayTrophiSim::SimulationDomainType::Gas);
+                        if (new_type != domain.type) {
+                            if (new_type == RayTrophiSim::SimulationDomainType::Matter) {
+                                const auto inherited_phase =
+                                    domain.type == RayTrophiSim::SimulationDomainType::Fluid
+                                        ? RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid
+                                        : RayTrophiSim::SimulationFlowSourceDesc::Phase::Gas;
+                                for (auto& source : particles->flowSources()) {
+                                    if (source.domain_index == selected_domain_index) {
+                                        source.phase = inherited_phase;
+                                    }
+                                }
+                            }
+                            domain.type = new_type;
+                            // Liquid wants a sealed box by default so it pools/settles;
+                            // open walls would silently drain it. Only override the
+                            // gas-default Open - leave an already-chosen Closed/Periodic.
+                            if (RayTrophiSim::simulationDomainHasLiquid(new_type) &&
+                                domain.boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Open) {
+                                domain.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Closed;
+                            }
+                            ui_ctx.start_render = true;
+                            if (scene.active_particle_system_index >= 0 &&
+                                scene.active_particle_system_index < static_cast<int>(scene.particle_systems.size())) {
+                                auto& active_sys = scene.particle_systems[static_cast<size_t>(scene.active_particle_system_index)];
+                                if (selected_domain_index >= 0 &&
+                                    selected_domain_index < static_cast<int>(active_sys.domain_last_fluid_render_mode.size())) {
+                                    active_sys.domain_last_fluid_render_mode[static_cast<size_t>(selected_domain_index)] = -1;
+                                }
+                            }
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Gas: smoke and fire on a grid.\n"
+                                          "Liquid: water, honey, viscous or granular matter with APIC/FLIP particles.\n"
+                                          "Matter: both phases share one domain, bounds, sources and identity.");
+                    }
+                }
 
                 // Group 1: Compute & Backend
                 if (UIWidgets::CollapsingHeader("Compute Device & Backend", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -398,6 +405,7 @@ void drawSimulationDomainControls(
                     ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "  [GPU Status: CUDA Capable GPU Not Found - CPU Fallback]");
                 }
                 }
+
 
                 const char* quality_profiles[] = {
                     "Interactive (Fast)",
@@ -508,28 +516,53 @@ void drawSimulationDomainControls(
                                       "512+ requires sparse tiles and Cinema profile or disk bake for memory safety.\n"
                                       "Prefer a non-cube box (e.g. 512x64x128) over a full 512^3 cube.");
                 }
-                // Live cell-count + rough grid memory so high resolutions are an
-                // informed choice. The solver re-derives resolution each rebuild and
-                // clamps every axis to Max Auto Resolution, so preview the clamped
-                // values - otherwise the estimate lies whenever a requested axis
-                // exceeds the ceiling. ~11 floats/cell estimates MAC velocity faces +
-                // pressure/divergence/density/mask + PCG scratch vectors.
+                // Preview the same dense working-set model that the solver's
+                // resource-budget clamp enforces. This includes CPU source grids,
+                // Vulkan mirrors and scratch for every phase present in the domain.
                 {
                     const int eff_cap = std::clamp(domain.max_auto_resolution, 32, 2048);
                     const int eff_x = std::clamp(domain.resolution_x, 8, eff_cap);
                     const int eff_y = std::clamp(domain.resolution_y, 8, eff_cap);
                     const int eff_z = std::clamp(domain.resolution_z, 8, eff_cap);
-                    const std::size_t cell_preview =
-                        static_cast<std::size_t>(eff_x) *
-                        static_cast<std::size_t>(eff_y) *
-                        static_cast<std::size_t>(eff_z);
-                    const double grid_mb =
-                        static_cast<double>(cell_preview) * 11.0 * sizeof(float) / (1024.0 * 1024.0);
-                    ImVec4 col = (grid_mb > 3000.0) ? ImVec4(1.0f, 0.35f, 0.35f, 1.0f)   // >~3 GB: danger
-                               : (grid_mb >  800.0) ? ImVec4(1.0f, 0.75f, 0.30f, 1.0f)   // >~0.8 GB: caution
-                                                    : ImVec4(0.55f, 0.85f, 0.55f, 1.0f); // comfortable
-                    ImGui::TextColored(col, "Effective: %dx%dx%d = %zu cells  (~%.0f MB grid est.)",
-                                       eff_x, eff_y, eff_z, cell_preview, grid_mb);
+                    const auto resource_estimate = RayTrophiSim::Fluid::estimateGridResources(
+                        eff_x,
+                        eff_y,
+                        eff_z,
+                        RayTrophiSim::simulationDomainHasGas(domain.type),
+                        RayTrophiSim::simulationDomainHasLiquid(domain.type));
+                    const double grid_mb = static_cast<double>(resource_estimate.working_bytes) /
+                        (1024.0 * 1024.0);
+                    const double budget_mb = static_cast<double>(domain.resource_budget_mb);
+                    const double budget_fraction =
+                        domain.enforce_resource_budget && budget_mb > 0.0
+                            ? grid_mb / budget_mb
+                            : 0.0;
+                    const ImVec4 col =
+                        (domain.enforce_resource_budget && budget_fraction > 1.0)
+                            ? ImVec4(1.0f, 0.35f, 0.35f, 1.0f)
+                        : (domain.enforce_resource_budget && budget_fraction > 0.75)
+                            ? ImVec4(1.0f, 0.75f, 0.30f, 1.0f)
+                            : ImVec4(0.55f, 0.85f, 0.55f, 1.0f);
+                    if (domain.enforce_resource_budget) {
+                        ImGui::TextColored(
+                            col,
+                            "Effective: %dx%dx%d = %zu cells  (~%.0f MB / %u MB grid budget)",
+                            eff_x,
+                            eff_y,
+                            eff_z,
+                            resource_estimate.cell_count,
+                            grid_mb,
+                            domain.resource_budget_mb);
+                    } else {
+                        ImGui::TextColored(
+                            col,
+                            "Effective: %dx%dx%d = %zu cells  (~%.0f MB, grid budget disabled)",
+                            eff_x,
+                            eff_y,
+                            eff_z,
+                            resource_estimate.cell_count,
+                            grid_mb);
+                    }
                     if (eff_x < domain.resolution_x || eff_y < domain.resolution_y || eff_z < domain.resolution_z) {
                         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.30f, 1.0f),
                                            "  (clamped by Max Auto Resolution = %d - raise it below to go higher)", eff_cap);
@@ -569,9 +602,11 @@ void drawSimulationDomainControls(
                             }
                         }
                     }
-                    if (grid_mb > 3000.0) {
+                    if (domain.enforce_resource_budget && budget_fraction > 1.0) {
                         ImGui::SameLine();
-                        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), " - OOM/freeze risk");
+                        ImGui::TextColored(
+                            ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                            " - solver will reduce resolution");
                     }
 
                     // **** THE ROW ABOVE IS THE LIVE GRID, AND IT IS NOT WHAT
@@ -706,6 +741,7 @@ void drawSimulationDomainControls(
                 ImGui::Separator();
                 }
 
+
                 // Group 3: Bounds & Boundary Mode
                 if (UIWidgets::CollapsingHeader("Domain Bounds & Behaviors", ImGuiTreeNodeFlags_DefaultOpen)) {
                     ImGui::Spacing();
@@ -737,7 +773,7 @@ void drawSimulationDomainControls(
                     ImGui::Spacing();
 
                     if (domain.source_mode == RayTrophiSim::SimulationGridDomainSourceMode::Adaptive) {
-                        ImGui::TextColored(ImVec4(0.0f, 0.85f, 1.0f, 1.0f), "Adaptive Grid Domain Settings:");
+                        ImGui::TextColored(ImVec4(0.0f, 0.85f, 1.0f, 1.0f), "Adaptive Grid Settings:");
                         ImGui::Spacing();
 
                         ImGui::Checkbox("Lock Ground Level (Y Min)", &domain.adaptive_lock_floor);
@@ -824,407 +860,7 @@ void drawSimulationDomainControls(
                     }
                 }
 
-                // Group 4: Statistics Summary
-                if (UIWidgets::CollapsingHeader("Simulation & Collision Statistics", ImGuiTreeNodeFlags_DefaultOpen)) {
-                    ImGui::Spacing();
-
-                int intersect_n = 0;
-                if (particles && !particles->colliders().empty()) {
-                    const Vec3 dmn = Vec3::min(domain.bounds_min, domain.bounds_max);
-                    const Vec3 dmx = Vec3::max(domain.bounds_min, domain.bounds_max);
-                    for (const auto& c : particles->colliders()) {
-                        if (!c.enabled) continue;
-                        switch (c.source_mode) {
-                            case RayTrophiSim::ParticleColliderSourceMode::PlaneY:
-                                if (c.plane_y >= dmn.y - 1.0f && c.plane_y <= dmx.y + 1.0f) ++intersect_n;
-                                break;
-                            case RayTrophiSim::ParticleColliderSourceMode::Sphere: {
-                                const Vec3 sc = c.sphere_center;
-                                const float r = c.sphere_radius + c.thickness;
-                                if (sc.x + r >= dmn.x && sc.x - r <= dmx.x &&
-                                    sc.y + r >= dmn.y && sc.y - r <= dmx.y &&
-                                    sc.z + r >= dmn.z && sc.z - r <= dmx.z) ++intersect_n;
-                                break;
-                            }
-                            default:
-                                ++intersect_n;
-                                break;
-                        }
-                    }
-                    ImGui::Text("Intersecting Colliders: %d / %zu", intersect_n, particles->colliders().size());
-                    ImGui::TextDisabled("  (Manage colliders using the main 'Colliders' tab at the top)");
-                } else {
-                    ImGui::TextDisabled("No active colliders registered in the scene.");
-                }
-
-                const auto& domain_states = particles->gridDomainStates();
-                if (selected_domain_index < static_cast<int>(domain_states.size())) {
-                    const auto& state = domain_states[static_cast<std::size_t>(selected_domain_index)];
-                    if (state.valid) {
-                        ImGui::Spacing();
-                        ImGui::Separator();
-                        ImGui::Columns(2, "DomainStatsColumns", false);
-                        if (domain.source_mode == RayTrophiSim::SimulationGridDomainSourceMode::Adaptive) {
-                            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.5f, 1.0f), "Dynamic Resolution:"); ImGui::NextColumn();
-                            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.5f, 1.0f), "%dx%dx%d", state.resolution_x, state.resolution_y, state.resolution_z); ImGui::NextColumn();
-                        } else {
-                            ImGui::TextDisabled("Active Resolution:"); ImGui::NextColumn();
-                            ImGui::TextDisabled("%dx%dx%d", state.resolution_x, state.resolution_y, state.resolution_z); ImGui::NextColumn();
-                        }
-                        if (is_gas_domain) {
-                            ImGui::TextDisabled("Active Dense Cells:"); ImGui::NextColumn();
-                            ImGui::TextDisabled("%zu", state.active_density_cells); ImGui::NextColumn();
-                            ImGui::TextDisabled("Max Smoke Density:"); ImGui::NextColumn();
-                            ImGui::TextDisabled("%.3f", state.max_density); ImGui::NextColumn();
-                        }
-                        ImGui::Columns(1);
-                    } else {
-                        ImGui::TextDisabled("Simulation Status: Idle (Play the timeline to step simulation / bake)");
-                    }
-                }
-                }
-
-                ImGui::EndTabItem();
-            }
-
-            // =================================================================
-            // TAB 2: Solver & Physics (Physical Parameters & Solvers)
-            // =================================================================
-            if (ImGui::BeginTabItem("Solver & Physics")) {
-                ImGui::Spacing();
-
-                if (is_gas_domain) {
-                    // Gas Channel Flags
-                    if (UIWidgets::CollapsingHeader("Simulation Solver Channels (Grids)", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        ImGui::Spacing();
-
-                    bool channel_density = (domain.channels & static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Density)) != 0u;
-                    bool channel_temperature = (domain.channels & static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Temperature)) != 0u;
-                    bool channel_velocity = (domain.channels & static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Velocity)) != 0u;
-                    bool channel_fuel = (domain.channels & static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Fuel)) != 0u;
-                    bool channel_pressure = (domain.channels & static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Pressure)) != 0u;
-                    bool channels_changed = false;
-                    
-                    channels_changed |= ImGui::Checkbox("Density Grid (Smoke Visualization)##DensityGrid", &channel_density);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Stores visual soot/smoke thickness. Must be ENABLED for smoke or dust simulations.");
-                    }
-                    channels_changed |= ImGui::Checkbox("Temperature Grid (Buoyant Heat Rise)##TempGrid", &channel_temperature);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Stores thermal distribution values. Controls dynamic buoyant upward expansion.");
-                    }
-                    channels_changed |= ImGui::Checkbox("Velocity Grid (Vector Flow Field)##VelocityGrid", &channel_velocity);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Stores 3D vector velocity flow. Required for the fluid/smoke to move.");
-                    }
-                    channels_changed |= ImGui::Checkbox("Fuel Grid (Combustion/Fire)##FuelGrid", &channel_fuel);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Stores flammable fuel concentration. Required for explosions, flame, and fire simulations.");
-                    }
-                    channels_changed |= ImGui::Checkbox("Pressure Grid (Volume Incompressibility)##PressGrid", &channel_pressure);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Stores internal compression pressure. Enforces grid incompressibility and forms realistic vortices.");
-                    }
-                    
-                    if (channels_changed) {
-                        domain.channels = 0u;
-                        if (channel_density) domain.channels |= static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Density);
-                        if (channel_temperature) domain.channels |= static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Temperature);
-                        if (channel_velocity) domain.channels |= static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Velocity);
-                        if (channel_fuel) domain.channels |= static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
-                        if (channel_pressure) domain.channels |= static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Pressure);
-                    }
-                    }
-
-                    if (UIWidgets::CollapsingHeader("Buoyancy & Gas Motion", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        ImGui::Spacing();
-                        ImGui::DragFloat("Heat Lift", &domain.gas_buoyancy_heat,
-                                         0.02f, -20.0f, 20.0f, "%.3f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Continuous upward/downward acceleration from temperature.\n"
-                                              "This is domain-local and remains active in hybrid Spark + Gas effects.");
-                        }
-                        ImGui::DragFloat("Smoke Lift", &domain.gas_buoyancy_density,
-                                         0.01f, -20.0f, 20.0f, "%.3f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Density-driven lift. Keep modest for stable smoke columns.");
-                        }
-                        ImGui::DragInt("Pressure Sweeps",
-                                       &domain.gas_pressure_iterations,
-                                       1.0f, 1, 200);
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip(
-                                "Red-black SOR sweeps used to make the velocity field\n"
-                                "divergence-free. The most expensive stage of the gas step.\n"
-                                "\n"
-                                "Script/IPC name: pressure_iterations\n"
-                                "A CONVERGENCE dial, not a quality dial: each sweep carries\n"
-                                "information one cell, so too few does not soften the image -\n"
-                                "it lets gas leak through walls and lose its swirl.");
-                        }
-                        ImGui::DragFloat("Stratification", &domain.gas_ambient_stratification,
-                                         0.002f, 0.0f, 5.0f, "%.4f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip(
-                                "Stable layering of the air inside this box: how much the\n"
-                                "SURROUNDING temperature rises per metre above the domain floor.\n"
-                                "0 = uniform air, so a hot plume climbs until the lid stops it.\n"
-                                "Above 0 the plume stops where its heat anomaly runs out and\n"
-                                "spreads sideways - this is what gives a mushroom cap an\n"
-                                "altitude of its own: roughly (plume heat) / (this value) metres.\n"
-                                "\n"
-                                "Script/IPC name: ambient_stratification\n"
-                                "The air can CANCEL a plume's lift, never reverse it. Setting this\n"
-                                "too high costs cap altitude; it cannot push the cap back down.\n"
-                                "Heat per unit of HEIGHT, so it scales as 1/scale when a scene is\n"
-                                "resized - the same inverse-length rule as Turbulence Scale.");
-                        }
-                        ImGui::DragFloat("Solved Vorticity", &domain.gas_vorticity,
-                                         0.01f, 0.0f, 50.0f, "%.3f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Grid-solver vorticity confinement. Separate from procedural turbulence.");
-                        }
-                        ImGui::Separator();
-                        ImGui::Checkbox("Surface Dust", &domain.gas_surface_dust_enabled);
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip(
-                                "Wind lifts dust off the domain floor and off the tops of\n"
-                                "colliders, once it blows hard enough ACROSS them.\n"
-                                "This is what gives a blast a ground skirt that EXPANDS with\n"
-                                "its own shock front, instead of a ring placed at the origin\n"
-                                "whose radius never changes. It is not blast-only: thruster\n"
-                                "wash, a passing vehicle and a door blown in all use it.\n"
-                                "Only the HORIZONTAL wind counts - otherwise a rising plume\n"
-                                "would manufacture dust from its own updraft and never stop.");
-                        }
-                        if (domain.gas_surface_dust_enabled) {
-                            ImGui::Indent();
-                            ImGui::DragFloat("Lift Threshold m/s", &domain.gas_surface_dust_threshold,
-                                             0.1f, 0.0f, 200.0f, "%.2f");
-                            if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip(
-                                    "Below this wind speed a surface gives up NOTHING.\n"
-                                    "That hard floor is the point: it is why still air over a\n"
-                                    "dusty ground is clear, and why the skirt has a sharp edge\n"
-                                    "that travels with the shock instead of a soft haze.");
-                            }
-                            ImGui::DragFloat("Dust Heat", &domain.gas_surface_dust_temperature,
-                                             0.01f, 0.0f, 5.0f, "%.2f");
-                            if (ImGui::IsItemHovered())
-                                ImGui::SetTooltip(
-                                    "Heat carried by ground the blast scours up.\n"
-                                    "0 = cold dust: it spreads as a flat, ground-hugging sheet\n"
-                                    "and never billows, which is what a dense suspension does.\n"
-                                    "A small value lets the heated fraction climb into a surge.\n"
-                                    "Too high and the whole skirt lifts off as a second mushroom.");
-                            ImGui::DragFloat("Dust Yield", &domain.gas_surface_dust_emission,
-                                             0.01f, 0.0f, 20.0f, "%.3f");
-                            if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip("Smoke released per m/s of wind ABOVE the threshold, per second.");
-                            }
-                            ImGui::DragFloat("Ground Reserve", &domain.gas_surface_dust_supply,
-                                             0.05f, 0.0f, 50.0f, "%.2f");
-                            if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip(
-                                    "How much dust a patch of ground holds IN TOTAL before it is\n"
-                                    "scoured clean. There is no replenishment.\n"
-                                    "This is what makes a blast's skirt a travelling RING: the\n"
-                                    "shock strips the ground it crosses and moves on. Set it to 0\n"
-                                    "for an unlimited supply and the ring fills itself in behind\n"
-                                    "the front into a uniform carpet.");
-                            }
-                            ImGui::DragFloat("Dust Ceiling", &domain.gas_surface_dust_max_density,
-                                             0.05f, 0.0f, 20.0f, "%.2f");
-                            if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip(
-                                    "Density a surface cell will not be pushed past. 0 = uncapped.\n"
-                                    "The surface has an INFINITE supply, so a wind that keeps\n"
-                                    "blowing keeps producing; this is the only thing bounding it.");
-                            }
-                            ImGui::Unindent();
-                        }
-                        ImGui::Separator();
-                        ImGui::Checkbox("Override Field Loss", &domain.gas_dissipation_override);
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip(
-                                "How fast smoke, heat and fuel fade, per second.\n"
-                                "OFF = the solver's global rates. Those are tuned for the thin\n"
-                                "smoke a spark carries (0.5/s) and every hybrid particle+gas\n"
-                                "effect inherits them, which erases a long-lived cloud: over ten\n"
-                                "seconds only 0.5%% of it survives, and it does not fade evenly -\n"
-                                "the whole cloud drops below visibility at nearly the same moment.\n"
-                                "Turn this on for smoke that has to LAST.\n"
-                                "Note: this is NOT Flame Dissipation above, which decays the flame\n"
-                                "field and leaves smoke and heat untouched.");
-                        }
-                        if (domain.gas_dissipation_override) {
-                            ImGui::Indent();
-                            ImGui::DragFloat("Smoke Loss /s", &domain.gas_density_dissipation,
-                                             0.005f, 0.0f, 5.0f, "%.3f");
-                            if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip(
-                                    "Script/IPC name: density_dissipation\n"
-                                    "0 = the smoke never thins out on its own. MEASURED on the\n"
-                                    "nuclear preset: at 0.012 only 9%% of the smoke is gone after\n"
-                                    "8 seconds, and since every flow source there finishes by 4.5 s\n"
-                                    "nothing produces and nothing removes - the cloud just spreads\n"
-                                    "until it fills the box, which reads as the cap collapsing.\n"
-                                    "At 0.18 removal balances spreading and the cloud reaches a\n"
-                                    "steady size instead of growing forever.");
-                            }
-                            ImGui::DragFloat("Heat Loss /s", &domain.gas_temperature_dissipation,
-                                             0.005f, 0.0f, 5.0f, "%.3f");
-                            if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip(
-                                    "Script/IPC name: temperature_dissipation\n"
-                                    "Cooling rate. COUPLED to Stratification: a plume that cools\n"
-                                    "slower keeps its lift longer and settles HIGHER, so changing\n"
-                                    "this moves the cap and the two are tuned together.\n"
-                                    "The coupling is no longer dangerous - getting it wrong costs\n"
-                                    "cap ALTITUDE, it can no longer turn the cap around and drive\n"
-                                    "it into the ground.");
-                            }
-                            ImGui::DragFloat("Fuel Loss /s", &domain.gas_fuel_dissipation,
-                                             0.005f, 0.0f, 5.0f, "%.3f");
-                            if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip(
-                                    "Script/IPC name: fuel_dissipation\n"
-                                    "How fast unburnt fuel disappears. Fuel that lingers keeps\n"
-                                    "re-igniting, which turns a rising column back into a flame.");
-                            }
-                            ImGui::Unindent();
-                        }
-                        ImGui::Separator();
-                        ImGui::Checkbox("MacCormack Advection", &domain.gas_maccormack_advection);
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Limited second-order transport. Preserves wisps, sharp flame fronts\n"
-                                              "and vortices that plain semi-Lagrangian smears away.\n"
-                                              "Costs one extra advection pass per field.");
-                        }
-                    }
-
-                    // Combustion / fire
-                    if (UIWidgets::CollapsingHeader("Combustion & Fire Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        ImGui::Spacing();
-
-                    if (ImGui::Checkbox("Enable Combustion Physics (Fire & Flames)##EnableFire", &domain.fire_enabled) && domain.fire_enabled) {
-                        domain.channels |= static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
-                        domain.channels |= static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Temperature);
-                    }
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("When enabled, fuel in cells exceeding the ignition threshold will ignite, producing fire visuals and smoke.");
-                    }
-
-                    if (domain.fire_enabled) {
-                        ImGui::DragFloat("Ignition Temperature", &domain.ignition_temperature, 0.01f, 0.0f, 10.0f, "%.2f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Minimum temperature required to ignite fuel.");
-                        }
-                        ImGui::DragFloat("Fuel Burn Rate", &domain.burn_rate, 0.05f, 0.0f, 20.0f, "%.2f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Controls how quickly fuel burns and converts into heat/flames.");
-                        }
-                        ImGui::DragFloat("Heat Release Rate", &domain.heat_release, 0.05f, 0.0f, 50.0f, "%.2f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Heat energy released to adjacent cells during burning. High values accelerate combustion spread.");
-                        }
-                        ImGui::DragFloat("Smoke Generation Rate", &domain.smoke_generation, 0.02f, 0.0f, 10.0f, "%.2f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Determines the amount of dark soot/smoke generated per unit of burned fuel.");
-                        }
-                        ImGui::DragFloat("Flame Dissipation Rate", &domain.flame_dissipation, 0.05f, 0.0f, 30.0f, "%.2f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Rate at which visual fire flames and thermal energy dissipate.");
-                        }
-                        ImGui::DragFloat("Maximum Temperature Limit", &domain.fire_max_temperature, 0.1f, 0.1f, 100.0f, "%.1f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Upper ceiling limit for thermal values inside combustion voxels.");
-                        }
-                        ImGui::DragFloat("Thermal Expansion (Blast)", &domain.fire_expansion, 0.02f, 0.0f, 20.0f, "%.2f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Hot gas dilates: the pressure solve targets an outward divergence\n"
-                                              "proportional to (temperature - ambient). Gives fire its rolling\n"
-                                              "billow, and a sudden fuel ignition becomes a real explosion blast.\n"
-                                              "0 = incompressible smoke. Note: this domain runs on the CPU solver\n"
-                                              "while expansion is > 0 (GPU grid path doesn't model expansion yet).");
-                        }
-
-                        ImGui::Spacing();
-                        ImGui::Separator();
-                        ImGui::Checkbox("Blast Damages Structures##StructCouple",
-                                        &domain.structural_coupling_enabled);
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Turn this fire's combustion into blast loading on breakable\n"
-                                              "objects. Without it, burning still weakens material and lowers\n"
-                                              "its fracture threshold, but nothing ever delivers the push -\n"
-                                              "so a fire can char a structure and never bring it down.");
-                        }
-                        if (domain.structural_coupling_enabled) {
-                            ImGui::DragFloat("Blast Pressure Scale", &domain.structural_pressure_scale,
-                                             5.0f, 0.0f, 5000.0f, "%.0f kPa");
-                            if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip("CALIBRATION, not a physical constant.\n"
-                                                  "Fuel and temperature here are normalized units, so no honest\n"
-                                                  "formula turns them into kilopascals. Raise this until a fire\n"
-                                                  "of the size you author breaks what it should. Compare against\n"
-                                                  "the Break Threshold you set on the fracture group.");
-                            }
-                            ImGui::DragFloat("Minimum Blast Intensity", &domain.structural_min_intensity,
-                                             0.01f, 0.0f, 5.0f, "%.3f");
-                            if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip("Below this mean burn rate the fire loads nothing.\n"
-                                                  "Keeps a steady small flame from emitting an endless\n"
-                                                  "drizzle of weak blast events.");
-                            }
-                            ImGui::DragFloat("Blast Interval", &domain.structural_event_interval,
-                                             0.01f, 1.0f / 120.0f, 5.0f, "%.2f s");
-                            if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip("Seconds between blast events from this domain, and the\n"
-                                                  "duration each one claims. A sustained fire therefore\n"
-                                                  "delivers repeated honest blows rather than one load\n"
-                                                  "counted again every frame.");
-                            }
-                        }
-
-                        ImGui::Spacing();
-                        ImGui::TextDisabled("Physics Note: Remember to add a Flow Source emitting Fuel and Temperature.\n"
-                                             "Set shader mode to 'Blackbody' in the Shading tab for realistic fire rendering.");
-                    } else {
-                        ImGui::TextDisabled("Combustion is disabled. Simulating smoke (Density) only.");
-                    }
-                    }
-
-                    // ── Thermal boundary override ────────────────────────────
-                    // The world defines ambient everywhere; a domain may override
-                    // it inside its own bounds. Off by default, so a domain that
-                    // says nothing simply inherits the world.
-                    FluidThermalUI::drawBoundaryOverride(
-                        domain,
-                        particles->worldThermal().ambient_kelvin,
-                        particles->worldThermal().oxygen_availability);
-
-                    // Procedural turbulence (divergence-free curl-noise detail).
-                    if (UIWidgets::CollapsingHeader("Turbulence (Procedural Detail)")) {
-                        ImGui::Spacing();
-                        ImGui::DragFloat("Turbulence Strength", &domain.turbulence_strength, 0.01f, 0.0f, 50.0f, "%.3f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Adds divergence-free swirling detail on top of the solved motion.\n"
-                                              "0 = off. Modulated by local density/heat/edges so still air stays calm.");
-                        }
-                        if (domain.turbulence_strength > 0.0f) {
-                            ImGui::DragFloat("Noise Scale", &domain.turbulence_scale, 0.02f, 0.05f, 20.0f, "%.2f");
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Base spatial frequency of the noise. Higher = finer, busier swirls.");
-                            ImGui::DragInt("Octaves", &domain.turbulence_octaves, 1, 1, 8);
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("FBM octaves. More octaves add finer layered detail at higher cost.");
-                            ImGui::DragFloat("Lacunarity", &domain.turbulence_lacunarity, 0.02f, 1.0f, 4.0f, "%.2f");
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Frequency multiplier per octave (typical ~2.0).");
-                            ImGui::DragFloat("Persistence", &domain.turbulence_persistence, 0.02f, 0.0f, 1.0f, "%.2f");
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Amplitude decay per octave (typical ~0.5).");
-                            ImGui::DragFloat("Evolution Speed", &domain.turbulence_speed, 0.02f, 0.0f, 5.0f, "%.2f");
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How fast the turbulence field animates over time.");
-                        }
-                    }
-                } else {
+                if (is_fluid_domain) {
                     auto& fp = domain.fluid_params;
                     // Fluid Seeding & Limits
                     if (UIWidgets::CollapsingHeader("Fluid Seeding & Capacity", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1314,6 +950,7 @@ void drawSimulationDomainControls(
                                 ImGui::TextDisabled("Budget OK \xE2\x80\x94 reaches the target level.");
                             }
                         }
+
                     } else {
                     ImGui::DragFloat3("Fluid Seed Box Min", &domain.fluid_seed_min.x, 0.05f, -10000.0f, 10000.0f, "%.2f");
                     seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
@@ -1396,489 +1033,7 @@ void drawSimulationDomainControls(
                                           "Emitters can keep adding particles without the original seed returning.");
                     }
                     }
-
-                    // APIC Solver Params
-                    if (UIWidgets::CollapsingHeader("APIC / FLIP Liquid Solver Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        ImGui::Spacing();
-                    ImGui::TextDisabled("Material Preset");
-                    if (drawFluidPresetCombo("##GridFluidSolverPreset", fp)) {
-                        ui_ctx.start_render = true;
-                    }
-                    // Manual edits to any preset-driven rheology field demote the
-                    // dropdown to "Custom" so it stops claiming a stale material.
-                    bool fp_edited = false;
-                    ImGui::Spacing();
-                    ImGui::DragFloat3("Gravity Force Vector", &fp.gravity.x, 0.05f, -100.0f, 100.0f, "%.2f");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Gravitational acceleration applied to the fluid. Use (0, -9.81, 0) for Earth gravity.");
-                    }
-
-                    fp_edited |= ImGui::SliderFloat("APIC Momentum Blend", &fp.apic_blend, 0.0f, 1.0f, "%.2f");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Preservation of angular momentum vs linear velocity.\n\n"
-                                          "0.0 = Viscous, highly-damped flow (PIC).\n"
-                                          "1.0 = Pure APIC. Values between 0.95 and 0.98 yield the most realistic swirls and splash turbulence for water.");
-                    }
-                    fp_edited |= ImGui::SliderFloat("FLIP Particle Blend", &fp.flip_blend, 0.0f, 1.0f, "%.2f");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("The degree of dynamic particle splashing.\n\n"
-                                          "0.0 = Damped, stable PIC movement.\n"
-                                          "1.0 = Highly energetic, splashy FLIP motion. Around 0.97 prevents excessive chaotic noise.");
-                    }
-
-                    // ★★ NAMED AS A GROUP so the four knobs below stop competing
-                    // with the real one. Every name here contains "viscous",
-                    // "friction" or "damping", and all four drag the WHOLE BODY —
-                    // they slow a falling blob down instead of making it resist
-                    // shear. Turning them up to fake thickness is what made honey
-                    // reach a terminal fall speed and sand fall slower than honey.
-                    ImGui::SeparatorText("Dissipation (slows motion - not thickness)");
-                    fp_edited |= ImGui::DragFloat("Velocity Damping", &fp.velocity_damping, 0.001f, 0.5f, 1.0f, "%.3f");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Velocity damping factor applied per step. 1.0 = frictionless flow, <1.0 = viscous slowdown.");
-                    }
-                    fp_edited |= ImGui::DragFloat("Internal Viscous Friction", &fp.internal_friction, 0.01f, 0.0f, 10.0f, "%.2f");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Exponential decay on EVERY particle, in whatever direction it\n"
-                                          "is moving: v *= exp(-rate * dt).\n\n"
-                                          "This is NOT viscosity. It brakes the whole body, so it also\n"
-                                          "brakes free FALL - a tall pour arrives slow and lands without\n"
-                                          "a splash. Use Kinematic Viscosity below for thickness.\n\n"
-                                          "0 = water and any real liquid. Non-zero is a stylised or\n"
-                                          "deliberately dead liquid. 10+ = near-instant stop.");
-                    }
-                    fp_edited |= ImGui::DragFloat("Air Drag Resistance", &fp.air_drag, 0.01f, 0.0f, 10.0f, "%.2f");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Quadratic drag on DETACHED droplets only (isolated spray), as\n"
-                                          "v *= 1 / (1 + k|v|dt). Bulk liquid is untouched.\n\n"
-                                          "k is in 1/m and follows from droplet size:\n"
-                                          "  k = 3*rho_air*Cd / (4*rho_water*d)\n"
-                                          "  ~0.15 for 3 mm drops | ~0.5 for sub-mm mist\n\n"
-                                          "Raising it is the fastest way to kill a splash - the spray is\n"
-                                          "exactly what it acts on.");
-                    }
-                    fp_edited |= ImGui::DragFloat("Wall Friction Damping", &fp.wall_damping, 0.01f,  0.0f, 1.0f, "%.2f");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Friction factor applied when liquid rubs boundaries or solid colliders.\n"
-                                          "0 = Slippery walls (sliding), 1 = Sticky walls (no-slip).");
-                    }
-
-                    ImGui::SeparatorText("Coupling");
-                    ImGui::SliderFloat("Domain Motion Coupling", &fp.domain_motion_coupling, 0.0f, 1.0f, "%.2f");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Couples domain coordinate translation to fluid velocity. Allows creating sloshing liquids inside a moving cup.");
-                    }
-
-                    // ★★★ THE ONE ROW THAT SETS THICKNESS, and it was the ninth
-                    // row down in a block where four of the eight above it are
-                    // also called viscous / friction / damping. "Internal Viscous
-                    // Friction", "Velocity Damping", "Air Drag" and "Wall Friction
-                    // Damping" all read like viscosity and none of them are one:
-                    // they drag the whole body instead of resisting SHEAR. A user
-                    // hunting for viscosity finds four plausible knobs before this
-                    // one and reasonably concludes the real control is gone.
-                    ImGui::SeparatorText("Rheology (how thick it is)");
-
-                    // Logarithmic: the useful range spans six decades (water 1e-6
-                    // to lava 1e2), so a linear drag bar would put every liquid
-                    // anyone actually pours inside its first pixel.
-                    fp_edited |= ImGui::DragFloat("Kinematic Viscosity (m^2/s)", &fp.kinematic_viscosity,
-                                                  0.0001f, 0.0f, 100.0f, "%.6f",
-                                                  ImGuiSliderFlags_Logarithmic);
-                    // ★★★ AND IT DOES NOT APPLY TO EVERY PARTICLE. A substance
-                    // binding that is not inheriting carries its OWN ν, captured
-                    // when its "Inherit Domain Viscosity" box was unticked, and
-                    // from that moment this row — and every material preset
-                    // written through it — is a no-op for that liquid. The domain
-                    // knob still moved, still read back, still changed the preset
-                    // name, and nothing on screen got thicker. That reads exactly
-                    // as "all the thick presets use one fixed high viscosity".
-                    {
-                        std::string pinned;
-                        for (const auto& b : domain.fluid_substance_materials) {
-                            if (b.kinematic_viscosity < 0.0f) continue;   // inheriting
-                            if (!pinned.empty()) pinned += ", ";
-                            pinned += b.substance.empty() ? std::string("(unnamed)") : b.substance;
-                        }
-                        if (!pinned.empty()) {
-                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.72f, 0.25f, 1.0f));
-                            ImGui::TextWrapped(
-                                "Not applied to: %s - these substances pin their own "
-                                "viscosity. Tick \"Inherit Domain Viscosity\" on them "
-                                "in Substance Overrides to let this row (and material "
-                                "presets) reach them.", pinned.c_str());
-                            ImGui::PopStyleColor();
-                        }
-                    }
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Physical kinematic viscosity in m^2/s, solved implicitly\n"
-                                          "as nu*dt/h^2 - so the same value behaves the same at any\n"
-                                          "voxel size.\n"
-                                          "  water 1e-6 | olive oil 8e-5 | chocolate 4e-3\n"
-                                          "  honey 7e-3 | molten plastic 0.3 | lava 0.5+\n"
-                                          "0 skips the solve entirely.");
-                    }
-                    ImGui::SetNextItemWidth(120.0f);
-                    fp_edited |= ImGui::DragInt("Viscosity Sweeps", &fp.viscosity_sweeps, 1.0f, 1, 64);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Red-black Gauss-Seidel sweeps for the implicit solve.\n"
-                                          "Too few never explodes - it UNDER-applies the viscosity,\n"
-                                          "so raise this if a thick liquid still flows too freely\n"
-                                          "(especially after raising the resolution).");
-                    }
-                    ImGui::SameLine();
-                    ImGui::SetNextItemWidth(140.0f);
-                    fp_edited |= ImGui::SliderFloat("Wall Slip", &fp.viscosity_wall_slip, 0.0f, 1.0f, "%.2f");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Tangential condition at colliders for the viscous solve.\n"
-                                          "0 = no-slip: the liquid sticks to surfaces and is dragged\n"
-                                          "    by moving ones. Honey, chocolate, mud, lava.\n"
-                                          "1 = free-slip: slides freely. Water.");
-                    }
-
-                    // ── Thermal liquid (wax) ─────────────────────────────────
-                    // Mirrors fluid.set_param's thermal_* keys one for one; the
-                    // live readout below is the same ThermalLiquidStats fluid.get
-                    // reports, so panel and script cannot disagree about whether
-                    // anything froze.
-                    const RayTrophiSim::Fluid::ThermalLiquidStats* thermal_stats = nullptr;
-                    if (particles && selected_domain_index >= 0 &&
-                        selected_domain_index <
-                            static_cast<int>(particles->gridDomainStates().size())) {
-                        thermal_stats = &particles->gridDomainStates()
-                            [static_cast<std::size_t>(selected_domain_index)].thermal_stats;
-                    }
-                    const float thermal_ambient_kelvin =
-                        RayTrophiSim::fluidDomainAmbientKelvin(
-                            domain,
-                            particles->worldThermal());
-                    fp_edited |= FluidThermalUI::drawDomainControls(
-                        fp,
-                        thermal_stats,
-                        thermal_ambient_kelvin,
-                        particles->flowSources(),
-                        selected_domain_index);
-                    fp_edited |= ImGui::DragFloat("Density Correction Strength", &fp.density_correction, 0.05f, 0.0f, 10.0f, "%.2f");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Repulsive force preventing particles from clustering too close. Helps maintain fluid incompressibility. ~1.0 is recommended.");
-                    }
-
-                    ImGui::Checkbox("Free Surface Pressure Boundary", &fp.free_surface);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("ON: Sets pressure to zero at surface air boundaries, creating natural free-surface waves.\n"
-                                          "OFF: Simulates enclosed pressurized fluid flow.");
-                    }
-                    ImGui::Checkbox("Ghost Fluid Method (GFM) Surface", &fp.ghost_fluid_surface);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Ghost Fluid Method (GFM) models sub-cell pressure extrapolation at the air-fluid boundary to eliminate staircasing/aliasing.");
-                    }
-
-                    ImGui::DragFloat("CFL Stability Factor", &fp.cfl,              0.01f,  0.05f, 1.0f, "%.2f");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Courant factor for the ADVECTION substeps below - how far a\n"
-                                          "particle is allowed to travel per substep, in cells.\n\n"
-                                          "It does not shorten the solver step: the transfer and the\n"
-                                          "pressure solve still run once per frame.");
-                    }
-                    // ★★★ RENAMED, because the old name promised the whole solver
-                    // and delivered advection only. P2G, the boundaries, the
-                    // viscous solve, the pressure projection and G2P all run
-                    // EXACTLY ONCE PER TIMELINE FRAME, at dt = 1/fps
-                    // (scene_data.h: fixed_dt = 1/fps). Only particle positions
-                    // are integrated in substeps.
-                    //
-                    // ★★ That single fact is the fixed, parameter-proof "high
-                    // viscosity" a fast liquid runs into. At 24 fps a 6 m/s pour
-                    // crosses 5-12 cells between two pressure solves; momentum is
-                    // smeared over all of them and no crown, sheet or separate
-                    // droplet can form. It is NUMERICAL viscosity — set by dt/h²,
-                    // not by kinematic_viscosity, internal_friction or air_drag —
-                    // which is why zeroing all three changes nothing, and why the
-                    // thick presets look right (they are slow, so their CFL number
-                    // is small AND their thickness is real).
-                    //
-                    // ★ A user reading "Max Solver Substeps" reasonably concludes
-                    // the solver already sub-steps itself and looks elsewhere. The
-                    // name was doing the hiding.
-                    ImGui::DragInt("Max Advection Substeps", &fp.max_substeps,  1.0f,   1, 64);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Substeps for PARTICLE ADVECTION only.\n\n"
-                                          "The transfer (P2G/G2P) and the pressure solve run ONCE per\n"
-                                          "frame, at dt = 1/fps. Raising this does not shorten that\n"
-                                          "step - it only stops fast particles from tunnelling.\n\n"
-                                          "For a fast liquid (water falling more than a metre) the frame\n"
-                                          "step itself is the limit: at 24 fps the liquid crosses several\n"
-                                          "cells between two pressure solves, which smears momentum and\n"
-                                          "flattens splashes no matter what the viscosity is set to.\n"
-                                          "Raise the timeline FPS to shorten it.");
-                    }
-                    ImGui::DragInt("Poisson Pressure Iterations", &fp.pressure_iterations, 1.0f, 0, 200);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Iterations for solving incompressibility (Poisson equation). Higher values prevent compression.");
-                    }
-                    ImGui::DragFloat("Pressure Residual Target", &fp.pressure_relative_residual, 1.0e-6f, 1.0e-8f, 1.0e-2f, "%.1e");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Relative residual target for CPU PCG / GPU MGPCG pressure solve.\n"
-                                          "1e-5 matches the current high-accuracy default; 1e-4 can reduce GPU dot-sync cost in heavy previews.");
-                    }
-                    ImGui::Checkbox("Pressure Layer B V-cycle", &fp.pressure_multigrid_preconditioner);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Experimental CUDA MGPCG multigrid preconditioner.\n"
-                                          "Can cut iteration count on large grids, but adds extra dispatch work per iteration.");
-                    }
-                    if (fp_edited) {
-                        fp.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
-                    }
-                    }
-
-                    if (UIWidgets::CollapsingHeader("Granular Material", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        bool granular_edited = false;
-                        granular_edited |= ImGui::Checkbox("Enable Granular MPM", &fp.granular_enabled);
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Switches this domain from incompressible liquid physics to compressible\n"
-                                              "Drucker-Prager granular MPM on Vulkan. Liquid pressure projection,\n"
-                                              "viscosity and particle reseeding are disabled. Use for sand, gravel,\n"
-                                              "soil, powder, snow and other frictional bulk materials.");
-                        ImGui::BeginDisabled(!fp.granular_enabled);
-                        granular_edited |= ImGui::SliderFloat("Friction Angle (deg)", &fp.granular_friction_angle_degrees, 0.0f, 55.0f, "%.1f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Internal grain friction controlling the shear-yield surface and repose angle.\n"
-                                              "Low values spread easily; high values form steeper, more stable piles.\n"
-                                              "Typical guides: powder 15-25, dry sand 30-38, angular gravel 38-48 deg.");
-                        granular_edited |= ImGui::DragFloat("Cohesion (Pa)", &fp.granular_cohesion, 1.0f, 0.0f, 100000.0f, "%.1f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Shear strength that remains even with no confining pressure.\n"
-                                              "0 Pa gives dry, non-sticky grains. Raise it for damp sand, soil, clay\n"
-                                              "or compacted snow. Excessive cohesion makes one rubber-like lump.");
-                        granular_edited |= ImGui::SliderFloat("Dilatancy (deg)", &fp.granular_dilatancy_degrees, 0.0f, 30.0f, "%.1f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Volume expansion produced by plastic shear as grains climb over neighbours.\n"
-                                              "0 keeps volume during shear; higher values make dense material swell\n"
-                                              "and loosen while flowing. Usually below the friction angle; sand 0-12 deg.");
-                        granular_edited |= ImGui::DragFloat("Young Modulus (Pa)", &fp.granular_young_modulus, 100.0f, 10.0f, 10000000.0f, "%.0f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Elastic stiffness before plastic yield. Higher values reduce the soft/rubber\n"
-                                              "compression seen on impact but require more granular solver substeps.\n"
-                                              "The runtime may cap the effective value for elastic CFL stability.");
-                        granular_edited |= ImGui::DragInt("Max Granular Solver Substeps",
-                                                          &fp.granular_max_solver_substeps,
-                                                          1.0f, 1, 64);
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Maximum full P2G-grid-G2P elastic substeps per frame.\n"
-                                              "Raise until Effective Young matches Requested Young. This is a\n"
-                                              "real solver-quality cost: 15 substeps can cost about 15x one step.\n"
-                                              "The density/render bridge still runs once after the final substep.");
-                        granular_edited |= ImGui::SliderFloat("Poisson Ratio", &fp.granular_poisson_ratio, 0.0f, 0.49f, "%.3f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Couples axial compression to sideways expansion in the elastic response.\n"
-                                              "0 is independently compressible; values near 0.5 resist volume change.\n"
-                                              "Loose grains are commonly 0.15-0.30. Avoid 0.49 at coarse timesteps.");
-                        granular_edited |= ImGui::DragFloat("Tensile Cutoff (Pa)", &fp.granular_tensile_cutoff, 1.0f, 0.0f, 100000.0f, "%.1f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Maximum tensile stress before material points detach.\n"
-                                              "0 means dry grains cannot carry tension and separate immediately.\n"
-                                              "Raise it for wet sand, clay, packed snow or weak bonded aggregates.");
-                        granular_edited |= ImGui::DragFloat("Hardening", &fp.granular_hardening, 0.01f, 0.0f, 100.0f, "%.2f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Changes resistance after plastic deformation. 0 keeps constant strength;\n"
-                                              "higher values make compressed/sheared material progressively harder.\n"
-                                              "Useful for compacting soil and snow; keep near 0 for dry sand.");
-                        ImGui::SeparatorText("Damage & Rebonding");
-                        granular_edited |= ImGui::DragFloat("Fracture Strain", &fp.granular_fracture_strain, 0.001f, 0.001f, 1.0f, "%.3f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Maximum irreversible Rankine bond-opening strain where damage begins.\n"
-                                              "It is not summed once per solver substep. Frictional compression/shear\n"
-                                              "may still flow and harden without\n"
-                                              "spending this fracture budget. Low values give brittle snowballs\n"
-                                              "or soil clods; it is inactive when cohesion and tension are zero.");
-                        granular_edited |= ImGui::DragFloat("Damage Rate", &fp.granular_damage_rate, 0.05f, 0.0f, 100.0f, "%.2f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Post-threshold softening slope per unit strain. Damage follows\n"
-                                              "1-exp(-rate * excess strain), so it grows progressively instead\n"
-                                              "of deleting every bond on the first yielded frame. 0 disables it.");
-                        granular_edited |= ImGui::Checkbox("Allow Rebonding", &fp.granular_rebonding);
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Lets damaged grains rebuild bonds while compressed and below yield.\n"
-                                              "Off for dry sand/gravel; on for wet sand, clay and compacting snow.");
-                        ImGui::BeginDisabled(!fp.granular_rebonding);
-                        granular_edited |= ImGui::DragFloat("Healing Rate", &fp.granular_healing_rate, 0.01f, 0.0f, 20.0f, "%.2f");
-                        ImGui::SeparatorText("Thermal / Burn Softening");
-                        granular_edited |= ImGui::DragFloat("Softening Temperature (K)",
-                                                           &fp.granular_softening_temperature,
-                                                           1.0f, 0.0f, 4000.0f, "%.0f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Temperature at which the granular skeleton has lost half"
-                                              "its strength. 0 DISABLES softening entirely (sand does not"
-                                              "melt). Bond strength falls faster than stiffness, so the body"
-                                              "stops holding its shape before it goes soft."
-                                              "Remaining mass_fraction multiplies this, so a charring body"
-                                              "weakens as it burns off without a second dial.");
-                        granular_edited |= ImGui::DragFloat("Softening Range (K)",
-                                                           &fp.granular_softening_range,
-                                                           1.0f, 1.0f, 2000.0f, "%.0f");
-                        granular_edited |= ImGui::SliderFloat("Residual Strength",
-                                                             &fp.granular_residual_strength,
-                                                             0.0f, 1.0f, "%.3f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Fraction of strength kept once fully softened."
-                                              "0 = a true melt; a small value leaves a molten residue.");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Fractional bond-damage recovery per second under compression.\n"
-                                              "Higher values let compressed fragments clump and rebuild bonds faster.\n"
-                                              "Airborne or freely separated fragments do not heal.");
-                        ImGui::EndDisabled();
-                        ImGui::EndDisabled();
-                        if (granular_edited) {
-                            fp.sanitizeGranularMaterial();
-                            fp.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
-                        }
-                        // These parameters are in the fluid coupling signature,
-                        // so committing an edit drops the bake and snaps the
-                        // playhead to frame 0 by itself. Telling the user to
-                        // Reset + Seed by hand described the old behaviour and
-                        // would now just be a second, redundant round trip.
-                        ImGui::TextDisabled(
-                            "Material edits rewind to frame 0 and drop the bake automatically.");
-                    }
-
-                    if (UIWidgets::CollapsingHeader(
-                            "Combustible Liquid / Gas Coupling",
-                            ImGuiTreeNodeFlags_DefaultOpen)) {
-                        using ChemistryPreset = RayTrophiSim::Fluid::FluidChemistryPreset;
-                        static const char* chemistry_labels[] = {
-                            "Inert", "Water", "Gasoline", "Alcohol", "Oil", "Custom", "Plastic", "Wax"
-                        };
-                        int chemistry_index = static_cast<int>(
-                            domain.fluid_params.chemistry_preset);
-                        chemistry_index = std::clamp(chemistry_index, 0, 7);
-                        ImGui::SetNextItemWidth(180.0f);
-                        if (ImGui::Combo("Chemistry Preset##FluidChemistry",
-                                         &chemistry_index, chemistry_labels, 8)) {
-                            const auto chosen = static_cast<ChemistryPreset>(chemistry_index);
-                            domain.fluid_params.applyChemistryProfile(chosen);
-                            const auto& chemistry = domain.fluid_params.fuel_profile;
-                            domain.fluid_flammable = chemistry.flammable;
-                            domain.fluid_extinguishing = chemistry.extinguishing;
-                            domain.fluid_ignition_temperature = chemistry.flash_temperature;
-                            domain.fluid_evaporation_rate = chemistry.vaporization_rate;
-                            domain.fluid_cooling_power = chemistry.cooling_power;
-                            domain.fluid_oxygen_dilution = chemistry.oxygen_dilution;
-                            if (chemistry.extinguishing) {
-                                domain.fluid_surface_cooling = std::max(
-                                    domain.fluid_surface_cooling,
-                                    chemistry.cooling_power);
-                            }
-                        }
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip(
-                                "Chemical behavior is independent from the physical fluid preset.\n"
-                                "Use Oil physics + Gasoline chemistry for a fast fuel jet,\n"
-                                "or Water chemistry to cool and extinguish overlapping gas fire.");
-                        }
-                        ImGui::Checkbox(
-                            "Enable Flammable Surface##FluidFire",
-                            &domain.fluid_flammable);
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                            "Exposes the liquid free surface to overlapping Vulkan Gas domains.\n"
-                            "The liquid bulk remains incompressible; only the surface exchanges heat and vapor.");
-                        if (domain.fluid_extinguishing) {
-                            ImGui::TextDisabled("Extinguishing liquid active");
-                        }
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip(
-                                "Publishes only the exposed APIC free-surface band "
-                                "into overlapping Vulkan Gas domains. The liquid "
-                                "bulk remains incompressible and does not emit.");
-                        }
-                        if (domain.fluid_flammable) {
-                            ImGui::Checkbox(
-                                "Auto Ignite##FluidFire",
-                                &domain.fluid_auto_ignite);
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                                "Ignites the authored liquid vapor immediately when it reaches the\n"
-                                "surface threshold. Disable this to require a pilot/flame contact.");
-                            ImGui::DragFloat(
-                                "Ignition Temperature##FluidFire",
-                                &domain.fluid_ignition_temperature,
-                                0.01f,0.0f,100.0f,"%.3f");
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                                "Normalized flash/ignition threshold of the liquid surface.\n"
-                                "Lower values make gasoline/alcohol vapor ignite more readily.");
-                            ImGui::DragFloat(
-                                "Evaporation / Burn Rate##FluidFire",
-                                &domain.fluid_evaporation_rate,
-                                0.01f,0.0f,100.0f,"%.3f");
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                                "Rate at which exposed liquid becomes fuel vapor.\n"
-                                "Higher values make gasoline/alcohol spread and ignite faster.");
-                            ImGui::DragFloat(
-                                "Surface Fuel Capacity##FluidFire",
-                                &domain.fluid_surface_fuel_capacity,
-                                0.05f,0.0f,1000.0f,"%.3f");
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                                "Maximum combustible material stored by an exposed surface cell.\n"
-                                "This controls available fuel duration, not liquid viscosity.");
-                            ImGui::DragFloat(
-                                "Heat Release##FluidFire",
-                                &domain.fluid_combustion_heat_release,
-                                0.05f,0.0f,100.0f,"%.3f");
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                                "Heat added to the gas per unit of vapor consumed by combustion.");
-                            ImGui::DragFloat(
-                                "Smoke Yield##FluidFire",
-                                &domain.fluid_combustion_smoke_yield,
-                                0.01f,0.0f,100.0f,"%.3f");
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                                "Smoke/density generated by burning liquid vapor.");
-                            ImGui::DragFloat(
-                                "Surface Cooling##FluidFire",
-                                &domain.fluid_surface_cooling,
-                                0.01f,0.0f,100.0f,"%.3f");
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                                "Relaxes the liquid surface temperature toward ambient between hot contacts.");
-                            ImGui::TextDisabled(
-                                "Vulkan APIC mask -> Gas fuel/heat/smoke; "
-                                "Gas temperature feeds ignition back.");
-                        }
-                    }
-
-                    // Redistribution / Reseed settings
-                    if (UIWidgets::CollapsingHeader("Dynamic Particle Reseeding (Reseed)", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        ImGui::Spacing();
-
-                    if (fp.granular_enabled) ImGui::BeginDisabled();
-                    ImGui::Checkbox("Enable Dynamic Reseeding##Reseed", &fp.reseed_enabled);
-                    if (fp.granular_enabled) ImGui::EndDisabled();
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Redistributes sampling density without creating liquid mass.\n"
-                                          "Only particles removed from crowded cells may be replaced in starved interior cells.\n"
-                                          "Emitters and open boundaries remain independent count-changing paths.");
-                    }
-
-                    if (fp.granular_enabled) {
-                        ImGui::TextDisabled("Disabled for granular MPM: reseeding would destroy plastic history and mass.");
-                    } else if (fp.reseed_enabled) {
-                        ImGui::DragInt("Target Particles Per Cell", &fp.reseed_target_per_cell, 0.1f, 0, 64);
-                        ImGui::DragInt("Minimum Threshold Per Cell", &fp.reseed_min_per_cell, 0.1f, 1, 32);
-                        ImGui::DragInt("Maximum Threshold Per Cell", &fp.reseed_max_per_cell, 0.1f, 2, 64);
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Cells above maximum fund replacements in interior cells below minimum.\n"
-                                              "A step can never add more particles than it removed.");
-                        }
-                    } else {
-                        ImGui::TextDisabled("Reseeding will not alter particle count; emitters and open boundaries still can.");
-                    }
-                    }
                 }
-
-                ImGui::EndTabItem();
-            }
-
-            // =================================================================
-            // TAB 3: Shading & Rendering (Visual Materials, Flow Sources & Baking)
-            // =================================================================
-            if (ImGui::BeginTabItem("Shading & Rendering")) {
-                ImGui::Spacing();
 
                 // Group 1: Flow Sources
                 if (UIWidgets::CollapsingHeader("Flow Sources Registry", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1908,7 +1063,10 @@ void drawSimulationDomainControls(
                     desc.source_mode = RayTrophiSim::SimulationFlowSourceMode::ObjectBounds;
                     desc.source_name = node;
                     desc.domain_index = selected_domain_index;
-                    if (is_fluid_domain) {
+                    desc.phase = is_gas_domain
+                        ? RayTrophiSim::SimulationFlowSourceDesc::Phase::Gas
+                        : RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid;
+                    if (!is_gas_domain) {
                         desc.velocity = Vec3(0.0f, -1.0f, 0.0f); // pour down
                         desc.density = 0.0f; desc.temperature = 0.0f; desc.fuel = 0.0f;
                     } else {
@@ -1927,7 +1085,7 @@ void drawSimulationDomainControls(
                     // with a selected object should not leave that hidden centre
                     // plume active. Remove only that exact preset placeholder;
                     // user-created point sources remain additive.
-                    if (!is_fluid_domain) {
+                    if (is_gas_domain) {
                         auto& existing_sources = particles->flowSources();
                         for (int source_i = static_cast<int>(existing_sources.size()) - 1;
                              source_i >= 0;
@@ -1957,13 +1115,18 @@ void drawSimulationDomainControls(
                         particles->flowSources());
                     desc.source_mode = RayTrophiSim::SimulationFlowSourceMode::Point;
                     desc.domain_index = selected_domain_index;
+                    desc.phase = is_gas_domain
+                        ? RayTrophiSim::SimulationFlowSourceDesc::Phase::Gas
+                        : RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid;
                     desc.position = (Vec3::min(domain.bounds_min, domain.bounds_max) +
                                      Vec3::max(domain.bounds_min, domain.bounds_max)) * 0.5f;
                     // A liquid source pours DOWN (gravity + emission agree); a gas
                     // source blasts UP (smoke/fire rises). The old shared (0,1,0)
                     // default made liquids shoot upward and bunch into a falling
                     // plate at the trajectory apex.
-                    desc.velocity = is_fluid_domain ? Vec3(0.0f, -1.0f, 0.0f) : Vec3(0.0f, 1.0f, 0.0f);
+                    desc.velocity = !is_gas_domain
+                        ? Vec3(0.0f, -1.0f, 0.0f)
+                        : Vec3(0.0f, 1.0f, 0.0f);
                     particles->addFlowSource(desc);
                 }
                 if (ImGui::IsItemHovered()) {
@@ -1973,7 +1136,7 @@ void drawSimulationDomainControls(
                 ImGui::Spacing();
                 ImGui::Separator();
 
-                if (!is_fluid_domain) {
+                if (is_gas_domain) {
                     bool key_authoring =
                         scene.simulationKeyAuthoringMode();
                     if (ImGui::Checkbox(
@@ -2157,13 +1320,28 @@ void drawSimulationDomainControls(
                     ImGui::SameLine();
                     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "[%s]", source.name.c_str());
 
+                    if (is_gas_domain && is_fluid_domain) {
+                        int source_phase = source.phase ==
+                            RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid ? 1 : 0;
+                        const char* source_phases[] = { "Gas", "Liquid" };
+                        if (ImGui::Combo("Emission Phase##FlowPhase", &source_phase,
+                                         source_phases, IM_ARRAYSIZE(source_phases))) {
+                            source.phase = source_phase == 1
+                                ? RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid
+                                : RayTrophiSim::SimulationFlowSourceDesc::Phase::Gas;
+                        }
+                    }
+                    const bool source_is_fluid = is_fluid_domain &&
+                        (!is_gas_domain || source.phase ==
+                            RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid);
+
                     const char* mode_labels[] = { "Point (Sphere)", "Object Bounding Box", "Mesh Geometry Surface" };
                     int mode_idx = static_cast<int>(source.source_mode);
                     if (ImGui::Combo("Emitter Geometry Type##FlowMode", &mode_idx, mode_labels, IM_ARRAYSIZE(mode_labels))) {
                         source.source_mode = static_cast<RayTrophiSim::SimulationFlowSourceMode>(mode_idx);
                     }
 
-                    if (!is_fluid_domain) {
+                    if (!source_is_fluid) {
                         const bool keyed = keyedFlowProperty([](const auto& k){ return k.has_radius; });
                         if (flowKeyButton("radius", keyed)) {
                             if (keyed) removeFlowPropertyKey([](auto& k){ k.has_radius = false; });
@@ -2192,7 +1370,7 @@ void drawSimulationDomainControls(
                     }
                     source.radius = std::max(0.001f, source.radius);
 
-                    if (is_fluid_domain) {
+                    if (source_is_fluid) {
                         const bool rate_keyed = keyedFlowProperty([](const auto& k){ return k.has_flow_rate; });
                         if (flowKeyButton("flow_rate", rate_keyed)) {
                             if (rate_keyed) removeFlowPropertyKey([](auto& k){ k.has_flow_rate = false; });
@@ -2266,7 +1444,7 @@ void drawSimulationDomainControls(
                         }
                         source.falloff = std::max(0.0f, source.falloff);
                     }
-                    if (!is_fluid_domain) {
+                    if (!source_is_fluid) {
                         const bool keyed = keyedFlowProperty([](const auto& k){ return k.has_velocity; });
                         if (flowKeyButton("velocity", keyed)) {
                             if (keyed) removeFlowPropertyKey([](auto& k){ k.has_velocity = false; });
@@ -2284,7 +1462,7 @@ void drawSimulationDomainControls(
                                           "buoyancy take over afterwards. Liquid: point it down to pour; gas: up to plume.");
                     }
 
-                    if (!is_fluid_domain) {
+                    if (!source_is_fluid) {
                         const bool keyed = keyedFlowProperty([](const auto& k){ return k.has_velocity_coupling; });
                         if (flowKeyButton("velocity_coupling", keyed)) {
                             if (keyed) removeFlowPropertyKey([](auto& k){ k.has_velocity_coupling = false; });
@@ -2307,7 +1485,7 @@ void drawSimulationDomainControls(
                             std::max(0.0f, source.velocity_coupling);
                     }
 
-                    if (is_fluid_domain) {
+                    if (source_is_fluid) {
                         ImGui::DragFloat("Velocity Spread", &source.fluid_velocity_spread, 0.01f, 0.0f, 2.0f, "%.2f");
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Per-particle random velocity jitter, as a fraction of the emission speed.\n"
@@ -2328,6 +1506,29 @@ void drawSimulationDomainControls(
 
                         // ── Substance ────────────────────────────────────────
                         {
+                            std::vector<std::string> substance_names;
+                            if (rtapi::listMaterialSubstances(substance_names).ok) {
+                                const char* preview = source.fluid_substance.empty()
+                                    ? "Untagged / Domain Default"
+                                    : source.fluid_substance.c_str();
+                                ImGui::SetNextItemWidth(-FLT_MIN);
+                                if (ImGui::BeginCombo("Substance Profile", preview)) {
+                                    if (ImGui::Selectable(
+                                            "Untagged / Domain Default",
+                                            source.fluid_substance.empty())) {
+                                        source.fluid_substance.clear();
+                                    }
+                                    for (const std::string& name : substance_names) {
+                                        const bool selected =
+                                            source.fluid_substance == name;
+                                        if (ImGui::Selectable(name.c_str(), selected)) {
+                                            source.fluid_substance = name;
+                                        }
+                                        if (selected) ImGui::SetItemDefaultFocus();
+                                    }
+                                    ImGui::EndCombo();
+                                }
+                            }
                             // Fixed buffer rather than an ImGui string callback:
                             // a substance name is an identifier, and 63 chars is
                             // past any sane one. Truncation is silent but the
@@ -2337,7 +1538,9 @@ void drawSimulationDomainControls(
                                 (std::min)(source.fluid_substance.size(), sizeof(subs_buf) - 1);
                             source.fluid_substance.copy(subs_buf, copy_n);
                             subs_buf[copy_n] = '\0';
-                            if (ImGui::InputText("Substance", subs_buf, sizeof(subs_buf))) {
+                            if (ImGui::InputText(
+                                    "Custom Substance ID", subs_buf,
+                                    sizeof(subs_buf))) {
                                 source.fluid_substance = subs_buf;
                             }
                             if (ImGui::IsItemHovered()) {
@@ -2356,6 +1559,45 @@ void drawSimulationDomainControls(
                             }
                         }
 
+                        {
+                            int model = static_cast<int>(
+                                source.initial_constitutive_model);
+                            const char* models[] = {
+                                "From Substance", "Fluid", "Granular", "Elastic"
+                            };
+                            ImGui::SetNextItemWidth(-FLT_MIN);
+                            if (ImGui::Combo(
+                                    "Initial Model", &model, models, 4)) {
+                                source.initial_constitutive_model =
+                                    static_cast<RayTrophiSim::Fluid::MatterConstitutiveModel>(
+                                        model);
+                            }
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "How newly emitted parcels respond to deformation.\n"
+                                    "From Substance is the normal choice: the central Substance\n"
+                                    "definition decides. Granular is a constitutive regime, not\n"
+                                    "a render mode or thermodynamic phase.");
+                            }
+                            rtapi::SubstanceProfileInfo chemistry;
+                            if (!source.fluid_substance.empty() &&
+                                rtapi::getMaterialSubstance(
+                                    source.fluid_substance, chemistry).ok) {
+                                ImGui::TextDisabled(
+                                    "Chemistry: %s | rho %.1f kg/m3 | melt %.1f K | boil %.1f K%s",
+                                    chemistry.default_constitutive_model.c_str(),
+                                    chemistry.density, chemistry.melt_kelvin,
+                                    chemistry.boiling_kelvin,
+                                    chemistry.fluid_flammable ? " | flammable" : "");
+                                if (ImGui::IsItemHovered()) {
+                                    ImGui::SetTooltip(
+                                        "Read from the central Substance profile. Reaction constants\n"
+                                        "belong to that profile/domain rules, not to this emitter.\n"
+                                        "The emitter owns initial composition, state and temperature.");
+                                }
+                            }
+                        }
+
                         // ── Pour temperature (Kelvin) ────────────────────────
                         // Not the gas "Temperature" above: that one is the gas
                         // solver's normalised unit. This is what the emitted
@@ -2371,7 +1613,7 @@ void drawSimulationDomainControls(
                     }
 
                     if (source.source_mode == RayTrophiSim::SimulationFlowSourceMode::Point) {
-                        if (!is_fluid_domain) {
+                        if (!source_is_fluid) {
                             const bool keyed = keyedFlowProperty([](const auto& k){ return k.has_position; });
                             if (flowKeyButton("position", keyed)) {
                                 if (keyed) removeFlowPropertyKey([](auto& k){ k.has_position = false; });
@@ -2522,7 +1764,7 @@ void drawSimulationDomainControls(
                         }
                         
                         // Particle Budget limits (only for fluid domains)
-                        if (is_fluid_domain) {
+                        if (source_is_fluid) {
                             ImGui::Spacing();
                             ImGui::Checkbox("Use Particle Budget Limit##ParticleLimit", &source.use_particle_limit);
                             if (ImGui::IsItemHovered()) {
@@ -2572,124 +1814,418 @@ void drawSimulationDomainControls(
                 }
                 }
 
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Matter")) {
+                ImGui::Spacing();
                 if (is_gas_domain) {
-                    // Volume shader
-                    if (!domain.shader) {
-                        domain.shader = VolumeShader::createSmokePreset();
-                    }
-                    if (UIWidgets::CollapsingHeader("Unified Volume Shader Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    // Combustion / fire
+                    if (UIWidgets::CollapsingHeader("Combustion & Fire Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
-                    
-                    if (SceneUI::drawVolumeShaderUI(ui_ctx, domain.shader, nullptr, nullptr)) {
-                        g_gas_volumes_dirty = true;
-                        ui_ctx.start_render = true;
-                    }
-                    }
-                } else {
-                    // Fluid Render settings group
-                    if (UIWidgets::CollapsingHeader("Liquid Display", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        ImGui::Spacing();
-                    ImGui::TextDisabled("Domain default; Substance Overrides can replace it per liquid type.");
 
-                    int current_mode_idx = 0; // default to explicit spheres
-                    if (domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) {
-                        current_mode_idx = 1;
-                    } else if (domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::VolumeFog) {
-                        current_mode_idx = 2;
-                    } else if (domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Volume) {
-                        // Display only — do NOT write. Drawing a panel must never
-                        // repair scene data: this assignment was the real reason a
-                        // scripted liquid rendered only after its panel had been
-                        // opened. syncSimulationRenderVolumes now normalises the
-                        // invalid 'Volume' liquid mode where it is consumed.
-                        current_mode_idx = 1;
-                    }
-                    const char* fluid_render_modes[] = {
-                        "Splat Spheres (Exact Geometry)",
-                        "Smooth Glassy Surface (Level Set SDF)",
-                        "Volumetric Fog / Gas (Density Volume)"
-                    };
-                    if (ImGui::Combo("Visualization Mode##DomainFluid", &current_mode_idx,
-                                     fluid_render_modes, IM_ARRAYSIZE(fluid_render_modes))) {
-                        domain.fluid_render_mode = current_mode_idx == 0
-                            ? RayTrophiSim::Fluid::FluidRenderMode::Particles
-                            : (current_mode_idx == 1
-                                ? RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF
-                                : RayTrophiSim::Fluid::FluidRenderMode::VolumeFog);
-                        scene.requestSimulationTimelineRenderResync();
-                        ui_ctx.start_render = true;
+                    if (ImGui::Checkbox("Enable Combustion Physics (Fire & Flames)##EnableFire", &domain.fire_enabled) && domain.fire_enabled) {
+                        domain.channels |= static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
+                        domain.channels |= static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Temperature);
                     }
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Choose how the liquid particles are visualised:\n\n"
-                                          "1. Splat Spheres: exact sphere geometry for every particle.\n"
-                                          "2. Smooth Surface: reconstructs a glassy, refractive fluid boundary.\n"
-                                          "3. Volumetric Fog: raymarches the liquid's splatted density with the\n"
-                                          "   Volume Material below (mist, murky water, gas-like looks).");
+                        ImGui::SetTooltip("When enabled, fuel in cells exceeding the ignition threshold will ignite, producing fire visuals and smoke.");
                     }
-                    // ★★★ WHAT IS ACTUALLY DRAWN, resolved the way the render
-                    // bridge resolves it. Two knobs answer one question here — a
-                    // domain default and a per-substance override — and the combo
-                    // above can only ever show one of them. With several
-                    // substances bound, the mode it displays may be true for
-                    // NOTHING on screen. Reading the answer back from the same
-                    // rule the bridge uses is the only line in this panel that
-                    // cannot drift from the picture.
+
+                    if (domain.fire_enabled) {
+                        ImGui::DragFloat("Ignition Temperature", &domain.ignition_temperature, 0.01f, 0.0f, 10.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Minimum temperature required to ignite fuel.");
+                        }
+                        ImGui::DragFloat("Fuel Burn Rate", &domain.burn_rate, 0.05f, 0.0f, 20.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Controls how quickly fuel burns and converts into heat/flames.");
+                        }
+                        ImGui::DragFloat("Heat Release Rate", &domain.heat_release, 0.05f, 0.0f, 50.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Heat energy released to adjacent cells during burning. High values accelerate combustion spread.");
+                        }
+                        ImGui::DragFloat("Smoke Generation Rate", &domain.smoke_generation, 0.02f, 0.0f, 10.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Determines the amount of dark soot/smoke generated per unit of burned fuel.");
+                        }
+                        ImGui::DragFloat("Flame Dissipation Rate", &domain.flame_dissipation, 0.05f, 0.0f, 30.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Rate at which visual fire flames and thermal energy dissipate.");
+                        }
+                        ImGui::DragFloat("Maximum Temperature Limit", &domain.fire_max_temperature, 0.1f, 0.1f, 100.0f, "%.1f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Upper ceiling limit for thermal values inside combustion voxels.");
+                        }
+                        ImGui::DragFloat("Thermal Expansion (Blast)", &domain.fire_expansion, 0.02f, 0.0f, 20.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Hot gas dilates: the pressure solve targets an outward divergence\n"
+                                              "proportional to (temperature - ambient). Gives fire its rolling\n"
+                                              "billow, and a sudden fuel ignition becomes a real explosion blast.\n"
+                                              "0 = incompressible smoke. Note: this domain runs on the CPU solver\n"
+                                              "while expansion is > 0 (GPU grid path doesn't model expansion yet).");
+                        }
+
+                        ImGui::Spacing();
+                        ImGui::Separator();
+                        ImGui::Checkbox("Blast Damages Structures##StructCouple",
+                                        &domain.structural_coupling_enabled);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Turn this fire's combustion into blast loading on breakable\n"
+                                              "objects. Without it, burning still weakens material and lowers\n"
+                                              "its fracture threshold, but nothing ever delivers the push -\n"
+                                              "so a fire can char a structure and never bring it down.");
+                        }
+                        if (domain.structural_coupling_enabled) {
+                            ImGui::DragFloat("Blast Pressure Scale", &domain.structural_pressure_scale,
+                                             5.0f, 0.0f, 5000.0f, "%.0f kPa");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("CALIBRATION, not a physical constant.\n"
+                                                  "Fuel and temperature here are normalized units, so no honest\n"
+                                                  "formula turns them into kilopascals. Raise this until a fire\n"
+                                                  "of the size you author breaks what it should. Compare against\n"
+                                                  "the Break Threshold you set on the fracture group.");
+                            }
+                            ImGui::DragFloat("Minimum Blast Intensity", &domain.structural_min_intensity,
+                                             0.01f, 0.0f, 5.0f, "%.3f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("Below this mean burn rate the fire loads nothing.\n"
+                                                  "Keeps a steady small flame from emitting an endless\n"
+                                                  "drizzle of weak blast events.");
+                            }
+                            ImGui::DragFloat("Blast Interval", &domain.structural_event_interval,
+                                             0.01f, 1.0f / 120.0f, 5.0f, "%.2f s");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("Seconds between blast events from this domain, and the\n"
+                                                  "duration each one claims. A sustained fire therefore\n"
+                                                  "delivers repeated honest blows rather than one load\n"
+                                                  "counted again every frame.");
+                            }
+                        }
+
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("Physics Note: Remember to add a Flow Source emitting Fuel and Temperature.\n"
+                                             "Set the gas volume's emission to 'Blackbody' (Output tab) for realistic fire rendering.");
+                    } else {
+                        ImGui::TextDisabled("Combustion is disabled. Simulating smoke (Density) only.");
+                    }
+                    }
+                }
+                if (is_fluid_domain) {
+                    auto& fp = domain.fluid_params;
+                    if (UIWidgets::CollapsingHeader("Liquid Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        ImGui::Spacing();
+                    ImGui::TextDisabled("Material Preset");
+                    if (drawFluidPresetCombo("##GridFluidSolverPreset", fp)) {
+                        ui_ctx.start_render = true;
+                    }
+                    // Manual edits to any preset-driven rheology field demote the
+                    // dropdown to "Custom" so it stops claiming a stale material.
+                    bool fp_edited = false;
+                    // ★★★ THE ONE ROW THAT SETS THICKNESS, and it was the ninth
+                    // row down in a block where four of the eight above it are
+                    // also called viscous / friction / damping. "Internal Viscous
+                    // Friction", "Velocity Damping", "Air Drag" and "Wall Friction
+                    // Damping" all read like viscosity and none of them are one:
+                    // they drag the whole body instead of resisting SHEAR. A user
+                    // hunting for viscosity finds four plausible knobs before this
+                    // one and reasonably concludes the real control is gone.
+                    ImGui::SeparatorText("Rheology (how thick it is)");
+
+                    // Logarithmic: the useful range spans six decades (water 1e-6
+                    // to lava 1e2), so a linear drag bar would put every liquid
+                    // anyone actually pours inside its first pixel.
+                    fp_edited |= ImGui::DragFloat("Kinematic Viscosity (m^2/s)", &fp.kinematic_viscosity,
+                                                  0.0001f, 0.0f, 100.0f, "%.6f",
+                                                  ImGuiSliderFlags_Logarithmic);
+                    // ★★★ AND IT DOES NOT APPLY TO EVERY PARTICLE. A substance
+                    // binding that is not inheriting carries its OWN ν, captured
+                    // when its "Inherit Domain Viscosity" box was unticked, and
+                    // from that moment this row — and every material preset
+                    // written through it — is a no-op for that liquid. The domain
+                    // knob still moved, still read back, still changed the preset
+                    // name, and nothing on screen got thicker. That reads exactly
+                    // as "all the thick presets use one fixed high viscosity".
                     {
-                        const bool domain_is_splat = current_mode_idx == 0;
-                        // The domain has ONE volume, drawn either as an isosurface or
-                        // as fog. Any SurfaceSDF override claims it for the surface
-                        // (syncSimulationRenderVolumes: fluid_surface_route), so a fog
-                        // default then shows nothing as fog -- report that, do not
-                        // promise it.
-                        const bool any_sdf_override = std::any_of(
-                            domain.fluid_substance_materials.begin(),
-                            domain.fluid_substance_materials.end(),
-                            [](const auto& b) {
-                                return b.representation ==
-                                    RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF;
-                            });
-                        const bool domain_is_fog = current_mode_idx == 2 && !any_sdf_override;
-                        std::string as_spheres, as_surface, as_fog;
-                        auto default_bucket = [&]() -> std::string& {
-                            return domain_is_splat ? as_spheres
-                                                   : (domain_is_fog ? as_fog : as_surface);
-                        };
+                        std::string pinned;
                         for (const auto& b : domain.fluid_substance_materials) {
-                            std::string* bucket = &default_bucket();
-                            if (b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::Splat)
-                                bucket = &as_spheres;
-                            else if (b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF)
-                                bucket = &as_surface;
-                            if (!bucket->empty()) *bucket += ", ";
-                            *bucket += b.substance.empty() ? std::string("(unnamed)") : b.substance;
+                            if (b.kinematic_viscosity < 0.0f) continue;   // inheriting
+                            if (!pinned.empty()) pinned += ", ";
+                            pinned += b.substance.empty() ? std::string("(unnamed)") : b.substance;
                         }
-                        // Untagged particles never match a binding, so they always
-                        // follow the domain default. They are the reason the
-                        // default still matters once every substance overrides it.
-                        {
-                            std::string& bucket = default_bucket();
-                            if (!bucket.empty()) bucket += ", ";
-                            bucket += "untagged";
+                        if (!pinned.empty()) {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.72f, 0.25f, 1.0f));
+                            ImGui::TextWrapped(
+                                "Not applied to: %s - these substances pin their own "
+                                "viscosity. Tick \"Inherit Domain Viscosity\" on them "
+                                "in Substance Overrides to let this row (and material "
+                                "presets) reach them.", pinned.c_str());
+                            ImGui::PopStyleColor();
                         }
-                        ImGui::TextDisabled("Now drawing:");
-                        ImGui::Indent(8.0f);
-                        if (current_mode_idx == 2 && any_sdf_override)
-                            ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f),
-                                "A Surface SDF override takes the domain volume; fog is not drawn.");
-                        if (!as_fog.empty())
-                            ImGui::TextWrapped("Fog volume: %s", as_fog.c_str());
-                        if (!as_surface.empty())
-                            ImGui::TextWrapped("Isosurface: %s", as_surface.c_str());
-                        if (!as_spheres.empty())
-                            ImGui::TextWrapped("Particle representation: %s", as_spheres.c_str());
-                        ImGui::Unindent(8.0f);
-                    }
-
-                    if (ImGui::Checkbox("Debug Particle Points Overlay##DomainFluid", &domain.fluid_debug_overlay)) {
-                        ui_ctx.start_render = true;
                     }
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Draws raw simulation particle coordinates as lightweight blue viewport overlays.");
+                        ImGui::SetTooltip("Physical kinematic viscosity in m^2/s, solved implicitly\n"
+                                          "as nu*dt/h^2 - so the same value behaves the same at any\n"
+                                          "voxel size.\n"
+                                          "  water 1e-6 | olive oil 8e-5 | chocolate 4e-3\n"
+                                          "  honey 7e-3 | molten plastic 0.3 | lava 0.5+\n"
+                                          "0 skips the solve entirely.");
+                    }
+                    ImGui::SetNextItemWidth(120.0f);
+                    fp_edited |= ImGui::DragInt("Viscosity Sweeps", &fp.viscosity_sweeps, 1.0f, 1, 64);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Red-black Gauss-Seidel sweeps for the implicit solve.\n"
+                                          "Too few never explodes - it UNDER-applies the viscosity,\n"
+                                          "so raise this if a thick liquid still flows too freely\n"
+                                          "(especially after raising the resolution).");
+                    }
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(140.0f);
+                    fp_edited |= ImGui::SliderFloat("Wall Slip", &fp.viscosity_wall_slip, 0.0f, 1.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Tangential condition at colliders for the viscous solve.\n"
+                                          "0 = no-slip: the liquid sticks to surfaces and is dragged\n"
+                                          "    by moving ones. Honey, chocolate, mud, lava.\n"
+                                          "1 = free-slip: slides freely. Water.");
+                    }
+
+                    // ── Thermal liquid (wax) ─────────────────────────────────
+                    // Mirrors fluid.set_param's thermal_* keys one for one; the
+                    // live readout below is the same ThermalLiquidStats fluid.get
+                    // reports, so panel and script cannot disagree about whether
+                    // anything froze.
+                    const RayTrophiSim::Fluid::ThermalLiquidStats* thermal_stats = nullptr;
+                    if (particles && selected_domain_index >= 0 &&
+                        selected_domain_index <
+                            static_cast<int>(particles->gridDomainStates().size())) {
+                        thermal_stats = &particles->gridDomainStates()
+                            [static_cast<std::size_t>(selected_domain_index)].thermal_stats;
+                    }
+                    const float thermal_ambient_kelvin =
+                        RayTrophiSim::fluidDomainAmbientKelvin(
+                            domain,
+                            particles->worldThermal());
+                    fp_edited |= FluidThermalUI::drawDomainControls(
+                        fp,
+                        thermal_stats,
+                        thermal_ambient_kelvin,
+                        particles->flowSources(),
+                        selected_domain_index);
+                    if (fp_edited) {
+                        fp.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
+                    }
+                    }
+
+                    if (UIWidgets::CollapsingHeader("Granular Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        bool granular_edited = false;
+                        granular_edited |= ImGui::Checkbox("Enable Granular MPM", &fp.granular_enabled);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Switches this domain from incompressible liquid physics to compressible\n"
+                                              "Drucker-Prager granular MPM on Vulkan. Liquid pressure projection,\n"
+                                              "viscosity and particle reseeding are disabled. Use for sand, gravel,\n"
+                                              "soil, powder, snow and other frictional bulk materials.");
+                        ImGui::BeginDisabled(!fp.granular_enabled);
+                        granular_edited |= ImGui::SliderFloat("Friction Angle (deg)", &fp.granular_friction_angle_degrees, 0.0f, 55.0f, "%.1f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Internal grain friction controlling the shear-yield surface and repose angle.\n"
+                                              "Low values spread easily; high values form steeper, more stable piles.\n"
+                                              "Typical guides: powder 15-25, dry sand 30-38, angular gravel 38-48 deg.");
+                        granular_edited |= ImGui::DragFloat("Cohesion (Pa)", &fp.granular_cohesion, 1.0f, 0.0f, 100000.0f, "%.1f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Shear strength that remains even with no confining pressure.\n"
+                                              "0 Pa gives dry, non-sticky grains. Raise it for damp sand, soil, clay\n"
+                                              "or compacted snow. Excessive cohesion makes one rubber-like lump.");
+                        granular_edited |= ImGui::SliderFloat("Dilatancy (deg)", &fp.granular_dilatancy_degrees, 0.0f, 30.0f, "%.1f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Volume expansion produced by plastic shear as grains climb over neighbours.\n"
+                                              "0 keeps volume during shear; higher values make dense material swell\n"
+                                              "and loosen while flowing. Usually below the friction angle; sand 0-12 deg.");
+                        granular_edited |= ImGui::DragFloat("Young Modulus (Pa)", &fp.granular_young_modulus, 100.0f, 10.0f, 10000000.0f, "%.0f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Elastic stiffness before plastic yield. Higher values reduce the soft/rubber\n"
+                                              "compression seen on impact but require more granular solver substeps.\n"
+                                              "The runtime may cap the effective value for elastic CFL stability.");
+                        granular_edited |= ImGui::DragInt("Max Granular Solver Substeps",
+                                                          &fp.granular_max_solver_substeps,
+                                                          1.0f, 1, 64);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Maximum full P2G-grid-G2P elastic substeps per frame.\n"
+                                              "Raise until Effective Young matches Requested Young. This is a\n"
+                                              "real solver-quality cost: 15 substeps can cost about 15x one step.\n"
+                                              "The density/render bridge still runs once after the final substep.");
+                        granular_edited |= ImGui::SliderFloat("Poisson Ratio", &fp.granular_poisson_ratio, 0.0f, 0.49f, "%.3f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Couples axial compression to sideways expansion in the elastic response.\n"
+                                              "0 is independently compressible; values near 0.5 resist volume change.\n"
+                                              "Loose grains are commonly 0.15-0.30. Avoid 0.49 at coarse timesteps.");
+                        granular_edited |= ImGui::DragFloat("Tensile Cutoff (Pa)", &fp.granular_tensile_cutoff, 1.0f, 0.0f, 100000.0f, "%.1f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Maximum tensile stress before material points detach.\n"
+                                              "0 means dry grains cannot carry tension and separate immediately.\n"
+                                              "Raise it for wet sand, clay, packed snow or weak bonded aggregates.");
+                        granular_edited |= ImGui::DragFloat("Hardening", &fp.granular_hardening, 0.01f, 0.0f, 100.0f, "%.2f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Changes resistance after plastic deformation. 0 keeps constant strength;\n"
+                                              "higher values make compressed/sheared material progressively harder.\n"
+                                              "Useful for compacting soil and snow; keep near 0 for dry sand.");
+                        ImGui::SeparatorText("Damage & Rebonding");
+                        granular_edited |= ImGui::DragFloat("Fracture Strain", &fp.granular_fracture_strain, 0.001f, 0.001f, 1.0f, "%.3f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Maximum irreversible Rankine bond-opening strain where damage begins.\n"
+                                              "It is not summed once per solver substep. Frictional compression/shear\n"
+                                              "may still flow and harden without\n"
+                                              "spending this fracture budget. Low values give brittle snowballs\n"
+                                              "or soil clods; it is inactive when cohesion and tension are zero.");
+                        granular_edited |= ImGui::DragFloat("Damage Rate", &fp.granular_damage_rate, 0.05f, 0.0f, 100.0f, "%.2f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Post-threshold softening slope per unit strain. Damage follows\n"
+                                              "1-exp(-rate * excess strain), so it grows progressively instead\n"
+                                              "of deleting every bond on the first yielded frame. 0 disables it.");
+                        granular_edited |= ImGui::Checkbox("Allow Rebonding", &fp.granular_rebonding);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Lets damaged grains rebuild bonds while compressed and below yield.\n"
+                                              "Off for dry sand/gravel; on for wet sand, clay and compacting snow.");
+                        ImGui::BeginDisabled(!fp.granular_rebonding);
+                        granular_edited |= ImGui::DragFloat("Healing Rate", &fp.granular_healing_rate, 0.01f, 0.0f, 20.0f, "%.2f");
+                        ImGui::SeparatorText("Thermal / Burn Softening");
+                        granular_edited |= ImGui::DragFloat("Softening Temperature (K)",
+                                                           &fp.granular_softening_temperature,
+                                                           1.0f, 0.0f, 4000.0f, "%.0f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Temperature at which the granular skeleton has lost half"
+                                              "its strength. 0 DISABLES softening entirely (sand does not"
+                                              "melt). Bond strength falls faster than stiffness, so the body"
+                                              "stops holding its shape before it goes soft."
+                                              "Remaining mass_fraction multiplies this, so a charring body"
+                                              "weakens as it burns off without a second dial.");
+                        granular_edited |= ImGui::DragFloat("Softening Range (K)",
+                                                           &fp.granular_softening_range,
+                                                           1.0f, 1.0f, 2000.0f, "%.0f");
+                        granular_edited |= ImGui::SliderFloat("Residual Strength",
+                                                             &fp.granular_residual_strength,
+                                                             0.0f, 1.0f, "%.3f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Fraction of strength kept once fully softened."
+                                              "0 = a true melt; a small value leaves a molten residue.");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Fractional bond-damage recovery per second under compression.\n"
+                                              "Higher values let compressed fragments clump and rebuild bonds faster.\n"
+                                              "Airborne or freely separated fragments do not heal.");
+                        ImGui::EndDisabled();
+                        ImGui::EndDisabled();
+                        if (granular_edited) {
+                            fp.sanitizeGranularMaterial();
+                            fp.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
+                        }
+                        // These parameters are in the fluid coupling signature,
+                        // so committing an edit drops the bake and snaps the
+                        // playhead to frame 0 by itself. Telling the user to
+                        // Reset + Seed by hand described the old behaviour and
+                        // would now just be a second, redundant round trip.
+                        ImGui::TextDisabled(
+                            "Material edits rewind to frame 0 and drop the bake automatically.");
+                    }
+
+                    if (UIWidgets::CollapsingHeader(
+                            "Combustible Liquid / Gas Coupling",
+                            ImGuiTreeNodeFlags_DefaultOpen)) {
+                        using ChemistryPreset = RayTrophiSim::Fluid::FluidChemistryPreset;
+                        static const char* chemistry_labels[] = {
+                            "Inert", "Water", "Gasoline", "Alcohol", "Oil", "Custom", "Plastic", "Wax"
+                        };
+                        int chemistry_index = static_cast<int>(
+                            domain.fluid_params.chemistry_preset);
+                        chemistry_index = std::clamp(chemistry_index, 0, 7);
+                        ImGui::SetNextItemWidth(180.0f);
+                        if (ImGui::Combo("Chemistry Preset##FluidChemistry",
+                                         &chemistry_index, chemistry_labels, 8)) {
+                            const auto chosen = static_cast<ChemistryPreset>(chemistry_index);
+                            domain.fluid_params.applyChemistryProfile(
+                                chosen, particles->worldThermal().scale());
+                            const auto& chemistry = domain.fluid_params.fuel_profile;
+                            domain.fluid_flammable = chemistry.flammable;
+                            domain.fluid_extinguishing = chemistry.extinguishing;
+                            domain.fluid_ignition_temperature = chemistry.flash_temperature;
+                            domain.fluid_evaporation_rate = chemistry.vaporization_rate;
+                            domain.fluid_cooling_power = chemistry.cooling_power;
+                            domain.fluid_oxygen_dilution = chemistry.oxygen_dilution;
+                            if (chemistry.extinguishing) {
+                                domain.fluid_surface_cooling = std::max(
+                                    domain.fluid_surface_cooling,
+                                    chemistry.cooling_power);
+                            }
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Chemical behavior is independent from the physical fluid preset.\n"
+                                "Use Oil physics + Gasoline chemistry for a fast fuel jet,\n"
+                                "or Water chemistry to cool and extinguish overlapping gas fire.");
+                        }
+                        ImGui::Checkbox(
+                            "Enable Flammable Surface##FluidFire",
+                            &domain.fluid_flammable);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                            "Exposes the liquid free surface to overlapping Vulkan Gas domains.\n"
+                            "The liquid bulk remains incompressible; only the surface exchanges heat and vapor.");
+                        if (domain.fluid_extinguishing) {
+                            ImGui::TextDisabled("Extinguishing liquid active");
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Publishes only the exposed APIC free-surface band "
+                                "into overlapping Vulkan Gas domains. The liquid "
+                                "bulk remains incompressible and does not emit.");
+                        }
+                        if (domain.fluid_flammable) {
+                            ImGui::Checkbox(
+                                "Auto Ignite##FluidFire",
+                                &domain.fluid_auto_ignite);
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "Ignites the authored liquid vapor immediately when it reaches the\n"
+                                "surface threshold. Disable this to require a pilot/flame contact.");
+                            ImGui::DragFloat(
+                                "Ignition Temperature##FluidFire",
+                                &domain.fluid_ignition_temperature,
+                                0.01f,0.0f,100.0f,"%.3f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "Normalized flash/ignition threshold of the liquid surface.\n"
+                                "Lower values make gasoline/alcohol vapor ignite more readily.");
+                            ImGui::DragFloat(
+                                "Evaporation / Burn Rate##FluidFire",
+                                &domain.fluid_evaporation_rate,
+                                0.01f,0.0f,100.0f,"%.3f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "Rate at which exposed liquid becomes fuel vapor.\n"
+                                "Higher values make gasoline/alcohol spread and ignite faster.");
+                            ImGui::DragFloat(
+                                "Surface Fuel Capacity##FluidFire",
+                                &domain.fluid_surface_fuel_capacity,
+                                0.05f,0.0f,1000.0f,"%.3f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "Maximum combustible material stored by an exposed surface cell.\n"
+                                "This controls available fuel duration, not liquid viscosity.");
+                            ImGui::DragFloat(
+                                "Heat Release##FluidFire",
+                                &domain.fluid_combustion_heat_release,
+                                0.05f,0.0f,100.0f,"%.3f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "Heat added to the gas per unit of vapor consumed by combustion.");
+                            ImGui::DragFloat(
+                                "Smoke Yield##FluidFire",
+                                &domain.fluid_combustion_smoke_yield,
+                                0.01f,0.0f,100.0f,"%.3f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "Smoke/density generated by burning liquid vapor.");
+                            ImGui::DragFloat(
+                                "Surface Cooling##FluidFire",
+                                &domain.fluid_surface_cooling,
+                                0.01f,0.0f,100.0f,"%.3f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "Relaxes the liquid surface temperature toward ambient between hot contacts.");
+                            ImGui::TextDisabled(
+                                "Vulkan APIC mask -> Gas fuel/heat/smoke; "
+                                "Gas temperature feeds ignition back.");
+                        }
                     }
 
                     // Per-substance overrides are domain-level authoring, so keep
@@ -2844,6 +2380,35 @@ void drawSimulationDomainControls(
                                         "cells separately so the two cases can be told apart.");
                                 }
 
+                                int model_idx = static_cast<int>(
+                                    binding.constitutive_model);
+                                const char* constitutive_models[] = {
+                                    "Auto / Legacy", "Fluid", "Granular", "Elastic"
+                                };
+                                ImGui::SetNextItemWidth(-FLT_MIN);
+                                if (ImGui::Combo(
+                                        "Constitutive Model", &model_idx,
+                                        constitutive_models, 4)) {
+                                    const std::string model_name =
+                                        RayTrophiSim::Fluid::matterConstitutiveModelName(
+                                            static_cast<RayTrophiSim::Fluid::MatterConstitutiveModel>(
+                                                model_idx));
+                                    const auto result = rtapi::setFluidSubstanceMaterial(
+                                        domain.name, binding.substance, "",
+                                        nullptr, nullptr, nullptr, nullptr,
+                                        &model_name);
+                                    if (result.ok) {
+                                        scene.requestSimulationTimelineRenderResync();
+                                        ui_ctx.start_render = true;
+                                    }
+                                }
+                                if (ImGui::IsItemHovered()) {
+                                    ImGui::SetTooltip(
+                                        "Solver regime for parcels carrying this Substance.\n"
+                                        "Fluid uses the incompressible APIC path; Granular selects\n"
+                                        "the frictional MPM path. Phase and Drawn As remain separate.");
+                                }
+
                                 bool inherit_visc = binding.kinematic_viscosity < 0.0f;
                                 if (ImGui::Checkbox("Inherit Domain Viscosity", &inherit_visc)) {
                                     binding.kinematic_viscosity = inherit_visc
@@ -2895,15 +2460,746 @@ void drawSimulationDomainControls(
                                         "liquids interpenetrate.");
                                 }
 
+
+                                ImGui::Unindent(8.0f);
+                                ImGui::EndGroup();
+                                ImGui::Spacing();
+                                ImGui::Separator();
+                                ImGui::Spacing();
+                                ImGui::PopID();
+                            }
+                            if (remove_binding >= 0) {
+                                domain.fluid_substance_materials.erase(
+                                    domain.fluid_substance_materials.begin() + remove_binding);
+                                scene.requestSimulationTimelineRenderResync();
+                                ui_ctx.start_render = true;
+                            }
+
+                            std::vector<std::string> available;
+                            for (const auto& name : domain_substances) {
+                                const bool bound = std::any_of(domain.fluid_substance_materials.begin(),
+                                    domain.fluid_substance_materials.end(),
+                                    [&](const auto& b) { return b.substance == name; });
+                                if (!bound) available.push_back(name);
+                            }
+                            static std::string pending_substance;
+                            if (std::find(available.begin(), available.end(), pending_substance) == available.end())
+                                pending_substance = available.empty() ? std::string() : available.front();
+                            const char* pending_label = available.empty()
+                                ? "No unbound emitter substances" : pending_substance.c_str();
+                            ImGui::BeginDisabled(available.empty());
+                            ImGui::SetNextItemWidth(-FLT_MIN);
+                            if (ImGui::BeginCombo("Add From Domain Emitters", pending_label)) {
+                                for (const auto& name : available) {
+                                    if (ImGui::Selectable(name.c_str(), pending_substance == name)) pending_substance = name;
+                                }
+                                ImGui::EndCombo();
+                            }
+                            const bool at_limit = domain.fluid_substance_materials.size() >=
+                                RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials;
+                            ImGui::BeginDisabled(at_limit);
+                            if (ImGui::Button("Add Override")) {
+                                RayTrophiSim::SimulationGridDomainDesc::SubstanceMaterial b;
+                                b.substance = pending_substance;
+                                domain.fluid_substance_materials.push_back(std::move(b));
+                                pending_substance.clear();
+                                ui_ctx.start_render = true;
+                            }
+                            ImGui::EndDisabled();
+                            ImGui::EndDisabled();
+                            if (domain_substances.empty())
+                                ImGui::TextDisabled("Assign a Substance to an emitter in this domain first.");
+                        }
+                    }
+                }
+
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Environment")) {
+                ImGui::Spacing();
+                {
+                    const auto& world = particles->worldThermal();
+                    const float ambient = world.ambientKelvin();
+                    ImGui::TextDisabled("World ambient: %.1f K (%.1f C, %s), oxygen %.2f",
+                                        ambient, ambient - 273.15f,
+                                        world.inherit_atmosphere ? "atmosphere" : "local",
+                                        world.oxygen_availability);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("The world default, set in the World panel (world.set_thermal).\n"
+                                          "A domain overrides it inside its own bounds below.");
+                    }
+                }
+
+                    // ── Thermal boundary override ────────────────────────────
+                    // The world defines ambient everywhere; a domain may override
+                    // it inside its own bounds. Off by default, so a domain that
+                    // says nothing simply inherits the world.
+                    FluidThermalUI::drawBoundaryOverride(
+                        domain,
+                        particles->worldThermal().ambientKelvin(),
+                        particles->worldThermal().oxygen_availability);
+
+                if (is_fluid_domain) {
+                    auto& fp = domain.fluid_params;
+                    if (UIWidgets::CollapsingHeader("Gravity##DomainEnv", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::DragFloat3("Gravity Force Vector", &fp.gravity.x, 0.05f, -100.0f, 100.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Gravitational acceleration applied to the fluid. Use (0, -9.81, 0) for Earth gravity.");
+                    }
+                    }
+                }
+
+                ImGui::TextDisabled("Force fields acting on this domain are edited in the Fields panel.");
+
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Solvers")) {
+                ImGui::Spacing();
+                if (is_gas_domain) {
+                    // Gas Channel Flags
+                    if (UIWidgets::CollapsingHeader("Simulation Solver Channels (Grids)", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        ImGui::Spacing();
+
+                    bool channel_density = (domain.channels & static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Density)) != 0u;
+                    bool channel_temperature = (domain.channels & static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Temperature)) != 0u;
+                    bool channel_velocity = (domain.channels & static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Velocity)) != 0u;
+                    bool channel_fuel = (domain.channels & static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Fuel)) != 0u;
+                    bool channel_pressure = (domain.channels & static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Pressure)) != 0u;
+                    bool channels_changed = false;
+                    
+                    channels_changed |= ImGui::Checkbox("Density Grid (Smoke Visualization)##DensityGrid", &channel_density);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Stores visual soot/smoke thickness. Must be ENABLED for smoke or dust simulations.");
+                    }
+                    channels_changed |= ImGui::Checkbox("Temperature Grid (Buoyant Heat Rise)##TempGrid", &channel_temperature);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Stores thermal distribution values. Controls dynamic buoyant upward expansion.");
+                    }
+                    channels_changed |= ImGui::Checkbox("Velocity Grid (Vector Flow Field)##VelocityGrid", &channel_velocity);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Stores 3D vector velocity flow. Required for the fluid/smoke to move.");
+                    }
+                    channels_changed |= ImGui::Checkbox("Fuel Grid (Combustion/Fire)##FuelGrid", &channel_fuel);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Stores flammable fuel concentration. Required for explosions, flame, and fire simulations.");
+                    }
+                    channels_changed |= ImGui::Checkbox("Pressure Grid (Volume Incompressibility)##PressGrid", &channel_pressure);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Stores internal compression pressure. Enforces grid incompressibility and forms realistic vortices.");
+                    }
+                    
+                    if (channels_changed) {
+                        domain.channels = 0u;
+                        if (channel_density) domain.channels |= static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Density);
+                        if (channel_temperature) domain.channels |= static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Temperature);
+                        if (channel_velocity) domain.channels |= static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Velocity);
+                        if (channel_fuel) domain.channels |= static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
+                        if (channel_pressure) domain.channels |= static_cast<uint32_t>(RayTrophiSim::SimulationGridDomainChannelFlags::Pressure);
+                    }
+                    }
+
+
+                    if (UIWidgets::CollapsingHeader("Buoyancy & Gas Motion", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        ImGui::Spacing();
+                        ImGui::DragFloat("Heat Lift", &domain.gas_buoyancy_heat,
+                                         0.02f, -20.0f, 20.0f, "%.3f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Continuous upward/downward acceleration from temperature.\n"
+                                              "This is domain-local and remains active in hybrid Spark + Gas effects.");
+                        }
+                        ImGui::DragFloat("Smoke Lift", &domain.gas_buoyancy_density,
+                                         0.01f, -20.0f, 20.0f, "%.3f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Density-driven lift. Keep modest for stable smoke columns.");
+                        }
+                        ImGui::DragInt("Pressure Sweeps",
+                                       &domain.gas_pressure_iterations,
+                                       1.0f, 1, 200);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Red-black SOR sweeps used to make the velocity field\n"
+                                "divergence-free. The most expensive stage of the gas step.\n"
+                                "\n"
+                                "Script/IPC name: pressure_iterations\n"
+                                "A CONVERGENCE dial, not a quality dial: each sweep carries\n"
+                                "information one cell, so too few does not soften the image -\n"
+                                "it lets gas leak through walls and lose its swirl.");
+                        }
+                        ImGui::Checkbox("Stratification from atmosphere", &domain.gas_inherit_atmosphere);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "On: derived from the world climate lapse rate\n"
+                                "(g/cp - L, in solver units). PHYSICAL and tiny -- about\n"
+                                "1e-5 per metre for the standard atmosphere, thousands of\n"
+                                "times below the preset values -- so the plume gets no\n"
+                                "ceiling at this scale. Off: the value below.");
+                        }
+                        if (domain.gas_inherit_atmosphere) {
+                            ImGui::TextDisabled("Effective stratification: %.3e per m",
+                                RayTrophiSim::gasEffectiveStratification(domain, particles->worldThermal()));
+                        } else {
+                        ImGui::DragFloat("Stratification", &domain.gas_ambient_stratification,
+                                         0.002f, 0.0f, 5.0f, "%.4f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Stable layering of the air inside this box: how much the\n"
+                                "SURROUNDING temperature rises per metre above the domain floor.\n"
+                                "0 = uniform air, so a hot plume climbs until the lid stops it.\n"
+                                "Above 0 the plume stops where its heat anomaly runs out and\n"
+                                "spreads sideways - this is what gives a mushroom cap an\n"
+                                "altitude of its own: roughly (plume heat) / (this value) metres.\n"
+                                "\n"
+                                "Script/IPC name: ambient_stratification\n"
+                                "The air can CANCEL a plume's lift, never reverse it. Setting this\n"
+                                "too high costs cap altitude; it cannot push the cap back down.\n"
+                                "Heat per unit of HEIGHT, so it scales as 1/scale when a scene is\n"
+                                "resized - the same inverse-length rule as Turbulence Scale.");
+                        }
+                        }
+                        ImGui::DragFloat("Solved Vorticity", &domain.gas_vorticity,
+                                         0.01f, 0.0f, 50.0f, "%.3f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Grid-solver vorticity confinement. Separate from procedural turbulence.");
+                        }
+                        ImGui::Separator();
+                        ImGui::Checkbox("Surface Dust", &domain.gas_surface_dust_enabled);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Wind lifts dust off the domain floor and off the tops of\n"
+                                "colliders, once it blows hard enough ACROSS them.\n"
+                                "This is what gives a blast a ground skirt that EXPANDS with\n"
+                                "its own shock front, instead of a ring placed at the origin\n"
+                                "whose radius never changes. It is not blast-only: thruster\n"
+                                "wash, a passing vehicle and a door blown in all use it.\n"
+                                "Only the HORIZONTAL wind counts - otherwise a rising plume\n"
+                                "would manufacture dust from its own updraft and never stop.");
+                        }
+                        if (domain.gas_surface_dust_enabled) {
+                            ImGui::Indent();
+                            ImGui::DragFloat("Lift Threshold m/s", &domain.gas_surface_dust_threshold,
+                                             0.1f, 0.0f, 200.0f, "%.2f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "Below this wind speed a surface gives up NOTHING.\n"
+                                    "That hard floor is the point: it is why still air over a\n"
+                                    "dusty ground is clear, and why the skirt has a sharp edge\n"
+                                    "that travels with the shock instead of a soft haze.");
+                            }
+                            ImGui::DragFloat("Dust Heat", &domain.gas_surface_dust_temperature,
+                                             0.01f, 0.0f, 5.0f, "%.2f");
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip(
+                                    "Heat carried by ground the blast scours up.\n"
+                                    "0 = cold dust: it spreads as a flat, ground-hugging sheet\n"
+                                    "and never billows, which is what a dense suspension does.\n"
+                                    "A small value lets the heated fraction climb into a surge.\n"
+                                    "Too high and the whole skirt lifts off as a second mushroom.");
+                            ImGui::DragFloat("Dust Yield", &domain.gas_surface_dust_emission,
+                                             0.01f, 0.0f, 20.0f, "%.3f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("Smoke released per m/s of wind ABOVE the threshold, per second.");
+                            }
+                            ImGui::DragFloat("Ground Reserve", &domain.gas_surface_dust_supply,
+                                             0.05f, 0.0f, 50.0f, "%.2f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "How much dust a patch of ground holds IN TOTAL before it is\n"
+                                    "scoured clean. There is no replenishment.\n"
+                                    "This is what makes a blast's skirt a travelling RING: the\n"
+                                    "shock strips the ground it crosses and moves on. Set it to 0\n"
+                                    "for an unlimited supply and the ring fills itself in behind\n"
+                                    "the front into a uniform carpet.");
+                            }
+                            ImGui::DragFloat("Dust Ceiling", &domain.gas_surface_dust_max_density,
+                                             0.05f, 0.0f, 20.0f, "%.2f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "Density a surface cell will not be pushed past. 0 = uncapped.\n"
+                                    "The surface has an INFINITE supply, so a wind that keeps\n"
+                                    "blowing keeps producing; this is the only thing bounding it.");
+                            }
+                            ImGui::Unindent();
+                        }
+                        ImGui::Separator();
+                        ImGui::Checkbox("Override Field Loss", &domain.gas_dissipation_override);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "How fast smoke, heat and fuel fade, per second.\n"
+                                "OFF = the solver's global rates. Those are tuned for the thin\n"
+                                "smoke a spark carries (0.5/s) and every hybrid particle+gas\n"
+                                "effect inherits them, which erases a long-lived cloud: over ten\n"
+                                "seconds only 0.5%% of it survives, and it does not fade evenly -\n"
+                                "the whole cloud drops below visibility at nearly the same moment.\n"
+                                "Turn this on for smoke that has to LAST.\n"
+                                "Note: this is NOT Flame Dissipation above, which decays the flame\n"
+                                "field and leaves smoke and heat untouched.");
+                        }
+                        if (domain.gas_dissipation_override) {
+                            ImGui::Indent();
+                            ImGui::DragFloat("Smoke Loss /s", &domain.gas_density_dissipation,
+                                             0.005f, 0.0f, 5.0f, "%.3f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "Script/IPC name: density_dissipation\n"
+                                    "0 = the smoke never thins out on its own. MEASURED on the\n"
+                                    "nuclear preset: at 0.012 only 9%% of the smoke is gone after\n"
+                                    "8 seconds, and since every flow source there finishes by 4.5 s\n"
+                                    "nothing produces and nothing removes - the cloud just spreads\n"
+                                    "until it fills the box, which reads as the cap collapsing.\n"
+                                    "At 0.18 removal balances spreading and the cloud reaches a\n"
+                                    "steady size instead of growing forever.");
+                            }
+                            ImGui::DragFloat("Heat Loss /s", &domain.gas_temperature_dissipation,
+                                             0.005f, 0.0f, 5.0f, "%.3f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "Script/IPC name: temperature_dissipation\n"
+                                    "Cooling rate. COUPLED to Stratification: a plume that cools\n"
+                                    "slower keeps its lift longer and settles HIGHER, so changing\n"
+                                    "this moves the cap and the two are tuned together.\n"
+                                    "The coupling is no longer dangerous - getting it wrong costs\n"
+                                    "cap ALTITUDE, it can no longer turn the cap around and drive\n"
+                                    "it into the ground.");
+                            }
+                            ImGui::DragFloat("Fuel Loss /s", &domain.gas_fuel_dissipation,
+                                             0.005f, 0.0f, 5.0f, "%.3f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "Script/IPC name: fuel_dissipation\n"
+                                    "How fast unburnt fuel disappears. Fuel that lingers keeps\n"
+                                    "re-igniting, which turns a rising column back into a flame.");
+                            }
+                            ImGui::Unindent();
+                        }
+                        ImGui::Separator();
+                        ImGui::Checkbox("MacCormack Advection", &domain.gas_maccormack_advection);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Limited second-order transport. Preserves wisps, sharp flame fronts\n"
+                                              "and vortices that plain semi-Lagrangian smears away.\n"
+                                              "Costs one extra advection pass per field.");
+                        }
+                    }
+
+                    // Procedural turbulence (divergence-free curl-noise detail).
+                    if (UIWidgets::CollapsingHeader("Turbulence (Procedural Detail)")) {
+                        ImGui::Spacing();
+                        ImGui::DragFloat("Turbulence Strength", &domain.turbulence_strength, 0.01f, 0.0f, 50.0f, "%.3f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Adds divergence-free swirling detail on top of the solved motion.\n"
+                                              "0 = off. Modulated by local density/heat/edges so still air stays calm.");
+                        }
+                        if (domain.turbulence_strength > 0.0f) {
+                            ImGui::DragFloat("Noise Scale", &domain.turbulence_scale, 0.02f, 0.05f, 20.0f, "%.2f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Base spatial frequency of the noise. Higher = finer, busier swirls.");
+                            ImGui::DragInt("Octaves", &domain.turbulence_octaves, 1, 1, 8);
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("FBM octaves. More octaves add finer layered detail at higher cost.");
+                            ImGui::DragFloat("Lacunarity", &domain.turbulence_lacunarity, 0.02f, 1.0f, 4.0f, "%.2f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Frequency multiplier per octave (typical ~2.0).");
+                            ImGui::DragFloat("Persistence", &domain.turbulence_persistence, 0.02f, 0.0f, 1.0f, "%.2f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Amplitude decay per octave (typical ~0.5).");
+                            ImGui::DragFloat("Evolution Speed", &domain.turbulence_speed, 0.02f, 0.0f, 5.0f, "%.2f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How fast the turbulence field animates over time.");
+                        }
+                    }
+                }
+                if (is_fluid_domain) {
+                    auto& fp = domain.fluid_params;
+                    if (UIWidgets::CollapsingHeader("APIC / FLIP Liquid Solver", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        ImGui::Spacing();
+                        // Solver edits also demote the material preset to Custom: the
+                        // preset recipe includes them.
+                        bool fp_edited = false;
+                    fp_edited |= ImGui::SliderFloat("APIC Momentum Blend", &fp.apic_blend, 0.0f, 1.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Preservation of angular momentum vs linear velocity.\n\n"
+                                          "0.0 = Viscous, highly-damped flow (PIC).\n"
+                                          "1.0 = Pure APIC. Values between 0.95 and 0.98 yield the most realistic swirls and splash turbulence for water.");
+                    }
+                    fp_edited |= ImGui::SliderFloat("FLIP Particle Blend", &fp.flip_blend, 0.0f, 1.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("The degree of dynamic particle splashing.\n\n"
+                                          "0.0 = Damped, stable PIC movement.\n"
+                                          "1.0 = Highly energetic, splashy FLIP motion. Around 0.97 prevents excessive chaotic noise.");
+                    }
+
+                    // ★★ NAMED AS A GROUP so the four knobs below stop competing
+                    // with the real one. Every name here contains "viscous",
+                    // "friction" or "damping", and all four drag the WHOLE BODY —
+                    // they slow a falling blob down instead of making it resist
+                    // shear. Turning them up to fake thickness is what made honey
+                    // reach a terminal fall speed and sand fall slower than honey.
+                    ImGui::SeparatorText("Dissipation (slows motion - not thickness)");
+                    fp_edited |= ImGui::DragFloat("Velocity Damping", &fp.velocity_damping, 0.001f, 0.5f, 1.0f, "%.3f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Velocity damping factor applied per step. 1.0 = frictionless flow, <1.0 = viscous slowdown.");
+                    }
+                    fp_edited |= ImGui::DragFloat("Internal Viscous Friction", &fp.internal_friction, 0.01f, 0.0f, 10.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Exponential decay on EVERY particle, in whatever direction it\n"
+                                          "is moving: v *= exp(-rate * dt).\n\n"
+                                          "This is NOT viscosity. It brakes the whole body, so it also\n"
+                                          "brakes free FALL - a tall pour arrives slow and lands without\n"
+                                          "a splash. Use Kinematic Viscosity below for thickness.\n\n"
+                                          "0 = water and any real liquid. Non-zero is a stylised or\n"
+                                          "deliberately dead liquid. 10+ = near-instant stop.");
+                    }
+                    fp_edited |= ImGui::DragFloat("Air Drag Resistance", &fp.air_drag, 0.01f, 0.0f, 10.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Quadratic drag on DETACHED droplets only (isolated spray), as\n"
+                                          "v *= 1 / (1 + k|v|dt). Bulk liquid is untouched.\n\n"
+                                          "k is in 1/m and follows from droplet size:\n"
+                                          "  k = 3*rho_air*Cd / (4*rho_water*d)\n"
+                                          "  ~0.15 for 3 mm drops | ~0.5 for sub-mm mist\n\n"
+                                          "Raising it is the fastest way to kill a splash - the spray is\n"
+                                          "exactly what it acts on.");
+                    }
+                    fp_edited |= ImGui::DragFloat("Wall Friction Damping", &fp.wall_damping, 0.01f,  0.0f, 1.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Friction factor applied when liquid rubs boundaries or solid colliders.\n"
+                                          "0 = Slippery walls (sliding), 1 = Sticky walls (no-slip).");
+                    }
+
+                    ImGui::SeparatorText("Coupling");
+                    ImGui::Checkbox("Atmosphere wind", &fp.inherit_atmosphere);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("On: the world climate wind (World panel -> Climate) is the air.\n"
+                                          "Spray drag acts relative to it (droplets carried downwind), and\n"
+                                          "the free surface drifts at 3%% of it (Wind field surface-drag model).\n"
+                                          "Calm world = no change. Local Wind force fields still add on top.");
+                    }
+                    if (fp.inherit_atmosphere) {
+                        const Vec3 air = RayTrophiSim::Fluid::atmosphereAirVelocity(fp);
+                        ImGui::TextDisabled("Air: (%.2f, %.2f, %.2f) m/s", air.x, air.y, air.z);
+                    }
+                    ImGui::SliderFloat("Domain Motion Coupling", &fp.domain_motion_coupling, 0.0f, 1.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Couples domain coordinate translation to fluid velocity. Allows creating sloshing liquids inside a moving cup.");
+                    }
+
+                    fp_edited |= ImGui::DragFloat("Density Correction Strength", &fp.density_correction, 0.05f, 0.0f, 10.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Repulsive force preventing particles from clustering too close. Helps maintain fluid incompressibility. ~1.0 is recommended.");
+                    }
+
+                    ImGui::Checkbox("Free Surface Pressure Boundary", &fp.free_surface);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("ON: Sets pressure to zero at surface air boundaries, creating natural free-surface waves.\n"
+                                          "OFF: Simulates enclosed pressurized fluid flow.");
+                    }
+                    ImGui::Checkbox("Ghost Fluid Method (GFM) Surface", &fp.ghost_fluid_surface);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Ghost Fluid Method (GFM) models sub-cell pressure extrapolation at the air-fluid boundary to eliminate staircasing/aliasing.");
+                    }
+
+                    ImGui::DragFloat("CFL Stability Factor", &fp.cfl,              0.01f,  0.05f, 1.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Courant factor for the ADVECTION substeps below - how far a\n"
+                                          "particle is allowed to travel per substep, in cells.\n\n"
+                                          "It does not shorten the solver step: the transfer and the\n"
+                                          "pressure solve still run once per frame.");
+                    }
+                    // ★★★ RENAMED, because the old name promised the whole solver
+                    // and delivered advection only. P2G, the boundaries, the
+                    // viscous solve, the pressure projection and G2P all run
+                    // EXACTLY ONCE PER TIMELINE FRAME, at dt = 1/fps
+                    // (scene_data.h: fixed_dt = 1/fps). Only particle positions
+                    // are integrated in substeps.
+                    //
+                    // ★★ That single fact is the fixed, parameter-proof "high
+                    // viscosity" a fast liquid runs into. At 24 fps a 6 m/s pour
+                    // crosses 5-12 cells between two pressure solves; momentum is
+                    // smeared over all of them and no crown, sheet or separate
+                    // droplet can form. It is NUMERICAL viscosity — set by dt/h²,
+                    // not by kinematic_viscosity, internal_friction or air_drag —
+                    // which is why zeroing all three changes nothing, and why the
+                    // thick presets look right (they are slow, so their CFL number
+                    // is small AND their thickness is real).
+                    //
+                    // ★ A user reading "Max Solver Substeps" reasonably concludes
+                    // the solver already sub-steps itself and looks elsewhere. The
+                    // name was doing the hiding.
+                    ImGui::DragInt("Max Advection Substeps", &fp.max_substeps,  1.0f,   1, 64);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Substeps for PARTICLE ADVECTION only.\n\n"
+                                          "The transfer (P2G/G2P) and the pressure solve run ONCE per\n"
+                                          "frame, at dt = 1/fps. Raising this does not shorten that\n"
+                                          "step - it only stops fast particles from tunnelling.\n\n"
+                                          "For a fast liquid (water falling more than a metre) the frame\n"
+                                          "step itself is the limit: at 24 fps the liquid crosses several\n"
+                                          "cells between two pressure solves, which smears momentum and\n"
+                                          "flattens splashes no matter what the viscosity is set to.\n"
+                                          "Raise the timeline FPS to shorten it.");
+                    }
+                    ImGui::DragInt("Poisson Pressure Iterations", &fp.pressure_iterations, 1.0f, 0, 200);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Iterations for solving incompressibility (Poisson equation). Higher values prevent compression.");
+                    }
+                    ImGui::DragFloat("Pressure Residual Target", &fp.pressure_relative_residual, 1.0e-6f, 1.0e-8f, 1.0e-2f, "%.1e");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Relative residual target for CPU PCG / GPU MGPCG pressure solve.\n"
+                                          "1e-5 matches the current high-accuracy default; 1e-4 can reduce GPU dot-sync cost in heavy previews.");
+                    }
+                    ImGui::Checkbox("Pressure Layer B V-cycle", &fp.pressure_multigrid_preconditioner);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Experimental CUDA MGPCG multigrid preconditioner.\n"
+                                          "Can cut iteration count on large grids, but adds extra dispatch work per iteration.");
+                    }
+                    if (fp_edited) {
+                        fp.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
+                    }
+                    }
+
+                    // Redistribution / Reseed settings
+                    if (UIWidgets::CollapsingHeader("Dynamic Particle Reseeding (Reseed)", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        ImGui::Spacing();
+
+                    if (fp.granular_enabled) ImGui::BeginDisabled();
+                    ImGui::Checkbox("Enable Dynamic Reseeding##Reseed", &fp.reseed_enabled);
+                    if (fp.granular_enabled) ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Redistributes sampling density without creating liquid mass.\n"
+                                          "Only particles removed from crowded cells may be replaced in starved interior cells.\n"
+                                          "Emitters and open boundaries remain independent count-changing paths.");
+                    }
+
+                    if (fp.granular_enabled) {
+                        ImGui::TextDisabled("Disabled for granular MPM: reseeding would destroy plastic history and mass.");
+                    } else if (fp.reseed_enabled) {
+                        ImGui::DragInt("Target Particles Per Cell", &fp.reseed_target_per_cell, 0.1f, 0, 64);
+                        ImGui::DragInt("Minimum Threshold Per Cell", &fp.reseed_min_per_cell, 0.1f, 1, 32);
+                        ImGui::DragInt("Maximum Threshold Per Cell", &fp.reseed_max_per_cell, 0.1f, 2, 64);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Cells above maximum fund replacements in interior cells below minimum.\n"
+                                              "A step can never add more particles than it removed.");
+                        }
+                    } else {
+                        ImGui::TextDisabled("Reseeding will not alter particle count; emitters and open boundaries still can.");
+                    }
+                    }
+                }
+
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Output")) {
+                ImGui::Spacing();
+                if (is_gas_domain) {
+                    // Volume shader
+                    auto& gas_shader = domain.type == RayTrophiSim::SimulationDomainType::Matter
+                        ? domain.fluid_fog_shader
+                        : domain.shader;
+                    if (!gas_shader) {
+                        gas_shader = VolumeShader::createSmokePreset();
+                    }
+                    if (UIWidgets::CollapsingHeader("Unified Volume Shader Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        ImGui::Spacing();
+                    
+                    if (SceneUI::drawVolumeShaderUI(ui_ctx, gas_shader, nullptr, nullptr)) {
+                        g_gas_volumes_dirty = true;
+                        ui_ctx.start_render = true;
+                    }
+                    }
+                }
+                if (is_fluid_domain) {
+                    // Fluid Render settings group
+                    if (UIWidgets::CollapsingHeader("Liquid Display", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        ImGui::Spacing();
+                    ImGui::TextDisabled("Domain default; Substance Overrides can replace it per liquid type.");
+
+                    int current_mode_idx = 0; // default to explicit spheres
+                    if (domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) {
+                        current_mode_idx = 1;
+                    } else if (domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::VolumeFog) {
+                        current_mode_idx = 2;
+                    } else if (domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Volume) {
+                        // Display only — do NOT write. Drawing a panel must never
+                        // repair scene data: this assignment was the real reason a
+                        // scripted liquid rendered only after its panel had been
+                        // opened. syncSimulationRenderVolumes now normalises the
+                        // invalid 'Volume' liquid mode where it is consumed.
+                        current_mode_idx = 1;
+                    }
+                    const char* fluid_render_modes[] = {
+                        "Splat Spheres (Exact Geometry)",
+                        "Smooth Glassy Surface (Level Set SDF)",
+                        "Volumetric Fog / Gas (Density Volume)"
+                    };
+                    if (ImGui::Combo("Visualization Mode##DomainFluid", &current_mode_idx,
+                                     fluid_render_modes, IM_ARRAYSIZE(fluid_render_modes))) {
+                        domain.fluid_render_mode = current_mode_idx == 0
+                            ? RayTrophiSim::Fluid::FluidRenderMode::Particles
+                            : (current_mode_idx == 1
+                                ? RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF
+                                : RayTrophiSim::Fluid::FluidRenderMode::VolumeFog);
+                        scene.requestSimulationTimelineRenderResync();
+                        ui_ctx.start_render = true;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Choose how the liquid particles are visualised:\n\n"
+                                          "1. Splat Spheres: exact sphere geometry for every particle.\n"
+                                          "2. Smooth Surface: reconstructs a glassy, refractive fluid boundary.\n"
+                                          "3. Volumetric Fog: raymarches the liquid's splatted density with the\n"
+                                          "   Volume Material below (mist, murky water, gas-like looks).");
+                    }
+                    // ★★★ WHAT IS ACTUALLY DRAWN, resolved the way the render
+                    // bridge resolves it. Two knobs answer one question here — a
+                    // domain default and a per-substance override — and the combo
+                    // above can only ever show one of them. With several
+                    // substances bound, the mode it displays may be true for
+                    // NOTHING on screen. Reading the answer back from the same
+                    // rule the bridge uses is the only line in this panel that
+                    // cannot drift from the picture.
+                    {
+                        using RayTrophiSim::Fluid::FluidView;
+                        // Substances resolving here, then the state labels a
+                        // label route sends here (e.g. "spray" of a surface liquid).
+                        auto listFor = [&](FluidView v) {
+                            std::string out;
+                            for (const auto& e : view_plan.entries) {
+                                if (e.view != v) continue;
+                                if (!out.empty()) out += ", ";
+                                out += e.substance.empty() ? std::string("untagged") : e.substance;
+                            }
+                            std::vector<std::string> routed;
+                            for (std::size_t li = 1; li < view_plan.label_routes.size(); ++li) {
+                                const auto label = static_cast<RayTrophiSim::Fluid::ParticleLabel>(li);
+                                const auto route = view_plan.label_routes[li];
+                                if (route == RayTrophiSim::Fluid::LabelRoute::Follow ||
+                                    view_plan.viewFor(RayTrophiSim::Fluid::kSubstanceUntagged, label) != v)
+                                    continue;
+                                routed.push_back(RayTrophiSim::Fluid::particleLabelName(label));
+                            }
+                            for (const auto& name : routed) {
+                                if (!out.empty()) out += ", ";
+                                out += name + " (state)";
+                            }
+                            return out;
+                        };
+                        RayTrophiSim::Fluid::FluidViewCounts view_counts, ww_counts;
+                        {
+                            const auto& states = particles->gridDomainStates();
+                            const std::size_t di = static_cast<std::size_t>(selected_domain_index);
+                            if (di < states.size() && states[di].valid) {
+                                view_counts = RayTrophiSim::Fluid::countParticlesPerView(
+                                    view_plan, states[di].particles);
+                                if (domain.fluid_foam_params.enabled)
+                                    ww_counts = RayTrophiSim::Fluid::countWhitewaterPerView(
+                                        view_plan, states[di].foam.type);
+                            }
+                        }
+                        ImGui::TextDisabled("Now drawing:");
+                        ImGui::Indent(8.0f);
+                        const struct { FluidView v; bool on; const char* label; } rows[] = {
+                            { FluidView::Surface, view_plan.surface, "Isosurface" },
+                            { FluidView::Splat,   view_plan.splat,   "Splat" },
+                            { FluidView::Fog,     view_plan.fog,     "Fog volume" },
+                        };
+                        for (const auto& r : rows) {
+                            if (!r.on) continue;
+                            const std::string names = listFor(r.v);
+                            const bool live = view_plan.anyLiveIn(r.v);
+                            const uint64_t n = r.v == FluidView::Surface ? view_counts.surface
+                                             : r.v == FluidView::Splat   ? view_counts.splat
+                                                                         : view_counts.fog;
+                            const uint64_t w = r.v == FluidView::Surface ? ww_counts.surface
+                                             : r.v == FluidView::Splat   ? ww_counts.splat
+                                                                         : ww_counts.fog;
+                            if (w > 0)
+                                ImGui::TextWrapped("%s: %s (%llu particles + %llu whitewater)", r.label,
+                                                   names.c_str(), static_cast<unsigned long long>(n),
+                                                   static_cast<unsigned long long>(w));
+                            else if (live)
+                                ImGui::TextWrapped("%s: %s (%llu particles)", r.label, names.c_str(),
+                                                   static_cast<unsigned long long>(n));
+                            else
+                                ImGui::TextWrapped("%s: %s (no particles yet)", r.label, names.c_str());
+                        }
+                        if (view_counts.hidden > 0 || ww_counts.hidden > 0)
+                            ImGui::TextWrapped("Hidden: %llu particles, %llu whitewater",
+                                               static_cast<unsigned long long>(view_counts.hidden),
+                                               static_cast<unsigned long long>(ww_counts.hidden));
+                        ImGui::Unindent(8.0f);
+                    }
+
+                    // Where each simulation STATE label is drawn. The substance
+                    // still decides where "Follow Substance" parcels go; a route
+                    // only moves the parcels carrying that label. Same table as
+                    // fluid.set_label_views.
+                    const bool label_views_open =
+                        ImGui::TreeNode("Particle State Views##DomainFluidLabels");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(
+                            "Labels are written by the simulation: body = inside the liquid,\n"
+                            "spray = detached droplets, frozen = solidified. By default spray,\n"
+                            "foam and bubbles are drawn as splats and mist as fog; the rest\n"
+                            "follow their substance.\n\n"
+                            "The same rows route whitewater spray / foam / bubble. For\n"
+                            "whitewater, Isosurface means a white medium inside the liquid's\n"
+                            "surface volume.");
+                    if (label_views_open) {
+                        using RayTrophiSim::Fluid::LabelRoute;
+                        using RayTrophiSim::Fluid::ParticleLabel;
+                        static const char* kRouteNames[] = {
+                            "Follow Substance", "Isosurface", "Splat", "Fog", "Hidden" };
+                        static const ParticleLabel kShown[] = {
+                            ParticleLabel::Body, ParticleLabel::Spray, ParticleLabel::Foam,
+                            ParticleLabel::Bubble, ParticleLabel::Mist, ParticleLabel::Frozen };
+                        bool routes_changed = false;
+                        for (const ParticleLabel label : kShown) {
+                            auto& route = domain.fluid_label_routes[static_cast<std::size_t>(label)];
+                            int idx = static_cast<int>(route);
+                            const std::string id = std::string(RayTrophiSim::Fluid::particleLabelName(label)) +
+                                                   "##LabelRoute";
+                            ImGui::SetNextItemWidth(160.0f);
+                            if (ImGui::Combo(id.c_str(), &idx, kRouteNames, IM_ARRAYSIZE(kRouteNames))) {
+                                route = static_cast<LabelRoute>(idx);
+                                routes_changed = true;
+                            }
+                        }
+                        // Unknown (not yet classified) always follows its
+                        // substance: presenting it as anything else would claim a
+                        // measurement that was never made.
+                        ImGui::TextDisabled("Unclassified particles always follow their substance.");
+                        if (ImGui::SmallButton("Reset to Defaults##LabelRoutes")) {
+                            domain.fluid_label_routes = RayTrophiSim::Fluid::defaultLabelRoutes();
+                            routes_changed = true;
+                        }
+                        if (routes_changed) {
+                            scene.requestSimulationTimelineRenderResync();
+                            ui_ctx.start_render = true;
+                        }
+                        ImGui::TreePop();
+                    }
+
+                    if (ImGui::Checkbox("Debug Particle Points Overlay##DomainFluid", &domain.fluid_debug_overlay)) {
+                        ui_ctx.start_render = true;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Draws raw simulation particle coordinates as lightweight blue viewport overlays.");
+                    }
+
+                        // Per-substance LOOK. The physics half of each binding (phase,
+                        // viscosity, miscibility) is edited in the Matter tab.
+                        if (!domain.fluid_substance_materials.empty() &&
+                            UIWidgets::CollapsingHeader("Substance Look", ImGuiTreeNodeFlags_DefaultOpen)) {
+                            auto& smgr = MaterialManager::getInstance();
+                            for (std::size_t bi = 0; bi < domain.fluid_substance_materials.size(); ++bi) {
+                                auto& binding = domain.fluid_substance_materials[bi];
+                                const auto& mats = smgr.getAllMaterials();
+                                ImGui::PushID(static_cast<int>(bi) + 62000);
+                                ImGui::TextUnformatted(binding.substance.c_str());
+                                ImGui::Indent(8.0f);
                                 // ── LOOK ─────────────────────────────────────
                                 // Nothing below this line re-simulates: it
                                 // repaints the frame currently on screen.
                                 ImGui::SeparatorText("Look (repaints this frame)");
 
                                 int rep = static_cast<int>(binding.representation);
-                                const char* reps[] = { "Inherit Domain Default", "Splat Spheres", "Surface SDF" };
+                                const char* reps[] = { "Inherit Domain Default", "Splat Spheres", "Surface SDF", "Fog" };
                                 ImGui::SetNextItemWidth(-FLT_MIN);
-                                if (ImGui::Combo("Drawn as", &rep, reps, 3)) {
+                                if (ImGui::Combo("Drawn as", &rep, reps, IM_ARRAYSIZE(reps))) {
                                     binding.representation = static_cast<RayTrophiSim::Fluid::SubstanceRepresentation>(rep);
                                     scene.requestSimulationTimelineRenderResync();
                                     ui_ctx.start_render = true;
@@ -2914,7 +3210,9 @@ void drawSimulationDomainControls(
                                         "splat spheres or part of the isosurface; so can a liquid.\n\n"
                                         "Splat Spheres also removes the substance from the shared\n"
                                         "isosurface, so its material is read per sphere instead of\n"
-                                        "blended into the mixture.");
+                                        "blended into the mixture.\n\n"
+                                        "Fog draws it as a participating medium on the domain's fog\n"
+                                        "volume, alongside the isosurface of the other substances.");
                                 }
 
                                 // ★★ THE UNSET LABEL MUST NAME THE FALLBACK THAT WILL
@@ -2927,9 +3225,8 @@ void drawSimulationDomainControls(
                                 // had not been applied — when in truth the panel had
                                 // named a material the splat path never consults.
                                 const bool binding_draws_splat =
-                                    binding.representation == RayTrophiSim::Fluid::SubstanceRepresentation::Splat ||
-                                    (binding.representation == RayTrophiSim::Fluid::SubstanceRepresentation::Inherit &&
-                                     current_mode_idx == 0);
+                                    view_plan.viewForTag(RayTrophiSim::Fluid::substanceTag(binding.substance)) ==
+                                    RayTrophiSim::Fluid::FluidView::Splat;
                                 const char* unset_label = binding_draws_splat
                                     ? "Domain Splat Material" : "Built-in Dielectric";
                                 const char* mat_label = unset_label;
@@ -2983,57 +3280,12 @@ void drawSimulationDomainControls(
                                         ui_ctx.start_render = true;
                                     }
                                 }
-
                                 ImGui::Unindent(8.0f);
-                                ImGui::EndGroup();
-                                ImGui::Spacing();
                                 ImGui::Separator();
-                                ImGui::Spacing();
                                 ImGui::PopID();
                             }
-                            if (remove_binding >= 0) {
-                                domain.fluid_substance_materials.erase(
-                                    domain.fluid_substance_materials.begin() + remove_binding);
-                                scene.requestSimulationTimelineRenderResync();
-                                ui_ctx.start_render = true;
-                            }
-
-                            std::vector<std::string> available;
-                            for (const auto& name : domain_substances) {
-                                const bool bound = std::any_of(domain.fluid_substance_materials.begin(),
-                                    domain.fluid_substance_materials.end(),
-                                    [&](const auto& b) { return b.substance == name; });
-                                if (!bound) available.push_back(name);
-                            }
-                            static std::string pending_substance;
-                            if (std::find(available.begin(), available.end(), pending_substance) == available.end())
-                                pending_substance = available.empty() ? std::string() : available.front();
-                            const char* pending_label = available.empty()
-                                ? "No unbound emitter substances" : pending_substance.c_str();
-                            ImGui::BeginDisabled(available.empty());
-                            ImGui::SetNextItemWidth(-FLT_MIN);
-                            if (ImGui::BeginCombo("Add From Domain Emitters", pending_label)) {
-                                for (const auto& name : available) {
-                                    if (ImGui::Selectable(name.c_str(), pending_substance == name)) pending_substance = name;
-                                }
-                                ImGui::EndCombo();
-                            }
-                            const bool at_limit = domain.fluid_substance_materials.size() >=
-                                RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials;
-                            ImGui::BeginDisabled(at_limit);
-                            if (ImGui::Button("Add Override")) {
-                                RayTrophiSim::SimulationGridDomainDesc::SubstanceMaterial b;
-                                b.substance = pending_substance;
-                                domain.fluid_substance_materials.push_back(std::move(b));
-                                pending_substance.clear();
-                                ui_ctx.start_render = true;
-                            }
-                            ImGui::EndDisabled();
-                            ImGui::EndDisabled();
-                            if (domain_substances.empty())
-                                ImGui::TextDisabled("Assign a Substance to an emitter in this domain first.");
                         }
-                    }
+
 
                     // ★ Gate the parameter blocks on what the COMBO SHOWS
                     // (current_mode_idx), not on the raw enum. They used to read
@@ -3049,10 +3301,7 @@ void drawSimulationDomainControls(
                     // This does NOT repair the scene data — the panel still
                     // writes nothing (see the note above); it only stops the
                     // combo from claiming a mode the rest of the panel ignores.
-                    const bool has_splat_override = std::any_of(
-                        domain.fluid_substance_materials.begin(), domain.fluid_substance_materials.end(),
-                        [](const auto& b) { return b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::Splat; });
-                    if ((current_mode_idx == 0 || has_splat_override) &&
+                    if (view_plan.splat &&
                         UIWidgets::CollapsingHeader("Splat Geometry & Preview",
                             current_mode_idx == 0 ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
                         const char* geometry_modes[] = { "Built-in Icosphere", "Scene Object / Mesh Group" };
@@ -3173,10 +3422,7 @@ void drawSimulationDomainControls(
                     // rather than as a missing gate. The splat half already got
                     // this right; the two halves must agree or the panel teaches
                     // that overrides are second-class.
-                    const bool has_sdf_override = std::any_of(
-                        domain.fluid_substance_materials.begin(), domain.fluid_substance_materials.end(),
-                        [](const auto& b) { return b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF; });
-                    if ((current_mode_idx == 1 || has_sdf_override) &&
+                    if (view_plan.surface &&
                         UIWidgets::CollapsingHeader("Surface SDF Settings",
                             current_mode_idx == 1 ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {   // see the note above: display, not enum
                         bool sdf_changed = false;
@@ -3488,6 +3734,7 @@ void drawSimulationDomainControls(
                     }
                     }
 
+
                     // ── Whitewater (Foam / Spray / Bubbles) — Ihmsen 2012 ────
                     if (UIWidgets::CollapsingHeader("Whitewater (Foam / Spray / Bubbles)")) {
                         ImGui::Spacing();
@@ -3495,9 +3742,10 @@ void drawSimulationDomainControls(
                         bool foam_changed = false;
                         foam_changed |= ImGui::Checkbox("Enable Whitewater", &fo.enabled);
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                            "Physically-generated secondary particles (Ihmsen 2012):\n"
-                            "spray from impacts, foam on the surface, bubbles below.\n"
-                            "Render-only - never affects the liquid solve. Has a cost.");
+                            "Massless secondary particles (Ihmsen 2012): a stand-in for the\n"
+                            "spray, foam and bubbles finer than the grid can resolve.\n"
+                            "Never affects the liquid solve. Has a cost.\n"
+                            "Where each type is drawn: Particle State Views.");
                         if (fo.enabled) {
                             ImGui::Indent();
                             ImGui::TextDisabled("Generation");
@@ -3520,47 +3768,33 @@ void drawSimulationDomainControls(
                             foam_changed |= ImGui::SliderInt("Bubble when >= N", &fo.bubble_min_neighbors, 4, 60);
 
                             ImGui::Spacing(); ImGui::TextDisabled("Render");
-                            // Foam render mode: Spheres (one instanced sphere per
-                            // particle — granular, but O(N) TLAS instances so it
-                            // crawls at high counts) vs Volume (foam splatted into the
-                            // fluid SURFACE volume's temperature channel and marched as
-                            // a white single-scatter medium — cost ~independent of
-                            // particle count; the production whitewater approach).
-                            {
-                                int foam_mode_idx =
-                                    (fo.render_mode == RayTrophiSim::Fluid::FoamRenderMode::Volume) ? 1 : 0;
-                                const char* foam_render_modes[] = { "Spheres (granular, per-particle)",
-                                                                    "Volume (whitewater medium, fast)" };
-                                if (ImGui::Combo("Foam Render##FoamMode", &foam_mode_idx, foam_render_modes, 2)) {
-                                    fo.render_mode = (foam_mode_idx == 1)
-                                        ? RayTrophiSim::Fluid::FoamRenderMode::Volume
-                                        : RayTrophiSim::Fluid::FoamRenderMode::Spheres;
-                                    // Structural: flips the sphere instance group on/off
-                                    // AND the volume foam splat on/off — force a re-sync
-                                    // so the current (paused) frame rebuilds both paths.
-                                    scene.requestSimulationTimelineRenderResync();
-                                    foam_changed = true;
-                                }
-                                if (ImGui::IsItemHovered())
-                                    ImGui::SetTooltip("Spheres: one instanced sphere per foam particle (granular close-up, "
-                                                      "but O(N) instances).\nVolume: foam rides the fluid surface volume's "
-                                                      "temperature channel as a white single-scatter medium — cheap at "
-                                                      "millions of particles, the production approach.");
-                                // Warn only when the mode actually SHOWN above is
-                                // Particles. Testing `!= SurfaceSDF` also caught the
-                                // invalid 'Volume' mode, which displays as — and
-                                // normalises to — Surface SDF: the panel told you to
-                                // pick a setting the combo already showed as picked.
-                                if (fo.render_mode == RayTrophiSim::Fluid::FoamRenderMode::Volume &&
-                                    domain.fluid_render_mode ==
-                                        RayTrophiSim::Fluid::FluidRenderMode::Particles) {
-                                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
-                                        "  Volume foam needs Fluid Render = Surface SDF (it rides that volume).");
-                                }
-                            }
+                            // Where each type goes is the Particle State Views table,
+                            // the one table for the solver's parcels and the
+                            // whitewater. This only reports its answer, and shows the
+                            // look controls of the views that are in use.
+                            using RayTrophiSim::Fluid::FluidView;
+                            const auto ww_in_surface = view_plan.whitewaterTypesIn(FluidView::Surface);
+                            const auto ww_in_splat   = view_plan.whitewaterTypesIn(FluidView::Splat);
+                            const auto ww_in_fog     = view_plan.whitewaterTypesIn(FluidView::Fog);
+                            auto anyOf = [](const auto& a) { return a[0] || a[1] || a[2]; };
+                            auto wwViewName = [&](RayTrophiSim::Fluid::FoamType t) {
+                                const FluidView v = view_plan.viewForWhitewater(static_cast<uint8_t>(t));
+                                return v == FluidView::Surface ? "isosurface medium"
+                                     : v == FluidView::Splat   ? "splat"
+                                     : v == FluidView::Fog     ? "fog" : "hidden";
+                            };
+                            ImGui::TextWrapped("Spray: %s, foam: %s, bubbles: %s",
+                                               wwViewName(RayTrophiSim::Fluid::FoamType::Spray),
+                                               wwViewName(RayTrophiSim::Fluid::FoamType::Foam),
+                                               wwViewName(RayTrophiSim::Fluid::FoamType::Bubble));
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Set in Particle State Views (same rows as the simulated\n"
+                                                  "spray / foam / bubble particles).");
+                            if (anyOf(ww_in_surface) && !view_plan.surface)
+                                ImGui::TextDisabled("  This domain draws no isosurface; the medium has no volume to ride.");
 
-                            const bool foam_is_volume =
-                                (fo.render_mode == RayTrophiSim::Fluid::FoamRenderMode::Volume);
+                            const bool foam_is_volume = anyOf(ww_in_surface) || anyOf(ww_in_fog);
+                            const bool foam_is_splat  = anyOf(ww_in_splat);
 
                             if (foam_is_volume) {
                                 // ── Volume whitewater medium look ──
@@ -3572,16 +3806,20 @@ void drawSimulationDomainControls(
                                 ImGui::Spacing(); ImGui::TextDisabled("Whitewater medium");
                                 bool foam_look_changed  = false;
                                 bool foam_resplat_changed = false;
+                                ImGui::BeginDisabled(!anyOf(ww_in_surface));
                                 foam_look_changed |= ImGui::ColorEdit3("Foam Color", &fo.volume_color.x);
-                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scattering tint of the foam medium (cool white = sea foam).");
+                                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Scattering tint of the isosurface medium (cool white = sea foam).\nA type routed to fog takes the fog material instead.");
+                                ImGui::EndDisabled();
                                 // Density drives the re-splat (SDF/temp re-upload) — gate
                                 // it to the drag RELEASE so dragging doesn't rebuild the
                                 // level set every frame (settle pattern, like auto-reseed).
                                 ImGui::DragFloat("Foam Density", &fo.volume_density, 0.02f, 0.05f, 20.0f, "%.2f");
                                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Density each foam particle deposits into the volume. Higher = thicker / whiter foam.");
                                 if (ImGui::IsItemDeactivatedAfterEdit()) foam_resplat_changed = true;
+                                ImGui::BeginDisabled(!anyOf(ww_in_surface));
                                 foam_look_changed |= ImGui::DragFloat("Foam Opacity", &fo.volume_opacity, 0.1f, 0.1f, 64.0f, "%.1f");
-                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Extinction multiplier — how strongly the foam medium occludes what is behind it.");
+                                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Extinction multiplier — how strongly the isosurface medium occludes what is behind it.");
+                                ImGui::EndDisabled();
                                 // Per-class whitewater contribution (Ihmsen spray/foam/bubble).
                                 // These change the deposited temp grid → settle-gated re-splat
                                 // like Foam Density. Surface foam is always full strength.
@@ -3599,8 +3837,9 @@ void drawSimulationDomainControls(
                                     scene.requestSimulationTimelineRenderResync();
                                     foam_changed = true;
                                 }
-                            } else {
-                            // ── Foam material pickers (with custom overrides) — Spheres mode ──
+                            }
+                            if (foam_is_splat) {
+                            // ── Foam material pickers (with custom overrides) — splat route ──
                             {
                                 static bool show_material_overrides = false;
                                 static int last_domain_id = -1;
@@ -3690,7 +3929,7 @@ void drawSimulationDomainControls(
 
                             foam_changed |= ImGui::SliderInt("Foam Subdivisions", &fo.foam_sphere_subdivisions, 0, 3);
                             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mesh subdivision level for rendering foam spheres. Higher = smoother close-up but slightly slower BVH rebuild.");
-                            } // end Spheres-mode controls
+                            } // end splat-route controls
 
                             int maxf = static_cast<int>(std::min<std::size_t>(fo.max_foam, 20000000u));
                             if (ImGui::DragInt("Max Foam Particles", &maxf, 1000.0f, 1000, 20000000)) {
@@ -3765,85 +4004,94 @@ void drawSimulationDomainControls(
                     }
 
                     // NanoVDB shader UI
-                    const bool fog_mode =
-                        domain.fluid_render_mode ==
-                            RayTrophiSim::Fluid::FluidRenderMode::VolumeFog;
-                    const bool wants_volume_panel =
-                        fog_mode ||
-                        domain.fluid_render_mode ==
-                            RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF ||
-                        std::any_of(
-                            domain.fluid_substance_materials.begin(),
-                            domain.fluid_substance_materials.end(),
-                            [](const auto& binding) {
-                                return binding.representation ==
-                                    RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF;
-                            });
-                    if (wants_volume_panel) {
-                        if (!domain.shader) {
-                            domain.shader = VolumeShader::createSmokePreset();
-                            domain.shader->name = "Liquid NanoVDB Preview";
-                            domain.shader->density.multiplier = 1.6f;
-                            domain.shader->scattering.color = Vec3(0.62f, 0.78f, 0.92f);
-                            domain.shader->scattering.coefficient = 1.1f;
-                            domain.shader->absorption.coefficient = 0.04f;
+                    // Fog view: its medium lives on the fog volume and is edited
+                    // there; this panel keeps only the domain-level spread.
+                    if (view_plan.fog &&
+                        UIWidgets::CollapsingHeader("Fog View##LiquidFogView",
+                                                    ImGuiTreeNodeFlags_DefaultOpen)) {
+                        // Same field and range as fluid.set_fog spread_voxels.
+                        if (ImGui::SliderFloat("Fog Spread (voxels)##LiquidFog",
+                                               &domain.fluid_fog_spread_voxels, 0.0f,
+                                               RayTrophiSim::Fluid::kFogSpreadMaxVoxels, "%.2f")) {
+                            domain.fluid_fog_spread_voxels = std::clamp(
+                                domain.fluid_fog_spread_voxels, 0.0f,
+                                RayTrophiSim::Fluid::kFogSpreadMaxVoxels);
+                            scene.requestSimulationTimelineRenderResync();
+                            ui_ctx.renderer.resetCPUAccumulation();
+                            if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
+                            ui_ctx.start_render = true;
                         }
-                        // Same VolumeShader in both modes, two meanings: in fog mode it IS
-                        // the material; under SDF it only tints the built-in dielectric.
-                        if (UIWidgets::CollapsingHeader(
-                                fog_mode ? "Volume Material (Fog)##LiquidVolume"
-                                         : "Volumetric Absorption & Density##LiquidVolume",
-                                ImGuiTreeNodeFlags_DefaultOpen)) {
-                            ImGui::Spacing();
-                            const bool has_surface_sdf =
-                                domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF ||
-                                std::any_of(domain.fluid_substance_materials.begin(),
-                                            domain.fluid_substance_materials.end(),
-                                            [](const auto& b) {
-                                                return b.representation ==
-                                                    RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF;
-                                            });
-                            if (has_surface_sdf) {
-                                ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f),
-                                                   "Surface SDF uses a geometric density proxy");
-                                ImGui::TextWrapped(
-                                    "Density, Remap and Edge Cutoff are fog controls and do not thicken "
-                                    "the SDF. Shape comes from Surface SDF Settings. Scattering/Absorption "
-                                    "shade the built-in dielectric; a bound Principled BSDF uses its own "
-                                    "Transmission and Interior controls.");
-                                ImGui::Separator();
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip(
+                                "Gaussian spread of the particle density before it is drawn.\n"
+                                "0 = raw splat (spray shows as dots); 1.5-3 = continuous cloud.\n"
+                                "Render only: does not change the simulation.");
+                        ImGui::BeginDisabled(!fog_volume);
+                        if (ImGui::Button("Edit Fog Medium...##LiquidFogEdit")) {
+                            ui_ctx.selection.selectVDBVolume(fog_volume, -1, fog_volume->name);
+                            // Selecting alone left Properties on this tab, so the
+                            // medium editor never came into view.
+                            ui.tab_to_focus = "VDB";
+                        }
+                        ImGui::EndDisabled();
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                            ImGui::SetTooltip(fog_volume
+                                ? "Select the fog volume; its medium (density, scattering, emission) is edited there."
+                                : "The fog volume appears once the domain has fog particles.");
+                        if (domain.fluid_fog_shader &&
+                            (domain.fluid_fog_shader->emission.mode == VolumeEmissionMode::Blackbody ||
+                             domain.fluid_fog_shader->emission.mode == VolumeEmissionMode::ChannelDriven)) {
+                            ImGui::TextWrapped(
+                                "Emission temperature = particle Kelvin. Ambient liquid barely "
+                                "glows (radiance ~ T^4); give the Flow Source a temperature "
+                                "override for hot liquid, and enable the thermal chain to "
+                                "let it cool.");
+                        }
+                    }
+                    // The liquid BODY behind the isosurface. The iso walk reads
+                    // only three fields of the surface volume shader (see
+                    // rtapi::FluidSurfaceInteriorSettings), so only those are
+                    // shown; the full gas shader editor that used to sit here
+                    // offered density/emission controls that change nothing.
+                    // The shader is created and tuned by the render sync; the
+                    // panel no longer creates it (an untuned preset walks 16
+                    // steps and renders the body black).
+                    if (view_plan.surface &&
+                        UIWidgets::CollapsingHeader("Liquid Body##LiquidBody",
+                                                    ImGuiTreeNodeFlags_DefaultOpen)) {
+                        if (!domain.shader) {
+                            ImGui::TextDisabled("Appears after the surface has been drawn once.");
+                        } else {
+                            auto& body = *domain.shader;
+                            bool body_changed = false;
+                            body_changed |= ImGui::ColorEdit3("Absorption Color##LiquidBody",
+                                                              &body.absorption.color.x);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip(
+                                    "Per-channel absorption with depth (Beer-Lambert). The"
+                                    "channels absorbed most are the ones that vanish: high red,"
+                                    "low blue is why deep water is blue. Applies with a bound"
+                                    "Surface Material too.");
+                            if (ImGui::DragFloat("Absorption##LiquidBody", &body.absorption.coefficient,
+                                                 0.01f, 0.0f, 100.0f, "%.3f / unit")) {
+                                body.absorption.coefficient = std::max(0.0f, body.absorption.coefficient);
+                                body_changed = true;
                             }
-                            if (fog_mode) {
-                                // Same field and range as fluid.set_fog spread_voxels.
-                                if (ImGui::SliderFloat("Fog Spread (voxels)##LiquidFog",
-                                                       &domain.fluid_fog_spread_voxels, 0.0f,
-                                                       RayTrophiSim::Fluid::kFogSpreadMaxVoxels, "%.2f")) {
-                                    domain.fluid_fog_spread_voxels = std::clamp(
-                                        domain.fluid_fog_spread_voxels, 0.0f,
-                                        RayTrophiSim::Fluid::kFogSpreadMaxVoxels);
-                                    scene.requestSimulationTimelineRenderResync();
-                                    ui_ctx.renderer.resetCPUAccumulation();
-                                    if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
-                                    ui_ctx.start_render = true;
-                                }
-                                if (ImGui::IsItemHovered())
-                                    ImGui::SetTooltip(
-                                        "Gaussian spread of the particle density before it is drawn.\n"
-                                        "0 = raw splat (spray shows as dots); 1.5-3 = continuous cloud.\n"
-                                        "Render only: does not change the simulation.");
-                                if (domain.shader &&
-                                    (domain.shader->emission.mode == VolumeEmissionMode::Blackbody ||
-                                     domain.shader->emission.mode == VolumeEmissionMode::ChannelDriven)) {
-                                    ImGui::TextWrapped(
-                                        "Emission temperature = particle Kelvin. Ambient liquid barely "
-                                        "glows (radiance ~ T^4); give the Flow Source a temperature "
-                                        "override for hot liquid, and enable the thermal chain to "
-                                        "let it cool.");
-                                }
-                                ImGui::Separator();
-                            }
-                            if (SceneUI::drawVolumeShaderUI(ui_ctx, domain.shader, nullptr, nullptr)) {
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Absorption strength per world unit of depth. 0 = clear.");
+                            const bool tint_active = domain.fluid_surface_material_id < 0;
+                            ImGui::BeginDisabled(!tint_active);
+                            body_changed |= ImGui::ColorEdit3("Refraction Tint##LiquidBody",
+                                                              &body.scattering.color.x);
+                            ImGui::EndDisabled();
+                            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                                ImGui::SetTooltip(tint_active
+                                    ? "Colour cast of light refracted through the built-in dielectric."
+                                    : "The bound Surface Material owns its transmission colour."
+                                      "Clear the material to use this tint.");
+                            if (body_changed) {
                                 scene.refreshFluidSurfaceMaterial();
+                                g_gas_volumes_dirty = true;
                                 ui_ctx.renderer.resetCPUAccumulation();
                                 if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
                                 ui_ctx.start_render = true;
@@ -3855,12 +4103,75 @@ void drawSimulationDomainControls(
                 ImGui::EndTabItem();
             }
 
-            ImGui::EndTabBar();
-        }
+            if (ImGui::BeginTabItem("Measure")) {
+                ImGui::Spacing();
+
+                // Group 4: Statistics Summary
+                if (UIWidgets::CollapsingHeader("Simulation & Collision Statistics", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::Spacing();
+
+                int intersect_n = 0;
+                if (particles && !particles->colliders().empty()) {
+                    const Vec3 dmn = Vec3::min(domain.bounds_min, domain.bounds_max);
+                    const Vec3 dmx = Vec3::max(domain.bounds_min, domain.bounds_max);
+                    for (const auto& c : particles->colliders()) {
+                        if (!c.enabled) continue;
+                        switch (c.source_mode) {
+                            case RayTrophiSim::ParticleColliderSourceMode::PlaneY:
+                                if (c.plane_y >= dmn.y - 1.0f && c.plane_y <= dmx.y + 1.0f) ++intersect_n;
+                                break;
+                            case RayTrophiSim::ParticleColliderSourceMode::Sphere: {
+                                const Vec3 sc = c.sphere_center;
+                                const float r = c.sphere_radius + c.thickness;
+                                if (sc.x + r >= dmn.x && sc.x - r <= dmx.x &&
+                                    sc.y + r >= dmn.y && sc.y - r <= dmx.y &&
+                                    sc.z + r >= dmn.z && sc.z - r <= dmx.z) ++intersect_n;
+                                break;
+                            }
+                            default:
+                                ++intersect_n;
+                                break;
+                        }
+                    }
+                    ImGui::Text("Intersecting Colliders: %d / %zu", intersect_n, particles->colliders().size());
+                    ImGui::TextDisabled("  (Manage colliders using the main 'Colliders' tab at the top)");
+                } else {
+                    ImGui::TextDisabled("No active colliders registered in the scene.");
+                }
+
+                const auto& domain_states = particles->gridDomainStates();
+                if (selected_domain_index < static_cast<int>(domain_states.size())) {
+                    const auto& state = domain_states[static_cast<std::size_t>(selected_domain_index)];
+                    if (state.valid) {
+                        ImGui::Spacing();
+                        ImGui::Separator();
+                        ImGui::Columns(2, "DomainStatsColumns", false);
+                        if (domain.source_mode == RayTrophiSim::SimulationGridDomainSourceMode::Adaptive) {
+                            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.5f, 1.0f), "Dynamic Resolution:"); ImGui::NextColumn();
+                            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.5f, 1.0f), "%dx%dx%d", state.resolution_x, state.resolution_y, state.resolution_z); ImGui::NextColumn();
+                        } else {
+                            ImGui::TextDisabled("Active Resolution:"); ImGui::NextColumn();
+                            ImGui::TextDisabled("%dx%dx%d", state.resolution_x, state.resolution_y, state.resolution_z); ImGui::NextColumn();
+                        }
+                        if (is_gas_domain) {
+                            ImGui::TextDisabled("Active Dense Cells:"); ImGui::NextColumn();
+                            ImGui::TextDisabled("%zu", state.active_density_cells); ImGui::NextColumn();
+                            ImGui::TextDisabled("Max Smoke Density:"); ImGui::NextColumn();
+                            ImGui::TextDisabled("%.3f", state.max_density); ImGui::NextColumn();
+                        }
+                        ImGui::Columns(1);
+                        if (is_fluid_domain) {
+                            drawFluidParticleLabels(state);
+                        }
+                    } else {
+                        ImGui::TextDisabled("Simulation Status: Idle (Play the timeline to step simulation / bake)");
+                    }
+                }
+                }
 
         // Detailed live solver step stats drawn beautifully at the bottom
         {
-            if (!is_fluid_domain && UIWidgets::CollapsingHeader(
+            if (is_gas_domain && UIWidgets::CollapsingHeader(
                     "Gas Step Stats##DomainGasComputeStats",
                     ImGuiTreeNodeFlags_DefaultOpen)) {
                 const auto& states = particles->gridDomainStates();
@@ -4221,6 +4532,7 @@ void drawSimulationDomainControls(
             }
         }
 
+
         {
             if (UIWidgets::CollapsingHeader("VDB Export##DomainVDBExport", ImGuiTreeNodeFlags_DefaultOpen)) {
                 static char vdb_dir[2048] = "";
@@ -4293,191 +4605,10 @@ void drawSimulationDomainControls(
             }
         }
 
-        // Legacy standalone-FluidObject VDB cache UI. The grid-domain workflow
-        // does NOT use FluidObjects (bake is the SimCache path below), so this is
-        // muted: it never auto-creates a "Fluid 1" anymore and only shows if a
-        // FluidObject already exists in the scene (old projects). Grid-domain-only
-        // users never see it.
-        if (false && is_fluid_domain && !scene.fluid_objects.empty()) {
-            ImGui::Spacing();
-            if (UIWidgets::CollapsingHeader("Fluid VDB Cache & Threaded Baking##FluidCacheBakeHeader", ImGuiTreeNodeFlags_DefaultOpen)) {
-                if (scene.active_fluid_object_index < 0 ||
-                    scene.active_fluid_object_index >= static_cast<int>(scene.fluid_objects.size())) {
-                    scene.active_fluid_object_index = 0;
-                }
-                auto* fluid = scene.activeFluidObject();
-                if (fluid) {
-                    ImGui::Spacing();
-                    
-                    // ── VDB Cache Mode ──
-                    if (ImGui::Checkbox("Use Baked VDB Sequence##FluidCache", &fluid->use_vdb_cache)) {
-                        ui_ctx.start_render = true;
-                    }
-                    if (fluid->use_vdb_cache) {
-                        ImGui::Indent();
-                        char cache_path_buf[256];
-                        strncpy_s(cache_path_buf, fluid->vdb_cache_pattern.c_str(), sizeof(cache_path_buf) - 1);
-                        if (ImGui::InputText("Cache Pattern##FluidCachePattern", cache_path_buf, sizeof(cache_path_buf))) {
-                            fluid->vdb_cache_pattern = cache_path_buf;
-                            ui_ctx.start_render = true;
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Browse##FluidCacheBrowse")) {
-                            std::string path = SceneUI::openFileDialogW(L"VDB Files\0*.vdb;*.nvdb\0All Files\0*.*\0", "", "");
-                            if (!path.empty()) {
-                                std::filesystem::path fpath(path);
-                                std::string stem = fpath.stem().string();
-                                std::string directory = fpath.parent_path().string();
-                                std::string ext = fpath.extension().string();
-                                
-                                size_t last_digit = std::string::npos;
-                                size_t first_digit = std::string::npos;
-                                for (size_t i = stem.length(); i > 0; --i) {
-                                    if (isdigit(stem[i-1])) {
-                                        if (last_digit == std::string::npos) last_digit = i-1;
-                                        first_digit = i-1;
-                                    } else if (last_digit != std::string::npos) {
-                                        break; 
-                                    }
-                                }
-                                if (last_digit != std::string::npos) {
-                                    int num_len = (int)(last_digit - first_digit + 1);
-                                    fluid->vdb_cache_digits = num_len;
-                                    std::string prefix = stem.substr(0, first_digit);
-                                    std::string suffix = stem.substr(last_digit + 1);
-                                    std::string placeholder(num_len, '#');
-                                    fluid->vdb_cache_pattern = (std::filesystem::path(directory) / (prefix + placeholder + suffix + ext)).string();
-                                } else {
-                                    fluid->vdb_cache_pattern = path;
-                                }
-                                ui_ctx.start_render = true;
-                            }
-                        }
-                        ImGui::Unindent();
-                    }
-                    
-                    ImGui::Spacing();
-                    
-                    // ── Export & Baking ──
-                    if (UIWidgets::BeginSection("Export & Baking##FluidBake", ImVec4(1.0f, 0.5f, 0.2f, 1.0f), false)) {
-                        static char export_dir[256] = "";
-                        static bool export_success = false;
-                        static bool export_error = false;
-                        static std::string export_message;
-                        
-                        ImGui::Text("Bake / Output Directory:");
-                        ImGui::InputText("##dir_fluid_bake", export_dir, sizeof(export_dir));
-                        ImGui::SameLine();
-                        if (ImGui::Button("Browse##FluidBakeBrowseBtn")) {
-                            std::string path = SceneUI::selectFolderDialogW(L"Select Fluid Export Directory");
-                            if (!path.empty()) {
-                                strncpy_s(export_dir, path.c_str(), sizeof(export_dir) - 1);
-                            }
-                        }
-                        
-                        ImGui::Separator();
-                        
-                        if (ImGui::Button("Export Current Frame (.vdb)##FluidExportFrame", ImVec2(-1, 30))) {
-                            if (strlen(export_dir) == 0) {
-                                export_error = true;
-                                export_message = "Please specify a directory first";
-                            } else {
-                                int current_frame = timeline ? timeline->getCurrentFrame() : 0;
-                                std::string full_path = std::string(export_dir) + "/" + fluid->name + "_" + std::to_string(current_frame) + ".vdb";
-                                bool result = fluid->exportToVDB(full_path);
-                                export_success = result;
-                                export_error = !result;
-                                export_message = result ? ("Saved: " + full_path) : "Export failed!";
-                            }
-                        }
-                        
-                        ImGui::Spacing();
-                        UIWidgets::ColoredHeader("Sequence Baking##FluidSequenceBake", ImVec4(1.0f, 0.6f, 0.4f, 1.0f));
-                        static int bake_start = 0, bake_end = 100;
-                        ImGui::DragInt("Start Frame##FluidBakeStart", &bake_start, 1, 0, 1000);
-                        ImGui::DragInt("End Frame##FluidBakeEnd", &bake_end, 1, 1, 1000);
-                        
-                        if (is_baking) {
-                            progress = static_cast<float>(current_bake_frame - bake_start) / std::max(1, (bake_end - bake_start));
-                            std::string progress_text = "Baking Frame: " + std::to_string(current_bake_frame) + " (" + std::to_string((int)(progress * 100)) + "%)";
-                            ImGui::ProgressBar(progress, ImVec2(-1, 0), progress_text.c_str());
-                            if (ImGui::Button("Cancel Bake##FluidCancelBake", ImVec2(-1, 0))) {
-                                cancel_bake = true;
-                            }
-                        } else {
-                            if (ImGui::Button("Start Bake Sequence##FluidStartBake", ImVec2(-1, 35))) {
-                                if (strlen(export_dir) == 0) {
-                                    export_error = true;
-                                    export_message = "Specify directory first!";
-                                } else {
-                                    is_baking = true;
-                                    cancel_bake = false;
-                                    current_bake_frame = bake_start;
-                                    
-                                    std::string dir = export_dir;
-                                    auto f_obj = fluid;
-                                    int start_f = bake_start;
-                                    int end_f = bake_end;
-                                    
-                                    if (bake_thread && bake_thread->joinable()) bake_thread->join();
-                                    bake_thread = std::make_unique<std::thread>([dir, start_f, end_f, f_obj]() {
-                                        f_obj->resetState();
-                                        f_obj->ensureGrid();
-                                        
-                                        // Seed initial particles for sequence baking
-                                        RayTrophiSim::Fluid::seedBox(
-                                            f_obj->particles,
-                                            f_obj->grid,
-                                            f_obj->seed_min,
-                                            f_obj->seed_max,
-                                            f_obj->seed_particles_per_cell,
-                                            /*seed=*/static_cast<uint32_t>(f_obj->id) * 2654435761u,
-                                            f_obj->max_particles
-                                        );
-                                        
-                                        float dt = 1.0f / 24.0f; // Bake step dt
-                                        
-                                        std::string clean_dir = dir;
-                                        if (!clean_dir.empty() && (clean_dir.back() == '/' || clean_dir.back() == '\\')) {
-                                            clean_dir.pop_back();
-                                        }
-                                        std::filesystem::create_directories(clean_dir);
-                                        
-                                        for (int frame = start_f; frame <= end_f && !cancel_bake; ++frame) {
-                                            current_bake_frame = frame;
-                                            
-                                            if (frame > start_f) {
-                                                RayTrophiSim::Fluid::step(
-                                                    f_obj->particles,
-                                                    f_obj->grid,
-                                                    f_obj->params,
-                                                    dt,
-                                                    /*force_snapshot=*/nullptr,
-                                                    /*time_seconds=*/(frame - start_f) * dt,
-                                                    &f_obj->stats
-                                                );
-                                            }
-                                            
-                                            char filename[256];
-                                            sprintf_s(filename, "%s/%s_%04d.vdb", clean_dir.c_str(), f_obj->name.c_str(), frame);
-                                            f_obj->exportToVDB(filename);
-                                        }
-                                        is_baking = false;
-                                    });
-                                }
-                            }
-                        }
-                        
-                        if (export_success) {
-                            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "%s", export_message.c_str());
-                        } else if (export_error) {
-                            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", export_message.c_str());
-                        }
-                        
-                        UIWidgets::EndSection();
-                    }
-                }
+                ImGui::EndTabItem();
             }
+
+            ImGui::EndTabBar();
         }
 
         // Reset lives at the TOP of this panel now (see resetSimulationNow).
@@ -4499,7 +4630,7 @@ void drawSimulationDomainControls(
         // frame-0 rewind from leaving other tanks empty; the rewind clears the
         // particles first, so replace_on_seed is irrelevant (nothing to stack on).
         if (seed_settled && s_fluid_auto_reseed && particles &&
-            domain.type == RayTrophiSim::SimulationDomainType::Fluid) {
+            RayTrophiSim::simulationDomainHasLiquid(domain.type)) {
             for (auto& sys : scene.particle_systems) {
                 if (!sys.runtime) continue;
                 for (auto& d : sys.runtime->gridDomains()) {
@@ -4513,7 +4644,7 @@ void drawSimulationDomainControls(
                     // drops into the upper half of the bounds for the gizmo to have
                     // something to show — so changing grid resolution while a hose
                     // was running dumped a block of water into the tank.
-                    if (d.type == RayTrophiSim::SimulationDomainType::Fluid &&
+                    if (RayTrophiSim::simulationDomainHasLiquid(d.type) &&
                         (d.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel ||
                          d.fluid_reseed_on_reset)) {
                         d.fluid_pending_seed = true;

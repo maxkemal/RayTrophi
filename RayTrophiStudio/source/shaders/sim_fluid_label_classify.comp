@@ -1,0 +1,57 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC {
+    ivec4 bin_dim_count; ivec4 bin_min_cap;
+    int bin_count; float radius; uint label_mask; uint label_shift;
+    uint frozen_mask; uint body_label; uint spray_label; uint frozen_label;
+    float mist_mass_fraction; uint mist_label; uvec2 padding;
+} pc;
+layout(set=0,binding=0) readonly buffer Positions { float positions[]; };
+layout(set=0,binding=1) buffer Flags { uint flags[]; };
+layout(set=0,binding=2) readonly buffer Counts { uint counts[]; };
+layout(set=0,binding=3) readonly buffer Items { uint items[]; };
+layout(set=0,binding=4) buffer Stats { uint stats[]; };
+layout(set=0,binding=5) readonly buffer MassFraction { float mass_fraction[]; };
+
+uint gather(uint own, vec3 p, ivec3 b, uint found) {
+    if (any(lessThan(b, ivec3(0))) || any(greaterThanEqual(b, pc.bin_dim_count.xyz))) return found;
+    uint bi = uint(b.x + b.y*pc.bin_dim_count.x + b.z*pc.bin_dim_count.x*pc.bin_dim_count.y);
+    uint n = min(counts[bi], uint(pc.bin_min_cap.w));
+    float r2 = pc.radius * pc.radius;
+    for (uint s=0u; s<n && found<6u; ++s) {
+        uint other = items[bi*uint(pc.bin_min_cap.w)+s];
+        if (other == own) continue;
+        vec3 q = vec3(positions[other*3u],positions[other*3u+1u],positions[other*3u+2u]);
+        vec3 d = p-q;
+        if (dot(d,d) <= r2) ++found;
+    }
+    return found;
+}
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= uint(pc.bin_dim_count.w)) return;
+    uint previous = (flags[id] & pc.label_mask) >> pc.label_shift;
+    uint label = 0u;
+    vec3 p = vec3(positions[id*3u], positions[id*3u+1u], positions[id*3u+2u]);
+    if ((flags[id] & pc.frozen_mask) != 0u) {
+        label = pc.frozen_label;
+    } else if (mass_fraction[id] > 0.0 &&
+               mass_fraction[id] <= pc.mist_mass_fraction) {
+        label = pc.mist_label;
+    } else if (!any(isnan(p)) && !any(isinf(p)) && pc.radius > 0.0) {
+        ivec3 center = ivec3(floor(p / pc.radius)) - pc.bin_min_cap.xyz;
+        uint found = gather(id, p, center, 0u);
+        if (found >= 6u) atomicAdd(stats[3], 1u);
+        for (int z=-1; z<=1 && found<6u; ++z)
+        for (int y=-1; y<=1 && found<6u; ++y)
+        for (int x=-1; x<=1 && found<6u; ++x) {
+            if (x==0 && y==0 && z==0) continue;
+            found = gather(id, p, center+ivec3(x,y,z), found);
+        }
+        label = found <= 2u ? pc.spray_label :
+                found >= 6u ? pc.body_label :
+                previous == pc.spray_label ? pc.spray_label : pc.body_label;
+    }
+    if (label != previous) atomicAdd(stats[2], 1u);
+    flags[id] = (flags[id] & ~pc.label_mask) | ((label << pc.label_shift) & pc.label_mask);
+}

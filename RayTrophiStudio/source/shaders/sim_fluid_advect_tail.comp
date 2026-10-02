@@ -9,6 +9,8 @@ layout(push_constant) uniform PC {
     float velocity_damping; float max_velocity;
     float wall_damping; float air_drag;
     int air_threshold; int substeps;
+    // Climate wind (Faz 2): spray drag is relative to the air. Zero = old formula.
+    float air_wind_x; float air_wind_y; float air_wind_z; float _pad0;
 } pc;
 
 layout(set=0,binding=0) buffer Positions { float positions[]; };
@@ -92,8 +94,10 @@ void main() {
             if(m>0.0) neighbourhood+=m;
         }
         if(neighbourhood<float(isolation)) {
-            float speed=length(v);
-            if(speed>1e-4) v*=1.0/(1.0+max(0.0,pc.air_drag)*speed*pc.dt);
+            vec3 air=vec3(pc.air_wind_x,pc.air_wind_y,pc.air_wind_z);
+            vec3 rel=v-air;
+            float speed=length(rel);
+            if(speed>1e-4) v=air+rel*(1.0/(1.0+max(0.0,pc.air_drag)*speed*pc.dt));
         }
     }
     v*=clamp(pc.velocity_damping,0.0,1.0);

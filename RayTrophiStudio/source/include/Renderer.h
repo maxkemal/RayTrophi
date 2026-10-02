@@ -167,10 +167,6 @@ public:
     Vec3 adaptive_sample_pixel(int i, int j, const Camera& cam, const ParallelBVHNode* bvh, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, int max_samples_per_pixel, float variance_threshold, int variance_check_interval);
    
     bool SaveSurface(SDL_Surface* surface, const char* file_path);
-    void render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer, 
-        const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration, int start_frame, int end_frame, SceneData& scene,
-        const std::string& output_folder = "", bool use_denoiser = false, float denoiser_blend = 0.9f,
-        Backend::IBackend* backend = nullptr, bool use_gpu = false, UIContext* ui_ctx = nullptr);
 
     bool updateAnimationState(SceneData& scene, float time, bool apply_cpu_skinning = true, bool force_bind_pose = false);
     std::vector<Matrix4x4> finalBoneMatrices; // Stores computed bone matrices for the current frame
@@ -403,12 +399,6 @@ private:
     std::vector<AnimatableGroup> animation_groups;
    
 
-    // Per-frame collection of (nodeName, worldMatrix) pairs for nodes that
-    // had a keyframe applied. Populated in updateAnimationState; consumed
-    // in render_Animation so a small change set can take a targeted
-    // backend update path (per-node) instead of the full scene scan that
-    // updateInstanceTransforms does.
-    std::vector<std::pair<std::string, Matrix4x4>> pending_anim_transform_updates;
     std::vector<std::shared_ptr<Triangle>> m_dynamic_triangles;           // [NEW] Transformu olan dinamik üçgenler önbelleği
     std::vector<std::shared_ptr<HittableInstance>> m_dynamic_instances;   // [NEW] Tüm instanced nesneler önbelleği
 

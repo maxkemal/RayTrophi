@@ -1,0 +1,161 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// RayFusion clouds (docs/dev/ATMOSPHERE_CLOUDS.md §3.2, Faz 3c).
+//
+// The SAME cloudMarch() as Vulkan RT (cloud_rt.glsl), run at reduced
+// resolution with a per-frame sub-pixel jitter and march offset, then
+// accumulated over frames by reprojecting each sample's transmittance-weighted
+// cloud depth into the previous camera. The sky pass composites the result:
+// sky * a + rgb. Parity with RT comes from sharing the function, not from
+// tuning a second model.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// cloud_rt.glsl reads worldData.w.{sunDir, sunIntensity, atmosphereHeight,
+// _pad5} and atmosphereLUTs[0]; this block provides exactly those names.
+struct CloudWorldLite {
+    vec3  sunDir;
+    float sunIntensity;
+    float atmosphereHeight;
+    int   _pad5;          // 1 = atmosphere LUTs bound (same meaning as RT)
+    float shadowCenterX;  // cloud_shadow.comp
+    float shadowCenterZ;
+};
+
+layout(set = 0, binding = 7, std430) readonly buffer CloudRasterFrame {
+    CloudWorldLite w;
+    vec4  camPos;         // xyz, w = tan(vertical fov / 2)
+    vec4  camRight;       // xyz, w = aspect
+    vec4  camUp;
+    vec4  camFwd;         // xyz, w = 1 when the history is valid
+    vec4  prevPos;        // previous frame, same layout
+    vec4  prevRight;
+    vec4  prevUp;
+    vec4  prevFwd;
+    uvec4 info;           // width, height, frame index, march steps
+} worldData;
+
+layout(set = 0, binding = 6) uniform sampler2D atmosphereLUTs[2];   // 0 transmittance, 1 sky-view
+
+#define CLOUD_SET 0
+#define CLOUD_BINDING_BASE 0
+#define CLOUD_MAJORANT_BINDING 5
+#define CLOUD_RT_LIGHTING
+#include "cloud_rt.glsl"
+
+layout(set = 0, binding = 8) uniform sampler2D prevHistory;
+layout(set = 0, binding = 9, rgba16f) uniform writeonly image2D curHistory;
+layout(set = 0, binding = 10, rgba16f) uniform writeonly image2D cloudOut;
+
+// History fetch with a 5-tap Catmull-Rom (Jimenez 2016). A bilinear fetch
+// re-blurs the history every frame, and under long accumulation that
+// compounds into soft, detail-less clouds.
+vec4 sampleHistoryCatmullRom(vec2 uv) {
+    vec2 size = vec2(textureSize(prevHistory, 0));
+    vec2 pos = uv * size;
+    vec2 c = floor(pos - 0.5) + 0.5;
+    vec2 f = pos - c;
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+    vec2 w12 = w1 + w2;
+    vec2 tc0 = (c - 1.0) / size, tc3 = (c + 2.0) / size;
+    vec2 tc12 = (c + w2 / w12) / size;
+    vec4 r = textureLod(prevHistory, vec2(tc12.x, tc0.y), 0.0) * (w12.x * w0.y) +
+             textureLod(prevHistory, vec2(tc0.x, tc12.y), 0.0) * (w0.x * w12.y) +
+             textureLod(prevHistory, tc12, 0.0) * (w12.x * w12.y) +
+             textureLod(prevHistory, vec2(tc3.x, tc12.y), 0.0) * (w3.x * w12.y) +
+             textureLod(prevHistory, vec2(tc12.x, tc3.y), 0.0) * (w12.x * w3.y);
+    float wsum = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+    r /= max(wsum, 1e-4);
+    // Bicubic overshoot: radiance >= 0, transmittance in [0, 1].
+    return vec4(max(r.rgb, vec3(0.0)), clamp(r.a, 0.0, 1.0));
+}
+
+// Same sky-view LUT addressing as miss.rmiss (no sun disk: NEE brings it).
+vec3 cloudSkyAmbient(vec3 dir) {
+    if (worldData.w._pad5 == 0) return vec3(0.0);
+    float u = atan(dir.z, dir.x) / (2.0 * CLOUD_PI);
+    if (u < 0.0) u += 1.0;
+    float v = (1.0 - clamp(dir.y, -1.0, 1.0)) * 0.5;
+    return textureLod(atmosphereLUTs[1], vec2(u, v), 0.0).rgb;
+}
+
+shared vec4 sCur[8][8];
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    uvec2 sz = worldData.info.xy;
+    bool inside = px.x < int(sz.x) && px.y < int(sz.y);
+    uint frame = worldData.info.z;
+
+    // R2 low-discrepancy sub-pixel jitter; the march offset comes from seed.
+    vec2 jit = fract(vec2(0.7548776662, 0.5698402910) * float(frame % 4096u) + 0.5);
+    vec2 uv = (vec2(px) + jit) / vec2(sz);
+    vec2 ndc = uv * 2.0 - 1.0;
+    float tanH = worldData.camPos.w;
+    vec3 d = normalize(worldData.camFwd.xyz +
+                       worldData.camRight.xyz * (ndc.x * worldData.camRight.w * tanH) -
+                       worldData.camUp.xyz * (ndc.y * tanH));
+
+    vec3 inscatter = vec3(0.0);
+    float T = 1.0, depth = -1.0;
+    if (inside && cloudRtEnabled()) {
+        uint seed = (uint(px.x) * 1973u) ^ (uint(px.y) * 9277u) ^ (frame * 26699u) ^ 0x68bc21ebu;
+        cloudMarch(worldData.camPos.xyz, d, int(worldData.info.w), seed, inscatter, T, depth);
+    }
+    vec4 cur = vec4(inscatter, T);
+    vec4 outv = cur;
+
+    // Neighbourhood statistics for variance clipping (3x3 inside the 8x8
+    // group; edge threads use the neighbours they have). A marched sample is
+    // too expensive to recompute for an apron.
+    uvec2 lid = gl_LocalInvocationID.xy;
+    sCur[lid.y][lid.x] = cur;
+    barrier();
+    vec4 m1 = vec4(0.0), m2 = vec4(0.0);
+    float cnt = 0.0;
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = ivec2(lid) + ivec2(dx, dy);
+            if (q.x < 0 || q.y < 0 || q.x > 7 || q.y > 7) continue;
+            vec4 c = sCur[q.y][q.x];
+            m1 += c; m2 += c * c; cnt += 1.0;
+        }
+    m1 /= cnt;
+    vec4 sigma = sqrt(max(m2 / cnt - m1 * m1, vec4(0.0)));
+    vec4 lo = m1 - 1.25 * sigma, hi = m1 + 1.25 * sigma;
+
+    if (worldData.camFwd.w > 0.5) {
+        // Clouds at their weighted depth; clear sky reprojects by direction.
+        // The cloud at this sample was, last frame, one wind step upwind.
+        vec3 drift = vec3(worldData.camUp.w, 0.0, worldData.prevUp.w);
+        vec3 v = depth > 0.0 ? (worldData.camPos.xyz + d * depth - drift - worldData.prevPos.xyz) : d;
+        float z = dot(v, worldData.prevFwd.xyz);
+        if (z > 1e-4) {
+            float tp = worldData.prevPos.w;
+            vec2 pn = vec2(dot(v, worldData.prevRight.xyz) / (z * tp * worldData.prevRight.w),
+                           -dot(v, worldData.prevUp.xyz) / (z * tp));
+            vec2 puv = pn * 0.5 + 0.5;
+            if (all(greaterThanEqual(puv, vec2(0.0))) && all(lessThanEqual(puv, vec2(1.0)))) {
+                vec4 hist = sampleHistoryCatmullRom(puv);
+                // In motion the history is clipped to what this neighbourhood
+                // can be (no ghosting) instead of trusting the noisy new
+                // sample more (which flickered). Static: no clip, pure
+                // accumulation, so the converged image stays noise-free.
+                float motion = length((puv - uv) * vec2(sz));
+                float clipW = clamp(motion / 0.5, 0.0, 1.0);
+                hist = mix(hist, clamp(hist, lo, hi), clipW);
+                float a = mix(0.06, 0.15, clamp(motion / 4.0, 0.0, 1.0));
+                // Evolving sky (time advancing): the shape itself changes, so
+                // the history may only lag a few frames behind.
+                if (dot(drift, drift) > 1e-6) a = max(a, 0.2);
+                outv = mix(hist, cur, a);
+            }
+        }
+    }
+    if (!inside) return;
+    imageStore(curHistory, px, outv);
+    imageStore(cloudOut, px, outv);
+}

@@ -114,9 +114,9 @@ def main():
         removed = int(info["reseed_removed_particles"])
         total_added += added
         total_removed += removed
-        if added > removed:
+        if added != removed:
             raise SystemExit(
-                "FAIL: step {} reseed created mass: +{} / -{}"
+                "FAIL: step {} reseed changed mass: +{} / -{}"
                 .format(step, added, removed))
         minimum = min(minimum, count)
         maximum = max(maximum, count)
@@ -126,10 +126,10 @@ def main():
 
     print("range: {}..{} (initial {})".format(minimum, maximum, reset_count))
     print("reseed totals: +{} / -{}".format(total_added, total_removed))
-    if maximum > reset_count:
+    if minimum != reset_count or maximum != reset_count:
         raise SystemExit(
-            "FAIL: particle count grew without an emitter: {} -> {}"
-            .format(reset_count, maximum))
+            "FAIL: closed tank count changed: initial {}, range {}..{}"
+            .format(reset_count, minimum, maximum))
     print("PASS: seed/reset stayed count-conservative for {} steps".format(STEPS))
 
 

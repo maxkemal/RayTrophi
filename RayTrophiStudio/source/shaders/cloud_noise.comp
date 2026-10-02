@@ -1,0 +1,189 @@
+#version 460
+// Cloud noise + weather map generator (docs/dev/ATMOSPHERE_CLOUDS.md §2.3-2.4).
+// Runs on EACH Vulkan device (two VkDevices cannot share a texture); the same
+// shader and the same inputs give the same bytes on both, which is where the
+// cloud parity starts.
+//
+// mode 0: base shape   128^3 RGBA8  R = Perlin-Worley, GBA = Worley fBm (4, 8, 16)
+// mode 1: detail        32^3 RGBA8  RGB = Worley fBm (2, 4, 8)
+// mode 2: curl         128^2 RGBA8  RG = curl of a tileable Perlin potential
+// mode 3: weather     2048^2 RGBA8  R coverage, G type, B precipitation potential, A development height
+// mode 4: majorant     256^2 RGBA8  R = max weather R over the 3x3-tile neighbourhood
+//                                   (RT delta-tracking bound, cloud_rt.glsl)
+// Every texture TILES (whole number of cells per period), sampled with REPEAT.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba8) uniform writeonly image3D baseImg;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image3D detailImg;
+layout(set = 0, binding = 2, rgba8) uniform writeonly image2D curlImg;
+layout(set = 0, binding = 3, rgba8) uniform image2D weatherImg;   // read by mode 4
+layout(set = 0, binding = 4, rgba8) uniform writeonly image2D majorantImg;
+
+layout(push_constant) uniform PC {
+    uint mode;
+    uint size;
+    uint seed;
+    uint cells;   // weather: clusters per tile
+} pc;
+
+uvec3 pcg3d(uvec3 v) {
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return v;
+}
+vec3 hash33(ivec3 c, uint salt) {
+    uvec3 h = pcg3d(uvec3(c + ivec3(1024)) ^ uvec3(salt * 0x9E3779B9u, salt * 0x85EBCA6Bu, salt));
+    return vec3(h) * (1.0 / 4294967295.0);
+}
+ivec3 wrap3(ivec3 c, int period) { return ((c % period) + period) % period; }
+
+// Tileable gradient noise, period `P` cells, returns ~[-1, 1].
+float perlin3(vec3 x, int P, uint salt) {
+    ivec3 i = ivec3(floor(x));
+    vec3 f = fract(x);
+    vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float r = 0.0;
+    float n[8];
+    for (int k = 0; k < 8; ++k) {
+        ivec3 o = ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+        vec3 g = hash33(wrap3(i + o, P), salt) * 2.0 - 1.0;
+        n[k] = dot(normalize(g + 1e-6), f - vec3(o));
+    }
+    float x00 = mix(n[0], n[1], u.x), x10 = mix(n[2], n[3], u.x);
+    float x01 = mix(n[4], n[5], u.x), x11 = mix(n[6], n[7], u.x);
+    r = mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+    return r * 1.2;   // scale to ~[-1,1]
+}
+
+// Tileable Worley (cellular), period `P`, returns 1 - nearest distance (0..1).
+float worley3(vec3 x, int P, uint salt) {
+    ivec3 i = ivec3(floor(x));
+    vec3 f = fract(x);
+    float d = 1e9;
+    for (int z = -1; z <= 1; ++z)
+    for (int y = -1; y <= 1; ++y)
+    for (int xx = -1; xx <= 1; ++xx) {
+        ivec3 o = ivec3(xx, y, z);
+        vec3 fp = vec3(o) + hash33(wrap3(i + o, P), salt);
+        d = min(d, dot(fp - f, fp - f));
+    }
+    return 1.0 - clamp(sqrt(d), 0.0, 1.0);
+}
+
+float worleyFbm(vec3 u01, int freq, uint salt) {
+    return worley3(u01 * float(freq), freq, salt) * 0.625 +
+           worley3(u01 * float(freq * 2), freq * 2, salt + 1u) * 0.25 +
+           worley3(u01 * float(freq * 4), freq * 4, salt + 2u) * 0.125;
+}
+
+float perlinFbm(vec3 u01, int freq, int octaves, uint salt) {
+    float s = 0.0, a = 0.5, norm = 0.0;
+    int f = freq;
+    for (int o = 0; o < octaves; ++o) {
+        s += a * perlin3(u01 * float(f), f, salt + uint(o));
+        norm += a;
+        a *= 0.5;
+        f *= 2;
+    }
+    return s / norm;   // ~[-1,1]
+}
+
+// Approximate normal CDF, used to flatten fBm's bell-shaped histogram into a
+// ~uniform one, so "coverage 0.3" really covers ~30% of the sky.
+float flattenFbm(float v, float sigma) {
+    float z = (v - 0.5) / (sigma * 1.41421356);
+    // erf approximation (Abramowitz-Stegun 7.1.26)
+    float s = sign(z); z = abs(z);
+    float t = 1.0 / (1.0 + 0.3275911 * z);
+    float e = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-z * z);
+    return 0.5 * (1.0 + s * e);
+}
+
+void main() {
+    uint N = pc.size;
+    uvec3 id = gl_GlobalInvocationID;
+    if (id.x >= N || id.y >= N) return;
+
+    if (pc.mode == 0u || pc.mode == 1u) {
+        // 3D: z slices dispatched as the Z group dimension.
+        if (id.z >= N) return;
+        vec3 u = (vec3(id) + 0.5) / float(N);
+        vec4 c;
+        if (pc.mode == 0u) {
+            float pf = perlinFbm(u, 4, 4, 11u) * 0.5 + 0.5;
+            pf = abs(pf * 2.0 - 1.0);                      // billowy
+            pf = mix(1.0, pf, 0.5);
+            float w4 = worleyFbm(u, 4, 21u);
+            c.r = clamp(w4 + (pf - 0.0) * (1.0 - w4), 0.0, 1.0);   // Perlin-Worley
+            c.g = w4;
+            c.b = worleyFbm(u, 8, 31u);
+            c.a = worleyFbm(u, 16, 41u);
+            imageStore(baseImg, ivec3(id), c);
+        } else {
+            c.r = worleyFbm(u, 2, 51u);
+            c.g = worleyFbm(u, 4, 61u);
+            c.b = worleyFbm(u, 8, 71u);
+            c.a = 1.0;
+            imageStore(detailImg, ivec3(id), c);
+        }
+        return;
+    }
+
+    if (pc.mode == 4u) {
+        // Conservative per-tile bound of the coverage channel. A ray segment no
+        // longer than one tile, starting in tile T, stays inside T's 3x3
+        // neighbourhood; the extra texel covers the bilinear footprint.
+        int W = imageSize(weatherImg).x;
+        int tile = W / int(N);
+        ivec2 lo = (ivec2(id.xy) - 1) * tile - 1;
+        int span = 3 * tile + 2;
+        float m = 0.0;
+        for (int y = 0; y < span; ++y)
+            for (int x = 0; x < span; ++x) {
+                ivec2 q = (lo + ivec2(x, y) + W) % W;
+                m = max(m, imageLoad(weatherImg, q).r);
+            }
+        imageStore(majorantImg, ivec2(id.xy), vec4(m, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    vec2 u = (vec2(id.xy) + 0.5) / float(N);
+    if (pc.mode == 2u) {
+        // Curl of a tileable 2D potential: (dpsi/dy, -dpsi/dx).
+        const int P = 8;
+        float e = 1.0 / float(N);
+        float py1 = perlinFbm(vec3(u + vec2(0, e), 0.5), P, 3, 81u);
+        float py0 = perlinFbm(vec3(u - vec2(0, e), 0.5), P, 3, 81u);
+        float px1 = perlinFbm(vec3(u + vec2(e, 0), 0.5), P, 3, 81u);
+        float px0 = perlinFbm(vec3(u - vec2(e, 0), 0.5), P, 3, 81u);
+        vec2 curl = vec2(py1 - py0, -(px1 - px0)) / (2.0 * e * float(P) * 4.0);
+        curl = clamp(curl, -1.0, 1.0);
+        imageStore(curlImg, ivec2(id.xy), vec4(curl * 0.5 + 0.5, 0.0, 1.0));
+        return;
+    }
+
+    // mode 3: weather map. Seeded: `salt` carries the seed so a new seed is
+    // a new sky, the same seed the same sky on both devices.
+    int C = int(max(pc.cells, 1u));
+    uint s = pc.seed * 7919u;
+    vec3 u3 = vec3(u, 0.0);
+    // Coverage: large clusters (Perlin fBm) broken by cellular gaps.
+    float field = perlinFbm(u3, C, 4, s + 101u) * 0.5 + 0.5;
+    float cells = worley3(u3 * float(C * 2), C * 2, s + 151u);
+    float cov = flattenFbm(field * 0.75 + cells * 0.25, 0.11);
+    // Type: slower variation.
+    int Ct = max(1, C / 4);
+    float type = flattenFbm(perlinFbm(u3, Ct, 3, s + 201u) * 0.5 + 0.5, 0.12);
+    // B: precipitation potential -- the cores of the coverage clusters
+    // (docs/dev/ATMOSPHERE_WEATHER.md §2.2); scaled by the derived rate.
+    float precip = smoothstep(0.6, 0.95, cov);
+    // A: vertical development (Faz 3e). A cumulus field is mostly shallow
+    // cells with a few towers: smooth noise at ~cell scale, skewed low
+    // (pow 1.6), lifted in cluster cores so the towers stand where it rains.
+    float devN = clamp(perlinFbm(u3, C * 3, 2, s + 251u) * 0.6 + 0.5, 0.0, 1.0);
+    float dev = clamp(pow(devN, 1.6) + 0.35 * precip, 0.0, 1.0);
+    imageStore(weatherImg, ivec2(id.xy), vec4(cov, type, precip, dev));
+}

@@ -294,17 +294,27 @@ struct InstanceGroup {
         bool allow_gpu_deform = true;
         float gpu_deform_max_distance = 35.0f; // CUDA only if the whole group stays near camera
         int gpu_deform_max_instances = 32;     // CUDA budget for hero foliage groups
+        // ★★ ATMOSPHERE (Faz 2). On: direction comes from the world climate's
+        //   wind, and speed/strength become RESPONSES to its m/s -- speed and
+        //   strength above are then the group's response at the reference
+        //   wind (kFoliageReferenceWindMps): speed x v/v_ref (sway frequency
+        //   follows the wind), strength x (v/v_ref)^2 (bending follows the
+        //   drag, which is quadratic). Calm world = still foliage. Off
+        //   (default): the values above as authored. Default off because an
+        //   ON group in a calm world stops swaying, and that must be a choice.
+        bool inherit_atmosphere = false;
     };
+    // Wind at which an inheriting group moves exactly as its authored
+    // speed/strength say. A breeze (Beaufort 3), where the authored defaults
+    // (strength 0.1, speed 1) read as ordinary foliage motion.
+    static constexpr float kFoliageReferenceWindMps = 5.0f;
     WindSettings wind_settings;
 
     // Backup of original transforms (Rest Pose) to prevent drift
     std::vector<InstanceTransform> initial_instances;
 
-    // Wind Animation Update
-    void updateWind(float time); // Updates active_hittables transforms
-
     // Runtime Link to Scene Objects (for fast updates)
-    // Used by updateWind to push changes to HittableInstances in scene.world
+    // Used by FoliageWindSystem to push changes to HittableInstances in scene.world
     std::vector<std::weak_ptr<Hittable>> active_hittables;
 
     

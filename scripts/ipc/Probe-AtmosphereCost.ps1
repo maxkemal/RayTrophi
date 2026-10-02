@@ -40,15 +40,20 @@
       - drains/frame: 2026-09-02'den beri sayac YALNIZCA gercekten bloklaninca
         artiyor. Olculen saglikli taban ~0.06/kare.
 
+    ★ Nem ve sicaklik 2026-09-30'dan beri IKLIM alanidir (world.set_climate,
+    sicaklik KELVIN). Ikisi de LUT'u kirletir; bu probe onlari dogru
+    metoda yonlendirir. world.set_atmosphere eski anahtarlari REDDEDER.
+
 .EXAMPLE
     .\Probe-AtmosphereCost.ps1
-    .\Probe-AtmosphereCost.ps1 -Iterations 60 -Field temperature
+    .\Probe-AtmosphereCost.ps1 -Iterations 60 -Field surface_temperature_k
 #>
 [CmdletBinding()]
 param(
     [int]$Iterations = 30,
-    [ValidateSet('air_density', 'dust_density', 'ozone_density', 'humidity',
-                 'temperature', 'mie_density', 'rayleigh_density',
+    [ValidateSet('air_density', 'dust_density', 'ozone_density',
+                 'surface_relative_humidity', 'surface_temperature_k',
+                 'mie_density', 'rayleigh_density',
                  'atmosphere_height', 'mie_anisotropy')]
     [string]$Field = 'air_density',
     # Olcum MaterialPreview'da yapilir (sikayetin geldigi mod). Bittiginde
@@ -69,14 +74,25 @@ $FieldStep = @{
     air_density       = 0.05
     dust_density      = 0.05
     ozone_density     = 0.05
-    humidity          = 0.02
-    temperature       = 1.5
+    surface_relative_humidity = 0.02
+    surface_temperature_k     = 1.5
     mie_density       = 25.0
     rayleigh_density  = 100.0
     atmosphere_height = 500.0
     mie_anisotropy    = 0.01
 }
 $step = $FieldStep[$Field]
+
+# Climate fields live on world.*_climate, the sky medium on world.*_atmosphere.
+$isClimate = $Field -like 'surface_*'
+function Get-FieldValue {
+    if ($isClimate) { return [double](Invoke-RtIpc world.get_climate).$Field }
+    return [double](Invoke-RtIpc world.get_atmosphere).$Field
+}
+function Set-FieldValue([double]$Value) {
+    if ($isClimate) { $null = Invoke-RtIpc world.set_climate @{ $Field = $Value } }
+    else            { $null = Invoke-RtIpc world.set_atmosphere @{ $Field = $Value } }
+}
 
 function Get-Telemetry {
     try { return Invoke-RtIpc viewport.frame_telemetry } catch { return $null }
@@ -122,8 +138,7 @@ if (-not $KeepShading -and $shading0 -ne 'material') {
     $null = Invoke-RtIpc viewport.set_shading @{ mode = 'material' }
     Start-Sleep -Milliseconds 300
 }
-$atmo0 = Invoke-RtIpc world.get_atmosphere
-$base  = [double]$atmo0.$Field
+$base  = Get-FieldValue
 
 Write-Host ("mode=nishita  shading={0}  field={1}  base={2}  step={3}  n={4}" -f
             (Invoke-RtIpc viewport.status).shading, $Field, $base, $step, $Iterations) -ForegroundColor Cyan
@@ -131,12 +146,12 @@ Write-Host ("mode=nishita  shading={0}  field={1}  base={2}  step={3}  n={4}" -f
 try {
     # ★ Deger GERCEKTEN hareket ediyor mu? Etmiyorsa olcum LUT'a hic dokunmaz
     #   ve "hizli" cikar -- yani sessizce yesil yalan soyler.
-    $null = Invoke-RtIpc world.set_atmosphere @{ $Field = ($base + $step) }
-    $moved = [double](Invoke-RtIpc world.get_atmosphere).$Field
+    Set-FieldValue ($base + $step)
+    $moved = Get-FieldValue
     if ([math]::Abs($moved - $base) -lt ($step * 0.5)) {
         throw ("'{0}' {1} -> {2}: deger hareket etmedi. Bu haliyle olcum LUT'a dokunmaz ve YANLIS yesil verir." -f $Field, $base, $moved)
     }
-    $null = Invoke-RtIpc world.set_atmosphere @{ $Field = $base }
+    Set-FieldValue $base
 
     # ★★★ ISINMA: sonuc ATILIR. Ilk tur ilk-kare kaynak kurulumunu yutuyor.
     $null = Invoke-Sweep 'warmup' {
@@ -149,17 +164,17 @@ try {
         param($i) $null = Invoke-RtIpc world.set_sun_size @{ sun_size = ($world0.sun_size + ($i % 10) * 0.005) }
     } $Iterations
     $results += Invoke-Sweep "B1 subject $Field (LUT kirli)" {
-        param($i) $null = Invoke-RtIpc world.set_atmosphere @{ $Field = ($base + ($i % 10) * $step) }
+        param($i) Set-FieldValue ($base + ($i % 10) * $step)
     } $Iterations
     $results += Invoke-Sweep "A2 control sun_size (LUT temiz)" {
         param($i) $null = Invoke-RtIpc world.set_sun_size @{ sun_size = ($world0.sun_size + ($i % 10) * 0.005) }
     } $Iterations
     $results += Invoke-Sweep "B2 subject $Field (LUT kirli)" {
-        param($i) $null = Invoke-RtIpc world.set_atmosphere @{ $Field = ($base + ($i % 10) * $step) }
+        param($i) Set-FieldValue ($base + ($i % 10) * $step)
     } $Iterations
 }
 finally {
-    $null = Invoke-RtIpc world.set_atmosphere @{ $Field = $base }
+    Set-FieldValue $base
     $null = Invoke-RtIpc world.set_sun_size @{ sun_size = $world0.sun_size }
     if (-not $KeepShading -and $shading0 -ne 'material') {
         $null = Invoke-RtIpc viewport.set_shading @{ mode = $shading0 }

@@ -763,7 +763,8 @@ json InstanceManager::serialize(std::ostream* binaryOut) {
             {"use_source_profiles", group.wind_settings.use_source_profiles},
             {"allow_gpu_deform", group.wind_settings.allow_gpu_deform},
             {"gpu_deform_max_distance", group.wind_settings.gpu_deform_max_distance},
-            {"gpu_deform_max_instances", group.wind_settings.gpu_deform_max_instances}
+            {"gpu_deform_max_instances", group.wind_settings.gpu_deform_max_instances},
+            {"inherit_atmosphere", group.wind_settings.inherit_atmosphere}
         };
         
         // Source Settings
@@ -992,6 +993,7 @@ void InstanceManager::deserialize(const json& j, SceneData& scene) {
             group.wind_settings.allow_gpu_deform = w.value("allow_gpu_deform", true);
             group.wind_settings.gpu_deform_max_distance = w.value("gpu_deform_max_distance", 35.0f);
             group.wind_settings.gpu_deform_max_instances = w.value("gpu_deform_max_instances", 32);
+            group.wind_settings.inherit_atmosphere = w.value("inherit_atmosphere", false);
         }
         
         // Sources

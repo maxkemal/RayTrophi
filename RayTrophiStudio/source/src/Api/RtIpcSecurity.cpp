@@ -420,9 +420,16 @@ uint32_t requiredCapabilities(const std::string& method) {
         method == "anim.source_clips" || method == "anim.source_channels" ||
         // Substance library enumeration: read-only, and its name matches none
         // of the ".get"/".list" substring heuristics below.
-        method == "msf.substances" || method == "msf.fields" ||
+        method == "msf.substances" || method == "msf.substance" ||
+        method == "matter.exchanges" ||
+        method == "msf.fields" ||
         method == "templates.refresh" || method == "templates.validate" ||
-        method == "templates.prepare")
+        method == "templates.prepare" ||
+        // Atmosphere measurements: pure reads whose names match none of the
+        // substring heuristics below, so the world. namespace would grade them
+        // SceneWrite.
+        method == "world.atmosphere_stats" || method == "world.sample_climate" ||
+        method == "world.cloud_stats" || method == "world.sample_clouds")
         return Read;
     const bool read_method = method == "version" || method == "project.path" ||
         method == "undo_description" || method == "redo_description" ||
@@ -441,7 +448,7 @@ uint32_t requiredCapabilities(const std::string& method) {
     static const char* namespaces[] = {
         "scene.", "select.", "material.", "lights.", "timeline.", "camera.", "spline.", "geometry_cache.", "mesh.profile.",
         "world.", "post.", "anim.", "rig.", "nodes.", "modifiers.",
-        "scatter.", "physics.", "forcefield.", "particle.", "fluid.", "gas.", "msf.", "terrain.",
+        "scatter.", "physics.", "forcefield.", "particle.", "fluid.", "gas.", "msf.", "terrain.", "water.",
         // Shared simulation colliders (rt.collider parity). `collider.list` and
         // `collider.get` fall through to Read above; create/update/remove/
         // rebuild_sdf land here as SceneWrite.

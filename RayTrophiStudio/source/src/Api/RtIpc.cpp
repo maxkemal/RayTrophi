@@ -1,4 +1,5 @@
 #include "RtPostBindings.h"
+#include "RtFluidLabelBindings.h"
 #include "RtViewportCutoutBindings.h"
 #include "RtRasterDiagnosticsBindings.h"
 #include "RtScreenGiBindings.h"
@@ -27,6 +28,7 @@
  */
 #include "Api/RtIpc.h"
 #include "Api/RtApi.h"
+#include "Fluid/FluidFoam.h"
 #include "Api/RtPython.h"   // addons.* dispatch (rtpython::listAddons/enableAddon/...)
 #include "RtIpcSecurity.h"
 #include "RtIpcSession.h"
@@ -43,6 +45,7 @@
 #include "RtIpcMeshEdit.h"
 #include "scene_ui.h"
 
+#include <cstdio>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -292,6 +295,23 @@ json substanceCountsToJson(
     return out;
 }
 
+json fluidViewsToJson(const std::vector<rtapi::FluidDomainInfo::ViewInfo>& views) {
+    json out = json::array();
+    for (const auto& v : views) {
+        out.push_back(json{{"view", v.view}, {"substances", v.substances},
+                           {"untagged", v.untagged}, {"live", v.live},
+                           {"vdb_id", v.vdb_id}, {"labels", v.labels},
+                           {"particles", v.particles}, {"whitewater", v.whitewater}});
+    }
+    return out;
+}
+
+json labelRoutesToJson(const std::vector<std::pair<std::string, std::string>>& routes) {
+    json out = json::object();
+    for (const auto& kv : routes) out[kv.first] = kv.second;
+    return out;
+}
+
 json substanceBindingsToJson(
         const std::vector<rtapi::FluidDomainInfo::SubstanceMaterialBinding>& b) {
     json out = json::array();
@@ -312,7 +332,8 @@ json substanceBindingsToJson(
                            {"miscibility", e.miscibility},
                            // State of matter, separate from `representation`:
                            // a solid still has to be drawn somehow.
-                           {"phase", e.phase}});
+                           {"phase", e.phase},
+                           {"constitutive_model", e.constitutive_model}});
     }
     return out;
 }
@@ -326,7 +347,7 @@ Vec3 vec3FromJson(const json& j, const Vec3& fallback) {
 // ported from rt.flow_source to remote IPC keeps working verbatim.
 json flowSourceToJson(const rtapi::SimulationFlowSourceInfo& s) {
     return json{
-        {"name", s.name}, {"domain", s.domain},
+        {"name", s.name}, {"domain", s.domain}, {"phase", s.phase},
         {"source_mode", s.source_mode}, {"source_object", s.source_object},
         {"enabled", s.enabled},
         {"parent_object", s.parent_object}, {"velocity_space", s.velocity_space},
@@ -343,6 +364,7 @@ json flowSourceToJson(const rtapi::SimulationFlowSourceInfo& s) {
         // anything meaningful, and comparing hashes across a rename would give a
         // difference nobody could interpret.
         {"fluid_substance", s.fluid_substance},
+        {"initial_constitutive_model", s.initial_constitutive_model},
         {"fluid_temperature_override", s.fluid_temperature_override},
         {"fluid_temperature_kelvin", s.fluid_temperature_kelvin},
         {"use_time_limit", s.use_time_limit},
@@ -359,6 +381,7 @@ void applyFlowSourceJson(rtapi::SimulationFlowSourceInfo& s, const json& p) {
     if (p.contains(key)) s.member = p.at(key).get<decltype(s.member)>()
     RT_FS_FIELD("name", name);
     RT_FS_FIELD("domain", domain);
+    RT_FS_FIELD("phase", phase);
     RT_FS_FIELD("source_mode", source_mode);
     RT_FS_FIELD("source_object", source_object);
     RT_FS_FIELD("enabled", enabled);
@@ -375,6 +398,7 @@ void applyFlowSourceJson(rtapi::SimulationFlowSourceInfo& s, const json& p) {
     RT_FS_FIELD("fluid_velocity_spread", fluid_velocity_spread);
     RT_FS_FIELD("fluid_emit_along_normal", fluid_emit_along_normal);
     RT_FS_FIELD("fluid_substance", fluid_substance);
+    RT_FS_FIELD("initial_constitutive_model", initial_constitutive_model);
     RT_FS_FIELD("fluid_temperature_override", fluid_temperature_override);
     RT_FS_FIELD("fluid_temperature_kelvin", fluid_temperature_kelvin);
     RT_FS_FIELD("use_time_limit", use_time_limit);
@@ -2005,6 +2029,15 @@ json dispatchMethod(const std::string& method, const json& params) {
         std::string m = requireString(params, "mode");
         return enqueueResult([m](UIContext&) { return rtapi::setWorldMode(m); });
     }
+    if (method == "world.ensure_sun_light") {
+        return enqueueQuery([](UIContext&) {
+            bool created = false;
+            std::string name;
+            rtapi::Result r = rtapi::ensureWorldSunLight(created, name);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"created", created}, {"name", name}};
+        });
+    }
     if (method == "world.set_background_color") {
         Vec3 c = requireVec3(params, "background_color");
         return enqueueResult([c](UIContext&) { return rtapi::setWorldBackgroundColor(c); });
@@ -2038,8 +2071,6 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"dust_density", a.dust_density},
                         {"ozone_density", a.ozone_density},
                         {"ozone_absorption_scale", a.ozone_absorption_scale},
-                        {"humidity", a.humidity},
-                        {"temperature", a.temperature},
                         {"altitude", a.altitude},
                         {"mie_anisotropy", a.mie_anisotropy},
                         {"planet_radius", a.planet_radius},
@@ -2067,8 +2098,18 @@ json dispatchMethod(const std::string& method, const json& params) {
         const AtmoOpt dust     = optNumber("dust_density");
         const AtmoOpt ozone    = optNumber("ozone_density");
         const AtmoOpt ozoneAbs = optNumber("ozone_absorption_scale");
-        const AtmoOpt humidity = optNumber("humidity");
-        const AtmoOpt temper   = optNumber("temperature");
+        // humidity/temperature moved to world.set_climate (Kelvin). Reject the
+        // old keys loudly instead of dropping them: a silently ignored field
+        // is a script that "worked" and changed nothing.
+        // (Iterated, not params.contains("literal"): the descriptor generator
+        //  reads literal contains() calls as ACCEPTED params and would
+        //  advertise the retired keys to agents.)
+        static const char* const kRetiredKeys[] = { "humidity", "temperature" };
+        for (const char* retired : kRetiredKeys) {
+            if (params.contains(retired))
+                throw std::runtime_error("humidity/temperature moved to world.set_climate "
+                                         "(surface_relative_humidity, surface_temperature_k in KELVIN)");
+        }
         const AtmoOpt altitude = optNumber("altitude");
         const AtmoOpt mieG     = optNumber("mie_anisotropy");
         const AtmoOpt planetR  = optNumber("planet_radius");
@@ -2085,8 +2126,6 @@ json dispatchMethod(const std::string& method, const json& params) {
             if (dust.has)     u.dust_density = &dust.value;
             if (ozone.has)    u.ozone_density = &ozone.value;
             if (ozoneAbs.has) u.ozone_absorption_scale = &ozoneAbs.value;
-            if (humidity.has) u.humidity = &humidity.value;
-            if (temper.has)   u.temperature = &temper.value;
             if (altitude.has) u.altitude = &altitude.value;
             if (mieG.has)     u.mie_anisotropy = &mieG.value;
             if (planetR.has)  u.planet_radius = &planetR.value;
@@ -2098,12 +2137,208 @@ json dispatchMethod(const std::string& method, const json& params) {
             return rtapi::updateWorldAtmosphere(u);
         });
     }
+    if (method == "world.get_climate") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::WorldClimateInfo c;
+            rtapi::Result r = rtapi::getWorldClimate(c);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"surface_temperature_k", c.surface_temperature_k},
+                        {"lapse_rate_k_per_m", c.lapse_rate_k_per_m},
+                        {"surface_relative_humidity", c.surface_relative_humidity},
+                        {"surface_pressure_pa", c.surface_pressure_pa},
+                        {"wind_direction", vec3ToJson(c.wind_direction)},
+                        {"wind_speed_mps", c.wind_speed_mps},
+                        {"instability", c.instability},
+                        {"applied_mie_humidity_scale", c.applied_mie_humidity_scale},
+                        {"applied_temperature_c", c.applied_temperature_c}};
+        });
+    }
+    if (method == "world.set_climate") {
+        // Parsed OUTSIDE the lambda: a malformed vec3 throws here and becomes
+        // an error reply instead of taking down the main thread.
+        struct ClimOpt { bool has = false; float value = 0.0f; };
+        auto optNumber = [&](const char* key) {
+            ClimOpt o;
+            if (params.contains(key)) {
+                if (!params.at(key).is_number())
+                    throw std::runtime_error(std::string(key) + " must be a number");
+                o.has = true;
+                o.value = params.at(key).get<float>();
+            }
+            return o;
+        };
+        const ClimOpt tempK  = optNumber("surface_temperature_k");
+        const ClimOpt lapse  = optNumber("lapse_rate_k_per_m");
+        const ClimOpt rh     = optNumber("surface_relative_humidity");
+        const ClimOpt press  = optNumber("surface_pressure_pa");
+        const ClimOpt speed  = optNumber("wind_speed_mps");
+        const ClimOpt instab = optNumber("instability");
+        const bool hasDir = params.contains("wind_direction");
+        const Vec3 dir = hasDir ? requireVec3(params, "wind_direction") : Vec3();
+        return enqueueResult([=](UIContext&) {
+            rtapi::WorldClimateUpdate u;
+            if (tempK.has) u.surface_temperature_k = &tempK.value;
+            if (lapse.has) u.lapse_rate_k_per_m = &lapse.value;
+            if (rh.has)    u.surface_relative_humidity = &rh.value;
+            if (press.has) u.surface_pressure_pa = &press.value;
+            if (speed.has) u.wind_speed_mps = &speed.value;
+            if (instab.has) u.instability = &instab.value;
+            if (hasDir)    u.wind_direction = &dir;
+            return rtapi::updateWorldClimate(u);
+        });
+    }
+    if (method == "world.sample_climate") {
+        const Vec3 pos = requireVec3(params, "position");
+        return enqueueQuery([pos](UIContext&) {
+            rtapi::ClimateSampleInfo s;
+            rtapi::Result r = rtapi::sampleWorldClimate(pos, s);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"altitude_m", s.altitude_m},
+                        {"temperature_k", s.temperature_k},
+                        {"relative_humidity", s.relative_humidity},
+                        {"pressure_pa", s.pressure_pa},
+                        {"air_density_kg_m3", s.air_density_kg_m3},
+                        {"wind_mps", vec3ToJson(s.wind_mps)}};
+        });
+    }
+    if (method == "world.get_aerial") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::WorldAerialInfo a;
+            rtapi::Result r = rtapi::getWorldAerial(a);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"aerial_perspective", a.aerial_perspective},
+                        {"fog_enabled", a.fog_enabled},
+                        {"fog_density", a.fog_density},
+                        {"fog_height", a.fog_height},
+                        {"fog_falloff", a.fog_falloff},
+                        {"fog_distance", a.fog_distance},
+                        {"fog_albedo", vec3ToJson(a.fog_albedo)},
+                        {"fog_anisotropy", a.fog_anisotropy}};
+        });
+    }
+    if (method == "world.set_aerial") {
+        // The artistic aerial ramp and the flat fog colour are gone, not
+        // renamed-in-place: reject them loudly. (Iterated, not literal
+        // contains(): the descriptor generator would advertise them.)
+        static const char* const kRetiredKeys[] = {
+            "aerial_density", "aerial_min_distance", "aerial_max_distance",
+            "fog_color", "fog_sun_scatter" };
+        for (const char* retired : kRetiredKeys) {
+            if (params.contains(retired))
+                throw std::runtime_error(std::string(retired) +
+                    " no longer exists: air haze comes from the atmosphere itself "
+                    "(world.set_atmosphere / world.set_climate); the fog is a lit "
+                    "medium (fog_albedo, fog_anisotropy)");
+        }
+        // Parsed OUTSIDE the lambda: a malformed value throws here and becomes
+        // an error reply instead of taking down the main thread.
+        const bool hasAerial   = params.contains("aerial_perspective");
+        const bool aerial      = optionalBool(params, "aerial_perspective", true);
+        const bool hasFog      = params.contains("fog_enabled");
+        const bool fogOn       = optionalBool(params, "fog_enabled", false);
+        const bool hasDensity  = params.contains("fog_density");
+        const float density    = optionalFloat(params, "fog_density", 0.0f);
+        const bool hasHeight   = params.contains("fog_height");
+        const float height     = optionalFloat(params, "fog_height", 0.0f);
+        const bool hasFalloff  = params.contains("fog_falloff");
+        const float falloff    = optionalFloat(params, "fog_falloff", 0.0f);
+        const bool hasDistance = params.contains("fog_distance");
+        const float distance   = optionalFloat(params, "fog_distance", 0.0f);
+        const bool hasAniso    = params.contains("fog_anisotropy");
+        const float aniso      = optionalFloat(params, "fog_anisotropy", 0.0f);
+        const bool hasAlbedo   = params.contains("fog_albedo");
+        const Vec3 albedo      = hasAlbedo ? requireVec3(params, "fog_albedo") : Vec3();
+        return enqueueResult([=](UIContext&) {
+            rtapi::WorldAerialUpdate u;
+            if (hasAerial)   u.aerial_perspective = &aerial;
+            if (hasFog)      u.fog_enabled = &fogOn;
+            if (hasDensity)  u.fog_density = &density;
+            if (hasHeight)   u.fog_height = &height;
+            if (hasFalloff)  u.fog_falloff = &falloff;
+            if (hasDistance) u.fog_distance = &distance;
+            if (hasAniso)    u.fog_anisotropy = &aniso;
+            if (hasAlbedo)   u.fog_albedo = &albedo;
+            return rtapi::updateWorldAerial(u);
+        });
+    }
+    // ── Clouds (Faz 3; docs/dev/ATMOSPHERE_CLOUDS.md) ────────────────────
+    // JSON pass-through: the schema is atmosphere::cloudsToJson, one definition.
+    if (method == "world.get_weather") {
+        return enqueueQuery([](UIContext&) {
+            std::string out;
+            rtapi::Result r = rtapi::getWeatherJson(out);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json::parse(out);
+        });
+    }
+    if (method == "world.get_clouds") {
+        return enqueueQuery([](UIContext&) {
+            std::string out;
+            rtapi::Result r = rtapi::getCloudsJson(out);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json::parse(out);
+        });
+    }
+    if (method == "world.set_clouds") {
+        // Partial patch: layers (element-wise), cirrus, weather, quality.
+        if (params.contains("layers") && !params.at("layers").is_array())
+            throw std::runtime_error("layers must be an array of layer objects");
+        const std::string patch = params.dump();
+        return enqueueResult([patch](UIContext&) { return rtapi::setCloudsJson(patch); });
+    }
+    if (method == "world.apply_cloud_preset") {
+        std::string name = requireString(params, "preset");
+        return enqueueResult([name](UIContext&) { return rtapi::applyCloudPreset(name); });
+    }
+    if (method == "world.cloud_stats") {
+        return enqueueQuery([](UIContext&) {
+            std::string out;
+            rtapi::Result r = rtapi::cloudStatsJson(out);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json::parse(out);
+        });
+    }
+    if (method == "world.sample_clouds") {
+        // mode, points | segments, steps, backend -- validated in rtapi.
+        if (params.contains("mode")) (void)requireString(params, "mode");
+        if (params.contains("steps")) (void)requireInt(params, "steps");
+        if (params.contains("backend")) (void)requireString(params, "backend");
+        if (!params.contains("points") && !params.contains("segments"))
+            throw std::runtime_error("points or segments required");
+        const std::string request = params.dump();
+        return enqueueQuery([request](UIContext&) {
+            std::string out;
+            rtapi::Result r = rtapi::sampleCloudsJson(request, out);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json::parse(out);
+        });
+    }
+    if (method == "world.atmosphere_stats") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::AtmosphereStatsInfo s = rtapi::atmosphereStats();
+            json rows = json::array();
+            for (const auto& r : s.backends) {
+                rows.push_back({{"role", r.role},
+                                {"is_vulkan", r.is_vulkan},
+                                {"lut_ready", r.lut_ready},
+                                {"froxel_available", r.froxel_available},
+                                {"froxel_active", r.froxel_active},
+                                {"froxel_dispatches", r.froxel_dispatches}});
+            }
+            return json{{"backends", rows}};
+        });
+    }
     if (method == "world.get_thermal") {
         return enqueueQuery([](UIContext&) {
             rtapi::WorldThermalInfo t;
             rtapi::Result r = rtapi::getWorldThermal(t);
             if (!r.ok) return json{{"__error", r.error}};
             return json{{"ambient_kelvin", t.ambient_kelvin},
+                        {"inherit_atmosphere", t.inherit_atmosphere},
+                        {"effective_ambient_kelvin", t.effective_ambient_kelvin},
+                        {"ambient_source", t.ambient_source},
+                        {"reference_kelvin", t.reference_kelvin},
+                        {"drying_scale", t.drying_scale},
                         {"kelvin_per_unit", t.kelvin_per_unit},
                         {"convection_coefficient", t.convection_coefficient},
                         {"oxygen_availability", t.oxygen_availability}};
@@ -2119,7 +2354,12 @@ json dispatchMethod(const std::string& method, const json& params) {
             if (params.contains("kelvin_per_unit")) { kelvin_val = params.at("kelvin_per_unit").get<float>(); p_kelvin = &kelvin_val; }
             if (params.contains("convection_coefficient")) { convection_val = params.at("convection_coefficient").get<float>(); p_convection = &convection_val; }
             if (params.contains("oxygen_availability")) { oxygen_val = params.at("oxygen_availability").get<float>(); p_oxygen = &oxygen_val; }
-            return rtapi::setWorldThermal(p_ambient, p_kelvin, p_convection, p_oxygen);
+            bool inherit_val = false;      const bool* p_inherit = nullptr;
+            float reference_val = 0.0f;    const float* p_reference = nullptr;
+            if (params.contains("inherit_atmosphere")) { inherit_val = params.at("inherit_atmosphere").get<bool>(); p_inherit = &inherit_val; }
+            if (params.contains("reference_kelvin")) { reference_val = params.at("reference_kelvin").get<float>(); p_reference = &reference_val; }
+            return rtapi::setWorldThermal(p_ambient, p_kelvin, p_convection, p_oxygen,
+                                          p_inherit, p_reference);
         });
     }
 
@@ -2349,6 +2589,63 @@ json dispatchMethod(const std::string& method, const json& params) {
             return rtapi::setScatterGroupSettings(group, patch);
         });
     }
+    if (method == "water.get_wind") {
+        std::string surface = requireString(params, "surface");
+        return enqueueQuery([surface](UIContext&) {
+            rtapi::WaterWindInfo w;
+            rtapi::Result r = rtapi::getWaterWind(surface, w);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"surface", w.surface}, {"type", w.type},
+                        {"inherit_atmosphere", w.inherit_atmosphere},
+                        {"wind_source", w.wind_source},
+                        {"speed_mps", w.speed_mps},
+                        {"direction_degrees", w.direction_degrees},
+                        {"effective_speed_mps", w.effective_speed_mps},
+                        {"effective_direction_degrees", w.effective_direction_degrees}};
+        });
+    }
+    if (method == "water.set_wind") {
+        std::string surface = requireString(params, "surface");
+        rtapi::WaterWindPatch patch;
+        if (params.contains("inherit_atmosphere")) patch.inherit_atmosphere = params["inherit_atmosphere"].get<bool>();
+        if (params.contains("speed_mps"))          patch.speed_mps = params["speed_mps"].get<float>();
+        if (params.contains("direction_degrees"))  patch.direction_degrees = params["direction_degrees"].get<float>();
+        return enqueueResult([surface, patch](UIContext&) {
+            return rtapi::setWaterWind(surface, patch);
+        });
+    }
+    if (method == "scatter.get_wind") {
+        std::string group = requireString(params, "group");
+        return enqueueQuery([group](UIContext&) {
+            rtapi::ScatterWindInfo w;
+            rtapi::Result r = rtapi::getScatterWind(group, w);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"enabled", w.enabled},
+                        {"inherit_atmosphere", w.inherit_atmosphere},
+                        {"wind_source", w.wind_source},
+                        {"speed", w.speed}, {"strength", w.strength},
+                        {"turbulence", w.turbulence}, {"wave_size", w.wave_size},
+                        {"direction", vec3ToJson(w.direction)},
+                        {"reference_wind_mps", w.reference_wind_mps},
+                        {"effective_speed", w.effective_speed},
+                        {"effective_strength", w.effective_strength},
+                        {"effective_direction", vec3ToJson(w.effective_direction)}};
+        });
+    }
+    if (method == "scatter.set_wind") {
+        std::string group = requireString(params, "group");
+        rtapi::ScatterWindPatch patch;
+        if (params.contains("enabled"))            patch.enabled = params["enabled"].get<bool>();
+        if (params.contains("inherit_atmosphere")) patch.inherit_atmosphere = params["inherit_atmosphere"].get<bool>();
+        if (params.contains("speed"))              patch.speed = params["speed"].get<float>();
+        if (params.contains("strength"))           patch.strength = params["strength"].get<float>();
+        if (params.contains("turbulence"))         patch.turbulence = params["turbulence"].get<float>();
+        if (params.contains("wave_size"))          patch.wave_size = params["wave_size"].get<float>();
+        if (params.contains("direction"))          patch.direction = requireVec3(params, "direction");
+        return enqueueResult([group, patch](UIContext&) {
+            return rtapi::setScatterWind(group, patch);
+        });
+    }
     if (method == "scatter.fill") {
         std::string group = requireString(params, "group");
         return enqueueQuery([group](UIContext&) {
@@ -2460,8 +2757,21 @@ json dispatchMethod(const std::string& method, const json& params) {
             rtapi::FluidDomainInfo info;
             rtapi::Result r = rtapi::createFluidDomain(name, dmin, dmax, vs, type, info);
             if (!r.ok) return json{{"__error", r.error}};
-            return json{{"id", info.id}, {"name", info.name}, {"type", info.type}, {"voxel_size", info.voxel_size},
-                        {"particle_count", info.particle_count}, {"active_density_cells", info.active_density_cells}, {"max_density", info.max_density}, {"live_state", info.live_state}, {"render_mode", info.render_mode}};
+            return json{{"id", info.id}, {"name", info.name}, {"type", info.type},
+                        {"phases", info.phases}, {"voxel_size", info.voxel_size},
+                        {"particle_count", info.particle_count},
+                        {"fluid_model_particles", info.fluid_model_particles},
+                        {"granular_model_particles", info.granular_model_particles},
+                        {"elastic_model_particles", info.elastic_model_particles},
+                        {"unresolved_model_particles", info.unresolved_model_particles},
+                        {"active_density_cells", info.active_density_cells}, {"max_density", info.max_density},
+                        {"gas_phase_mass_kg", info.gas_phase_mass_kg}, {"gas_phase_energy_j", info.gas_phase_energy_j},
+                        {"gas_phase_active_cells", info.gas_phase_active_cells},
+                        {"gas_phase_mass_centroid", json::array({
+                            info.gas_phase_mass_centroid.x,
+                            info.gas_phase_mass_centroid.y,
+                            info.gas_phase_mass_centroid.z})},
+                        {"live_state", info.live_state}, {"render_mode", info.render_mode}};
         });
     }
     if (method == "fluid.get" || method == "gas.get") {
@@ -2471,9 +2781,22 @@ json dispatchMethod(const std::string& method, const json& params) {
             rtapi::Result r = rtapi::getFluidDomain(domain, info);
             if (!r.ok) return json{{"__error", r.error}};
             return json{{"id", info.id}, {"name", info.name}, {"type", info.type},
+                        {"phases", info.phases},
                         {"domain_min", json::array({info.domain_min.x, info.domain_min.y, info.domain_min.z})},
                         {"domain_max", json::array({info.domain_max.x, info.domain_max.y, info.domain_max.z})},
-                        {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count}, {"active_density_cells", info.active_density_cells}, {"max_density", info.max_density}, {"live_state", info.live_state},
+                        {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count},
+                        {"fluid_model_particles", info.fluid_model_particles},
+                        {"granular_model_particles", info.granular_model_particles},
+                        {"elastic_model_particles", info.elastic_model_particles},
+                        {"unresolved_model_particles", info.unresolved_model_particles},
+                        {"active_density_cells", info.active_density_cells}, {"max_density", info.max_density},
+                        {"gas_phase_mass_kg", info.gas_phase_mass_kg}, {"gas_phase_energy_j", info.gas_phase_energy_j},
+                        {"gas_phase_active_cells", info.gas_phase_active_cells},
+                        {"gas_phase_mass_centroid", json::array({
+                            info.gas_phase_mass_centroid.x,
+                            info.gas_phase_mass_centroid.y,
+                            info.gas_phase_mass_centroid.z})},
+                        {"live_state", info.live_state},
                         {"render_mode", info.render_mode}, {"backend", info.backend},
                         {"boundary", info.boundary}, {"preset", info.preset},
                         {"kinematic_viscosity", info.kinematic_viscosity},
@@ -2588,7 +2911,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"uvw_voxel", info.uvw_voxel},
                         {"uvw_refresh_period", info.uvw_refresh_period},
                         {"substances", substanceCountsToJson(info.substances)},
-                        {"substance_materials", substanceBindingsToJson(info.substance_materials)},
+                        {"substance_materials", substanceBindingsToJson(info.substance_materials)}, {"views", fluidViewsToJson(info.views)}, {"views_measured", info.views_measured}, {"label_routes", labelRoutesToJson(info.label_routes)}, {"hidden_particles", info.hidden_particles}, {"max_particles", info.max_particles},
+                        {"particle_labels", fluidLabelsToJson(info.particle_labels)},
                         {"uvw_drift", info.uvw_drift},
                     // Measured on the last simulated step, not derived from the
                     // binding: parcels-with-zero-cells is the reading that says
@@ -2619,9 +2943,22 @@ json dispatchMethod(const std::string& method, const json& params) {
             for (const auto& info : domains) {
                 arr.push_back(json{
                     {"id", info.id}, {"name", info.name}, {"type", info.type},
+                    {"phases", info.phases},
                     {"domain_min", json::array({info.domain_min.x, info.domain_min.y, info.domain_min.z})},
                     {"domain_max", json::array({info.domain_max.x, info.domain_max.y, info.domain_max.z})},
-                    {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count}, {"active_density_cells", info.active_density_cells}, {"max_density", info.max_density}, {"live_state", info.live_state},
+                    {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count},
+                    {"fluid_model_particles", info.fluid_model_particles},
+                    {"granular_model_particles", info.granular_model_particles},
+                    {"elastic_model_particles", info.elastic_model_particles},
+                    {"unresolved_model_particles", info.unresolved_model_particles},
+                    {"active_density_cells", info.active_density_cells}, {"max_density", info.max_density},
+                    {"gas_phase_mass_kg", info.gas_phase_mass_kg}, {"gas_phase_energy_j", info.gas_phase_energy_j},
+                    {"gas_phase_active_cells", info.gas_phase_active_cells},
+                    {"gas_phase_mass_centroid", json::array({
+                        info.gas_phase_mass_centroid.x,
+                        info.gas_phase_mass_centroid.y,
+                        info.gas_phase_mass_centroid.z})},
+                    {"live_state", info.live_state},
                     {"render_mode", info.render_mode}, {"backend", info.backend},
                     {"boundary", info.boundary}, {"preset", info.preset},
                     {"kinematic_viscosity", info.kinematic_viscosity},
@@ -2736,7 +3073,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"uvw_voxel", info.uvw_voxel},
                     {"uvw_refresh_period", info.uvw_refresh_period},
                     {"substances", substanceCountsToJson(info.substances)},
-                    {"substance_materials", substanceBindingsToJson(info.substance_materials)},
+                    {"substance_materials", substanceBindingsToJson(info.substance_materials)}, {"views", fluidViewsToJson(info.views)}, {"views_measured", info.views_measured}, {"label_routes", labelRoutesToJson(info.label_routes)}, {"hidden_particles", info.hidden_particles}, {"max_particles", info.max_particles},
+                        {"particle_labels", fluidLabelsToJson(info.particle_labels)},
                     {"uvw_drift", info.uvw_drift},
                     // Measured on the last simulated step, not derived from the
                     // binding: parcels-with-zero-cells is the reading that says
@@ -2964,6 +3302,12 @@ json dispatchMethod(const std::string& method, const json& params) {
                 rtapi::Result tr = rtapi::setFluidThermal(domain, thermal_patch);
                 if (!tr.ok) return tr;
             }
+            if (params.contains("max_particles")) {
+                const int64_t mp = params.at("max_particles").get<int64_t>();
+                if (mp < 0) return rtapi::Result::fail("max_particles must be >= 0");
+                rtapi::Result mr = rtapi::setFluidMaxParticles(domain, static_cast<uint64_t>(mp));
+                if (!mr.ok) return mr;
+            }
             if (has_surface_patch) {
                 rtapi::Result sr = rtapi::setFluidSurfaceDetail(domain, surface_patch);
                 if (!sr.ok) return sr;
@@ -3002,6 +3346,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"buoyancy_heat", s.buoyancy_heat},
                         {"buoyancy_density", s.buoyancy_density},
                         {"ambient_stratification", s.ambient_stratification},
+                        {"inherit_atmosphere", s.inherit_atmosphere},
+                        {"effective_ambient_stratification", s.effective_ambient_stratification},
                         {"pressure_iterations", s.pressure_iterations},
                         {"surface_dust_enabled", s.surface_dust_enabled},
                         {"surface_dust_threshold", s.surface_dust_threshold},
@@ -3049,6 +3395,7 @@ json dispatchMethod(const std::string& method, const json& params) {
             RT_GAS_JSON(buoyancy_heat, float);
             RT_GAS_JSON(buoyancy_density, float);
             RT_GAS_JSON(ambient_stratification, float);
+            RT_GAS_JSON(inherit_atmosphere, bool);
             RT_GAS_JSON(pressure_iterations, int);
             RT_GAS_JSON(surface_dust_enabled, bool);
             RT_GAS_JSON(surface_dust_threshold, float);
@@ -3148,12 +3495,298 @@ json dispatchMethod(const std::string& method, const json& params) {
             return rtapi::updateGasShaderSettings(domain, s);
         });
     }
+    if (method == "fluid.get_environment") {
+        std::string domain = requireString(params, "domain");
+        return enqueueQuery([domain](UIContext&) {
+            rtapi::DomainEnvironmentInfo e;
+            auto r = rtapi::getDomainEnvironment(domain, e);
+            if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
+            return nlohmann::json{
+                {"ok", true},
+                {"override_enabled", e.override_enabled},
+                {"ambient_kelvin", e.ambient_kelvin},
+                {"oxygen", e.oxygen},
+                {"effective_ambient_kelvin", e.effective_ambient_kelvin},
+                {"effective_oxygen", e.effective_oxygen},
+                {"world_ambient_kelvin", e.world_ambient_kelvin},
+                {"world_oxygen", e.world_oxygen}};
+        });
+    }
+    if (method == "fluid.set_environment") {
+        std::string domain = requireString(params, "domain");
+        std::optional<bool> overrideEnabled;
+        std::optional<float> ambientK, oxygen;
+        if (params.contains("override_enabled")) overrideEnabled = requireBool(params, "override_enabled");
+        if (params.contains("ambient_kelvin")) ambientK = requireFloat(params, "ambient_kelvin");
+        if (params.contains("oxygen")) oxygen = requireFloat(params, "oxygen");
+        return enqueueResult([=](UIContext&) {
+            return rtapi::setDomainEnvironment(domain, overrideEnabled, ambientK, oxygen);
+        });
+    }
+    if (method == "fluid.state_digest") {
+        std::string domain = requireString(params, "domain");
+        return enqueueQuery([domain](UIContext&) {
+            rtapi::FluidStateDigest dg;
+            auto r = rtapi::getFluidStateDigest(domain, dg);
+            if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
+            // Hashes as hex strings: a 64-bit value does not survive a JSON
+            // double on every client.
+            auto hex = [](uint64_t v) { char b[17]; std::snprintf(b, sizeof(b), "%016llx",
+                                        static_cast<unsigned long long>(v)); return std::string(b); };
+            return nlohmann::json{
+                {"ok", true}, {"live", dg.live}, {"particles", dg.particles},
+                {"position_hash", hex(dg.position_hash)}, {"velocity_hash", hex(dg.velocity_hash)},
+                {"centroid", nlohmann::json::array({dg.centroid[0], dg.centroid[1], dg.centroid[2]})},
+                {"mean_speed", dg.mean_speed},
+                {"whitewater_particles", dg.whitewater_particles},
+                {"whitewater_position_hash", hex(dg.whitewater_position_hash)}};
+        });
+    }
+    if (method == "fluid.get_whitewater") {
+        std::string domain = requireString(params, "domain");
+        return enqueueQuery([domain](UIContext&) {
+            RayTrophiSim::Fluid::FoamParams p;
+            rtapi::WhitewaterStats st;
+            auto r = rtapi::getFluidWhitewater(domain, p, st);
+            if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
+            return nlohmann::json{
+                {"ok", true},
+                {"enabled", p.enabled},
+                {"max_foam", static_cast<uint64_t>(p.max_foam)},
+                {"volume_color", nlohmann::json::array({p.volume_color.x, p.volume_color.y, p.volume_color.z})},
+                {"trapped_air_rate", p.trapped_air_rate},
+                {"wave_crest_rate", p.wave_crest_rate},
+                {"ta_min", p.ta_min},
+                {"ta_max", p.ta_max},
+                {"wc_min", p.wc_min},
+                {"wc_max", p.wc_max},
+                {"ke_min", p.ke_min},
+                {"ke_max", p.ke_max},
+                {"crest_cos", p.crest_cos},
+                {"neighbor_radius_voxels", p.neighbor_radius_voxels},
+                {"lifetime", p.lifetime},
+                {"buoyancy", p.buoyancy},
+                {"fluid_drag", p.fluid_drag},
+                {"spray_drag", p.spray_drag},
+                {"spawn_jitter_voxels", p.spawn_jitter_voxels},
+                {"volume_opacity", p.volume_opacity},
+                {"volume_bubble_strength", p.volume_bubble_strength},
+                {"volume_spray_strength", p.volume_spray_strength},
+                {"volume_density", p.volume_density},
+                {"spray_max_neighbors", p.spray_max_neighbors},
+                {"bubble_min_neighbors", p.bubble_min_neighbors},
+                {"views", nlohmann::json{
+                    {"spray", st.spray_view}, {"foam", st.foam_view}, {"bubble", st.bubble_view}}},
+                {"stats", nlohmann::json{
+                    {"live", st.live}, {"alive", st.alive}, {"spray", st.spray},
+                    {"foam", st.foam}, {"bubble", st.bubble}, {"spawned", st.spawned},
+                    {"gen_ms", st.gen_ms}, {"advect_ms", st.advect_ms},
+                    {"crit_on_gpu", st.crit_on_gpu}, {"neigh_on_gpu", st.neigh_on_gpu},
+                    {"in_sdf", st.in_sdf}, {"in_splat", st.in_splat},
+                    {"in_fog", st.in_fog}, {"hidden", st.hidden}}}};
+        });
+    }
+    if (method == "fluid.set_whitewater") {
+        std::string domain = requireString(params, "domain");
+        // Applies the present keys onto `p`. Type errors THROW (requireX); run it
+        // once on a scratch copy here so they fail the request, never the queue.
+        auto apply = [](const json& params, RayTrophiSim::Fluid::FoamParams& p) -> std::string {
+            bool any = false;
+            if (params.contains("enabled")) { p.enabled = requireBool(params, "enabled"); any = true; }
+            if (params.contains("max_foam")) {
+                const int m = requireInt(params, "max_foam");
+                if (m < 0) return std::string("max_foam must be >= 0");
+                p.max_foam = static_cast<std::size_t>(m); any = true;
+            }
+            if (params.contains("render_mode"))
+                return std::string("render_mode was removed: whitewater follows the label routes "
+                                   "(fluid.set_label_views spray/foam/bubble)");
+            if (params.contains("volume_color")) { p.volume_color = requireVec3(params, "volume_color"); any = true; }
+            if (params.contains("trapped_air_rate")) { p.trapped_air_rate = requireFloat(params, "trapped_air_rate"); any = true; }
+            if (params.contains("wave_crest_rate")) { p.wave_crest_rate = requireFloat(params, "wave_crest_rate"); any = true; }
+            if (params.contains("ta_min")) { p.ta_min = requireFloat(params, "ta_min"); any = true; }
+            if (params.contains("ta_max")) { p.ta_max = requireFloat(params, "ta_max"); any = true; }
+            if (params.contains("wc_min")) { p.wc_min = requireFloat(params, "wc_min"); any = true; }
+            if (params.contains("wc_max")) { p.wc_max = requireFloat(params, "wc_max"); any = true; }
+            if (params.contains("ke_min")) { p.ke_min = requireFloat(params, "ke_min"); any = true; }
+            if (params.contains("ke_max")) { p.ke_max = requireFloat(params, "ke_max"); any = true; }
+            if (params.contains("crest_cos")) { p.crest_cos = requireFloat(params, "crest_cos"); any = true; }
+            if (params.contains("neighbor_radius_voxels")) { p.neighbor_radius_voxels = requireFloat(params, "neighbor_radius_voxels"); any = true; }
+            if (params.contains("lifetime")) { p.lifetime = requireFloat(params, "lifetime"); any = true; }
+            if (params.contains("buoyancy")) { p.buoyancy = requireFloat(params, "buoyancy"); any = true; }
+            if (params.contains("fluid_drag")) { p.fluid_drag = requireFloat(params, "fluid_drag"); any = true; }
+            if (params.contains("spray_drag")) { p.spray_drag = requireFloat(params, "spray_drag"); any = true; }
+            if (params.contains("spawn_jitter_voxels")) { p.spawn_jitter_voxels = requireFloat(params, "spawn_jitter_voxels"); any = true; }
+            if (params.contains("volume_opacity")) { p.volume_opacity = requireFloat(params, "volume_opacity"); any = true; }
+            if (params.contains("volume_bubble_strength")) { p.volume_bubble_strength = requireFloat(params, "volume_bubble_strength"); any = true; }
+            if (params.contains("volume_spray_strength")) { p.volume_spray_strength = requireFloat(params, "volume_spray_strength"); any = true; }
+            if (params.contains("volume_density")) { p.volume_density = requireFloat(params, "volume_density"); any = true; }
+            if (params.contains("spray_max_neighbors")) { p.spray_max_neighbors = requireInt(params, "spray_max_neighbors"); any = true; }
+            if (params.contains("bubble_min_neighbors")) { p.bubble_min_neighbors = requireInt(params, "bubble_min_neighbors"); any = true; }
+            if (!any) return std::string("no whitewater key given");
+            return std::string();
+        };
+        {
+            RayTrophiSim::Fluid::FoamParams scratch;
+            const std::string err = apply(params, scratch);
+            if (!err.empty()) throw std::runtime_error(err);
+        }
+        const json patch = params;
+        return enqueueResult([domain, patch, apply](UIContext&) {
+            RayTrophiSim::Fluid::FoamParams p;
+            rtapi::WhitewaterStats st;
+            auto r = rtapi::getFluidWhitewater(domain, p, st);
+            if (!r.ok) return r;
+            const std::string err = apply(patch, p);
+            if (!err.empty()) return rtapi::Result::fail(err);
+            return rtapi::setFluidWhitewater(domain, p);
+        });
+    }
+    if (method == "fluid.set_label_views") {
+        std::string domain = requireString(params, "domain");
+        const bool reset = params.contains("reset") && requireBool(params, "reset");
+        std::vector<std::pair<std::string, std::string>> routes;
+        if (params.contains("routes")) {
+            const auto& r = params.at("routes");
+            if (!r.is_object()) throw std::runtime_error("routes must be an object {label: route}");
+            for (auto it = r.begin(); it != r.end(); ++it) {
+                if (!it.value().is_string())
+                    throw std::runtime_error("route for '" + it.key() + "' must be a string");
+                routes.emplace_back(it.key(), it.value().get<std::string>());
+            }
+        }
+        return enqueueResult([domain, routes, reset](UIContext&) {
+            return rtapi::setFluidLabelRoutes(domain, routes, reset);
+        });
+    }
+    if (method == "fluid.get_surface_interior") {
+        std::string domain = requireString(params, "domain");
+        return enqueueQuery([domain](UIContext&) {
+            rtapi::FluidSurfaceInteriorSettings s;
+            auto r = rtapi::getFluidSurfaceInterior(domain, s);
+            if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
+            auto v3 = [](const Vec3& v) { return nlohmann::json::array({v.x, v.y, v.z}); };
+            return nlohmann::json{
+                {"ok", true},
+                {"created", s.created},
+                {"tint_active", s.tint_active},
+                {"absorption_color", v3(s.absorption_color)},
+                {"absorption_coefficient", s.absorption_coefficient},
+                {"refraction_tint", v3(s.refraction_tint)}};
+        });
+    }
+    if (method == "fluid.set_surface_interior") {
+        std::string domain = requireString(params, "domain");
+        std::optional<Vec3> absColor, tint;
+        std::optional<float> absCoef;
+        if (params.contains("absorption_color")) absColor = requireVec3(params, "absorption_color");
+        if (params.contains("absorption_coefficient")) absCoef = requireFloat(params, "absorption_coefficient");
+        if (params.contains("refraction_tint")) tint = requireVec3(params, "refraction_tint");
+        return enqueueResult([=](UIContext&) {
+            return rtapi::setFluidSurfaceInterior(domain, absColor, absCoef, tint);
+        });
+    }
+    if (method == "fluid.get_fog_shader") {
+        std::string domain = requireString(params, "domain");
+        return enqueueQuery([domain](UIContext&) {
+            rtapi::FluidFogShaderSettings s;
+            auto r = rtapi::getFluidFogShaderSettings(domain, s);
+            if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
+            auto v3 = [](const Vec3& v) { return nlohmann::json::array({v.x, v.y, v.z}); };
+            return nlohmann::json{
+                {"ok", true},
+                {"created", s.created},
+                {"density_multiplier", s.density_multiplier},
+                {"density_cutoff", s.density_cutoff},
+                {"scattering_coefficient", s.scattering_coefficient},
+                {"scattering_color", v3(s.scattering_color)},
+                {"anisotropy", s.anisotropy},
+                {"absorption_coefficient", s.absorption_coefficient},
+                {"absorption_color", v3(s.absorption_color)},
+                {"voxel_step_multiplier", s.voxel_step_multiplier},
+                {"max_steps", s.max_steps},
+                {"shadow_steps", s.shadow_steps},
+                {"shadow_stride", s.shadow_stride},
+                {"shadow_strength", s.shadow_strength}};
+        });
+    }
+    if (method == "fluid.set_fog_shader") {
+        std::string domain = requireString(params, "domain");
+        // Parsed here so a malformed value fails the request, not the queue.
+        std::optional<float> densityMul, densityCut, scatCoef, aniso, absCoef, stepMul, shadowStrength;
+        std::optional<int> maxSteps, shadowSteps, shadowStride;
+        std::optional<Vec3> scatColor, absColor;
+        if (params.contains("density_multiplier")) densityMul = requireFloat(params, "density_multiplier");
+        if (params.contains("density_cutoff")) densityCut = requireFloat(params, "density_cutoff");
+        if (params.contains("scattering_coefficient")) scatCoef = requireFloat(params, "scattering_coefficient");
+        if (params.contains("scattering_color")) scatColor = requireVec3(params, "scattering_color");
+        if (params.contains("anisotropy")) aniso = requireFloat(params, "anisotropy");
+        if (params.contains("absorption_coefficient")) absCoef = requireFloat(params, "absorption_coefficient");
+        if (params.contains("absorption_color")) absColor = requireVec3(params, "absorption_color");
+        if (params.contains("voxel_step_multiplier")) stepMul = requireFloat(params, "voxel_step_multiplier");
+        if (params.contains("max_steps")) maxSteps = requireInt(params, "max_steps");
+        if (params.contains("shadow_steps")) shadowSteps = requireInt(params, "shadow_steps");
+        if (params.contains("shadow_stride")) shadowStride = requireInt(params, "shadow_stride");
+        if (params.contains("shadow_strength")) shadowStrength = requireFloat(params, "shadow_strength");
+        return enqueueResult([=](UIContext&) {
+            rtapi::FluidFogShaderSettings s;
+            auto r = rtapi::getFluidFogShaderSettings(domain, s);
+            if (!r.ok) return r;
+            if (densityMul) s.density_multiplier = *densityMul;
+            if (densityCut) s.density_cutoff = *densityCut;
+            if (scatCoef) s.scattering_coefficient = *scatCoef;
+            if (scatColor) s.scattering_color = *scatColor;
+            if (aniso) s.anisotropy = *aniso;
+            if (absCoef) s.absorption_coefficient = *absCoef;
+            if (absColor) s.absorption_color = *absColor;
+            if (stepMul) s.voxel_step_multiplier = *stepMul;
+            if (maxSteps) s.max_steps = *maxSteps;
+            if (shadowSteps) s.shadow_steps = *shadowSteps;
+            if (shadowStride) s.shadow_stride = *shadowStride;
+            if (shadowStrength) s.shadow_strength = *shadowStrength;
+            return rtapi::updateFluidFogShaderSettings(domain, s);
+        });
+    }
     if (method == "msf.substances") {
         return enqueueQuery([](UIContext&) {
             std::vector<std::string> names;
             auto r = rtapi::listMaterialSubstances(names);
             if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
             return nlohmann::json{{"ok", true}, {"substances", names}};
+        });
+    }
+    if (method == "msf.substance") {
+        const std::string name = requireString(params, "name");
+        return enqueueQuery([name](UIContext&) {
+            rtapi::SubstanceProfileInfo p;
+            auto r = rtapi::getMaterialSubstance(name, p);
+            if (!r.ok) return nlohmann::json{{"__error", r.error}};
+            return nlohmann::json{{"ok", true}, {"substance", {
+                {"name", p.name},
+                {"default_constitutive_model", p.default_constitutive_model},
+                {"density", p.density},
+                {"liquid_density", p.liquid_density},
+                {"specific_heat", p.specific_heat},
+                {"conductivity", p.conductivity},
+                {"liquid_kinematic_viscosity", p.liquid_kinematic_viscosity},
+                {"combustible", p.combustible},
+                {"fluid_flammable", p.fluid_flammable},
+                {"fluid_extinguishing", p.fluid_extinguishing},
+                {"meltable", p.meltable},
+                {"ignition_kelvin", p.ignition_kelvin},
+                {"flash_kelvin", p.flash_kelvin},
+                {"autoignition_kelvin", p.autoignition_kelvin},
+                {"melt_kelvin", p.melt_kelvin},
+                {"boiling_kelvin", p.boiling_kelvin},
+                {"latent_heat_fusion", p.latent_heat_fusion},
+                {"latent_heat_vaporization", p.latent_heat_vaporization},
+                {"vaporization_rate", p.vaporization_rate},
+                {"cooling_power", p.cooling_power},
+                {"oxygen_dilution", p.oxygen_dilution},
+                {"flame_persistence", p.flame_persistence},
+                {"granular_friction_degrees", p.granular_friction_degrees},
+                {"granular_cohesion", p.granular_cohesion}
+            }}};
         });
     }
     if (method == "msf.fields") {
@@ -3933,13 +4566,51 @@ json dispatchMethod(const std::string& method, const json& params) {
     }
     if (method == "render.volume_counters") {
         const bool on = requireBool(params, "enabled");
-        return enqueueResult([on](UIContext&) {
-            return rtapi::setVolumeInstrumentation(on);
+        std::array<float, 4> region{0.0f, 0.0f, 1.0f, 1.0f};
+        if (params.contains("region")) {
+            const json& r = params["region"];
+            if (!r.is_array() || r.size() != 4)
+                throw std::runtime_error("region must be [x0, y0, x1, y1] (normalized)");
+            for (size_t i = 0; i < 4; ++i) {
+                if (!r[i].is_number()) throw std::runtime_error("region values must be numbers");
+                region[i] = r[i].get<float>();
+            }
+        }
+        return enqueueResult([on, region](UIContext&) {
+            return rtapi::setVolumeInstrumentation(on, region);
+        });
+    }
+    if (method == "render.get_settings") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::RenderBudgetInfo b = rtapi::renderBudget();
+            return json{{"max_bounces", b.max_bounces},
+                        {"diffuse_bounces", b.diffuse_bounces},
+                        {"transmission_bounces", b.transmission_bounces},
+                        {"debug_view", b.debug_view},
+                        {"debug_view_name", b.debug_view_name}};
+        });
+    }
+    if (method == "render.set_settings") {
+        // Keys written inline so the descriptor generator can read them.
+        std::optional<int> maxB, diffB, transB, dv;
+        if (params.contains("max_bounces")) maxB = requireInt(params, "max_bounces");
+        if (params.contains("diffuse_bounces")) diffB = requireInt(params, "diffuse_bounces");
+        if (params.contains("transmission_bounces")) transB = requireInt(params, "transmission_bounces");
+        if (params.contains("debug_view")) dv = requireInt(params, "debug_view");
+        return enqueueResult([maxB, diffB, transB, dv](UIContext&) {
+            return rtapi::setRenderBudget(maxB, diffB, transB, dv);
         });
     }
     if (method == "render.volume_stats") {
         return enqueueQuery([](UIContext&) {
             const rtapi::VolumeInstrumentationInfo s = rtapi::volumeStats();
+            json devices = json::array();
+            for (const auto& d : s.devices) {
+                devices.push_back(json{
+                    {"role", d.role}, {"enabled", d.enabled},
+                    {"region", json::array({d.region[0], d.region[1], d.region[2], d.region[3]})},
+                    {"paths_traced", d.paths_traced}, {"volume_rays", d.volume_rays}});
+            }
             // `available` and `enabled` ship alongside the numbers on purpose. A
             // caller that reads only the counters cannot tell an all-zero
             // snapshot caused by "counters were never switched on" from one
@@ -3971,7 +4642,21 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"arbiter_gate_open", s.arbiter_gate_open},
                 {"arbiter_no_box", s.arbiter_no_box},
                 {"arbiter_empty_range", s.arbiter_empty_range},
-                {"arbiter_no_crossing", s.arbiter_no_crossing}};
+                {"arbiter_no_crossing", s.arbiter_no_crossing},
+                {"region", json::array({s.region_min_x, s.region_min_y,
+                                        s.region_max_x, s.region_max_y})},
+                {"paths_traced", s.paths_traced},
+                {"paths_bounce_capped", s.paths_bounce_capped},
+                {"paths_pass_capped", s.paths_pass_capped},
+                {"charged_specular", s.charged_specular},
+                {"charged_diffuse", s.charged_diffuse},
+                {"charged_transmission", s.charged_transmission},
+                {"charged_other", s.charged_other},
+                {"free_passes", s.free_passes},
+                {"medium_passes", s.medium_passes},
+                {"arbiter_started_inside", s.arbiter_started_inside},
+                {"arbiter_inside_found", s.arbiter_inside_found},
+                {"devices", devices}};
         });
     }
     if (method == "render.volume_tables") {
@@ -4024,7 +4709,9 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"system", d.system}, {"domain_index", d.domain_index},
                     {"domain", d.domain}, {"type", d.type},
                     {"render_mode", d.render_mode}, {"vdb_id", d.vdb_id},
-                    {"has_volume", d.has_volume}, {"volume_name", d.volume_name}});
+                    {"has_volume", d.has_volume}, {"volume_name", d.volume_name},
+                    {"fog_vdb_id", d.fog_vdb_id}, {"has_fog_volume", d.has_fog_volume},
+                    {"fog_volume_name", d.fog_volume_name}});
             }
             return json{{"available", t.available}, {"backends", backends},
                         {"domains", domains}};
@@ -4213,6 +4900,45 @@ json dispatchMethod(const std::string& method, const json& params) {
     }
     if (method == "sim_graph.clear_overrides") {
         return enqueueResult([](UIContext&) { return rtapi::simGraphClearOverrides(); });
+    }
+    if (method == "matter.exchanges") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::MatterExchangeReport report = rtapi::matterExchangeReport();
+            nlohmann::json rows = nlohmann::json::array();
+            for (const auto& e : report.exchanges) {
+                rows.push_back({
+                    {"event_id", e.event_id}, {"kind", e.kind},
+                    {"source", e.source}, {"target", e.target},
+                    {"substance", e.substance},
+                    {"source_mass_kg", e.source_mass_kg},
+                    {"target_mass_kg", e.target_mass_kg},
+                    {"source_energy_j", e.source_energy_j},
+                    {"target_energy_j", e.target_energy_j},
+                    {"latent_required_j", e.latent_required_j},
+                    {"latent_accounted_j", e.latent_accounted_j},
+                    {"source_momentum_kg_m_s", {
+                        e.source_momentum_kg_m_s.x,
+                        e.source_momentum_kg_m_s.y,
+                        e.source_momentum_kg_m_s.z}},
+                    {"target_momentum_kg_m_s", {
+                        e.target_momentum_kg_m_s.x,
+                        e.target_momentum_kg_m_s.y,
+                        e.target_momentum_kg_m_s.z}}
+                });
+            }
+            return nlohmann::json{
+                {"traced", report.traced}, {"step", report.step},
+                {"exchanges", std::move(rows)},
+                {"source_mass_kg", report.source_mass_kg},
+                {"target_mass_kg", report.target_mass_kg},
+                {"mass_error_kg", report.mass_error_kg},
+                {"source_energy_j", report.source_energy_j},
+                {"target_energy_j", report.target_energy_j},
+                {"latent_required_j", report.latent_required_j},
+                {"latent_accounted_j", report.latent_accounted_j},
+                {"energy_error_j", report.energy_error_j}
+            };
+        });
     }
     if (method == "sim_graph.couplings") {
         return enqueueQuery([](UIContext&) {
@@ -4455,7 +5181,8 @@ json dispatchMethod(const std::string& method, const json& params) {
         });
     }
     if (method == "sim_cache.clear") {
-        return enqueueResult([](UIContext&) { return rtapi::simClearCache(); });
+        const bool ramOnly = params.contains("ram_only") && requireBool(params, "ram_only");
+        return enqueueResult([ramOnly](UIContext&) { return rtapi::simClearCache(ramOnly); });
     }
     if (method == "viewport.status") {
         return enqueueQuery([](UIContext&) {
@@ -5566,13 +6293,21 @@ json dispatchMethod(const std::string& method, const json& params) {
         // here would change whether matter blocks flow.
         std::optional<std::string> phase;
         if (params.contains("phase")) phase = requireString(params, "phase");
+        std::optional<std::string> constitutive_model;
+        if (params.contains("constitutive_model")) {
+            constitutive_model = requireString(params, "constitutive_model");
+        }
         return enqueueResult([domain, substance, material, representation,
-                              viscosity, miscibility, phase](UIContext&) {
+                              viscosity, miscibility, phase,
+                              constitutive_model](UIContext&) {
             return rtapi::setFluidSubstanceMaterial(domain, substance, material,
                                                      representation ? &*representation : nullptr,
                                                      viscosity ? &*viscosity : nullptr,
                                                      miscibility ? &*miscibility : nullptr,
-                                                     phase ? &*phase : nullptr);
+                                                     phase ? &*phase : nullptr,
+                                                     constitutive_model
+                                                         ? &*constitutive_model
+                                                         : nullptr);
         });
     }
     if (method == "flow_source.list") {
@@ -5775,6 +6510,7 @@ json dispatchMethod(const std::string& method, const json& params) {
             j["pressure_on_gpu"] = s.pressure_on_gpu;
             j["g2p_on_gpu"] = s.g2p_on_gpu;
             j["density_on_gpu"] = s.density_on_gpu;
+            j["total_ms"] = s.total_ms;
             j["p2g_ms"] = s.p2g_ms;
             j["pressure_ms"] = s.pressure_ms;
             j["g2p_ms"] = s.g2p_ms;
@@ -5806,6 +6542,7 @@ json dispatchMethod(const std::string& method, const json& params) {
             j["resolution"] = json::array({s.resolution[0], s.resolution[1], s.resolution[2]});
                 j["total_ms"] = s.total_ms;
                 j["voxelize_ms"] = s.voxelize_ms;
+                j["inventory_advection_ms"] = s.inventory_advection_ms;
                 j["analysis_ms"] = s.analysis_ms;
                 j["gpu_collider_source_ms"] = s.gpu_collider_source_ms;
                 j["gpu_msf_ms"] = s.gpu_msf_ms;
@@ -5845,6 +6582,11 @@ json dispatchMethod(const std::string& method, const json& params) {
                 j["grid_memory_bytes"] = s.grid_memory_bytes;
                 j["burning_cells"] = s.burning_cells;
                 j["solid_cells"] = s.solid_cells;
+                j["liquid_boundary_cells"] = s.liquid_boundary_cells;
+                j["liquid_boundary_mean_velocity"] = json::array({
+                    s.liquid_boundary_mean_velocity.x,
+                    s.liquid_boundary_mean_velocity.y,
+                    s.liquid_boundary_mean_velocity.z});
             return j;
         });
     }

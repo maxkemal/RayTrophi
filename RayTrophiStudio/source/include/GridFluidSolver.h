@@ -25,6 +25,8 @@
 #include "Vec3.h"
 #include "FluidGrid.h"
 
+#include <vector>
+
 namespace RayTrophiSim {
 
 class SimulationForceFieldSnapshot;
@@ -208,6 +210,17 @@ void projectPressure(FluidSim::FluidGrid& grid,
 void advectVelocityField(FluidSim::FluidGrid& grid,
                          const SolverParams& params,
                          float dt);
+
+/// @brief Advect an additional cell-centred scalar with the gas transport rule.
+///
+/// This shared CPU reference applies the selected advection scheme and domain
+/// boundary mode, but intentionally applies no visual dissipation. Non-periodic
+/// fields execute over their positive support plus a conservative trace band.
+void advectPassiveScalarField(FluidSim::FluidGrid& grid,
+                              const SolverParams& params,
+                              std::vector<float>& field,
+                              float background,
+                              float dt);
 
 } // namespace GridFluid
 } // namespace RayTrophiSim

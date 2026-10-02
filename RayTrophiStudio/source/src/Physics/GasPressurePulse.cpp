@@ -12,7 +12,7 @@ bool ParticleSimulationSystem::injectGasPressurePulse(
     for (std::size_t i = 0; i < grid_domains_.size() &&
                             i < grid_domain_states_.size(); ++i) {
         if (grid_domains_[i].name != domain ||
-            grid_domains_[i].type != SimulationDomainType::Gas) continue;
+            !simulationDomainHasGas(grid_domains_[i].type)) continue;
         auto& state = grid_domain_states_[i];
         if (!state.valid) return false;
         auto& grid = state.grid;

@@ -267,17 +267,12 @@ inline void DrawRayFusionDevelopmentStatus() {
             // yaziliyordu ve "hicbir isik desteklenmiyor" diye okunuyordu --
             // cumlesi tersten okunabilen bir sayac olcum degildir.
             RtDiag::Row("materials", "%u of %u supported", b.supportedMaterials, b.materials);
-            RtDiag::Row("lights", "%u of %u usable%s", b.lights,
-                        b.lights + b.unsupportedLights,
-                        b.sunInBounce ? " (+ sky sun)" : "");
-            if (b.sunInBounce && !b.sunTintFromLut)
-                RtDiag::Warn("sun tint is the constant fallback, not the transmittance LUT");
-            if (!b.sunInBounce)
-                RtDiag::Note("Physical Sky sun is NOT carried indirectly");
-            RtDiag::Help("Without the sun in this table the bounce can only carry sky light, so "
-                         "an interior lit through a window goes blue instead of taking the warm "
-                         "bounce off the sunlit floor. Measured against the RT reference, that "
-                         "was the whole remaining difference.");
+            RtDiag::Row("lights", "%u of %u usable", b.lights,
+                        b.lights + b.unsupportedLights);
+            RtDiag::Help("The Physical Sky sun bounces only through a directional scene light "
+                         "(same rule as Vulkan RT). With no directional in the table the bounce "
+                         "carries sky light only, so a sunlit interior goes blue -- World panel "
+                         "'Add Sun Light' fixes that.");
             if (b.unsupportedMaterials > 0u) {
                 RtDiag::Note("rejected by: textured %u, transparent %u, layered %u, flags %u (0x%X)",
                              b.rejectedTextured, b.rejectedTransparent,

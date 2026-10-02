@@ -2347,8 +2347,7 @@ NodeSystem::PinValue GeometryNodesV2::ScatterInstancesNode::compute(int /*output
 //      crosses each column's X ray; a cell behind an odd number of crossings
 //      is inside. Robust for closed surfaces; open boundaries have no defined
 //      inside (documented node limitation, same as Blender's voxel remesher).
-//   3. Marching cubes (Paul Bourke tables — FoamSurface.cpp keeps its own
-//      deliberately self-contained copy of the same public-domain tables) with
+//   3. Marching cubes (Paul Bourke public-domain tables) with
 //      an edge-keyed vertex map, so the output comes out fully WELDED — no
 //      post-weld pass needed, and Laplacian smoothing has real adjacency.
 
@@ -2874,7 +2873,7 @@ NodeSystem::PinValue GeometryNodesV2::RemeshNode::compute(int /*outputIndex*/, N
 
         const int* tri = kTriTable[cubeindex];
         for (int t = 0; tri[t] != -1; t += 3) {
-            // Same winding FoamSurface uses: with phi negative INSIDE, e0,e2,e1
+            // With phi negative INSIDE, the e0,e2,e1 winding
             // fronts the outward direction.
             outIdx.push_back(ev[tri[t]]);
             outIdx.push_back(ev[tri[t + 2]]);

@@ -12,9 +12,9 @@ bool rtScreenShadow(uint light, out float visibility) {
     visibility = 1.0;
     if ((vMaterialID & 0x80000000u) != 0u) return false;
     if (rtShadowMeta.x != 0x52545348u) return false;
-    // 32 = dunya gunesi slotu (kMaterialPreviewMaxSceneLights).
-    bool covered = light < 32u ? (rtShadowCoverage.x & (1u << light)) != 0u
-                              : rtShadowCoverage.y != 0u;
+    // Scene lights only; the Physical Sky sun is no longer a light of its own
+    // (rtShadowCoverage.y stays 0, kept so the buffer layout does not move).
+    bool covered = light < 32u && (rtShadowCoverage.x & (1u << light)) != 0u;
     if (!covered) return false;
     ivec2 pixel = ivec2(gl_FragCoord.xy);
     if (any(lessThan(pixel, ivec2(0))) ||

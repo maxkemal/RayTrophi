@@ -166,7 +166,6 @@ public:
     uint32_t frameTileCapacity = 64u;
     uint32_t frameLightBudget = 8u;
     uint32_t shadowedLights = 0;
-    bool worldSunShadow = false;
     bool ready = false;
     std::string shaderDir;
     std::unique_ptr<MaterialPreviewVolumeShadow> volumeShadow;
@@ -503,7 +502,6 @@ void VulkanBackendAdapter::prepareMaterialPreviewShadowFrame() {
     if (!state || !state->ready) return;
     state->views.clear();
     state->shadowedLights = 0;
-    state->worldSunShadow = false;
     state->cpuRecords = {};
     state->deepEnabled = false;
     if (m_viewportMode != ViewportMode::MaterialPreview ||
@@ -668,34 +666,6 @@ void VulkanBackendAdapter::prepareMaterialPreviewShadowFrame() {
         }
     };
 
-    if (m_cachedWorld.mode == WORLD_MODE_NISHITA &&
-        m_cachedWorld.nishita.sun_intensity > 0.0f &&
-        nextTile < state->frameTileCapacity &&
-        !(rayOwnsLight && rayCoverage.worldSun)) {
-        const uint32_t sunCascadeCount = std::min(
-            requestedDirectionalCascades,
-            state->frameTileCapacity - nextTile);
-        ShadowRecordGPU& sunRecord = state->cpuRecords[kMaxLights];
-        sunRecord.meta[0] = 1u;
-        sunRecord.meta[1] = 1u;
-        sunRecord.meta[2] = sunCascadeCount;
-        sunRecord.meta[3] = kMaxLights;
-        sunRecord.params[0] = 0.0015f;
-        sunRecord.params[1] = 0.01f;
-        sunRecord.params[2] = 1.0f / static_cast<float>(kAtlasSize);
-        sunRecord.params[3] = 1.0f;
-        addDirectionalViews(
-            sunRecord,
-            Vec3(m_cachedWorld.nishita.sun_direction.x,
-                 m_cachedWorld.nishita.sun_direction.y,
-                 m_cachedWorld.nishita.sun_direction.z),
-            sunCascadeCount);
-        state->worldSunShadow = true;
-    } else if (rayOwnsLight && rayCoverage.worldSun &&
-               m_cachedWorld.mode == WORLD_MODE_NISHITA &&
-               m_cachedWorld.nishita.sun_intensity > 0.0f) {
-        m_rtShadowCascadesReplaced += requestedDirectionalCascades;
-    }
 
     for (const auto& light : m_cachedLights) {
         if (!light || !light->visible) continue;
@@ -885,8 +855,10 @@ void VulkanBackendAdapter::updateMaterialPreviewShadowWorldBindings() {
                         (hasWorldEnv ? 2u : 0u) |
                         (nishitaOverlay ? 4u : 0u) |
                         (hasAtmosphereLuts ? 8u : 0u) |
-                        (state && state->worldSunShadow ? 16u : 0u) |
-                        (hasPrefilteredIbl ? 32u : 0u);
+                        (hasPrefilteredIbl ? 32u : 0u) |
+                        // Cloud shadow map bound (26/27) and clouds rendering.
+                        ((m_cloudShadowBound && m_cloudRtRendering &&
+                          m_cloudBoundPreviewSet == m_interactiveViewport.materialPreviewDescSet) ? 64u : 0u);
         globals.shadowedCount = state ? state->shadowedLights : 0u;
         globals.worldMode = static_cast<uint32_t>(m_cachedWorld.mode);
 
@@ -955,6 +927,9 @@ void VulkanBackendAdapter::recordMaterialPreviewSkyPass(
     push.cameraPos[3] = static_cast<float>(width) / static_cast<float>(height);
     const float fov = std::clamp(m_camera.fov, 1.0f, 179.0f);
     push.lightDir0[3] = std::tan(fov * 0.5f * 3.14159265358979f / 180.0f);
+    // Cloud layer (binding 25) written this frame by recordCloudRasterPass.
+    push.materialMeta[0] = (m_cloudRasterWritten &&
+        m_cloudBoundPreviewSet == m_interactiveViewport.materialPreviewDescSet) ? 1u : 0u;
     vkCmdPushConstants(cmd, m_interactiveViewport.materialPreviewPipelineLayout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(push), &push);

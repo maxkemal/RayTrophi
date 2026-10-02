@@ -37,6 +37,8 @@
 namespace RayTrophiSim {
 
 class SimulationForceFieldSnapshot;
+struct MaterialTemperatureScale;
+struct SubstanceProfile;
 
 namespace Fluid {
 
@@ -67,6 +69,20 @@ struct FluidFuelProfile {
     float oxygen_dilution = 0.0f;
     float flame_persistence = 0.0f;
 };
+
+// Wind-driven surface current as a fraction of the wind speed. ~3% is the
+// classic drift ratio (wind-driven surface current / 10 m wind).
+constexpr float kAtmosphereSurfaceDrift = 0.03f;
+// Same as ForceField::fluid_drag_coupling / fluid_surface_depth defaults, so
+// the global wind and a local Wind field drag the surface the same way.
+constexpr float kAtmosphereSurfaceCoupling = 4.0f;   // 1/s
+constexpr float kAtmosphereSurfaceDepth = 0.5f;      // m
+
+struct APICSolverParams;
+// The air velocity the solver sees: the climate wind when inherit_atmosphere,
+// else zero (local Wind force fields are separate and still apply). One
+// function for the CPU path and the GPU constants, so they cannot disagree.
+Vec3 atmosphereAirVelocity(const APICSolverParams& params);
 
 struct APICSolverParams {
     enum class FluidPreset : int;
@@ -274,10 +290,21 @@ struct APICSolverParams {
     // to 200 was the only way to feel a difference.
     float air_drag = 0.15f;
 
-    // Particle redistribution (reseed). Crowded-cell removals fund replacements
-    // in starved interior cells during the same step. Because P2G currently uses
-    // unit-mass particles, reseeding is count-conservative and cannot invent
-    // liquid; emitters and open boundaries remain the count-changing paths.
+    // ★★ ATMOSPHERE (Faz 2). On: the world climate's wind is the AIR these
+    //   particles move through. Two effects, both identities at 0 m/s:
+    //   - air_drag above acts on the velocity RELATIVE to the wind, so spray
+    //     is carried downwind instead of braked toward rest;
+    //   - the free surface is dragged toward kAtmosphereSurfaceDrift x wind
+    //     with the Wind force field's own surface-drag model and defaults
+    //     (kAtmosphereSurfaceCoupling, kAtmosphereSurfaceDepth).
+    //   Default ON: a calm world (the default climate) changes nothing, so
+    //   existing scenes step identically. Off: only local Wind force fields.
+    bool inherit_atmosphere = true;
+
+    // Particle redistribution (reseed). Move existing parcels from crowded
+    // face neighbors into starved interior cells of the same substance.
+    // No deletion or emission: count and all parcel sidecars are preserved.
+    // With no suitable local destination, excess parcels stay in place.
     bool  reseed_enabled = true;
     // Target particles per fluid cell. 0 = use particles_per_cell (the seed
     // density). Reseed kicks in when count falls below min_per_cell or rises
@@ -371,67 +398,11 @@ struct APICSolverParams {
     FluidFuelProfile fuel_profile;
     FluidChemistryPreset chemistry_preset = FluidChemistryPreset::Inert;
 
-    void applyChemistryProfile(FluidChemistryPreset preset) {
-        chemistry_preset = preset;
-        fuel_profile = {};
-        switch (preset) {
-            case FluidChemistryPreset::Gasoline:
-                fuel_profile.flammable = true;
-                fuel_profile.flash_temperature = 0.35f;
-                fuel_profile.autoignition_temperature = 0.80f;
-                fuel_profile.vaporization_rate = 0.85f;
-                fuel_profile.heat_capacity = 1.7f;
-                fuel_profile.latent_heat = 0.9f;
-                fuel_profile.flame_persistence = 0.55f;
-                break;
-            case FluidChemistryPreset::Alcohol:
-                fuel_profile.flammable = true;
-                fuel_profile.flash_temperature = 0.28f;
-                fuel_profile.autoignition_temperature = 0.72f;
-                fuel_profile.vaporization_rate = 1.20f;
-                fuel_profile.heat_capacity = 2.4f;
-                fuel_profile.latent_heat = 0.85f;
-                fuel_profile.flame_persistence = 0.35f;
-                break;
-            case FluidChemistryPreset::Oil:
-                fuel_profile.flammable = true;
-                fuel_profile.flash_temperature = 0.65f;
-                fuel_profile.autoignition_temperature = 1.10f;
-                fuel_profile.vaporization_rate = 0.28f;
-                fuel_profile.heat_capacity = 1.7f;
-                fuel_profile.latent_heat = 1.2f;
-                fuel_profile.flame_persistence = 0.90f;
-                break;
-            case FluidChemistryPreset::Plastic:
-                fuel_profile.flammable = true;
-                fuel_profile.flash_temperature = 0.92f;
-                fuel_profile.autoignition_temperature = 1.10f;
-                fuel_profile.vaporization_rate = 0.18f;
-                fuel_profile.heat_capacity = 1.9f;
-                fuel_profile.latent_heat = 1.35f;
-                fuel_profile.flame_persistence = 1.10f;
-                break;
-            case FluidChemistryPreset::Wax:
-                fuel_profile.flammable = true;
-                fuel_profile.flash_temperature = 0.66f;
-                fuel_profile.autoignition_temperature = 0.88f;
-                fuel_profile.vaporization_rate = 0.12f;
-                fuel_profile.heat_capacity = 2.1f;
-                fuel_profile.latent_heat = 1.45f;
-                fuel_profile.flame_persistence = 0.95f;
-                break;
-            case FluidChemistryPreset::Water:
-                fuel_profile.extinguishing = true;
-                fuel_profile.heat_capacity = 4.18f;
-                fuel_profile.latent_heat = 2.26f;
-                fuel_profile.cooling_power = 1.0f;
-                fuel_profile.oxygen_dilution = 0.35f;
-                break;
-            case FluidChemistryPreset::Custom:
-            default:
-                break;
-        }
-    }
+    void applyChemistryProfile(FluidChemistryPreset preset);
+    void applyChemistryProfile(FluidChemistryPreset preset,
+                               const MaterialTemperatureScale& scale);
+    void applySubstanceProfile(const SubstanceProfile& profile,
+                               const MaterialTemperatureScale& scale);
 
     // Backward-compatible bridge: old Oil fluid presets retain oil chemistry.
     void applyFuelProfile(FluidPreset preset) {

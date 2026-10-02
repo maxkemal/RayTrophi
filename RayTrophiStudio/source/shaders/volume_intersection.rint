@@ -61,14 +61,7 @@ struct VkVolumeInstance {
     float ramp_colors_b[8];
     float pivot_offset[3];
     int   source_type;
-    float cloud_coverage;
-    float cloud_detail;
-    float cloud_erosion;
-    float cloud_base_scale;
-    float cloud_edge_fade;
-    float cloud_offset_x;
-    float cloud_offset_z;
-    float cloud_seed;
+    float _retired_cloud[8];   // retired Faz 3b: sky clouds are no longer a volume (ATMOSPHERE_CLOUDS.md)
     float _ext_reserved[12];
     // Appended acceleration block — MUST match VkVolumeInstance in
     // include/Backend/vulkan_volume_types.h (576 bytes). Every shader that
@@ -139,33 +132,42 @@ void main() {
     
     float rawTNear = max(max(tSmaller.x, tSmaller.y), tSmaller.z);
     float tNear = rawTNear;
-    float tFar  = min(min(tLarger.x,  tLarger.y),  tLarger.z);
-    
+    float boxFar = min(min(tLarger.x,  tLarger.y),  tLarger.z);
+
+    bool liquidSurface = volumes.v[volIdx].source_type == 4;
+
     // Clamp to valid ray range
     tNear = max(tNear, gl_RayTminEXT);
-    tFar  = min(tFar,  gl_RayTmaxEXT);
-    
+    // ★★★★ gl_RayTmaxEXT here is "the closest hit found SO FAR in traversal",
+    // i.e. it depends on the order the BVH happens to visit boxes in. A liquid
+    // surface box coincident with a fog box reports its entry 1 mm behind the
+    // fog's (isoBias below). When the BVH visited the liquid first, the FOG's
+    // interval was clamped to that 1 mm: the fog marched 1 mm, stepped ~1 cm
+    // past it, re-entered, and did it again — every hop charged as a bounce.
+    // Measured 2026-09-28 (render.volume_counters region on the dark patch):
+    // 6.44 of 7.92 bounces per path were fog segments, 58% of paths died on
+    // the bounce cap, and the gas->liquid arbiter searched for the liquid's
+    // exit inside that 1 mm and found it 0.04% of the time. Plain fog with no
+    // liquid still paid 2.66 bounces per path.
+    // A gas/fog box therefore reports its TRUE exit: anything in front of it
+    // is found by its own solid probe and the arbiter, which are exactly the
+    // clamps this was standing in for. The liquid
+    // surface keeps the clamp: its own march was validated against it.
+    float tFar = liquidSurface
+        ? min(boxFar, gl_RayTmaxEXT)
+        : boxFar;
+
     // Report hit if we have a valid intersection interval
-    if (tNear < tFar && tFar > 0.0) {
+    if (tNear < tFar && tFar > 0.0 && tNear <= gl_RayTmaxEXT) {
         volumeHitAttrib = vec2(tNear, tFar);
         float reportT = tNear;
 
-        // Internal Nishita cloud can contain the camera. Reporting its entry
-        // at ray tmin lets the sky volume win closest-hit ordering and skip
-        // smaller domain volumes inside it. Only push that procedural source
-        // toward its exit surface; normal domain volumes keep near hits.
-        bool proceduralSkyCloud = volumes.v[volIdx].source_type == 3 ||
-                                  volumes.v[volIdx].volume_type == 3;
-        if (proceduralSkyCloud && rawTNear <= gl_RayTminEXT) {
-            float exitBias = max(0.001, 0.0001 * max(tFar, 1.0));
-            reportT = max(tNear, tFar - exitBias);
-        }
 
         // Coincident participating media must be accumulated before a liquid
         // redirect changes the path. SurfaceSDF is therefore slightly behind
         // gas/fog at an equal AABB entry; the gas closest-hit clamps itself to
         // the actual nearest SDF crossing and explicitly hands the ray over.
-        if (volumes.v[volIdx].source_type == 4) {
+        if (liquidSurface) {
             float isoBias = max(0.001, 0.0001 * max(tFar, 1.0));
             reportT = tNear + isoBias;
         }

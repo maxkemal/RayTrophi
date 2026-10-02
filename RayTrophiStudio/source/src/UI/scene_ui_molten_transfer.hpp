@@ -46,7 +46,7 @@ inline void draw(SceneData& scene, RayTrophiSim::ParticleSimulationSystem& runti
         ? "Select Fluid domain" : collider.msf_transfer_domain.c_str();
     if (ImGui::BeginCombo("Target Fluid Domain##MsfTransferDomain", preview)) {
         for (const auto& domain : runtime.gridDomains()) {
-            if (domain.type != RayTrophiSim::SimulationDomainType::Fluid) continue;
+            if (!RayTrophiSim::simulationDomainHasLiquid(domain.type)) continue;
             const bool selected = collider.msf_transfer_domain == domain.name;
             if (ImGui::Selectable(domain.name.c_str(), selected)) {
                 collider.msf_transfer_domain = domain.name;

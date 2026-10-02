@@ -10,6 +10,8 @@
 #include "SimCache.h"
 
 #include "Fluid/SubstanceTag.h"
+#include "Fluid/FluidParticleLabels.h"
+#include "Fluid/FluidParticles.h"
 #include "json.hpp"
 
 #include <cstdio>
@@ -24,6 +26,10 @@ namespace SimCache {
 
 // ── Low-level binary helpers (little-endian host assumed: x86/x64) ───────────
 namespace {
+
+// Particle flag bits that are STATE and must survive the cache.
+constexpr uint32_t kPersistentParticleFlags =
+    Fluid::kParticleLabelMask | Fluid::kParticleFlagFrozen;
 
 template <typename T>
 inline void writePod(std::ostream& os, const T& v) {
@@ -280,6 +286,8 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
         writeFloatArray(os, d.grid.temperature);
         writeFloatArray(os, d.grid.fuel);
         writeFloatArray(os, d.grid.interaction);
+        writeFloatArray(os, d.gas_phase_mass_kg);
+        writeFloatArray(os, d.gas_phase_energy_j);
 
         // Fluid particles — position + material coordinate. Both are render
         // source of truth: position places the surface, uvw anchors what is
@@ -324,6 +332,30 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
             writePod(os, i < d.particles.substance_tag.size()
                              ? d.particles.substance_tag[i]
                              : Fluid::kSubstanceUntagged);
+        }
+        // Per-parcel constitutive regime (v9). This must cross the cache with
+        // the substance or a mixed water/sand bake resumes as one domain mode.
+        for (uint64_t i = 0; i < pcount; ++i) {
+            writePod(os, i < d.particles.constitutive_model.size()
+                             ? d.particles.constitutive_model[i]
+                             : static_cast<uint8_t>(
+                                   Fluid::MatterConstitutiveModel::Auto));
+        }
+        // ── Physical parcel mass (v7) ────────────────────────────────────────
+        // Both values are required: rest_mass_kg identifies the parcel's kg at
+        // birth, while mass_fraction records how much survives phase exchange.
+        for (uint64_t i = 0; i < pcount; ++i) {
+            writePod(os, i < d.particles.mass_fraction.size()
+                             ? d.particles.mass_fraction[i] : 1.0f);
+            writePod(os, i < d.particles.rest_mass_kg.size()
+                             ? d.particles.rest_mass_kg[i] : 0.0f);
+        }
+        // ── Persistent state bits ────────────────────────────────────────────
+        // Label + frozen only; see kVersion. A short flags array writes 0, which
+        // decodes as label `unknown` - honest, never a fabricated body.
+        for (uint64_t i = 0; i < pcount; ++i) {
+            const uint32_t f = i < d.particles.flags.size() ? d.particles.flags[i] : 0u;
+            writePod(os, static_cast<uint32_t>(f & kPersistentParticleFlags));
         }
 
         // Foam — position + type + remaining lifetime.
@@ -410,14 +442,19 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         d.grid.resize(gnx, gny, gnz, gvoxel, gorigin);
 
         std::vector<float> density, temperature, fuel, interaction;
+        std::vector<float> gas_phase_mass_kg, gas_phase_energy_j;
         if (!readFloatArray(is, density))     return false;
         if (!readFloatArray(is, temperature)) return false;
         if (!readFloatArray(is, fuel))        return false;
         if (!readFloatArray(is, interaction)) return false;
+        if (!readFloatArray(is, gas_phase_mass_kg)) return false;
+        if (!readFloatArray(is, gas_phase_energy_j)) return false;
         if (!density.empty())     d.grid.density     = std::move(density);
         if (!temperature.empty()) d.grid.temperature = std::move(temperature);
         if (!fuel.empty())        d.grid.fuel        = std::move(fuel);
         if (!interaction.empty()) d.grid.interaction = std::move(interaction);
+        d.gas_phase_mass_kg = std::move(gas_phase_mass_kg);
+        d.gas_phase_energy_j = std::move(gas_phase_energy_j);
 
         // Fluid particles — positions restored; velocity/affine/flags zeroed to
         // match the count so any consumer iterating them in lockstep stays valid.
@@ -444,6 +481,7 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         d.particles.affine.assign(static_cast<size_t>(pcount), Fluid::AffineC{});
         d.particles.flags.assign(static_cast<size_t>(pcount), 0u);
         d.particles.mass_fraction.assign(static_cast<size_t>(pcount), 1.0f);
+        d.particles.rest_mass_kg.assign(static_cast<size_t>(pcount), 0.0f);
         // ★ 293 K, not 0. Playback used to assign 0 K here, so a cached frame
         // came back colder than absolute ambient and every thermal threshold
         // read against it behaved differently from the live sim. Same class as
@@ -458,6 +496,21 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         d.particles.substance_tag.resize(static_cast<size_t>(pcount));
         for (uint64_t i = 0; i < pcount; ++i) {
             if (!readPod(is, d.particles.substance_tag[i])) return false;
+        }
+        d.particles.constitutive_model.resize(static_cast<size_t>(pcount));
+        for (uint64_t i = 0; i < pcount; ++i) {
+            if (!readPod(is, d.particles.constitutive_model[i])) return false;
+        }
+        for (uint64_t i = 0; i < pcount; ++i) {
+            if (!readPod(is, d.particles.mass_fraction[i]) ||
+                !readPod(is, d.particles.rest_mass_kg[i])) {
+                return false;
+            }
+        }
+        for (uint64_t i = 0; i < pcount; ++i) {
+            uint32_t f = 0u;
+            if (!readPod(is, f)) return false;
+            d.particles.flags[static_cast<size_t>(i)] = f & kPersistentParticleFlags;
         }
 
         // Foam — position + type + lifetime restored; velocity zeroed.

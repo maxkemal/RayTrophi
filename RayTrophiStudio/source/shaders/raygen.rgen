@@ -99,31 +99,6 @@ struct VkWorldDataExtended {
     int   multiScatterEnabled;
     float multiScatterFactor;
     
-    // ════════════════════════════ CLOUD LAYER 1 PARAMETERS (64 bytes)
-    int   cloudsEnabled;
-    float cloudCoverage;
-    float cloudDensity;
-    float cloudScale;
-    float cloudHeightMin;
-    float cloudHeightMax;
-    float cloudOffsetX;
-    float cloudOffsetZ;
-    float cloudQuality;
-    float cloudDetail;
-    int   cloudBaseSteps;
-    int   cloudLightSteps;
-    float cloudShadowStrength;
-    float cloudAmbientStrength;
-    float cloudSilverIntensity;
-    float cloudAbsorption;
-    
-    // ════════════════════════════ ADVANCED CLOUD SCATTERING (32 bytes)
-    float cloudAnisotropy;
-    float cloudAnisotropyBack;
-    float cloudLobeMix;
-    float cloudEmissiveIntensity;
-    vec3  cloudEmissiveColor;
-    float _pad3;
     
     // ════════════════════════════ FOG PARAMETERS (40 bytes)
     int   fogEnabled;
@@ -131,9 +106,9 @@ struct VkWorldDataExtended {
     float fogHeight;
     float fogFalloff;
     float fogDistance;
-    float fogSunScatter;
-    vec3  fogColor;
-    float _pad4;   // padding — aligns fogColor to 16 bytes, matches C++ struct
+    float fogAnisotropy;   // Henyey-Greenstein g of the height fog (froxel only)
+    vec3  fogAlbedo;
+    float _pad4;   // padding — aligns fogAlbedo to 16 bytes, matches C++ struct
     
     // ════════════════════════════ GOD RAYS (16 bytes)
     int   godRaysEnabled;
@@ -141,11 +116,11 @@ struct VkWorldDataExtended {
     float godRaysDensity;
     int   godRaysSamples;
     
-    // ════════════════════════════ AERIAL PERSPECTIVE (16 bytes) — matches OptiX AtmosphereAdvanced
-    int   aerialEnabled;        // 1 = apply aerial perspective
-    float aerialMinDistance;    // No haze below this (meters)
-    float aerialMaxDistance;    // Full haze at this (meters)
-    float aerialDensity;        // Independent haze density/strength multiplier
+    // ════════════════════════════ AERIAL FROXEL (16 bytes)
+    int   aerialFroxelReady;    // 1 = atmosphereLUTs[3] holds this device's aerial froxel (aerial_froxel.glsl)
+    float _aerialPad0;
+    float _aerialPad1;
+    float _aerialPad2;
 
     // Weather payload (passive until weather rendering is enabled)
     int   weatherEnabled;
@@ -183,8 +158,9 @@ layout(set = 0, binding = 3, scalar) readonly buffer LightBuffer     { LightData
 layout(set = 0, binding = 4, scalar) readonly buffer GeometryBuffer  { VkGeometryData g[]; } geometries;
 layout(set = 0, binding = 5, scalar) readonly buffer InstanceBuffer  { VkInstanceData  i[]; } instances;
 layout(set = 0, binding = 7, scalar) readonly buffer WorldBuffer     { VkWorldDataExtended w; } worldData;
-// Atmosphere LUT samplers: [0]=transmittance, [1]=skyview, [2]=multi_scatter, [3]=aerial_perspective
+// Atmosphere LUT samplers: [0]=transmittance, [1]=skyview, [2]=multi_scatter, [3]=aerial froxel atlas
 layout(set = 0, binding = 8) uniform sampler2D atmosphereLUTs[4];
+#include "aerial_froxel.glsl"
 layout(set = 0, binding = 13, rgba32f) uniform image2D denoiserColorImage;
 layout(set = 0, binding = 14, rgba32f) uniform image2D denoiserAlbedoImage;
 layout(set = 0, binding = 15, rgba32f) uniform image2D denoiserNormalImage;
@@ -385,24 +361,6 @@ uint initSeed(uvec2 pixel, uvec2 size, uint frame) {
 // ============================================================
 float luminance(vec3 c) {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
-}
-
-// OptiX parity: analytical exponential height fog integral.
-float calculateHeightFogFactor(
-    vec3 rayOrigin,
-    vec3 rayDir,
-    float distance,
-    float fogDensity,
-    float fogHeight,
-    float fogFalloff
-) {
-    float a = fogDensity * exp(-fogFalloff * rayOrigin.y);
-    float b = fogFalloff * rayDir.y;
-    if (abs(b) < 1e-5) {
-        return 1.0 - exp(-a * distance);
-    }
-    float fogAmount = a * (1.0 - exp(-b * distance)) / b;
-    return 1.0 - exp(-fogAmount);
 }
 
 float sanitizeComponent(float v) {
@@ -980,7 +938,14 @@ void main() {
     int maxTotalPasses = effectiveBounces + 32; // Allow up to 32 extra passes for transparent/volume skipping
 
     int bounce = 0;      // hoisted: Bounce Count debug view reads it after the loop
+    // Instrumentation only: `continuing` is true exactly when the loop exits on
+    // its own condition (a budget cap) rather than on a break (miss, absorbed,
+    // roulette). `subBudgetCapped` marks the diffuse/transmission/resin caps,
+    // which break out of the loop but are budget exhaustion all the same.
+    bool continuing = false;
+    bool subBudgetCapped = false;
     for (int totalPasses = 0; bounce < effectiveBounces && totalPasses < maxTotalPasses; totalPasses++) {
+        continuing = false;
 
         // Consume skipVolumeAABBs flag set by previous bounce (volume solid detection)
         bool useSkipVolumeAABBs = payload.skipVolumeAABBs;
@@ -998,6 +963,7 @@ void main() {
         payload.primaryABT    = 0u;
         payload.primaryNrm    = 0u;
         payload.primaryMeta   = plMetaReset(payload.primaryMeta); // keeps dispersion bits
+        if (bounce == 0) payload.primaryMeta |= PL_CAMERA_SEGMENT;
         payload.bounceType = BOUNCE_SPECULAR;
 
         // When the previous bounce was a volume that detected a solid surface
@@ -1119,20 +1085,33 @@ void main() {
         // --- STOCHASTIC TRANSPARENCY BOUNCE PRESERVATION ---
         // If the ray passed straight through without altering radiance or attenuation (opacity cutout),
         // do NOT count it as a GI bounce. Keep bounce limit available for actual lighting.
-        if (!isTransparentPass && !payload.skipVolumeAABBs &&
+        // A straight continuation through a medium (gas/fog segment integrated,
+        // direction unchanged) is not a scattering event. It stays bounded by
+        // maxTotalPasses but spends no bounce. isTransparentPass cannot cover it:
+        // the segment carries in-scattered radiance.
+        bool mediumPass = payload.bounceType == BOUNCE_MEDIUM_PASS &&
+                          dot(payload.scatterDir, rayDir) > 0.9999;
+        if (!isTransparentPass && !mediumPass && !payload.skipVolumeAABBs &&
             !payload.skipGasVolumes) {
             if (payload.bounceType == BOUNCE_DIFFUSE) {
+                volumeRecordPass(1u);
                 diffuseBounceCount++;
-                if (diffuseBounceCount > effectiveDiffuseBounces) break;
+                if (diffuseBounceCount > effectiveDiffuseBounces) { subBudgetCapped = true; break; }
             } else if (payload.bounceType == BOUNCE_TRANSMISSION ||
                        payload.bounceType == BOUNCE_GLASS_REFLECT) {
+                volumeRecordPass(2u);
                 transmissionBounceCount++;
-                if (transmissionBounceCount > effectiveTransmissionBounces) break;
+                if (transmissionBounceCount > effectiveTransmissionBounces) { subBudgetCapped = true; break; }
             } else if (payload.bounceType == BOUNCE_RESIN) {
+                volumeRecordPass(3u);
                 resinBounceCount++;
-                if (resinBounceCount > RESIN_MAX_BOUNCES) break;
+                if (resinBounceCount > RESIN_MAX_BOUNCES) { subBudgetCapped = true; break; }
+            } else {
+                volumeRecordPass(payload.bounceType == BOUNCE_SPECULAR ? 0u : 3u);
             }
             bounce++;
+        } else {
+            volumeRecordPass(4u);
         }
 
         rayOrigin = payload.scatterOrigin;
@@ -1143,11 +1122,13 @@ void main() {
             firstHitPos   = payload.scatterOrigin;
             firstHitValid = true;
         }
+        continuing = true;
     }
+    volumeRecordPathEnd(subBudgetCapped || (continuing && bounce >= effectiveBounces),
+                        continuing && bounce < effectiveBounces);
 
     // ══════════════════════════════════════════════════════════════════════════
-    // ATMOSPHERIC FOG — Distance-based exponential fog (uses VkWorldDataExtended)
-    // Matches OptiX fog integration in closesthit kernels
+    // GOD RAYS (primary segment)
     // ══════════════════════════════════════════════════════════════════════════
     if (worldData.w.godRaysEnabled != 0) {
         float godRayMaxDist = firstHitValid ? length(firstHitPos - primaryRayOrigin) : 200000.0;
@@ -1166,113 +1147,43 @@ void main() {
         radiance += softClipFireflies(sanitizeRadiance(volCaustic), 64.0);
     }
 
-    if (worldData.w.fogEnabled != 0 && worldData.w.fogDensity > 0.0) {
-        vec3 primaryOrigin = primaryRayOrigin;
-        vec3 fogDir = firstHitValid ? normalize(firstHitPos - primaryOrigin) : normalize(primaryRayDir);
-        float hitDist = firstHitValid ? length(firstHitPos - primaryOrigin) : (worldData.w.fogDistance * 0.8);
-        // A volume AABB is not an opaque atmospheric endpoint. Its own
-        // Beer-Lambert compositing is already in the path radiance; scaling
-        // aerial distance by its weak opacity creates a domain-shaped halo.
-        if (!primaryVolumeHit) {
-            hitDist *= (1.0 - clamp(firstHitTransmission, 0.0, 1.0));
-        }
-        hitDist = min(hitDist, worldData.w.fogDistance);
-
-        // OptiX-parity analytical height fog.
-        float fogAmount = calculateHeightFogFactor(
-            primaryOrigin,
-            fogDir,
-            hitDist,
-            worldData.w.fogDensity,
-            worldData.w.fogHeight,
-            worldData.w.fogFalloff
-        );
-        fogAmount = clamp(fogAmount, 0.0, 1.0);
-        
-        // Sun scattering in fog (Mie-like forward scatter)
-        vec3 fogCol = worldData.w.fogColor;
-        if (worldData.w.fogSunScatter > 0.0) {
-            float sunDot = max(dot(fogDir, normalize(worldData.w.sunDir)), 0.0);
-            float sunScatter = pow(sunDot, 8.0) * worldData.w.fogSunScatter;
-            fogCol += worldData.w.sunColor * worldData.w.sunIntensity * sunScatter * 0.1;
-        }
-        
-        radiance = mix(radiance, fogCol, fogAmount);
-    }
-
     // ══════════════════════════════════════════════════════════════════════
-    // AERIAL PERSPECTIVE — matches OptiX gpu_get_aerial_perspective() exactly
-    // Nishita-based distance haze: uses Transmittance + SkyView LUTs
+    // AERIAL PERSPECTIVE + HEIGHT FOG — the froxel (aerial_froxel.glsl)
     // ══════════════════════════════════════════════════════════════════════
-    bool hasAtmosLUTs = worldData.w._pad5 != 0;
-    // Nishita miss radiance already represents the atmosphere to infinity.
-    // Aerial perspective is a finite-distance surface effect; applying it
-    // again on a sky miss double-hazes both the sky and any nearby volume
-    // composited in front of it.
-    if (worldData.w.mode == 2 && worldData.w.aerialEnabled != 0 &&
-        hasAtmosLUTs && firstHitValid) {
-        vec3 primaryOrigin = primaryRayOrigin;
-        float hitDist = firstHitValid ? length(firstHitPos - primaryOrigin) : max(worldData.w.aerialMinDistance, 10000.0);
-        // Volume transmittance is already composed in the path. Treating the
-        // volume AABB as an aerial endpoint makes weak density fringe pixels
-        // use a different haze distance than adjacent sky pixels.
-        if (!primaryVolumeHit) {
-            hitDist *= (1.0 - clamp(firstHitTransmission, 0.0, 1.0));
+    // One medium, integrated once per camera/atmosphere change by
+    // atmosphere_aerial_froxel.comp; RayFusion reads the same atlas layout in
+    // raster_post.comp. The former artistic ramp (aerial_min/max_distance,
+    // pow(transmittance, distFactor)) and the separate analytic fog mix are
+    // gone: two formulas for one medium is how RT and the viewport drifted.
+    //   surface hit -> air + fog up to the hit's VIEW depth
+    //   sky miss    -> fog only, out to fog_distance (the sky-view LUT already
+    //                  holds the air to infinity; adding it again double-hazes)
+    if (worldData.w.aerialFroxelReady != 0) {
+        vec3  camOrigin = cam.origin.xyz;
+        vec3  viewDir;
+        float rayLen;
+        bool  fogOnly;
+        if (firstHitValid) {
+            vec3 toHit = firstHitPos - camOrigin;
+            rayLen  = length(toHit);
+            viewDir = rayLen > 1e-6 ? toHit / rayLen : normalize(primaryRayDir);
+            fogOnly = false;
+            // A volume AABB is not an opaque atmospheric endpoint: its own
+            // Beer-Lambert compositing is already in the path radiance, and
+            // using the box as the haze distance draws a domain-shaped halo.
+            if (!primaryVolumeHit) rayLen *= (1.0 - clamp(firstHitTransmission, 0.0, 1.0));
+        } else {
+            viewDir = normalize(primaryRayDir);
+            rayLen  = worldData.w.fogDistance;
+            fogOnly = true;
         }
-        
-        if (hitDist > 0.1 && hitDist < 1e6) {
-            vec3  rayDir      = firstHitValid ? normalize(firstHitPos - primaryOrigin) : normalize(primaryRayDir);
-            float Rg          = worldData.w.planetRadius;
-            vec3  p           = primaryOrigin + vec3(0.0, Rg, 0.0);
-            float altitude    = length(p) - Rg;
-            vec3  up          = p / (Rg + altitude);
-
-            // Transmittance LUT sample — same UV mapping as OptiX
-            float cosTheta    = max(0.01, dot(up, rayDir));
-            float uT          = (cosTheta + 0.2) / 1.2;
-            float vT          = clamp(altitude / max(1.0, worldData.w.atmosphereHeight), 0.0, 1.0);
-            vec3  transmittance = texture(atmosphereLUTs[0], vec2(uT, vT)).rgb;
-
-            // Distance ramp (matches OptiX ramp * ramp)
-            float minD   = worldData.w.aerialMinDistance;
-            float maxD   = worldData.w.aerialMaxDistance;
-            float ramp   = (hitDist < minD) ? 0.0 : clamp((hitDist - minD) / max(1.0, maxD - minD), 0.0, 1.0);
-            
-            float aerialDensity = max(worldData.w.aerialDensity, 0.0);
-            float atmosphereDensity = max(worldData.w.airDensity * 0.60 + worldData.w.dustDensity * 0.40, 0.001);
-            float enabledFogDensity = worldData.w.fogEnabled != 0
-                ? max(worldData.w.fogDensity, 0.0) : 0.0;
-            float densityFactor = aerialDensity * atmosphereDensity * (1.0 + enabledFogDensity * 120.0);
-            float distFactor = (1.0 - exp(-(hitDist / 10000.0) * densityFactor)) * (ramp * ramp);
-
-            vec3 finalTrans = pow(transmittance, vec3(distFactor));
-
-            // Sky radiance at view direction (clamped above horizon, same as OptiX)
-            vec3 lookupDir = rayDir;
-            if (lookupDir.y < 0.0) {
-                vec3 horizonDir = vec3(lookupDir.x, 0.0, lookupDir.z);
-                float horizonLen2 = dot(horizonDir, horizonDir);
-                if (horizonLen2 > 1e-10) {
-                    lookupDir = horizonDir * inversesqrt(horizonLen2);
-                } else {
-                    // Avoid a NaN direction at the image center when the ray points almost
-                    // straight up/down and the horizon projection collapses to zero.
-                    lookupDir = vec3(0.0, 0.0, 1.0);
-                }
-            }
-            float az       = atan(lookupDir.z, lookupDir.x);
-            if (az < 0.0) az += 6.2831853;
-            float uS       = az / 6.2831853;
-            float vS       = (1.0 - lookupDir.y) * 0.5;
-            vec3  skyRad   = texture(atmosphereLUTs[1], vec2(uS, vS)).rgb;
-            float uMS      = clamp((worldData.w.sunDir.y + 0.1) / 1.1, 0.0, 1.0);
-            float vMS      = clamp(altitude / max(1.0, worldData.w.atmosphereHeight), 0.0, 1.0);
-            vec3  msRad    = texture(atmosphereLUTs[2], vec2(uMS, vMS)).rgb;
-            float msWeight = clamp(worldData.w.airDensity * 0.035 + worldData.w.dustDensity * 0.025, 0.0, 0.28)
-                           * ramp;
-            vec3  aerialScatter = skyRad + msRad * worldData.w.atmosphereIntensity * msWeight;
-
-            radiance = radiance * finalTrans + aerialScatter * (vec3(1.0) - finalTrans);
+        vec2  froxelUV;
+        float cosView;
+        if (rayLen > 0.0 &&
+            afProjectDirection(camOrigin, cam.lowerLeft.xyz, cam.horizontal.xyz, cam.vertical.xyz,
+                               viewDir, froxelUV, cosView)) {
+            AerialSample a = afSample(atmosphereLUTs[3], froxelUV, rayLen * cosView, fogOnly);
+            radiance = afApply(radiance, a);
         }
     }
 

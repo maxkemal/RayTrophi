@@ -122,13 +122,17 @@ struct NishitaSkyParams {
     // ═══════════════════════════════════════════════════════════════
     // ATMOSPHERIC FOG (Height-based + Distance-based)
     // ═══════════════════════════════════════════════════════════════
-    int fog_enabled;               // 1 = show fog
-    float fog_density;             // Extinction per metre (typical 0.00001 - 0.001)
-    float fog_height;              // Fog falloff height (meters, 0 = ground level)
-    float fog_falloff;             // Exponential falloff rate (0.001 - 0.01)
-    float fog_distance;            // Max fog distance (meters)
-    float3 fog_color;              // Fog color (usually bluish-white)
-    float fog_sun_scatter;         // How much fog scatters sunlight toward camera
+    // A participating medium integrated into the aerial froxel together with
+    // the air (atmosphere_aerial_froxel.comp):
+    //   sigma(y) = fog_density * exp(-fog_falloff * max(y - fog_height, 0))
+    // Below fog_height the layer is uniform; above it thins out.
+    int fog_enabled;               // 1 = height fog on
+    float fog_density;             // Extinction per metre at and below fog_height (typical 1e-5 - 1e-3)
+    float fog_height;              // Top of the uniform layer, scene y in metres
+    float fog_falloff;             // Exponential thinning above fog_height, 1/m (0.001 - 0.01)
+    float fog_distance;            // Fog exists only within this distance of the camera (metres)
+    float3 fog_albedo;             // Single-scattering albedo (Nishita: lit by sun + sky; other modes: radiance)
+    float fog_anisotropy;          // Henyey-Greenstein g of the fog droplets, -0.95..0.95
     
     // ═══════════════════════════════════════════════════════════════
     // VOLUMETRIC LIGHT RAYS (God Rays / Light Shafts)
@@ -138,9 +142,12 @@ struct NishitaSkyParams {
     float godrays_density;         // God ray density/thickness
     int godrays_samples;           // Quality (8-32 recommended)
     
-    // Physical Parameters (Atmosphere Physics)
-    float humidity;                // 0.0 (Dry) to 1.0 (Humid/Hazy)
-    float temperature;             // Celsius (-50 to +50)
+    // Climate PACKET — written ONLY by World::syncClimatePacket() from
+    // atmosphere::ClimateState. Renderers read these; nothing else writes
+    // them (a copied NishitaSkyParams carrying a stale value is overwritten on
+    // setNishitaParams). The authority is World::getClimate().
+    float derived_relative_humidity; // 0..1, surface
+    float derived_temperature_c;     // Celsius, surface; scales both scale heights
     float ozone_absorption_scale;  // Scales the "Blue Hour" intensity (0.0 to 10.0)
 };
 
@@ -150,12 +157,10 @@ struct NishitaSkyParams {
 struct AtmosphereAdvanced {
     int multi_scatter_enabled;     // 1 = enable multi-scattering
     float multi_scatter_factor;    // Multi-scatter intensity (0.0 - 1.0)
-    int aerial_perspective;        // 1 = Physical haze based on distance
-    
-    // Aerial Perspective Distance Control (UI adjustable)
-    float aerial_density;         // Independent haze density/strength multiplier
-    float aerial_min_distance;     // No haze below this distance (meters, default: 1000)
-    float aerial_max_distance;     // Full haze at this distance (meters, default: 10000)
+    // 1 = air scattering between the camera and surfaces (aerial froxel). How
+    // much haze there is comes from the atmosphere itself -- air/dust density,
+    // climate humidity -- not from a separate strength or distance ramp.
+    int aerial_perspective;
     
     // Environment Texture Overlay (Moved here for better UI grouping)
     int env_overlay_enabled;       // 1 = blend environment texture with Nishita
@@ -171,8 +176,10 @@ struct WeatherParams {
     float intensity;                // Artist-facing strength, 0..1
     float density;                  // Particle/volume density, 0..1
 
-    float3 wind_direction;          // Normalized world-space wind direction
-    float wind_speed;               // Meters/second style scale for animation
+    // Climate PACKET (see NishitaSkyParams::derived_*): mirrored from
+    // atmosphere::ClimateState by World::syncClimatePacket(), never authored here.
+    float3 derived_wind_direction;  // Normalized horizontal world-space wind direction
+    float derived_wind_speed_mps;   // m/s at the surface
 
     float precipitation_scale;      // Visual streak/flake scale
     float visibility;               // 1 = clear, lower values reduce distance contrast
@@ -228,6 +235,8 @@ struct WorldData {
 #include <string>
 #include <vector>
 #include <Texture.h>
+#include "Atmosphere/AtmosphereClimate.h"
+#include "Atmosphere/AtmosphereClouds.h"
 class AtmosphereLUT;
 class World {
 public:
@@ -275,7 +284,37 @@ public:
     void setAdvancedParams(const AtmosphereAdvanced& a);
     WeatherParams getWeatherParams() const;
     void setWeatherParams(const WeatherParams& params);
-    
+
+    // Climate authority (docs/dev/ATMOSPHERE_SYSTEM.md §2). setClimate rejects
+    // invalid input instead of clamping; on success it normalizes the wind
+    // direction, mirrors the render packet and dirties the LUT when the
+    // temperature or humidity changed.
+    const atmosphere::ClimateState& getClimate() const { return climate; }
+    bool setClimate(const atmosphere::ClimateState& c, std::string* error = nullptr);
+    atmosphere::DerivedWeather derivedWeather() const {
+        return atmosphere::deriveWeather(climate, data.nishita.altitude);
+    }
+    // Samples at a scene position (metres); altitude = pos.y + nishita.altitude.
+    atmosphere::ClimateSample sampleClimate(const Vec3& scene_pos) const;
+
+    // Cloud authority (docs/dev/ATMOSPHERE_CLOUDS.md). Rejects invalid input.
+    // The legacy nishita.cloud_* fields are a packet written from this.
+    const atmosphere::CloudState& getClouds() const { return clouds; }
+    bool setClouds(const atmosphere::CloudState& c, std::string* error = nullptr);
+    // Timeline time the clouds are evaluated at (weather drift + evolution).
+    // Set by the timeline applier; a function of the frame, so a replayed
+    // frame gets the same sky.
+    void setCloudTime(float seconds);
+    float getCloudTime() const { return cloud_time_seconds; }
+    // Accumulated weather drift in metres (x, z): climate wind x time. Exact
+    // for a constant wind; a keyed wind uses the current velocity (still
+    // deterministic per frame).
+    Vec3 cloudWindOffset() const;
+    // Climate wind (m/s): slants the precipitation shafts.
+    Vec3 cloudWindVelocity() const { return climate.wind_direction * climate.wind_speed_mps; }
+    // Bumps on every change that alters the cloud field (params or time).
+    uint64_t cloudRevision() const { return cloud_revision; }
+
     // Environment Texture Overlay for Nishita
     void setNishitaEnvOverlay(const std::string& path);
     std::string getNishitaEnvOverlayPath() const;
@@ -309,6 +348,19 @@ private:
    Texture* env_overlay_texture = nullptr;
    AtmosphereLUT* atmosphere_lut = nullptr;
    bool lut_dirty = false;  // Deferred LUT recomputation flag
+   atmosphere::ClimateState climate;
+   atmosphere::CloudState clouds;
+   float cloud_time_seconds = 0.0f;
+   uint64_t cloud_revision = 1;
+   // Writes the legacy nishita.cloud_* packet from `clouds`. Called from
+   // syncClimatePacket (wind feeds the drift) and after cloud/time writes.
+   bool rederiveClouds();
+   void syncCloudPacket();
+
+   // Writes the derived_* packet fields from `climate`. Called after every
+   // write that could carry a stale copy of them (setNishitaParams,
+   // setWeatherParams) and after every climate change.
+   void syncClimatePacket();
    
    // Internal helper for Nishita
    Vec3 calculateNishitaSky(const Vec3& ray_dir, const Vec3& origin = Vec3(0,0,0));

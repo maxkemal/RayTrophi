@@ -29,12 +29,16 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include "post_chain.glsl"
+#include "aerial_froxel.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform sampler2D inHDR;    // scene-linear RGBA16F
 layout(set = 0, binding = 1) uniform sampler2D inDepth;  // D32_SFLOAT, [0,1]
 layout(set = 0, binding = 2, rgba8) uniform writeonly image2D outLDR;
+// Aerial perspective + height fog froxel -- the SAME atlas the Vulkan RT raygen
+// reads (aerial_froxel.glsl), built on this device by atmosphere_aerial_froxel.comp.
+layout(set = 0, binding = 3) uniform sampler2D aerialFroxel;
 
 layout(push_constant) uniform Push {
     uint  width;
@@ -60,6 +64,10 @@ layout(push_constant) uniform Push {
     float depthC;         // zFar
     float maxCoC;         // piksel tavani (performans)
     uint  maxTaps;        // orneklem tavani
+
+    // Aerial froxel
+    uint  aerialEnabled;  // 1 = binding 3 holds a froxel built for this frame's camera
+    float fogDistance;    // m, sky pixels read the fog-only blocks out to here
 } pc;
 
 const float GOLDEN_ANGLE = 2.39996323;
@@ -69,6 +77,28 @@ float linearDepth(float d) {
     // mesafe donmesi DoF acisindan dogru davranistir (arka plan tam bulanik).
     float denom = d * pc.depthB + pc.depthC;
     return (abs(denom) < 1e-9) ? 1e9 : (pc.depthA / denom);
+}
+
+// ★★★ Aerial is applied to EVERY HDR read, centre and DoF taps alike, each at
+//   its own depth. Hazing only the centre would gather un-hazed neighbours
+//   into a hazed pixel: a blurred far ridge would come out clearer than the
+//   same ridge in focus. It is applied BEFORE the DoF gather for the same
+//   reason tonemap is applied after it -- the lens sees the hazed scene.
+vec3 hazedHDR(vec2 uv, float d) {
+    vec3 c = texture(inHDR, uv).rgb;
+    if (pc.aerialEnabled == 0u) return c;
+    // Froxel v runs from the image's BOTTOM edge; raster uv.y from its top.
+    vec2 fuv = vec2(uv.x, 1.0 - uv.y);
+    if (d >= 1.0) {
+        // Sky: the sky-view LUT already holds the air to infinity -- only the
+        // height fog layer, out to fog_distance, covers it.
+        float aspect = float(max(pc.width, 1u)) / float(max(pc.height, 1u));
+        vec2 ndc = fuv * 2.0 - 1.0;
+        vec2 slope = ndc * vec2(pc.tanHalfFovY * aspect, pc.tanHalfFovY);
+        float cosView = inversesqrt(1.0 + dot(slope, slope));
+        return afApply(c, afSample(aerialFroxel, fuv, pc.fogDistance * cosView, true));
+    }
+    return afApply(c, afSample(aerialFroxel, fuv, linearDepth(d), false));
 }
 
 float cocPixels(float z) {
@@ -86,13 +116,14 @@ void main() {
     vec2 uv = (vec2(px) + vec2(0.5)) * texel;
 
     vec4 center = texture(inHDR, uv);
-    vec3 color = center.rgb;
+    float centerDepth = texture(inDepth, uv).r;
+    vec3 color = hazedHDR(uv, centerDepth);
 
     // ── Alan derinligi ──────────────────────────────────────────────────────
     // ★ lensRadius == 0 (varsayilan kamera) ise TEK bir doku okumasi bile
     //   fazladan yapilmaz: DoF kapaliyken bu gecis duz bir tonemap'tir.
     if (pc.lensRadius > 1e-6) {
-        float z0 = linearDepth(texture(inDepth, uv).r);
+        float z0 = linearDepth(centerDepth);
         float r0 = cocPixels(z0);
 
         // ★★ Arama yaricapi YALNIZCA merkezin CoC'u olamaz: onde duran bulanik
@@ -135,7 +166,8 @@ void main() {
                 vec2 offset = vec2(cos(angle), sin(angle)) * radius;
 
                 vec2 suv = uv + offset * texel;
-                float zt = linearDepth(texture(inDepth, suv).r);
+                float dt = texture(inDepth, suv).r;
+                float zt = linearDepth(dt);
                 float ct = cocPixels(zt);
 
                 // ★★★ SCATTER-AS-GATHER: bir orneklem merkeze ancak KENDI
@@ -147,7 +179,7 @@ void main() {
                 if (influence <= 0.0) continue;
 
                 float w = influence / max(ct * ct, 0.25);
-                acc += texture(inHDR, suv).rgb * w;
+                acc += hazedHDR(suv, dt) * w;
                 wsum += w;
             }
             color = acc / max(wsum, 1e-6);

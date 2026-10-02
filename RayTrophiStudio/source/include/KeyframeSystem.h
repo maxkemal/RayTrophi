@@ -19,6 +19,7 @@
 #include "Vec3.h"
 #include "material_gpu.h"  // For GpuMaterial
 #include "json.hpp"
+#include "Atmosphere/AtmosphereClouds.h"
 #include "world.h"
 #include "MeshEdit/SplineAnimation.h"
 using json = nlohmann::json;
@@ -825,44 +826,35 @@ struct WorldKeyframe {
     bool has_air_density = false;
     bool has_dust_density = false;
     bool has_ozone_density = false;
-    bool has_humidity = false;
-    bool has_temperature = false;
     bool has_ozone_absorption_scale = false;
     bool has_altitude = false;
     bool has_mie_anisotropy = false;
     
-    // Cloud properties (Layer 1)
-    bool has_cloud_density = false;
-    bool has_cloud_coverage = false;
-    bool has_cloud_scale = false;
-    bool has_cloud_offset = false;
-    bool has_cloud_quality = false;
-    bool has_cloud_detail = false;
-
-    // Cloud properties (Layer 2)
-    bool has_cloud_layer2 = false;
-    bool has_cloud_layer2_params = false; // Coverage, Density, Scale
-    bool has_cloud_layer2_heights = false;
-
-    // Cloud Lighting
-    bool has_cloud_lighting = false; // Steps, Shadow, Ambient, Silver, Absorption
+    // Clouds (atmosphere::CloudState) - one group, keyed as a block like the
+    // climate. Replaced the per-field legacy cloud_* keys (artistic dials);
+    // those keys are NOT read.
+    bool has_clouds = false;
     
     // Atmospheric Effects
     bool has_fog = false;
-    bool has_fog_params = false; // Density, Height, Falloff, Distance, Color, Scatter
+    bool has_fog_params = false; // Density, Height, Falloff, Distance, Albedo, Anisotropy
     bool has_godrays = false;
     bool has_godrays_params = false; // Intensity, Density, Samples
 
     // Advanced Environment
     bool has_multi_scatter = false;
     bool has_aerial_perspective = false;
-    bool has_aerial_params = false; // Min/Max distance
     bool has_overlay = false;
     bool has_overlay_params = false; // Intensity, Rotation, Mode
 
     // Weather
     bool has_weather_params = false;
-    
+
+    // Climate (atmosphere::ClimateState) — one group, keyed as a block.
+    // Replaced the old per-field humidity/temperature keys (Celsius) and the
+    // wind that rode inside the weather block.
+    bool has_climate = false;
+
     // Property values
     Vec3 background_color = Vec3(0.5, 0.7, 1.0);
     float background_strength = 1.0f;
@@ -878,43 +870,12 @@ struct WorldKeyframe {
     float atmosphere_intensity = 10.0f;
     float dust_density = 1.0f;
     float ozone_density = 1.0f;
-    float humidity = 0.1f;
-    float temperature = 15.0f;
     float ozone_absorption_scale = 1.0f;
     float altitude = 0.0f;
     float mie_anisotropy = 0.76f;
     
     // Cloud L1
-    float cloud_density = 0.5f;
-    float cloud_coverage = 0.5f;
-    float cloud_scale = 1.0f;
-    float cloud_offset_x = 0.0f;
-    float cloud_offset_z = 0.0f;
-    float cloud_quality = 1.0f;
-    float cloud_detail = 1.0f;
-    int cloud_base_steps = 8;
-    float cloud_height_min = 500.0f;
-    float cloud_height_max = 2000.0f;
-
-    // Cloud L2
-    int cloud_layer2_enabled = 0;
-    float cloud2_coverage = 0.3f;
-    float cloud2_density = 0.3f;
-    float cloud2_scale = 8.0f;
-    float cloud2_height_min = 6000.0f;
-    float cloud2_height_max = 7000.0f;
-
-    // Cloud Lighting
-    int cloud_light_steps = 0;
-    float cloud_shadow_strength = 1.0f;
-    float cloud_ambient_strength = 1.0f;
-    float cloud_silver_intensity = 1.0f;
-    float cloud_absorption = 1.0f;
-    float cloud_anisotropy = 0.85f;
-    float cloud_anisotropy_back = -0.3f;
-    float cloud_lobe_mix = 0.5f;
-    float cloud_emissive_intensity = 0.0f;
-    Vec3 cloud_emissive_color = Vec3(1.0, 1.0, 1.0);
+    atmosphere::CloudState clouds;
 
     // Fog
     int fog_enabled = 0;
@@ -922,8 +883,8 @@ struct WorldKeyframe {
     float fog_height = 500.0f;
     float fog_falloff = 0.003f;
     float fog_distance = 10000.0f;
-    Vec3 fog_color = Vec3(0.7, 0.8, 0.9);
-    float fog_sun_scatter = 0.5f;
+    Vec3 fog_albedo = Vec3(0.95, 0.95, 0.95);
+    float fog_anisotropy = 0.6f;
 
     // God Rays
     int godrays_enabled = 0;
@@ -936,9 +897,6 @@ struct WorldKeyframe {
     int multi_scatter_enabled = 1;
     float multi_scatter_factor = 0.3f;
     int aerial_perspective = 1;
-    float aerial_density = 1.0f;
-    float aerial_min_distance = 1000.0f;
-    float aerial_max_distance = 10000.0f;
     int env_overlay_enabled = 0;
     float env_overlay_intensity = 1.0f;
     float env_overlay_rotation = 0.0f;
@@ -948,8 +906,6 @@ struct WorldKeyframe {
     int weather_type = 0;
     float weather_intensity = 0.0f;
     float weather_density = 0.0f;
-    Vec3 weather_wind_direction = Vec3(1.0f, 0.0f, 0.0f);
-    float weather_wind_speed = 0.0f;
     float weather_precipitation_scale = 1.0f;
     float weather_visibility = 1.0f;
     float weather_surface_wetness = 0.0f;
@@ -958,6 +914,14 @@ struct WorldKeyframe {
     float weather_surface_height = 0.0f;
     int weather_visual_mode = 0;
     int weather_surface_response_enabled = 1;
+
+    // Climate — same units and defaults as atmosphere::ClimateState.
+    float climate_temperature_k = 288.15f;
+    float climate_lapse_rate_k_per_m = 0.0065f;
+    float climate_relative_humidity = 0.1f;
+    float climate_pressure_pa = 101325.0f;
+    Vec3  climate_wind_direction = Vec3(1.0f, 0.0f, 0.0f);
+    float climate_wind_speed_mps = 0.0f;
     
     WorldKeyframe() = default;
     
@@ -1068,26 +1032,26 @@ struct WorldKeyframe {
             result.dust_density = b.dust_density;
         }
 
-        // Humidity
-        result.has_humidity = a.has_humidity || b.has_humidity;
-        if (a.has_humidity && b.has_humidity) {
-            result.humidity = a.humidity + (b.humidity - a.humidity) * t;
-        } else if (a.has_humidity) {
-            result.humidity = a.humidity;
-        } else if (b.has_humidity) {
-            result.humidity = b.humidity;
+        // Climate (block)
+        result.has_climate = a.has_climate || b.has_climate;
+        if (a.has_climate && b.has_climate) {
+            result.climate_temperature_k = a.climate_temperature_k + (b.climate_temperature_k - a.climate_temperature_k) * t;
+            result.climate_lapse_rate_k_per_m = a.climate_lapse_rate_k_per_m + (b.climate_lapse_rate_k_per_m - a.climate_lapse_rate_k_per_m) * t;
+            result.climate_relative_humidity = a.climate_relative_humidity + (b.climate_relative_humidity - a.climate_relative_humidity) * t;
+            result.climate_pressure_pa = a.climate_pressure_pa + (b.climate_pressure_pa - a.climate_pressure_pa) * t;
+            // Linear blend of unit vectors; World::setClimate re-normalizes.
+            result.climate_wind_direction = a.climate_wind_direction + (b.climate_wind_direction - a.climate_wind_direction) * t;
+            result.climate_wind_speed_mps = a.climate_wind_speed_mps + (b.climate_wind_speed_mps - a.climate_wind_speed_mps) * t;
+        } else if (a.has_climate || b.has_climate) {
+            const WorldKeyframe& s = a.has_climate ? a : b;
+            result.climate_temperature_k = s.climate_temperature_k;
+            result.climate_lapse_rate_k_per_m = s.climate_lapse_rate_k_per_m;
+            result.climate_relative_humidity = s.climate_relative_humidity;
+            result.climate_pressure_pa = s.climate_pressure_pa;
+            result.climate_wind_direction = s.climate_wind_direction;
+            result.climate_wind_speed_mps = s.climate_wind_speed_mps;
         }
 
-        // Temperature
-        result.has_temperature = a.has_temperature || b.has_temperature;
-        if (a.has_temperature && b.has_temperature) {
-            result.temperature = a.temperature + (b.temperature - a.temperature) * t;
-        } else if (a.has_temperature) {
-            result.temperature = a.temperature;
-        } else if (b.has_temperature) {
-            result.temperature = b.temperature;
-        }
-        
         // Ozone Density & Strength
         result.has_ozone_density = a.has_ozone_density || b.has_ozone_density;
         if (a.has_ozone_density && b.has_ozone_density) {
@@ -1119,103 +1083,12 @@ struct WorldKeyframe {
             result.mie_anisotropy = b.mie_anisotropy;
         }
         
-        // ===== CLOUD PROPERTIES (L1) =====
-        // Cloud Density
-        result.has_cloud_density = a.has_cloud_density || b.has_cloud_density;
-        if (a.has_cloud_density && b.has_cloud_density) {
-            result.cloud_density = a.cloud_density + (b.cloud_density - a.cloud_density) * t;
-        } else if (a.has_cloud_density) {
-            result.cloud_density = a.cloud_density;
-        } else if (b.has_cloud_density) {
-            result.cloud_density = b.cloud_density;
-        }
-        
-        // Cloud Coverage
-        result.has_cloud_coverage = a.has_cloud_coverage || b.has_cloud_coverage;
-        if (a.has_cloud_coverage && b.has_cloud_coverage) {
-            result.cloud_coverage = a.cloud_coverage + (b.cloud_coverage - a.cloud_coverage) * t;
-        } else if (a.has_cloud_coverage) {
-            result.cloud_coverage = a.cloud_coverage;
-        } else if (b.has_cloud_coverage) {
-            result.cloud_coverage = b.cloud_coverage;
-        }
-        
-        // Cloud Scale
-        result.has_cloud_scale = a.has_cloud_scale || b.has_cloud_scale;
-        if (a.has_cloud_scale && b.has_cloud_scale) {
-            result.cloud_scale = a.cloud_scale + (b.cloud_scale - a.cloud_scale) * t;
-        } else if (a.has_cloud_scale) {
-            result.cloud_scale = a.cloud_scale;
-        } else if (b.has_cloud_scale) {
-            result.cloud_scale = b.cloud_scale;
-        }
-        
-        // Cloud Offset (X and Z together)
-        result.has_cloud_offset = a.has_cloud_offset || b.has_cloud_offset;
-        if (a.has_cloud_offset && b.has_cloud_offset) {
-            result.cloud_offset_x = a.cloud_offset_x + (b.cloud_offset_x - a.cloud_offset_x) * t;
-            result.cloud_offset_z = a.cloud_offset_z + (b.cloud_offset_z - a.cloud_offset_z) * t;
-        } else if (a.has_cloud_offset) {
-            result.cloud_offset_x = a.cloud_offset_x;
-            result.cloud_offset_z = a.cloud_offset_z;
-        } else if (b.has_cloud_offset) {
-            result.cloud_offset_x = b.cloud_offset_x;
-            result.cloud_offset_z = b.cloud_offset_z;
-        }
-        
-        // Quality & Detail
-        result.has_cloud_quality = a.has_cloud_quality || b.has_cloud_quality;
-        if (a.has_cloud_quality && b.has_cloud_quality) {
-            result.cloud_quality = a.cloud_quality + (b.cloud_quality - a.cloud_quality) * t;
-            result.cloud_detail = a.cloud_detail + (b.cloud_detail - a.cloud_detail) * t;
-            result.cloud_base_steps = (t < 0.5f) ? a.cloud_base_steps : b.cloud_base_steps;
-        } else if (a.has_cloud_quality) {
-            result.cloud_quality = a.cloud_quality; result.cloud_detail = a.cloud_detail; result.cloud_base_steps = a.cloud_base_steps;
-        } else if (b.has_cloud_quality) {
-            result.cloud_quality = b.cloud_quality; result.cloud_detail = b.cloud_detail; result.cloud_base_steps = b.cloud_base_steps;
-        }
-
-        // ===== CLOUD LAYER 2 =====
-        result.has_cloud_layer2 = a.has_cloud_layer2 || b.has_cloud_layer2;
-        if (result.has_cloud_layer2) {
-            result.cloud_layer2_enabled = (t < 0.5f) ? a.cloud_layer2_enabled : b.cloud_layer2_enabled;
-        }
-        result.has_cloud_layer2_params = a.has_cloud_layer2_params || b.has_cloud_layer2_params;
-        if (a.has_cloud_layer2_params && b.has_cloud_layer2_params) {
-            result.cloud2_coverage = a.cloud2_coverage + (b.cloud2_coverage - a.cloud2_coverage) * t;
-            result.cloud2_density = a.cloud2_density + (b.cloud2_density - a.cloud2_density) * t;
-            result.cloud2_scale = a.cloud2_scale + (b.cloud2_scale - a.cloud2_scale) * t;
-        } else if (a.has_cloud_layer2_params) {
-            result.cloud2_coverage = a.cloud2_coverage; result.cloud2_density = a.cloud2_density; result.cloud2_scale = a.cloud2_scale;
-        } else if (b.has_cloud_layer2_params) {
-            result.cloud2_coverage = b.cloud2_coverage; result.cloud2_density = b.cloud2_density; result.cloud2_scale = b.cloud2_scale;
-        }
-
-        // ===== CLOUD LIGHTING =====
-        result.has_cloud_lighting = a.has_cloud_lighting || b.has_cloud_lighting;
-        if (a.has_cloud_lighting && b.has_cloud_lighting) {
-            result.cloud_light_steps = (t < 0.5f) ? a.cloud_light_steps : b.cloud_light_steps;
-            result.cloud_shadow_strength = a.cloud_shadow_strength + (b.cloud_shadow_strength - a.cloud_shadow_strength) * t;
-            result.cloud_ambient_strength = a.cloud_ambient_strength + (b.cloud_ambient_strength - a.cloud_ambient_strength) * t;
-            result.cloud_silver_intensity = a.cloud_silver_intensity + (b.cloud_silver_intensity - a.cloud_silver_intensity) * t;
-            result.cloud_absorption = a.cloud_absorption + (b.cloud_absorption - a.cloud_absorption) * t;
-            result.cloud_anisotropy = a.cloud_anisotropy + (b.cloud_anisotropy - a.cloud_anisotropy) * t;
-            result.cloud_anisotropy_back = a.cloud_anisotropy_back + (b.cloud_anisotropy_back - a.cloud_anisotropy_back) * t;
-            result.cloud_lobe_mix = a.cloud_lobe_mix + (b.cloud_lobe_mix - a.cloud_lobe_mix) * t;
-            result.cloud_emissive_intensity = a.cloud_emissive_intensity + (b.cloud_emissive_intensity - a.cloud_emissive_intensity) * t;
-            result.cloud_emissive_color = a.cloud_emissive_color + (b.cloud_emissive_color - a.cloud_emissive_color) * t;
-        } else if (a.has_cloud_lighting) {
-            result.cloud_light_steps = a.cloud_light_steps; result.cloud_shadow_strength = a.cloud_shadow_strength;
-            result.cloud_ambient_strength = a.cloud_ambient_strength; result.cloud_silver_intensity = a.cloud_silver_intensity;
-            result.cloud_absorption = a.cloud_absorption; result.cloud_anisotropy = a.cloud_anisotropy;
-            result.cloud_anisotropy_back = a.cloud_anisotropy_back; result.cloud_lobe_mix = a.cloud_lobe_mix;
-            result.cloud_emissive_intensity = a.cloud_emissive_intensity; result.cloud_emissive_color = a.cloud_emissive_color;
-        } else if (b.has_cloud_lighting) {
-            result.cloud_light_steps = b.cloud_light_steps; result.cloud_shadow_strength = b.cloud_shadow_strength;
-            result.cloud_ambient_strength = b.cloud_ambient_strength; result.cloud_silver_intensity = b.cloud_silver_intensity;
-            result.cloud_absorption = b.cloud_absorption; result.cloud_anisotropy = b.cloud_anisotropy;
-            result.cloud_anisotropy_back = b.cloud_anisotropy_back; result.cloud_lobe_mix = b.cloud_lobe_mix;
-            result.cloud_emissive_intensity = b.cloud_emissive_intensity; result.cloud_emissive_color = b.cloud_emissive_color;
+        // ===== CLOUDS (group) =====
+        result.has_clouds = a.has_clouds || b.has_clouds;
+        if (a.has_clouds && b.has_clouds) {
+            result.clouds = atmosphere::lerpClouds(a.clouds, b.clouds, t);
+        } else if (a.has_clouds || b.has_clouds) {
+            result.clouds = a.has_clouds ? a.clouds : b.clouds;
         }
 
         // ===== FOG =====
@@ -1229,14 +1102,14 @@ struct WorldKeyframe {
             result.fog_height = a.fog_height + (b.fog_height - a.fog_height) * t;
             result.fog_falloff = a.fog_falloff + (b.fog_falloff - a.fog_falloff) * t;
             result.fog_distance = a.fog_distance + (b.fog_distance - a.fog_distance) * t;
-            result.fog_color = a.fog_color + (b.fog_color - a.fog_color) * t;
-            result.fog_sun_scatter = a.fog_sun_scatter + (b.fog_sun_scatter - a.fog_sun_scatter) * t;
+            result.fog_albedo = a.fog_albedo + (b.fog_albedo - a.fog_albedo) * t;
+            result.fog_anisotropy = a.fog_anisotropy + (b.fog_anisotropy - a.fog_anisotropy) * t;
         } else if (a.has_fog_params) {
             result.fog_density = a.fog_density; result.fog_height = a.fog_height; result.fog_falloff = a.fog_falloff;
-            result.fog_distance = a.fog_distance; result.fog_color = a.fog_color; result.fog_sun_scatter = a.fog_sun_scatter;
+            result.fog_distance = a.fog_distance; result.fog_albedo = a.fog_albedo; result.fog_anisotropy = a.fog_anisotropy;
         } else if (b.has_fog_params) {
             result.fog_density = b.fog_density; result.fog_height = b.fog_height; result.fog_falloff = b.fog_falloff;
-            result.fog_distance = b.fog_distance; result.fog_color = b.fog_color; result.fog_sun_scatter = b.fog_sun_scatter;
+            result.fog_distance = b.fog_distance; result.fog_albedo = b.fog_albedo; result.fog_anisotropy = b.fog_anisotropy;
         }
 
         // ===== GOD RAYS =====
@@ -1261,16 +1134,6 @@ struct WorldKeyframe {
         result.has_aerial_perspective = a.has_aerial_perspective || b.has_aerial_perspective;
         if (result.has_aerial_perspective) {
             result.aerial_perspective = (t < 0.5f) ? a.aerial_perspective : b.aerial_perspective;
-        }
-        result.has_aerial_params = a.has_aerial_params || b.has_aerial_params;
-        if (a.has_aerial_params && b.has_aerial_params) {
-            result.aerial_density = a.aerial_density + (b.aerial_density - a.aerial_density) * t;
-            result.aerial_min_distance = a.aerial_min_distance + (b.aerial_min_distance - a.aerial_min_distance) * t;
-            result.aerial_max_distance = a.aerial_max_distance + (b.aerial_max_distance - a.aerial_max_distance) * t;
-        } else if (a.has_aerial_params) {
-            result.aerial_density = a.aerial_density; result.aerial_min_distance = a.aerial_min_distance; result.aerial_max_distance = a.aerial_max_distance;
-        } else if (b.has_aerial_params) {
-            result.aerial_density = b.aerial_density; result.aerial_min_distance = b.aerial_min_distance; result.aerial_max_distance = b.aerial_max_distance;
         }
 
         result.has_multi_scatter = a.has_multi_scatter || b.has_multi_scatter;
@@ -1302,8 +1165,6 @@ struct WorldKeyframe {
             result.weather_type = (t < 0.5f) ? a.weather_type : b.weather_type;
             result.weather_intensity = a.weather_intensity + (b.weather_intensity - a.weather_intensity) * t;
             result.weather_density = a.weather_density + (b.weather_density - a.weather_density) * t;
-            result.weather_wind_direction = a.weather_wind_direction + (b.weather_wind_direction - a.weather_wind_direction) * t;
-            result.weather_wind_speed = a.weather_wind_speed + (b.weather_wind_speed - a.weather_wind_speed) * t;
             result.weather_precipitation_scale = a.weather_precipitation_scale + (b.weather_precipitation_scale - a.weather_precipitation_scale) * t;
             result.weather_visibility = a.weather_visibility + (b.weather_visibility - a.weather_visibility) * t;
             result.weather_surface_wetness = a.weather_surface_wetness + (b.weather_surface_wetness - a.weather_surface_wetness) * t;
@@ -1315,7 +1176,6 @@ struct WorldKeyframe {
         } else if (a.has_weather_params) {
             result.weather_enabled = a.weather_enabled; result.weather_type = a.weather_type;
             result.weather_intensity = a.weather_intensity; result.weather_density = a.weather_density;
-            result.weather_wind_direction = a.weather_wind_direction; result.weather_wind_speed = a.weather_wind_speed;
             result.weather_precipitation_scale = a.weather_precipitation_scale; result.weather_visibility = a.weather_visibility;
             result.weather_surface_wetness = a.weather_surface_wetness; result.weather_surface_accumulation = a.weather_surface_accumulation;
             result.weather_surface_settling = a.weather_surface_settling;
@@ -1325,7 +1185,6 @@ struct WorldKeyframe {
         } else if (b.has_weather_params) {
             result.weather_enabled = b.weather_enabled; result.weather_type = b.weather_type;
             result.weather_intensity = b.weather_intensity; result.weather_density = b.weather_density;
-            result.weather_wind_direction = b.weather_wind_direction; result.weather_wind_speed = b.weather_wind_speed;
             result.weather_precipitation_scale = b.weather_precipitation_scale; result.weather_visibility = b.weather_visibility;
             result.weather_surface_wetness = b.weather_surface_wetness; result.weather_surface_accumulation = b.weather_surface_accumulation;
             result.weather_surface_settling = b.weather_surface_settling;
@@ -2633,136 +2492,32 @@ struct ObjectAnimationTrack {
             evalWorldFloat(&WorldKeyframe::has_air_density, &WorldKeyframe::air_density);
             evalWorldFloat(&WorldKeyframe::has_dust_density, &WorldKeyframe::dust_density);
             evalWorldFloat(&WorldKeyframe::has_ozone_density, &WorldKeyframe::ozone_density);
-            evalWorldFloat(&WorldKeyframe::has_humidity, &WorldKeyframe::humidity);
-            evalWorldFloat(&WorldKeyframe::has_temperature, &WorldKeyframe::temperature);
+            evalWorldFloat(&WorldKeyframe::has_climate, &WorldKeyframe::climate_temperature_k);
+            evalWorldFloat(&WorldKeyframe::has_climate, &WorldKeyframe::climate_lapse_rate_k_per_m);
+            evalWorldFloat(&WorldKeyframe::has_climate, &WorldKeyframe::climate_relative_humidity);
+            evalWorldFloat(&WorldKeyframe::has_climate, &WorldKeyframe::climate_pressure_pa);
+            evalWorldVec3(&WorldKeyframe::has_climate, &WorldKeyframe::climate_wind_direction);
+            evalWorldFloat(&WorldKeyframe::has_climate, &WorldKeyframe::climate_wind_speed_mps);
             evalWorldFloat(&WorldKeyframe::has_ozone_absorption_scale, &WorldKeyframe::ozone_absorption_scale);
             evalWorldFloat(&WorldKeyframe::has_altitude, &WorldKeyframe::altitude);
             evalWorldFloat(&WorldKeyframe::has_mie_anisotropy, &WorldKeyframe::mie_anisotropy);
 
-            evalWorldFloat(&WorldKeyframe::has_cloud_density, &WorldKeyframe::cloud_density);
-            evalWorldFloat(&WorldKeyframe::has_cloud_coverage, &WorldKeyframe::cloud_coverage);
-            evalWorldFloat(&WorldKeyframe::has_cloud_scale, &WorldKeyframe::cloud_scale);
-
             {
-                auto has = [](const Keyframe& k) { return k.has_world && k.world.has_cloud_offset; };
+                auto has = [](const Keyframe& k) { return k.has_world && k.world.has_clouds; };
                 const Keyframe* p = findPrev(has);
                 const Keyframe* n = findNext(has);
                 if (p && n) {
                     const float t = interpolateT(p, n);
-                    result.world.cloud_offset_x = p->world.cloud_offset_x + (n->world.cloud_offset_x - p->world.cloud_offset_x) * t;
-                    result.world.cloud_offset_z = p->world.cloud_offset_z + (n->world.cloud_offset_z - p->world.cloud_offset_z) * t;
-                    result.world.has_cloud_offset = true;
+                    result.world.clouds = atmosphere::lerpClouds(p->world.clouds, n->world.clouds, t);
+                    result.world.has_clouds = true;
                     result.has_world = true;
                 } else if (p) {
-                    result.world.cloud_offset_x = p->world.cloud_offset_x;
-                    result.world.cloud_offset_z = p->world.cloud_offset_z;
-                    result.world.has_cloud_offset = true;
+                    result.world.clouds = p->world.clouds;
+                    result.world.has_clouds = true;
                     result.has_world = true;
                 } else if (n && n->frame == current_frame) {
-                    result.world.cloud_offset_x = n->world.cloud_offset_x;
-                    result.world.cloud_offset_z = n->world.cloud_offset_z;
-                    result.world.has_cloud_offset = true;
-                    result.has_world = true;
-                }
-            }
-
-            evalWorldFloat(&WorldKeyframe::has_cloud_quality, &WorldKeyframe::cloud_quality);
-            evalWorldInt(&WorldKeyframe::has_cloud_quality, &WorldKeyframe::cloud_base_steps);
-            evalWorldFloat(&WorldKeyframe::has_cloud_detail, &WorldKeyframe::cloud_detail);
-            evalWorldInt(&WorldKeyframe::has_cloud_layer2, &WorldKeyframe::cloud_layer2_enabled);
-
-            {
-                auto has = [](const Keyframe& k) { return k.has_world && k.world.has_cloud_lighting; };
-                const Keyframe* p = findPrev(has);
-                const Keyframe* n = findNext(has);
-                if (p && n) {
-                    const float t = interpolateT(p, n);
-                    result.world.cloud_light_steps = (t < 0.5f) ? p->world.cloud_light_steps : n->world.cloud_light_steps;
-                    result.world.cloud_shadow_strength = p->world.cloud_shadow_strength + (n->world.cloud_shadow_strength - p->world.cloud_shadow_strength) * t;
-                    result.world.cloud_ambient_strength = p->world.cloud_ambient_strength + (n->world.cloud_ambient_strength - p->world.cloud_ambient_strength) * t;
-                    result.world.cloud_silver_intensity = p->world.cloud_silver_intensity + (n->world.cloud_silver_intensity - p->world.cloud_silver_intensity) * t;
-                    result.world.cloud_absorption = p->world.cloud_absorption + (n->world.cloud_absorption - p->world.cloud_absorption) * t;
-                    result.world.cloud_anisotropy = p->world.cloud_anisotropy + (n->world.cloud_anisotropy - p->world.cloud_anisotropy) * t;
-                    result.world.cloud_anisotropy_back = p->world.cloud_anisotropy_back + (n->world.cloud_anisotropy_back - p->world.cloud_anisotropy_back) * t;
-                    result.world.cloud_lobe_mix = p->world.cloud_lobe_mix + (n->world.cloud_lobe_mix - p->world.cloud_lobe_mix) * t;
-                    result.world.cloud_emissive_intensity = p->world.cloud_emissive_intensity + (n->world.cloud_emissive_intensity - p->world.cloud_emissive_intensity) * t;
-                    result.world.cloud_emissive_color = p->world.cloud_emissive_color + (n->world.cloud_emissive_color - p->world.cloud_emissive_color) * t;
-                    result.world.has_cloud_lighting = true;
-                    result.has_world = true;
-                } else if (p) {
-                    result.world.cloud_light_steps = p->world.cloud_light_steps;
-                    result.world.cloud_shadow_strength = p->world.cloud_shadow_strength;
-                    result.world.cloud_ambient_strength = p->world.cloud_ambient_strength;
-                    result.world.cloud_silver_intensity = p->world.cloud_silver_intensity;
-                    result.world.cloud_absorption = p->world.cloud_absorption;
-                    result.world.cloud_anisotropy = p->world.cloud_anisotropy;
-                    result.world.cloud_anisotropy_back = p->world.cloud_anisotropy_back;
-                    result.world.cloud_lobe_mix = p->world.cloud_lobe_mix;
-                    result.world.cloud_emissive_intensity = p->world.cloud_emissive_intensity;
-                    result.world.cloud_emissive_color = p->world.cloud_emissive_color;
-                    result.world.has_cloud_lighting = true;
-                    result.has_world = true;
-                } else if (n && n->frame == current_frame) {
-                    result.world.cloud_light_steps = n->world.cloud_light_steps;
-                    result.world.cloud_shadow_strength = n->world.cloud_shadow_strength;
-                    result.world.cloud_ambient_strength = n->world.cloud_ambient_strength;
-                    result.world.cloud_silver_intensity = n->world.cloud_silver_intensity;
-                    result.world.cloud_absorption = n->world.cloud_absorption;
-                    result.world.cloud_anisotropy = n->world.cloud_anisotropy;
-                    result.world.cloud_anisotropy_back = n->world.cloud_anisotropy_back;
-                    result.world.cloud_lobe_mix = n->world.cloud_lobe_mix;
-                    result.world.cloud_emissive_intensity = n->world.cloud_emissive_intensity;
-                    result.world.cloud_emissive_color = n->world.cloud_emissive_color;
-                    result.world.has_cloud_lighting = true;
-                    result.has_world = true;
-                }
-            }
-
-            {
-                auto has = [](const Keyframe& k) { return k.has_world && k.world.has_cloud_layer2_params; };
-                const Keyframe* p = findPrev(has);
-                const Keyframe* n = findNext(has);
-                if (p && n) {
-                    const float t = interpolateT(p, n);
-                    result.world.cloud2_coverage = p->world.cloud2_coverage + (n->world.cloud2_coverage - p->world.cloud2_coverage) * t;
-                    result.world.cloud2_density = p->world.cloud2_density + (n->world.cloud2_density - p->world.cloud2_density) * t;
-                    result.world.cloud2_scale = p->world.cloud2_scale + (n->world.cloud2_scale - p->world.cloud2_scale) * t;
-                    result.world.has_cloud_layer2_params = true;
-                    result.has_world = true;
-                } else if (p) {
-                    result.world.cloud2_coverage = p->world.cloud2_coverage;
-                    result.world.cloud2_density = p->world.cloud2_density;
-                    result.world.cloud2_scale = p->world.cloud2_scale;
-                    result.world.has_cloud_layer2_params = true;
-                    result.has_world = true;
-                } else if (n && n->frame == current_frame) {
-                    result.world.cloud2_coverage = n->world.cloud2_coverage;
-                    result.world.cloud2_density = n->world.cloud2_density;
-                    result.world.cloud2_scale = n->world.cloud2_scale;
-                    result.world.has_cloud_layer2_params = true;
-                    result.has_world = true;
-                }
-            }
-
-            {
-                auto has = [](const Keyframe& k) { return k.has_world && k.world.has_cloud_layer2_heights; };
-                const Keyframe* p = findPrev(has);
-                const Keyframe* n = findNext(has);
-                if (p && n) {
-                    const float t = interpolateT(p, n);
-                    result.world.cloud2_height_min = p->world.cloud2_height_min + (n->world.cloud2_height_min - p->world.cloud2_height_min) * t;
-                    result.world.cloud2_height_max = p->world.cloud2_height_max + (n->world.cloud2_height_max - p->world.cloud2_height_max) * t;
-                    result.world.has_cloud_layer2_heights = true;
-                    result.has_world = true;
-                } else if (p) {
-                    result.world.cloud2_height_min = p->world.cloud2_height_min;
-                    result.world.cloud2_height_max = p->world.cloud2_height_max;
-                    result.world.has_cloud_layer2_heights = true;
-                    result.has_world = true;
-                } else if (n && n->frame == current_frame) {
-                    result.world.cloud2_height_min = n->world.cloud2_height_min;
-                    result.world.cloud2_height_max = n->world.cloud2_height_max;
-                    result.world.has_cloud_layer2_heights = true;
+                    result.world.clouds = n->world.clouds;
+                    result.world.has_clouds = true;
                     result.has_world = true;
                 }
             }
@@ -2778,8 +2533,8 @@ struct ObjectAnimationTrack {
                     result.world.fog_height = p->world.fog_height + (n->world.fog_height - p->world.fog_height) * t;
                     result.world.fog_falloff = p->world.fog_falloff + (n->world.fog_falloff - p->world.fog_falloff) * t;
                     result.world.fog_distance = p->world.fog_distance + (n->world.fog_distance - p->world.fog_distance) * t;
-                    result.world.fog_color = p->world.fog_color + (n->world.fog_color - p->world.fog_color) * t;
-                    result.world.fog_sun_scatter = p->world.fog_sun_scatter + (n->world.fog_sun_scatter - p->world.fog_sun_scatter) * t;
+                    result.world.fog_albedo = p->world.fog_albedo + (n->world.fog_albedo - p->world.fog_albedo) * t;
+                    result.world.fog_anisotropy = p->world.fog_anisotropy + (n->world.fog_anisotropy - p->world.fog_anisotropy) * t;
                     result.world.has_fog_params = true;
                     result.has_world = true;
                 } else if (p) {
@@ -2787,8 +2542,8 @@ struct ObjectAnimationTrack {
                     result.world.fog_height = p->world.fog_height;
                     result.world.fog_falloff = p->world.fog_falloff;
                     result.world.fog_distance = p->world.fog_distance;
-                    result.world.fog_color = p->world.fog_color;
-                    result.world.fog_sun_scatter = p->world.fog_sun_scatter;
+                    result.world.fog_albedo = p->world.fog_albedo;
+                    result.world.fog_anisotropy = p->world.fog_anisotropy;
                     result.world.has_fog_params = true;
                     result.has_world = true;
                 } else if (n && n->frame == current_frame) {
@@ -2796,8 +2551,8 @@ struct ObjectAnimationTrack {
                     result.world.fog_height = n->world.fog_height;
                     result.world.fog_falloff = n->world.fog_falloff;
                     result.world.fog_distance = n->world.fog_distance;
-                    result.world.fog_color = n->world.fog_color;
-                    result.world.fog_sun_scatter = n->world.fog_sun_scatter;
+                    result.world.fog_albedo = n->world.fog_albedo;
+                    result.world.fog_anisotropy = n->world.fog_anisotropy;
                     result.world.has_fog_params = true;
                     result.has_world = true;
                 }
@@ -2811,9 +2566,6 @@ struct ObjectAnimationTrack {
             evalWorldInt(&WorldKeyframe::has_multi_scatter, &WorldKeyframe::multi_scatter_enabled);
             evalWorldFloat(&WorldKeyframe::has_multi_scatter, &WorldKeyframe::multi_scatter_factor);
             evalWorldInt(&WorldKeyframe::has_aerial_perspective, &WorldKeyframe::aerial_perspective);
-            evalWorldFloat(&WorldKeyframe::has_aerial_params, &WorldKeyframe::aerial_density);
-            evalWorldFloat(&WorldKeyframe::has_aerial_params, &WorldKeyframe::aerial_min_distance);
-            evalWorldFloat(&WorldKeyframe::has_aerial_params, &WorldKeyframe::aerial_max_distance);
             evalWorldInt(&WorldKeyframe::has_overlay, &WorldKeyframe::env_overlay_enabled);
             evalWorldFloat(&WorldKeyframe::has_overlay_params, &WorldKeyframe::env_overlay_intensity);
             evalWorldFloat(&WorldKeyframe::has_overlay_params, &WorldKeyframe::env_overlay_rotation);
@@ -2829,8 +2581,6 @@ struct ObjectAnimationTrack {
                     result.world.weather_type = (t < 0.5f) ? p->world.weather_type : n->world.weather_type;
                     result.world.weather_intensity = p->world.weather_intensity + (n->world.weather_intensity - p->world.weather_intensity) * t;
                     result.world.weather_density = p->world.weather_density + (n->world.weather_density - p->world.weather_density) * t;
-                    result.world.weather_wind_direction = p->world.weather_wind_direction + (n->world.weather_wind_direction - p->world.weather_wind_direction) * t;
-                    result.world.weather_wind_speed = p->world.weather_wind_speed + (n->world.weather_wind_speed - p->world.weather_wind_speed) * t;
                     result.world.weather_precipitation_scale = p->world.weather_precipitation_scale + (n->world.weather_precipitation_scale - p->world.weather_precipitation_scale) * t;
                     result.world.weather_visibility = p->world.weather_visibility + (n->world.weather_visibility - p->world.weather_visibility) * t;
                     result.world.weather_surface_wetness = p->world.weather_surface_wetness + (n->world.weather_surface_wetness - p->world.weather_surface_wetness) * t;
@@ -2846,8 +2596,6 @@ struct ObjectAnimationTrack {
                     result.world.weather_type = p->world.weather_type;
                     result.world.weather_intensity = p->world.weather_intensity;
                     result.world.weather_density = p->world.weather_density;
-                    result.world.weather_wind_direction = p->world.weather_wind_direction;
-                    result.world.weather_wind_speed = p->world.weather_wind_speed;
                     result.world.weather_precipitation_scale = p->world.weather_precipitation_scale;
                     result.world.weather_visibility = p->world.weather_visibility;
                     result.world.weather_surface_wetness = p->world.weather_surface_wetness;
@@ -2863,8 +2611,6 @@ struct ObjectAnimationTrack {
                     result.world.weather_type = n->world.weather_type;
                     result.world.weather_intensity = n->world.weather_intensity;
                     result.world.weather_density = n->world.weather_density;
-                    result.world.weather_wind_direction = n->world.weather_wind_direction;
-                    result.world.weather_wind_speed = n->world.weather_wind_speed;
                     result.world.weather_precipitation_scale = n->world.weather_precipitation_scale;
                     result.world.weather_visibility = n->world.weather_visibility;
                     result.world.weather_surface_wetness = n->world.weather_surface_wetness;
@@ -3294,44 +3040,34 @@ inline void to_json(json& j, const WorldKeyframe& w) {
         {"fbgc", w.has_background_color}, {"fbgs", w.has_background_strength}, {"fhr", w.has_hdri_rotation},
         {"fse", w.has_sun_elevation}, {"fsa", w.has_sun_azimuth}, {"fsi", w.has_sun_intensity}, {"fss", w.has_sun_size},
         {"fad", w.has_air_density}, {"fdd", w.has_dust_density}, {"fod", w.has_ozone_density},
-        {"fhum", w.has_humidity}, {"ftmp", w.has_temperature}, {"fozs", w.has_ozone_absorption_scale},
+        {"fclim", w.has_climate}, {"fozs", w.has_ozone_absorption_scale},
         {"falt", w.has_altitude}, {"fma", w.has_mie_anisotropy},
-        {"fcd", w.has_cloud_density}, {"fcc", w.has_cloud_coverage}, {"fcs", w.has_cloud_scale}, {"fco", w.has_cloud_offset},
-        {"fcq", w.has_cloud_quality}, {"fcdt", w.has_cloud_detail},
-        {"fcl2", w.has_cloud_layer2}, {"fcl2p", w.has_cloud_layer2_params}, {"fcl2h", w.has_cloud_layer2_heights},
-        {"fcll", w.has_cloud_lighting}, {"ffog", w.has_fog}, {"ffogp", w.has_fog_params},
+        {"fclds", w.has_clouds}, {"ffog", w.has_fog}, {"ffogp", w.has_fog_params},
         {"fgr", w.has_godrays}, {"fgrp", w.has_godrays_params},
-        {"fms", w.has_multi_scatter}, {"fap", w.has_aerial_perspective}, {"fapp", w.has_aerial_params},
+        {"fms", w.has_multi_scatter}, {"fap", w.has_aerial_perspective},
         {"fovr", w.has_overlay}, {"fovrp", w.has_overlay_params}, {"fwth", w.has_weather_params},
 
         {"bgc", w.background_color}, {"bgs", w.background_strength}, {"hr", w.hdri_rotation}, {"hint", w.hdri_intensity},
         {"se", w.sun_elevation}, {"sa", w.sun_azimuth}, {"si", w.sun_intensity}, {"ss", w.sun_size},
         {"ad", w.air_density}, {"dd", w.dust_density}, {"od", w.ozone_density},
-        {"hum", w.humidity}, {"tmp", w.temperature}, {"ozs", w.ozone_absorption_scale},
+        {"ctk", w.climate_temperature_k}, {"clr", w.climate_lapse_rate_k_per_m},
+        {"crh", w.climate_relative_humidity}, {"cpa", w.climate_pressure_pa},
+        {"cwd", w.climate_wind_direction}, {"cws", w.climate_wind_speed_mps},
+        {"ozs", w.ozone_absorption_scale},
         {"alt", w.altitude}, {"ma", w.mie_anisotropy},
-        {"cd", w.cloud_density}, {"cc", w.cloud_coverage}, {"cs", w.cloud_scale},
-        {"cox", w.cloud_offset_x}, {"coz", w.cloud_offset_z},
-        {"cq", w.cloud_quality}, {"cdt", w.cloud_detail}, {"cbs", w.cloud_base_steps},
-        {"cmn", w.cloud_height_min}, {"cmx", w.cloud_height_max},
-
-        {"cl2e", w.cloud_layer2_enabled}, {"ccov2", w.cloud2_coverage}, {"cden2", w.cloud2_density}, {"cscl2", w.cloud2_scale},
-        {"cmnh2", w.cloud2_height_min}, {"cmxh2", w.cloud2_height_max},
-
-        {"cstl", w.cloud_light_steps}, {"cshd", w.cloud_shadow_strength}, {"camb", w.cloud_ambient_strength}, {"csil", w.cloud_silver_intensity}, {"cabs", w.cloud_absorption},
-        {"cani", w.cloud_anisotropy}, {"canib", w.cloud_anisotropy_back}, {"clmx", w.cloud_lobe_mix}, {"cemi", w.cloud_emissive_intensity}, {"cemc", w.cloud_emissive_color},
-
-        {"fge", w.fog_enabled}, {"fgd", w.fog_density}, {"fgh", w.fog_height}, {"fgf", w.fog_falloff}, {"fgds", w.fog_distance}, {"fgc", w.fog_color}, {"fgs", w.fog_sun_scatter},
+        {"fge", w.fog_enabled}, {"fgd", w.fog_density}, {"fgh", w.fog_height}, {"fgf", w.fog_falloff}, {"fgds", w.fog_distance}, {"fga", w.fog_albedo}, {"fgg", w.fog_anisotropy},
 
         {"gre", w.godrays_enabled}, {"gri", w.godrays_intensity}, {"grd", w.godrays_density}, {"grs", w.godrays_samples},
 
-        {"mse", w.multi_scatter_enabled}, {"msf", w.multi_scatter_factor}, {"ape", w.aerial_perspective}, {"apden", w.aerial_density}, {"apmin", w.aerial_min_distance}, {"apmax", w.aerial_max_distance},
+        {"mse", w.multi_scatter_enabled}, {"msf", w.multi_scatter_factor}, {"ape", w.aerial_perspective}, 
         {"ove", w.env_overlay_enabled}, {"ovi", w.env_overlay_intensity}, {"ovr", w.env_overlay_rotation}, {"ovm", w.env_overlay_blend_mode},
         {"wte", w.weather_enabled}, {"wtt", w.weather_type}, {"wti", w.weather_intensity}, {"wtd", w.weather_density},
-        {"wtw", w.weather_wind_direction}, {"wtws", w.weather_wind_speed}, {"wtps", w.weather_precipitation_scale},
+        {"wtps", w.weather_precipitation_scale},
         {"wtv", w.weather_visibility}, {"wtwet", w.weather_surface_wetness}, {"wtacc", w.weather_surface_accumulation},
         {"wtset", w.weather_surface_settling}, {"wthgt", w.weather_surface_height},
         {"wtvm", w.weather_visual_mode}, {"wtsr", w.weather_surface_response_enabled}
     };
+    if (w.has_clouds) atmosphere::cloudsToJson(w.clouds, j["clds"]);
 }
 
 inline void from_json(const json& j, WorldKeyframe& w) {
@@ -3341,19 +3077,16 @@ inline void from_json(const json& j, WorldKeyframe& w) {
     w.has_sun_intensity = j.value("fsi", false); w.has_sun_size = j.value("fss", false);
     w.has_air_density = j.value("fad", false); w.has_dust_density = j.value("fdd", false);
     w.has_ozone_density = j.value("fod", false); 
-    w.has_humidity = j.value("fhum", false); w.has_temperature = j.value("ftmp", false);
+    // Old "fhum"/"ftmp" (Celsius) keys are deliberately NOT read: the climate
+    // block replaced them with Kelvin and a keyed-as-group layout.
+    w.has_climate = j.value("fclim", false);
     w.has_ozone_absorption_scale = j.value("fozs", false);
     w.has_altitude = j.value("falt", false); w.has_mie_anisotropy = j.value("fma", false);
-    w.has_cloud_density = j.value("fcd", false); w.has_cloud_coverage = j.value("fcc", false);
-    w.has_cloud_scale = j.value("fcs", false); w.has_cloud_offset = j.value("fco", false);
-    w.has_cloud_quality = j.value("fcq", false); w.has_cloud_detail = j.value("fcdt", false);
-    w.has_cloud_layer2 = j.value("fcl2", false); w.has_cloud_layer2_params = j.value("fcl2p", false);
-    w.has_cloud_layer2_heights = j.value("fcl2h", false);
-    w.has_cloud_lighting = j.value("fcll", false);
+    // Legacy fcd/fcc/.../fcll cloud flags are NOT read (CloudState group).
+    w.has_clouds = j.value("fclds", false);
     w.has_fog = j.value("ffog", false); w.has_fog_params = j.value("ffogp", false);
     w.has_godrays = j.value("fgr", false); w.has_godrays_params = j.value("fgrp", false);
     w.has_multi_scatter = j.value("fms", false); w.has_aerial_perspective = j.value("fap", false);
-    w.has_aerial_params = j.value("fapp", false);
     w.has_overlay = j.value("fovr", false); w.has_overlay_params = j.value("fovrp", false);
     w.has_weather_params = j.value("fwth", false);
 
@@ -3364,34 +3097,26 @@ inline void from_json(const json& j, WorldKeyframe& w) {
     w.sun_intensity = j.value("si", 1.0f); w.sun_size = j.value("ss", 0.545f);
     w.air_density = j.value("ad", 1.0f); w.dust_density = j.value("dd", 1.0f);
     w.ozone_density = j.value("od", 1.0f); 
-    w.humidity = j.value("hum", 0.1f); w.temperature = j.value("tmp", 15.0f);
+    w.climate_temperature_k = j.value("ctk", 288.15f);
+    w.climate_lapse_rate_k_per_m = j.value("clr", 0.0065f);
+    w.climate_relative_humidity = j.value("crh", 0.1f);
+    w.climate_pressure_pa = j.value("cpa", 101325.0f);
+    if(j.contains("cwd")) j.at("cwd").get_to(w.climate_wind_direction);
+    w.climate_wind_speed_mps = j.value("cws", 0.0f);
     w.ozone_absorption_scale = j.value("ozs", 1.0f);
     w.altitude = j.value("alt", 0.0f);
     w.mie_anisotropy = j.value("ma", 0.76f);
-    w.cloud_density = j.value("cd", 0.5f); w.cloud_coverage = j.value("cc", 0.5f);
-    w.cloud_scale = j.value("cs", 1.0f);
-    w.cloud_offset_x = j.value("cox", 0.0f); w.cloud_offset_z = j.value("coz", 0.0f);
-    w.cloud_quality = j.value("cq", 1.0f); w.cloud_detail = j.value("cdt", 1.0f);
-    w.cloud_base_steps = j.value("cbs", 8);
-    w.cloud_height_min = j.value("cmn", 500.0f); w.cloud_height_max = j.value("cmx", 2000.0f);
-
-    w.cloud_layer2_enabled = j.value("cl2e", 0);
-    w.cloud2_coverage = j.value("ccov2", 0.3f); w.cloud2_density = j.value("cden2", 0.3f);
-    w.cloud2_scale = j.value("cscl2", 8.0f);
-    w.cloud2_height_min = j.value("cmnh2", 6000.0f); w.cloud2_height_max = j.value("cmxh2", 7000.0f);
-
-    w.cloud_light_steps = j.value("cstl", 0);
-    w.cloud_shadow_strength = j.value("cshd", 1.0f); w.cloud_ambient_strength = j.value("camb", 1.0f);
-    w.cloud_silver_intensity = j.value("csil", 1.0f); w.cloud_absorption = j.value("cabs", 1.0f);
-    w.cloud_anisotropy = j.value("cani", 0.85f); w.cloud_anisotropy_back = j.value("canib", -0.3f);
-    w.cloud_lobe_mix = j.value("clmx", 0.5f); w.cloud_emissive_intensity = j.value("cemi", 0.0f);
-    if(j.contains("cemc")) j.at("cemc").get_to(w.cloud_emissive_color);
+    if (j.contains("clds")) {
+        std::string cloudError;
+        if (!atmosphere::cloudsFromJson(j.at("clds"), w.clouds, &cloudError)) w.has_clouds = false;
+    }
 
     w.fog_enabled = j.value("fge", 0);
     w.fog_density = j.value("fgd", 0.01f); w.fog_height = j.value("fgh", 500.0f);
     w.fog_falloff = j.value("fgf", 0.003f); w.fog_distance = j.value("fgds", 10000.0f);
-    if(j.contains("fgc")) j.at("fgc").get_to(w.fog_color);
-    w.fog_sun_scatter = j.value("fgs", 0.5f);
+    // fgc/fgs (flat fog colour, sun-scatter gain) are not read: different quantities.
+    if(j.contains("fga")) j.at("fga").get_to(w.fog_albedo);
+    w.fog_anisotropy = j.value("fgg", 0.6f);
 
     w.godrays_enabled = j.value("gre", 0);
     w.godrays_intensity = j.value("gri", 0.5f); w.godrays_density = j.value("grd", 0.1f);
@@ -3399,8 +3124,6 @@ inline void from_json(const json& j, WorldKeyframe& w) {
 
     w.multi_scatter_enabled = j.value("mse", 1); w.multi_scatter_factor = j.value("msf", 0.3f);
     w.aerial_perspective = j.value("ape", 1);
-    w.aerial_density = j.value("apden", 1.0f);
-    w.aerial_min_distance = j.value("apmin", 1000.0f); w.aerial_max_distance = j.value("apmax", 10000.0f);
 
     w.env_overlay_enabled = j.value("ove", 0);
     w.env_overlay_intensity = j.value("ovi", 1.0f); w.env_overlay_rotation = j.value("ovr", 0.0f);
@@ -3410,8 +3133,6 @@ inline void from_json(const json& j, WorldKeyframe& w) {
     w.weather_type = j.value("wtt", 0);
     w.weather_intensity = j.value("wti", 0.0f);
     w.weather_density = j.value("wtd", 0.0f);
-    if(j.contains("wtw")) j.at("wtw").get_to(w.weather_wind_direction);
-    w.weather_wind_speed = j.value("wtws", 0.0f);
     w.weather_precipitation_scale = j.value("wtps", 1.0f);
     w.weather_visibility = j.value("wtv", 1.0f);
     w.weather_surface_wetness = j.value("wtwet", 0.0f);

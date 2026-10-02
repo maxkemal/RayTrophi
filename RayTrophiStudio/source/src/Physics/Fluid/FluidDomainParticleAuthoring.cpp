@@ -13,7 +13,7 @@ bool ParticleSimulationSystem::seedFluidDomainParticles(
     bool persistent) {
     for (auto& domain : grid_domains_) {
         if (domain.name != domain_name ||
-            domain.type != SimulationDomainType::Fluid) {
+            !simulationDomainHasLiquid(domain.type)) {
             continue;
         }
 
@@ -42,7 +42,7 @@ bool ParticleSimulationSystem::clearFluidDomainParticles(
     for (std::size_t i = 0; i < grid_domains_.size(); ++i) {
         auto& domain = grid_domains_[i];
         if (domain.name != domain_name ||
-            domain.type != SimulationDomainType::Fluid) {
+            !simulationDomainHasLiquid(domain.type)) {
             continue;
         }
 

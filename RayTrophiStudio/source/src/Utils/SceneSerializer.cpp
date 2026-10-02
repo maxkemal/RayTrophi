@@ -385,6 +385,7 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_params"]["granular_rebonding"] = d.fluid_params.granular_rebonding;
     j["fluid_params"]["granular_max_solver_substeps"] = d.fluid_params.granular_max_solver_substeps;
     j["fluid_params"]["air_drag"] = d.fluid_params.air_drag;
+    j["fluid_params"]["inherit_atmosphere"] = d.fluid_params.inherit_atmosphere;
     j["fluid_params"]["reseed_enabled"] = d.fluid_params.reseed_enabled;
     // Remaining preset-driven rheology so a material preset round-trips fully
     // (these were previously dropped, resetting Honey/Lava/Sand on reload).
@@ -445,6 +446,12 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_fill_wall_margin"] = d.fluid_fill_wall_margin;
     j["fluid_render_mode"] = (int)d.fluid_render_mode;
     j["fluid_fog_spread_voxels"] = d.fluid_fog_spread_voxels;
+    {
+        json routes = json::object();
+        for (const auto& kv : RayTrophiSim::Fluid::labelRoutesToNames(d.fluid_label_routes))
+            routes[kv.first] = kv.second;
+        j["fluid_label_routes"] = routes;
+    }
     j["fluid_particle_color"] = vec3ToJson(d.fluid_particle_color);
     j["fluid_particle_radius_factor"] = d.fluid_particle_radius_factor;
     j["fluid_particle_size_multiplier"] = d.fluid_particle_size_multiplier;
@@ -504,7 +511,6 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
         fj["max_foam"] = static_cast<uint64_t>(fo.max_foam);
         fj["render_radius_voxels"] = fo.render_radius_voxels;
         fj["foam_sphere_subdivisions"] = fo.foam_sphere_subdivisions;
-        fj["render_mode"] = static_cast<int>(fo.render_mode);
         fj["volume_density"] = fo.volume_density;
         fj["volume_color"] = { fo.volume_color.x, fo.volume_color.y, fo.volume_color.z };
         fj["volume_opacity"] = fo.volume_opacity;
@@ -513,11 +519,6 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
         fj["foam_material_id"] = fo.foam_material_id;
         fj["spray_material_id"] = fo.spray_material_id;
         fj["bubble_material_id"] = fo.bubble_material_id;
-        fj["surface_kernel_radius_voxels"]   = fo.surface_kernel_radius_voxels;
-        fj["surface_particle_radius_voxels"] = fo.surface_particle_radius_voxels;
-        fj["surface_band_voxels"]            = fo.surface_band_voxels;
-        fj["surface_smoothing_iterations"]   = fo.surface_smoothing_iterations;
-        fj["surface_resolution_multiplier"]  = fo.surface_resolution_multiplier;
     }
 
     // Fire settings
@@ -610,6 +611,7 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         d.fluid_params.sanitizeGranularMaterial();
         d.fluid_params.sanitizeGranularMaterial();
         if (fp.contains("air_drag")) d.fluid_params.air_drag = fp["air_drag"];
+        d.fluid_params.inherit_atmosphere = fp.value("inherit_atmosphere", true);
         if (fp.contains("reseed_enabled")) d.fluid_params.reseed_enabled = fp["reseed_enabled"];
         if (fp.contains("velocity_damping")) d.fluid_params.velocity_damping = fp["velocity_damping"];
         if (fp.contains("wall_damping")) d.fluid_params.wall_damping = fp["wall_damping"];
@@ -684,6 +686,13 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_fill_wall_margin")) d.fluid_fill_wall_margin = j["fluid_fill_wall_margin"];
     if (j.contains("fluid_render_mode")) d.fluid_render_mode = RayTrophiSim::Fluid::fluidRenderModeFromStored(j["fluid_render_mode"].get<int>());
     if (j.contains("fluid_fog_spread_voxels")) d.fluid_fog_spread_voxels = j["fluid_fog_spread_voxels"];
+    if (j.contains("fluid_label_routes") && j["fluid_label_routes"].is_object()) {
+        for (auto it = j["fluid_label_routes"].begin(); it != j["fluid_label_routes"].end(); ++it) {
+            if (it.value().is_string())
+                RayTrophiSim::Fluid::setLabelRouteByName(
+                    d.fluid_label_routes, it.key(), it.value().get<std::string>());
+        }
+    }
     if (j.contains("fluid_particle_color")) d.fluid_particle_color = jsonToVec3(j["fluid_particle_color"]);
     if (j.contains("fluid_particle_radius_factor")) d.fluid_particle_radius_factor = j["fluid_particle_radius_factor"];
     if (j.contains("fluid_particle_size_multiplier")) d.fluid_particle_size_multiplier = j["fluid_particle_size_multiplier"];
@@ -744,13 +753,6 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fj.contains("max_foam")) fo.max_foam = static_cast<std::size_t>(fj["max_foam"].get<uint64_t>());
         if (fj.contains("render_radius_voxels")) fo.render_radius_voxels = fj["render_radius_voxels"];
         if (fj.contains("foam_sphere_subdivisions")) fo.foam_sphere_subdivisions = fj["foam_sphere_subdivisions"].get<int>();
-        if (fj.contains("render_mode")) {
-            // FoamRenderMode { Surface=0 (legacy, treated as Spheres), Spheres=1,
-            // Volume=2 (foam rides the surface volume's temperature channel) }.
-            int rm = fj["render_mode"].get<int>();
-            if (rm < 0 || rm > 2) rm = 0;
-            fo.render_mode = static_cast<RayTrophiSim::Fluid::FoamRenderMode>(rm);
-        }
         if (fj.contains("volume_density")) fo.volume_density = fj["volume_density"];
         if (fj.contains("volume_color") && fj["volume_color"].is_array() && fj["volume_color"].size() == 3) {
             fo.volume_color = Vec3(fj["volume_color"][0].get<float>(),
@@ -763,11 +765,6 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fj.contains("foam_material_id")) fo.foam_material_id = fj["foam_material_id"].get<int>();
         if (fj.contains("spray_material_id")) fo.spray_material_id = fj["spray_material_id"].get<int>();
         if (fj.contains("bubble_material_id")) fo.bubble_material_id = fj["bubble_material_id"].get<int>();
-        if (fj.contains("surface_kernel_radius_voxels")) fo.surface_kernel_radius_voxels = fj["surface_kernel_radius_voxels"];
-        if (fj.contains("surface_particle_radius_voxels")) fo.surface_particle_radius_voxels = fj["surface_particle_radius_voxels"];
-        if (fj.contains("surface_band_voxels")) fo.surface_band_voxels = fj["surface_band_voxels"];
-        if (fj.contains("surface_smoothing_iterations")) fo.surface_smoothing_iterations = fj["surface_smoothing_iterations"];
-        if (fj.contains("surface_resolution_multiplier")) fo.surface_resolution_multiplier = fj["surface_resolution_multiplier"];
     }
 
     if (j.contains("fire_enabled")) d.fire_enabled = j["fire_enabled"];
@@ -809,6 +806,9 @@ json flowSourceToJson(const RayTrophiSim::SimulationFlowSourceDesc& fs) {
     j["fluid_velocity_spread"] = fs.fluid_velocity_spread;
     j["fluid_emit_along_normal"] = fs.fluid_emit_along_normal;
     j["fluid_substance"] = fs.fluid_substance;
+    j["initial_constitutive_model"] =
+        RayTrophiSim::Fluid::matterConstitutiveModelName(
+            fs.initial_constitutive_model);
     j["fluid_temperature_override"] = fs.fluid_temperature_override;
     j["fluid_temperature_kelvin"] = fs.fluid_temperature_kelvin;
     j["use_time_limit"] = fs.use_time_limit;
@@ -841,6 +841,11 @@ RayTrophiSim::SimulationFlowSourceDesc jsonToFlowSource(const json& j) {
     if (j.contains("fluid_velocity_spread")) fs.fluid_velocity_spread = j["fluid_velocity_spread"];
     if (j.contains("fluid_emit_along_normal")) fs.fluid_emit_along_normal = j["fluid_emit_along_normal"];
     if (j.contains("fluid_substance")) fs.fluid_substance = j["fluid_substance"];
+    if (j.contains("initial_constitutive_model")) {
+        RayTrophiSim::Fluid::parseMatterConstitutiveModel(
+            j["initial_constitutive_model"].get<std::string>(),
+            fs.initial_constitutive_model);
+    }
     if (j.contains("fluid_temperature_override")) fs.fluid_temperature_override = j["fluid_temperature_override"];
     if (j.contains("fluid_temperature_kelvin")) fs.fluid_temperature_kelvin = j["fluid_temperature_kelvin"];
     if (j.contains("use_time_limit")) fs.use_time_limit = j["use_time_limit"];
@@ -1049,6 +1054,7 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
             sj["runtime"]["physics_settings"]["solver_iterations"] = ps.solver_iterations;
             sj["runtime"]["physics_settings"]["max_neighbors_per_particle"] = ps.max_neighbors_per_particle;
             sj["runtime"]["physics_settings"]["viscosity"] = ps.viscosity;
+            sj["runtime"]["physics_settings"]["inherit_atmosphere"] = ps.inherit_atmosphere;
             sj["runtime"]["physics_settings"]["cohesion"] = ps.cohesion;
             sj["runtime"]["physics_settings"]["pressure_stiffness"] = ps.pressure_stiffness;
             sj["runtime"]["physics_settings"]["rest_density"] = ps.rest_density;
@@ -1061,6 +1067,8 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
             // field added to only one of them loads back as its default.
             const auto& wt = system.runtime->worldThermal();
             sj["runtime"]["world_thermal"]["ambient_kelvin"] = wt.ambient_kelvin;
+            sj["runtime"]["world_thermal"]["reference_kelvin"] = wt.reference_kelvin;
+            sj["runtime"]["world_thermal"]["inherit_atmosphere"] = wt.inherit_atmosphere;
             sj["runtime"]["world_thermal"]["kelvin_per_unit"] = wt.kelvin_per_unit;
             sj["runtime"]["world_thermal"]["convection_coefficient"] = wt.convection_coefficient;
             sj["runtime"]["world_thermal"]["oxygen_availability"] = wt.oxygen_availability;
@@ -1566,6 +1574,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                     if (psj.contains("solver_iterations")) ps.solver_iterations = psj["solver_iterations"];
                     if (psj.contains("max_neighbors_per_particle")) ps.max_neighbors_per_particle = psj["max_neighbors_per_particle"];
                     if (psj.contains("viscosity")) ps.viscosity = psj["viscosity"];
+                    ps.inherit_atmosphere = psj.value("inherit_atmosphere", true);
                     if (psj.contains("cohesion")) ps.cohesion = psj["cohesion"];
                     if (psj.contains("pressure_stiffness")) ps.pressure_stiffness = psj["pressure_stiffness"];
                     if (psj.contains("rest_density")) ps.rest_density = psj["rest_density"];
@@ -1579,6 +1588,11 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                     const auto& wtj = rtj["world_thermal"];
                     auto& wt = system.runtime->worldThermal();
                     if (wtj.contains("ambient_kelvin")) wt.ambient_kelvin = wtj["ambient_kelvin"];
+                    // Saved before the zero/ambient split: the ambient WAS the
+                    // zero, so keep stored temperatures meaning the same Kelvin.
+                    wt.reference_kelvin = wtj.contains("reference_kelvin")
+                        ? wtj["reference_kelvin"].get<float>() : wt.ambient_kelvin;
+                    wt.inherit_atmosphere = wtj.value("inherit_atmosphere", false);
                     if (wtj.contains("kelvin_per_unit")) wt.kelvin_per_unit = wtj["kelvin_per_unit"];
                     if (wtj.contains("convection_coefficient")) wt.convection_coefficient = wtj["convection_coefficient"];
                     if (wtj.contains("oxygen_availability")) wt.oxygen_availability = wtj["oxygen_availability"];
@@ -1645,6 +1659,8 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                 size_t num_domains = system.runtime->gridDomains().size();
                 system.domain_vdb_ids.assign(num_domains, -1);
                 system.domain_volumes.assign(num_domains, nullptr);
+                system.domain_fog_vdb_ids.assign(num_domains, -1);
+                system.domain_fog_volumes.assign(num_domains, nullptr);
                 system.domain_particle_render_group_ids.assign(num_domains, -1);
                 system.domain_particle_pool_capacities.assign(num_domains, 0);
                 system.domain_sdf_buffers.resize(num_domains);

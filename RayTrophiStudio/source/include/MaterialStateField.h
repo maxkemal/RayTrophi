@@ -24,11 +24,15 @@
 */
 #pragma once
 
+#include "Fluid/MatterConstitutive.h"
+
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "Atmosphere/AtmosphereClimate.h"
 #include "SimulationCompute.h"
 #include "SurfaceMeshCache.h"
 #include "SurfaceField.h"
@@ -56,7 +60,7 @@ namespace RayTrophiSim {
 // exactly one Kelvin -> normalized code path.
 // ─────────────────────────────────────────────────────────────────────────────
 struct MaterialTemperatureScale {
-    float ambient_kelvin = 293.0f;    // normalized 0 maps to this
+    float reference_kelvin = 293.0f;  // normalized 0 maps to this (calibration zero)
     // Kelvin per normalized unit. The default is chosen so the legacy authored
     // defaults keep their meaning: wood's real ignition point (573 K) lands on
     // 0.8 normalized, which is exactly ParticleColliderDesc's old default. Iron's
@@ -66,10 +70,10 @@ struct MaterialTemperatureScale {
 
     float toNormalized(float kelvin) const {
         if (!(kelvin_per_unit > 0.0f)) return 0.0f;
-        return (kelvin - ambient_kelvin) / kelvin_per_unit;
+        return (kelvin - reference_kelvin) / kelvin_per_unit;
     }
     float toKelvin(float normalized) const {
-        return ambient_kelvin + normalized * kelvin_per_unit;
+        return reference_kelvin + normalized * kelvin_per_unit;
     }
 };
 
@@ -98,9 +102,26 @@ struct MaterialTemperatureScale {
 // single World node makes that unambiguous.
 // ─────────────────────────────────────────────────────────────────────────────
 struct WorldThermalState {
-    // Everything the room is at, unless a domain says otherwise. Normalized 0 is
-    // DEFINED as this temperature, which is why an untouched scene relaxes to 0.
+    // Everything the room is at, unless a domain says otherwise -- when
+    // `inherit_atmosphere` is off. Read it through ambientKelvin(), never
+    // directly: with inheritance on this field is the (kept) local value, not
+    // what the solver uses.
     float ambient_kelvin = 293.0f;
+    // ★★★ ATMOSPHERE (Faz 2). On: the ambient is the climate's temperature at
+    //   the scene origin (atmosphere::ambientSurfaceKelvin), so editing or
+    //   keying the world climate warms/cools the room. Off (default): the
+    //   local ambient_kelvin -- a lab or an interior. Default OFF because ON
+    //   moves the room from 293 K to the climate's 288.15 K and every thermal
+    //   probe's ignition timing with it.
+    bool inherit_atmosphere = false;
+    // ★★★ CALIBRATION ZERO: normalized 0 == this many Kelvin. It used to BE
+    //   ambient_kelvin, and that is why it is now separate: an ambient that
+    //   follows a keyed climate would otherwise re-interpret every stored
+    //   element temperature each frame -- a burning log would jump by exactly
+    //   the climate's delta. The ambient is a boundary condition; the zero is a
+    //   unit. Projects saved before the split load it from their ambient_kelvin,
+    //   so nothing they stored changes meaning.
+    float reference_kelvin = 293.0f;
     // Kelvin per normalized solver unit. Calibration — see the note above.
     float kelvin_per_unit = 350.0f;
     // Scales every substance's passive cooling toward ambient. 1 = the substance
@@ -111,11 +132,31 @@ struct WorldThermalState {
     // transport model is not in scope.
     float oxygen_availability = 1.0f;
 
+    // The ambient the solver actually relaxes toward (boundary condition).
+    float ambientKelvin() const {
+        return inherit_atmosphere ? atmosphere::ambientSurfaceKelvin() : ambient_kelvin;
+    }
+
+    // Kelvin <-> normalized. Built on the CALIBRATION zero, not the ambient.
     MaterialTemperatureScale scale() const {
         MaterialTemperatureScale s;
-        s.ambient_kelvin = ambient_kelvin;
+        s.reference_kelvin = reference_kelvin;
         s.kelvin_per_unit = kelvin_per_unit;
         return s;
+    }
+
+    // The ambient in solver units. 0 whenever ambient == reference, i.e. for
+    // every scene authored before the split with inheritance off.
+    float ambientNormalized() const { return scale().toNormalized(ambientKelvin()); }
+
+    // Evaporation runs on the vapour-pressure DEFICIT, so a substance's
+    // dry_rate is its rate in dry air and humid air scales it by (1 - RH).
+    // Only with inheritance on: a local (lab) room has no humidity authority,
+    // and scaling there would change every existing scene's drying by 0.9.
+    float dryingScale() const {
+        if (!inherit_atmosphere) return 1.0f;
+        const float rh = atmosphere::ambientSnapshot().climate.surface_relative_humidity;
+        return std::clamp(1.0f - rh, 0.0f, 1.0f);
     }
 };
 
@@ -128,6 +169,8 @@ struct WorldThermalState {
 // real values instead of being retrofitted per phase.
 struct SubstanceProfile {
     std::string name;
+    Fluid::MatterConstitutiveModel default_constitutive_model =
+        Fluid::MatterConstitutiveModel::Fluid;
 
     // ── Thermal ──────────────────────────────────────────────────────────────
     float density            = 1000.0f;  // kg/m^3
@@ -140,6 +183,13 @@ struct SubstanceProfile {
     // hard-coded 3.0 / 0.08 in sim_gas_collider_source.comp.
     float thermal_response   = 3.0f;     // 1/s
     float cooling_rate       = 0.08f;    // normalized units/s, passive loss
+
+    // ── Fluid transport ────────────────────────────────────────────────────
+    // These are physical values shared by the APIC liquid solver and molten
+    // mass transfer. `density` remains the solid/general density used by MSF;
+    // liquid_density describes the flowing phase after melting.
+    float liquid_density = 1000.0f;                 // kg/m^3
+    float liquid_kinematic_viscosity = 1.0e-6f;     // m^2/s
 
     // ── Moisture (Phase 5) ───────────────────────────────────────────────────
     // How readily the surface takes on water from a liquid domain, per second
@@ -167,12 +217,30 @@ struct SubstanceProfile {
     float heat_release       = 0.8f;     // gas temperature (normalized) per unit mass
     float flame_level        = 0.25f;    // visible flame level while burning, 0..1
 
+    // Liquid/gas chemistry is authored here in physical units. The APIC bridge
+    // converts Kelvin through MaterialTemperatureScale and SI heat values to
+    // its compact solver representation.
+    bool  fluid_flammable        = false;
+    bool  fluid_extinguishing    = false;
+    float flash_kelvin           = 0.0f;
+    float autoignition_kelvin    = 0.0f;
+    float latent_heat_vaporization = 0.0f;  // J/kg
+    float vaporization_rate      = 0.0f;    // 1/s
+    float cooling_power          = 0.0f;
+    float oxygen_dilution        = 0.0f;
+    float flame_persistence      = 0.0f;
+
     // ── Phase change ─────────────────────────────────────────────────────────
     bool  meltable           = false;
     float melt_kelvin        = 1811.0f;
     float boiling_kelvin     = 3134.0f;
     float latent_heat_fusion = 2.7e5f;   // J/kg
     float melt_viscosity     = 0.5f;     // 0 = runs like water, 1 = barely flows
+
+    // Granular phase defaults. They are inert for non-granular substances but
+    // live in the same table so a future phase transition has no second source.
+    float granular_friction_degrees = 35.0f;
+    float granular_cohesion = 0.0f;
 
     // ── Optical (Phase 3) ────────────────────────────────────────────────────
     float char_color[3]      = {0.05f, 0.04f, 0.035f};
@@ -214,10 +282,11 @@ struct MaterialStateFieldBridgeStats {
 };
 MaterialStateFieldBridgeStats& materialStateFieldBridgeStats();
 
-// Built-in substance library. Lookup is by name; an unknown name yields the
-// "Custom" profile so a project authored against a newer build degrades to
-// editable free values instead of failing to load.
+// Built-in substance library. Strict callers use tryFindSubstance; legacy scene
+// loading uses findSubstance and falls back to the first/default profile.
 const std::vector<SubstanceProfile>& substanceLibrary();
+const SubstanceProfile* tryFindSubstance(const std::string& name);
+const SubstanceProfile* tryFindSubstanceByTag(uint32_t tag);
 const SubstanceProfile& findSubstance(const std::string& name);
 
 // Per-object deviation from the library profile.

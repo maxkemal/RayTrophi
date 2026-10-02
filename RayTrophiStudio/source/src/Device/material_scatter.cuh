@@ -129,9 +129,9 @@ __device__ inline float ms_weather_surface_exposure(const WeatherParams& weather
     float upMask = ms_saturate((baseNormal.y - 0.12f) / 0.78f);
     upMask = upMask * upMask * (3.0f - 2.0f * upMask);
 
-    float windAmount = ms_saturate(weather.wind_speed / 35.0f);
-    float windLen2 = dot(weather.wind_direction, weather.wind_direction);
-    float3 windDir = (windLen2 > 1e-8f) ? normalize(weather.wind_direction) : make_float3(1.0f, 0.0f, 0.0f);
+    float windAmount = ms_saturate(weather.derived_wind_speed_mps / 35.0f);
+    float windLen2 = dot(weather.derived_wind_direction, weather.derived_wind_direction);
+    float3 windDir = (windLen2 > 1e-8f) ? normalize(weather.derived_wind_direction) : make_float3(1.0f, 0.0f, 0.0f);
     float3 incoming = normalize(make_float3(0.0f, 1.0f, 0.0f) - windDir * windAmount);
     float windFacing = ms_saturate(dot(baseNormal, incoming));
     float exposure = ms_saturate(upMask * (1.0f - windAmount * 0.78f) + windFacing * (0.12f + windAmount * 1.22f));
@@ -172,7 +172,7 @@ __device__ inline float ms_weather_surface_settling(const WeatherParams& weather
     if (supportGate <= 1e-4f) return 0.0f;
     const float exposure = ms_weather_surface_exposure(weather, payload);
     const float cavity = ms_saturate((1.0f - dot(shadingNormal, macroNormal)) * 3.8f + (1.0f - support) * 0.10f);
-    float3 windFlat = make_float3(weather.wind_direction.x, 0.0f, weather.wind_direction.z);
+    float3 windFlat = make_float3(weather.derived_wind_direction.x, 0.0f, weather.derived_wind_direction.z);
     float3 leeDir = dot(windFlat, windFlat) > 1e-8f ? ms_safe_normalize(make_float3(-windFlat.x, 0.28f, -windFlat.z), make_float3(0.0f, 1.0f, 0.0f)) : make_float3(0.0f, 1.0f, 0.0f);
     const float lee = ms_saturate(dot(macroNormal, leeDir) * 0.85f + cavity * 0.35f);
     const float shelter = ms_saturate((1.0f - exposure) * 0.52f + cavity * 0.26f + (1.0f - support) * 0.22f + lee * 0.42f);
@@ -204,7 +204,7 @@ __device__ inline float ms_weather_surface_height(const WeatherParams& weather, 
     const float scale = fmaxf(weather.precipitation_scale, 0.1f);
     const float heightBoost = 0.25f + ms_saturate(weather.surface_height_output) * 3.75f;
     if (weather.type == WEATHER_SNOW) {
-        float2 windXZ = make_float2(weather.wind_direction.x, weather.wind_direction.z);
+        float2 windXZ = make_float2(weather.derived_wind_direction.x, weather.derived_wind_direction.z);
         float windLen2 = windXZ.x * windXZ.x + windXZ.y * windXZ.y;
         float invWindLen = windLen2 > 1e-8f ? rsqrtf(windLen2) : 0.0f;
         float2 along = windLen2 > 1e-8f ? make_float2(windXZ.x * invWindLen, windXZ.y * invWindLen) : make_float2(1.0f, 0.0f);
@@ -246,7 +246,7 @@ __device__ inline float3 ms_weather_surface_normal(const WeatherParams& weather,
     float normalStrength = buildup * detailCapture * heightResponse * (weather.type == WEATHER_SNOW ? 0.42f : 0.15f);
     if (normalStrength <= 1e-4f) return baseNormal;
 
-    float3 windDir = weather.wind_direction;
+    float3 windDir = weather.derived_wind_direction;
     float3 tangent = windDir - baseNormal * dot(windDir, baseNormal);
     if (dot(tangent, tangent) <= 1e-8f) {
         tangent = cross(fabsf(baseNormal.y) < 0.999f ? make_float3(0.0f, 1.0f, 0.0f) : make_float3(1.0f, 0.0f, 0.0f), baseNormal);

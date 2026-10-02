@@ -1602,10 +1602,18 @@ Result renderFrame(const std::string& output_path, int spp) {
     ui.viewport_settings.shading_mode = 2;
     g_ctx->start_render = true;
     
-    // Agent Viewport Measurement: Ensure counters are routing to the backend
-    // so that render.start doesn't falsely report 0 volume rays in probe queries.
-    setVolumeInstrumentation(true);
-    
+    // ★★★ A render must NOT touch the volume counters. This used to call
+    // setVolumeInstrumentation(true) here "so probe queries do not report 0
+    // volume rays". It reset and re-enabled the counters on every render.start
+    // with the default whole-image region, so a caller's region, a caller's
+    // disable, and anything counted before the render were silently replaced.
+    // Measured 2026-09-28: every region (a 2% corner included) counted the full
+    // 1680x945xspp; disabled + render read back enabled=true. The instrument
+    // looked like it worked and measured something else.
+    // The routing concern it papered over is solved where it lives:
+    // setVolumeInstrumentation/volumeStats now cover EVERY Vulkan device.
+    // Callers enable the counters themselves (render.volume_counters).
+
     return Result::success();
 }
 
@@ -1644,23 +1652,83 @@ std::string renderOutputPath() {
 }
 
 namespace {
-Backend::VulkanBackendAdapter* activeVulkanBackendForStats() {
-    if (g_ctx) {
-        if (auto* r = dynamic_cast<Backend::VulkanBackendAdapter*>(g_ctx->backend_ptr))
-            return r;
+// ★★★ EVERY Vulkan device, not "the active one".
+//
+// The process runs up to two Vulkan devices (render backend + raster viewport
+// backend) and each owns its OWN instrumentation buffer. This used to pick one
+// device per call through g_ctx->backend_ptr — which the main loop re-points
+// EVERY FRAME by shading mode (Main.cpp, getActiveViewportBackendForShading),
+// while render.start traces on the render device whatever the viewport shows.
+// Measured 2026-09-28: render.volume_counters(enabled=false)
+// followed by a render read back enabled=true and full-image counts, and a
+// region written before a render read back as 0,0,1,1 after it — the reset and
+// the read were landing on different devices, and the rays were being counted
+// on a third state nobody had reset. Every region measurement was therefore a
+// whole-image measurement that looked like a region one.
+// Reset writes all devices; the read SUMS them (a given ray is traced on
+// exactly one device, so the sum is that ray's count wherever it ran).
+std::vector<Backend::VulkanBackendAdapter*> vulkanBackendsForStats() {
+    std::vector<Backend::VulkanBackendAdapter*> out;
+    auto add = [&out](Backend::IBackend* b) {
+        auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(b);
+        if (vk && std::find(out.begin(), out.end(), vk) == out.end()) out.push_back(vk);
+    };
+    // ★★ Name the devices, never derive them from backend_ptr. In Solid,
+    // backend_ptr IS the viewport backend, so "backend_ptr + viewport" was ONE
+    // device and the render device (g_backend, where render.start traces) was
+    // never reset. Measured 2026-09-28 on the first all-devices build: counters
+    // disabled, render.start, read back enabled=true — the render device's
+    // stale state from an earlier Rendered session.
+    add(::g_backend.get());
+    add(::g_viewport_backend.get());
+    if (g_ctx) add(g_ctx->backend_ptr);
+    return out;
+}
+
+// Word-wise sum of two snapshots. The layout is pinned by the static_assert in
+// VulkanVolumeInstrumentation.h (40 x 4-byte words). `enabled` (word 15) is
+// OR-ed and the region (words 25..28, floats) is taken from the first device:
+// both are written identically to every device by setVolumeInstrumentation.
+VulkanRT::VolumePerformanceStats sumStats(const VulkanRT::VolumePerformanceStats& a,
+                                          const VulkanRT::VolumePerformanceStats& b) {
+    constexpr size_t kWords = sizeof(VulkanRT::VolumePerformanceStats) / 4;
+    uint32_t wa[kWords], wb[kWords];
+    std::memcpy(wa, &a, sizeof(wa));
+    std::memcpy(wb, &b, sizeof(wb));
+    for (size_t i = 0; i < kWords; ++i) {
+        if (i == 15) wa[i] = (wa[i] | wb[i]) ? 1u : 0u;
+        else if (i >= 25 && i <= 28) continue;
+        else wa[i] += wb[i];
     }
-    return dynamic_cast<Backend::VulkanBackendAdapter*>(::g_viewport_backend.get());
+    VulkanRT::VolumePerformanceStats out;
+    std::memcpy(&out, wa, sizeof(out));
+    return out;
 }
 } // namespace
 
 VolumeInstrumentationInfo volumeStats() {
     VolumeInstrumentationInfo out;
-    auto* backend = activeVulkanBackendForStats();
-    if (!backend) return out;   // available stays false: no Vulkan backend
+    const auto backends = vulkanBackendsForStats();
+    if (backends.empty()) return out;   // available stays false: no Vulkan backend
     // ★ Synchronized readback (true), the same call the panel's Refresh makes.
     // A non-synchronized read races the in-flight frame and returns a partially
     // updated set — which looks like a plausible measurement, not like an error.
-    const VulkanRT::VolumePerformanceStats s = backend->getVolumePerformanceStats(true);
+    VulkanRT::VolumePerformanceStats s{};
+    for (size_t i = 0; i < backends.size(); ++i) {
+        const VulkanRT::VolumePerformanceStats d = backends[i]->getVolumePerformanceStats(true);
+        s = (i == 0) ? d : sumStats(s, d);
+        VolumeInstrumentationInfo::DeviceRow row;
+        row.role = backends[i] == dynamic_cast<Backend::VulkanBackendAdapter*>(::g_backend.get())
+            ? "render"
+            : backends[i] == dynamic_cast<Backend::VulkanBackendAdapter*>(::g_viewport_backend.get())
+                ? "viewport" : "active";
+        row.enabled = d.enabled != 0u;
+        row.region[0] = d.regionMinX; row.region[1] = d.regionMinY;
+        row.region[2] = d.regionMaxX; row.region[3] = d.regionMaxY;
+        row.paths_traced = d.pathsTraced;
+        row.volume_rays = d.volumeRays;
+        out.devices.push_back(row);
+    }
     out.available = true;
     out.enabled = s.enabled != 0u;
     out.volume_rays = s.volumeRays;
@@ -1687,14 +1755,81 @@ VolumeInstrumentationInfo volumeStats() {
     out.arbiter_no_box = s.arbiterNoBox;
     out.arbiter_empty_range = s.arbiterEmptyRange;
     out.arbiter_no_crossing = s.arbiterNoCrossing;
+    out.region_min_x = s.regionMinX;
+    out.region_min_y = s.regionMinY;
+    out.region_max_x = s.regionMaxX;
+    out.region_max_y = s.regionMaxY;
+    out.paths_traced = s.pathsTraced;
+    out.paths_bounce_capped = s.pathsBounceCapped;
+    out.paths_pass_capped = s.pathsPassCapped;
+    out.charged_specular = s.chargedSpecular;
+    out.charged_diffuse = s.chargedDiffuse;
+    out.charged_transmission = s.chargedTransmission;
+    out.charged_other = s.chargedOther;
+    out.free_passes = s.freePasses;
+    out.medium_passes = s.mediumPasses;
+    out.arbiter_started_inside = s.arbiterStartedInside;
+    out.arbiter_inside_found = s.arbiterInsideFound;
     return out;
 }
 
-Result setVolumeInstrumentation(bool enabled) {
-    auto* backend = activeVulkanBackendForStats();
-    if (!backend)
+Result setVolumeInstrumentation(bool enabled, const std::array<float, 4>& region) {
+    const auto backends = vulkanBackendsForStats();
+    if (backends.empty())
         return Result::fail("no active Vulkan backend (volume counters are Vulkan-only)");
-    backend->resetVolumePerformanceStats(enabled);
+    for (float v : region)
+        if (!(v >= 0.0f && v <= 1.0f))
+            return Result::fail("region values must be normalized to [0, 1]");
+    if (!(region[0] < region[2] && region[1] < region[3]))
+        return Result::fail("region must be [x0, y0, x1, y1] with x0 < x1 and y0 < y1");
+    VulkanRT::VolumeInstrumentationRegion r;
+    r.minX = region[0]; r.minY = region[1]; r.maxX = region[2]; r.maxY = region[3];
+    for (auto* backend : backends) backend->resetVolumePerformanceStats(enabled, r);
+    return Result::success();
+}
+
+namespace {
+const char* debugViewName(int v) {
+    static const char* names[] = {
+        "off", "photon_grid", "light_shafts", "photon_energy", "caustic_cells",
+        "photon_directions", "bounce_count", "transmission", "absorption",
+        "medium_density", "normal", "albedo", "depth", "material_id",
+        "sample_heatmap"};
+    return (v >= 0 && v < 15) ? names[v] : "unknown";
+}
+} // namespace
+
+RenderBudgetInfo renderBudget() {
+    RenderBudgetInfo out;
+    if (!g_ctx) return out;
+    const auto& rs = g_ctx->render_settings;
+    out.max_bounces = rs.max_bounces;
+    out.diffuse_bounces = rs.diffuse_bounces;
+    out.transmission_bounces = rs.transmission_bounces;
+    out.debug_view = rs.debug_view;
+    out.debug_view_name = debugViewName(rs.debug_view);
+    return out;
+}
+
+Result setRenderBudget(std::optional<int> max_bounces,
+                       std::optional<int> diffuse_bounces,
+                       std::optional<int> transmission_bounces,
+                       std::optional<int> debug_view) {
+    if (!g_ctx) return Result::fail("no UI context");
+    // Same range as the panel's DragInt (1..64).
+    auto inRange = [](const std::optional<int>& v) { return !v || (*v >= 1 && *v <= 64); };
+    if (!inRange(max_bounces) || !inRange(diffuse_bounces) || !inRange(transmission_bounces))
+        return Result::fail("bounce counts must be in [1, 64]");
+    if (debug_view && (*debug_view < 0 || *debug_view > 14))
+        return Result::fail("debug_view must be in [0, 14]");
+    auto& rs = g_ctx->render_settings;
+    if (max_bounces) rs.max_bounces = *max_bounces;
+    if (diffuse_bounces) rs.diffuse_bounces = *diffuse_bounces;
+    if (transmission_bounces) rs.transmission_bounces = *transmission_bounces;
+    if (debug_view) rs.debug_view = *debug_view;
+    // The panel clamps the sub-budgets to the total after every edit.
+    rs.diffuse_bounces = std::clamp(rs.diffuse_bounces, 1, rs.max_bounces);
+    rs.transmission_bounces = std::clamp(rs.transmission_bounces, 1, rs.max_bounces);
     return Result::success();
 }
 
@@ -1789,8 +1924,10 @@ VolumeSlotsInfo volumeSlots() {
             row.system = system.name;
             row.domain_index = static_cast<int>(d);
             row.domain = descs[d].name;
-            const bool fluid = descs[d].type == RayTrophiSim::SimulationDomainType::Fluid;
-            row.type = fluid ? "fluid" : "gas";
+            const bool fluid = RayTrophiSim::simulationDomainHasLiquid(descs[d].type);
+            row.type = descs[d].type == RayTrophiSim::SimulationDomainType::Matter
+                ? "matter"
+                : (fluid ? "fluid" : "gas");
             if (fluid) {
                 using Mode = RayTrophiSim::Fluid::FluidRenderMode;
                 const Mode m = descs[d].fluid_render_mode;
@@ -1801,6 +1938,11 @@ VolumeSlotsInfo volumeSlots() {
             if (d < system.domain_volumes.size() && system.domain_volumes[d]) {
                 row.has_volume = true;
                 row.volume_name = system.domain_volumes[d]->name;
+            }
+            if (d < system.domain_fog_vdb_ids.size()) row.fog_vdb_id = system.domain_fog_vdb_ids[d];
+            if (d < system.domain_fog_volumes.size() && system.domain_fog_volumes[d]) {
+                row.has_fog_volume = true;
+                row.fog_volume_name = system.domain_fog_volumes[d]->name;
             }
             out.domains.push_back(std::move(row));
         }
@@ -2532,8 +2674,15 @@ Result setWorldMode(const std::string& mode) {
     WorldMode m;
     if (!parseWorldMode(mode, m))
         return Result::fail("unknown world mode '" + mode + "' (expected solid|hdri|nishita)");
+    const bool enteringNishita =
+        m == WORLD_MODE_NISHITA && g_ctx->renderer.world.getMode() != WORLD_MODE_NISHITA;
     g_ctx->renderer.world.setMode(m);
     worldChanged();
+    if (enteringNishita) {
+        bool created = false;
+        std::string name;
+        if (Result r = ensureWorldSunLight(created, name); !r) return r;
+    }
     return Result::success();
 }
 
@@ -2617,8 +2766,6 @@ Result getWorldAtmosphere(WorldAtmosphereInfo& out) {
     out.dust_density = p.dust_density;
     out.ozone_density = p.ozone_density;
     out.ozone_absorption_scale = p.ozone_absorption_scale;
-    out.humidity = p.humidity;
-    out.temperature = p.temperature;
     out.altitude = p.altitude;
     out.mie_anisotropy = p.mie_anisotropy;
     out.planet_radius = p.planet_radius;
@@ -2645,10 +2792,6 @@ Result updateWorldAtmosphere(const WorldAtmosphereUpdate& update) {
     if (update.ozone_density && *update.ozone_density < 0.0f) return reject("ozone_density must be >= 0");
     if (update.ozone_absorption_scale && *update.ozone_absorption_scale < 0.0f)
         return reject("ozone_absorption_scale must be >= 0");
-    if (update.humidity && (*update.humidity < 0.0f || *update.humidity > 1.0f))
-        return reject("humidity must be within 0..1");
-    if (update.temperature && (*update.temperature < -273.15f))
-        return reject("temperature is in CELSIUS and must be above absolute zero");
     if (update.mie_anisotropy && (*update.mie_anisotropy <= -1.0f || *update.mie_anisotropy >= 1.0f))
         return reject("mie_anisotropy (g) must be within (-1, 1)");
     if (update.planet_radius && *update.planet_radius < 1000.0f)
@@ -2664,8 +2807,6 @@ Result updateWorldAtmosphere(const WorldAtmosphereUpdate& update) {
     if (update.dust_density)            p.dust_density = *update.dust_density;
     if (update.ozone_density)           p.ozone_density = *update.ozone_density;
     if (update.ozone_absorption_scale)  p.ozone_absorption_scale = *update.ozone_absorption_scale;
-    if (update.humidity)                p.humidity = *update.humidity;
-    if (update.temperature)             p.temperature = *update.temperature;
     if (update.altitude)                p.altitude = *update.altitude;
     if (update.mie_anisotropy)          p.mie_anisotropy = *update.mie_anisotropy;
     if (update.planet_radius)           p.planet_radius = *update.planet_radius;
@@ -2688,6 +2829,135 @@ Result updateWorldAtmosphere(const WorldAtmosphereUpdate& update) {
     return Result::success();
 }
 
+Result getWorldClimate(WorldClimateInfo& out) {
+    if (!g_ctx) return notBound();
+    const World& world = g_ctx->renderer.world;
+    const atmosphere::ClimateState& c = world.getClimate();
+    out.surface_temperature_k = c.surface_temperature_k;
+    out.lapse_rate_k_per_m = c.lapse_rate_k_per_m;
+    out.surface_relative_humidity = c.surface_relative_humidity;
+    out.surface_pressure_pa = c.surface_pressure_pa;
+    out.wind_direction = c.wind_direction;
+    out.wind_speed_mps = c.wind_speed_mps;
+    out.instability = c.instability;
+    // From the packet, deliberately: a mirror that stopped syncing shows up
+    // here as a disagreement with the fields above.
+    const NishitaSkyParams p = world.getNishitaParams();
+    out.applied_mie_humidity_scale = atmosphere::hygroscopicMieScale(p.derived_relative_humidity);
+    out.applied_temperature_c = p.derived_temperature_c;
+    return Result::success();
+}
+
+Result updateWorldClimate(const WorldClimateUpdate& update) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+
+    atmosphere::ClimateState c = g_ctx->renderer.world.getClimate();
+    if (update.surface_temperature_k)     c.surface_temperature_k = *update.surface_temperature_k;
+    if (update.lapse_rate_k_per_m)        c.lapse_rate_k_per_m = *update.lapse_rate_k_per_m;
+    if (update.surface_relative_humidity) c.surface_relative_humidity = *update.surface_relative_humidity;
+    if (update.surface_pressure_pa)       c.surface_pressure_pa = *update.surface_pressure_pa;
+    if (update.wind_direction)            c.wind_direction = *update.wind_direction;
+    if (update.wind_speed_mps)            c.wind_speed_mps = *update.wind_speed_mps;
+    if (update.instability)               c.instability = *update.instability;
+
+    std::string error;
+    if (!g_ctx->renderer.world.setClimate(c, &error)) return Result::fail(error);
+    worldChanged();
+    return Result::success();
+}
+
+Result sampleWorldClimate(const Vec3& scene_pos, ClimateSampleInfo& out) {
+    if (!g_ctx) return notBound();
+    const atmosphere::ClimateSample s = g_ctx->renderer.world.sampleClimate(scene_pos);
+    out.altitude_m = s.altitude_m;
+    out.temperature_k = s.temperature_k;
+    out.relative_humidity = s.relative_humidity;
+    out.pressure_pa = s.pressure_pa;
+    out.air_density_kg_m3 = s.air_density_kg_m3;
+    out.wind_mps = s.wind_mps;
+    return Result::success();
+}
+
+Result getWorldAerial(WorldAerialInfo& out) {
+    if (!g_ctx) return notBound();
+    const World& world = g_ctx->renderer.world;
+    const NishitaSkyParams p = world.getNishitaParams();
+    out.aerial_perspective = world.getAdvancedParams().aerial_perspective != 0;
+    out.fog_enabled = p.fog_enabled != 0;
+    out.fog_density = p.fog_density;
+    out.fog_height = p.fog_height;
+    out.fog_falloff = p.fog_falloff;
+    out.fog_distance = p.fog_distance;
+    out.fog_albedo = Vec3(p.fog_albedo.x, p.fog_albedo.y, p.fog_albedo.z);
+    out.fog_anisotropy = p.fog_anisotropy;
+    return Result::success();
+}
+
+Result updateWorldAerial(const WorldAerialUpdate& update) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+
+    auto reject = [](const char* what) { return Result::fail(std::string(what)); };
+    if (update.fog_density && !(*update.fog_density >= 0.0f))
+        return reject("fog_density is an extinction in 1/m and must be >= 0");
+    if (update.fog_falloff && !(*update.fog_falloff >= 0.0f))
+        return reject("fog_falloff is in 1/m and must be >= 0");
+    if (update.fog_distance && !(*update.fog_distance > 0.0f))
+        return reject("fog_distance is in METRES and must be > 0");
+    if (update.fog_height && !std::isfinite(*update.fog_height))
+        return reject("fog_height must be finite (scene Y, metres)");
+    if (update.fog_anisotropy && !(*update.fog_anisotropy > -0.95f && *update.fog_anisotropy < 0.95f))
+        return reject("fog_anisotropy (Henyey-Greenstein g) must be within (-0.95, 0.95)");
+    if (update.fog_albedo) {
+        const Vec3& a = *update.fog_albedo;
+        if (!(a.x >= 0.0f && a.x <= 1.0f && a.y >= 0.0f && a.y <= 1.0f && a.z >= 0.0f && a.z <= 1.0f))
+            return reject("fog_albedo is a single-scattering albedo, each channel 0..1");
+    }
+
+    World& world = g_ctx->renderer.world;
+    NishitaSkyParams p = world.getNishitaParams();
+    if (update.fog_enabled)    p.fog_enabled = *update.fog_enabled ? 1 : 0;
+    if (update.fog_density)    p.fog_density = *update.fog_density;
+    if (update.fog_height)     p.fog_height = *update.fog_height;
+    if (update.fog_falloff)    p.fog_falloff = *update.fog_falloff;
+    if (update.fog_distance)   p.fog_distance = *update.fog_distance;
+    if (update.fog_albedo)
+        p.fog_albedo = make_float3(update.fog_albedo->x, update.fog_albedo->y, update.fog_albedo->z);
+    if (update.fog_anisotropy) p.fog_anisotropy = *update.fog_anisotropy;
+    world.setNishitaParams(p);
+
+    if (update.aerial_perspective) {
+        AtmosphereAdvanced adv = world.getAdvancedParams();
+        adv.aerial_perspective = *update.aerial_perspective ? 1 : 0;
+        world.setAdvancedParams(adv);
+    }
+    worldChanged();
+    return Result::success();
+}
+
+AtmosphereStatsInfo atmosphereStats() {
+    AtmosphereStatsInfo out;
+    // Same role rule as volumeSlots(): name the two ROLES, even when both
+    // point at one object -- "one device or two" is part of the answer.
+    auto describe = [&](const char* role, Backend::IBackend* backend) {
+        if (!backend) return;
+        AtmosphereStatsRow row;
+        row.role = role;
+        if (auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(backend)) {
+            row.is_vulkan = true;
+            row.lut_ready = vk->atmosphereLutReady();
+            row.froxel_available = vk->aerialFroxelAvailable();
+            row.froxel_active = vk->aerialFroxelActive();
+            row.froxel_dispatches = vk->aerialFroxelDispatchCount();
+        }
+        out.backends.push_back(std::move(row));
+    };
+    describe("render", ::g_backend.get());
+    describe("viewport", ::g_viewport_backend.get());
+    return out;
+}
+
 Result getWorldThermal(WorldThermalInfo& out) {
     if (!g_ctx) return notBound();
     // ★ worldThermal() lives on ParticleSimulationSystem, not SceneData
@@ -2697,6 +2967,11 @@ Result getWorldThermal(WorldThermalInfo& out) {
     // actually lives (ParticleSimulation.h).
     const auto& t = g_ctx->scene.ensureParticleSimulationSystem().worldThermal();
     out.ambient_kelvin = t.ambient_kelvin;
+    out.inherit_atmosphere = t.inherit_atmosphere;
+    out.effective_ambient_kelvin = t.ambientKelvin();
+    out.ambient_source = t.inherit_atmosphere ? "atmosphere" : "local";
+    out.reference_kelvin = t.reference_kelvin;
+    out.drying_scale = t.dryingScale();
     out.kelvin_per_unit = t.kelvin_per_unit;
     out.convection_coefficient = t.convection_coefficient;
     out.oxygen_availability = t.oxygen_availability;
@@ -2704,9 +2979,16 @@ Result getWorldThermal(WorldThermalInfo& out) {
 }
 
 Result setWorldThermal(const float* ambient_kelvin, const float* kelvin_per_unit,
-                       const float* convection_coefficient, const float* oxygen_availability) {
+                       const float* convection_coefficient, const float* oxygen_availability,
+                       const bool* inherit_atmosphere, const float* reference_kelvin) {
     if (!g_ctx) return notBound();
     auto& t = g_ctx->scene.ensureParticleSimulationSystem().worldThermal();
+    if (reference_kelvin && !(*reference_kelvin > 0.0f))
+        return Result::fail("reference_kelvin must be positive");
+    if (inherit_atmosphere) t.inherit_atmosphere = *inherit_atmosphere;
+    // Moving the zero re-interprets every stored normalized temperature; it is
+    // a calibration edit, like kelvin_per_unit, not an ambient one.
+    if (reference_kelvin) t.reference_kelvin = *reference_kelvin;
     if (ambient_kelvin) {
         if (*ambient_kelvin <= 0.0f) return Result::fail("ambient_kelvin must be positive");
         t.ambient_kelvin = *ambient_kelvin;
@@ -2742,8 +3024,8 @@ Result setWorldThermal(const float* ambient_kelvin, const float* kelvin_per_unit
 // Scatter & Foliage System (Faz 5.2c)
 // ---------------------------------------------------------------------------
 
-namespace {
-
+// Shared with RtApiAtmosphere.cpp (scatter.get_wind/set_wind); declared in
+// RtApiInternal.h.
 InstanceGroup* findScatterGroupHelper(const std::string& key) {
     InstanceManager& im = InstanceManager::getInstance();
     if (key.empty()) return nullptr;
@@ -2756,8 +3038,6 @@ InstanceGroup* findScatterGroupHelper(const std::string& key) {
     } catch (...) {}
     return im.findGroupByName(key);
 }
-
-} // namespace
 
 Result listScatterGroups(std::vector<rtapi::ScatterGroupInfo>& out_groups) {
     out_groups.clear();

@@ -55,6 +55,17 @@ class Ipc(object):
         self.k32.SetNamedPipeHandleState(self.handle, ctypes.byref(mode), None, None)
         self._id = 0
 
+    def close(self):
+        if self.handle:
+            self.k32.CloseHandle(self.handle)
+            self.handle = None
+
+    def reconnect(self):
+        self.close()
+        # Give the application one unowned frame to publish the Vulkan result.
+        time.sleep(0.05)
+        self.__init__()
+
     def call(self, method, params=None):
         self._id += 1
         msg = {"id": self._id, "method": method}
@@ -95,11 +106,13 @@ def build_rig(rt):
     for name, x, substance in ((SRC_MILK, -0.35, "MilkChocolate"),
                                (SRC_BITTER, 0.35, "BitterChocolate")):
         payload = {"name": name, "domain": DOMAIN,
+                   "phase": "liquid",
                    "position": [x, 2.4, 0.0],
                    "velocity": [0.0, -1.2, 0.0],
                    "radius": 0.16,
                    "fluid_particles_per_second": 4000.0,
-                   "fluid_substance": substance}
+                   "fluid_substance": substance,
+                   "initial_constitutive_model": "auto"}
         if name in existing:
             rt.call("flow_source.update", payload)
         else:
@@ -128,6 +141,10 @@ def phase_readback(rt):
                 "carrying what was set, so every particle it spawns is tagged "
                 "wrong (or untagged) and the mixture below is meaningless."
                 .format(s["name"], got, want[s["name"]]))
+        if s.get("initial_constitutive_model") != "auto":
+            failures.append(
+                "{} reports initial_constitutive_model {!r}, expected 'auto'."
+                .format(s["name"], s.get("initial_constitutive_model")))
     if not failures:
         # A partial write is worse than a rejected one: it looks configured.
         seen = {s["name"] for s in (rt.call("flow_source.list") or [])}
@@ -180,8 +197,18 @@ def phase_cache_roundtrip(rt):
     for _ in range(40):
         rt.call("fluid.step", {"dt": DT})
 
+    # A long uninterrupted IPC transaction can own every application frame.
+    # Release the pipe once so the frame loop can publish the Vulkan result;
+    # polling on the same connection keeps observing the reset snapshot.
+    rt.reconnect()
     before = rt.call("fluid.get", {"domain": DOMAIN})
     live = int(before.get("particles", 0))
+    if live <= 0:
+        # The first query can be the command that retires the queued device
+        # work. Release that dispatch frame as well, then read the publication.
+        rt.reconnect()
+        before = rt.call("fluid.get", {"domain": DOMAIN})
+        live = int(before.get("particles", 0))
     print("  live particles after pour: {}".format(live))
     if live <= 0:
         failures.append(
@@ -289,6 +316,33 @@ def phase_substance_physics(rt):
             "rejected so a script learns its number was wrong.")
     except Exception:
         print("  miscibility=5.0 rejected, as it should be")
+
+    rt.call("fluid.set_substance_material",
+            {"domain": DOMAIN, "substance": "BitterChocolate",
+             "constitutive_model": "granular"})
+    b = _binding(rt, "BitterChocolate")
+    if b is None or b.get("constitutive_model") != "granular":
+        failures.append(
+            "constitutive_model did not round-trip as granular: {!r}."
+            .format(None if b is None else b.get("constitutive_model")))
+    rt.call("fluid.reset")
+    for _ in range(6):
+        rt.call("fluid.step", {"dt": DT})
+    model_info = rt.call("fluid.get", {"domain": DOMAIN})
+    if int(model_info.get("granular_model_particles", 0)) <= 0:
+        failures.append(
+            "a granular Substance emitted zero granular-model particles; "
+            "the authoring row exists but did not reach parcel state")
+    try:
+        rt.call("fluid.set_substance_material",
+                {"domain": DOMAIN, "substance": "BitterChocolate",
+                 "constitutive_model": "banana"})
+        failures.append("invalid constitutive_model='banana' was accepted")
+    except Exception:
+        print("  invalid constitutive model rejected, as it should be")
+    rt.call("fluid.set_substance_material",
+            {"domain": DOMAIN, "substance": "BitterChocolate",
+             "constitutive_model": "fluid"})
 
     return failures
 
@@ -591,28 +645,31 @@ def phase_effective_representation(rt):
 
 def main():
     rt = Ipc()
-    print("Connected to RayTrophi Studio.")
-    build_rig(rt)
+    try:
+        print("Connected to RayTrophi Studio.")
+        build_rig(rt)
 
-    failures = []
-    failures += phase_readback(rt)
-    failures += phase_untagged_default(rt)
-    failures += phase_substance_physics(rt)
-    failures += phase_solid_substance(rt)
-    failures += phase_sealed_pockets(rt)
-    failures += phase_effective_representation(rt)
-    if not failures:
-        failures += phase_cache_roundtrip(rt)
+        failures = []
+        failures += phase_readback(rt)
+        failures += phase_untagged_default(rt)
+        failures += phase_substance_physics(rt)
+        failures += phase_solid_substance(rt)
+        failures += phase_sealed_pockets(rt)
+        failures += phase_effective_representation(rt)
+        if not failures:
+            failures += phase_cache_roundtrip(rt)
 
-    print("\n" + "=" * 72)
-    if failures:
-        print("FAILED")
-        for f in failures:
-            print("\n  * " + f)
+        print("\n" + "=" * 72)
+        if failures:
+            print("FAILED")
+            for f in failures:
+                print("\n  * " + f)
+            print("=" * 72)
+            raise SystemExit(1)
+        print("PASSED - substance identity reaches the emitter and survives.")
         print("=" * 72)
-        raise SystemExit(1)
-    print("PASSED - substance identity reaches the emitter and survives.")
-    print("=" * 72)
+    finally:
+        rt.close()
 
 
 def refuse_if_running_inside_the_app():

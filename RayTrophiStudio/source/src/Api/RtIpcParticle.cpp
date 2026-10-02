@@ -334,7 +334,10 @@ json particlePhysicsToJson(const rtapi::ParticlePhysicsInfo& info) {
         {"grid_density_deposit", info.grid_density_deposit},
         {"grid_temperature_deposit", info.grid_temperature_deposit},
         {"grid_fuel_deposit", info.grid_fuel_deposit},
-        {"grid_deposit_fade_with_age", info.grid_deposit_fade_with_age}};
+        {"grid_deposit_fade_with_age", info.grid_deposit_fade_with_age},
+        {"inherit_atmosphere", info.inherit_atmosphere},
+        {"effective_air_wind", {info.effective_air_wind.x, info.effective_air_wind.y,
+                                info.effective_air_wind.z}}};
 }
 
 void applyParticlePhysicsPatch(const json& patch, rtapi::ParticlePhysicsInfo& info) {
@@ -364,6 +367,7 @@ void applyParticlePhysicsPatch(const json& patch, rtapi::ParticlePhysicsInfo& in
     flt("grid_temperature_deposit", info.grid_temperature_deposit);
     flt("grid_fuel_deposit", info.grid_fuel_deposit);
     boolean("grid_deposit_fade_with_age", info.grid_deposit_fade_with_age);
+    boolean("inherit_atmosphere", info.inherit_atmosphere);
 }
 
 json particleStatsToJson(const rtapi::ParticleStatsInfo& info) {

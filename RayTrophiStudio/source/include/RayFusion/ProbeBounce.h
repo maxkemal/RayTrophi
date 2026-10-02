@@ -174,12 +174,6 @@ struct BounceStatus {
     // Emissive taramasi onbellekten mi geldi. Bu bayrak olmadan 0,00 ms iki
     // ayri seyi anlatabilir: "cache isabet etti" ve "tarama hic calismadi".
     bool   emissiveCached = false;
-    // Physical Sky gunesi sicrama isik tablosunda mi, ve tonu gercek
-    // transmittance LUT'undan mi geldi. Ikincisi ayri bir alan cunku LUT yokken
-    // shader'in sabit yedegi kullanilir ve o, ALCAK GUNESTE gorunur sekilde
-    // daha az sicaktir -- yaklasim oldugu SOYLENMELI, sessizce kullanilmamali.
-    bool   sunInBounce = false;
-    bool   sunTintFromLut = false;
     // ── Hair bounce integration ──────────────────────────────────────────
     // Hair geometry is added to the RayFusion TLAS as opaque AABB occluders.
     // These counters let the UI panel confirm hair participates in bounce.

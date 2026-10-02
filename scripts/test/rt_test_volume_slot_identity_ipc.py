@@ -11,6 +11,9 @@ touching that code:
   4. An unrelated scene edit (TLAS rebuild) does not evict the SDF volume.
   5. Foam off -> the SDF slot carries no temperature channel (foam rides it).
   6. The domain's volume name / vdb id match a slot on every Vulkan backend.
+  7. Surface + fog of ONE domain at once (Faz 1): untagged water stays the
+     isosurface, a "steam" substance bound to fog gets its own volume; both
+     are active, and fluid.get's views agree with the volume table.
 
 Self-contained: creates domain 'SlotProbe' + a primitive, removes both on exit.
 Run with the app open and the timeline paused:
@@ -27,6 +30,7 @@ import time
 PIPE_NAME = r"\\.\pipe\RayTrophiStudio"
 DOMAIN = "SlotProbe"
 PROP = "SlotProbeProp"
+SOURCE = "SlotProbeSteam"
 SETTLE_S = 1.5
 # "solid" exercises the raster viewport (packet order, no TLAS); "rendered"
 # fills the render backend too (TLAS order, stable_key identity).
@@ -226,8 +230,61 @@ def main():
             s = r["slot"]
             check(s is not None and s["is_active"] == 1 and s["has_density"],
                   "{}: SDF active with density".format(role), describe({role: r}))
+
+        print("7. surface + fog of one domain at once")
+        rt.call("fluid.set_substance_material",
+                {"domain": DOMAIN, "substance": "steam", "representation": "fog"})
+        rt.call("flow_source.create", {"name": SOURCE, "domain": DOMAIN,
+                                       "position": [0.5, 1.3, 0.5], "radius": 0.15,
+                                       "fluid_particles_per_second": 6000,
+                                       "fluid_substance": "steam"})
+        # Adding a source resets the domain (particle_count -> 0), so the
+        # untagged water seeded in setup is gone; seed it again or the sdf
+        # view has nothing live to draw.
+        rt.call("fluid.seed", {"domain": DOMAIN, "seed_min": [-0.6, 0.05, -0.6],
+                               "seed_max": [0.2, 0.8, 0.2], "particles_per_cell": 4})
+        frame = rt.call("timeline.get_frame")
+        frame = int(frame.get("frame", 0) if isinstance(frame, dict) else frame)
+        for i in range(12):   # let the source emit
+            rt.call("timeline.set_frame", {"frame": frame + 1 + i})
+            time.sleep(0.25)
+        settle(rt)
+        info = rt.call("fluid.get", {"domain": DOMAIN})
+        views = {v["view"]: v for v in info.get("views", [])}
+        check("sdf" in views and "fog" in views, "fluid.get reports sdf and fog views",
+              "views={}".format(sorted(views)))
+        fog_view = views.get("fog", {})
+        check(bool(fog_view.get("live")) and "steam" in fog_view.get("substances", []),
+              "fog view is live and holds 'steam'", str(fog_view))
+        check(bool(views.get("sdf", {}).get("untagged")) and bool(views.get("sdf", {}).get("live")),
+              "untagged water stays on the isosurface, live", str(views.get("sdf")))
+        t7 = rt.call("render.volume_slots")
+        dom7 = next((x for x in t7["domains"] if x["domain"] == DOMAIN), None)
+        check(dom7 is not None and dom7["has_volume"] and dom7["has_fog_volume"] and
+              dom7["vdb_id"] != dom7["fog_vdb_id"],
+              "domain owns a surface volume AND a separate fog volume", str(dom7))
+        if dom7:
+            check(views.get("sdf", {}).get("vdb_id") == dom7["vdb_id"] and
+                  fog_view.get("vdb_id") == dom7["fog_vdb_id"],
+                  "fluid.get views name the same volumes as render.volume_slots",
+                  "views sdf={} fog={} / slots {} {}".format(
+                      views.get("sdf", {}).get("vdb_id"), fog_view.get("vdb_id"),
+                      dom7["vdb_id"], dom7["fog_vdb_id"]))
+            for bk in t7["backends"]:
+                if not bk["is_vulkan"] or not bk["slots"]:
+                    continue
+                surf = next((x for x in bk["slots"]
+                             if is_ours(x, dom7["volume_name"], dom7["vdb_id"])), None)
+                fog = next((x for x in bk["slots"]
+                            if is_ours(x, dom7["fog_volume_name"], dom7["fog_vdb_id"])), None)
+                check(surf is not None and surf["is_active"] == 1 and surf["source"] == "sdf",
+                      "{}: surface slot active as sdf".format(bk["role"]), str(surf))
+                check(fog is not None and fog["is_active"] == 1 and fog["source"] != "sdf" and
+                      fog["has_density"],
+                      "{}: fog slot active, not an isosurface".format(bk["role"]), str(fog))
     finally:
-        for method, params in (("fluid.remove_domain", {"domain": DOMAIN}),
+        for method, params in (("flow_source.remove", {"name": SOURCE}),
+                               ("fluid.remove_domain", {"domain": DOMAIN}),
                                ("scene.delete", {"name": PROP}),
                                ("viewport.set_shading", {"mode": shading_before})):
             try:

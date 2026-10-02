@@ -52,6 +52,13 @@ const uint PL_PRIMARY_VOLUME = 1u << 19;
 // For ray-marched fog/gas volumes, primaryNrm stores floatBitsToUint of the
 // optical-depth centroid ray distance instead of an octahedral normal.
 const uint PL_PRIMARY_VOLUME_DEPTH = 1u << 20;
+// Set by raygen on every trace of the camera segment (bounce 0, including
+// transparent passes). miss.rmiss uses it to give camera rays the full cloud
+// walk and later bounces the capped one (cloud_rt.glsl).
+const uint PL_CAMERA_SEGMENT = 1u << 21;
+// Set by photon.rgen: its escaping photons carry no sky radiance, so miss
+// skips the cloud walk (it would only burn time).
+const uint PL_NO_SKY_RADIANCE = 1u << 22;
 
 // Octahedral unit-vector packing for the denoiser normal AOV.
 vec2 plOctWrap(vec2 v) {
@@ -117,6 +124,14 @@ const uint BOUNCE_MARBLE = 5u;
 // mirrored ghost caustic on the floor. Camera-side raygen spends the same
 // transmission budget on it, so camera behavior is unchanged.
 const uint BOUNCE_GLASS_REFLECT = 6u;
+// Straight continuation through a participating medium: the gas/fog march
+// integrated its segment (attenuation + analytic in-scatter) and hands the ray
+// on in the SAME direction. That is not a scattering event, so raygen does not
+// charge it to the bounce budget (only to the pass cap). It used to fall under
+// BOUNCE_SPECULAR, and every fog crossing cost a real bounce: a liquid surface
+// lying in fog starved its paths of budget and rendered black (2026-09-28).
+// The photon pass treats it like SPECULAR/TRANSPARENT: keep walking.
+const uint BOUNCE_MEDIUM_PASS = 7u;
 
 // Shared tracing constants. Same reasoning as the bounce codes above: both
 // closest-hit shaders and the shared BSDF module need identical values, and a

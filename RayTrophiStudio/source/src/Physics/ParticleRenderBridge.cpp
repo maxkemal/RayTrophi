@@ -40,6 +40,7 @@
 #include "PBRMaterialSnapshot.h"
 #include "Fluid/FluidFoam.h"
 #include "Fluid/FluidSplatMaterialPolicy.h"
+#include "Fluid/FluidViewResolver.h"
 #include "globals.h"
 #include "PerfProfile.h"
 
@@ -375,6 +376,7 @@ inline std::size_t particlePoolCapacityFor(std::size_t soa_slots) {
 // at chunk boundaries instead of every frame during fill-up — that per-frame
 // rebuild was racing the in-flight render and was a crash vector.
 constexpr std::size_t kFluidInstanceHardCeiling = 1000000;
+constexpr std::size_t kFluidPoolMinCapacity = 256;
 constexpr std::size_t kFluidPoolChunk = 16384;
 constexpr std::size_t kFluidSurfaceProxyInstanceCeiling = 32768;
 
@@ -387,14 +389,10 @@ inline std::size_t fluidRenderBudget(std::size_t ui_max_particles) {
 inline std::size_t fluidPoolCapacityFor(std::size_t live_count, std::size_t budget) {
     const std::size_t capped = std::min(live_count, budget);
     if (capped == 0) return 0;
-    // Geometric (doubling) growth instead of fixed kFluidPoolChunk steps. The
-    // pool capacity only ever grows (callers clamp with `if (want > cap)`), and
-    // every growth event triggers a structural backend rebuild — the spammy
-    // "Rebuilding Geometry" path on both backends during a filling sim. Fixed
-    // chunks crossed O(N / chunk) boundaries (≈31 rebuilds for 500k); doubling
-    // makes it O(log) (≈5) and amortises to O(1) per particle, at the cost of up
-    // to ~2x transient slack in the (degenerate, scale-0) instance pool.
-    std::size_t cap = kFluidPoolChunk;
+    // Start small, grow by 4x to 16K, then preserve the old 2x large-scene tiers.
+    // This avoids a 16K TLAS for one droplet without rebuilding at every spawn.
+    std::size_t cap = kFluidPoolMinCapacity;
+    while (cap < capped && cap < kFluidPoolChunk) cap <<= 2;
     while (cap < capped) cap <<= 1;
     return std::min(cap, budget);
 }
@@ -1165,34 +1163,29 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
 
         for (std::size_t d = 0; d < states.size(); ++d) {
             const auto& state  = states[d];
-            const bool is_fluid = state.type == RayTrophiSim::SimulationDomainType::Fluid;
+            const bool is_fluid = RayTrophiSim::simulationDomainHasLiquid(state.type);
+            // The one view decision (FluidViewResolver); splat vs surface vs fog
+            // is never re-derived from the mode or the bindings in this file.
+            RayTrophiSim::Fluid::FluidViewPlan view_plan;
+            if (is_fluid && d < domains.size()) {
+                view_plan = RayTrophiSim::Fluid::resolveFluidViews(
+                    domains[d], RayTrophiSim::Fluid::distinctViewKeys(state.particles));
+            }
 
             // Solid, Matcap, Material Preview and RayFusion share the native
             // SurfaceSDF volume allocation. Keep the bounded sphere fallback
-            // only until that pipeline has been created successfully.
-            // A fog domain has no surface to stand in for: no proxy spheres.
+            // only until that pipeline has been created successfully, and only
+            // for a domain that has a surface to stand in for.
             const bool needs_raster_sdf_proxy =
                 g_solid_viewport_active && !g_material_preview_viewport_active &&
-                !g_native_surface_sdf_viewport_available &&
-                !(d < domains.size() && domains[d].fluid_render_mode ==
-                      RayTrophiSim::Fluid::FluidRenderMode::VolumeFog);
+                !g_native_surface_sdf_viewport_available && view_plan.surface;
 
             // Explicit particle/Splat authoring always wins. The compatibility
             // proxy only fills SurfaceSDF in raster modes without a native pass.
             const bool lifecycle_alive =
                 system.visible && system.enabled && state.valid && is_fluid &&
                 d < domains.size();
-            bool has_splat_override = false;
-            if (d < domains.size()) {
-                for (const auto& b : domains[d].fluid_substance_materials)
-                    has_splat_override |= b.representation ==
-                        RayTrophiSim::Fluid::SubstanceRepresentation::Splat;
-            }
-            const bool has_explicit_splats =
-                d < domains.size() &&
-                (domains[d].fluid_render_mode ==
-                     RayTrophiSim::Fluid::FluidRenderMode::Particles ||
-                 has_splat_override);
+            const bool has_explicit_splats = view_plan.splat;
             const bool render_eligible = enable_rt_geometry && lifecycle_alive &&
                 (has_explicit_splats || needs_raster_sdf_proxy);
 
@@ -1246,6 +1239,27 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                     // Raster keeps every pool slot and masks zero-scale ones
                     // (syncRasterInstanceTransforms), so hiding is a motion
                     // update there too -- no raster rebuild is needed.
+                    motion_change = true;
+                }
+                continue;
+            }
+
+            // Authored splat view (a label route) with no splat parcel this frame:
+            // keep the pool - deleting it is a structural RT rebuild, and it would
+            // come back with the next droplet - hide its instances, skip the walk.
+            // A pool that never existed is not created until a parcel needs it.
+            if (!view_plan.anyLiveIn(RayTrophiSim::Fluid::FluidView::Splat) &&
+                !needs_raster_sdf_proxy) {
+                InstanceGroup* existing = (group_id >= 0) ? im.getGroup(group_id) : nullptr;
+                if (!existing) continue;
+                bool had_visible = false;
+                for (auto& tr : existing->instances) {
+                    had_visible |= tr.scale.x != 0.0f || tr.scale.y != 0.0f || tr.scale.z != 0.0f;
+                    tr.scale = Vec3(0.0f);
+                }
+                if (had_visible) {
+                    existing->gpu_dirty = true;
+                    g_fluid_source_state[group_id].content_hash = 0u;
                     motion_change = true;
                 }
                 continue;
@@ -1409,14 +1423,14 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             for (std::size_t pi = 0; pi < state.particles.size(); ++pi) {
                 const uint32_t tag = pi < state.particles.substance_tag.size()
                     ? state.particles.substance_tag[pi] : RayTrophiSim::Fluid::kSubstanceUntagged;
-                bool splat =
-                    dconfig.fluid_render_mode ==
-                        RayTrophiSim::Fluid::FluidRenderMode::Particles;
+                // Per PARCEL: the substance's view, then its state label's route
+                // (a spray parcel of a surface substance is a splat here).
+                const RayTrophiSim::Fluid::FluidView view =
+                    view_plan.viewForParticle(state.particles, pi);
+                const bool splat = view == RayTrophiSim::Fluid::FluidView::Splat;
                 std::size_t source_index = 0;
                 for (const auto& b : dconfig.fluid_substance_materials) {
                     if (RayTrophiSim::Fluid::substanceTag(b.substance) != tag) continue;
-                    if (b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::Splat) splat = true;
-                    if (b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF) splat = false;
                     const int base_key = st.source_material_keys.empty()
                         ? 0 : st.source_material_keys.front();
                     const int requested_key =
@@ -1430,8 +1444,10 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                     }
                     break;
                 }
+                // Proxy spheres stand in for a SURFACE only; fog parcels are
+                // drawn by the fog volume and get no sphere.
                 const bool sampled_proxy =
-                    !splat && needs_raster_sdf_proxy &&
+                    view == RayTrophiSim::Fluid::FluidView::Surface && needs_raster_sdf_proxy &&
                     accepted_proxy_particles < proxy_budget &&
                     pi % proxy_stride == 0;
                 if ((splat || sampled_proxy) && accepted_particles < budget) {
@@ -1586,7 +1602,7 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
 
         for (std::size_t d = 0; d < states.size(); ++d) {
             const auto& state   = states[d];
-            const bool is_fluid = state.type == RayTrophiSim::SimulationDomainType::Fluid;
+            const bool is_fluid = RayTrophiSim::simulationDomainHasLiquid(state.type);
             // NOTE: do NOT gate on `!state.foam.empty()`. Foam is volatile — it is
             // culled by lifetime and re-spawned constantly, so its count oscillates
             // through 0 every few frames. Gating on non-empty here tore the group
@@ -1611,23 +1627,16 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
                 system.visible && system.enabled && state.valid && is_fluid &&
                 d < domains.size() &&
                 domains[d].fluid_foam_params.enabled;
-            // Foam renders as instanced spheres EXCEPT in Volume mode, where it is
-            // splatted into the fluid surface volume's temperature channel by
-            // SceneData::syncSimulationRenderVolumes (no per-particle geometry). The
-            // two paths are mutually exclusive — when Volume is selected we tear the
-            // sphere group down so the foam isn't drawn twice.
-            // Volume foam rides the fluid SURFACE volume's temperature channel, so it
-            // only applies when the fluid is in Surface SDF render mode. With any other
-            // fluid mode there is no host volume → fall back to spheres instead of
-            // silently drawing nothing.
-            const bool is_volume_foam =
-                base_ok &&
-                domains[d].fluid_foam_params.render_mode ==
-                    RayTrophiSim::Fluid::FoamRenderMode::Volume &&
-                domains[d].fluid_render_mode ==
-                    RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;
-            const bool is_spheres = base_ok && !is_volume_foam;
-            const bool wants = is_spheres;
+            // The label routes decide where each whitewater type is drawn; this
+            // group draws the types routed to splat. The group follows the ROUTE,
+            // not the live foam (see the NOTE above): a type routed here keeps the
+            // pool even on frames with no particle of that type.
+            const RayTrophiSim::Fluid::FluidViewPlan ww_plan = base_ok
+                ? RayTrophiSim::Fluid::resolveFluidViews(
+                      domains[d], RayTrophiSim::Fluid::distinctViewKeys(state.particles))
+                : RayTrophiSim::Fluid::FluidViewPlan{};
+            const auto splat_types = ww_plan.whitewaterTypesIn(RayTrophiSim::Fluid::FluidView::Splat);
+            const bool wants = base_ok && (splat_types[0] || splat_types[1] || splat_types[2]);
 
             int& group_id = system.domain_foam_render_group_ids[d];
 
@@ -1688,7 +1697,16 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
                 structural_change = true;
             }
 
-            const std::size_t live_count = state.foam.size();
+            // Only the types routed to splat take pool slots: foam routed to sdf
+            // or fog must not leave 100k scale-0 instances in the TLAS.
+            std::vector<uint32_t> routed_src;
+            routed_src.reserve(state.foam.size());
+            for (std::size_t s = 0; s < state.foam.size(); ++s) {
+                const uint8_t t = s < state.foam.type.size() ? state.foam.type[s] : 0;
+                if (t < splat_types.size() && splat_types[t])
+                    routed_src.push_back(static_cast<uint32_t>(s));
+            }
+            const std::size_t live_count = routed_src.size();
             const std::size_t budget     = fluidRenderBudget(fparams.max_foam);
             const std::size_t draw_count = std::min(live_count, budget);
             const std::size_t want_cap   = fluidPoolCapacityFor(live_count, budget);
@@ -1722,6 +1740,7 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
             content = hashCombine(content, state.version);
             content = hashCombine(content, static_cast<uint64_t>(draw_count));
             content = hashCombine(content, quantize(diam));
+            for (const bool routed : splat_types) content = hashCombine(content, routed ? 1u : 0u);
 
             const std::vector<float>& sdf_buf = system.domain_sdf_buffers[d];
             const auto& lsp = dconfig.fluid_level_set_params;
@@ -1783,10 +1802,11 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
                 InstanceTransform& tr = inst[i];
                 tr.rotation = Vec3(0.0f, 0.0f, 0.0f);
                 
-                const uint8_t foam_type = state.foam.type[i];
+                const std::size_t src = routed_src[i];
+                const uint8_t foam_type = state.foam.type[src];
                 tr.source_index = std::min(2, static_cast<int>(foam_type));
-                
-                Vec3 p = state.foam.position[i];
+
+                Vec3 p = state.foam.position[src];
                 if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
                     tr.position = Vec3(0.0f, 0.0f, 0.0f);
                     tr.scale = Vec3(0.0f, 0.0f, 0.0f);
@@ -1830,7 +1850,7 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
                 
                 // Dissolving/Popping scale: if lifetime < 0.5s, shrink to zero
                 float dissolve_scale = 1.0f;
-                const float life = state.foam.lifetime[i];
+                const float life = state.foam.lifetime[src];
                 if (life < 0.5f && life > 0.0f) {
                     dissolve_scale = life / 0.5f;
                 } else if (life <= 0.0f) {

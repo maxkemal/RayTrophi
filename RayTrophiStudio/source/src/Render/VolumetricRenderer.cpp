@@ -1061,11 +1061,14 @@ Vec3 VolumetricRenderer::applyAerialPerspective(const SceneData& scene, const Wo
     
     float clampedDist = (std::min)(dist, 1000000.0f);
     
-    const float min_dist = world_data.advanced.aerial_min_distance;
-    const float max_dist = world_data.advanced.aerial_max_distance;
+    // FROZEN mapping (docs/dev/ATMOSPHERE_SYSTEM.md, Faz 1b): Vulkan replaced this
+    // artistic ramp with the aerial froxel and the ramp fields are gone. This path
+    // keeps their former defaults so its output does not move.
+    const float min_dist = 1000.0f;
+    const float max_dist = 10000.0f;
     float ramp = (clampedDist < min_dist) ? 0.0f : (std::min)(1.0f, (clampedDist - min_dist) / (std::max)(1.0f, max_dist - min_dist));
     
-    float aerialDensity = (std::max)(0.0f, world_data.advanced.aerial_density);
+    float aerialDensity = 1.0f;
     float atmosphereDensity = (std::max)(0.001f, world_data.nishita.air_density * 0.60f + world_data.nishita.dust_density * 0.40f);
     float enabledFogDensity = world_data.nishita.fog_enabled
         ? (std::max)(world_data.nishita.fog_density, 0.0f) : 0.0f;
@@ -1093,7 +1096,7 @@ Vec3 VolumetricRenderer::applyAerialPerspective(const SceneData& scene, const Wo
             world_data.nishita.fog_height,
             world_data.nishita.fog_falloff
         );
-        Vec3 fogCol(world_data.nishita.fog_color.x, world_data.nishita.fog_color.y, world_data.nishita.fog_color.z);
+        Vec3 fogCol(world_data.nishita.fog_albedo.x, world_data.nishita.fog_albedo.y, world_data.nishita.fog_albedo.z);
         res = res * (1.0f - fAmount) + fogCol * fAmount;
     }
 

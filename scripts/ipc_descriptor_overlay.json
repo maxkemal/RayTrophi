@@ -1121,6 +1121,7 @@
   },
   "world.set_mode": {
     "summary": "Switch the world background between flat colour, HDRI and physical sky",
+    "notes": "Switching INTO nishita calls world.ensure_sun_light: the sky sun never lights surfaces by itself (Vulkan RT and RayFusion alike), so a scene without a directional light gets an undoable 'Sun' directional aligned with the world sun. Only on the switch -- a Sun deleted afterwards stays deleted.",
     "tags": "environment|sky|background|hdri",
     "params": {
       "mode": {
@@ -1155,7 +1156,7 @@
   },
   "world.get_thermal": {
     "summary": "Return the ambient thermal condition every uncoupled substance relaxes toward",
-    "notes": "Distinct from world.get: that is the render sky, this is WorldThermalState -- the room temperature (ambient_kelvin), the Kelvin-per-normalized-unit calibration a substance's MSF temperature is read against (kelvin_per_unit), the passive-cooling multiplier (convection_coefficient) and the pyrolysis rate scale (oxygen_availability). Formerly no scripting surface existed for any of this -- see docs/dev/SIMULATION_NODE_OBJECT_MODEL.md section 7 item 1.",
+    "notes": "Distinct from world.get: that is the render sky, this is WorldThermalState -- the room temperature (ambient_kelvin), the Kelvin-per-normalized-unit calibration a substance's MSF temperature is read against (kelvin_per_unit), the passive-cooling multiplier (convection_coefficient) and the pyrolysis rate scale (oxygen_availability). Formerly no scripting surface existed for any of this -- see docs/dev/SIMULATION_NODE_OBJECT_MODEL.md section 7 item 1. ATMOSPHERE (Faz 2): with inherit_atmosphere the room is the world climate's temperature at the scene origin -- read effective_ambient_kelvin / ambient_source ('atmosphere'|'local'), NOT ambient_kelvin, which then only holds the kept local value. reference_kelvin is the calibration zero (normalized 0 == this many Kelvin), deliberately separate from the ambient so a keyed climate cannot re-interpret stored temperatures. drying_scale is (1 - RH) when inheriting, else 1.",
     "returns": "WorldThermalInfo",
     "tags": "simulation|thermal|ambient|world|msf",
     "related": "world.set_thermal|sim_graph.list"
@@ -1177,6 +1178,12 @@
       },
       "oxygen_availability": {
         "description": "0..1, scales pyrolysis burn rate; 0 smothers combustion entirely. Clamped, not rejected, if out of range."
+      },
+      "inherit_atmosphere": {
+        "description": "true: the ambient follows world.set_climate (default false = the local ambient_kelvin). Turning it on moves the room from 293 K to the climate temperature."
+      },
+      "reference_kelvin": {
+        "description": "Calibration zero: normalized temperature 0 == this many Kelvin. Must be positive. Changing it re-interprets every stored normalized temperature -- a calibration edit, like kelvin_per_unit."
       }
     }
   },
@@ -1253,12 +1260,16 @@
     }
   },
   "render.volume_stats": {
-    "summary": "Return volume traversal counters for the last frame",
-    "tags": "diagnostics|performance|volume"
+    "summary": "Return volume traversal and path-budget counters accumulated since render.volume_counters",
+    "notes": "paths_bounce_capped / paths_traced is the share of paths that were still scattering when the bounce budget ran out: a black surface with a high share is budget-starved, not unlit. paths_pass_capped counts the free-pass cap (maxBounces + 32) instead. charged_* partition every bounce spent by kind; medium_passes counts straight gas/fog continuations; they are FREE (inside free_passes) -- ~1 per box crossed is healthy, many per path is short-hop re-entry. arbiter_started_inside / arbiter_inside_found: the gas->liquid arbiter began inside a liquid and whether it found the exit.",
+    "tags": "diagnostics|performance|volume|bounce|budget",
+    "related": "render.volume_counters|render.get_settings"
   },
   "render.volume_counters": {
-    "summary": "Enable or disable volume instrumentation counters",
-    "tags": "diagnostics|performance|volume"
+    "summary": "Enable or disable volume instrumentation counters (zeroes them), optionally restricted to a pixel region",
+    "notes": "region = [x0, y0, x1, y1] normalized to the image; every counter then counts only launches inside it, so a small dark patch is not drowned by background rays. Omitted = whole image. The counters also cover the path tracer's bounce budget (see render.volume_stats).",
+    "tags": "diagnostics|performance|volume|bounce|budget|region",
+    "related": "render.volume_stats|render.set_settings"
   },
   "render.volume_tables": {
     "summary": "Report the published volume SSBO state per backend (render / raster viewport), including whether the simulation compute device is that backend's own device",
@@ -1454,8 +1465,8 @@
     "tags": "shading|texture"
   },
   "fluid.create_domain": {
-    "summary": "Create an APIC liquid or gas grid domain over a world-space box",
-    "notes": "voxel_size sets both resolution and cost: halving it multiplies cell count by eight. A liquid domain does nothing until fluid.seed or a flow_source fills it. Changing voxel_size later invalidates the bake.",
+    "summary": "Create a liquid, gas, or unified matter domain over a world-space box",
+    "notes": "type=matter runs APIC liquid/granular and Euler gas phases under one identity and shared bounds; the returned phases list reports the active phases. voxel_size sets both resolution and cost: halving it multiplies cell count by eight. A liquid phase does nothing until fluid.seed or a liquid flow_source fills it. Changing voxel_size later invalidates the bake.",
     "tags": "simulation|liquid|water|smoke|fire|create|domain|grid",
     "related": "fluid.seed|fluid.set_param|flow_source.create|fluid.list_domains",
     "returns": "FluidDomainInfo",
@@ -1465,7 +1476,7 @@
       },
       "type": {
         "description": "Solver family",
-        "enum": "fluid|gas"
+        "enum": "fluid|gas|matter"
       },
       "domain_min": {
         "description": "World-space AABB minimum in metres"
@@ -1482,12 +1493,14 @@
     "summary": "List every fluid and gas domain with its full settings",
     "tags": "simulation|inventory",
     "related": "fluid.get",
-    "returns": "FluidDomainInfo[]"
+    "returns": "FluidDomainInfo[]",
+    "notes": "particle_labels has the same schema and semantics as fluid.get; primary and secondary populations are counted separately."
   },
   "fluid.get": {
     "summary": "Return one fluid or gas domain's complete settings and live counters",
     "tags": "simulation",
-    "returns": "FluidDomainInfo"
+    "returns": "FluidDomainInfo",
+    "notes": "views[] is the view resolver's decision (sdf | splat | fog): which substances each view draws, whether any live parcel resolves there, and the vdb_id it is published on. One domain can hold an sdf AND a fog volume at once; match vdb_id against render.volume_slots domains[].vdb_id / fog_vdb_id. substance_materials[].effective_representation comes from the same resolver. particle_labels reports simulation-owned primary labels and separate spray/foam/bubble secondary counts. Sum(primary) equals primary_particles; sum(secondary) equals secondary_particles. Secondary whitewater carries no liquid mass. unknown includes new particles, old disk cache and unsupported granular/solid states. The neighborhood_v1 classifier runs after simulation, with 1.5-voxel radius and 2/6-neighbor hysteresis; last_step reports its timing and changed count. Mist is routed to fog, entrained by overlapping gas and then transferred into gas-phase physical inventory. gas_phase_mass_kg/energy_j report totals; gas_phase_active_cells and gas_phase_mass_centroid expose spatial transport. Missing domains retain the existing API error; gas or missing live state reports available=false."
   },
   "fluid.remove_domain": {
     "summary": "Delete a fluid or gas domain",
@@ -1553,7 +1566,7 @@
   },
   "fluid.set_substance_material": {
     "summary": "Bind a substance (its physical identity, phase and representation) to a fluid domain",
-    "notes": "Phase is what the matter IS; representation is how it is solved and drawn. They are separate axes - setting one does not imply the other.",
+    "notes": "Phase, constitutive model and representation are separate axes: phase is thermodynamic state, constitutive_model selects fluid/granular/elastic stress response, and representation selects inherit|splat|sdf|fog drawing.",
     "tags": "simulation|substance|material|phase|msf",
     "related": "msf.substances|fluid.set_splat_material|fluid.set_param",
     "params": {
@@ -1565,10 +1578,14 @@
       },
       "phase": {
         "description": "Physical phase",
-        "enum": "liquid|solid|gas"
+        "enum": "liquid|solid"
       },
       "representation": {
-        "description": "How the substance is solved and rendered"
+        "description": "How the substance is rendered"
+      },
+      "constitutive_model": {
+        "description": "Solver regime carried by parcels of this Substance",
+        "enum": "auto|fluid|granular|elastic"
       }
     }
   },
@@ -1696,7 +1713,7 @@
   },
   "flow_source.create": {
     "summary": "Create an emitter that feeds a fluid or gas domain with mass, heat, fuel or particles",
-    "notes": "An emitter belongs to a domain by name. With a parent_object it follows that object, and velocity_space decides whether its velocity is read in world or parent-local space.",
+    "notes": "An emitter belongs to a domain by name. phase selects gas or liquid emission inside a unified matter domain; legacy single-phase domains ignore it. With a parent_object it follows that object, and velocity_space decides whether its velocity is read in world or parent-local space.",
     "tags": "simulation|emitter|source|inject|pour|jet|flame|inflow",
     "related": "flow_source.update|flow_source.list|fluid.create_domain|gas.set_settings",
     "returns": "FlowSourceInfo",
@@ -1708,6 +1725,11 @@
       "domain": {
         "description": "Target fluid or gas domain name",
         "type": "string"
+      },
+      "phase": {
+        "description": "Target phase inside a matter domain",
+        "type": "string",
+        "enum": "gas|liquid"
       },
       "source_mode": {
         "description": "Emission shape/source kind",
@@ -1753,6 +1775,11 @@
         "description": "Substance id emitted into a liquid domain",
         "type": "string"
       },
+      "initial_constitutive_model": {
+        "description": "Optional birth-state override; auto resolves through the Substance",
+        "type": "string",
+        "enum": "auto|fluid|granular|elastic"
+      },
       "fluid_particles_per_second": {
         "description": "Liquid particle emission rate",
         "type": "float"
@@ -1789,11 +1816,23 @@
     "tags": "substance|material|library|wood|water|metal|thermochemistry",
     "related": "fluid.set_substance_material|msf.fields"
   },
+  "msf.substance": {
+    "summary": "Read one substance's canonical physical properties",
+    "notes": "Temperatures use Kelvin, energy values use J/kg and kinematic viscosity uses m^2/s.",
+    "tags": "substance|physical|properties|density|viscosity|temperature|combustion",
+    "related": "msf.substances|fluid.set_substance_material"
+  },
   "msf.fields": {
     "summary": "Report the live material state fields (temperature, moisture, char, mass) per object",
     "notes": "This is the measurement side of burning and melting: mass loss, integrity and mass-conservation error are reported here.",
     "tags": "substance|thermal|burn|melt|measure|verify|temperature|moisture",
     "related": "msf.substances"
+  },
+  "matter.exchanges": {
+    "summary": "Report physical matter transfers that ran in the latest simulation step",
+    "notes": "Mass uses kg, energy uses joules and momentum uses kg*m/s. Empty with traced=true means the solver stepped without a transfer.",
+    "tags": "matter|exchange|mass|energy|momentum|conservation|phase|melting|mist",
+    "related": "sim_graph.couplings|msf.fields|msf.substances"
   },
   "physics.add_body": {
     "summary": "Give an object a rigid-body with a mass, motion type and collision shape",
@@ -2670,7 +2709,8 @@
   },
   "sim_cache.clear": {
     "summary": "Clear the simulation cache",
-    "tags": "simulation|cache|reset"
+    "tags": "simulation|cache|reset",
+    "notes": "ram_only:true drops the RAM timeline frames but keeps the disk bake bound, so the next timeline read streams from disk. Playback prefers RAM (which carries more state than the disk format), so a disk-format test must use it."
   },
   "debris.configure": {
     "summary": "Enable and configure the ash/debris particle system",
@@ -3690,6 +3730,42 @@
       }
     }
   },
+  "scatter.get_wind": {
+    "summary": "Return a scatter group's wind animation settings and the wind it actually runs with",
+    "notes": "With inherit_atmosphere the direction is the climate's and speed/strength are the group's RESPONSE at reference_wind_mps (sway speed x v/v_ref, bend x (v/v_ref)^2); effective_* is what the animation uses. A calm world leaves an inheriting group still. wind_source says 'atmosphere' or 'local'.",
+    "tags": "foliage|scatter|wind|atmosphere",
+    "related": "scatter.set_wind|world.set_climate",
+    "params": {
+      "group": { "description": "Scatter group id or name" }
+    }
+  },
+  "scatter.set_wind": {
+    "summary": "Set a scatter group's wind animation (enabled, inherit_atmosphere, speed, strength, turbulence, wave_size, direction)",
+    "notes": "Partial update: omitted keys are left alone; a rejected call changes nothing. Disabling wind restores the rest pose. direction uses its horizontal (x/z) part and is ignored while inherit_atmosphere is on.",
+    "tags": "foliage|scatter|wind|atmosphere",
+    "related": "scatter.get_wind",
+    "params": {
+      "group": { "description": "Scatter group id or name" }
+    }
+  },
+  "water.get_wind": {
+    "summary": "Return an ocean/lake surface's wind (authored and effective, speed in m/s, direction in degrees)",
+    "notes": "With inherit_atmosphere the water shader receives the climate's wind (speed floored at 0.1 m/s; a dead-calm climate keeps the authored direction). Rivers have no wind: flow is authored. Direction: 0 = +X, 90 = +Z.",
+    "tags": "water|ocean|wind|atmosphere",
+    "related": "water.set_wind|world.set_climate",
+    "params": {
+      "surface": { "description": "Water surface id or name" }
+    }
+  },
+  "water.set_wind": {
+    "summary": "Set an ocean/lake surface's wind (inherit_atmosphere, speed_mps, direction_degrees)",
+    "notes": "Partial update. Rejects inherit_atmosphere on a river. Pushes the GPU material like a panel edit.",
+    "tags": "water|ocean|wind|atmosphere",
+    "related": "water.get_wind",
+    "params": {
+      "surface": { "description": "Water surface id or name" }
+    }
+  },
   "scatter.set_settings": {
     "summary": "Patch a scatter group's placement rules and its density / exclusion / scale masks",
     "notes": "Only the keys you pass are written; the rest are left alone. The two mask roles are NOT symmetric: density_mask INCLUDES probabilistically (its value is a placement probability, so 0.3 thins a stand), while exclusion_mask FORBIDS placement wherever the field is >= exclusion_threshold. exclusion_threshold is shared by exclusion_mask and splat_exclude_channel. Mask names are terrain analysis fields - get the ones a terrain actually has from terrain.list_fields, and build a combined mask upstream with a Publish Field node rather than expecting more mask slots here. splat channels are -1 (off) or 0..3 (RGBA); an out-of-range channel is refused, not clamped. Read the result back with scatter.list_groups.",
@@ -3994,7 +4070,7 @@
   },
   "world.set_atmosphere": {
     "summary": "Set the physical atmosphere parameters of the Nishita sky",
-    "notes": "Every field optional: omit a key to leave it unchanged. Out-of-range values are REJECTED, not clamped, because a silently clamped planet radius or scale height reads as 'the sky looks odd' rather than as an error. Any changed field marks the atmosphere LUT dirty; the runtime rebuilds it on the GPU compute path (throttled to about 15 Hz while a value is being dragged) and falls back to a CPU bake only when that pipeline is missing. UNITS ARE ABSOLUTE: planet_radius/atmosphere_height/altitude are METRES, rayleigh_density and mie_density are SCALE HEIGHTS in metres (NOT densities, despite the field names), temperature is CELSIUS and scales both scale heights.",
+    "notes": "Every field optional: omit a key to leave it unchanged. Out-of-range values are REJECTED, not clamped, because a silently clamped planet radius or scale height reads as 'the sky looks odd' rather than as an error. Any changed field marks the atmosphere LUT dirty; the runtime rebuilds it on the GPU compute path (throttled to about 15 Hz while a value is being dragged) and falls back to a CPU bake only when that pipeline is missing. UNITS ARE ABSOLUTE: planet_radius/atmosphere_height/altitude are METRES, rayleigh_density and mie_density are SCALE HEIGHTS in metres (NOT densities, despite the field names). humidity and temperature are NOT accepted here any more: they are climate state, set them with world.set_climate (temperature in KELVIN); passing the old keys is an error, not a silent no-op.",
     "tags": "environment|sky|atmosphere|nishita|scattering",
     "related": "world.get_atmosphere|world.set_atmosphere_intensity|world.set_sun_elevation",
     "params": {
@@ -4009,12 +4085,6 @@
       },
       "ozone_absorption_scale": {
         "description": "Scales the ozone absorption coefficients on top of ozone_density. Must be >= 0."
-      },
-      "humidity": {
-        "description": "0..1, dry to hazy. Rejected outside that range."
-      },
-      "temperature": {
-        "description": "Air temperature in CELSIUS. Scales BOTH Rayleigh and Mie scale heights by (T+273.15)/288.15, so it moves the whole atmosphere profile, not just a tint."
       },
       "altitude": {
         "description": "Viewer height above sea level in METRES; the SkyView LUT is baked from this camera altitude."
@@ -4039,6 +4109,51 @@
       },
       "mie_density": {
         "description": "Mie SCALE HEIGHT in metres (Earth = 1200). Same naming trap as rayleigh_density. Must be >= 1."
+      }
+    }
+  },
+  "world.get_climate": {
+    "summary": "Return the world climate: surface temperature (K), lapse rate, humidity, pressure and wind",
+    "notes": "The climate is the single owner of ambient temperature, humidity, pressure and wind (docs/dev/ATMOSPHERE_SYSTEM.md). Renderers read a packet mirrored from it. applied_mie_humidity_scale and applied_temperature_c are read back from that RENDER PACKET, not from the climate: if they disagree with surface_relative_humidity / surface_temperature_k the mirror stopped syncing. applied_mie_humidity_scale is what the sky LUT multiplies aerosol (Mie) extinction by, (1-RH)^-0.5 with RH capped at 0.95; 1.0 = dry aerosol.",
+    "returns": "WorldClimateInfo",
+    "tags": "environment|climate|atmosphere|temperature|humidity|wind|world",
+    "related": "world.set_climate|world.sample_climate|world.get_atmosphere"
+  },
+  "world.set_climate": {
+    "summary": "Set the world climate (temperature in KELVIN, humidity 0..1, pressure Pa, wind m/s)",
+    "notes": "Every field optional; omit a key to leave it unchanged. Out-of-range values are REJECTED, not clamped. Replaces the old world.set_atmosphere humidity/temperature (which was CELSIUS). Humidity and temperature feed the sky LUT (humidity grows aerosol haze, temperature scales both scale heights), so changing either dirties the LUT; wind feeds the weather shaders. Verify with world.get_climate applied_* fields, which read the render packet.",
+    "tags": "environment|climate|atmosphere|temperature|humidity|wind|world",
+    "related": "world.get_climate|world.sample_climate",
+    "params": {
+      "surface_temperature_k": {
+        "description": "Surface air temperature in KELVIN (15 C = 288.15). Must be within 150..400."
+      },
+      "lapse_rate_k_per_m": {
+        "description": "Temperature drop per METRE of altitude (ISA = 0.0065). Negative = inversion. Must be within -0.02..0.02 and must not cool the air below 100 K by 11 km."
+      },
+      "surface_relative_humidity": {
+        "description": "Relative humidity 0..1."
+      },
+      "surface_pressure_pa": {
+        "description": "Surface pressure in PASCAL (sea level 101325). Must be within 30000..120000."
+      },
+      "wind_direction": {
+        "description": "Direction the wind blows TOWARD as [x, y, z]; projected onto the horizontal plane and normalized. Must have an x/z component."
+      },
+      "wind_speed_mps": {
+        "description": "Surface wind speed in m/s, 0..150."
+      }
+    }
+  },
+  "world.sample_climate": {
+    "summary": "Sample the climate at a scene position: temperature, humidity, pressure, air density, wind",
+    "notes": "ISA model: temperature falls by the lapse rate up to the 11 km tropopause and is constant above; pressure follows the barometric formula; air density = p / (287.05 * T). altitude_m = position.y + the sky's altitude offset (world.get_atmosphere altitude), scene units are metres. Humidity and wind do not vary with altitude yet. Pure read, does not dirty anything. This is the entry point physics systems will read ambient conditions through.",
+    "returns": "ClimateSampleInfo",
+    "tags": "environment|climate|atmosphere|sample|physics|world",
+    "related": "world.get_climate|world.set_climate",
+    "params": {
+      "position": {
+        "description": "Scene position [x, y, z] in metres."
       }
     }
   },
@@ -4244,7 +4359,7 @@
   },
   "rayfusion.probe_field": {
     "summary": "RayFusion probe field as it actually reaches the GPU: grid, fill progress and which producer filled it.",
-    "notes": "Step 1a. 'producer' is 'sky_bake' while the field is filled from the baked sky irradiance, which means the rendered image is meant to look IDENTICAL to the direct sky read - the counters, not the picture, are what show the pipe is live. 'uploaded' false with 'configured' true means the CPU field exists but no slot has reached the GPU, so shading still falls back to the global sky texture. 'valid' climbs toward 'total' over several frames because scheduling is budget-limited by 'budget_preset'. 'rejected' counts stale or duplicate tickets and should stay flat once the field is full; a climbing 'rejected' means results are arriving against a revision that has already been invalidated. Real indirect light needs probe rays, which need an acceleration structure in the raster viewport - until then this reports a working pipe, not GI. STEP 1b: 'producer' reports what actually ran - 'traced' (rays), 'sky_bake' (the step-1a bake), or 'none' - never the request; 'producer_traced_requested' is the request and 'producer_reason' explains any refusal. 'hit_fraction' is the share of probe rays that hit anything: if it stays 0.0 while geometry is clearly within range, the rays are not seeing the scene at all, and the result then looks EXACTLY like the sky-only producer - a correct-looking image that measures nothing. 'rejected_inside' counts probes born inside geometry; those publish with alpha 0 so the slot stops being re-traced while the shader falls back to the global read instead of going black. 'trace_ms' is the GPU dispatch plus readback for the last batch. Switch producers with rayfusion.set_probe_producer. STEP 1b-beta bounce keys: 'bounce_supported_materials' is the number of materials actually inside the single-diffuse-bounce subset, and it is the one to read first - 'bounce_unsupported_materials' alone cannot be checked against the scene, because a fully textured scene and a gate that rejects everything print the same number. When supported is 0 the bounce cannot change a single pixel and the image is identical to 1b-alpha, which is why 'bounce_reason' says so in words. 'bounce_rejected_textured', 'bounce_rejected_transparent', 'bounce_rejected_layered' and 'bounce_rejected_flagged' name the clause that rejected each material and overlap (a material can trip several), so they do not sum to the unsupported count. 'bounce_rejected_flag_bits' is the OR of the material flags that tripped the flag clause: its low bits are packed texture-channel selectors rather than material features, so a material that looks plain in the material panel can still be rejected here, and this field is what names the bit. STEP 1b-beta TEXTURE slice: 'bounce_shaded_hits' is the acceptance number and the only one measured on the GPU rather than counted off the CPU table -- how many probe rays actually landed on a material this slice could shade, during the last dispatch. 'bounce_hits' greater than zero with 'bounce_shaded_hits' at zero means every ray met an occluder and the published field is byte-identical to the bounce being off; the material counts cannot report that, because they describe what the slice COULD shade, not what it DID. 'bounce_alpha_tested' and 'bounce_alpha_occluded' measure the alpha cutout: shadow and primary rays no longer carry the opaque flag, so a masked leaf or curtain lets light through instead of shadowing like a solid sheet, and the candidate loop that costs is reported rather than assumed. Albedo, emission, opacity, metallic and specular textures are read at the bounce hit through the SAME bindless array and the same packed-channel policy the RT closest-hit uses, with the same UV transform; roughness, normal and height maps are deliberately not read (a diffuse lobe never reads roughness, and a probe texel is a hemisphere average, below the frequency of a normal map). transmission_tex, scalar opacity below 1 and transmission above 0 still fall outside the slice. INDIRECT SUN: 'bounce_sun_included' says whether the Physical Sky sun is carried as a directional bounce light. Until 2026-09-15 it was NOT, and the bounce could therefore only carry SKY light: an interior lit through a window went blue instead of taking the warm bounce off the sunlit floor. Measured against the RT reference on the same scene and settings, the ceiling ratio was 3.2/7.0/12.0 in R/G/B -- a blue-weighted excess, not a scalar gain, which is the signature of missing sun transport rather than a double-applied intensity. 'bounce_sun_tint_from_lut' says whether the sun tint came from the real transmittance LUT or from the shader's constant fallback; the fallback is visibly less warm at low sun elevations, so it is reported rather than applied silently. PER-FRAME CPU COST: 'bounce_prepare_ms' is how long the hit/material/light tables took to rebuild on the CPU. The emissive triangle scan behind it is now gated on an INPUT signature (geometry + instances + materials): measured 2026-09-15 it was 8.89 ms of a 9.21 ms total, every frame, in a scene with zero emissive triangles. 'bounce_emissive_cached' distinguishes 'the cache hit' from 'the scan never ran', which a bare 0.00 ms cannot. Read it beside rayfusion.scene_as 'signature_ms' (the AS change gate, also per frame): together they are what RayFusion spends before a single ray is cast. Measured 2026-09-08 in a foliage scene, the table build re-hashed each mesh's whole material-ID stream once per PLACEMENT, so the cost was multiplied by the instance count and one core sat at 100% while the GPU idled -- on a 16-thread machine that reads as '6% CPU', which is why the number has to be here rather than inferred from task-manager totals. WHY A HIT WAS NOT SHADED: 'bounce_shaded_hits' at zero is true but useless on its own, because five different exits produce the same zero. The named counters split it, and bounce_skipped_disabled + bounce_rejected_unresolved + bounce_rejected_unsupported_hit + bounce_rejected_degenerate + bounce_shaded_hits must equal bounce_hits -- if they do not, there is an unnamed exit left. 'bounce_backface_shaded' is NOT part of that sum: it is a SUBSET of the shaded hits, not an exit. RENAMED 2026-09-15 from 'bounce_skipped_backface' because the behaviour changed, not just the label: the front-face gate was REMOVED. Measured in a closed interior, 681 of 806 hits (84.5%) were back faces and every one of them returned black, so enabling the bounce cost CPU and changed almost nothing. The RT reference never rejected them (closesthit.rchit flips the normal on a back face) and rfBounceRadiance already flipped the normal toward the incoming ray, so the gate was discarding hits the shading function could handle correctly. A high value here now just means the scene is an interior, not that anything is wrong. 'bounce_rejected_unresolved' means the hit instance/index/material address could not be resolved at all -- a table problem, not a material one, and the CPU material counts cannot see it. 'bounce_rejected_unsupported_hit' is the per-RAY twin of the CPU-side material counts: it says the material the ray actually landed on is outside the slice, which is a different question from how many materials in the scene are.",
+    "notes": "Step 1a. 'producer' is 'sky_bake' while the field is filled from the baked sky irradiance, which means the rendered image is meant to look IDENTICAL to the direct sky read - the counters, not the picture, are what show the pipe is live. 'uploaded' false with 'configured' true means the CPU field exists but no slot has reached the GPU, so shading still falls back to the global sky texture. 'valid' climbs toward 'total' over several frames because scheduling is budget-limited by 'budget_preset'. 'rejected' counts stale or duplicate tickets and should stay flat once the field is full; a climbing 'rejected' means results are arriving against a revision that has already been invalidated. Real indirect light needs probe rays, which need an acceleration structure in the raster viewport - until then this reports a working pipe, not GI. STEP 1b: 'producer' reports what actually ran - 'traced' (rays), 'sky_bake' (the step-1a bake), or 'none' - never the request; 'producer_traced_requested' is the request and 'producer_reason' explains any refusal. 'hit_fraction' is the share of probe rays that hit anything: if it stays 0.0 while geometry is clearly within range, the rays are not seeing the scene at all, and the result then looks EXACTLY like the sky-only producer - a correct-looking image that measures nothing. 'rejected_inside' counts probes born inside geometry; those publish with alpha 0 so the slot stops being re-traced while the shader falls back to the global read instead of going black. 'trace_ms' is the GPU dispatch plus readback for the last batch. Switch producers with rayfusion.set_probe_producer. STEP 1b-beta bounce keys: 'bounce_supported_materials' is the number of materials actually inside the single-diffuse-bounce subset, and it is the one to read first - 'bounce_unsupported_materials' alone cannot be checked against the scene, because a fully textured scene and a gate that rejects everything print the same number. When supported is 0 the bounce cannot change a single pixel and the image is identical to 1b-alpha, which is why 'bounce_reason' says so in words. 'bounce_rejected_textured', 'bounce_rejected_transparent', 'bounce_rejected_layered' and 'bounce_rejected_flagged' name the clause that rejected each material and overlap (a material can trip several), so they do not sum to the unsupported count. 'bounce_rejected_flag_bits' is the OR of the material flags that tripped the flag clause: its low bits are packed texture-channel selectors rather than material features, so a material that looks plain in the material panel can still be rejected here, and this field is what names the bit. STEP 1b-beta TEXTURE slice: 'bounce_shaded_hits' is the acceptance number and the only one measured on the GPU rather than counted off the CPU table -- how many probe rays actually landed on a material this slice could shade, during the last dispatch. 'bounce_hits' greater than zero with 'bounce_shaded_hits' at zero means every ray met an occluder and the published field is byte-identical to the bounce being off; the material counts cannot report that, because they describe what the slice COULD shade, not what it DID. 'bounce_alpha_tested' and 'bounce_alpha_occluded' measure the alpha cutout: shadow and primary rays no longer carry the opaque flag, so a masked leaf or curtain lets light through instead of shadowing like a solid sheet, and the candidate loop that costs is reported rather than assumed. Albedo, emission, opacity, metallic and specular textures are read at the bounce hit through the SAME bindless array and the same packed-channel policy the RT closest-hit uses, with the same UV transform; roughness, normal and height maps are deliberately not read (a diffuse lobe never reads roughness, and a probe texel is a hemisphere average, below the frequency of a normal map). transmission_tex, scalar opacity below 1 and transmission above 0 still fall outside the slice. PER-FRAME CPU COST: 'bounce_prepare_ms' is how long the hit/material/light tables took to rebuild on the CPU. The emissive triangle scan behind it is now gated on an INPUT signature (geometry + instances + materials): measured 2026-09-15 it was 8.89 ms of a 9.21 ms total, every frame, in a scene with zero emissive triangles. 'bounce_emissive_cached' distinguishes 'the cache hit' from 'the scan never ran', which a bare 0.00 ms cannot. Read it beside rayfusion.scene_as 'signature_ms' (the AS change gate, also per frame): together they are what RayFusion spends before a single ray is cast. Measured 2026-09-08 in a foliage scene, the table build re-hashed each mesh's whole material-ID stream once per PLACEMENT, so the cost was multiplied by the instance count and one core sat at 100% while the GPU idled -- on a 16-thread machine that reads as '6% CPU', which is why the number has to be here rather than inferred from task-manager totals. WHY A HIT WAS NOT SHADED: 'bounce_shaded_hits' at zero is true but useless on its own, because five different exits produce the same zero. The named counters split it, and bounce_skipped_disabled + bounce_rejected_unresolved + bounce_rejected_unsupported_hit + bounce_rejected_degenerate + bounce_shaded_hits must equal bounce_hits -- if they do not, there is an unnamed exit left. 'bounce_backface_shaded' is NOT part of that sum: it is a SUBSET of the shaded hits, not an exit. RENAMED 2026-09-15 from 'bounce_skipped_backface' because the behaviour changed, not just the label: the front-face gate was REMOVED. Measured in a closed interior, 681 of 806 hits (84.5%) were back faces and every one of them returned black, so enabling the bounce cost CPU and changed almost nothing. The RT reference never rejected them (closesthit.rchit flips the normal on a back face) and rfBounceRadiance already flipped the normal toward the incoming ray, so the gate was discarding hits the shading function could handle correctly. A high value here now just means the scene is an interior, not that anything is wrong. 'bounce_rejected_unresolved' means the hit instance/index/material address could not be resolved at all -- a table problem, not a material one, and the CPU material counts cannot see it. 'bounce_rejected_unsupported_hit' is the per-RAY twin of the CPU-side material counts: it says the material the ray actually landed on is outside the slice, which is a different question from how many materials in the scene are.",
     "tags": "rayfusion|gi|probe|grid|status|development",
     "related": "rayfusion.core_status|rayfusion.validate_core|viewport.preview_lighting"
   },
@@ -5789,14 +5904,14 @@
     "notes": "Check `measured` FIRST: every extent reads 0 both for an empty domain and for one that could not be sampled. `touching_ceiling` true means the cap's shape is the domain lid, not the stratification, and the other numbers describe a clipped cloud."
   },
   "gas.step_stats": {
-    "summary": "Per-stage timing breakdown of the last gas solver step: every GPU stage, the host residual, the field analysis scan, plus grid size, CFL and field peaks",
-    "notes": "Read `measured` FIRST - every timing is 0.0 both for a free stage and for a step that never ran, so an idle domain otherwise records as a 0 ms step, which in an optimisation A/B reads as a total win. Times are HOST WALL TIME around each call, so a GPU row includes the submit/fence the host waited on; that is the cost the frame pays, not isolated kernel time, and reading it as kernel time makes a transfer-bound stage look compute-bound. cfl above 1 means the semi-Lagrangian trace jumps more than one cell per step and smears detail.",
+    "summary": "Per-stage timing breakdown of the last gas solver step, including physical inventory advection, grid size, CFL and field peaks",
+    "notes": "Read `measured` FIRST - every timing is 0.0 both for a free stage and for a step that never ran, so an idle domain otherwise records as a 0 ms step, which in an optimisation A/B reads as a total win. inventory_advection_ms is the host transport of liquid-to-gas kg/J sidecars. Times are HOST WALL TIME around each call, so a GPU row includes the submit/fence the host waited on; that is the cost the frame pays, not isolated kernel time. cfl above 1 means the semi-Lagrangian trace jumps more than one cell per step and smears detail. liquid_boundary_cells and liquid_boundary_mean_velocity report the overlapping liquid cells imposed on gas as moving walls.",
     "tags": "simulation|gas|performance|timing|profiling|optimisation|cfl",
     "related": "particle.stats|gas.get_settings|gas.measure_plume|perf.get_gpu_memory"
   },
   "fluid.step_stats": {
-    "summary": "Read the last fluid step's requested GPU transfer bytes, call times, and actual GPU path",
-    "notes": "Read measured first. Bytes are requested transfers in the fluid domain step, including fluid coupling. upload_call_ms, download_call_ms, batch_end_ms, synchronize_ms and dispatch_call_ms are host call times; dispatch_call_ms is not kernel time. Cached-frame reads do not run the solver or refresh these counters.",
+    "summary": "Read the last fluid step's total time, requested GPU transfer bytes, call times, and actual GPU path",
+    "notes": "Read measured first. total_ms is the complete liquid-domain wall time, including APIC, labels, whitewater and the density bridge. Bytes are requested transfers in the fluid domain step, including fluid coupling. upload_call_ms, download_call_ms, batch_end_ms, synchronize_ms and dispatch_call_ms are host call times; dispatch_call_ms is not kernel time. Cached-frame reads do not run the solver or refresh these counters.",
     "tags": "fluid|simulation|performance|transfer|measurement",
     "related": "fluid.step|particle.stats|perf.get_gpu_memory"
   },
@@ -5959,5 +6074,167 @@
     "verify_with": [
       "fluid.get"
     ]
+  },
+  "render.get_settings": {
+    "summary": "Read the path tracer bounce budget and the active Debug Visualizer view",
+    "tags": "render|bounces|budget|debug|visualizer",
+    "related": "render.set_settings|render.volume_stats"
+  },
+  "render.set_settings": {
+    "summary": "Set the path tracer bounce budget (total, diffuse, transmission; 1..64) and/or the Debug Visualizer view (0..14, 6 = Bounce Count)",
+    "notes": "Writes the same settings the panel edits; the main loop resets accumulation on change. diffuse/transmission are clamped to max_bounces like the panel does. Raising max_bounces also raises the free-pass cap (max_bounces + 32), so a fix by 'more bounces' does not by itself tell which budget was short -- read render.volume_stats paths_bounce_capped vs paths_pass_capped.",
+    "tags": "render|bounces|budget|debug|visualizer|quality",
+    "related": "render.get_settings|render.volume_counters"
+  },
+  "fluid.get_fog_shader": {
+    "summary": "Read the fog-view medium (density, scattering, absorption, march quality) of a liquid domain",
+    "notes": "created=false means no fog has drawn yet and the values are the default recipe the fog sync will install.",
+    "tags": "fluid|fog|volume|shader|appearance",
+    "related": "fluid.set_fog_shader|fluid.set_fog|fluid.get"
+  },
+  "fluid.set_fog_shader": {
+    "summary": "Edit the fog-view medium of a liquid domain; omitted keys are unchanged",
+    "notes": "The shader the panel's 'Edit Fog Medium...' opens. Edited in place and republished, so it repaints a paused frame without a simulation step. density_multiplier scales the splatted density (a packed cell is ~1); colors are 0..1.",
+    "tags": "fluid|fog|volume|shader|appearance|density",
+    "related": "fluid.get_fog_shader|fluid.set_fog"
+  },
+  "fluid.get_environment": {
+    "summary": "Read a gas or liquid domain's thermal environment: its override and the effective ambient/oxygen the solvers read",
+    "notes": "effective_* come from the solvers' own rule (fluidDomainAmbientKelvin): the domain value when override_enabled, else the world default (world.get_thermal).",
+    "tags": "fluid|gas|thermal|environment|ambient|oxygen",
+    "related": "fluid.set_environment|world.get_thermal"
+  },
+  "fluid.set_environment": {
+    "summary": "Override the world ambient temperature (K) and oxygen (0..1) inside one gas or liquid domain; omitted keys are unchanged",
+    "notes": "The panel's Environment tab edits the same three fields. The liquid's thermal cooling and an emitter using Domain Ambient read the override; ambient_kelvin outside [0, 3000] is rejected, oxygen is clamped.",
+    "tags": "fluid|gas|thermal|environment|ambient|oxygen",
+    "related": "fluid.get_environment|world.set_thermal"
+  },
+  "fluid.get_surface_interior": {
+    "summary": "Read the liquid body behind a SurfaceSDF isosurface: depth absorption and the built-in dielectric's refraction tint",
+    "notes": "These are the only three fields of the surface volume shader the iso walk reads. Absorption applies under a bound surface material too; refraction_tint only while tint_active (no surface material bound). created=false means the render sync has not drawn the surface yet and the values are the SDF recipe.",
+    "tags": "fluid|surface|sdf|absorption|tint|appearance",
+    "related": "fluid.set_surface_interior|fluid.set_param"
+  },
+  "fluid.set_surface_interior": {
+    "summary": "Set a liquid body's depth absorption (color x coefficient per world unit) and built-in refraction tint; omitted keys are unchanged",
+    "notes": "The panel's 'Liquid Body' block edits the same fields. Fails until the surface has been drawn once (the sync creates and tunes the shader; an untuned preset renders the body black). Colors are clamped to 0..1.",
+    "tags": "fluid|surface|sdf|absorption|tint|appearance",
+    "related": "fluid.get_surface_interior|fluid.set_param"
+  },
+  "fluid.set_label_views": {
+    "summary": "Route a liquid's particle STATE labels to views: routes {label: follow|sdf|splat|fog|hidden}; reset restores the design table",
+    "notes": "Labels: unknown body spray foam bubble mist frozen. Defaults: spray/foam/bubble -> splat, mist -> fog, the rest follow their substance. The substance (binding representation or domain default) still decides where 'follow' parcels go. The spray/foam/bubble rows ALSO route the domain's whitewater (massless secondary particles): for whitewater, sdf = a white medium in the surface volume, fog = deposited into the fog volume. Read back with fluid.get: label_routes, views[].labels, views[].particles, views[].whitewater, hidden_particles; fluid.get_whitewater views. Render only; unknown names fail the whole call.",
+    "tags": "fluid|view|label|spray|splat|render|appearance",
+    "related": "fluid.get|fluid.set_substance_material"
+  },
+  "fluid.get_whitewater": {
+    "summary": "Read a liquid domain's whitewater (Ihmsen spray/foam/bubble) settings plus live counts and step timings",
+    "notes": "stats.alive/spray/foam/bubble count the secondary massless particles; stats.live false means no live state. views {spray, foam, bubble} is where each type is drawn (sdf|splat|fog|hidden), decided by the label routes; stats.in_sdf/in_splat/in_fog/hidden count live whitewater per view.",
+    "tags": "fluid|whitewater|foam|spray|bubble|measure",
+    "related": "fluid.set_whitewater|fluid.get"
+  },
+  "fluid.set_whitewater": {
+    "summary": "Edit whitewater settings by key (enabled, rates, potential ranges, thresholds, dynamics, max_foam, volume_*); omitted keys are unchanged",
+    "notes": "Validated as a whole before writing. Generation/dynamics changes drop the RAM timeline cache (foam is simulated state); render-only keys repaint. render_mode was removed and is rejected: where each type is drawn is fluid.set_label_views (spray/foam/bubble rows).",
+    "tags": "fluid|whitewater|foam|spray|bubble|simulation",
+    "related": "fluid.get_whitewater|fluid.set_label_views"
+  },
+  "fluid.state_digest": {
+    "summary": "Bit-exact fingerprint of a liquid domain's live particle state: count, FNV position/velocity hashes, centroid, mean speed, whitewater count/hash",
+    "notes": "For determinism probes (Faz 2-W gate: enabling whitewater must leave the primary hashes unchanged). Hashes are hex strings; centroid/mean_speed are the tolerant view when runs are not bit-identical.",
+    "tags": "fluid|determinism|measure|verify|whitewater",
+    "related": "fluid.get|fluid.step|fluid.reset"
+  },
+  "world.get_weather": {
+    "summary": "Return the weather derived from the climate: cloud base (LCL), genus, coverage, depth, freezing level, precipitation mm/h, snow, lightning rate",
+    "notes": "Read-only (docs/dev/ATMOSPHERE_WEATHER.md §2). Inputs: world.set_climate (surface_temperature_k, surface_relative_humidity, lapse_rate_k_per_m, instability 0..1) and world.set_clouds {derive_from_climate}. While derive_from_climate is true, cloud layer 0 base/thickness/type/coverage follow these values; a cloud preset turns it off.",
+    "tags": "environment|sky|clouds|atmosphere|weather|climate",
+    "related": "world.set_climate|world.get_clouds|world.set_clouds"
+  },
+  "world.get_clouds": {
+    "summary": "Return the cloud authority (layers, cirrus, weather map, quality) plus drift, time and preset names",
+    "notes": "Schema = atmosphere::cloudsToJson (docs/dev/ATMOSPHERE_CLOUDS.md). Physical units: base_altitude_m / thickness_m (m, above sea level), extinction_per_m (1/m; cumulus ~0.05 -> a 1 km column is opaque), droplet_diameter_um (5..50, drives the phase), coverage 0..1 (fraction of sky), type 0 stratus .. 0.5 cumulus .. 1 cumulonimbus. Read-only extras: time_seconds, wind_offset_m (drift from the CLIMATE wind -- wind is not a cloud field), revision, any_enabled, presets. The legacy nishita.cloud_* fields are a packet derived from this and are not writable.",
+    "tags": "environment|sky|clouds|atmosphere|weather",
+    "related": "world.set_clouds|world.apply_cloud_preset|world.sample_clouds|world.cloud_stats|world.set_climate"
+  },
+  "world.set_clouds": {
+    "summary": "Patch the cloud authority: layers (element-wise), cirrus, weather, quality",
+    "notes": "Partial: objects merge, and layers merges per element, so {layers:[{},{coverage:0.4}]} edits layer 1 only. Invalid values (range, overlapping enabled layers) are REJECTED, never clamped, and leave the state untouched. Read-only keys from world.get_clouds are ignored, so get -> edit -> set round-trips.",
+    "tags": "environment|sky|clouds|atmosphere",
+    "related": "world.get_clouds|world.apply_cloud_preset"
+  },
+  "world.apply_cloud_preset": {
+    "summary": "Replace the clouds with a named preset (keeps quality settings)",
+    "notes": "Names: clear, fair_weather_cumulus, scattered, broken, overcast_stratus, storm, high_cirrus, sunset_altocumulus (also listed by world.get_clouds presets).",
+    "tags": "environment|sky|clouds|preset",
+    "related": "world.get_clouds|world.set_clouds",
+    "params": {
+      "preset": { "description": "Preset name" }
+    }
+  },
+  "world.cloud_stats": {
+    "summary": "Per-backend cloud resource counters: textures built, noise/weather generations, sample dispatches",
+    "notes": "Lazy by design: with every layer off, noise_ready/weather_ready stay false and nothing is generated. weather_generations must stay flat while only the wind/time moves (drift moves the lookup, not the map); it climbs only on seed/extent/cluster-size changes. `renderer` names what draws the picture (legacy_volume until Faz 3b).",
+    "tags": "clouds|measure|diagnostics|atmosphere",
+    "related": "world.sample_clouds|world.get_clouds"
+  },
+  "world.sample_clouds": {
+    "summary": "Measure the cloud field on the GPU: density (1/m) or precipitation (mm/h) at points, or transmittance along segments",
+    "notes": "Runs the SAME cloudDensity() the renderers use (shaders/cloud_common.glsl) -- no CPU mirror. mode density|base_density need points [[x,y,z],...] in scene metres; transmittance needs segments [[[ax,ay,az],[bx,by,bz]],...] and integrates with `steps` midpoint samples. mode precipitation returns the local rain/snow rate (mm/h, cloudPrecipAt: layer 0 weather-map B channel under cloud, slanted by wind, virga cut) at points. backend render|viewport picks the device (both must agree: same shader, same packet). Works with clouds off (measures 0).",
+    "tags": "clouds|measure|verify|atmosphere",
+    "related": "world.cloud_stats|world.get_clouds"
+  },
+  "world.ensure_sun_light": {
+    "summary": "Add a 'Sun' directional light aligned with the world sun if the scene has no directional light",
+    "notes": "The Physical Sky sun reaches surfaces ONLY through a directional scene light, in both Vulkan backends. A hidden directional counts as present. created=false, name='' when one already exists. Undoable. Sun sync then keeps the light and the sky sun aligned.",
+    "tags": "environment|sky|sun|light|world",
+    "related": "world.set_mode|lights.list|world.set_sun_elevation"
+  },
+  "world.get_aerial": {
+    "summary": "Return aerial perspective + height fog settings (air toggle, fog density/height/falloff/distance/albedo/anisotropy)",
+    "notes": "One medium, integrated into the aerial froxel by both Vulkan backends (docs/dev/ATMOSPHERE_SYSTEM.md Faz 1b). The air haze has no strength or distance knob: its amount is the atmosphere's (world.set_atmosphere air/dust density, world.set_climate humidity). Fog density profile: sigma(y) = fog_density * exp(-fog_falloff * max(y - fog_height, 0)) in 1/m, scene Y in metres, only within fog_distance of the camera.",
+    "returns": "WorldAerialInfo",
+    "tags": "environment|atmosphere|aerial|fog|haze|world",
+    "related": "world.set_aerial|world.atmosphere_stats|world.get_atmosphere|world.get_climate"
+  },
+  "world.set_aerial": {
+    "summary": "Set aerial perspective toggle and height fog (density 1/m, height m, falloff 1/m, distance m, albedo, anisotropy)",
+    "notes": "Every field optional. Out-of-range values are REJECTED, not clamped. The retired keys aerial_density, aerial_min_distance, aerial_max_distance, fog_color and fog_sun_scatter are rejected with an error: the artistic haze ramp is gone and the fog is now a lit medium. With the Nishita sky the fog is lit by the sun (transmittance LUT, Henyey-Greenstein fog_anisotropy) and the sky; in other world modes fog_albedo is used as the fog radiance. Does not dirty the sky LUT; it rebuilds the froxel (verify with world.atmosphere_stats froxel_dispatches).",
+    "tags": "environment|atmosphere|aerial|fog|haze|world",
+    "related": "world.get_aerial|world.atmosphere_stats",
+    "params": {
+      "aerial_perspective": {
+        "description": "Air scattering between the camera and surfaces on/off."
+      },
+      "fog_enabled": {
+        "description": "Height fog on/off."
+      },
+      "fog_density": {
+        "description": "Fog extinction per METRE at and below fog_height (0.0001 light, 0.001 dense over km views). >= 0."
+      },
+      "fog_height": {
+        "description": "Top of the uniform fog layer, scene Y in metres."
+      },
+      "fog_falloff": {
+        "description": "Exponential thinning above fog_height, per metre. >= 0."
+      },
+      "fog_distance": {
+        "description": "Fog only exists within this many metres of the camera; sky pixels are fogged out to here. > 0."
+      },
+      "fog_albedo": {
+        "description": "Single-scattering albedo [r, g, b], each 0..1."
+      },
+      "fog_anisotropy": {
+        "description": "Henyey-Greenstein g of the fog droplets, within (-0.95, 0.95); higher = brighter around the sun."
+      }
+    }
+  },
+  "world.atmosphere_stats": {
+    "summary": "Per Vulkan device (render / viewport): LUT ready, aerial froxel available/active and its rebuild count",
+    "notes": "froxel_dispatches counts froxel rebuilds recorded into frame command buffers. It must climb when the camera moves or the medium changes and stay FLAT while nothing changes -- a counter that climbs on a still camera means a rebuild every frame. froxel_active=false with froxel_available=true means the world wants no aerial/fog (both off) or the view is orthographic. Two rows even when both roles are one object.",
+    "returns": "AtmosphereStatsInfo",
+    "tags": "environment|atmosphere|aerial|fog|diagnostics|stats|world",
+    "related": "world.get_aerial|world.set_aerial|render.probe"
   }
 }

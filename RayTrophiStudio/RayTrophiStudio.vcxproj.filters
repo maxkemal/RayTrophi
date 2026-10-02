@@ -310,6 +310,9 @@
     <ClInclude Include="source\include\Fluid\FluidParticles.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterConstitutive.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Fluid\FluidGpuParticleUpload.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
@@ -334,6 +337,33 @@
     <ClInclude Include="source\include\Fluid\FluidThermalLiquid.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidParticleLabels.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidParticleLabelsGpu.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidMistCoupling.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidMistPhaseExchange.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidGasMovingBoundary.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidThermalPhaseExchange.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidCombustionExchange.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidPhysicalMass.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidParticleRedistribution.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Fluid\FluidFoam.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
@@ -341,9 +371,6 @@
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Fluid\FluidSplatMaterialAuthoring.h">
-      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
-    </ClInclude>
-    <ClInclude Include="source\include\Fluid\FoamSurface.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
     <ClInclude Include="source\include\SurfaceFlowField.h">
@@ -494,6 +521,18 @@
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\World.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Atmosphere\AtmosphereClimate.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Atmosphere\AtmosphereClouds.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Backend\AtmosphereLutParams.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Backend\AerialFroxelParams.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\include\unified_types.h">
@@ -1083,6 +1122,9 @@
     <ClCompile Include="source\src\Physics\GridFluidSolver.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Physics\MatterExchangeLedger.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\APICFluidSolver.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
@@ -1093,6 +1135,42 @@
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\FluidFogDensity.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidDomainFogVolume.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidViewResolver.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidParticleLabels.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidParticleLabelsGpu.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidMistCoupling.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidMistPhaseExchange.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidGasMovingBoundary.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidThermalPhaseExchange.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidCombustionExchange.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidPhysicalMass.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidParticleRedistribution.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidParticleLabelReport.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\FluidParticleSolidRecovery.cpp">
@@ -1114,9 +1192,6 @@
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\FluidSplatMaterialAuthoring.cpp">
-      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Physics\Fluid\FoamSurface.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\SimulationCompute.cpp">
@@ -1173,6 +1248,15 @@
     <ClCompile Include="source\src\Api\RtApi.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiAtmosphere.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiClouds.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanDeviceClouds.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Api\RtPythonTemplates.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
@@ -1189,6 +1273,15 @@
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiFluid.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiSubstance.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMatterExchange.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtFluidLabelBindings.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiForceField.cpp">
@@ -1407,6 +1500,9 @@
     <ClCompile Include="source\src\UI\scene_ui_simulation_domains.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_fluid_labels.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\UI\scene_ui_stylize.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
@@ -1420,6 +1516,12 @@
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Scene\World.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Atmosphere\AtmosphereClimate.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Atmosphere\AtmosphereClouds.cpp">
       <Filter>Kaynak Dosyalar\Scene</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Scene\HittableList.cpp">
@@ -2293,5 +2395,9 @@
     <ClCompile Include="source\src\Api\RtApiKinematicCollider.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\Api\RtIpcKinematicCollider.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\Api\RtPythonKinematicCollider.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\src\Api\RtFluidLabelBindings.h" />
+    <ClInclude Include="source\src\UI\scene_ui_fluid_labels.h" />
   </ItemGroup>
 </Project>

@@ -173,14 +173,7 @@ struct VkVolumeInstance {
     float ramp_colors_b[8];
     float pivot_offset[3];
     int   source_type;
-    float cloud_coverage;
-    float cloud_detail;
-    float cloud_erosion;
-    float cloud_base_scale;
-    float cloud_edge_fade;
-    float cloud_offset_x;
-    float cloud_offset_z;
-    float cloud_seed;
+    float _retired_cloud[8];   // retired Faz 3b: sky clouds are no longer a volume (ATMOSPHERE_CLOUDS.md)
     // [6] is Surface-SDF foam opacity for source_type 4, otherwise authored
     // minimum emission temperature. [7..11] carry density-noise parameters.
     float _ext_reserved[12];
@@ -241,16 +234,10 @@ struct VkWorldDataExtended {
     float ozoneDensity; float altitude;
     float planetRadius; float atmosphereHeight;
     int   multiScatterEnabled; float multiScatterFactor;
-    int   cloudsEnabled; float cloudCoverage; float cloudDensity; float cloudScale;
-    float cloudHeightMin; float cloudHeightMax; float cloudOffsetX; float cloudOffsetZ;
-    float cloudQuality; float cloudDetail; int cloudBaseSteps; int cloudLightSteps;
-    float cloudShadowStrength; float cloudAmbientStrength; float cloudSilverIntensity; float cloudAbsorption;
-    float cloudAnisotropy; float cloudAnisotropyBack; float cloudLobeMix; float cloudEmissiveIntensity;
-    vec3  cloudEmissiveColor; float _pad3;
     int   fogEnabled;   float fogDensity; float fogHeight; float fogFalloff;
-    float fogDistance;  float fogSunScatter; vec3 fogColor; float _pad4;
+    float fogDistance;  float fogAnisotropy; vec3 fogAlbedo; float _pad4;
     int   godRaysEnabled; float godRaysIntensity; float godRaysDensity; int godRaysSamples;
-    int   aerialEnabled; float aerialMinDistance; float aerialMaxDistance; float aerialDensity;
+    int   aerialFroxelReady; float _aerialPad0; float _aerialPad1; float _aerialPad2;
     int   weatherEnabled; int weatherType; float weatherIntensity; float weatherDensity;
     vec3  weatherWindDirection; float weatherWindSpeed;
     float weatherPrecipitationScale; float weatherVisibility; float weatherSurfaceWetness; float weatherSurfaceAccumulation;
@@ -731,47 +718,6 @@ float fbmNoise(vec3 p, int octaves) {
         amplitude *= 0.5;
     }
     return value;
-}
-
-float proceduralCloudDensity(VkVolumeInstance vol, vec3 localPos) {
-    vec3 span = max(vol.aabb_max - vol.aabb_min, vec3(1e-5));
-    vec3 normPos = clamp((localPos - vol.aabb_min) / span, vec3(0.0), vec3(1.0));
-    float baseScale = max(vol.cloud_base_scale, 1.0);
-    vec3 cloudCoord = vec3(
-        normPos.x * baseScale + vol.cloud_offset_x,
-        normPos.y * 1.35,
-        normPos.z * baseScale + vol.cloud_offset_z);
-    vec3 seedOffset = vec3(vol.cloud_seed * 0.137, vol.cloud_seed * 0.317, vol.cloud_seed * 0.719);
-    cloudCoord += seedOffset;
-
-    float coverage = clamp(vol.cloud_coverage, 0.0, 1.0);
-    float detail = clamp(vol.cloud_detail, 0.0, 1.0);
-    float erosion = clamp(vol.cloud_erosion, 0.0, 1.0);
-
-    float warpX = fbmNoise(vec3(cloudCoord.x * 0.38, cloudCoord.y * 0.16, cloudCoord.z * 0.38) + vec3(11.0, 0.0, 7.0), 2) - 0.5;
-    float warpZ = fbmNoise(vec3(cloudCoord.x * 0.38, cloudCoord.y * 0.16, cloudCoord.z * 0.38) + vec3(41.0, 3.0, 23.0), 2) - 0.5;
-    vec3 warped = cloudCoord + vec3(warpX * 1.35, 0.0, warpZ * 1.35);
-
-    float base = fbmNoise(vec3(warped.x * 0.52, warped.y * 0.28, warped.z * 0.52), 4);
-    float billow = 1.0 - abs(fbmNoise(vec3(warped.x * 1.15, warped.y * 0.5, warped.z * 1.15) + vec3(17.0, 3.0, 11.0), 4) * 2.0 - 1.0);
-    float detailNoise = fbmNoise(warped * mix(2.8, 7.0, detail) + vec3(31.0, 7.0, 19.0), 2);
-
-    float puffy = smoothstep(0.32, 0.88, billow);
-    float cumulus = clamp((vol.density_multiplier - 0.38) / 0.85, 0.0, 1.0);
-    float shape = mix(base, base * 0.45 + puffy * 0.75, mix(0.55, 0.9, cumulus));
-    shape -= detailNoise * mix(0.06, 0.28, erosion);
-
-    float threshold = mix(0.80, 0.26, coverage) - cumulus * 0.08;
-    float density = max((shape - threshold) / max(1.0 - threshold, 1e-4), 0.0);
-
-    float bottom = smoothstep(mix(0.12, 0.04, cumulus), mix(0.42, 0.24, cumulus), normPos.y);
-    float top = 1.0 - smoothstep(mix(0.72, 0.82, cumulus), 1.02, normPos.y);
-    float dome = mix(1.0, smoothstep(0.08, 0.58, normPos.y) * (1.0 - smoothstep(0.88, 1.04, normPos.y)) + 0.25, cumulus);
-    float heightProfile = bottom * top * dome;
-
-    vec3 edge = vec3(0.5) - abs(normPos - vec3(0.5));
-    float edgeFalloff = smoothstep(0.0, max(vol.cloud_edge_fade, 0.02), min(edge.x, edge.z));
-    return density * mix(density, sqrt(max(density, 0.0)), cumulus * 0.55) * heightProfile * edgeFalloff * mix(4.6, 3.4, cumulus);
 }
 
 // ============================================================
@@ -1524,8 +1470,6 @@ float sampleDensityAccMode(
             vec3 edgeDist = vec3(0.5) - abs(normPos - vec3(0.5));
             density *= smoothstep(0.0, 0.1, min(min(edgeDist.x, edgeDist.y), edgeDist.z));
         }
-    } else if (vol.volume_type == 3 || vol.source_type == 3) {
-        density = proceduralCloudDensity(vol, localPos);
     } else if (vol.volume_type == 4 && vol.source_type == 5) {
         density = sampleDenseGasFloat(vol.vdb_grid_address, vol, localPos);
     }
@@ -1763,8 +1707,6 @@ float sampleDensity(VkVolumeInstance vol, vec3 worldPos) {
             vec3 edgeDist = vec3(0.5) - abs(normPos - vec3(0.5));
             density *= smoothstep(0.0, 0.1, min(min(edgeDist.x, edgeDist.y), edgeDist.z));
         }
-    } else if (vol.volume_type == 3 || vol.source_type == 3) {
-        density = proceduralCloudDensity(vol, localPos);
     } else if (vol.volume_type == 4 && vol.source_type == 5) {
         density = sampleDenseGasFloat(vol.vdb_grid_address, vol, localPos);
     }
@@ -2119,6 +2061,7 @@ float nearestSurfaceSDFCrossing(vec3 rayOrigin,
             if (t0s >= endT) break;
         }
         if (!foundCrossing) volumeRecordArbiterNoCrossing();
+        if (startedInside) volumeRecordArbiterStartedInside(foundCrossing);
     }
     return nearestHit <= rangeFar ? nearestHit : -1.0;
 }
@@ -2279,7 +2222,32 @@ void main() {
     // ══════════════════════════════════════════════════════════════════════════
     selectForegroundGas(rayOrigin, rayDir, volCount, payload.volumeTraversalMask,
                         volIdx, vol, tNear, tFar, cameraInsideVolume);
-    const float selectedVolumeSpan = tFar - tNear;
+    float selectedVolumeSpan = tFar - tNear;
+    // Coexisting gas/fog: march only up to the next membership change, and fold
+    // a second overlapping gas volume into this march as a companion medium.
+    // See volume_overlap_selection.glsl for why sequential marching is wrong.
+    int companionIdx = resolveGasOverlapSegment(
+        rayOrigin, rayDir, volCount, volIdx, vol, tNear, tFar, selectedVolumeSpan);
+    bool hasCompanion = companionIdx >= 0;
+    VkVolumeInstance comp = hasCompanion ? volumes.v[uint(companionIdx)] : vol;
+    pnanovdb_buf_t        compBuf;
+    pnanovdb_map_handle_t compMapH;
+    pnanovdb_readaccessor_t compAcc;
+    {
+        compBuf.address = (hasCompanion && comp.volume_type == 2 && comp.vdb_grid_address != 0)
+            ? comp.vdb_grid_address : uint64_t(0);
+        if (compBuf.address != 0) {
+            pnanovdb_grid_handle_t gridH; gridH.address.byte_offset = 0u;
+            pnanovdb_tree_handle_t treeH = pnanovdb_grid_get_tree(compBuf, gridH);
+            pnanovdb_root_handle_t rootH = pnanovdb_tree_get_root(compBuf, treeH);
+            compMapH = pnanovdb_grid_get_map(compBuf, gridH);
+            pnanovdb_readaccessor_init(compAcc, rootH);
+        } else {
+            compMapH.address.byte_offset = 0u;
+            pnanovdb_root_handle_t dummyRoot; dummyRoot.address.byte_offset = 0u;
+            pnanovdb_readaccessor_init(compAcc, dummyRoot);
+        }
+    }
     pnanovdb_buf_t        vdbBuf;
     pnanovdb_map_handle_t vdbMapH;
     pnanovdb_readaccessor_t vdbAcc;
@@ -3728,6 +3696,12 @@ void main() {
     // Preserve the legacy fast path: a temperature NanoVDB lookup is eight
     // trilinear tree samples and must not run for an ordinary non-emissive cloud.
     bool needsTemperature = (vol.emission_mode >= 2) || (volumeProgram != MATPROG_NONE);
+
+    // Companion medium constants (ray-constant; see resolveGasOverlapSegment).
+    // Base coefficients only: the companion's material program is not run.
+    vec3 compAbsColor = max(comp.absorption_color, vec3(0.0));
+    float compAbsPeak = max(compAbsColor.r, max(compAbsColor.g, compAbsColor.b));
+    vec3 compAbsWeights = compAbsPeak > 1e-5 ? compAbsColor / compAbsPeak : vec3(1.0);
     
     vec3  accumulated_radiance = vec3(0.0);
     vec3  transmittance = vec3(1.0);
@@ -3893,7 +3867,9 @@ void main() {
         // Live dense gas: block-majorant skip. Same safety rule as the NanoVDB
         // branch below — a Volume Graph may synthesize density where the source
         // field has none, so skipping is only valid for unmodified density.
-        if (vol.volume_type == 4 && vol.source_type == 5 &&
+        // Both skips test the PRIMARY field only; a companion may hold density
+        // exactly where the primary is empty, so they are off in an overlap.
+        if (!hasCompanion && vol.volume_type == 4 && vol.source_type == 5 &&
             volumeProgram == MATPROG_NONE) {
             float denseSkip = denseGasEmptyBlockStep(
                 vol, samplePos, rayDir, denseSkipCutoff);
@@ -3909,7 +3885,7 @@ void main() {
 
         // A Volume Graph may synthesize density in inactive source voxels.
         // Hierarchy skipping is therefore safe only for legacy/baked density.
-        if (vdbBuf.address != 0 && volumeProgram == MATPROG_NONE) {
+        if (!hasCompanion && vdbBuf.address != 0 && volumeProgram == MATPROG_NONE) {
             uint skipKind = 0u;
             float sparseStep = nanoEmptyTileStep(
                 vol, samplePos, rayDir, baseStep, vdbBuf, vdbMapH, vdbAcc,
@@ -3965,6 +3941,22 @@ void main() {
             if ((vp.volumeWritten & (1u << 8)) != 0u) stepMultiScatter = clamp(vp.volumeMultiScatter, 0.0, 1.0);
         }
         float sigma_s_local = density * sigma_s_coeff;
+        // Companion medium: extinction adds, scattering colour and phase are
+        // mixed by each medium's share of the scattering coefficient.
+        float compDensity = 0.0;
+        float compSigmaS = 0.0;
+        if (hasCompanion) {
+            compDensity = sampleDensityAcc(comp, samplePos, compBuf, compMapH, compAcc);
+            compSigmaS = compDensity * comp.scatter_coefficient;
+            float scatterSum = sigma_s_local + compSigmaS;
+            if (compSigmaS > 0.0 && scatterSum > EPSILON) {
+                float compShare = compSigmaS / scatterSum;
+                stepScatterColor = mix(stepScatterColor, comp.scatter_color, compShare);
+                stepAnisotropy = mix(stepAnisotropy, comp.scatter_anisotropy, compShare);
+                stepMultiScatter = mix(stepMultiScatter, comp.scatter_multi, compShare);
+            }
+        }
+        sigma_s_local += compSigmaS;
         // RGB absorption. Black historically meant "neutral absorption" in
         // existing assets, so preserve it as an achromatic fallback. Otherwise
         // Absorption Color identifies the wavelengths removed by the medium.
@@ -3975,7 +3967,8 @@ void main() {
         vec3 absorptionWeights = absorptionPeak > 1e-5
             ? authoredAbsorption / absorptionPeak
             : vec3(1.0);
-        vec3 sigma_a_local = density * sigma_a_coeff * absorptionWeights;
+        vec3 sigma_a_local = density * sigma_a_coeff * absorptionWeights
+                           + compDensity * comp.absorption_coefficient * compAbsWeights;
         vec3 sigma_t_rgb = vec3(sigma_s_local) + sigma_a_local;
         float sigma_t_local = dot(
             sigma_t_rgb, vec3(0.2126, 0.7152, 0.0722));
@@ -4204,7 +4197,10 @@ void main() {
                                 max(baseStep, volumeExitDistance(vol, samplePos, lightDir)));
                             float evaluatedShadow = lightMarchAcc(
                                 vol, samplePos, lightDir, shadowMaxDist,
-                                vdbBuf, vdbMapH, vdbAcc, -1.0);
+                                vdbBuf, vdbMapH, vdbAcc, -1.0)
+                                * companionLightMarch(
+                                    hasCompanion, comp, samplePos, lightDir, lightDist,
+                                    baseStep, compBuf, compMapH, compAcc, -1.0);
                             if (ls == 0) {
                                 cachedSceneShadow0 = evaluatedShadow;
                                 cachedSceneShadow0Valid = true;
@@ -4246,7 +4242,10 @@ void main() {
                             vol, samplePos, emitterDir,
                             min(emitterDist, max(baseStep,
                                 volumeExitDistance(vol, samplePos, emitterDir))),
-                            vdbBuf, vdbMapH, vdbAcc, -1.0);
+                            vdbBuf, vdbMapH, vdbAcc, -1.0)
+                            * companionLightMarch(
+                                hasCompanion, comp, samplePos, emitterDir, emitterDist,
+                                baseStep, compBuf, compMapH, compAcc, -1.0);
                         cachedEmitterShadowValid = true;
                     }
                     float eFalloff = volSegmentInvSqAverageExt(
@@ -4279,7 +4278,10 @@ void main() {
                             baseStep, volumeExitDistance(vol, samplePos, sunDir));
                         cachedSunShadow = lightMarchAcc(
                             vol, samplePos, sunDir, sunShadowMaxDist,
-                            vdbBuf, vdbMapH, vdbAcc, -1.0);
+                            vdbBuf, vdbMapH, vdbAcc, -1.0)
+                            * companionLightMarch(
+                                hasCompanion, comp, samplePos, sunDir, 1e30,
+                                baseStep, compBuf, compMapH, compAcc, -1.0);
                         cachedSunShadowValid = true;
                     }
                     sunShadowTr = cachedSunShadow;
@@ -4313,7 +4315,10 @@ void main() {
                     volumeExitDistance(vol, samplePos, ambientLightDir));
                 cachedAmbientShadow = lightMarchAcc(
                     vol, samplePos, ambientLightDir, ambientShadowMaxDist,
-                    vdbBuf, vdbMapH, vdbAcc, 1.0);
+                    vdbBuf, vdbMapH, vdbAcc, 1.0)
+                    * companionLightMarch(
+                        hasCompanion, comp, samplePos, ambientLightDir, 1e30,
+                        baseStep, compBuf, compMapH, compAcc, 1.0);
                 cachedAmbientShadowValid = true;
             }
             inscatter += ambientSky * stepScatterColor * ambientAlbedo
@@ -4559,9 +4564,15 @@ void main() {
             payload.scattered &&
             ((layeredSurfaceT > 0.0) ||
              (degenerateSpan && transparentSegment && layeredSurfaceT <= 0.0));
-        if (transparentSegment) {
-            payload.bounceType = BOUNCE_TRANSPARENT;
-        }
+        // Direction is unchanged on this path (didScatter is structurally off),
+        // so the continuation is never a bounce: BOUNCE_MEDIUM_PASS is free in
+        // raygen's bounce budget. Transparent segments keep BOUNCE_TRANSPARENT.
+        payload.bounceType = transparentSegment ? BOUNCE_TRANSPARENT : BOUNCE_MEDIUM_PASS;
+        // How many medium crossings a path makes. One per box crossed is
+        // healthy; many per path is the short-hop re-entry the intersection
+        // clamp used to cause.
+        if (payload.scattered && payload.bounceType == BOUNCE_MEDIUM_PASS)
+            volumeRecordMediumPass();
     }
     uint marchOutcome = transmittanceLuma <= 0.01
         ? VOLUME_MARCH_EXTINCTION

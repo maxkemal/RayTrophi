@@ -657,22 +657,15 @@ void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
         //   frame changes" report. For such a volume these controls edit the
         //   domain, and the volume follows. Presets are not applied here: the
         //   domain retunes its own shader when its mode changes.
-        if (auto* owner = ctx.scene.fluidDomainOwningVolume(vdb)) {
-            const bool surface =
-                owner->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF ||
-                owner->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Volume;
-            int owned_mode = surface ? 1 : 0;
-            const char* owned_modes[] = { "Volumetric Fog / Gas", "Refractive Fluid Surface (SDF Isosurface)" };
-            ImGui::TextDisabled("Owned by liquid domain '%s' -- edits the domain.", owner->name.c_str());
-            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 10.0f);
-            if (ImGui::Combo("##VDBOwnedRenderModeCombo", &owned_mode, owned_modes, IM_ARRAYSIZE(owned_modes))) {
-                owner->fluid_render_mode = owned_mode == 1
-                    ? RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF
-                    : RayTrophiSim::Fluid::FluidRenderMode::VolumeFog;
-                ctx.scene.requestSimulationTimelineRenderResync();
-                changed = true;
-            }
-            if (owned_mode == 1) {
+        bool owned_fog_view = false;
+        if (auto* owner = ctx.scene.fluidDomainOwningVolume(vdb, &owned_fog_view)) {
+            // A liquid domain owns two volumes, one per view. Which substances
+            // go to which view is chosen in the domain panel, so there is no
+            // mode switch here: this volume only says which view it is.
+            ImGui::TextDisabled("%s view of liquid domain '%s'.",
+                                owned_fog_view ? "Fog" : "Surface", owner->name.c_str());
+            ImGui::TextDisabled("Choose views per substance in the domain panel.");
+            if (!owned_fog_view) {
                 ImGui::Spacing();
                 ImGui::Indent();
                 bool surface_changed = false;

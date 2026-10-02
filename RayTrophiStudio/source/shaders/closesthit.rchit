@@ -248,31 +248,6 @@ struct VkWorldDataExtended {
     int   multiScatterEnabled;
     float multiScatterFactor;
     
-    // ════════════════════════════ CLOUD LAYER 1 PARAMETERS (64 bytes)
-    int   cloudsEnabled;
-    float cloudCoverage;
-    float cloudDensity;
-    float cloudScale;
-    float cloudHeightMin;
-    float cloudHeightMax;
-    float cloudOffsetX;
-    float cloudOffsetZ;
-    float cloudQuality;
-    float cloudDetail;
-    int   cloudBaseSteps;
-    int   cloudLightSteps;
-    float cloudShadowStrength;
-    float cloudAmbientStrength;
-    float cloudSilverIntensity;
-    float cloudAbsorption;
-    
-    // ════════════════════════════ ADVANCED CLOUD SCATTERING (32 bytes)
-    float cloudAnisotropy;
-    float cloudAnisotropyBack;
-    float cloudLobeMix;
-    float cloudEmissiveIntensity;
-    vec3  cloudEmissiveColor;
-    float _pad3;
     
     // ════════════════════════════ FOG PARAMETERS (32 bytes)
     int   fogEnabled;
@@ -280,8 +255,8 @@ struct VkWorldDataExtended {
     float fogHeight;
     float fogFalloff;
     float fogDistance;
-    float fogSunScatter;
-    vec3  fogColor;
+    float fogAnisotropy;
+    vec3  fogAlbedo;
     float _pad4;
     
     // ════════════════════════════ GOD RAYS (16 bytes)
@@ -291,10 +266,10 @@ struct VkWorldDataExtended {
     int   godRaysSamples;
     
     // ════════════════════════════ ENVIRONMENT & LUT REFS (32 bytes)
-    int   aerialEnabled;
-    float aerialMinDistance;
-    float aerialMaxDistance;
-    float aerialDensity;
+    int   aerialFroxelReady;
+    float _aerialPad0;
+    float _aerialPad1;
+    float _aerialPad2;
 
     int   weatherEnabled;
     int   weatherType;
@@ -375,14 +350,7 @@ struct VkVolumeInstance {
     float ramp_colors_b[8];
     float pivot_offset[3];
     int   source_type;
-    float cloud_coverage;
-    float cloud_detail;
-    float cloud_erosion;
-    float cloud_base_scale;
-    float cloud_edge_fade;
-    float cloud_offset_x;
-    float cloud_offset_z;
-    float cloud_seed;
+    float _retired_cloud[8];   // retired Faz 3b: sky clouds are no longer a volume (ATMOSPHERE_CLOUDS.md)
     float _ext_reserved[12];
     // Appended acceleration block — MUST match VkVolumeInstance in
     // include/Backend/vulkan_volume_types.h (576 bytes). Every shader that
@@ -418,6 +386,8 @@ struct VkVolumeInstance {
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
+// Cloud field (Faz 3b): the sun NEE below reads the clouds\' shadow.
+#include "cloud_rt.glsl"
 
 // Live Vulkan gas density is a device-addressable dense float grid. Surface
 // shadows must sample it too; otherwise source type 5 falls through to the
@@ -561,41 +531,6 @@ float ch_fbmNoise(vec3 p, int oct) {
     return v;
 }
 
-float ch_proceduralCloudDensity(VkVolumeInstance vol, vec3 lp, vec3 bmin, vec3 bmax) {
-    vec3 span = max(bmax - bmin, vec3(1e-5));
-    vec3 norm = clamp((lp - bmin) / span, vec3(0.0), vec3(1.0));
-    float baseScale = max(vol.cloud_base_scale, 1.0);
-    vec3 cloudCoord = vec3(
-        norm.x * baseScale + vol.cloud_offset_x,
-        norm.y * 1.35,
-        norm.z * baseScale + vol.cloud_offset_z);
-    cloudCoord += vec3(vol.cloud_seed * 0.137, vol.cloud_seed * 0.317, vol.cloud_seed * 0.719);
-
-    float coverage = clamp(vol.cloud_coverage, 0.0, 1.0);
-    float detail = clamp(vol.cloud_detail, 0.0, 1.0);
-    float erosion = clamp(vol.cloud_erosion, 0.0, 1.0);
-    float warpX = ch_fbmNoise(vec3(cloudCoord.x * 0.38, cloudCoord.y * 0.16, cloudCoord.z * 0.38) + vec3(11.0, 0.0, 7.0), 2) - 0.5;
-    float warpZ = ch_fbmNoise(vec3(cloudCoord.x * 0.38, cloudCoord.y * 0.16, cloudCoord.z * 0.38) + vec3(41.0, 3.0, 23.0), 2) - 0.5;
-    vec3 warped = cloudCoord + vec3(warpX * 1.35, 0.0, warpZ * 1.35);
-
-    float base = ch_fbmNoise(vec3(warped.x * 0.52, warped.y * 0.28, warped.z * 0.52), 4);
-    float billow = 1.0 - abs(ch_fbmNoise(vec3(warped.x * 1.15, warped.y * 0.5, warped.z * 1.15) + vec3(17.0, 3.0, 11.0), 4) * 2.0 - 1.0);
-    float detailNoise = ch_fbmNoise(warped * mix(2.8, 7.0, detail) + vec3(31.0, 7.0, 19.0), 2);
-
-    float puffy = smoothstep(0.32, 0.88, billow);
-    float shape = mix(base, base * 0.45 + puffy * 0.75, 0.72);
-    shape -= detailNoise * mix(0.06, 0.28, erosion);
-
-    float threshold = mix(0.78, 0.30, coverage);
-    float density = max((shape - threshold) / max(1.0 - threshold, 1e-4), 0.0);
-
-    float bottom = smoothstep(0.12, 0.42, norm.y);
-    float top = 1.0 - smoothstep(0.72, 1.02, norm.y);
-    vec3 ed = vec3(0.5) - abs(norm - vec3(0.5));
-    float edge = smoothstep(0.0, max(vol.cloud_edge_fade, 0.02), min(ed.x, ed.z));
-    return density * density * bottom * top * edge * 4.6;
-}
-
 // World-pos → object-space density for shadow ray march.
 // type 0 (homogeneous): density=1.0,  type 1 (noise): fbm density,
 // type 2 (NanoVDB): real trilinear grid sample via the caller's accessor.
@@ -636,8 +571,6 @@ float ch_volDensity(VkVolumeInstance vol, vec3 wp,
             vec3 nc = norm * max(vol.noise_scale, 1.0);
             density = ch_fbmNoise(nc, 4);
         }
-    } else if (vol.volume_type == 3 || vol.source_type == 3) {
-        density = ch_proceduralCloudDensity(vol, lp, bmin, bmax);
     } else if (vol.volume_type == 4 && vol.source_type == 5) {
         density = ch_sampleDenseGasFloat(vol.vdb_grid_address, vol, lp);
     }
@@ -2641,6 +2574,11 @@ if (emissionTexID > 0 && (mpWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
                                         0, 1, 1, shadowOrigin, tmin, wi, tmax, 1);
                         }
                         vec3 shadowVisibility = (shadowPayload.w > 0.5) ? shadowPayload.rgb : vec3(0.0);
+                        // Directional light = the sun (sun rule): the clouds shade it.
+                        if (int(lights.l[lightIdx].position.w + 0.5) == 1 &&
+                            any(greaterThan(shadowVisibility, vec3(1e-4)))) {
+                            shadowVisibility *= cloudSunTransmittance(shadowOrigin, wi, payload.seed);
+                        }
                         if (any(greaterThan(shadowVisibility, vec3(1e-4)))) {
                             // Volumetric soft shadow: march through any volume AABB between surface and light.
                             // cam.pad0 carries float(volumeCount) from C++ renderProgressive each frame.

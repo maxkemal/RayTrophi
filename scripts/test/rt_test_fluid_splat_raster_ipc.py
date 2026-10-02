@@ -25,7 +25,7 @@ import time
 
 
 PIPE_NAME = r"\\.\pipe\RayTrophiStudio"
-DOMAIN = sys.argv[1] if len(sys.argv) > 1 else "Grid Domain 1"
+DOMAIN = sys.argv[1] if len(sys.argv) > 1 else "Physics Domain 1"
 SETTLE_S = 2.0
 
 

@@ -3,6 +3,8 @@
 #include "Matrix4x4.h"
 #include "FluidGrid.h"
 #include "Fluid/FluidParticles.h"
+#include "Fluid/FluidParticleLabels.h"
+#include "Fluid/FluidViewResolver.h"
 #include "Fluid/APICFluidSolver.h"
 #include "Fluid/FluidLevelSet.h"
 #include "Fluid/FluidThermalLiquid.h"
@@ -10,10 +12,12 @@
 #include "Fluid/FluidRenderMode.h"
 #include "Fluid/GranularGpuState.h"
 #include "Fluid/SubstanceTag.h"
+#include "Fluid/MatterConstitutive.h"
 #include "GridFluidSolver.h"   // GridFluid::GasSolverStats (gas step telemetry)
 #include "VolumeShader.h"
 #include "SimulationWorld.h"
 #include "SimulationCompute.h"
+#include "MatterExchangeLedger.h"
 
 #include <memory>
 #include <atomic>
@@ -92,9 +96,20 @@ enum class ParticleExecutionPolicy {
 // serialization, timeline cache) lives on the same domain — the type just
 // picks the per-step solver.
 enum class SimulationDomainType {
-    Gas,
-    Fluid
+    Gas = 0,
+    Fluid = 1,
+    Matter = 2
 };
+
+inline bool simulationDomainHasGas(SimulationDomainType type) {
+    return type == SimulationDomainType::Gas ||
+           type == SimulationDomainType::Matter;
+}
+
+inline bool simulationDomainHasLiquid(SimulationDomainType type) {
+    return type == SimulationDomainType::Fluid ||
+           type == SimulationDomainType::Matter;
+}
 
 enum class SimulationDomainBackend {
     CPU_Dense     = 0,
@@ -227,6 +242,12 @@ inline float computeFluidFillSeedAABB(const Vec3& bounds_min,
 }
 
 struct ParticlePhysicsSettings {
+    // ★★ ATMOSPHERE (Faz 2). On: drag (linear_drag + viscosity) pulls the
+    //   velocity toward the climate's wind instead of toward rest:
+    //   v = W + (v + a*dt - W) * drag_factor. With no drag the air cannot
+    //   push, which is the physics, not an omission. Default ON: a calm world
+    //   makes this the old formula exactly.
+    bool inherit_atmosphere = true;
     ParticlePhysicsMode mode = ParticlePhysicsMode::Spark;
     ParticleQualityMode quality = ParticleQualityMode::Realtime;
     ParticleExecutionPolicy execution_policy = ParticleExecutionPolicy::Auto;
@@ -295,7 +316,7 @@ inline int effectiveTurbulenceOctaves(int requested, float scale,
 }
 
 struct SimulationGridDomainDesc {
-    std::string name = "Grid Domain";
+    std::string name = "Physics Domain";
     // Defaults to Gas so existing projects deserialize unchanged. Fluid domains
     // are created explicitly from the UI (or migrated from legacy FluidObject).
     SimulationDomainType type = SimulationDomainType::Gas;
@@ -438,6 +459,15 @@ struct SimulationGridDomainDesc {
     // With it, the cap sits at h* = anomaly / gas_ambient_stratification, a
     // number the author chooses and a script can measure.
     float gas_ambient_stratification = 0.0f;
+    // ★★ ATMOSPHERE (Faz 2). On: the stratification is DERIVED from the world
+    //   climate's lapse rate (gasEffectiveStratification below) and the
+    //   authored gas_ambient_stratification is ignored. Default OFF, and it
+    //   must stay a choice: the derived value is PHYSICAL and tiny (~1e-5 per
+    //   metre for the ISA), three to four orders below the artistic values the
+    //   presets use (0.05 .. 0.25), so switching it on removes the plume's
+    //   ceiling at any domain scale. That is what a real atmosphere does over
+    //   100 m; it is not what a mushroom-cap preset wants.
+    bool  gas_inherit_atmosphere = false;
 
     // ***** PRESSURE SOLVER SWEEPS, AND THE REASON THIS IS NOT A CONSTANT ANY
     // MORE.
@@ -553,6 +583,12 @@ struct SimulationGridDomainDesc {
     // render bridge / UI). Travels with the domain for serialization and is
     // bound to the domain's live VDB volume. Not used by the solver.
     std::shared_ptr<VolumeShader> shader;
+    // Liquid FOG view's medium, on its own volume (FluidViewResolver). Separate
+    // from `shader`, which a liquid's surface volume uses: both views can be
+    // drawn at once, and one shader tuned for an isosurface walk renders fog
+    // wrong and vice versa. Created lazily by the fog volume sync; edited in
+    // the fog volume's panel.
+    std::shared_ptr<VolumeShader> fluid_fog_shader;
     // Which preset recipe the shader above was built from ("fire" | "smoke"),
     // empty when it was never chosen explicitly.
     //
@@ -715,8 +751,17 @@ struct SimulationGridDomainDesc {
         // body: parcels have no cohesion, so a pile spreads. See
         // Fluid::SubstancePhase for why that boundary is deliberate.
         Fluid::SubstancePhase phase = Fluid::SubstancePhase::Liquid;
+        // Solver regime, separate from thermodynamic phase and render routing.
+        Fluid::MatterConstitutiveModel constitutive_model =
+            Fluid::MatterConstitutiveModel::Auto;
     };
     std::vector<SubstanceMaterial> fluid_substance_materials;
+
+    // Where parcels of each STATE label are drawn (FluidViewResolver). Indexed
+    // by Fluid::ParticleLabel. Follow = the substance's view; the default is the
+    // design table (spray/foam/bubble -> splat, mist -> fog). Per label, never
+    // per domain: the substance still decides where its body goes.
+    Fluid::LabelRoutes fluid_label_routes = Fluid::defaultLabelRoutes();
 
     // ── Solid-phase coupling (domain-wide) ──────────────────────────────────
     // Master switch for the whole solid-phase path: with this off, a substance
@@ -851,10 +896,27 @@ struct SimulationGridDomainDesc {
 // One definition for the emitter, the seed, the cooling pass and the API
 // readout — two opinions about "room temperature" would make freshly emitted
 // liquid cool or warm on its first frame for no reason anyone authored.
+// Stratification the gas solver runs with, in normalized heat units per metre
+// above the domain floor. The solver has no adiabatic cooling (a parcel keeps
+// its temperature), so it works in POTENTIAL temperature, whose environmental
+// gradient is  dtheta/dz = g/cp - L  (K/m, L = lapse rate). Stable (> 0) for
+// L below the dry adiabat 9.76e-3 K/m; an unstable atmosphere gives 0, because
+// the solver's restoring term cannot push a parcel UP. Converted to solver
+// units by the world's single Kelvin calibration -- the one place that
+// conversion is allowed to live (MaterialTemperatureScale).
+inline float gasEffectiveStratification(const SimulationGridDomainDesc& domain,
+                                        const WorldThermalState& world) {
+    if (!domain.gas_inherit_atmosphere) return domain.gas_ambient_stratification;
+    constexpr float kCpAir = 1004.0f;  // J/(kg K)
+    const float lapse = atmosphere::ambientSnapshot().climate.lapse_rate_k_per_m;
+    const float dtheta_dz = std::max(0.0f, atmosphere::kGravity / kCpAir - lapse);
+    return dtheta_dz / std::max(1.0f, world.kelvin_per_unit);
+}
+
 inline float fluidDomainAmbientKelvin(const SimulationGridDomainDesc& domain,
                                       const WorldThermalState& world) {
     const float k = domain.thermal_override_enabled ? domain.thermal_ambient_kelvin
-                                                    : world.ambient_kelvin;
+                                                    : world.ambientKelvin();
     return std::max(1.0f, k);
 }
 
@@ -877,6 +939,7 @@ struct SimulationGasStats {
 
     float total_ms = 0.0f;      // whole per-domain gas step, host wall time
     float voxelize_ms = 0.0f;   // collider stamp into grid.solid + face weights
+    float inventory_advection_ms = 0.0f; // physical kg/J sidecar transport
     float analysis_ms = 0.0f;   // the post-step O(cells) field scan below
 
     // Device stages, in execution order.
@@ -934,9 +997,13 @@ struct SimulationGasStats {
 
     // ── Field measurements (post-step scan) ──────────────────────────────────
     std::size_t cell_count = 0;
+    std::size_t active_density_cells = 0; // gas density only; never liquid SDF
     std::size_t active_fuel_cells = 0;   // fuel > 1e-4
     std::size_t burning_cells = 0;       // flame/interaction field lit
     std::size_t solid_cells = 0;         // collider-occupied cells
+    std::size_t liquid_boundary_cells = 0;
+    Vec3 liquid_boundary_mean_velocity;
+    float max_density = 0.0f;
     float max_temperature = 0.0f;
     float total_density = 0.0f;          // smoke mass proxy (sum over cells)
     float total_fuel = 0.0f;
@@ -965,6 +1032,16 @@ struct SimulationGridDomainState {
     // density/temperature/fuel). For Fluid this is per-step scratch for the
     // pressure projection; the source of truth is `particles`.
     FluidSim::FluidGrid grid;
+    // Matter domains keep gas in `grid` (the renderer and gas solver's existing
+    // authority) and APIC scratch in this parallel grid. Both share the same
+    // bounds, resolution and voxel size; particles remain the liquid authority.
+    // Legacy Gas/Fluid domains leave it empty, preserving their storage/layout.
+    FluidSim::FluidGrid matter_liquid_grid;
+    // Physical gas-phase inventory. The legacy gas density/fuel/temperature
+    // channels are dimensionless solver/render tracers; these sidecars carry
+    // the kg and J deposited by phase exchange without changing that ABI.
+    std::vector<float> gas_phase_mass_kg;
+    std::vector<float> gas_phase_energy_j;
     // ★★★ Particles destroyed by COMBUSTION, cumulative for this run.
     //
     // The emitter's capacity gate compares the live particle count against
@@ -1006,6 +1083,7 @@ struct SimulationGridDomainState {
     // Fluid-only runtime state. Empty for Gas domains.
     Fluid::FluidParticles particles;
     Fluid::APICSolverStats fluid_stats;
+    Fluid::ParticleLabelStepStats particle_label_stats;
     // Thermal-liquid readout (cooling / freezing / ν(T)). Kept beside
     // fluid_stats rather than inside it: Fluid::step resets its stats on entry,
     // and the thermal chain runs once per FRAME, before the solver.
@@ -1258,6 +1336,17 @@ struct SimulationGridDomainComputeBuffers {
     // GPU mirror of FluidParticles::mass_fraction. Kept separate so existing
     // APIC kernels retain their buffer ABI while lifecycle support is added.
     ComputeBufferHandle fluid_mass_fraction;
+    // Same-frame particle-state classification. Dense radius-sized bins avoid
+    // a device prefix scan; any capacity overflow rejects the GPU result and
+    // falls back to the exact CPU classifier.
+    ComputeBufferHandle label_bin_counts;
+    ComputeBufferHandle label_bin_items;
+    ComputeBufferHandle label_flags;
+    ComputeBufferHandle label_stats;
+    std::size_t label_bin_count_capacity = 0;
+    std::size_t label_bin_item_capacity = 0;
+    std::size_t label_flag_capacity = 0;
+    std::size_t label_stat_capacity = 0;
     Fluid::Granular::GpuBuffers granular;
     ComputeBufferHandle foam_positions;
     SimulationGpuFoamRenderBuffer foam_render;
@@ -1365,6 +1454,10 @@ struct SimulationGridDomainComputeBuffers {
 };
 
 struct SimulationFlowSourceDesc {
+    enum class Phase {
+        Gas = 0,
+        Liquid = 1
+    };
     struct Keyframe {
         bool has_enabled = false;
         bool has_position = false;
@@ -1395,6 +1488,9 @@ struct SimulationFlowSourceDesc {
     SimulationFlowSourceMode source_mode = SimulationFlowSourceMode::Point;
     std::string source_name;
     int domain_index = 0;
+    // Selects which phase receives this source when the target is Matter.
+    // Legacy single-phase domains ignore it.
+    Phase phase = Phase::Gas;
     bool enabled = true;
 
     // ── Object binding (parenting) ───────────────────────────────────────────
@@ -1475,6 +1571,10 @@ struct SimulationFlowSourceDesc {
     // rides advection, compaction and reseed inheritance — the identity is a
     // property of the material, not of where it was born.
     std::string fluid_substance;
+    // Optional birth-state override. Auto resolves through the substance row,
+    // then falls back to the legacy domain granular switch for old scenes.
+    Fluid::MatterConstitutiveModel initial_constitutive_model =
+        Fluid::MatterConstitutiveModel::Auto;
     // Per-source accumulator for fractional emit counts (kept in the desc so
     // it survives step boundaries; reset on disable).
     // Kelvin the emitted LIQUID is born at (a hot wax pour). Separate from
@@ -2126,6 +2226,9 @@ public:
     const std::vector<CouplingTraceEntry>& couplingTrace() const {
         return coupling_trace_;
     }
+    const MatterExchangeLedger& matterExchangeLedger() const {
+        return matter_exchange_ledger_;
+    }
     // Per proxy and domain: cells stamped and the velocity written into
     // solid_vel during the last grid step. steps == 0 means never stepped,
     // which an empty log alone cannot tell apart from "nothing stamped".
@@ -2343,7 +2446,8 @@ private:
     void solveSelfCollisions(float dt);
     // Device residency (ParticleDeviceResidency.cpp).
     const char* residentIneligibility() const;
-    bool stepDeviceResident(const SimulationContext& context, float drag_factor);
+    bool stepDeviceResident(const SimulationContext& context, float drag_factor,
+                            const Vec3& air_wind);
     void advanceHostLifecycle(float dt);
     void noteResidentSlotWrite(std::size_t index);
     void resetResidency();
@@ -2435,7 +2539,13 @@ private:
 
     std::vector<SimulationGridDomainDesc> grid_domains_;
     std::vector<SimulationGridDomainState> grid_domain_states_;
+    // A Matter domain owns two independent solver states. Keep their device
+    // allocations independent too: reusing the gas buffers for APIC let the
+    // liquid kernels overwrite the gas device fields. This separation is also
+    // the prerequisite for independent phase layouts and active regions.
     std::vector<SimulationGridDomainComputeBuffers> grid_domain_compute_buffers_;
+    std::vector<SimulationGridDomainComputeBuffers>
+        matter_liquid_compute_buffers_;
     std::vector<SimulationFlowSourceDesc> flow_sources_;
     std::function<bool(const ParticleEmitterDesc&, Vec3&, Vec3&)> emitter_source_resolver_;
     std::function<bool(const ParticleEmitterDesc&, Vec3&, Vec3&)> emitter_bounds_resolver_;
@@ -2455,6 +2565,8 @@ private:
     // Couplings that RAN during the last stepGridDomains, in execution order.
     // Cleared at the top of every step; see couplingTrace().
     std::vector<CouplingTraceEntry> coupling_trace_;
+    MatterExchangeLedger matter_exchange_ledger_;
+    uint64_t matter_exchange_step_ = 0;
     void noteCoupling(const char* name, const char* producer, const char* consumer,
                       std::string source_domain, std::string target_domain) {
         coupling_trace_.push_back(CouplingTraceEntry{

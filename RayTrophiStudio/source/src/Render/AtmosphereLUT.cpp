@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 #include "globals.h"
+#include "Atmosphere/AtmosphereClimate.h"
 
 #define CUDA_CHECK(call) \
     do { \
@@ -140,12 +141,18 @@ inline float3 compute_transmittance_internal(float3 pos, float3 sunDir, float Rg
     return make_float3(expf(-tau.x), expf(-tau.y), expf(-tau.z));
 }
 
-void AtmosphereLUT::precompute(const NishitaSkyParams& params) {
+void AtmosphereLUT::precompute(const NishitaSkyParams& inputParams) {
     if (!initialized) initialize();
-    
+
+    // Effective medium: the climate's humidity grows the aerosol extinction
+    // (same formula atmosphere_lut.comp receives as weather.x). Folding it
+    // into dust_density ONCE keeps every phase below on the same Mie value.
+    NishitaSkyParams params = inputParams;
+    params.dust_density *= atmosphere::hygroscopicMieScale(inputParams.derived_relative_humidity);
+
     float Rg = params.planet_radius;
     float Rt = Rg + params.atmosphere_height;
-    float t_kelvin = params.temperature + 273.15f;
+    float t_kelvin = params.derived_temperature_c + 273.15f;
     float h_scale = t_kelvin / 288.15f;
     float rH = params.rayleigh_density * h_scale;
     float mH = params.mie_density * h_scale;

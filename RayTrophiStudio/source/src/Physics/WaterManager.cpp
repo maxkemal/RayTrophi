@@ -252,6 +252,27 @@ WaterUpdateResult WaterManager::update(float waterTime) {
         surf.params.use_fft_ocean = false;
         surf.params.use_fft_mesh_displacement = false;
 
+        // Climate wind (Faz 2). The CUDA FFT below is retired, so the ocean's
+        // wind reaches the picture ONLY through the GPU material's fft_wind_*
+        // (Gerstner direction + micro ripples). Those are stamped at material
+        // sync, which a keyed climate never triggers -- refresh them here, per
+        // frame, for inheriting surfaces. Without this a keyed wind would move
+        // the panel readout and nothing else.
+        if (surf.params.inherit_atmosphere && surf.material_id > 0 &&
+            surf.type != WaterSurface::Type::River) {
+            auto mat = MaterialManager::getInstance().getMaterial(surf.material_id);
+            if (mat && mat->gpuMaterial) {
+                const float speed = surf.params.effectiveWindSpeed();
+                const float direction = surf.params.effectiveWindDirection();
+                if (mat->gpuMaterial->fft_wind_speed != speed ||
+                    mat->gpuMaterial->fft_wind_direction != direction) {
+                    mat->gpuMaterial->fft_wind_speed = speed;
+                    mat->gpuMaterial->fft_wind_direction = direction;
+                    result.material_changed = true;
+                }
+            }
+        }
+
         // Water rendering is Vulkan-RT-first. Do not run the legacy CUDA -> CPU
         // download -> Vulkan upload bridge. Ocean spectrum generation will be
         // reintroduced only through a native Vulkan compute resource.
@@ -272,8 +293,8 @@ WaterUpdateResult WaterManager::update(float waterTime) {
             FFTOceanParams fft_params;
             fft_params.resolution = surf.params.fft_resolution;
             fft_params.ocean_size = resolveWaveDomainSize(&surf);
-            fft_params.wind_speed = surf.params.fft_wind_speed;
-            fft_params.wind_direction = surf.params.fft_wind_direction;
+            fft_params.wind_speed = surf.params.effectiveWindSpeed();
+            fft_params.wind_direction = surf.params.effectiveWindDirection();
             fft_params.choppiness = surf.params.fft_choppiness;
             fft_params.amplitude = surf.params.fft_amplitude;
             fft_params.time_scale = resolveSharedAnimationSpeed(&surf);
@@ -1971,6 +1992,7 @@ nlohmann::json WaterManager::serialize() const {
         ws["domain_size_multiplier"] = surf.params.domain_size_multiplier;
         ws["fft_wind_speed"] = surf.params.fft_wind_speed;
         ws["fft_wind_direction"] = surf.params.fft_wind_direction;
+        ws["inherit_atmosphere"] = surf.params.inherit_atmosphere;
         ws["fft_choppiness"] = surf.params.fft_choppiness;
         ws["fft_amplitude"] = surf.params.fft_amplitude;
         ws["fft_time_scale"] = surf.params.fft_time_scale;
@@ -2145,6 +2167,7 @@ void WaterManager::deserialize(const nlohmann::json& j, SceneData& scene) {
         surf.params.domain_size_multiplier = 1.0f;
         surf.params.fft_wind_speed = ws.value("fft_wind_speed", 10.0f);
         surf.params.fft_wind_direction = ws.value("fft_wind_direction", 0.0f);
+        surf.params.inherit_atmosphere = ws.value("inherit_atmosphere", false);
         surf.params.fft_choppiness = ws.value("fft_choppiness", 1.0f);
         surf.params.fft_amplitude = ws.value("fft_amplitude", 0.0002f);
         surf.params.fft_time_scale = ws.value("fft_time_scale", 1.0f);

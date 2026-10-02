@@ -1,0 +1,15 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC {
+    ivec4 bin_dim_count; ivec4 bin_min_cap;
+    int bin_count; float radius; uint label_mask; uint label_shift;
+    uint frozen_mask; uint body_label; uint spray_label; uint frozen_label;
+    float mist_mass_fraction; uint mist_label; uvec2 padding;
+} pc;
+layout(set=0,binding=0) buffer Counts { uint counts[]; };
+layout(set=0,binding=1) buffer Stats { uint stats[]; };
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id < uint(pc.bin_count)) counts[id] = 0u;
+    if (id < 4u) stats[id] = 0u;
+}

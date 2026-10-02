@@ -21,7 +21,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rt_test_fluid_splat_raster_ipc import Ipc  # same pipe client
 
-DOMAIN = sys.argv[1] if len(sys.argv) > 1 else "Grid Domain 1"
+DOMAIN = sys.argv[1] if len(sys.argv) > 1 else "Physics Domain 1"
 failures = []
 
 

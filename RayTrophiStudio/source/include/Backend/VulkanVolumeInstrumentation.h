@@ -55,10 +55,34 @@ struct VolumePerformanceStats {
     uint32_t arbiterNoBox = 0;
     uint32_t arbiterEmptyRange = 0;
     uint32_t arbiterNoCrossing = 0;
+    // Pixel region, normalized launch coordinates [min, max). Every counter
+    // counts only launches inside it; the default is the whole image.
+    float regionMinX = 0.0f;
+    float regionMinY = 0.0f;
+    float regionMaxX = 1.0f;
+    float regionMaxY = 1.0f;
+    // Path budget accounting (raygen) — see volume_instrumentation.glsl.
+    uint32_t pathsTraced = 0;
+    uint32_t pathsBounceCapped = 0;
+    uint32_t pathsPassCapped = 0;
+    uint32_t chargedSpecular = 0;
+    uint32_t chargedDiffuse = 0;
+    uint32_t chargedTransmission = 0;
+    uint32_t chargedOther = 0;
+    uint32_t freePasses = 0;
+    // Volume-side attribution (volume closest-hit).
+    uint32_t mediumPasses = 0;
+    uint32_t arbiterStartedInside = 0;
+    uint32_t arbiterInsideFound = 0;
 };
-static_assert(sizeof(VolumePerformanceStats) == 100,
-              "Volume instrumentation ABI must remain 25 uint32 words "
+static_assert(sizeof(VolumePerformanceStats) == 160,
+              "Volume instrumentation ABI must remain 40 x 4-byte words "
               "and must match volume_instrumentation.glsl exactly.");
+
+// Normalized [min, max) pixel rectangle the counters are restricted to.
+struct VolumeInstrumentationRegion {
+    float minX = 0.0f, minY = 0.0f, maxX = 1.0f, maxY = 1.0f;
+};
 
 class VulkanVolumeInstrumentation {
 public:
@@ -70,7 +94,8 @@ public:
 
     bool ensure(VulkanDevice& device);
     void destroy(VulkanDevice& device);
-    void reset(VulkanDevice& device, bool enabled);
+    void reset(VulkanDevice& device, bool enabled,
+               const VolumeInstrumentationRegion& region = {});
     VolumePerformanceStats read(VulkanDevice& device) const;
     const BufferHandle* buffer() const;
 

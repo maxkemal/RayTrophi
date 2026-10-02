@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -15,6 +15,9 @@
 #include "Triangle.h"
 #include "WaterShaderCommon.h"
 #include "json.hpp"
+#include "Atmosphere/AtmosphereClimate.h"
+#include <algorithm>
+#include <cmath>
 #include <vector>
 #include <memory>
 #include <string>
@@ -102,7 +105,28 @@ struct WaterWaveParams {
     bool auto_domain_from_mesh = false; // Deprecated: keep explicit FFT domain stable across mesh scale
     float domain_size_multiplier = 1.0f;// Deprecated: ignored to keep one stable water domain
     float fft_wind_speed = 10.0f;       // Wind speed (m/s) - affects wave size
-    float fft_wind_direction = 0.0f;    // Wind direction (degrees)
+    float fft_wind_direction = 0.0f;    // Wind direction in RADIANS (0 = +X, pi/2 = +Z)
+    // ★★ ATMOSPHERE (Faz 2). On: speed and direction come from the world
+    //   climate's wind and the two fields above are ignored -- read the
+    //   EFFECTIVE pair through effectiveWindSpeed()/effectiveWindDirection(),
+    //   never the raw fields. Default OFF: an ocean's wind is authored, and ON
+    //   in a calm world would flatten it.
+    bool inherit_atmosphere = false;
+    // Phillips spectrum divides by wind_speed^2 (L = V^2/g), so a dead-calm
+    // climate is floored here instead of feeding the FFT a zero.
+    static constexpr float kMinInheritedWindMps = 0.1f;
+    float effectiveWindSpeed() const {
+        if (!inherit_atmosphere) return fft_wind_speed;
+        const Vec3 w = atmosphere::ambientWindMps();
+        return (std::max)(std::sqrt(w.x * w.x + w.z * w.z), kMinInheritedWindMps);
+    }
+    float effectiveWindDirection() const {
+        if (!inherit_atmosphere) return fft_wind_direction;
+        const Vec3 w = atmosphere::ambientWindMps();
+        // Calm: keep the authored direction rather than snapping to atan2(0,0).
+        if (w.x * w.x + w.z * w.z < 1e-8f) return fft_wind_direction;
+        return std::atan2(w.z, w.x);
+    }
     float fft_choppiness = 1.0f;        // Horizontal displacement strength
     float fft_amplitude = 0.001f;       // Phillips spectrum amplitude (higher = bigger waves)
     float fft_time_scale = 1.0f;        // Animation speed
@@ -209,8 +233,8 @@ struct WaterWaveParams {
         out.micro_morph_speed = micro_morph_speed;
         out.foam_noise_scale = foam_noise_scale;
         out.foam_threshold = foam_threshold;
-        out.wind_direction = fft_wind_direction;
-        out.wind_speed = fft_wind_speed;
+        out.wind_direction = effectiveWindDirection();
+        out.wind_speed = effectiveWindSpeed();
         out.time = time_seconds;
         return out;
     }
@@ -451,6 +475,7 @@ inline nlohmann::json WaterWaveParams::serializeParams() const {
         {"fft_ocean_size", fft_ocean_size}, {"auto_domain_from_mesh", auto_domain_from_mesh},
         {"domain_size_multiplier", domain_size_multiplier}, {"fft_wind_speed", fft_wind_speed},
         {"fft_wind_direction", fft_wind_direction}, {"fft_choppiness", fft_choppiness},
+        {"inherit_atmosphere", inherit_atmosphere},
         {"fft_amplitude", fft_amplitude}, {"fft_time_scale", fft_time_scale},
         {"micro_detail_strength", micro_detail_strength}, {"micro_detail_scale", micro_detail_scale},
         {"micro_anim_speed", micro_anim_speed}, {"micro_morph_speed", micro_morph_speed},
@@ -500,6 +525,7 @@ inline void WaterWaveParams::deserializeParams(const nlohmann::json& j) {
     domain_size_multiplier = j.value("domain_size_multiplier", domain_size_multiplier);
     fft_wind_speed = j.value("fft_wind_speed", fft_wind_speed);
     fft_wind_direction = j.value("fft_wind_direction", fft_wind_direction);
+    inherit_atmosphere = j.value("inherit_atmosphere", false);
     fft_choppiness = j.value("fft_choppiness", fft_choppiness);
     fft_amplitude = j.value("fft_amplitude", fft_amplitude);
     fft_time_scale = j.value("fft_time_scale", fft_time_scale);

@@ -1,4 +1,5 @@
 #include "RtPostBindings.h"
+#include "RtFluidLabelBindings.h"
 #include "RtViewportCutoutBindings.h"
 #include "RtRasterDiagnosticsBindings.h"
 #include "RtScreenGiBindings.h"
@@ -33,6 +34,7 @@
 #include <pybind11/stl.h>
 
 #include "Api/RtApi.h"
+#include "Fluid/FluidFoam.h"
 #include "Api/RtUi.h"   // Faz 4b: addon panels + regions (implementation in RtUi.cpp)
 #include "RtUiBindings.h"
 #include "RtPyCommon.h" // shared binding helpers + rtpy::registerSceneBindings
@@ -1070,6 +1072,69 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "density_mask includes probabilistically; exclusion_mask forbids at/above "
        "exclusion_threshold. Mask names come from rt.terrain.list_fields().");
 
+    // Ocean / lake wind (Faz 2). There is no rt.water namespace yet; two calls
+    // do not justify inventing one.
+    module.def("water_get_wind", [](const std::string& surface) {
+        rtapi::WaterWindInfo w;
+        requireResult(rtapi::getWaterWind(surface, w));
+        py::dict d;
+        d["surface"] = w.surface;
+        d["type"] = w.type;
+        d["inherit_atmosphere"] = w.inherit_atmosphere;
+        d["wind_source"] = w.wind_source;
+        d["speed_mps"] = w.speed_mps;
+        d["direction_degrees"] = w.direction_degrees;
+        d["effective_speed_mps"] = w.effective_speed_mps;
+        d["effective_direction_degrees"] = w.effective_direction_degrees;
+        return d;
+    }, py::arg("surface"));
+    module.def("water_set_wind", [](const std::string& surface, const py::kwargs& kwargs) {
+        rtapi::WaterWindPatch patch;
+        if (kwargs.contains("inherit_atmosphere"))
+            patch.inherit_atmosphere = py::cast<bool>(kwargs["inherit_atmosphere"]);
+        if (kwargs.contains("speed_mps")) patch.speed_mps = py::cast<float>(kwargs["speed_mps"]);
+        if (kwargs.contains("direction_degrees"))
+            patch.direction_degrees = py::cast<float>(kwargs["direction_degrees"]);
+        requireResult(rtapi::setWaterWind(surface, patch));
+    }, py::arg("surface"),
+       "Keywords: inherit_atmosphere, speed_mps, direction_degrees. Omitted keys are left alone.");
+
+    scatter.def("get_wind", [](const std::string& group) {
+        rtapi::ScatterWindInfo w;
+        requireResult(rtapi::getScatterWind(group, w));
+        py::dict d;
+        d["enabled"] = w.enabled;
+        d["inherit_atmosphere"] = w.inherit_atmosphere;
+        d["wind_source"] = w.wind_source;
+        d["speed"] = w.speed;
+        d["strength"] = w.strength;
+        d["turbulence"] = w.turbulence;
+        d["wave_size"] = w.wave_size;
+        d["direction"] = vec3ToPython(w.direction);
+        d["reference_wind_mps"] = w.reference_wind_mps;
+        d["effective_speed"] = w.effective_speed;
+        d["effective_strength"] = w.effective_strength;
+        d["effective_direction"] = vec3ToPython(w.effective_direction);
+        return d;
+    }, py::arg("group"));
+    scatter.def("set_wind", [](const std::string& group, const py::kwargs& kwargs) {
+        rtapi::ScatterWindPatch patch;
+        if (kwargs.contains("enabled")) patch.enabled = py::cast<bool>(kwargs["enabled"]);
+        if (kwargs.contains("inherit_atmosphere"))
+            patch.inherit_atmosphere = py::cast<bool>(kwargs["inherit_atmosphere"]);
+        const auto readFloat = [&](const char* key, std::optional<float>& slot) {
+            if (kwargs.contains(key)) slot = py::cast<float>(kwargs[key]);
+        };
+        readFloat("speed", patch.speed);
+        readFloat("strength", patch.strength);
+        readFloat("turbulence", patch.turbulence);
+        readFloat("wave_size", patch.wave_size);
+        if (kwargs.contains("direction")) patch.direction = vec3FromPython(kwargs["direction"]);
+        requireResult(rtapi::setScatterWind(group, patch));
+    }, py::arg("group"),
+       "Keywords: enabled, inherit_atmosphere, speed, strength, turbulence, wave_size, "
+       "direction. Omitted keys are left alone.");
+
     scatter.def("fill", [](const std::string& group) -> int {
         int spawned = 0;
         requireResult(rtapi::fillScatterGroup(group, spawned));
@@ -1400,12 +1465,21 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["id"] = info.id;
         d["name"] = info.name;
         d["type"] = info.type;
+        d["phases"] = info.phases;
         d["domain_min"] = vec3ToPython(info.domain_min);
         d["domain_max"] = vec3ToPython(info.domain_max);
         d["voxel_size"] = info.voxel_size;
         d["particle_count"] = info.particle_count;
+        d["fluid_model_particles"] = info.fluid_model_particles;
+        d["granular_model_particles"] = info.granular_model_particles;
+        d["elastic_model_particles"] = info.elastic_model_particles;
+        d["unresolved_model_particles"] = info.unresolved_model_particles;
         d["active_density_cells"] = info.active_density_cells;
         d["max_density"] = info.max_density;
+        d["gas_phase_mass_kg"] = info.gas_phase_mass_kg;
+        d["gas_phase_energy_j"] = info.gas_phase_energy_j;
+        d["gas_phase_active_cells"] = info.gas_phase_active_cells;
+        d["gas_phase_mass_centroid"] = vec3ToPython(info.gas_phase_mass_centroid);
         d["live_state"] = info.live_state;
         d["render_mode"] = info.render_mode;
         d["backend"] = info.backend;
@@ -1546,9 +1620,37 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                 e["miscibility"] = b.miscibility;
                 // State of matter, a separate axis from representation.
                 e["phase"] = b.phase;
+                e["constitutive_model"] = b.constitutive_model;
                 binds.append(e);
             }
             d["substance_materials"] = binds;
+            py::list views;
+            for (const auto& v : info.views) {
+                py::dict e;
+                e["view"] = v.view;
+                py::list names;
+                for (const auto& n : v.substances) names.append(n);
+                e["substances"] = names;
+                e["untagged"] = v.untagged;
+                e["live"] = v.live;
+                e["vdb_id"] = v.vdb_id;
+                py::list lbls;
+                for (const auto& l : v.labels) lbls.append(l);
+                e["labels"] = lbls;
+                e["particles"] = v.particles;
+                e["whitewater"] = v.whitewater;
+                views.append(e);
+            }
+            d["views"] = views;
+            d["views_measured"] = info.views_measured;
+            {
+                py::dict routes;
+                for (const auto& kv : info.label_routes) routes[py::str(kv.first)] = kv.second;
+                d["label_routes"] = routes;
+            }
+            d["hidden_particles"] = info.hidden_particles;
+            d["max_particles"] = info.max_particles;
+            d["particle_labels"] = fluidLabelsToPython(info.particle_labels);
         }
         d["uvw_drift"] = info.uvw_drift;
         // Measured on the last simulated step (see FluidDomainInfo).
@@ -1592,12 +1694,21 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["id"] = info.id;
             d["name"] = info.name;
             d["type"] = info.type;
+            d["phases"] = info.phases;
             d["domain_min"] = vec3ToPython(info.domain_min);
             d["domain_max"] = vec3ToPython(info.domain_max);
             d["voxel_size"] = info.voxel_size;
             d["particle_count"] = info.particle_count;
+            d["fluid_model_particles"] = info.fluid_model_particles;
+            d["granular_model_particles"] = info.granular_model_particles;
+            d["elastic_model_particles"] = info.elastic_model_particles;
+            d["unresolved_model_particles"] = info.unresolved_model_particles;
             d["active_density_cells"] = info.active_density_cells;
             d["max_density"] = info.max_density;
+            d["gas_phase_mass_kg"] = info.gas_phase_mass_kg;
+            d["gas_phase_energy_j"] = info.gas_phase_energy_j;
+            d["gas_phase_active_cells"] = info.gas_phase_active_cells;
+            d["gas_phase_mass_centroid"] = vec3ToPython(info.gas_phase_mass_centroid);
             d["live_state"] = info.live_state;
             d["render_mode"] = info.render_mode;
             d["backend"] = info.backend;
@@ -1735,9 +1846,37 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                     e["miscibility"] = b.miscibility;
                     // State of matter, a separate axis from representation.
                     e["phase"] = b.phase;
+                    e["constitutive_model"] = b.constitutive_model;
                     binds.append(e);
                 }
                 d["substance_materials"] = binds;
+                py::list views;
+                for (const auto& v : info.views) {
+                    py::dict e;
+                    e["view"] = v.view;
+                    py::list names;
+                    for (const auto& n : v.substances) names.append(n);
+                    e["substances"] = names;
+                    e["untagged"] = v.untagged;
+                    e["live"] = v.live;
+                    e["vdb_id"] = v.vdb_id;
+                    py::list lbls;
+                    for (const auto& l : v.labels) lbls.append(l);
+                    e["labels"] = lbls;
+                    e["particles"] = v.particles;
+                    e["whitewater"] = v.whitewater;
+                    views.append(e);
+                }
+                d["views"] = views;
+                d["views_measured"] = info.views_measured;
+                {
+                    py::dict routes;
+                    for (const auto& kv : info.label_routes) routes[py::str(kv.first)] = kv.second;
+                    d["label_routes"] = routes;
+                }
+                d["hidden_particles"] = info.hidden_particles;
+                d["max_particles"] = info.max_particles;
+                d["particle_labels"] = fluidLabelsToPython(info.particle_labels);
             }
             d["uvw_drift"] = info.uvw_drift;
         // Measured on the last simulated step (see FluidDomainInfo).
@@ -1766,12 +1905,21 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["id"] = info.id;
         d["name"] = info.name;
         d["type"] = info.type;
+        d["phases"] = info.phases;
         d["domain_min"] = vec3ToPython(info.domain_min);
         d["domain_max"] = vec3ToPython(info.domain_max);
         d["voxel_size"] = info.voxel_size;
         d["particle_count"] = info.particle_count;
+        d["fluid_model_particles"] = info.fluid_model_particles;
+        d["granular_model_particles"] = info.granular_model_particles;
+        d["elastic_model_particles"] = info.elastic_model_particles;
+        d["unresolved_model_particles"] = info.unresolved_model_particles;
         d["active_density_cells"] = info.active_density_cells;
         d["max_density"] = info.max_density;
+        d["gas_phase_mass_kg"] = info.gas_phase_mass_kg;
+        d["gas_phase_energy_j"] = info.gas_phase_energy_j;
+        d["gas_phase_active_cells"] = info.gas_phase_active_cells;
+        d["gas_phase_mass_centroid"] = vec3ToPython(info.gas_phase_mass_centroid);
         d["live_state"] = info.live_state;
         d["render_mode"] = info.render_mode;
         d["backend"] = info.backend;
@@ -1912,9 +2060,37 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                 e["miscibility"] = b.miscibility;
                 // State of matter, a separate axis from representation.
                 e["phase"] = b.phase;
+                e["constitutive_model"] = b.constitutive_model;
                 binds.append(e);
             }
             d["substance_materials"] = binds;
+            py::list views;
+            for (const auto& v : info.views) {
+                py::dict e;
+                e["view"] = v.view;
+                py::list names;
+                for (const auto& n : v.substances) names.append(n);
+                e["substances"] = names;
+                e["untagged"] = v.untagged;
+                e["live"] = v.live;
+                e["vdb_id"] = v.vdb_id;
+                py::list lbls;
+                for (const auto& l : v.labels) lbls.append(l);
+                e["labels"] = lbls;
+                e["particles"] = v.particles;
+                e["whitewater"] = v.whitewater;
+                views.append(e);
+            }
+            d["views"] = views;
+            d["views_measured"] = info.views_measured;
+            {
+                py::dict routes;
+                for (const auto& kv : info.label_routes) routes[py::str(kv.first)] = kv.second;
+                d["label_routes"] = routes;
+            }
+            d["hidden_particles"] = info.hidden_particles;
+            d["max_particles"] = info.max_particles;
+            d["particle_labels"] = fluidLabelsToPython(info.particle_labels);
         }
         d["uvw_drift"] = info.uvw_drift;
         // Measured on the last simulated step (see FluidDomainInfo).
@@ -2020,7 +2196,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
               [](const std::string& domain, const std::string& substance,
                  const std::string& material, const py::object& representation,
                  const py::object& kinematic_viscosity, const py::object& miscibility,
-                 const py::object& phase) {
+                 const py::object& phase, const py::object& constitutive_model) {
         std::string rep;
         const std::string* p_rep = nullptr;
         if (!representation.is_none()) { rep = py::cast<std::string>(representation); p_rep = &rep; }
@@ -2034,13 +2210,20 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         }
         std::string phase_val; const std::string* p_phase = nullptr;
         if (!phase.is_none()) { phase_val = py::cast<std::string>(phase); p_phase = &phase_val; }
+        std::string model_val; const std::string* p_model = nullptr;
+        if (!constitutive_model.is_none()) {
+            model_val = py::cast<std::string>(constitutive_model);
+            p_model = &model_val;
+        }
         requireResult(rtapi::setFluidSubstanceMaterial(domain, substance, material,
-                                                       p_rep, p_visc, p_misc, p_phase));
+                                                       p_rep, p_visc, p_misc,
+                                                       p_phase, p_model));
     }, py::arg("domain"), py::arg("substance"), py::arg("material") = std::string(),
        py::arg("representation") = py::none(),
        py::arg("kinematic_viscosity") = py::none(),
        py::arg("miscibility") = py::none(),
-       py::arg("phase") = py::none());
+       py::arg("phase") = py::none(),
+       py::arg("constitutive_model") = py::none());
 
     fluid.def("set_param", [](const std::string& domain, const py::kwargs& kwargs) {
         Vec3 dmin_val; const Vec3* p_dmin = nullptr;
@@ -2214,6 +2397,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                                                p_granular_residual,
                                                p_granular_tack, p_granular_cond));
         if (has_thermal_patch) requireResult(rtapi::setFluidThermal(domain, thermal_patch));
+        if (kwargs.contains("max_particles"))
+            requireResult(rtapi::setFluidMaxParticles(domain, py::cast<uint64_t>(kwargs["max_particles"])));
         if (has_surface_patch) requireResult(rtapi::setFluidSurfaceDetail(domain, surface_patch));
     }, py::arg("domain"));
 
@@ -2238,6 +2423,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["pressure_on_gpu"] = s.pressure_on_gpu;
         d["g2p_on_gpu"] = s.g2p_on_gpu;
         d["density_on_gpu"] = s.density_on_gpu;
+        d["total_ms"] = s.total_ms;
         d["p2g_ms"] = s.p2g_ms;
         d["pressure_ms"] = s.pressure_ms;
         d["g2p_ms"] = s.g2p_ms;
@@ -2290,6 +2476,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["buoyancy_heat"] = s.buoyancy_heat;
         d["buoyancy_density"] = s.buoyancy_density;
         d["ambient_stratification"] = s.ambient_stratification;
+        d["inherit_atmosphere"] = s.inherit_atmosphere;
+        d["effective_ambient_stratification"] = s.effective_ambient_stratification;
         d["pressure_iterations"] = s.pressure_iterations;
         d["surface_dust_enabled"] = s.surface_dust_enabled;
         d["surface_dust_threshold"] = s.surface_dust_threshold;
@@ -2371,6 +2559,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_GAS_KW(buoyancy_heat, float);
         RT_GAS_KW(buoyancy_density, float);
         RT_GAS_KW(ambient_stratification, float);
+        RT_GAS_KW(inherit_atmosphere, bool);
         RT_GAS_KW(pressure_iterations, int);
         RT_GAS_KW(surface_dust_enabled, bool);
         RT_GAS_KW(surface_dust_threshold, float);
@@ -2422,6 +2611,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["resolution"] = py::make_tuple(s.resolution[0], s.resolution[1], s.resolution[2]);
         d["total_ms"] = s.total_ms;
         d["voxelize_ms"] = s.voxelize_ms;
+        d["inventory_advection_ms"] = s.inventory_advection_ms;
         d["analysis_ms"] = s.analysis_ms;
         d["gpu_collider_source_ms"] = s.gpu_collider_source_ms;
         d["gpu_msf_ms"] = s.gpu_msf_ms;
@@ -2461,6 +2651,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["grid_memory_bytes"] = s.grid_memory_bytes;
         d["burning_cells"] = s.burning_cells;
         d["solid_cells"] = s.solid_cells;
+        d["liquid_boundary_cells"] = s.liquid_boundary_cells;
+        d["liquid_boundary_mean_velocity"] =
+            vec3ToPython(s.liquid_boundary_mean_velocity);
         return d;
     }, py::arg("domain"));
     gas.def("get_shader", [gas_shader_to_dict](const std::string& domain) {
@@ -2491,6 +2684,229 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 #undef RT_GASSHADER_KW
         requireResult(rtapi::updateGasShaderSettings(domain, s));
     }, py::arg("domain"));
+
+    // Thermal environment of a gas or liquid domain (IPC fluid.get/set_environment).
+    fluid.def("get_environment", [](const std::string& domain) {
+        rtapi::DomainEnvironmentInfo e;
+        requireResult(rtapi::getDomainEnvironment(domain, e));
+        py::dict d;
+        d["override_enabled"] = e.override_enabled;
+        d["ambient_kelvin"] = e.ambient_kelvin;
+        d["oxygen"] = e.oxygen;
+        d["effective_ambient_kelvin"] = e.effective_ambient_kelvin;
+        d["effective_oxygen"] = e.effective_oxygen;
+        d["world_ambient_kelvin"] = e.world_ambient_kelvin;
+        d["world_oxygen"] = e.world_oxygen;
+        return d;
+    }, py::arg("domain"),
+       "The domain's thermal environment: its override and the effective values "
+       "the solvers read (world default when not overriding).");
+    fluid.def("set_environment", [](const std::string& domain, const py::object& override_enabled,
+                                    const py::object& ambient_kelvin, const py::object& oxygen) {
+        std::optional<bool> o;
+        std::optional<float> k, ox;
+        if (!override_enabled.is_none()) o = py::cast<bool>(override_enabled);
+        if (!ambient_kelvin.is_none()) k = py::cast<float>(ambient_kelvin);
+        if (!oxygen.is_none()) ox = py::cast<float>(oxygen);
+        requireResult(rtapi::setDomainEnvironment(domain, o, k, ox));
+    }, py::arg("domain"), py::arg("override_enabled") = py::none(),
+       py::arg("ambient_kelvin") = py::none(), py::arg("oxygen") = py::none(),
+       "Override the world ambient (K) and oxygen (0..1) inside this domain; "
+       "omitted arguments are unchanged.");
+
+    // Determinism fingerprint (IPC fluid.state_digest). Hashes as hex strings.
+    fluid.def("state_digest", [](const std::string& domain) {
+        rtapi::FluidStateDigest dg;
+        requireResult(rtapi::getFluidStateDigest(domain, dg));
+        auto hex = [](uint64_t v) { char b[17]; std::snprintf(b, sizeof(b), "%016llx",
+                                    static_cast<unsigned long long>(v)); return std::string(b); };
+        py::dict d;
+        d["live"] = dg.live; d["particles"] = dg.particles;
+        d["position_hash"] = hex(dg.position_hash); d["velocity_hash"] = hex(dg.velocity_hash);
+        d["centroid"] = py::make_tuple(dg.centroid[0], dg.centroid[1], dg.centroid[2]);
+        d["mean_speed"] = dg.mean_speed;
+        d["whitewater_particles"] = dg.whitewater_particles;
+        d["whitewater_position_hash"] = hex(dg.whitewater_position_hash);
+        return d;
+    }, py::arg("domain"), "Bit-exact fingerprint of the live particle state (determinism probes).");
+
+    // Whitewater (IPC fluid.get_whitewater / set_whitewater).
+    fluid.def("get_whitewater", [](const std::string& domain) {
+        RayTrophiSim::Fluid::FoamParams p;
+        rtapi::WhitewaterStats st;
+        requireResult(rtapi::getFluidWhitewater(domain, p, st));
+        py::dict d;
+        d["enabled"] = p.enabled;
+        d["max_foam"] = static_cast<uint64_t>(p.max_foam);
+        d["volume_color"] = py::make_tuple(p.volume_color.x, p.volume_color.y, p.volume_color.z);
+        d["trapped_air_rate"] = p.trapped_air_rate;
+        d["wave_crest_rate"] = p.wave_crest_rate;
+        d["ta_min"] = p.ta_min;
+        d["ta_max"] = p.ta_max;
+        d["wc_min"] = p.wc_min;
+        d["wc_max"] = p.wc_max;
+        d["ke_min"] = p.ke_min;
+        d["ke_max"] = p.ke_max;
+        d["crest_cos"] = p.crest_cos;
+        d["neighbor_radius_voxels"] = p.neighbor_radius_voxels;
+        d["lifetime"] = p.lifetime;
+        d["buoyancy"] = p.buoyancy;
+        d["fluid_drag"] = p.fluid_drag;
+        d["spray_drag"] = p.spray_drag;
+        d["spawn_jitter_voxels"] = p.spawn_jitter_voxels;
+        d["volume_opacity"] = p.volume_opacity;
+        d["volume_bubble_strength"] = p.volume_bubble_strength;
+        d["volume_spray_strength"] = p.volume_spray_strength;
+        d["volume_density"] = p.volume_density;
+        d["spray_max_neighbors"] = p.spray_max_neighbors;
+        d["bubble_min_neighbors"] = p.bubble_min_neighbors;
+        py::dict s;
+        s["live"] = st.live; s["alive"] = st.alive; s["spray"] = st.spray;
+        s["foam"] = st.foam; s["bubble"] = st.bubble; s["spawned"] = st.spawned;
+        s["gen_ms"] = st.gen_ms; s["advect_ms"] = st.advect_ms;
+        s["crit_on_gpu"] = st.crit_on_gpu; s["neigh_on_gpu"] = st.neigh_on_gpu;
+        s["in_sdf"] = st.in_sdf; s["in_splat"] = st.in_splat;
+        s["in_fog"] = st.in_fog; s["hidden"] = st.hidden;
+        d["stats"] = s;
+        py::dict views;
+        views["spray"] = st.spray_view; views["foam"] = st.foam_view; views["bubble"] = st.bubble_view;
+        d["views"] = views;
+        return d;
+    }, py::arg("domain"), "Whitewater settings of a liquid domain plus live counts and timings.");
+    fluid.def("set_whitewater", [](const std::string& domain, const py::kwargs& kwargs) {
+        RayTrophiSim::Fluid::FoamParams p;
+        rtapi::WhitewaterStats st;
+        requireResult(rtapi::getFluidWhitewater(domain, p, st));
+        bool any = false;
+        if (kwargs.contains("enabled")) { p.enabled = py::cast<bool>(kwargs["enabled"]); any = true; }
+        if (kwargs.contains("max_foam")) { p.max_foam = py::cast<std::size_t>(kwargs["max_foam"]); any = true; }
+        if (kwargs.contains("render_mode"))
+            throw py::value_error("render_mode was removed: whitewater follows the label routes "
+                                  "(fluid.set_label_views spray/foam/bubble)");
+        if (kwargs.contains("volume_color")) {
+            auto c = py::cast<std::vector<float>>(kwargs["volume_color"]);
+            if (c.size() != 3) throw py::value_error("volume_color needs 3 floats");
+            p.volume_color = Vec3(c[0], c[1], c[2]); any = true;
+        }
+        if (kwargs.contains("trapped_air_rate")) { p.trapped_air_rate = py::cast<float>(kwargs["trapped_air_rate"]); any = true; }
+        if (kwargs.contains("wave_crest_rate")) { p.wave_crest_rate = py::cast<float>(kwargs["wave_crest_rate"]); any = true; }
+        if (kwargs.contains("ta_min")) { p.ta_min = py::cast<float>(kwargs["ta_min"]); any = true; }
+        if (kwargs.contains("ta_max")) { p.ta_max = py::cast<float>(kwargs["ta_max"]); any = true; }
+        if (kwargs.contains("wc_min")) { p.wc_min = py::cast<float>(kwargs["wc_min"]); any = true; }
+        if (kwargs.contains("wc_max")) { p.wc_max = py::cast<float>(kwargs["wc_max"]); any = true; }
+        if (kwargs.contains("ke_min")) { p.ke_min = py::cast<float>(kwargs["ke_min"]); any = true; }
+        if (kwargs.contains("ke_max")) { p.ke_max = py::cast<float>(kwargs["ke_max"]); any = true; }
+        if (kwargs.contains("crest_cos")) { p.crest_cos = py::cast<float>(kwargs["crest_cos"]); any = true; }
+        if (kwargs.contains("neighbor_radius_voxels")) { p.neighbor_radius_voxels = py::cast<float>(kwargs["neighbor_radius_voxels"]); any = true; }
+        if (kwargs.contains("lifetime")) { p.lifetime = py::cast<float>(kwargs["lifetime"]); any = true; }
+        if (kwargs.contains("buoyancy")) { p.buoyancy = py::cast<float>(kwargs["buoyancy"]); any = true; }
+        if (kwargs.contains("fluid_drag")) { p.fluid_drag = py::cast<float>(kwargs["fluid_drag"]); any = true; }
+        if (kwargs.contains("spray_drag")) { p.spray_drag = py::cast<float>(kwargs["spray_drag"]); any = true; }
+        if (kwargs.contains("spawn_jitter_voxels")) { p.spawn_jitter_voxels = py::cast<float>(kwargs["spawn_jitter_voxels"]); any = true; }
+        if (kwargs.contains("volume_opacity")) { p.volume_opacity = py::cast<float>(kwargs["volume_opacity"]); any = true; }
+        if (kwargs.contains("volume_bubble_strength")) { p.volume_bubble_strength = py::cast<float>(kwargs["volume_bubble_strength"]); any = true; }
+        if (kwargs.contains("volume_spray_strength")) { p.volume_spray_strength = py::cast<float>(kwargs["volume_spray_strength"]); any = true; }
+        if (kwargs.contains("volume_density")) { p.volume_density = py::cast<float>(kwargs["volume_density"]); any = true; }
+        if (kwargs.contains("spray_max_neighbors")) { p.spray_max_neighbors = py::cast<int>(kwargs["spray_max_neighbors"]); any = true; }
+        if (kwargs.contains("bubble_min_neighbors")) { p.bubble_min_neighbors = py::cast<int>(kwargs["bubble_min_neighbors"]); any = true; }
+        if (!any) throw py::value_error("no whitewater key given");
+        requireResult(rtapi::setFluidWhitewater(domain, p));
+    }, py::arg("domain"), "Edit whitewater settings by keyword; omitted keys are unchanged.");
+
+    // Where each state label is drawn (IPC fluid.set_label_views). The current
+    // table is fluid.get(domain)["label_routes"].
+    fluid.def("set_label_views", [](const std::string& domain, const py::dict& routes, bool reset) {
+        std::vector<std::pair<std::string, std::string>> r;
+        for (auto item : routes)
+            r.emplace_back(py::cast<std::string>(item.first), py::cast<std::string>(item.second));
+        requireResult(rtapi::setFluidLabelRoutes(domain, r, reset));
+    }, py::arg("domain"), py::arg("routes") = py::dict(), py::arg("reset") = false,
+       "Route state labels to views, e.g. {'spray': 'hidden'}. Routes: follow, sdf, "
+       "splat, fog, hidden. reset=True restores the default table first.");
+
+    // Liquid body behind the SurfaceSDF isosurface
+    // (IPC fluid.get_surface_interior / set_surface_interior).
+    fluid.def("get_surface_interior", [](const std::string& domain) {
+        rtapi::FluidSurfaceInteriorSettings s;
+        requireResult(rtapi::getFluidSurfaceInterior(domain, s));
+        auto v3 = [](const Vec3& v) { return py::make_tuple(v.x, v.y, v.z); };
+        py::dict d;
+        d["created"] = s.created;
+        d["tint_active"] = s.tint_active;
+        d["absorption_color"] = v3(s.absorption_color);
+        d["absorption_coefficient"] = s.absorption_coefficient;
+        d["refraction_tint"] = v3(s.refraction_tint);
+        return d;
+    }, py::arg("domain"),
+       "Depth absorption and built-in refraction tint of the liquid body under its isosurface.");
+    fluid.def("set_surface_interior", [](const std::string& domain, const py::object& absorption_color,
+                                         const py::object& absorption_coefficient,
+                                         const py::object& refraction_tint) {
+        auto vec = [](const py::object& o) -> std::optional<Vec3> {
+            if (o.is_none()) return std::nullopt;
+            auto seq = py::cast<std::vector<float>>(o);
+            if (seq.size() != 3) throw py::value_error("expected 3 floats");
+            return Vec3(seq[0], seq[1], seq[2]);
+        };
+        std::optional<float> coef;
+        if (!absorption_coefficient.is_none()) coef = py::cast<float>(absorption_coefficient);
+        requireResult(rtapi::setFluidSurfaceInterior(domain, vec(absorption_color), coef,
+                                                     vec(refraction_tint)));
+    }, py::arg("domain"), py::arg("absorption_color") = py::none(),
+       py::arg("absorption_coefficient") = py::none(), py::arg("refraction_tint") = py::none(),
+       "Set the liquid body's depth absorption and built-in refraction tint; "
+       "omitted arguments are unchanged.");
+
+    // Fog view medium of a LIQUID domain (IPC fluid.get_fog_shader / set_fog_shader).
+    fluid.def("get_fog_shader", [](const std::string& domain) {
+        rtapi::FluidFogShaderSettings s;
+        requireResult(rtapi::getFluidFogShaderSettings(domain, s));
+        auto v3 = [](const Vec3& v) { return py::make_tuple(v.x, v.y, v.z); };
+        py::dict d;
+        d["created"] = s.created;
+        d["density_multiplier"] = s.density_multiplier;
+        d["density_cutoff"] = s.density_cutoff;
+        d["scattering_coefficient"] = s.scattering_coefficient;
+        d["scattering_color"] = v3(s.scattering_color);
+        d["anisotropy"] = s.anisotropy;
+        d["absorption_coefficient"] = s.absorption_coefficient;
+        d["absorption_color"] = v3(s.absorption_color);
+        d["voxel_step_multiplier"] = s.voxel_step_multiplier;
+        d["max_steps"] = s.max_steps;
+        d["shadow_steps"] = s.shadow_steps;
+        d["shadow_stride"] = s.shadow_stride;
+        d["shadow_strength"] = s.shadow_strength;
+        return d;
+    }, py::arg("domain"),
+       "Fog-view medium of a liquid domain. created=False: no fog has drawn yet "
+       "and the values are the default recipe.");
+    fluid.def("set_fog_shader", [](const std::string& domain, const py::kwargs& kwargs) {
+        rtapi::FluidFogShaderSettings s;
+        requireResult(rtapi::getFluidFogShaderSettings(domain, s));
+        auto color = [&](const char* key, Vec3& target) {
+            if (!kwargs.contains(key)) return;
+            auto seq = py::cast<std::vector<float>>(kwargs[key]);
+            if (seq.size() != 3) throw py::value_error(std::string(key) + " must have 3 components");
+            target = Vec3(seq[0], seq[1], seq[2]);
+        };
+#define RT_FOGSHADER_KW(name, type) if (kwargs.contains(#name)) s.name = py::cast<type>(kwargs[#name])
+        RT_FOGSHADER_KW(density_multiplier, float);
+        RT_FOGSHADER_KW(density_cutoff, float);
+        RT_FOGSHADER_KW(scattering_coefficient, float);
+        RT_FOGSHADER_KW(anisotropy, float);
+        RT_FOGSHADER_KW(absorption_coefficient, float);
+        RT_FOGSHADER_KW(voxel_step_multiplier, float);
+        RT_FOGSHADER_KW(max_steps, int);
+        RT_FOGSHADER_KW(shadow_steps, int);
+        RT_FOGSHADER_KW(shadow_stride, int);
+        RT_FOGSHADER_KW(shadow_strength, float);
+#undef RT_FOGSHADER_KW
+        color("scattering_color", s.scattering_color);
+        color("absorption_color", s.absorption_color);
+        requireResult(rtapi::updateFluidFogShaderSettings(domain, s));
+    }, py::arg("domain"),
+       "Edit the fog-view medium; omitted keys are unchanged. Repaints the "
+       "current frame, no simulation step needed.");
 
     fluid.def("get_combustion", [](const std::string& domain) {
         rtapi::CombustibleFluidSettings s;
@@ -2528,7 +2944,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 
     auto flow_to_dict = [](const rtapi::SimulationFlowSourceInfo& s) {
         py::dict d;
-        d["name"] = s.name; d["domain"] = s.domain;
+        d["name"] = s.name; d["domain"] = s.domain; d["phase"] = s.phase;
         d["source_mode"] = s.source_mode; d["source_object"] = s.source_object;
         d["enabled"] = s.enabled; d["parent_object"] = s.parent_object;
         d["velocity_space"] = s.velocity_space;
@@ -2542,6 +2958,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["fluid_velocity_spread"] = s.fluid_velocity_spread;
         d["fluid_emit_along_normal"] = s.fluid_emit_along_normal;
         d["fluid_substance"] = s.fluid_substance;
+        d["initial_constitutive_model"] = s.initial_constitutive_model;
         d["fluid_temperature_override"] = s.fluid_temperature_override;
         d["fluid_temperature_kelvin"] = s.fluid_temperature_kelvin;
         d["use_time_limit"] = s.use_time_limit;
@@ -2554,6 +2971,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                                 const py::kwargs& kw) {
 #define RT_FLOW_KW(name,type) if (kw.contains(#name)) s.name = py::cast<type>(kw[#name])
         RT_FLOW_KW(name, std::string); RT_FLOW_KW(domain, std::string);
+        RT_FLOW_KW(phase, std::string);
         RT_FLOW_KW(source_mode, std::string); RT_FLOW_KW(source_object, std::string);
         RT_FLOW_KW(enabled, bool); RT_FLOW_KW(radius, float);
         RT_FLOW_KW(parent_object, std::string); RT_FLOW_KW(velocity_space, std::string);
@@ -2564,6 +2982,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_FLOW_KW(fluid_velocity_spread, float);
         RT_FLOW_KW(fluid_emit_along_normal, bool);
         RT_FLOW_KW(fluid_substance, std::string);
+        RT_FLOW_KW(initial_constitutive_model, std::string);
         RT_FLOW_KW(fluid_temperature_override, bool);
         RT_FLOW_KW(fluid_temperature_kelvin, float);
         RT_FLOW_KW(use_time_limit, bool);
@@ -2760,6 +3179,36 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         py::list out; for (const auto& n : names) out.append(n);
         return out;
     }, "Names accepted by collider(msf_substance=...)");
+    msf.def("substance", [](const std::string& name) {
+        rtapi::SubstanceProfileInfo p;
+        requireResult(rtapi::getMaterialSubstance(name, p));
+        py::dict d;
+        d["name"] = p.name;
+        d["default_constitutive_model"] = p.default_constitutive_model;
+        d["density"] = p.density;
+        d["liquid_density"] = p.liquid_density;
+        d["specific_heat"] = p.specific_heat;
+        d["conductivity"] = p.conductivity;
+        d["liquid_kinematic_viscosity"] = p.liquid_kinematic_viscosity;
+        d["combustible"] = p.combustible;
+        d["fluid_flammable"] = p.fluid_flammable;
+        d["fluid_extinguishing"] = p.fluid_extinguishing;
+        d["meltable"] = p.meltable;
+        d["ignition_kelvin"] = p.ignition_kelvin;
+        d["flash_kelvin"] = p.flash_kelvin;
+        d["autoignition_kelvin"] = p.autoignition_kelvin;
+        d["melt_kelvin"] = p.melt_kelvin;
+        d["boiling_kelvin"] = p.boiling_kelvin;
+        d["latent_heat_fusion"] = p.latent_heat_fusion;
+        d["latent_heat_vaporization"] = p.latent_heat_vaporization;
+        d["vaporization_rate"] = p.vaporization_rate;
+        d["cooling_power"] = p.cooling_power;
+        d["oxygen_dilution"] = p.oxygen_dilution;
+        d["flame_persistence"] = p.flame_persistence;
+        d["granular_friction_degrees"] = p.granular_friction_degrees;
+        d["granular_cohesion"] = p.granular_cohesion;
+        return d;
+    }, py::arg("name"), "Physical properties for one canonical substance");
     msf.def("fields", [] {
         std::vector<rtapi::MaterialFieldInfo> fields;
         requireResult(rtapi::listMaterialFields(fields));
@@ -2793,6 +3242,49 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         }
         return out;
     }, "Read-only metadata for live Material State Fields");
+
+    py::module_ matter = module.def_submodule(
+        "matter", "Physical matter transfers and conservation measurements");
+    matter.def("exchanges", [] {
+        const rtapi::MatterExchangeReport report = rtapi::matterExchangeReport();
+        py::list rows;
+        for (const auto& e : report.exchanges) {
+            py::dict d;
+            d["event_id"] = e.event_id;
+            d["kind"] = e.kind;
+            d["source"] = e.source;
+            d["target"] = e.target;
+            d["substance"] = e.substance;
+            d["source_mass_kg"] = e.source_mass_kg;
+            d["target_mass_kg"] = e.target_mass_kg;
+            d["source_energy_j"] = e.source_energy_j;
+            d["target_energy_j"] = e.target_energy_j;
+            d["latent_required_j"] = e.latent_required_j;
+            d["latent_accounted_j"] = e.latent_accounted_j;
+            d["source_momentum_kg_m_s"] = py::make_tuple(
+                e.source_momentum_kg_m_s.x,
+                e.source_momentum_kg_m_s.y,
+                e.source_momentum_kg_m_s.z);
+            d["target_momentum_kg_m_s"] = py::make_tuple(
+                e.target_momentum_kg_m_s.x,
+                e.target_momentum_kg_m_s.y,
+                e.target_momentum_kg_m_s.z);
+            rows.append(std::move(d));
+        }
+        py::dict out;
+        out["traced"] = report.traced;
+        out["step"] = report.step;
+        out["exchanges"] = std::move(rows);
+        out["source_mass_kg"] = report.source_mass_kg;
+        out["target_mass_kg"] = report.target_mass_kg;
+        out["mass_error_kg"] = report.mass_error_kg;
+        out["source_energy_j"] = report.source_energy_j;
+        out["target_energy_j"] = report.target_energy_j;
+        out["latent_required_j"] = report.latent_required_j;
+        out["latent_accounted_j"] = report.latent_accounted_j;
+        out["energy_error_j"] = report.energy_error_j;
+        return out;
+    }, "Matter transfers that actually ran in the latest simulation step");
 
     py::module_ terrain = module.def_submodule("terrain", "Terrain creation, queries, and procedural operations");
     auto terrain_info_to_dict = [](const rtapi::TerrainInfo& info) -> py::dict {
@@ -4198,8 +4690,6 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["dust_density"]           = a.dust_density;
         d["ozone_density"]          = a.ozone_density;
         d["ozone_absorption_scale"] = a.ozone_absorption_scale;
-        d["humidity"]               = a.humidity;
-        d["temperature"]            = a.temperature;
         d["altitude"]               = a.altitude;
         d["mie_anisotropy"]         = a.mie_anisotropy;
         d["planet_radius"]          = a.planet_radius;
@@ -4212,8 +4702,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     });
     world.def("set_atmosphere", [](const py::kwargs& kwargs) {
         rtapi::WorldAtmosphereUpdate u;
+        if (kwargs.contains("humidity") || kwargs.contains("temperature"))
+            throw std::runtime_error("humidity/temperature moved to world.set_climate "
+                                     "(surface_relative_humidity, surface_temperature_k in KELVIN)");
         float air = 0.0f, dust = 0.0f, ozone = 0.0f, ozoneAbs = 0.0f;
-        float humidity = 0.0f, temperature = 0.0f, altitude = 0.0f;
+        float altitude = 0.0f;
         float mieG = 0.0f, planetR = 0.0f, atmoH = 0.0f, rayH = 0.0f, mieH = 0.0f;
         Vec3 rayS, mieS;
         auto grab = [&](const char* key, float& slot, const float*& ptr) {
@@ -4225,8 +4718,6 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         grab("dust_density", dust, u.dust_density);
         grab("ozone_density", ozone, u.ozone_density);
         grab("ozone_absorption_scale", ozoneAbs, u.ozone_absorption_scale);
-        grab("humidity", humidity, u.humidity);
-        grab("temperature", temperature, u.temperature);
         grab("altitude", altitude, u.altitude);
         grab("mie_anisotropy", mieG, u.mie_anisotropy);
         grab("planet_radius", planetR, u.planet_radius);
@@ -4244,6 +4735,172 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::updateWorldAtmosphere(u));
     });
 
+    // Climate authority (docs/dev/ATMOSPHERE_SYSTEM.md). Temperature in KELVIN.
+    world.def("get_climate", [] {
+        rtapi::WorldClimateInfo c;
+        requireResult(rtapi::getWorldClimate(c));
+        py::dict d;
+        d["surface_temperature_k"]      = c.surface_temperature_k;
+        d["lapse_rate_k_per_m"]         = c.lapse_rate_k_per_m;
+        d["surface_relative_humidity"]  = c.surface_relative_humidity;
+        d["surface_pressure_pa"]        = c.surface_pressure_pa;
+        d["wind_direction"]             = vec3ToPython(c.wind_direction);
+        d["wind_speed_mps"]             = c.wind_speed_mps;
+        d["instability"]                = c.instability;
+        d["applied_mie_humidity_scale"] = c.applied_mie_humidity_scale;
+        d["applied_temperature_c"]      = c.applied_temperature_c;
+        return d;
+    });
+    world.def("set_climate", [](const py::kwargs& kwargs) {
+        rtapi::WorldClimateUpdate u;
+        float tempK = 0.0f, lapse = 0.0f, rh = 0.0f, press = 0.0f, speed = 0.0f, instab = 0.0f;
+        Vec3 dir;
+        auto grab = [&](const char* key, float& slot, const float*& ptr) {
+            if (!kwargs.contains(key)) return;
+            slot = py::cast<float>(kwargs[key]);
+            ptr = &slot;
+        };
+        grab("surface_temperature_k", tempK, u.surface_temperature_k);
+        grab("lapse_rate_k_per_m", lapse, u.lapse_rate_k_per_m);
+        grab("surface_relative_humidity", rh, u.surface_relative_humidity);
+        grab("surface_pressure_pa", press, u.surface_pressure_pa);
+        grab("wind_speed_mps", speed, u.wind_speed_mps);
+        grab("instability", instab, u.instability);
+        if (kwargs.contains("wind_direction")) {
+            dir = vec3FromPython(kwargs["wind_direction"]);
+            u.wind_direction = &dir;
+        }
+        requireResult(rtapi::updateWorldClimate(u));
+    });
+    world.def("sample_climate", [](py::object position) {
+        rtapi::ClimateSampleInfo s;
+        requireResult(rtapi::sampleWorldClimate(vec3FromPython(position), s));
+        py::dict d;
+        d["altitude_m"]        = s.altitude_m;
+        d["temperature_k"]     = s.temperature_k;
+        d["relative_humidity"] = s.relative_humidity;
+        d["pressure_pa"]       = s.pressure_pa;
+        d["air_density_kg_m3"] = s.air_density_kg_m3;
+        d["wind_mps"]          = vec3ToPython(s.wind_mps);
+        return d;
+    }, py::arg("position"));
+
+    // Aerial perspective + height fog (ATMOSPHERE_SYSTEM.md Faz 1b). Parity
+    // with world.get_aerial / world.set_aerial / world.atmosphere_stats.
+    world.def("get_aerial", [] {
+        rtapi::WorldAerialInfo a;
+        requireResult(rtapi::getWorldAerial(a));
+        py::dict d;
+        d["aerial_perspective"] = a.aerial_perspective;
+        d["fog_enabled"]        = a.fog_enabled;
+        d["fog_density"]        = a.fog_density;
+        d["fog_height"]         = a.fog_height;
+        d["fog_falloff"]        = a.fog_falloff;
+        d["fog_distance"]       = a.fog_distance;
+        d["fog_albedo"]         = vec3ToPython(a.fog_albedo);
+        d["fog_anisotropy"]     = a.fog_anisotropy;
+        return d;
+    });
+    world.def("set_aerial", [](const py::kwargs& kwargs) {
+        static const char* const kRetiredKeys[] = {
+            "aerial_density", "aerial_min_distance", "aerial_max_distance",
+            "fog_color", "fog_sun_scatter" };
+        for (const char* retired : kRetiredKeys) {
+            if (kwargs.contains(retired))
+                throw std::runtime_error(std::string(retired) +
+                    " no longer exists: air haze comes from the atmosphere itself; "
+                    "the fog is a lit medium (fog_albedo, fog_anisotropy)");
+        }
+        rtapi::WorldAerialUpdate u;
+        bool aerial = true, fogOn = false;
+        float density = 0.0f, height = 0.0f, falloff = 0.0f, distance = 0.0f, aniso = 0.0f;
+        Vec3 albedo;
+        if (kwargs.contains("aerial_perspective")) {
+            aerial = py::cast<bool>(kwargs["aerial_perspective"]);
+            u.aerial_perspective = &aerial;
+        }
+        if (kwargs.contains("fog_enabled")) {
+            fogOn = py::cast<bool>(kwargs["fog_enabled"]);
+            u.fog_enabled = &fogOn;
+        }
+        auto grab = [&](const char* key, float& slot, const float*& ptr) {
+            if (!kwargs.contains(key)) return;
+            slot = py::cast<float>(kwargs[key]);
+            ptr = &slot;
+        };
+        grab("fog_density", density, u.fog_density);
+        grab("fog_height", height, u.fog_height);
+        grab("fog_falloff", falloff, u.fog_falloff);
+        grab("fog_distance", distance, u.fog_distance);
+        grab("fog_anisotropy", aniso, u.fog_anisotropy);
+        if (kwargs.contains("fog_albedo")) {
+            albedo = vec3FromPython(kwargs["fog_albedo"]);
+            u.fog_albedo = &albedo;
+        }
+        requireResult(rtapi::updateWorldAerial(u));
+    });
+    world.def("ensure_sun_light", [] {
+        bool created = false;
+        std::string name;
+        requireResult(rtapi::ensureWorldSunLight(created, name));
+        py::dict d;
+        d["created"] = created;
+        d["name"]    = name;
+        return d;
+    });
+    // Clouds (Faz 3). JSON-schema pass-through (atmosphere::cloudsToJson);
+    // dicts cross the boundary through Python's json module.
+    auto pyDumps = [](const py::object& o) {
+        return py::cast<std::string>(py::module_::import("json").attr("dumps")(o));
+    };
+    auto pyLoads = [](const std::string& s) {
+        return py::module_::import("json").attr("loads")(s);
+    };
+    world.def("get_weather", [pyLoads] {
+        std::string out;
+        requireResult(rtapi::getWeatherJson(out));
+        return pyLoads(out);
+    }, "Weather derived from the climate (read-only): climate, derived, derive_from_climate.");
+    world.def("get_clouds", [pyLoads] {
+        std::string out;
+        requireResult(rtapi::getCloudsJson(out));
+        return pyLoads(out);
+    });
+    world.def("set_clouds", [pyDumps](const py::kwargs& kwargs) {
+        requireResult(rtapi::setCloudsJson(pyDumps(kwargs)));
+    }, "Partial patch: layers=[{...}, ...] (element-wise), cirrus={...}, weather={...}, quality={...}.");
+    world.def("apply_cloud_preset", [](const std::string& preset) {
+        requireResult(rtapi::applyCloudPreset(preset));
+    }, py::arg("preset"));
+    world.def("cloud_stats", [pyLoads] {
+        std::string out;
+        requireResult(rtapi::cloudStatsJson(out));
+        return pyLoads(out);
+    });
+    world.def("sample_clouds", [pyDumps, pyLoads](const py::kwargs& kwargs) {
+        std::string out;
+        requireResult(rtapi::sampleCloudsJson(pyDumps(kwargs), out));
+        return pyLoads(out);
+    }, "mode='density'|'transmittance'|'base_density', points=[[x,y,z],...] or "
+       "segments=[[[a],[b]],...], steps=256, backend='render'|'viewport'.");
+    world.def("atmosphere_stats", [] {
+        const rtapi::AtmosphereStatsInfo s = rtapi::atmosphereStats();
+        py::list rows;
+        for (const auto& r : s.backends) {
+            py::dict d;
+            d["role"]              = r.role;
+            d["is_vulkan"]         = r.is_vulkan;
+            d["lut_ready"]         = r.lut_ready;
+            d["froxel_available"]  = r.froxel_available;
+            d["froxel_active"]     = r.froxel_active;
+            d["froxel_dispatches"] = r.froxel_dispatches;
+            rows.append(d);
+        }
+        py::dict out;
+        out["backends"] = rows;
+        return out;
+    });
+
     // Ambient thermal condition every uncoupled substance relaxes toward.
     // Distinct from world.get/set above (render sky) -- see WorldThermalInfo.
     world.def("get_thermal", [] {
@@ -4251,6 +4908,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::getWorldThermal(t));
         py::dict d;
         d["ambient_kelvin"]          = t.ambient_kelvin;
+        d["inherit_atmosphere"]      = t.inherit_atmosphere;
+        d["effective_ambient_kelvin"] = t.effective_ambient_kelvin;
+        d["ambient_source"]          = t.ambient_source;
+        d["reference_kelvin"]        = t.reference_kelvin;
+        d["drying_scale"]            = t.drying_scale;
         d["kelvin_per_unit"]         = t.kelvin_per_unit;
         d["convection_coefficient"]  = t.convection_coefficient;
         d["oxygen_availability"]     = t.oxygen_availability;
@@ -4266,7 +4928,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         if (kwargs.contains("convection_coefficient")) { convection_val = py::cast<float>(kwargs["convection_coefficient"]); p_convection = &convection_val; }
 
         if (kwargs.contains("oxygen_availability")) { oxygen_val = py::cast<float>(kwargs["oxygen_availability"]); p_oxygen = &oxygen_val; }
-        requireResult(rtapi::setWorldThermal(p_ambient, p_kelvin, p_convection, p_oxygen));
+        bool inherit_val = false;      const bool* p_inherit = nullptr;
+        float reference_val = 0.0f;    const float* p_reference = nullptr;
+        if (kwargs.contains("inherit_atmosphere")) { inherit_val = py::cast<bool>(kwargs["inherit_atmosphere"]); p_inherit = &inherit_val; }
+        if (kwargs.contains("reference_kelvin")) { reference_val = py::cast<float>(kwargs["reference_kelvin"]); p_reference = &reference_val; }
+        requireResult(rtapi::setWorldThermal(p_ambient, p_kelvin, p_convection, p_oxygen,
+                                             p_inherit, p_reference));
     });
 
     py::module_ post = module.def_submodule("post", "Post-processing: exposure, tonemap, vignette, stylize (Faz 5.1d)");
@@ -4393,12 +5060,42 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         return result;
     });
     render.def("cancel", [] { requireResult(rtapi::cancelRender()); });
-    render.def("volume_counters", [](bool enabled) {
-        requireResult(rtapi::setVolumeInstrumentation(enabled));
-    }, py::arg("enabled"),
+    render.def("volume_counters", [](bool enabled, const py::object& region) {
+        std::array<float, 4> r{0.0f, 0.0f, 1.0f, 1.0f};
+        if (!region.is_none()) {
+            auto seq = py::cast<std::vector<float>>(region);
+            if (seq.size() != 4) throw std::runtime_error("region must be (x0, y0, x1, y1)");
+            for (size_t i = 0; i < 4; ++i) r[i] = seq[i];
+        }
+        requireResult(rtapi::setVolumeInstrumentation(enabled, r));
+    }, py::arg("enabled"), py::arg("region") = py::none(),
        "Enable/disable the Vulkan volume GPU counters and zero them. They are "
        "opt-in: the atomics cost a little, so leave them off while measuring "
-       "frame time.");
+       "frame time. region=(x0, y0, x1, y1), normalized to the image, limits "
+       "every counter to that pixel rectangle.");
+    render.def("get_settings", [] {
+        const rtapi::RenderBudgetInfo b = rtapi::renderBudget();
+        py::dict d;
+        d["max_bounces"] = b.max_bounces;
+        d["diffuse_bounces"] = b.diffuse_bounces;
+        d["transmission_bounces"] = b.transmission_bounces;
+        d["debug_view"] = b.debug_view;
+        d["debug_view_name"] = b.debug_view_name;
+        return d;
+    }, "Path tracer bounce budget and the active Debug Visualizer view.");
+    render.def("set_settings", [](const py::object& max_bounces, const py::object& diffuse_bounces,
+                                  const py::object& transmission_bounces, const py::object& debug_view) {
+        auto opt = [](const py::object& o) -> std::optional<int> {
+            if (o.is_none()) return std::nullopt;
+            return py::cast<int>(o);
+        };
+        requireResult(rtapi::setRenderBudget(opt(max_bounces), opt(diffuse_bounces),
+                                             opt(transmission_bounces), opt(debug_view)));
+    }, py::arg("max_bounces") = py::none(), py::arg("diffuse_bounces") = py::none(),
+       py::arg("transmission_bounces") = py::none(), py::arg("debug_view") = py::none(),
+       "Set the bounce budget (1..64) and/or the Debug Visualizer view (0..14, "
+       "6 = Bounce Count). Omitted arguments are unchanged; sub-budgets are "
+       "clamped to max_bounces like the panel does.");
     render.def("volume_stats", [] {
         const rtapi::VolumeInstrumentationInfo s = rtapi::volumeStats();
         py::dict d;
@@ -4428,6 +5125,30 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["arbiter_no_box"] = s.arbiter_no_box;
         d["arbiter_empty_range"] = s.arbiter_empty_range;
         d["arbiter_no_crossing"] = s.arbiter_no_crossing;
+        d["region"] = py::make_tuple(s.region_min_x, s.region_min_y,
+                                     s.region_max_x, s.region_max_y);
+        d["paths_traced"] = s.paths_traced;
+        d["paths_bounce_capped"] = s.paths_bounce_capped;
+        d["paths_pass_capped"] = s.paths_pass_capped;
+        d["charged_specular"] = s.charged_specular;
+        d["charged_diffuse"] = s.charged_diffuse;
+        d["charged_transmission"] = s.charged_transmission;
+        d["charged_other"] = s.charged_other;
+        d["free_passes"] = s.free_passes;
+        d["medium_passes"] = s.medium_passes;
+        d["arbiter_started_inside"] = s.arbiter_started_inside;
+        d["arbiter_inside_found"] = s.arbiter_inside_found;
+        py::list devices;
+        for (const auto& row : s.devices) {
+            py::dict r;
+            r["role"] = row.role;
+            r["enabled"] = row.enabled;
+            r["region"] = py::make_tuple(row.region[0], row.region[1], row.region[2], row.region[3]);
+            r["paths_traced"] = row.paths_traced;
+            r["volume_rays"] = row.volume_rays;
+            devices.append(r);
+        }
+        d["devices"] = devices;
         return d;
     }, "Synchronized snapshot of the Vulkan volume counters. Check 'available' "
        "(Vulkan backend present) and 'enabled' before reading any number — an "
@@ -4499,6 +5220,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             e["vdb_id"] = d.vdb_id;
             e["has_volume"] = d.has_volume;
             e["volume_name"] = d.volume_name;
+            e["fog_vdb_id"] = d.fog_vdb_id;
+            e["has_fog_volume"] = d.has_fog_volume;
+            e["fog_volume_name"] = d.fog_volume_name;
             domains.append(e);
         }
         py::dict d;
@@ -4942,9 +5666,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        py::arg("fps") = 24.0f,
        "Deterministically bake [start_frame, end_frame] to a disk point cache. "
        "BLOCKING: it walks the whole simulation on the calling thread.");
-    sim_cache.def("clear", [] {
-        requireResult(rtapi::simClearCache());
-    }, "Drop the timeline cache and unbind the disk bake (free-run preview).");
+    sim_cache.def("clear", [](bool ram_only) {
+        requireResult(rtapi::simClearCache(ram_only));
+    }, py::arg("ram_only") = false,
+       "Drop the timeline cache and unbind the disk bake (free-run preview). "
+       "ram_only=True keeps the disk bake bound so playback reads from disk.");
 
     // ── rt.attr: unified attribute discovery + measurement (section 9.5-9.6) ──
     // ★ Merges sim_graph.attributes (domain) and sim_graph.surface_attributes

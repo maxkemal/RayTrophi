@@ -817,6 +817,16 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 ImGui::DragFloat("Gravity Scale", &physics.gravity_scale, 0.01f, -10.0f, 10.0f, "%.3f");
                 ImGui::DragFloat("Turbulent Vorticity", &physics.vorticity, 0.01f, 0.0f, 100.0f, "%.3f");
             }
+            ImGui::Checkbox("Drag toward atmosphere wind", &physics.inherit_atmosphere);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("On: drag (linear drag + viscosity) relaxes particles toward the\n"
+                                  "world climate wind (World panel -> Climate) instead of toward rest.\n"
+                                  "No drag = the air cannot push. Calm world = no change.");
+            }
+            if (physics.inherit_atmosphere) {
+                const Vec3 air = atmosphere::ambientWindMps();
+                ImGui::TextDisabled("Air: (%.2f, %.2f, %.2f) m/s", air.x, air.y, air.z);
+            }
 
             ImGui::Spacing();
             if (UIWidgets::CollapsingHeader("Gas Coupling (particles feed the grid)")) {
@@ -1136,7 +1146,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                     particles->gridDomains().end(),
                     [](const RayTrophiSim::SimulationGridDomainDesc& domain) {
                         return domain.enabled &&
-                               domain.type == RayTrophiSim::SimulationDomainType::Gas;
+                               RayTrophiSim::simulationDomainHasGas(domain.type);
                     });
                 if (has_gas_domain) {
                     ImGui::TextColored(
@@ -3273,17 +3283,44 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                     // is never "fixed" by moving one of them.
                     ImGui::Separator();
                     ImGui::TextDisabled("World thermal (affects the WHOLE scene)");
-                    ImGui::DragFloat("Ambient (K)##CollTabMsf", &world_thermal.ambient_kelvin,
-                                     1.0f, 0.0f, 2000.0f, "%.0f");
+                    ImGui::Checkbox("Ambient from atmosphere##CollTabMsf",
+                                    &world_thermal.inherit_atmosphere);
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip(
-                            "What the room is at. Defined EVERYWHERE, including\n"
-                            "outside every simulation domain — that is what lets a\n"
-                            "burning object carried out of the smoke box keep cooling\n"
-                            "like a real object instead of freezing mid-burn.\n"
-                            "Normalized 0 is defined as this temperature.\n\n"
-                            "A domain can override it inside its own bounds\n"
-                            "(Domain panel -> Thermal Override).");
+                            "On: the room is the world climate's temperature at the\n"
+                            "scene origin (World panel -> Climate), and humid air\n"
+                            "slows drying by (1 - RH). Keying the climate warms or\n"
+                            "cools the room.\n"
+                            "Off: the local value below -- a lab or an interior.");
+                    }
+                    if (world_thermal.inherit_atmosphere) {
+                        // The value the solver uses, not the kept local one: a
+                        // panel that showed the latter would lie.
+                        const float effective = world_thermal.ambientKelvin();
+                        ImGui::TextDisabled("Ambient: %.1f K (%.1f C) from atmosphere, drying x%.2f",
+                                            effective, effective - 273.15f,
+                                            world_thermal.dryingScale());
+                    } else {
+                        ImGui::DragFloat("Ambient (K)##CollTabMsf", &world_thermal.ambient_kelvin,
+                                         1.0f, 1.0f, 2000.0f, "%.0f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "What the room is at. Defined EVERYWHERE, including\n"
+                                "outside every simulation domain — that is what lets a\n"
+                                "burning object carried out of the smoke box keep cooling\n"
+                                "like a real object instead of freezing mid-burn.\n\n"
+                                "A domain can override it inside its own bounds\n"
+                                "(Domain panel -> Thermal Override).");
+                        }
+                    }
+                    ImGui::DragFloat("Reference (K)##CollTabMsf", &world_thermal.reference_kelvin,
+                                     1.0f, 1.0f, 2000.0f, "%.0f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "Calibration: normalized temperature 0 == this many Kelvin.\n"
+                            "NOT the room temperature. Kept apart from the ambient so a\n"
+                            "keyed climate cannot re-interpret stored temperatures.\n"
+                            "Changing it shifts what every stored temperature means.");
                     }
                     ImGui::DragFloat("Kelvin per unit##CollTabMsf", &world_thermal.kelvin_per_unit,
                                      1.0f, 1.0f, 5000.0f, "%.0f");
@@ -3351,9 +3388,10 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                                                   "%u domain overrides",
                                   st.ambient_stepped ? "on" : "OFF",
                                   st.thermal_sources, st.ambient_zones);
-                        blk.Value("  world ambient", "%.0f K  (convection x%.2f, "
+                        blk.Value("  world ambient", "%.0f K %s (convection x%.2f, "
                                                      "oxygen %.2f)",
-                                  world_thermal.ambient_kelvin,
+                                  world_thermal.ambientKelvin(),
+                                  world_thermal.inherit_atmosphere ? "atmosphere" : "local",
                                   world_thermal.convection_coefficient,
                                   world_thermal.oxygen_availability);
                         // ★ Per-object row. The stats above are the sum over every

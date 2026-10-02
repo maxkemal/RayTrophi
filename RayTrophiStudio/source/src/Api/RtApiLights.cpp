@@ -23,6 +23,7 @@
 
 #include "RtApiInternal.h"
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <string>
@@ -234,6 +235,46 @@ Result addLight(const std::string& type, const Vec3& position, std::string& out_
     g_history->record(std::move(cmd));
     ProjectManager::getInstance().markModified();
     out_name = light->nodeName;
+    return Result::success();
+}
+
+Result ensureWorldSunLight(bool& created, std::string& out_name) {
+    created = false;
+    out_name.clear();
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (!g_history) return Result::fail("rtapi has no SceneHistory bound");
+
+    // A HIDDEN directional counts too: the user switched it off on purpose, and
+    // sun sync already drives the first directional whether visible or not.
+    for (const auto& light : g_ctx->scene.lights) {
+        if (light && light->type() == LightType::Directional)
+            return Result::success();
+    }
+
+    const NishitaSkyParams p = g_ctx->renderer.world.getNishitaParams();
+    // light->direction is the direction light TRAVELS (sun -> ground).
+    const Vec3 toGround(-p.sun_direction.x, -p.sun_direction.y, -p.sun_direction.z);
+    // Disk radius is the tangent of the sun's angular radius, so the shadow
+    // penumbra matches the disc drawn in the sky (the "Add > Light" default of
+    // 0.1 is a ~6 degree sun).
+    const float angularRadius = 0.5f * p.sun_size * 3.14159265f / 180.0f;
+    auto sun = std::make_shared<DirectionalLight>(
+        toGround, Vec3(1.0f, 1.0f, 1.0f), std::tan(angularRadius));
+    // The ctor splits its vector into color = v/|v| and intensity = |v|, so
+    // white would come out as 0.577 per channel. Write both explicitly:
+    // radiance = white * sun_intensity, the same scale the sky sun had as a
+    // RayFusion light and the one syncDirectionalLightToWorldSun maintains.
+    sun->color = Vec3(1.0f, 1.0f, 1.0f);
+    sun->intensity = std::max(p.sun_intensity, 0.0f);
+    sun->nodeName = "Sun";
+
+    auto cmd = std::make_unique<AddLightCommand>(sun);
+    cmd->execute(*g_ctx);
+    g_history->record(std::move(cmd));
+    ProjectManager::getInstance().markModified();
+    created = true;
+    out_name = sun->nodeName;
     return Result::success();
 }
 

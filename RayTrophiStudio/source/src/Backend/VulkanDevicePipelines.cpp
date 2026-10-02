@@ -3,49 +3,7 @@
  * Extracted from VulkanBackend.cpp without changing the public backend API.
  */
 #include "Backend/VulkanBackend.h"
-
-namespace {
-struct AtmosphereLUTParamsGPU {
-    float sunDir_intensity[4];
-    float density_intensity[4];
-    float physical[4];
-    float weather[4];
-    float rayleigh[4];
-    float mie[4];
-};
-
-static AtmosphereLUTParamsGPU makeAtmosphereLUTParamsGPU(const WorldData& world) {
-    const NishitaSkyParams& n = world.nishita;
-    AtmosphereLUTParamsGPU p{};
-    p.sunDir_intensity[0] = n.sun_direction.x;
-    p.sunDir_intensity[1] = n.sun_direction.y;
-    p.sunDir_intensity[2] = n.sun_direction.z;
-    p.sunDir_intensity[3] = n.sun_intensity;
-    p.density_intensity[0] = n.air_density;
-    p.density_intensity[1] = n.dust_density;
-    p.density_intensity[2] = n.ozone_density;
-    p.density_intensity[3] = n.atmosphere_intensity;
-    p.physical[0] = n.planet_radius;
-    p.physical[1] = n.atmosphere_height;
-    p.physical[2] = n.altitude;
-    p.physical[3] = n.mie_anisotropy;
-    p.weather[0] = n.humidity;
-    p.weather[1] = n.temperature;
-    p.weather[2] = n.ozone_absorption_scale;
-    p.weather[3] = 0.0f;
-    p.rayleigh[0] = n.rayleigh_scattering.x;
-    p.rayleigh[1] = n.rayleigh_scattering.y;
-    p.rayleigh[2] = n.rayleigh_scattering.z;
-    p.rayleigh[3] = n.rayleigh_density;
-    p.mie[0] = n.mie_scattering.x;
-    p.mie[1] = n.mie_scattering.y;
-    p.mie[2] = n.mie_scattering.z;
-    p.mie[3] = n.mie_density;
-    return p;
-}
-
-
-}
+#include "Backend/AtmosphereLutParams.h"
 
 namespace VulkanRT {
 bool VulkanDevice::createSkinningPipeline(const std::vector<uint32_t>& computeSPV) {
@@ -986,6 +944,251 @@ bool VulkanDevice::generateAtmosphereLUTGPU(const WorldData& world) {
         m_lutImagesStorageCapable = true;
     }
     return true;
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Aerial perspective froxel (atmosphere_aerial_froxel.comp)
+// ═══════════════════════════════════════════════════════════════════════════
+// Atlas: 32 slices x 32x32 cells x 4 blocks -> 1024 x 128 (aerial_froxel.glsl).
+namespace {
+constexpr uint32_t kAerialFroxelAtlasW = 1024;
+constexpr uint32_t kAerialFroxelAtlasH = 128;
+constexpr uint32_t kAerialFroxelCells  = 32;
+}
+
+void VulkanDevice::destroyAerialFroxel() {
+    if (m_aerialFroxelPipeline)       { vkDestroyPipeline(m_device, m_aerialFroxelPipeline, nullptr); m_aerialFroxelPipeline = VK_NULL_HANDLE; }
+    if (m_aerialFroxelPipelineLayout) { vkDestroyPipelineLayout(m_device, m_aerialFroxelPipelineLayout, nullptr); m_aerialFroxelPipelineLayout = VK_NULL_HANDLE; }
+    if (m_aerialFroxelDescLayout)     { vkDestroyDescriptorSetLayout(m_device, m_aerialFroxelDescLayout, nullptr); m_aerialFroxelDescLayout = VK_NULL_HANDLE; }
+    if (m_aerialFroxelDescPool)       { vkDestroyDescriptorPool(m_device, m_aerialFroxelDescPool, nullptr); m_aerialFroxelDescPool = VK_NULL_HANDLE; }
+    m_aerialFroxelDescSet = VK_NULL_HANDLE;
+    if (m_aerialFroxel.image || m_aerialFroxel.view) destroyImage(m_aerialFroxel);
+    m_aerialFroxel = {};
+    if (m_aerialFroxelPlaceholderLut.image || m_aerialFroxelPlaceholderLut.view) destroyImage(m_aerialFroxelPlaceholderLut);
+    m_aerialFroxelPlaceholderLut = {};
+    if (m_aerialFroxelAtmosphereBuffer.buffer) destroyBuffer(m_aerialFroxelAtmosphereBuffer);
+    m_aerialFroxelAtmosphereBuffer = {};
+    if (m_aerialFroxelParamsBuffer.buffer) destroyBuffer(m_aerialFroxelParamsBuffer);
+    m_aerialFroxelParamsBuffer = {};
+    m_aerialFroxelPending = false;
+    m_aerialFroxelBuilt = false;
+}
+
+bool VulkanDevice::createAerialFroxelPipeline(const std::vector<uint32_t>& computeSPV) {
+    if (computeSPV.empty()) return false;
+    destroyAerialFroxel();
+
+    // 0,1 = transmittance / sky-view LUT (sampled), 2 = atmosphere params,
+    // 3 = atlas (storage), 4 = froxel params.
+    VkDescriptorSetLayoutBinding bindings[5]{};
+    for (uint32_t i = 0; i < 5; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 5;
+    layoutInfo.pBindings = bindings;
+    bool ok = vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_aerialFroxelDescLayout) == VK_SUCCESS;
+
+    if (ok) {
+        VkDescriptorPoolSize poolSizes[3] = {
+            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2},
+            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}
+        };
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.poolSizeCount = 3;
+        poolInfo.pPoolSizes = poolSizes;
+        poolInfo.maxSets = 1;
+        ok = vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_aerialFroxelDescPool) == VK_SUCCESS;
+    }
+    if (ok) {
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = m_aerialFroxelDescPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &m_aerialFroxelDescLayout;
+        ok = vkAllocateDescriptorSets(m_device, &allocInfo, &m_aerialFroxelDescSet) == VK_SUCCESS;
+    }
+    if (ok) {
+        VkPipelineLayoutCreateInfo plInfo{};
+        plInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        plInfo.setLayoutCount = 1;
+        plInfo.pSetLayouts = &m_aerialFroxelDescLayout;
+        ok = vkCreatePipelineLayout(m_device, &plInfo, nullptr, &m_aerialFroxelPipelineLayout) == VK_SUCCESS;
+    }
+    if (ok) {
+        VkShaderModuleCreateInfo smInfo{};
+        smInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        smInfo.codeSize = computeSPV.size() * sizeof(uint32_t);
+        smInfo.pCode = computeSPV.data();
+        VkShaderModule module = VK_NULL_HANDLE;
+        ok = vkCreateShaderModule(m_device, &smInfo, nullptr, &module) == VK_SUCCESS;
+        if (ok) {
+            VkComputePipelineCreateInfo cpInfo{};
+            cpInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+            cpInfo.layout = m_aerialFroxelPipelineLayout;
+            cpInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            cpInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            cpInfo.stage.module = module;
+            cpInfo.stage.pName = "main";
+            ok = vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpInfo, nullptr,
+                                          &m_aerialFroxelPipeline) == VK_SUCCESS;
+            vkDestroyShaderModule(m_device, module, nullptr);
+        }
+    }
+
+    // Resources. createImage2D returns images already in GENERAL.
+    auto makeSampler = [&](ImageHandle& img) {
+        VkSamplerCreateInfo sInfo{};
+        sInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        sInfo.magFilter = VK_FILTER_LINEAR;
+        sInfo.minFilter = VK_FILTER_LINEAR;
+        sInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sInfo.maxLod = 0.0f;
+        return vkCreateSampler(m_device, &sInfo, nullptr, &img.sampler) == VK_SUCCESS;
+    };
+    if (ok) {
+        m_aerialFroxel = createImage2D(kAerialFroxelAtlasW, kAerialFroxelAtlasH, VK_FORMAT_R16G16B16A16_SFLOAT,
+                                       VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        ok = m_aerialFroxel.image && m_aerialFroxel.view && makeSampler(m_aerialFroxel);
+    }
+    if (ok) {
+        m_aerialFroxelPlaceholderLut = createImage2D(1, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
+                                                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+        ok = m_aerialFroxelPlaceholderLut.image && m_aerialFroxelPlaceholderLut.view &&
+             makeSampler(m_aerialFroxelPlaceholderLut);
+    }
+    auto makeParamBuffer = [&](BufferHandle& buf, uint64_t size) {
+        BufferCreateInfo ci{};
+        ci.size = size;
+        ci.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
+        ci.location = MemoryLocation::GPU_ONLY;
+        buf = createBuffer(ci);
+        return buf.buffer != VK_NULL_HANDLE;
+    };
+    if (ok) ok = makeParamBuffer(m_aerialFroxelAtmosphereBuffer, sizeof(AtmosphereLUTParamsGPU));
+    if (ok) ok = makeParamBuffer(m_aerialFroxelParamsBuffer, sizeof(AerialFroxelParamsGPU));
+
+    if (!ok) {
+        destroyAerialFroxel();
+        return false;
+    }
+
+    // Fixed bindings: the two parameter buffers and the atlas never change.
+    VkDescriptorBufferInfo atmoInfo{m_aerialFroxelAtmosphereBuffer.buffer, 0, sizeof(AtmosphereLUTParamsGPU)};
+    VkDescriptorBufferInfo paramInfo{m_aerialFroxelParamsBuffer.buffer, 0, sizeof(AerialFroxelParamsGPU)};
+    VkDescriptorImageInfo atlasInfo{};
+    atlasInfo.imageView = m_aerialFroxel.view;
+    atlasInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkWriteDescriptorSet writes[3]{};
+    for (auto& w : writes) {
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = m_aerialFroxelDescSet;
+        w.descriptorCount = 1;
+    }
+    writes[0].dstBinding = 2; writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; writes[0].pBufferInfo = &atmoInfo;
+    writes[1].dstBinding = 3; writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;  writes[1].pImageInfo = &atlasInfo;
+    writes[2].dstBinding = 4; writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; writes[2].pBufferInfo = &paramInfo;
+    vkUpdateDescriptorSets(m_device, 3, writes, 0, nullptr);
+    writeAerialFroxelLutDescriptors();
+
+    // The RT set may already exist and be referenced by in-flight frames;
+    // this happens once per device, so a full idle is the simple safe choice.
+    if (m_rtDescriptorSet != VK_NULL_HANDLE) {
+        waitIdle();
+        writeRtAtmosphereDescriptors();
+    }
+    return true;
+}
+
+void VulkanDevice::writeAerialFroxelLutDescriptors() {
+    if (m_aerialFroxelDescSet == VK_NULL_HANDLE || !m_aerialFroxelPlaceholderLut.view) return;
+    VkDescriptorImageInfo infos[2]{};
+    VkWriteDescriptorSet writes[2]{};
+    for (uint32_t i = 0; i < 2; ++i) {
+        const ImageHandle& lut = m_lutImages[i];
+        const bool usable = lut.view != VK_NULL_HANDLE && lut.sampler != VK_NULL_HANDLE;
+        const ImageHandle& img = usable ? lut : m_aerialFroxelPlaceholderLut;
+        infos[i].sampler = img.sampler;
+        infos[i].imageView = img.view;
+        infos[i].imageLayout = usable ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = m_aerialFroxelDescSet;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].pImageInfo = &infos[i];
+    }
+    vkUpdateDescriptorSets(m_device, 2, writes, 0, nullptr);
+}
+
+void VulkanDevice::scheduleAerialFroxel(const AtmosphereLUTParamsGPU& atmosphere,
+                                        const AerialFroxelParamsGPU& froxel) {
+    m_aerialFroxelPendingAtmosphere = atmosphere;
+    m_aerialFroxelPendingParams = froxel;
+    m_aerialFroxelPending = true;
+}
+
+void VulkanDevice::recordAerialFroxelPass(VkCommandBuffer cmd) {
+    if (!m_aerialFroxelPending || cmd == VK_NULL_HANDLE) return;
+    m_aerialFroxelPending = false;
+    if (!hasAerialFroxel() || m_aerialFroxelDescSet == VK_NULL_HANDLE) return;
+
+    // WAR: earlier submissions on this queue may still be sampling the atlas
+    // (raygen / raster post) or reading the parameter buffers. A pipeline
+    // barrier's first scope covers every command submitted before it.
+    VkMemoryBarrier before{};
+    before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    before.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &before, 0, nullptr, 0, nullptr);
+
+    // In-command-buffer parameter upload: a mapped host write could land
+    // while the previous frame's dispatch is still reading the buffer.
+    vkCmdUpdateBuffer(cmd, m_aerialFroxelAtmosphereBuffer.buffer, 0,
+                      sizeof(AtmosphereLUTParamsGPU), &m_aerialFroxelPendingAtmosphere);
+    vkCmdUpdateBuffer(cmd, m_aerialFroxelParamsBuffer.buffer, 0,
+                      sizeof(AerialFroxelParamsGPU), &m_aerialFroxelPendingParams);
+
+    VkMemoryBarrier uploaded{};
+    uploaded.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    uploaded.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    uploaded.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &uploaded, 0, nullptr, 0, nullptr);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_aerialFroxelPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_aerialFroxelPipelineLayout,
+                            0, 1, &m_aerialFroxelDescSet, 0, nullptr);
+    const uint32_t groups = (kAerialFroxelCells + 7u) / 8u;
+    vkCmdDispatch(cmd, groups, groups, 1);
+
+    // Readers: RT raygen (binding 8) or the raster post compute pass.
+    VkMemoryBarrier written{};
+    written.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    written.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    written.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         0, 1, &written, 0, nullptr, 0, nullptr);
+
+    m_aerialFroxelBuilt = true;
+    ++m_aerialFroxelDispatchCount;
 }
 
 } // namespace VulkanRT

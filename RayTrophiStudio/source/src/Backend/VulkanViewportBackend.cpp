@@ -82,8 +82,11 @@ struct RasterPostPush {
     float    depthC;
     float    maxCoC;
     uint32_t maxTaps;
+
+    uint32_t aerialEnabled;   // binding 3 holds a froxel built for this frame's camera
+    float    fogDistance;     // m, sky pixels read the fog-only blocks out to here
 };
-static_assert(sizeof(RasterPostPush) == 72u, "raster_post push ABI changed");
+static_assert(sizeof(RasterPostPush) == 80u, "raster_post push ABI changed");
 
 // ★ rasterImageBarrier ARTIK Viewport/RasterImageBarrier.h icinde (Backend
 //   namespace'inde, inline). Buradaki anonim-namespace kopyasi ikinci bir
@@ -1495,7 +1498,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
             bool ok = vkCreateShaderModule(vkDevice, &smci, nullptr, &postModule) == VK_SUCCESS;
 
             if (ok) {
-                VkDescriptorSetLayoutBinding binds[3]{};
+                VkDescriptorSetLayoutBinding binds[4]{};
                 binds[0].binding = 0;  // HDR scene colour (sampled)
                 binds[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                 binds[0].descriptorCount = 1;
@@ -1505,10 +1508,12 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                 binds[2] = binds[0];
                 binds[2].binding = 2;  // 8-bit output (storage)
                 binds[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                binds[3] = binds[0];
+                binds[3].binding = 3;  // aerial froxel atlas (sampled, own sampler)
 
                 VkDescriptorSetLayoutCreateInfo dslci{};
                 dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-                dslci.bindingCount = 3;
+                dslci.bindingCount = 4;
                 dslci.pBindings = binds;
                 ok = vkCreateDescriptorSetLayout(vkDevice, &dslci, nullptr,
                                                  &m_interactiveViewport.postDescLayout) == VK_SUCCESS;
@@ -1516,7 +1521,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
             if (ok) {
                 VkDescriptorPoolSize sizes[2]{};
                 sizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                sizes[0].descriptorCount = 2;
+                sizes[0].descriptorCount = 3;
                 sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
                 sizes[1].descriptorCount = 1;
                 VkDescriptorPoolCreateInfo dpci{};
@@ -1686,7 +1691,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     }
                     m_interactiveViewport.materialPreviewTextureArrayLen = mpTextureArrayLen;
 
-                    VkDescriptorSetLayoutBinding mpDslBindings[25]{};
+                    VkDescriptorSetLayoutBinding mpDslBindings[28]{};
                     mpDslBindings[0].binding = 0;
                     mpDslBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[0].descriptorCount = 1;
@@ -1775,10 +1780,26 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                         mpDslBindings[binding].descriptorCount = 1;
                         mpDslBindings[binding].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
                     }
+                    // binding 25: RayFusion cloud layer (cloud_raster.comp output: rgb
+                    // in-scatter, a transmittance). Partially bound -- the sky pass reads
+                    // it only when the push flag says it was written this session.
+                    mpDslBindings[25].binding = 25;
+                    mpDslBindings[25].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    mpDslBindings[25].descriptorCount = 1;
+                    mpDslBindings[25].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    // 26/27: RayFusion cloud shadow map + its frame block (sun, centre).
+                    mpDslBindings[26].binding = 26;
+                    mpDslBindings[26].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    mpDslBindings[26].descriptorCount = 1;
+                    mpDslBindings[26].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[27].binding = 27;
+                    mpDslBindings[27].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[27].descriptorCount = 1;
+                    mpDslBindings[27].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
                     VkDescriptorSetLayoutCreateInfo mpDslci{};
                     mpDslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-                    mpDslci.bindingCount = 25;
+                    mpDslci.bindingCount = 28;
                     mpDslci.pBindings = mpDslBindings;
 
                     // Binding 1 is a sparse sampler2D array: only the slots whose texture IDs
@@ -1787,7 +1808,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     // ICDs observed crashing in vkCmdBindDescriptorSets/first draw) dereference
                     // them unconditionally. PARTIALLY_BOUND is core in Vulkan 1.2 and only
                     // requires VK_EXT_descriptor_indexing — already gated by `hasDescIdx`.
-                    VkDescriptorBindingFlags mpBindingFlags[25] = {
+                    VkDescriptorBindingFlags mpBindingFlags[28] = {
                         0,
                         hasDescIdx ? VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT : VkDescriptorBindingFlags{0},
                         0,
@@ -1796,9 +1817,12 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                         0,
                         0
                     };
+                    mpBindingFlags[25] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+                    mpBindingFlags[26] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+                    mpBindingFlags[27] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
                     VkDescriptorSetLayoutBindingFlagsCreateInfo mpBindingFlagsCI{};
                     mpBindingFlagsCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-                    mpBindingFlagsCI.bindingCount = 25;
+                    mpBindingFlagsCI.bindingCount = 28;
                     mpBindingFlagsCI.pBindingFlags = mpBindingFlags;
                     if (hasDescIdx) {
                         mpDslci.pNext = &mpBindingFlagsCI;
@@ -1813,10 +1837,10 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     // + 5 (sahne isiklari) + 6 (onizleme sahne globalleri)
                     // + 7 (shadow records) + 16 (material graph program)
                     // + 20 (volume table) + 21/22 (RayFusion probe alani + izgara)
-                    mpPoolSizes[0].descriptorCount = 12;
+                    mpPoolSizes[0].descriptorCount = 13;
                     mpPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                     // +2 for the 2 env map slots at binding 2
-                    mpPoolSizes[1].descriptorCount = (hasDescIdx ? mpTextureArrayLen : 1u) + 12u;
+                    mpPoolSizes[1].descriptorCount = (hasDescIdx ? mpTextureArrayLen : 1u) + 14u;
                     mpPoolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
                     mpPoolSizes[2].descriptorCount = 1;
                     VkDescriptorPoolCreateInfo mpDpci{};
@@ -3004,6 +3028,11 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
         return true;
     }
 
+    // ★★★★ Resize/recreate destroys the transmission image + sampler, which a
+    //   frame still in the ring may be sampling. Validation (VUID-vkDestroyImage
+    //   -01000 / vkDestroySampler-01082) caught exactly this just before the
+    //   RayFusion -> Rendered device loss; every other destroy site drains first.
+    drainInteractiveViewportInFlight();
     destroyInteractiveViewportResourcesImpl(true);
    // SCENE_LOG_INFO("[MP-init] step=createImages");
 
@@ -4003,6 +4032,9 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     uint32_t shadowAtlasLights = 0;
     materialPreviewShadowAtlasState(shadowAtlasRan, shadowAtlasLights);
     recordMaterialPreviewShadowPass(cmd);
+    // Clouds (Faz 3c): compute, so before the render pass; the sky pass
+    // composites the result.
+    recordCloudRasterPass(cmd, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
     markRasterStage(cmd, RasterStage::ShadowAtlas, shadowAtlasRan);
     if (m_materialPreviewTransmission) {
         prepareMaterialPreviewTransmissionThickness(cmd);
@@ -4376,10 +4408,14 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         // Solid and Matcap shade the same volume SSBO used by Material Preview
         // and RayFusion. Their lightweight gas path skips scene lighting and
         // shadow queries; no second grid or particle proxy is needed.
-        recordMaterialPreviewVolumePass(
+        // Surface FIRST: it writes depth, and the volume pass depth-tests its
+        // first-contribution depth (gl_FragDepth) against it. Drawn the other
+        // way round the volume writes no depth, so the SDF/proxy surface
+        // painted over gas standing in front of it.
+        recordMaterialPreviewSdfSurfacePass(
             cmd, viewProj, view, static_cast<uint32_t>(width),
             static_cast<uint32_t>(height), false);
-        recordMaterialPreviewSdfSurfacePass(
+        recordMaterialPreviewVolumePass(
             cmd, viewProj, view, static_cast<uint32_t>(width),
             static_cast<uint32_t>(height), false);
     }
@@ -4458,6 +4494,17 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
             m_taaFrameIndex = 0;
         }
         markRasterStage(cmd, RasterStage::Taa, taaRan);
+        // Aerial perspective + height fog froxel: same shader and parameter
+        // block as the Vulkan RT backend, built from the same image-plane
+        // formula (AerialFroxelParams.h), recorded here so the post pass below
+        // reads this frame's atlas and the previous frame's reads are fenced.
+        m_aerialFroxelActive = false;
+        if (!m_camera.orthographic) {
+            const CameraImagePlane plane =
+                makeCameraImagePlane(m_camera, (float)width / (float)height, 1.0f);
+            if (syncAerialFroxel(plane, /*world_buffer_reads_flag=*/false))
+                m_device->recordAerialFroxelPass(cmd);
+        }
         recordRasterPostPass(cmd, (uint32_t)width, (uint32_t)height);
         markRasterStage(cmd, RasterStage::Post, true);
 
@@ -7569,7 +7616,6 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
 
     m_rasterGeometryDirty = false;
     m_interactiveViewport.dirty = true;
-    m_hasPresentedRenderedFrame = false;
     m_lastCameraHash = 0;
 
     // Stamp current scene generation so we can skip redundant rebuilds later.
@@ -8634,8 +8680,17 @@ bool VulkanViewportBackend::updateRasterPostDescriptors() {
     outInfo.imageView = m_interactiveViewport.colorImage.view;
     outInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-    VkWriteDescriptorSet writes[3]{};
-    for (uint32_t i = 0; i < 3; ++i) {
+    // Aerial froxel atlas (GENERAL, linear sampler of its own). Without one
+    // (shader missing) the HDR target stands in -- any valid sampled image
+    // does, the push flag keeps the shader from reading it.
+    const bool haveFroxel = m_device->hasAerialFroxel();
+    VkDescriptorImageInfo froxelInfo{};
+    froxelInfo.sampler = haveFroxel ? m_device->m_aerialFroxel.sampler : m_interactiveViewport.postSampler;
+    froxelInfo.imageView = haveFroxel ? m_device->m_aerialFroxel.view : m_interactiveViewport.hdrColorImage.view;
+    froxelInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkWriteDescriptorSet writes[4]{};
+    for (uint32_t i = 0; i < 4; ++i) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = m_interactiveViewport.postDescSet;
         writes[i].dstBinding = i;
@@ -8647,8 +8702,11 @@ bool VulkanViewportBackend::updateRasterPostDescriptors() {
     writes[1].pImageInfo = &depthInfo;
     writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[2].pImageInfo = &outInfo;
+    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[3].pImageInfo = &froxelInfo;
 
-    vkUpdateDescriptorSets(vkDevice, 3, writes, 0, nullptr);
+    vkUpdateDescriptorSets(vkDevice, 4, writes, 0, nullptr);
+    m_interactiveViewport.postFroxelBound = haveFroxel;
     return true;
 }
 
@@ -8717,6 +8775,13 @@ void VulkanViewportBackend::recordRasterPostPass(VkCommandBuffer cmd,
     pc.depthC = kFar;
     pc.maxCoC = m_rasterDofMaxCoCPixels;
     pc.maxTaps = m_rasterDofMaxTaps;
+
+    // Aerial froxel: built (or rebuilt) just before this pass in the same
+    // command buffer; see the call site. Orthographic views have no view
+    // frustum to slice.
+    pc.aerialEnabled = (m_aerialFroxelActive && m_interactiveViewport.postFroxelBound &&
+                        !m_camera.orthographic) ? 1u : 0u;
+    pc.fogDistance = m_cachedWorld.nishita.fog_distance;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_interactiveViewport.postPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
