@@ -19,6 +19,7 @@ layout(location = 5) flat in vec3 vObjectOrigin;
 layout(location = 6) flat in vec3 vWorldToObject0;
 layout(location = 7) flat in vec3 vWorldToObject1;
 layout(location = 8) flat in vec3 vWorldToObject2;
+layout(location = 9) flat in float vObjectRandom;
 
 layout(location = 0) out vec4 outColor;
 // ★★★ RayFusion reflection G-buffer. Bu iki cikis, yansima compute gecisinin
@@ -856,8 +857,9 @@ void main() {
     MatProgOut graphOut = mp_defaultOut();
     uint graphWritten = 0u;
     if (graphOffset != MATPROG_NONE) {
-        graphOut = evalMaterialProgram(
+        graphOut = evalMaterialProgramWithObjectRandom(
             graphOffset, rawUV, vWorldPos, N, 0.5, vObjectOrigin,
+            vObjectRandom,
             graphAttrs, vObjectPos, V,
             0.0, 0.0, 0.0, 0.0, vec3(0.0), vWorldPos,
             vec3(0.0), vec3(0.0), 0.0, vObjectPos, 0.0);

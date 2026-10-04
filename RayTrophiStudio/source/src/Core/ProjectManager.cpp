@@ -1,4 +1,5 @@
 #include "Animation/RigBindingScope.h"
+#include "Fluid/MatterPhaseConfig.h"
 #include "PostProcess/PostService.h"
 #include "ProjectManager.h"
 #include "globals.h"
@@ -5772,6 +5773,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["use_sparse_tiles"] = domain.use_sparse_tiles;
         d["render_to_nanovdb"] = domain.render_to_nanovdb;
         d["bounds_min"] = vec3ToJson(domain.bounds_min);
+        d["phase_grids"] = RayTrophiSim::Fluid::phaseSettingsJson(domain);
         d["bounds_max"] = vec3ToJson(domain.bounds_max);
         d["resolution"] = { domain.resolution_x, domain.resolution_y, domain.resolution_z };
         d["max_auto_resolution"] = domain.max_auto_resolution;
@@ -5901,6 +5903,14 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["fluid_particle_color"] = vec3ToJson(domain.fluid_particle_color);
         d["fluid_particle_radius_factor"] = domain.fluid_particle_radius_factor;
         d["fluid_particle_size_multiplier"] = domain.fluid_particle_size_multiplier;
+        d["fluid_particle_visual_children"] =
+            domain.fluid_particle_visual_children;
+        d["fluid_particle_visual_size_variation"] =
+            domain.fluid_particle_visual_size_variation;
+        d["fluid_granular_physical_carriers"] =
+            domain.fluid_granular_physical_carriers;
+        d["fluid_particle_visual_budget"] =
+            domain.fluid_particle_visual_budget;
         d["fluid_particle_subdivisions"] = domain.fluid_particle_subdivisions;
         d["fluid_particle_geometry_mode"] = domain.fluid_particle_geometry_mode;
         d["fluid_particle_geometry_source"] = domain.fluid_particle_geometry_source;
@@ -6374,6 +6384,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             item.value("enforce_resource_budget", domain.enforce_resource_budget);
         domain.voxel_size = item.value("voxel_size", domain.voxel_size);
         domain.padding = item.value("padding", domain.padding);
+        RayTrophiSim::Fluid::loadPhaseSettings(item, domain);
         domain.channels = item.value("channels", domain.channels);
         domain.thermal_override_enabled =
             item.value("thermal_override_enabled", domain.thermal_override_enabled);
@@ -6546,6 +6557,22 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         if (item.contains("fluid_particle_color")) domain.fluid_particle_color = jsonToVec3(item["fluid_particle_color"]);
         domain.fluid_particle_radius_factor = item.value("fluid_particle_radius_factor", domain.fluid_particle_radius_factor);
         domain.fluid_particle_size_multiplier = item.value("fluid_particle_size_multiplier", domain.fluid_particle_size_multiplier);
+        domain.fluid_particle_visual_children = item.value(
+            "fluid_particle_visual_children",
+            item.value(
+                "fluid_granular_visual_children",
+                domain.fluid_particle_visual_children));
+        domain.fluid_particle_visual_size_variation = item.value(
+            "fluid_particle_visual_size_variation",
+            item.value(
+                "fluid_granular_visual_size_variation",
+                domain.fluid_particle_visual_size_variation));
+        domain.fluid_particle_visual_budget = item.value(
+            "fluid_particle_visual_budget",
+            domain.fluid_particle_visual_budget);
+        domain.fluid_granular_physical_carriers = item.value(
+            "fluid_granular_physical_carriers",
+            domain.fluid_granular_physical_carriers);
         domain.fluid_particle_subdivisions = item.value("fluid_particle_subdivisions", domain.fluid_particle_subdivisions);
         domain.fluid_particle_geometry_mode = item.value("fluid_particle_geometry_mode", domain.fluid_particle_geometry_mode);
         domain.fluid_particle_geometry_source = item.value("fluid_particle_geometry_source", domain.fluid_particle_geometry_source);

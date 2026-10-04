@@ -54,6 +54,19 @@ struct ParticlePulledDraw {
     uint64_t state_version = 0;
 };
 
+// A render-only refinement of APIC carrier particles. RayFusion expands each
+// parent deterministically in the vertex shader; no child list is stored and
+// no child feeds back into the solver.
+struct FluidSphereProxyDraw {
+    uint64_t position_buffer = 0;  // simulation-owned VkBuffer of packed Vec3
+    uint32_t parent_count = 0;
+    uint32_t children_per_parent = 1;
+    float child_radius = 0.0f;
+    float spread_radius = 0.0f;
+    float size_variation = 0.0f;
+    uint64_t state_version = 0;
+};
+
 struct ParticleBillboardUpload {
     std::vector<SphereImpostorInstance> spheres;
     std::vector<ParticleBillboardVertex> additive;
@@ -65,4 +78,5 @@ struct ParticleBillboardUpload {
     // Never empty: entry 0 keeps the binding valid.
     std::vector<uint32_t> row_lookup;
     std::vector<ParticlePulledDraw> pulled;
+    std::vector<FluidSphereProxyDraw> fluid_sphere_proxies;
 };

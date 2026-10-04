@@ -531,6 +531,7 @@ public:
 
         vkResetCommandBuffer(m_cmdBuf, 0);
         vkResetDescriptorPool(m_device, m_descPool, 0);
+        m_recordedDescriptorSets = 0;
         m_recording = false;
 
         // Recorded transfers are now complete: flush deferred download
@@ -553,6 +554,7 @@ public:
         // Kernels using float atomics (P2G scatter, density splat) need hardware support.
         const std::string kernel(cmd.kernel ? cmd.kernel : "");
         const bool needs_atomics = (kernel == "sim_fluid_p2g_scatter" ||
+                                    kernel == "sim_fluid_occupancy" ||
                                     kernel == "sim_fluid_density_splat" ||
                                     kernel == "terrain_thermal" ||
                                     kernel == "terrain_thermal_hardness" ||
@@ -567,14 +569,23 @@ public:
         // without the shaderFloat64 device feature is UB. Failing here sends
         // the host cleanly to the CPU PCG fallback.
         if (!m_has_shader_float64 &&
-            (kernel == "sim_fluid_cg_dot" ||
+            ((kernel == "sim_fluid_cg_dot" ||
+              kernel == "sim_fluid_cg_dot_window") ||
              kernel == "sim_fluid_cg_scalar_step" ||
-             kernel == "sim_fluid_cg_axpy_dev" ||
-             kernel == "sim_fluid_cg_zpby_dev" ||
-             kernel == "sim_fluid_cg_jacobi_dot" ||
-             kernel == "sim_fluid_cg_spmv_dot" ||
-             kernel == "sim_fluid_cg_spmv_dot_var" ||
-             kernel == "sim_fluid_cg_axpy2_dev")) return false;
+             (kernel == "sim_fluid_cg_axpy_dev" ||
+              kernel == "sim_fluid_cg_axpy_dev_window") ||
+             (kernel == "sim_fluid_cg_zpby_dev" ||
+              kernel == "sim_fluid_cg_zpby_dev_window") ||
+             (kernel == "sim_fluid_cg_jacobi_dot" ||
+              kernel == "sim_fluid_cg_jacobi_dot_window") ||
+             (kernel == "sim_fluid_cg_spmv_dot" ||
+              kernel == "sim_fluid_cg_spmv_dot_window") ||
+             (kernel == "sim_fluid_cg_spmv_dot_var" ||
+              kernel == "sim_fluid_cg_spmv_dot_var_window") ||
+             (kernel == "sim_fluid_cg_axpy2_dev" ||
+              kernel == "sim_fluid_cg_axpy2_dev_window"))) {
+            return false;
+        }
 
         auto pit = m_pipelines.find(kernel);
         if (pit == m_pipelines.end()) return false;
@@ -593,6 +604,12 @@ public:
             return false;
         }
 
+        // Resident subcycles can queue more than one pool's worth of dispatches.
+        // Drain at its actual capacity before allocating another set. This also
+        // keeps each submission below the 1024 timestamp-pair limit.
+        if (m_recordedDescriptorSets >= MAX_DESC_SETS) {
+            synchronize();
+        }
         // Ensure command buffer is recording.
         if (!ensureRecording()) return false;
 
@@ -608,6 +625,7 @@ public:
 
         VkDescriptorSet ds = VK_NULL_HANDLE;
         if (vkAllocateDescriptorSets(m_device, &dsai, &ds) != VK_SUCCESS) return false;
+        ++m_recordedDescriptorSets;
 
         std::array<VkDescriptorBufferInfo, MAX_BINDINGS> bufInfos{};
         std::array<VkWriteDescriptorSet,   MAX_BINDINGS> writes{};
@@ -703,6 +721,7 @@ private:
     VkCommandBuffer  m_cmdBuf   = VK_NULL_HANDLE;
     VkFence          m_fence    = VK_NULL_HANDLE;
     VkDescriptorPool m_descPool = VK_NULL_HANDLE;
+    uint32_t         m_recordedDescriptorSets = 0;
 
     // One desc layout per buffer count (index = count, 0 unused).
     std::array<VkDescriptorSetLayout, MAX_BINDINGS + 1> m_descLayouts{};
@@ -956,6 +975,7 @@ private:
             // 5-binding set on a 2-binding layout (UB): bindings 0/1 hit the
             // particle position/velocity buffers → positions corrupted per step.
             { "sim_fluid_p2g_normalize",            "sim_fluid_p2g_normalize.spv",         5, 36 },
+            { "sim_fluid_normalize_window",         "sim_fluid_normalize_window.spv",      2, 40 },
             { "sim_fluid_density_clear",            "sim_fluid_density_clear.spv",         1, 36 },
             { "sim_fluid_density_splat",            "sim_fluid_density_splat.spv",         2, 36 },
             { "sim_fluid_label_bin_clear",          "sim_fluid_label_bin_clear.spv",       2, 80 },
@@ -987,6 +1007,7 @@ private:
             { "sim_fluid_granular_stress_p2g",      "sim_fluid_granular_stress_p2g.spv",    4, 48 },
             { "sim_fluid_granular_settle",          "sim_fluid_granular_settle.spv",        3, 32 },
             { "sim_fluid_advect_tail",              "sim_fluid_advect_tail.spv",           9, 80 },
+            { "sim_fluid_occupancy",                "sim_fluid_occupancy.spv",             4, 36 },
             { "sim_fluid_surface_combustion",       "sim_fluid_surface_combustion.spv",    9, 96 },
             // GridProjectionGpuConstants = 13 fields x 4 = 52. The shaders may
             // declare only the leading fields; the pipeline range must cover the
@@ -1013,39 +1034,73 @@ private:
             // has_nu — so only the descriptor count moved.
             { "sim_fluid_viscosity_rbgs",           "sim_fluid_viscosity_rbgs.spv",       11, 52 },
             { "sim_fluid_divergence",               "sim_fluid_divergence.spv",            5, 52 },
+            { "sim_fluid_divergence_window", "sim_fluid_divergence_window.spv",
+              5, 76 },
             { "sim_fluid_subtract_gradient",        "sim_fluid_subtract_gradient.spv",     5, 52 },
             { "sim_fluid_cg_build_diag",            "sim_fluid_cg_build_diag.spv",         2, 52 },
+            { "sim_fluid_cg_build_diag_window", "sim_fluid_cg_build_diag_window.spv",
+              2, 76 },
             { "sim_fluid_cg_residual_init",         "sim_fluid_cg_residual_init.spv",      4, 52 },
             { "sim_fluid_cg_spmv",                  "sim_fluid_cg_spmv.spv",               4, 52 },
+            { "sim_fluid_cg_spmv_window", "sim_fluid_cg_spmv_window.spv",
+              4, 76 },
             // Variational solid coupling: separate registrations because the
             // registry binds a FIXED buffer count per kernel name and these carry
             // the face-weight (+ solid-velocity) arrays on top of the plain set.
             // Keeping them apart leaves the plain path byte-identical.
             { "sim_fluid_divergence_var",           "sim_fluid_divergence_var.spv",       11, 52 },
+            { "sim_fluid_divergence_var_window", "sim_fluid_divergence_var_window.spv",
+              11, 76 },
             { "sim_fluid_subtract_gradient_var",    "sim_fluid_subtract_gradient_var.spv",11, 52 },
             { "sim_fluid_cg_build_diag_var",        "sim_fluid_cg_build_diag_var.spv",     5, 52 },
+            { "sim_fluid_cg_build_diag_var_window", "sim_fluid_cg_build_diag_var_window.spv",
+              5, 76 },
             { "sim_fluid_cg_spmv_var",              "sim_fluid_cg_spmv_var.spv",           7, 52 },
+            { "sim_fluid_cg_spmv_var_window", "sim_fluid_cg_spmv_var_window.spv",
+              7, 76 },
             { "sim_fluid_cg_jacobi",                "sim_fluid_cg_jacobi.spv",             3, 52 },
+            { "sim_fluid_cg_jacobi_window", "sim_fluid_cg_jacobi_window.spv",
+              3, 76 },
             { "sim_fluid_cg_copy",                  "sim_fluid_cg_copy.spv",               2, 52 },
+            { "sim_fluid_cg_copy_window", "sim_fluid_cg_copy_window.spv",
+              2, 76 },
             { "sim_fluid_cg_axpy",                  "sim_fluid_cg_axpy.spv",               2, 52 },
+            { "sim_fluid_cg_axpy_window", "sim_fluid_cg_axpy_window.spv",
+              2, 76 },
             { "sim_fluid_cg_zpby",                  "sim_fluid_cg_zpby.spv",               2, 52 },
+            { "sim_fluid_cg_zpby_window", "sim_fluid_cg_zpby_window.spv",
+              2, 76 },
             // Double-precision block partials → requires shaderFloat64 (gated in
             // dispatch(); pipeline creation simply fails without the feature).
             { "sim_fluid_cg_dot",                   "sim_fluid_cg_dot.spv",                3, 52 },
+            { "sim_fluid_cg_dot_window", "sim_fluid_cg_dot_window.spv",
+              3, 76 },
             // Device-resident CG scalars (alpha/beta/sigma live on the GPU) —
             // collapses per-dot submit+fence round-trips into one small download
             // every K iterations. All three read/write double scalars →
             // shaderFloat64-gated like sim_fluid_cg_dot.
             { "sim_fluid_cg_scalar_step",           "sim_fluid_cg_scalar_step.spv",        2, 52 },
             { "sim_fluid_cg_axpy_dev",              "sim_fluid_cg_axpy_dev.spv",           3, 52 },
+            { "sim_fluid_cg_axpy_dev_window", "sim_fluid_cg_axpy_dev_window.spv",
+              3, 76 },
             { "sim_fluid_cg_zpby_dev",              "sim_fluid_cg_zpby_dev.spv",           3, 52 },
+            { "sim_fluid_cg_zpby_dev_window", "sim_fluid_cg_zpby_dev_window.spv",
+              3, 76 },
             // Fused CG kernels (CUDA name/buffer-order parity, plain branch only;
             // + axpy2_dev, Vulkan-only fused p/r pair update). Cut the device-
             // scalar loop from 9 to 6 dispatches+barriers per iteration.
             { "sim_fluid_cg_jacobi_dot",            "sim_fluid_cg_jacobi_dot.spv",         4, 52 },
+            { "sim_fluid_cg_jacobi_dot_window", "sim_fluid_cg_jacobi_dot_window.spv",
+              4, 76 },
             { "sim_fluid_cg_spmv_dot",              "sim_fluid_cg_spmv_dot.spv",           5, 52 },
+            { "sim_fluid_cg_spmv_dot_window", "sim_fluid_cg_spmv_dot_window.spv",
+              5, 76 },
             { "sim_fluid_cg_spmv_dot_var",          "sim_fluid_cg_spmv_dot_var.spv",       8, 52 },
+            { "sim_fluid_cg_spmv_dot_var_window", "sim_fluid_cg_spmv_dot_var_window.spv",
+              8, 76 },
             { "sim_fluid_cg_axpy2_dev",             "sim_fluid_cg_axpy2_dev.spv",          5, 52 },
+            { "sim_fluid_cg_axpy2_dev_window", "sim_fluid_cg_axpy2_dev_window.spv",
+              5, 76 },
             { "sim_grid_advect_scalar",             "sim_grid_advect_scalar.spv",          7, 28 },
             { "sim_grid_advect_velocity",           "sim_grid_advect_velocity.spv",       10, 24 },
             { "sim_grid_velocity_dissipate_clamp",  "sim_grid_velocity_dissipate.spv",     3, 20 },

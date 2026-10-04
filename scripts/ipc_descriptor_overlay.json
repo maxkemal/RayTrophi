@@ -1508,7 +1508,7 @@
   },
   "fluid.seed": {
     "summary": "Fill a liquid domain with particles - a given box, or the domain's lower half",
-    "notes": "Omit seed_min and seed_max to fill the bottom half of the domain; there is no fixed default box any more, because the old one was derived from nothing and seeded zero particles in any domain that did not contain it. A region that does not overlap the domain is now refused with both boxes in the error, instead of succeeding having created nothing. particles_per_cell of 4 is the standard APIC density; a thin jet seeded below that has no interior cells and therefore no pressure field, which reads as 'water that will not splash'. persistent=true re-seeds the box every reset.",
+    "notes": "Omit seed_min and seed_max to fill the bottom half of the domain; there is no fixed default box any more, because the old one was derived from nothing and seeded zero particles in any domain that did not contain it. A region that does not overlap the domain is refused with both boxes in the error. particles_per_cell applies to this initial fill and becomes the solver's material-point density target. Point, object-bounds and mesh-surface flow sources use their independent fluid_particles_per_second rate. persistent=true re-seeds the box every reset.",
     "tags": "simulation|liquid|water|fill|particles|initial",
     "related": "fluid.create_domain|fluid.clear|flow_source.create",
     "params": {
@@ -1547,7 +1547,7 @@
   },
   "fluid.set_param": {
     "summary": "Update any field of a fluid or gas domain: bounds, voxel size, solver backend, viscosity, granular constitutive settings, thermal liquid (cooling/freezing), surface reconstruction detail, render mode and surface material",
-    "notes": "Overlay semantics - fields you do not send keep their value. render_mode accepts particles/splat, surface/sdf and fog (aliases volume_fog, volume); on a liquid 'fog' raymarches the splatted density with the domain VolumeShader, on a gas domain 'volume' is the plain gas route. Reads return the canonical name ('fog' for a liquid). A SurfaceSDF substance override claims the single domain volume, so a fog domain with one draws that surface, not fog (substance_materials effective_representation says which). fluid.get reports active_density_cells / max_density, the fog mode's input. The retired virtual_particles/virtual/adaptive names are refused with an error. Changing voxel_size or the bounds invalidates the bake for that domain. Surface keys (surface_resolution_multiplier 1..4, kernel/particle radius, smoothing, anisotropy_*) refine the RENDERED surface without touching the simulation and are rejected out of range, not clamped. thermal_* keys drive the wax chain (preset 'wax' sets them all); read the result back as fluid.get thermal_frozen_particles / thermal_min_kelvin, and thermal_cold_unsupported > 0 with nothing frozen means the liquid is cold but touches no collider or closed wall. Thermal and surface keys are applied after preset, so a preset in the same call cannot undo them.",
+    "notes": "Overlay semantics - fields you do not send keep their value. render_mode accepts particles/splat, surface/sdf and fog (aliases volume_fog, volume); on a liquid 'fog' raymarches the splatted density with the domain VolumeShader, on a gas domain 'volume' is the plain gas route. Reads return the canonical name ('fog' for a liquid). A SurfaceSDF substance override claims the single domain volume, so a fog domain with one draws that surface, not fog (substance_materials effective_representation says which). fluid.get reports active_density_cells / max_density, the fog mode's input. The retired virtual_particles/virtual/adaptive names are refused with an error. Changing voxel_size or the bounds invalidates the bake for that domain. Surface keys (surface_resolution_multiplier 1..4, kernel/particle radius, smoothing, anisotropy_*) refine the RENDERED surface without touching the simulation and are rejected out of range, not clamped. thermal_* keys drive the wax chain (preset 'wax' sets them all); read the result back as fluid.get thermal_frozen_particles / thermal_min_kelvin, and thermal_cold_unsupported > 0 with nothing frozen means the liquid is cold but touches no collider or closed wall. Thermal and surface keys are applied after preset, so a preset in the same call cannot undo them. Granular substeps are adaptive: wave/strain CFL requests are fully granted on CPU and GPU, preserving the authored Young modulus. granular_max_solver_substeps is a legacy compatibility field (stored/clamped to 1..64); it no longer limits physical substeps. Closed, inviscid Vulkan granular domains without solid/frozen parcels keep particle velocity/affine on device between substeps. Positions remain available to the host for occupancy and material coordinates. Compare total_ms and upload/download_bytes; deferred GPU execution can be charged to advect_ms instead of g2p_ms.",
     "requires": [
       "fluid.create_domain"
     ],
@@ -1594,8 +1594,8 @@
     "tags": "simulation|render|appearance"
   },
   "fluid.set_splat_geometry": {
-    "summary": "Set the splat-sphere geometry of a liquid domain: icosphere subdivisions, scene-object geometry, radius and size",
-    "notes": "Overlay semantics - keys you do not send keep their value. subdivisions 0..3 = 20/80/320/1280 triangles per splat (default 0); each level multiplies raster triangles and RT BLAS memory by four. geometry 'scene_object' requires geometry_source naming a live scene node. Out-of-range values are rejected, not clamped. Read back with fluid.get splat_geometry / splat_subdivisions / splat_triangles.",
+    "summary": "Set splat geometry, size and render-only particle refinement",
+    "notes": "Overlay semantics - keys you do not send keep their value. subdivisions 0..3 = 20/80/320/1280 triangles per splat (default 0); each level multiplies raster triangles and RT BLAS memory by four. geometry 'icosphere' is the procedural sphere cloud on RT (splat_triangles 0); 'icosphere_mesh' forces the triangle icosphere. Procedural granular spheres have a PPC-derived minimum radius equal to one MPM point's represented volume. granular_physical_carriers=true draws exactly one sphere per physical granular MPM carrier and disables attached virtual clusters for the primary sand body; this is the high-resolution granular default. virtual_grains 1..32 remains the low-resolution fill count and always controls procedural liquid/whitewater children. Virtual children are pulled toward a distance- and direction-weighted average of nearby stable carrier candidates; spray, foam and bubbles use the same proxy contract. grain_size_variation 0..0.75 varies deterministic child diameters while opposite pairs preserve represented volume. virtual_grain_budget 1000000..32000000 is a user-controlled domain cap. Its effective child count is derived from Max Particles plus enabled Max Foam, so live particle-count changes do not change proxy topology. Read primary_visual_children, whitewater_visual_children, virtual_grains_requested, virtual_grains_effective, virtual_grain_count, virtual_grain_budget and virtual_grain_rt_estimated_bytes with fluid.get; virtual_grain_count includes splat-routed whitewater. The memory estimate covers RT proxy inputs before acceleration-structure scratch. geometry 'scene_object' requires geometry_source naming a live scene node; its primary particles do not use virtual children, while procedural whitewater still does. Out-of-range values are rejected, not clamped.",
     "verify_with": [
       "fluid.get",
       "viewport.frame_telemetry"
@@ -3736,7 +3736,9 @@
     "tags": "foliage|scatter|wind|atmosphere",
     "related": "scatter.set_wind|world.set_climate",
     "params": {
-      "group": { "description": "Scatter group id or name" }
+      "group": {
+        "description": "Scatter group id or name"
+      }
     }
   },
   "scatter.set_wind": {
@@ -3745,7 +3747,9 @@
     "tags": "foliage|scatter|wind|atmosphere",
     "related": "scatter.get_wind",
     "params": {
-      "group": { "description": "Scatter group id or name" }
+      "group": {
+        "description": "Scatter group id or name"
+      }
     }
   },
   "water.get_wind": {
@@ -3754,7 +3758,9 @@
     "tags": "water|ocean|wind|atmosphere",
     "related": "water.set_wind|world.set_climate",
     "params": {
-      "surface": { "description": "Water surface id or name" }
+      "surface": {
+        "description": "Water surface id or name"
+      }
     }
   },
   "water.set_wind": {
@@ -3763,7 +3769,9 @@
     "tags": "water|ocean|wind|atmosphere",
     "related": "water.get_wind",
     "params": {
-      "surface": { "description": "Water surface id or name" }
+      "surface": {
+        "description": "Water surface id or name"
+      }
     }
   },
   "scatter.set_settings": {
@@ -6170,7 +6178,9 @@
     "tags": "environment|sky|clouds|preset",
     "related": "world.get_clouds|world.set_clouds",
     "params": {
-      "preset": { "description": "Preset name" }
+      "preset": {
+        "description": "Preset name"
+      }
     }
   },
   "world.cloud_stats": {
@@ -6236,5 +6246,51 @@
     "returns": "AtmosphereStatsInfo",
     "tags": "environment|atmosphere|aerial|fog|diagnostics|stats|world",
     "related": "world.get_aerial|world.set_aerial|render.probe"
+  },
+  "fluid.get_phase_grids": {
+    "summary": "Read requested and effective gas/liquid phase grids for one domain",
+    "returns": "Domain, phase presence/inheritance, bounds, voxel, resolution, cells and working bytes",
+    "tags": "fluid|matter|phase|grid|read",
+    "related": "fluid.set_phase_grid|fluid.step_stats",
+    "notes": "Bounds and voxel are meters. measured=false describes a planned layout before synchronization. Granular matter uses the liquid grid. Absent phases allocate no grid. Budget is combined across actual phase cells.",
+    "params": {
+      "domain": {
+        "type": "string",
+        "required": true
+      }
+    }
+  },
+  "fluid.set_phase_grid": {
+    "summary": "Configure one phase grid through the shared validated domain service",
+    "returns": "Resulting requested/planned phase grids (measured=false until synchronized)",
+    "tags": "fluid|matter|phase|grid|write",
+    "related": "fluid.get_phase_grids",
+    "notes": "Restarts grid simulation and invalidates frame cache. phase is gas or liquid. inherit=true restores logical domain layout without bounds. Otherwise finite strictly ordered 3-number world bounds are required, with voxel >= 1e-6 meters. Invalid requests do not mutate settings/cache. Bounds follow logical domain movement; effective cubic grids may over-cover short axes after clamping.",
+    "params": {
+      "domain": {
+        "type": "string",
+        "required": true
+      },
+      "phase": {
+        "type": "string",
+        "required": true
+      },
+      "inherit": {
+        "type": "boolean",
+        "required": false
+      },
+      "bounds_min": {
+        "type": "array",
+        "required": false
+      },
+      "bounds_max": {
+        "type": "array",
+        "required": false
+      },
+      "voxel": {
+        "type": "number",
+        "required": false
+      }
+    }
   }
 }

@@ -1,4 +1,5 @@
 #include "RtPostBindings.h"
+#include "RtPhaseGrid.h"
 #include "RtFluidLabelBindings.h"
 #include "RtViewportCutoutBindings.h"
 #include "RtRasterDiagnosticsBindings.h"
@@ -1456,6 +1457,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 
     // ── Fluid & Gas Simulation Engine (Faz 5.3b) ────────────────────────
     py::module_ fluid = module.def_submodule("fluid", "APIC liquid & fluid domain simulation");
+    rtpy::registerPhaseGridBindings(fluid);
     auto py_create_domain = [](const std::string& name, const py::tuple& domain_min, const py::tuple& domain_max, float voxel_size, const std::string& type) -> py::dict {
         Vec3 dmin = vec3FromPython(domain_min);
         Vec3 dmax = vec3FromPython(domain_max);
@@ -1580,6 +1582,17 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["splat_triangles"] = info.splat_triangles;
         d["splat_radius_factor"] = info.splat_radius_factor;
         d["splat_size_multiplier"] = info.splat_size_multiplier;
+        d["virtual_grains_requested"] = info.virtual_grains_requested;
+        d["virtual_grains_effective"] = info.virtual_grains_effective;
+        d["primary_visual_children"] = info.primary_visual_children;
+        d["whitewater_visual_children"] = info.whitewater_visual_children;
+        d["granular_physical_carriers"] =
+            info.granular_physical_carriers;
+        d["virtual_grain_count"] = info.virtual_grain_count;
+        d["virtual_grain_budget"] = info.virtual_grain_budget;
+        d["virtual_grain_rt_estimated_bytes"] =
+            info.virtual_grain_rt_estimated_bytes;
+        d["grain_size_variation"] = info.grain_size_variation;
         d["fog_spread_voxels"] = info.fog_spread_voxels;
         d["particle_kelvin_measured"] = info.particle_kelvin_measured;
         d["particle_min_kelvin"] = info.particle_min_kelvin;
@@ -1809,6 +1822,17 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["splat_triangles"] = info.splat_triangles;
             d["splat_radius_factor"] = info.splat_radius_factor;
             d["splat_size_multiplier"] = info.splat_size_multiplier;
+            d["virtual_grains_requested"] = info.virtual_grains_requested;
+            d["virtual_grains_effective"] = info.virtual_grains_effective;
+            d["primary_visual_children"] = info.primary_visual_children;
+            d["whitewater_visual_children"] = info.whitewater_visual_children;
+            d["granular_physical_carriers"] =
+                info.granular_physical_carriers;
+            d["virtual_grain_count"] = info.virtual_grain_count;
+            d["virtual_grain_budget"] = info.virtual_grain_budget;
+            d["virtual_grain_rt_estimated_bytes"] =
+                info.virtual_grain_rt_estimated_bytes;
+            d["grain_size_variation"] = info.grain_size_variation;
             d["fog_spread_voxels"] = info.fog_spread_voxels;
             d["particle_kelvin_measured"] = info.particle_kelvin_measured;
             d["particle_min_kelvin"] = info.particle_min_kelvin;
@@ -2020,6 +2044,17 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["splat_triangles"] = info.splat_triangles;
         d["splat_radius_factor"] = info.splat_radius_factor;
         d["splat_size_multiplier"] = info.splat_size_multiplier;
+        d["virtual_grains_requested"] = info.virtual_grains_requested;
+        d["virtual_grains_effective"] = info.virtual_grains_effective;
+        d["primary_visual_children"] = info.primary_visual_children;
+        d["whitewater_visual_children"] = info.whitewater_visual_children;
+        d["granular_physical_carriers"] =
+            info.granular_physical_carriers;
+        d["virtual_grain_count"] = info.virtual_grain_count;
+        d["virtual_grain_budget"] = info.virtual_grain_budget;
+        d["virtual_grain_rt_estimated_bytes"] =
+            info.virtual_grain_rt_estimated_bytes;
+        d["grain_size_variation"] = info.grain_size_variation;
         d["fog_spread_voxels"] = info.fog_spread_voxels;
         d["particle_kelvin_measured"] = info.particle_kelvin_measured;
         d["particle_min_kelvin"] = info.particle_min_kelvin;
@@ -2133,7 +2168,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        py::arg("persistent") = false,
        "Fill a fluid domain with particles. Omit seed_min/seed_max to fill the "
        "bottom half of the domain; a region that does not overlap the domain is "
-       "refused rather than silently creating nothing.");
+       "refused rather than silently creating nothing. particles_per_cell applies "
+       "to this initial fill. Point, object-bounds and mesh-surface flow sources "
+       "use their independent fluid_particles_per_second rate.");
 
     fluid.def("clear", [](const std::string& domain, bool clear_seed) {
         requireResult(rtapi::clearFluidParticles(domain, clear_seed));
@@ -2165,21 +2202,48 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     fluid.def("set_splat_geometry",
               [](const std::string& domain, const py::object& geometry,
                  const py::object& geometry_source, const py::object& subdivisions,
-                 const py::object& radius_factor, const py::object& size_multiplier) {
+                 const py::object& radius_factor, const py::object& size_multiplier,
+                 const py::object& virtual_grains,
+                 const py::object& grain_size_variation,
+                 const py::object& virtual_grain_budget,
+                 const py::object& granular_physical_carriers) {
         rtapi::FluidSplatGeometryPatch patch;
         if (!geometry.is_none()) patch.geometry = py::cast<std::string>(geometry);
         if (!geometry_source.is_none()) patch.geometry_source = py::cast<std::string>(geometry_source);
         if (!subdivisions.is_none()) patch.subdivisions = py::cast<int>(subdivisions);
         if (!radius_factor.is_none()) patch.radius_factor = py::cast<float>(radius_factor);
         if (!size_multiplier.is_none()) patch.size_multiplier = py::cast<float>(size_multiplier);
+        if (!virtual_grains.is_none()) patch.virtual_grains = py::cast<int>(virtual_grains);
+        if (!grain_size_variation.is_none()) {
+            patch.grain_size_variation = py::cast<float>(grain_size_variation);
+        }
+        if (!virtual_grain_budget.is_none()) {
+            patch.virtual_grain_budget = py::cast<uint64_t>(virtual_grain_budget);
+        }
+        if (!granular_physical_carriers.is_none()) {
+            patch.granular_physical_carriers =
+                py::cast<bool>(granular_physical_carriers);
+        }
         requireResult(rtapi::setFluidSplatGeometry(domain, patch));
     }, py::arg("domain"), py::arg("geometry") = py::none(),
        py::arg("geometry_source") = py::none(), py::arg("subdivisions") = py::none(),
        py::arg("radius_factor") = py::none(), py::arg("size_multiplier") = py::none(),
-       "Splat geometry: geometry 'icosphere' | 'scene_object', geometry_source "
+       py::arg("virtual_grains") = py::none(),
+       py::arg("grain_size_variation") = py::none(),
+       py::arg("virtual_grain_budget") = py::none(),
+       py::arg("granular_physical_carriers") = py::none(),
+       "Splat geometry: geometry 'icosphere' | 'icosphere_mesh' | 'scene_object', geometry_source "
        "(live scene node), subdivisions 0..3 (20/80/320/1280 triangles), "
        "radius_factor 0.05..1.5, size_multiplier 0.05..8. Out-of-range values "
-       "are rejected, not clamped.");
+       "are rejected, not clamped. Procedural granular spheres also have a "
+       "PPC-derived minimum radius equal to the volume represented by one MPM point; "
+       "larger authored sizes are preserved. virtual_grains 1..32 controls "
+       "render-only spheres per physical carrier; grain_size_variation 0..0.75 "
+       "changes child diameters deterministically while preserving volume. "
+       "virtual_grain_budget 1000000..32000000 fixes the domain visual-sphere "
+       "budget used with Max Particles, preventing frame-to-frame count changes. "
+       "granular_physical_carriers draws one sphere per physical granular MPM "
+       "carrier so attached virtual clusters cannot hide carrier motion.");
 
     // VolumeFog shaping of a liquid domain. None = leave that field alone.
     fluid.def("set_fog",
@@ -2400,7 +2464,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         if (kwargs.contains("max_particles"))
             requireResult(rtapi::setFluidMaxParticles(domain, py::cast<uint64_t>(kwargs["max_particles"])));
         if (has_surface_patch) requireResult(rtapi::setFluidSurfaceDetail(domain, surface_patch));
-    }, py::arg("domain"));
+    }, py::arg("domain"),
+       "Update canonical fluid parameters. Granular CFL substeps preserve authored stiffness; "
+       "granular_max_solver_substeps is retained for compatibility and no longer caps them.");
 
     fluid.def("reset", []() {
         requireResult(rtapi::resetFluidSimulation());
@@ -2417,6 +2483,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["measured"] = s.measured;
         if (!s.measured) return d;
         d["resolution"] = py::make_tuple(s.resolution[0], s.resolution[1], s.resolution[2]);
+        d["normalize_window_used"] = s.normalize_window_used;
+        d["normalize_window_cells"] = s.normalize_window_cells;
+        d["full_grid_cells"] = s.full_grid_cells;
+        d["pressure_window_used"] = s.pressure_window_used;
+        d["pressure_window_cells"] = s.pressure_window_cells;
+        d["occupancy_on_gpu"] = s.occupancy_on_gpu;
         d["particle_count"] = s.particle_count;
         d["gpu_status"] = s.gpu_status;
         d["p2g_on_gpu"] = s.p2g_on_gpu;

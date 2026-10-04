@@ -102,10 +102,9 @@ namespace MaterialNodesV2 {
                      //   both do the same single lerp between two table entries.
         ObjLocation, // -> out = the hit object's world-space origin
         ObjRandom,   // -> out = stable per-object random in [0,1), broadcast
-                     //   Both read the object origin the runtime hands the VM: on GPU
-                     //   gl_ObjectToWorldEXT[3].xyz, on CPU HitRecord::object_origin.
-                     //   See objectRandom01 (MaterialProceduralMath.h) for why the RANDOM
-                     //   hashes the origin instead of an instance id.
+                     //   Regular objects hash the runtime's object origin. Procedural
+                     //   particle spheres may supply a stable logical-sphere override
+                     //   because their shared TLAS origin cannot distinguish grains.
         Attribute,   // aux = attribute SLOT (not a name) -> out = value, broadcast
                      //   A named per-vertex float channel (sculpt mask, Geo-DAG mask,
                      //   paint layer, vertex group) barycentric-blended at the hit. The

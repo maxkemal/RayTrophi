@@ -1,0 +1,132 @@
+[
+  {
+    "step": 1,
+    "particles": 4166,
+    "total_ms": 859.2462158203125,
+    "upload_bytes": 42940224,
+    "download_bytes": 34585520,
+    "substeps": 48,
+    "invalid": 0,
+    "elapsed_s": 1.111615299996629
+  },
+  {
+    "step": 20,
+    "particles": 83333,
+    "total_ms": 199.0177001953125,
+    "upload_bytes": 38728352,
+    "download_bytes": 48084316,
+    "substeps": 48,
+    "invalid": 0,
+    "elapsed_s": 4.913916899997275
+  },
+  {
+    "step": 40,
+    "particles": 166666,
+    "total_ms": 319.267822265625,
+    "upload_bytes": 52061632,
+    "download_bytes": 62417592,
+    "substeps": 48,
+    "invalid": 0,
+    "elapsed_s": 11.405030000001716
+  },
+  {
+    "step": 60,
+    "particles": 250000,
+    "total_ms": 468.9580078125,
+    "upload_bytes": 65395072,
+    "download_bytes": 76751040,
+    "substeps": 48,
+    "invalid": 0,
+    "elapsed_s": 20.44612369999959
+  },
+  {
+    "step": 80,
+    "particles": 333333,
+    "total_ms": 610.30224609375,
+    "upload_bytes": 78728352,
+    "download_bytes": 91084316,
+    "substeps": 48,
+    "invalid": 0,
+    "elapsed_s": 32.81955510000262
+  },
+  {
+    "step": 100,
+    "particles": 416666,
+    "total_ms": 754.0263061523438,
+    "upload_bytes": 92061632,
+    "download_bytes": 105417592,
+    "substeps": 48,
+    "invalid": 0,
+    "elapsed_s": 47.771858000000066
+  },
+  {
+    "step": 120,
+    "particles": 500000,
+    "total_ms": 968.8840942382812,
+    "upload_bytes": 105395072,
+    "download_bytes": 119751040,
+    "substeps": 48,
+    "invalid": 0,
+    "elapsed_s": 66.3703389000002
+  },
+  {
+    "step": 140,
+    "particles": 583333,
+    "total_ms": 1036.2752685546875,
+    "upload_bytes": 118728352,
+    "download_bytes": 134084316,
+    "substeps": 48,
+    "invalid": 0,
+    "elapsed_s": 88.45989720000216
+  },
+  {
+    "step": 160,
+    "particles": 666666,
+    "total_ms": 1178.9642333984375,
+    "upload_bytes": 132061632,
+    "download_bytes": 148417592,
+    "substeps": 48,
+    "invalid": 0,
+    "elapsed_s": 113.27977459999966
+  },
+  {
+    "step": 180,
+    "particles": 750000,
+    "total_ms": 1317.563720703125,
+    "upload_bytes": 145395072,
+    "download_bytes": 162751040,
+    "substeps": 48,
+    "invalid": 0,
+    "elapsed_s": 141.12807079999766
+  },
+  {
+    "step": 200,
+    "particles": 833333,
+    "total_ms": 1519.623046875,
+    "upload_bytes": 158728352,
+    "download_bytes": 177084316,
+    "substeps": 48,
+    "invalid": 0,
+    "elapsed_s": 171.88560019999568
+  },
+  {
+    "step": 220,
+    "particles": 916666,
+    "total_ms": 1606.955810546875,
+    "upload_bytes": 172061632,
+    "download_bytes": 191417592,
+    "substeps": 48,
+    "invalid": 0,
+    "elapsed_s": 205.5856696999981
+  },
+  {
+    "step": 238,
+    "particles": 991666,
+    "total_ms": 1767.013916015625,
+    "upload_bytes": 184061632,
+    "download_bytes": 216217584,
+    "substeps": 48,
+    "invalid": 0,
+    "elapsed_s": 238.5232915000015
+  }
+]

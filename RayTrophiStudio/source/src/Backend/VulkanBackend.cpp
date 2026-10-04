@@ -11,6 +11,7 @@
 #include "Backend/VulkanBackend.h"
 #include "Backend/VulkanFailureReporting.h"
 #include "Backend/VulkanTransitionDiagnostics.h"
+#include "Fluid/FluidRenderProxy.h"
 #include <atomic>
 #include "PerfProfile.h"
 #include "TerrainSemanticMap.h"
@@ -6210,42 +6211,58 @@ bool VulkanDevice::updateFoamSphereBLAS(uint32_t blasIndex, const std::vector<Vk
 
     uint64_t scratchAlignment = m_capabilities.minScratchAlignment > 0 ? m_capabilities.minScratchAlignment : 128;
     uint64_t bldScratch = (sizeInfo.buildScratchSize + scratchAlignment - 1) & ~(scratchAlignment - 1);
-    BufferCreateInfo scratchCI;
-    scratchCI.size = bldScratch;
-    scratchCI.usage = BufferUsage::STORAGE;
-    scratchCI.location = MemoryLocation::GPU_ONLY;
-    scratchCI.category = VramCategory::Scratch;
-    auto scratchBuffer = createBuffer(scratchCI);
-    if (!scratchBuffer.buffer) return false;
-    buildInfo.scratchData.deviceAddress = scratchBuffer.deviceAddress;
+    // Keep the scratch across frames (same slot the hair refit uses): a per-frame
+    // create/destroy of a multi-MB buffer was pure allocator churn.
+    if (blas.skinScratchBuffer.size < bldScratch) {
+        if (blas.skinScratchBuffer.buffer) destroyBuffer(blas.skinScratchBuffer);
+        BufferCreateInfo scratchCI;
+        scratchCI.size = bldScratch;
+        scratchCI.usage = BufferUsage::STORAGE;
+        scratchCI.location = MemoryLocation::GPU_ONLY;
+        scratchCI.category = VramCategory::Scratch;
+        blas.skinScratchBuffer = createBuffer(scratchCI);
+        if (!blas.skinScratchBuffer.buffer) return false;
+    }
+    buildInfo.scratchData.deviceAddress = blas.skinScratchBuffer.deviceAddress;
 
     VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
     rangeInfo.primitiveCount = primitiveCount;
     const VkAccelerationStructureBuildRangeInfoKHR* pRange = &rangeInfo;
 
     VkCommandBuffer cmd = beginSingleTimeCommands();
-    if (cmd == VK_NULL_HANDLE) { destroyBuffer(scratchBuffer); return false; }
+    if (cmd == VK_NULL_HANDLE) return false;
     fpCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRange);
     endSingleTimeCommands(cmd);
-    destroyBuffer(scratchBuffer);
     return true;
 }
 
-// Upload the combined foam sphere buffer (centre/radius/matId per sphere) to
+// Upload the combined sphere buffer (centre/radius/matId/objectRandom) to
 // binding 18 and (re)point the descriptor at it. `data` is FoamSphereGPU[count]
 // (32 bytes each, see sphere_intersection.rint).
-void VulkanDevice::updateFoamSphereBuffer(const void* data, uint32_t count) {
-    if (count == 0) return;
+bool VulkanDevice::updateFoamSphereBuffer(
+    const void* data,
+    uint32_t count,
+    uint32_t capacity) {
+    if (count == 0) return true;
     const uint64_t bytes = (uint64_t)count * 32ull;   // sizeof(FoamSphereGPU)
+    // Allocate for the reserved capacity so a growing live count never
+    // reallocates the buffer (and rewrites binding 18) frame after frame.
+    const uint64_t allocBytes = (uint64_t)(std::max)(count, capacity) * 32ull;
     bool recreated = false;
     if (!m_foamSphereBuffer.buffer || m_foamSphereBuffer.size < bytes) {
         if (m_foamSphereBuffer.buffer) destroyBuffer(m_foamSphereBuffer);
         BufferCreateInfo ci;
-        ci.size = bytes;
+        ci.size = allocBytes;
         ci.usage = BufferUsage::STORAGE;
         ci.location = MemoryLocation::CPU_TO_GPU;
-        ci.initialData = const_cast<void*>(data);
+        // No initialData: createBuffer copies info.size bytes from it, and `data`
+        // only holds `count` records while the allocation is capacity-sized.
         m_foamSphereBuffer = createBuffer(ci);
+        if (!m_foamSphereBuffer.buffer) {
+            m_foamSphereCount = 0;
+            return false;
+        }
+        uploadBuffer(m_foamSphereBuffer, data, bytes);
         recreated = true;
     } else {
         uploadBuffer(m_foamSphereBuffer, data, bytes);
@@ -6267,6 +6284,7 @@ void VulkanDevice::updateFoamSphereBuffer(const void* data, uint32_t count) {
         w.pBufferInfo = &info;
         vkUpdateDescriptorSets(m_device, 1, &w, 0, nullptr);
     }
+    return true;
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -10860,8 +10878,8 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
         // index so the next updateGeometry() rebuilds it fresh and the motion hook
         // doesn't refit a freed slot.
         m_foamSphereBlasIndex   = UINT32_MAX;
-        m_foamSphereGroupId     = -1;
         m_foamSpherePoolCapacity = 0;
+        m_foamSphereTlasIndex = UINT32_MAX;
 
         // [CRASH GUARD] Disable ray tracing until updateGeometry() rebuilds a valid TLAS.
         // traceRays() checks m_tlas.accel (Fix 1) but also gate m_rtPipelineReady so legacy
@@ -11233,11 +11251,8 @@ void VulkanBackendAdapter::setVisibilityByNodeName(const std::string& nodeName, 
     }
 }
 
-// NOTE: foam (point_sphere_mode) is rendered on Vulkan through the per-particle
-// InstanceTransform scatter path (real material/closest-hit shader). The native
-// sphere-AABB BLAS path (createFoamSphereBLAS / sphere_*.rint|rchit / binding 18)
-// is OptiX-only on this backend; the Vulkan device methods + shaders remain built
-// but unused so the approach can be revisited without re-plumbing the pipeline.
+// Built-in point-sphere groups use the compact sphere-AABB BLAS path. Scene-object
+// particle geometry remains on the ordinary triangle scatter path.
 
 void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) {
     VulkanRT::TransitionDiagnostic transition("updateGeometry");
@@ -11853,6 +11868,7 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         if (m_viewportMode == ViewportMode::Rendered &&
             group.rendered_rt_excluded) continue;
         if (group.instances.empty() || group.sources.empty()) continue;
+        if (group.point_sphere_mode && m_device->shouldUseProceduralSpherePath()) continue;
 
         auto& meta = scatterMeta[gi];
         meta.entriesBySource.resize(group.sources.size());
@@ -11945,13 +11961,8 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         if (m_viewportMode == ViewportMode::Rendered &&
             group.rendered_rt_excluded) continue;
         if (group.instances.empty() || group.sources.empty()) continue;
+        if (group.point_sphere_mode && m_device->shouldUseProceduralSpherePath()) continue;
 
-        // NOTE: point_sphere_mode (foam) groups are rendered on Vulkan via the SAME
-        // per-particle InstanceTransform scatter path as foliage — one TLAS instance
-        // per particle using the real material/closest-hit shader (correct foam
-        // materials + NEE). The flag is honoured only by the OptiX backend (native
-        // sphere GAS). BVH degradation from foam motion is handled by a per-frame
-        // full TLAS rebuild in updateInstanceTransforms() (see foamPresent there).
         const auto& meta = scatterMeta[gi];
         if (meta.entriesBySource.empty()) continue;
 
@@ -12027,6 +12038,11 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
     if (m_device->hasHardwareRT()) {
         m_device->endBatchedBLASBuild();
     }
+
+    // Compact built-in splat and whitewater spheres into one procedural BLAS.
+    // The sphere builder owns its short command submission, so it runs after the
+    // triangle batch. Failure leaves the ordinary scene usable.
+    appendProceduralSphereCloud(vkInstances, instanceSources);
 
     m_vkInstances = vkInstances; // Store for updates
     m_instanceSources = instanceSources;
@@ -15385,7 +15401,7 @@ void VulkanBackendAdapter::recordGpuInstancePrepass(VkCommandBuffer cmd,uint32_t
 
 void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects) {
     if (!m_device || !m_device->isInitialized()) return;
-    if (objects.empty()) return;
+    if (objects.empty() && m_foamSphereBlasIndex == UINT32_MAX) return;
 
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
@@ -15393,38 +15409,37 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
     // Rebuild the mapping here to avoid syncing TLAS against stale representatives.
     syncInstanceTransforms(objects, true);
 
-    // ── Foam BVH-degradation guard ───────────────────────────────────────────────
-    // Foam (point_sphere_mode) groups scatter as MANY fast-moving per-particle TLAS
-    // instances. A per-frame TLAS REFIT keeps the frame-0 tree topology, so as the
-    // foam disperses the BVH degenerates and path tracing chokes (the 10x slowdown
-    // that a Solid→Rendered toggle — i.e. a full rebuild — cured). When foam is
-    // present we therefore REBUILD the TLAS from scratch each frame instead of
-    // refitting it: optimal BVH every frame, which is what made the toggle fast.
-    bool foamPresent = false;
-    for (const auto& g : InstanceManager::getInstance().getGroups()) {
-        if (g.point_sphere_mode && !g.instances.empty()) { foamPresent = true; break; }
+    // The procedural sphere BLAS is rebuilt from the compact live set. Its TLAS
+    // transform is identity and only changes when the cloud becomes empty/live.
+    bool sphereMaskChanged = false;
+    // The cloud can appear after the pipeline already exists (sim spawned its
+    // first particles later, or the mode switched with the pool still empty).
+    // Nothing else would build it until the next full updateGeometry().
+    if (m_foamSphereBlasIndex == UINT32_MAX && m_device->hasSphereShaders() &&
+        m_device->shouldUseProceduralSpherePath()) {
+        finalizeDeferredProceduralSphereCloud();
+    }
+    if (m_foamSphereBlasIndex != UINT32_MAX) {
+        m_device->waitIdle();
+        if (!updateProceduralSphereCloud(sphereMaskChanged)) {
+            g_vulkan_rebuild_pending = true;
+            return;
+        }
+        // The BLAS was rebuilt in place with new bounds. A TLAS keeps the
+        // instance bounds it saw at its last build/refit, so it MUST be refit
+        // every time; otherwise particles that moved outside the old bounds are
+        // culled until something else happens to touch the TLAS (the "vanishes
+        // at frame 12, reappears later" symptom).
+        {
+            auto merged = m_vkInstances;
+            for (const auto& h : m_hairVkInstances) merged.push_back(h);
+            m_device->updateTLAS(merged);
+        }
+        resetAccumulation();
     }
 
-    // Commit the merged instance list to the TLAS: a full rebuild when foam is
-    // present (optimal BVH every frame, no degradation), else a cheap refit.
-    // NOTE: createTLAS() does an in-place REFIT when allowUpdate==true AND the
-    // instance count is unchanged — which is exactly the degradation we must avoid.
-    // Passing allowUpdate=false forces its full-rebuild branch (old TLAS destroyed,
-    // built fresh; the instance buffer is still reused in place, so no per-frame
-    // alloc churn). This is what the Solid→Rendered toggle did to cure the slowdown.
-    // NOTE: both call sites below already m_device->waitIdle() immediately before
-    // invoking this, which is strictly stronger than drainInFlightTraces(). The
-    // TLAS destroy/recreate branch is therefore already guarded here — this path
-    // is NOT the particle-burst driver reset. Do not add a drain.
-    auto commitTLAS = [this](std::vector<VulkanRT::TLASInstance>& merged, bool rebuild) {
-        if (rebuild) {
-            VulkanRT::TLASCreateInfo ci;
-            ci.instances   = merged;
-            ci.allowUpdate = false;       // force a FULL BUILD → optimal BVH under foam motion
-            m_device->createTLAS(ci);
-        } else {
-            m_device->updateTLAS(merged); // refit (cheap) for static / slow-moving scenes
-        }
+    auto commitTLAS = [this](std::vector<VulkanRT::TLASInstance>& merged) {
+        m_device->updateTLAS(merged);
     };
 
     const auto& scatterGroups = InstanceManager::getInstance().getGroups();
@@ -15435,6 +15450,7 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
     for (const auto& group : scatterGroups) {
         if (m_viewportMode == ViewportMode::Rendered &&
             group.rendered_rt_excluded) continue;
+        if (group.point_sphere_mode && m_device->shouldUseProceduralSpherePath()) continue;
         if (!group.instances.empty()) {
             scatterGroupsById.emplace(group.id, &group);
             const auto revisionIt = m_scatterTransformRevisions.find(group.id);
@@ -15445,13 +15461,11 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
         }
     }
 
-    // Fast biome path: when only scatter transforms moved, keep the CPU TLAS
-    // mirror untouched and let the async trace prepass generate native Vulkan
-    // instances directly from TRS. Ordinary scene-object motion still uses the
-    // conservative CPU path below. Foam deliberately keeps its full-build path
-    // because persistent refits degrade its highly chaotic BVH.
+    // Fast biome path: when only triangle scatter transforms moved, keep the CPU
+    // TLAS mirror untouched and let the async trace prepass generate native Vulkan
+    // instances directly from TRS. Procedural sphere groups were handled above.
     bool regularObjectChanged=false;
-    if(!dirtyScatterGroups.empty() && !foamPresent && !m_instance_sync_cache.empty()){
+    if(!dirtyScatterGroups.empty() && !m_instance_sync_cache.empty()){
         for(const auto& item:m_instance_sync_cache){
             if(!item.representative_hittable||item.instance_id<0||item.instance_id>=static_cast<int>(m_vkInstances.size())) continue;
             Matrix4x4 live; bool valid=false;
@@ -15585,7 +15599,7 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
             // [VULKAN] Wait for device to finish any pending ray tracing before modifying AS
             m_device->waitIdle();
 
-            { auto merged = m_vkInstances; for (const auto& h : m_hairVkInstances) merged.push_back(h); commitTLAS(merged, foamPresent); }
+            { auto merged = m_vkInstances; for (const auto& h : m_hairVkInstances) merged.push_back(h); commitTLAS(merged); }
 
             if (data_changed) {
                 // update instance SSBO (Binding 5)
@@ -15668,7 +15682,7 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
         {
             auto merged = m_vkInstances;
             for (const auto& h : m_hairVkInstances) merged.push_back(h);
-            commitTLAS(merged, foamPresent);
+            commitTLAS(merged);
         }
 
         if (data_changed) {
@@ -16019,7 +16033,12 @@ bool VulkanBackendAdapter::refreshRasterScatterInstances() {
 
     const auto& groups = InstanceManager::getInstance().getGroups();
     size_t scatterCount = 0;
-    for (const auto& group : groups) scatterCount += group.instances.size();
+    for (const auto& group : groups) {
+        const size_t visualChildren = group.point_sphere_mode
+            ? std::max<size_t>(1u, group.point_sphere_visual_children)
+            : 1u;
+        scatterCount += group.instances.size() * visualChildren;
+    }
     m_rasterInstances.reserve(m_rasterInstances.size() + scatterCount);
 
     for (const auto& group : groups) {
@@ -16061,26 +16080,56 @@ bool VulkanBackendAdapter::refreshRasterScatterInstances() {
             int sourceIndex = transform.source_index;
             if (sourceIndex < 0 || sourceIndex >= static_cast<int>(sourceEntries.size())) sourceIndex = 0;
             if (sourceIndex >= static_cast<int>(sourceEntries.size())) continue;
-            for (const auto& sourceEntry : sourceEntries[sourceIndex]) {
-                RasterInstance instance;
-                instance.meshKey = sourceEntry.meshKey;
-                instance.nodeName = nodePrefix + std::to_string(instanceIndex);
-                instance.transform = transform.toMatrix() * sourceEntry.sourceToScatter;
-                instance.mask = 0xFF;
-                instance.scatterGroupId = group.id;
-                instance.rayFusionExcluded = group.rendered_rt_excluded;
-                instance.scatterInstanceIndex = static_cast<uint32_t>(instanceIndex);
-                instance.scatterSourceTransform = sourceEntry.sourceToScatter;
-                if (m_rasterScatterPaintActive) {
-                    const auto oldLod = previousLod.find(lodKey(instance));
-                    instance.scatterLodHint = oldLod != previousLod.end() ? oldLod->second : 1;
+            const uint32_t visualChildren = group.point_sphere_mode
+                ? std::max<uint32_t>(1u, group.point_sphere_visual_children)
+                : 1u;
+            for (uint32_t child = 0; child < visualChildren; ++child) {
+                InstanceTransform visualTransform;
+                if (!RayTrophiSim::Fluid::resolveFluidRenderProxyTransform(
+                        group,
+                        static_cast<uint32_t>(instanceIndex),
+                        child,
+                        visualTransform)) {
+                    continue;
                 }
-                const auto bbox = m_rasterMeshBBoxes.find(instance.meshKey);
-                if (bbox != m_rasterMeshBBoxes.end()) {
-                    instance.localBBox = bbox->second;
-                    updateRasterInstanceWorldBBox(instance);
+                for (const auto& sourceEntry : sourceEntries[sourceIndex]) {
+                    RasterInstance instance;
+                    instance.meshKey = sourceEntry.meshKey;
+                    instance.nodeName = nodePrefix + std::to_string(instanceIndex) +
+                        "_c" + std::to_string(child);
+                    instance.transform = visualTransform.toMatrix() *
+                        sourceEntry.sourceToScatter;
+                    const bool zeroScale = transform.scale.x == 0.0f &&
+                        transform.scale.y == 0.0f &&
+                        transform.scale.z == 0.0f;
+                    instance.mask = zeroScale ? 0 : 0xFF;
+                    instance.simPoolSlot = group.transient;
+                    instance.scatterGroupId = group.id;
+                    if (group.point_sphere_mode) {
+                        instance.objectRandom =
+                            RayTrophiSim::Fluid::fluidRenderProxyObjectRandom(
+                                group.id,
+                                static_cast<uint32_t>(instanceIndex),
+                                child);
+                    }
+                    instance.rayFusionExcluded = group.rendered_rt_excluded;
+                    instance.scatterInstanceIndex =
+                        static_cast<uint32_t>(instanceIndex);
+                    instance.fluidProxyChildIndex = static_cast<uint8_t>(child);
+                    instance.scatterSourceTransform = sourceEntry.sourceToScatter;
+                    if (m_rasterScatterPaintActive) {
+                        const auto oldLod = previousLod.find(lodKey(instance));
+                        instance.scatterLodHint = oldLod != previousLod.end()
+                            ? oldLod->second
+                            : 1;
+                    }
+                    const auto bbox = m_rasterMeshBBoxes.find(instance.meshKey);
+                    if (bbox != m_rasterMeshBBoxes.end()) {
+                        instance.localBBox = bbox->second;
+                        updateRasterInstanceWorldBBox(instance);
+                    }
+                    m_rasterInstances.push_back(std::move(instance));
                 }
-                m_rasterInstances.push_back(std::move(instance));
             }
         }
     }
@@ -17955,6 +18004,7 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
             float model[16];
         } identityGpu{};
         matrixToGL(Matrix4x4::identity(), identityGpu.model);
+        identityGpu.model[3] = -1.0f;
         VulkanRT::BufferCreateInfo ici{};
         ici.size = sizeof(identityGpu);
         ici.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
@@ -19098,6 +19148,19 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
                     sphereChitSPV, sphereIntSPV, photonRgenSPV)) {
                 SCENE_LOG_ERROR("[Vulkan] Failed to create RT Pipeline.");
                 return;
+            }
+            // updateGeometry can run before this lazy pipeline exists. In that
+            // phase point-sphere groups are deliberately omitted so they never
+            // create a huge temporary triangle TLAS. Now that the procedural
+            // hit group and its final SBT offset are known, build the compact
+            // sphere BLAS before the first trace/present.
+            if (!finalizeDeferredProceduralSphereCloud()) {
+                // Optional sphere shaders are missing or failed to initialize.
+                // Rebuild once with the ordinary triangle fallback now that
+                // shouldUseProceduralSpherePath() can make the final choice.
+                rebuildAccelerationStructure();
+                m_testInitialized = true;
+                updateGeometry(m_lastObjects);
             }
         } else {
             SCENE_LOG_INFO("[Vulkan] Skipping RT pipeline creation (not in Rendered mode)");

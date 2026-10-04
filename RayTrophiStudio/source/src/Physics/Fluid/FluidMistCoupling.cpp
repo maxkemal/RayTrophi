@@ -2,6 +2,7 @@
 
 #include "Fluid/FluidParticleLabels.h"
 #include "ParticleSimulation.h"
+#include "Fluid/MatterPhaseGrid.h"
 
 #include <algorithm>
 #include <cmath>
@@ -29,9 +30,7 @@ std::size_t applyMistGasDrag(SimulationGridDomainState& fluid_state,
             continue;
         }
         const Vec3& p = particles.position[i];
-        if (p.x < gas_desc.bounds_min.x || p.y < gas_desc.bounds_min.y ||
-            p.z < gas_desc.bounds_min.z || p.x >= gas_desc.bounds_max.x ||
-            p.y >= gas_desc.bounds_max.y || p.z >= gas_desc.bounds_max.z) {
+        if (!gridContains(gasGrid(gas_state), p)) {
             continue;
         }
 
@@ -44,7 +43,7 @@ std::size_t applyMistGasDrag(SimulationGridDomainState& fluid_state,
         // effectively entrained in one or two 60 Hz steps.
         const float response_seconds = 0.55f * mass;
         const float blend = 1.0f - std::exp(-dt / response_seconds);
-        const Vec3 gas_velocity = gas_state.grid.sampleVelocity(p);
+        const Vec3 gas_velocity = gasGrid(gas_state).sampleVelocity(p);
         particles.velocity[i] +=
             (gas_velocity - particles.velocity[i]) * std::clamp(blend, 0.0f, 1.0f);
         ++carried;

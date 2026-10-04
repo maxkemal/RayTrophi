@@ -13,6 +13,7 @@
 
 #include "Backend/VulkanBackend.h"
 #include "Backend/vulkan_world_data.h"
+#include "Fluid/FluidRenderProxy.h"
 #include "Viewport/RasterInstanceUpload.h"
 #include "VulkanBackend_Internal.h"
 #include "globals.h"
@@ -347,7 +348,9 @@ void VulkanBackendAdapter::setRasterVisibleInstances(RasterMeshBuffer& mesh,
         for (size_t i = start; i < end; ++i) {
             const uint32_t instanceIndex = visibleInstanceIndices[i];
             if (instanceIndex >= m_rasterInstances.size()) continue;
-            matrixToGL(m_rasterInstances[instanceIndex].transform, gpuInstances[i].model);
+            const auto& ri = m_rasterInstances[instanceIndex];
+            matrixToGL(ri.transform, gpuInstances[i].model);
+            gpuInstances[i].model[3] = ri.objectRandom;
         }
     };
     if (visibleInstanceIndices.size() < kParallelMatrixThreshold || numThreads < 2) {
@@ -586,6 +589,7 @@ void VulkanBackendAdapter::uploadRasterInstanceBuffer(RasterMeshBuffer& mesh) {
                     std::memset(gpuInstances[i].model, 0, sizeof(float) * 16);
                 } else {
                     matrixToGL(ri.transform, gpuInstances[i].model);
+                    gpuInstances[i].model[3] = ri.objectRandom;
                 }
             }
             // GPU culling sinirlarini YALNIZ bu mesh'in araligi icin gonder.
@@ -669,7 +673,9 @@ void VulkanBackendAdapter::uploadRasterInstanceBuffer(RasterMeshBuffer& mesh) {
         for (size_t i = start; i < end; ++i) {
             const uint32_t instanceIndex = visibleInstanceIndices[i];
             if (instanceIndex >= m_rasterInstances.size()) continue;
-            matrixToGL(m_rasterInstances[instanceIndex].transform, gpuInstances[i].model);
+            const auto& ri = m_rasterInstances[instanceIndex];
+            matrixToGL(ri.transform, gpuInstances[i].model);
+            gpuInstances[i].model[3] = ri.objectRandom;
         }
     };
     if (visibleInstanceIndices.size() < kParallelMatrixThreshold || numThreads < 2) {
@@ -1173,7 +1179,11 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
             int srcIdx = inst.source_index;
             if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
             if (srcIdx < static_cast<int>(meta.entriesBySrc.size())) {
-                totalValidScatterInstances += meta.entriesBySrc[srcIdx].size();
+                const size_t visualChildren = group.point_sphere_mode
+                    ? std::max<size_t>(1u, group.point_sphere_visual_children)
+                    : 1u;
+                totalValidScatterInstances +=
+                    meta.entriesBySrc[srcIdx].size() * visualChildren;
             }
         }
     }
@@ -1191,24 +1201,51 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
         if (entriesBySrc.empty()) continue;
 
         const size_t count = group.instances.size();
+        const uint32_t visualChildren = group.point_sphere_mode
+            ? std::max<uint32_t>(1u, group.point_sphere_visual_children)
+            : 1u;
         std::vector<RasterInstance> localInstances;
-        localInstances.reserve(count);
+        localInstances.reserve(count * visualChildren);
         const std::string nodePrefix = "_inst_gid" + std::to_string(group.id) + "_";
         for (size_t i = 0; i < count; ++i) {
             const auto& inst = group.instances[i];
             int srcIdx = inst.source_index;
             if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
             if (srcIdx >= static_cast<int>(entriesBySrc.size())) continue;
-            for (const auto& entry : entriesBySrc[srcIdx]) {
-                RasterInstance ri;
-                ri.meshKey = entry.meshKey;
-                ri.nodeName = nodePrefix + std::to_string(i);
-                ri.transform = inst.toMatrix() * entry.sourceToScatter;
-                ri.mask = 0xFF;
-                ri.scatterGroupId = group.id;
-                ri.scatterInstanceIndex = static_cast<uint32_t>(i);
-                ri.scatterSourceTransform = entry.sourceToScatter;
-                localInstances.push_back(std::move(ri));
+            for (uint32_t child = 0; child < visualChildren; ++child) {
+                InstanceTransform visualTransform;
+                if (!RayTrophiSim::Fluid::resolveFluidRenderProxyTransform(
+                        group,
+                        static_cast<uint32_t>(i),
+                        child,
+                        visualTransform)) {
+                    continue;
+                }
+                for (const auto& entry : entriesBySrc[srcIdx]) {
+                    RasterInstance ri;
+                    ri.meshKey = entry.meshKey;
+                    ri.nodeName = nodePrefix + std::to_string(i) +
+                        "_c" + std::to_string(child);
+                    ri.transform = visualTransform.toMatrix() *
+                        entry.sourceToScatter;
+                    const bool zeroScale = inst.scale.x == 0.0f &&
+                        inst.scale.y == 0.0f &&
+                        inst.scale.z == 0.0f;
+                    ri.mask = zeroScale ? 0 : 0xFF;
+                    ri.simPoolSlot = group.transient;
+                    ri.scatterGroupId = group.id;
+                    if (group.point_sphere_mode) {
+                        ri.objectRandom =
+                            RayTrophiSim::Fluid::fluidRenderProxyObjectRandom(
+                                group.id,
+                                static_cast<uint32_t>(i),
+                                child);
+                    }
+                    ri.scatterInstanceIndex = static_cast<uint32_t>(i);
+                    ri.fluidProxyChildIndex = static_cast<uint8_t>(child);
+                    ri.scatterSourceTransform = entry.sourceToScatter;
+                    localInstances.push_back(std::move(ri));
+                }
             }
         }
 
@@ -1356,7 +1393,32 @@ void VulkanBackendAdapter::syncRasterInstanceTransformsImpl(const std::vector<st
                 if (groupIt != scatterGroupsById.end()) {
                     const auto* group = groupIt->second;
                     if (ri.scatterInstanceIndex < group->instances.size()) {
-                        newTransform = group->instances[ri.scatterInstanceIndex].toMatrix() *
+                        const auto& parent =
+                            group->instances[ri.scatterInstanceIndex];
+                        if (ri.simPoolSlot) {
+                            const uint8_t mask =
+                                (parent.scale.x == 0.0f &&
+                                 parent.scale.y == 0.0f &&
+                                 parent.scale.z == 0.0f)
+                                ? 0
+                                : 0xFF;
+                            if (mask != ri.mask) {
+                                ri.mask = mask;
+                                localDirty.insert(ri.meshKey);
+                            }
+                            if (mask == 0) {
+                                continue;
+                            }
+                        }
+                        InstanceTransform visualTransform;
+                        if (!RayTrophiSim::Fluid::resolveFluidRenderProxyTransform(
+                                *group,
+                                ri.scatterInstanceIndex,
+                                ri.fluidProxyChildIndex,
+                                visualTransform)) {
+                            continue;
+                        }
+                        newTransform = visualTransform.toMatrix() *
                             ri.scatterSourceTransform;
                         hasTransform = true;
                     }
@@ -2176,6 +2238,7 @@ void VulkanBackendAdapter::writeRasterInstanceTransformsToGlobal() {
                     std::memset(gpuInstances[i].model, 0, sizeof(float) * 16);
                 } else {
                     matrixToGL(ri.transform, gpuInstances[i].model);
+                    gpuInstances[i].model[3] = ri.objectRandom;
                 }
             }
         };
@@ -2209,4 +2272,3 @@ void VulkanBackendAdapter::writeRasterInstanceTransformsToGlobal() {
 }
 
 } // namespace Backend
-

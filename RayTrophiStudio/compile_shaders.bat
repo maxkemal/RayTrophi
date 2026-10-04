@@ -33,6 +33,9 @@ for %%f in (%SHADER_DIR%\*.comp) do (
 )
 
 REM Compile raster shaders (.vert, .frag, .geom)
+call "%SHADER_DIR%\compile_fluid_window_shaders.bat" "%GLSLC%"
+if errorlevel 1 goto :error
+
 for %%e in (vert frag geom) do (
     for %%f in (%SHADER_DIR%\*.%%e) do (
         echo Compiling: %%~nxf
@@ -74,6 +77,11 @@ for %%e in (rgen rmiss rchit rahit rint) do (
         )
     )
 )
+
+REM Procedural point-sphere hit shader = the full material closest-hit with the SPHERE_HIT variant.
+echo Compiling: sphere_closesthit (closesthit.rchit -DSPHERE_HIT)
+"%GLSLC%" "%SHADER_DIR%\closesthit.rchit" -DSPHERE_HIT=1 -o "%OUTPUT_DIR%\sphere_closesthit.spv" --target-env=vulkan1.3 --target-spv=spv1.4 -O
+if errorlevel 1 goto :error
 
 echo.
 echo ===== All shaders compiled successfully =====

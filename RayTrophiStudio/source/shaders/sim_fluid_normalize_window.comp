@@ -1,0 +1,27 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz; int component;
+    int begin_x; int begin_y; int begin_z;
+    int extent_x; int extent_y; int extent_z;
+} pc;
+
+layout(set = 0, binding = 0) buffer Velocity { float velocity[]; };
+layout(set = 0, binding = 1) readonly buffer Weight { float weight[]; };
+
+void main() {
+    uint local = gl_GlobalInvocationID.x;
+    uint count = uint(pc.extent_x) * uint(pc.extent_y) * uint(pc.extent_z);
+    if (local >= count) {
+        return;
+    }
+    uint i = uint(pc.begin_x) + local % uint(pc.extent_x);
+    uint j = uint(pc.begin_y) + (local / uint(pc.extent_x)) % uint(pc.extent_y);
+    uint k = uint(pc.begin_z) + local / (uint(pc.extent_x) * uint(pc.extent_y));
+    uint stride_x = uint(pc.nx + (pc.component == 0 ? 1 : 0));
+    uint stride_y = uint(pc.ny + (pc.component == 1 ? 1 : 0));
+    uint index = i + stride_x * (j + stride_y * k);
+    float w = weight[index];
+    velocity[index] = w > 1e-8 ? velocity[index] / w : 0.0;
+}

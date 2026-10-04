@@ -3791,6 +3791,12 @@ struct ParticleStateSample {
 
 struct FluidStepStats {
     bool measured = false;
+    uint64_t normalize_window_cells = 0;
+    uint64_t full_grid_cells = 0;
+    bool normalize_window_used = false;
+    uint64_t pressure_window_cells = 0;
+    bool pressure_window_used = false;
+    bool occupancy_on_gpu = false;
     int resolution[3] = {0, 0, 0};
     std::size_t particle_count = 0;
     std::string gpu_status;
@@ -4185,6 +4191,15 @@ struct FluidDomainInfo {
     int   splat_triangles = 0;
     float splat_radius_factor = 0.0f;
     float splat_size_multiplier = 0.0f;
+    int   virtual_grains_requested = 1;
+    int   virtual_grains_effective = 1;
+    int   primary_visual_children = 1;
+    int   whitewater_visual_children = 1;
+    bool  granular_physical_carriers = true;
+    uint64_t virtual_grain_count = 0;
+    uint64_t virtual_grain_budget = 0;
+    uint64_t virtual_grain_rt_estimated_bytes = 0;
+    float grain_size_variation = 0.0f;
     // VolumeFog Gaussian spread (sigma, simulation voxels); 0 = raw splat.
     float fog_spread_voxels = 0.0f;
     // Particle temperature range, Kelvin, over parcels that carry one (> 0).
@@ -4452,11 +4467,17 @@ struct FluidDomainInfo {
 
 // Splat-sphere geometry of a liquid domain. Empty fields keep their value.
 struct FluidSplatGeometryPatch {
-    std::optional<std::string> geometry;         // "icosphere" | "scene_object"
+    std::optional<std::string> geometry;         // icosphere | icosphere_mesh | scene_object
     std::optional<std::string> geometry_source;  // live scene node; "" clears
     std::optional<int>   subdivisions;           // 0..3 (20/80/320/1280 tris)
+    // Procedural granular spheres use max(radius_factor*size_multiplier,
+    // equivalent MPM point-volume radius). Scene-object geometry is unmodified.
     std::optional<float> radius_factor;          // 0.05..1.5, x voxel size
     std::optional<float> size_multiplier;        // 0.05..8
+    std::optional<int> virtual_grains;            // 1..32 per physical carrier
+    std::optional<float> grain_size_variation;   // 0..0.75, volume-normalized
+    std::optional<bool> granular_physical_carriers;
+    std::optional<uint64_t> virtual_grain_budget; // 1M..32M visual spheres
 };
 
 // Volumetric Fog shaping of a liquid domain. Empty fields keep their value.
@@ -5049,7 +5070,9 @@ Result setFluidSurfaceDetail(const std::string& domain_id_or_name,
 // like setFluidSurfaceDetail: subdivision multiplies every splat's triangles
 // by four per level. "scene_object" needs a live scene node, either in this
 // patch or already on the domain; a missing node would silently fall back to
-// the icosphere. Takes effect on the next bridge update, no simulation reset.
+// the icosphere. Procedural granular spheres retain a PPC-derived physical
+// volume floor; larger authored sizes win. Takes effect on the next bridge
+// update, no simulation reset.
 Result setFluidSplatGeometry(const std::string& domain_id_or_name,
                              const FluidSplatGeometryPatch& patch);
 // VolumeFog shaping. Render-side only (the solver density is untouched), so

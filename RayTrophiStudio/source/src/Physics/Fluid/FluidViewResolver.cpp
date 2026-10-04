@@ -6,6 +6,8 @@
 #include "ParticleSimulation.h"
 
 #include <algorithm>
+#include <mutex>
+#include <unordered_map>
 
 namespace RayTrophiSim {
 namespace Fluid {
@@ -203,6 +205,41 @@ std::vector<FluidViewKey> distinctViewKeys(const FluidParticles& particles) {
         if (std::find(keys.begin(), keys.end(), k) == keys.end()) keys.push_back(k);
     }
     return keys;
+}
+
+std::vector<FluidViewKey> cachedDistinctViewKeys(
+    const FluidParticles& particles, uint64_t state_version) {
+    struct CacheEntry {
+        uint64_t version = 0;
+        std::size_t particle_count = 0;
+        const uint32_t* tag_data = nullptr;
+        const uint32_t* flag_data = nullptr;
+        std::vector<FluidViewKey> keys;
+    };
+    static std::mutex cache_mutex;
+    static std::unordered_map<const FluidParticles*, CacheEntry> cache;
+
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    CacheEntry& entry = cache[&particles];
+    const bool valid = entry.version == state_version &&
+        entry.particle_count == particles.position.size() &&
+        entry.tag_data == particles.substance_tag.data() &&
+        entry.flag_data == particles.flags.data();
+    if (!valid) {
+        entry.version = state_version;
+        entry.particle_count = particles.position.size();
+        entry.tag_data = particles.substance_tag.data();
+        entry.flag_data = particles.flags.data();
+        entry.keys = distinctViewKeys(particles);
+    }
+    // Scene reloads can leave old FluidParticles addresses in this process-wide
+    // cache. Keep a generous small ceiling; active scenes use only a few entries.
+    if (cache.size() > 128) {
+        const CacheEntry current = entry;
+        cache.clear();
+        return cache.emplace(&particles, current).first->second.keys;
+    }
+    return entry.keys;
 }
 
 FluidViewPlan resolveFluidViews(const SimulationGridDomainDesc& desc,

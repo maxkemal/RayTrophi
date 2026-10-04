@@ -21,7 +21,9 @@ layout(push_constant) uniform SolidPushConstants {
 } pc;
 
 void main() {
-    mat4 model = mat4(inModelCol0, inModelCol1, inModelCol2, inModelCol3);
+    vec4 modelCol0 = inModelCol0;
+    modelCol0.w = 0.0;
+    mat4 model = mat4(modelCol0, inModelCol1, inModelCol2, inModelCol3);
     vec4 worldPos4 = model * vec4(inPosition, 1.0);
     gl_Position = pc.viewProj * worldPos4;
     vWorldPos = worldPos4.xyz;
