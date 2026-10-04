@@ -27,6 +27,7 @@ layout(location = 5) flat out vec3 vObjectOrigin;
 layout(location = 6) flat out vec3 vWorldToObject0;
 layout(location = 7) flat out vec3 vWorldToObject1;
 layout(location = 8) flat out vec3 vWorldToObject2;
+layout(location = 9) flat out float vObjectRandom;
 
 layout(push_constant) uniform MaterialPreviewPushConstants {
     mat4 viewProj;
@@ -39,7 +40,10 @@ layout(push_constant) uniform MaterialPreviewPushConstants {
 } pc;
 
 void main() {
-    mat4 model = mat4(inModelCol0, inModelCol1, inModelCol2, inModelCol3);
+    vObjectRandom = inModelCol0.w;
+    vec4 modelCol0 = inModelCol0;
+    modelCol0.w = 0.0;
+    mat4 model = mat4(modelCol0, inModelCol1, inModelCol2, inModelCol3);
     vec4 worldPos = model * vec4(inPosition, 1.0);
     gl_Position = pc.viewProj * worldPos;
 

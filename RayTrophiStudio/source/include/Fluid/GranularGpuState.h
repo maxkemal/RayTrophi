@@ -19,7 +19,6 @@ struct GpuBuffers {
     // strength does not track stiffness through the melt (SofteningParams).
     ComputeBufferHandle bond_scale{};
     ComputeBufferHandle hardening{};
-    ComputeBufferHandle material_flags{};
     ComputeBufferHandle stress_diag{};
     ComputeBufferHandle stress_shear{};
     ComputeBufferHandle yield_value{};
@@ -31,11 +30,11 @@ struct GpuBuffers {
     bool valid() const {
         return deformation_col0.valid() && deformation_col1.valid() &&
                deformation_col2.valid() && plastic_volume.valid() &&
-               hardening.valid() && material_flags.valid() &&
+               hardening.valid() &&
                stress_diag.valid() && stress_shear.valid() &&
                yield_value.valid() && plastic_increment.valid() &&
                state_flags.valid() && damage.valid() && fracture_history.valid() &&
-               softening.valid();
+               softening.valid() && bond_scale.valid();
     }
 };
 
@@ -53,8 +52,8 @@ inline void destroy(SimulationComputeContext* compute, GpuBuffers& b) {
     compute->destroyBuffer(b.deformation_col2);
     compute->destroyBuffer(b.plastic_volume);
     compute->destroyBuffer(b.softening);
+    compute->destroyBuffer(b.bond_scale);
     compute->destroyBuffer(b.hardening);
-    compute->destroyBuffer(b.material_flags);
     compute->destroyBuffer(b.stress_diag);
     compute->destroyBuffer(b.stress_shear);
     compute->destroyBuffer(b.yield_value);

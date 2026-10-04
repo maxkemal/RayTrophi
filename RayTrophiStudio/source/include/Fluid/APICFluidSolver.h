@@ -179,6 +179,8 @@ struct APICSolverParams {
     float granular_damage_rate = 6.0f;
     float granular_healing_rate = 0.0f;
     bool  granular_rebonding = false;
+    // Legacy serialized/API field, clamped to 1..64 for compatibility only.
+    // Adaptive subcycling always grants the full CFL request; this cannot lower E.
     int   granular_max_solver_substeps = 32;
 
     // ── Thermal / burn softening ─────────────────────────────────────────────
@@ -520,7 +522,18 @@ struct APICSolverParams {
         // without this, switching Wax -> Water would keep freezing on: water
         // born at 293 K is below wax's 330 K freeze point, and the "water"
         // would set solid on the first surface it touched.
-        if (preset != FluidPreset::Custom) thermal_liquid_enabled = false;
+        if (preset != FluidPreset::Custom) {
+            thermal_liquid_enabled = false;
+            // Clear the granular thermal signature before applying a named
+            // material. Otherwise Molten Plastic -> Sand leaves Sand softening
+            // at 420 K with tack/conductivity still enabled even though the
+            // combo says Sand. Thermal presets below write their own values.
+            granular_softening_temperature = 0.0f;
+            granular_softening_range = 40.0f;
+            granular_residual_strength = 0.05f;
+            granular_tack_peak = 1.0f;
+            granular_thermal_conductivity = 0.0f;
+        }
         switch (preset) {
             case FluidPreset::Water:
                 granular_enabled = false;
@@ -662,12 +675,8 @@ struct APICSolverParams {
             // "TOO SOFT FOR LOAD" row lights up rather than the pile quietly
             // sinking — raise E, or accept a shallower pour.
             //
-            // ★★ granular_max_solver_substeps IS PART OF THE MATERIAL, because
-            // it decides how much of the authored E the solver can deliver
-            // (E_eff = E * (granted/needed)^2). The ceilings below are sized for
-            // roughly 5 cm voxels at 24 fps, the common preview setup; coarser
-            // voxels need fewer. Watch "Granular Young effective" in the panel —
-            // if it sits below requested, this ceiling is the reason.
+            // Legacy substep budgets below survive scene/API round trips.
+            // CFL subcycling now preserves each preset's authored stiffness.
             case FluidPreset::WetSand:
                 granular_enabled = true;
                 // Capillary bridges: wet sand stands steeper than dry and holds
@@ -867,6 +876,11 @@ struct APICSolverStats {
     size_t reseed_removed_particles = 0;
     size_t grid_cell_count = 0;
     size_t active_fluid_cells = 0;
+    uint64_t normalize_window_cells = 0;
+    bool normalize_window_used = false;
+    uint64_t pressure_window_cells = 0;
+    bool pressure_window_used = false;
+    bool occupancy_on_gpu = false;
     size_t recovered_solid_particles = 0;
     size_t granular_yielded_particles = 0;
     size_t granular_detached_particles = 0;
@@ -889,9 +903,7 @@ struct APICSolverStats {
     int granular_required_substeps = 1;
     int granular_solver_substeps = 1;
     bool granular_stiffness_capped = false;
-    // The subcycle answers to two limits; reporting only the total hides which
-    // one asked, and hides the case where NEITHER was granted because
-    // granular_max_solver_substeps clamped the request.
+    // Report both stability limits independently; the solver grants their maximum.
     int granular_wave_substeps = 1;
     int granular_strain_substeps = 1;
     float granular_strain_rate = 0.0f;

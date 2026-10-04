@@ -702,8 +702,28 @@ layout(buffer_reference, scalar) readonly buffer PointinessBuffer    { float p[]
 layout(buffer_reference, scalar) readonly buffer AttribBuffer        { float a[]; };
 layout(buffer_reference, scalar) readonly buffer WaterVertexBuffer   { vec4 w[]; };
 
+#ifdef SPHERE_HIT
+// Procedural point-sphere variant (compiled to sphere_closesthit.spv with
+// -DSPHERE_HIT=1). The whole splat/whitewater cloud is ONE AABB BLAS; the hit
+// attribute is the analytic outward normal from sphere_intersection.rint and
+// the per-sphere material id comes from binding 18. Everything else is this
+// file's full material path, so SSS / bubble / interior depth / volume flags
+// behave exactly as on a triangle sphere.
+hitAttributeEXT vec3 sphereNormal;
+struct FoamSphereGPU {
+    vec4 centerRadius;
+    uint matId;
+    float objectRandom;
+    uint _p1;
+    uint _p2;
+};
+layout(set = 0, binding = 18, scalar) readonly buffer FoamSphereSSBO {
+    FoamSphereGPU foamSpheres[];
+};
+#else
 // Hit attributes (barycentrics)
 hitAttributeEXT vec2 baryCoord;
+#endif
 
 // ============================================================
 // PCG Hash — hızlı, düşük korelasyonlu RNG
@@ -1155,6 +1175,13 @@ void main() {
     // ----------------------------------------------------------
     // 1. Instance & materyal verisi
     // ----------------------------------------------------------
+#ifdef SPHERE_HIT
+    // No instance/geometry record backs the procedural cloud: every per-vertex
+    // channel is absent, which the code below already treats as "not uploaded".
+    VkInstanceData   inst = VkInstanceData(0u, 0u, 0u, 0u);
+    VkGeometryData   geo  = VkGeometryData(0ul, 0ul, 0ul, 0ul, 0ul, 0ul, 0ul, 0ul);
+    uint matIndex = foamSpheres[uint(gl_PrimitiveID)].matId;
+#else
     VkInstanceData   inst = instances.i[gl_InstanceID];
     VkGeometryData   geo  = geometries.g[inst.blasIndex];
     uint matIndex = inst.materialIndex;
@@ -1162,6 +1189,7 @@ void main() {
         MaterialIndexBuffer mi = MaterialIndexBuffer(geo.materialAddr);
         matIndex = mi.m[uint(gl_PrimitiveID)];
     }
+#endif
     Material         mat  = materials.m[matIndex];
 
     // ----------------------------------------------------------
@@ -1197,10 +1225,18 @@ void main() {
         vec3 localFaceNormal = normalize(cross(objV1 - objV0, objV2 - objV0));
         geomNormalRaw = normalize(vec3(localFaceNormal * mat3(gl_WorldToObjectEXT)));
     } else {
+#ifdef SPHERE_HIT
+        geomNormalRaw = normalize(sphereNormal);
+#else
         geomNormalRaw = normalize(vec3(0, 1, 0));  // Fallback
+#endif
     }
 
+#ifdef SPHERE_HIT
+    vec3 bary = vec3(1.0, 0.0, 0.0);
+#else
     vec3 bary = vec3(1.0 - baryCoord.x - baryCoord.y, baryCoord.x, baryCoord.y);
+#endif
 
     if (geo.normalAddr != 0) {
         NormalBuffer nBuf = NormalBuffer(geo.normalAddr);
@@ -1773,7 +1809,16 @@ void main() {
         // Object Info: the instance's world origin, free from the TLAS transform. The CPU
         // fills HitRecord::object_origin from the translation of the very same matrix, so
         // both backends hash identical bits and a scattered rock keeps its color.
+#ifdef SPHERE_HIT
+        // The procedural cloud is one identity-transformed TLAS instance, so
+        // gl_ObjectToWorldEXT[3] is shared by every sphere. Location should be
+        // the actual sphere centre, while Random comes from its stable logical
+        // identity stored in the sphere record.
+        vec3 hitObjOrigin = foamSpheres[uint(gl_PrimitiveID)].centerRadius.xyz;
+        float hitObjRandom = foamSpheres[uint(gl_PrimitiveID)].objectRandom;
+#else
         vec3 hitObjOrigin = gl_ObjectToWorldEXT[3];
+#endif
         // Object-space shading point for the procedural "Object Space" toggle: the BLAS
         // vertices ARE object space, so this is a barycentric blend of values already loaded
         // — no inverse transform. The CPU builds it the same way out of the mesh's P_orig.
@@ -1786,10 +1831,19 @@ void main() {
         // Layer Weight are the only consumers; on a secondary bounce it is that bounce's
         // incoming direction, which is exactly what a path tracer should ask them about.
         vec3 hitView = normalize(-gl_WorldRayDirectionEXT);
-        MatProgOut mp = evalMaterialProgram(mp_procOff, rawUV, hitPos, worldNormal, hitPointiness, hitObjOrigin,
-                                            hitAttribs, hitObjPos, hitView,
-                                            0.0, 0.0, 0.0, 0.0, vec3(0.0), hitPos,
-                                            vec3(0.0), vec3(0.0), 0.0, hitObjPos, cam.waterTime);
+#ifdef SPHERE_HIT
+        MatProgOut mp = evalMaterialProgramWithObjectRandom(
+            mp_procOff, rawUV, hitPos, worldNormal, hitPointiness, hitObjOrigin,
+            hitObjRandom, hitAttribs, hitObjPos, hitView,
+            0.0, 0.0, 0.0, 0.0, vec3(0.0), hitPos,
+            vec3(0.0), vec3(0.0), 0.0, hitObjPos, cam.waterTime);
+#else
+        MatProgOut mp = evalMaterialProgram(
+            mp_procOff, rawUV, hitPos, worldNormal, hitPointiness, hitObjOrigin,
+            hitAttribs, hitObjPos, hitView,
+            0.0, 0.0, 0.0, 0.0, vec3(0.0), hitPos,
+            vec3(0.0), vec3(0.0), 0.0, hitObjPos, cam.waterTime);
+#endif
         mpWritten = mp.written;
         if ((mp.written & MP_SLOT_BASECOLOR)        != 0u) albedo       = max(mp.baseColor, vec3(0.0));
         if ((mp.written & MP_SLOT_ROUGHNESS)        != 0u) roughness    = clamp(mp.roughness, 0.0, 1.0);

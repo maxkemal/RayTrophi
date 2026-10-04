@@ -1,0 +1,224 @@
+{
+  "invalid_request_atomic": true,
+  "distinct_vulkan": {
+    "grids": {
+      "budget_enforced": true,
+      "budget_mb": 1024,
+      "domain": "C3Checkpoint_8482cf40",
+      "estimated_working_bytes": 2816000,
+      "gas": {
+        "bounds_max": [
+          26.0,
+          6.0,
+          26.0
+        ],
+        "bounds_min": [
+          20.0,
+          0.0,
+          20.0
+        ],
+        "budget_clamped": false,
+        "cells": 8000,
+        "inherit": false,
+        "measured": true,
+        "present": true,
+        "requested_bounds_max": [
+          26.0,
+          6.0,
+          26.0
+        ],
+        "requested_bounds_min": [
+          20.0,
+          0.0,
+          20.0
+        ],
+        "requested_voxel": 0.30000001192092896,
+        "resolution": [
+          20,
+          20,
+          20
+        ],
+        "voxel": 0.30000001192092896,
+        "working_bytes": 1024000
+      },
+      "liquid": {
+        "bounds_max": [
+          23.0,
+          2.0,
+          23.0
+        ],
+        "bounds_min": [
+          21.0,
+          0.0,
+          21.0
+        ],
+        "budget_clamped": false,
+        "cells": 8000,
+        "inherit": false,
+        "measured": true,
+        "present": true,
+        "requested_bounds_max": [
+          23.0,
+          2.0,
+          23.0
+        ],
+        "requested_bounds_min": [
+          21.0,
+          0.0,
+          21.0
+        ],
+        "requested_voxel": 0.10000000149011612,
+        "resolution": [
+          20,
+          20,
+          20
+        ],
+        "voxel": 0.10000000149011612,
+        "working_bytes": 1792000
+      },
+      "working_bytes": 2816000
+    },
+    "stats": {
+      "advect_ms": 0.11810000240802765,
+      "batch_end_calls": 16,
+      "batch_end_ms": 1.7818,
+      "density_ms": 0.11500000208616257,
+      "density_on_gpu": true,
+      "dispatch_call_ms": 1.149,
+      "dispatch_calls": 279,
+      "download_bytes": 400296,
+      "download_call_ms": 0.6431999999999999,
+      "download_calls": 25,
+      "full_grid_cells": 8000,
+      "g2p_ms": 0.022299999371170998,
+      "g2p_on_gpu": true,
+      "gpu_status": "GPU on Vulkan Simulation Compute: P2G/pressure(MGPCG)/G2P/density/advect+boundaries. Reseed topology CPU. forces GPU.",
+      "measured": true,
+      "normalize_window_cells": 972,
+      "normalize_window_used": true,
+      "occupancy_on_gpu": true,
+      "ok": true,
+      "p2g_ms": 0.35510000586509705,
+      "p2g_on_gpu": true,
+      "particle_count": 640,
+      "pressure_ms": 1.0946999788284302,
+      "pressure_on_gpu": true,
+      "pressure_window_cells": 972,
+      "pressure_window_used": true,
+      "resolution": [
+        20,
+        20,
+        20
+      ],
+      "synchronize_calls": 4,
+      "synchronize_ms": 0.4183,
+      "total_ms": 30.694700241088867,
+      "upload_bytes": 358336,
+      "upload_call_ms": 0.9844999999999999,
+      "upload_calls": 19
+    },
+    "particles": 640
+  },
+  "cpu_reference": {
+    "centroid": [
+      21.70030883550644,
+      0.7496569080278277,
+      21.699964982271194
+    ],
+    "live": true,
+    "mean_speed": 0.08166825771331787,
+    "ok": true,
+    "particles": 640,
+    "position_hash": "324dc6e2202d1fb6",
+    "velocity_hash": "76b36245e6ef7783",
+    "whitewater_particles": 0,
+    "whitewater_position_hash": "14650fb0739d0383"
+  },
+  "cpu_gpu_parity_passed": true,
+  "cpu_centroid_error_m": 5.960464477539063e-08,
+  "combined_budget": {
+    "budget_enforced": true,
+    "budget_mb": 128,
+    "domain": "C3Checkpoint_8482cf40",
+    "estimated_working_bytes": 101198592,
+    "gas": {
+      "bounds_max": [
+        26.028844833374023,
+        6.028844356536865,
+        26.028844833374023
+      ],
+      "bounds_min": [
+        20.0,
+        0.0,
+        20.0
+      ],
+      "budget_clamped": true,
+      "cells": 287496,
+      "inherit": false,
+      "measured": true,
+      "present": true,
+      "requested_bounds_max": [
+        26.0,
+        6.0,
+        26.0
+      ],
+      "requested_bounds_min": [
+        20.0,
+        0.0,
+        20.0
+      ],
+      "requested_voxel": 0.02500000037252903,
+      "resolution": [
+        66,
+        66,
+        66
+      ],
+      "voxel": 0.0913461297750473,
+      "working_bytes": 36799488
+    },
+    "liquid": {
+      "bounds_max": [
+        23.009614944458008,
+        2.0096147060394287,
+        23.009614944458008
+      ],
+      "bounds_min": [
+        21.0,
+        0.0,
+        21.0
+      ],
+      "budget_clamped": true,
+      "cells": 287496,
+      "inherit": false,
+      "measured": true,
+      "present": true,
+      "requested_bounds_max": [
+        23.0,
+        2.0,
+        23.0
+      ],
+      "requested_bounds_min": [
+        21.0,
+        0.0,
+        21.0
+      ],
+      "requested_voxel": 0.014999999664723873,
+      "resolution": [
+        66,
+        66,
+        66
+      ],
+      "voxel": 0.030448708683252335,
+      "working_bytes": 64399104
+    },
+    "working_bytes": 101198592
+  },
+  "inherit_reset": true,
+  "legacy_absent_phases": [
+    "gas",
+    "fluid"
+  ],
+  "phase_contracts_passed": true,
+  "passed": true,
+  "scratch_removed": true
+}

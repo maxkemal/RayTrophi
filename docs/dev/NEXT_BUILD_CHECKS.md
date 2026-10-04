@@ -1,4 +1,66 @@
-# Sıradaki derlemede kontrol edilecekler
+# Sonraki derleme kontrolleri — prosedürel küre (splat/whitewater) düzeltmeleri
+
+**Granular GPU occupancy (2026-10-02):** Yeni `sim_fluid_occupancy.comp` i?in ?nce
+shader derlemesi/deploy, sonra C++ derlemesi. Bo? ve duraklat?lm?? sahnede d??
+terminalden `python scripts/test/rt_test_granular_stiffness_residency_ipc.py` ?al??t?r.
+Konum geri okumalar? UVW yenileme/kare sonuyla s?n?rl?; GPU maske ve 512 descriptor
+s?n?r?nda g?nderim do?rulanmal?. ?l??m ve fallback kontrol listesi:
+[GRANULAR_GPU_OCCUPANCY.md](GRANULAR_GPU_OCCUPANCY.md). S?re kazanc? hen?z ?l??lmedi.
+
+> **Durum:** CANLI — her partide üzerine yazılır
+
+Önce `compile_shaders.bat` (sphere_closesthit.spv artık `closesthit.rchit -DSPHERE_HIT=1`
+ile üretiliyor; eski `sphere_closesthit.rchit` silindi), sonra C++ derlemesi.
+
+00. **Sim frame cache: dinamik bütçe + afin sadeleştirme (YENİ, en üstte).**
+   `sim_cache.status`: `budget_bytes` artık 4 GiB sabit değil = min(RAM%70, RAM-2GiB) (alt sınır 1 GiB).
+   Kontrol: sayı makinenin RAM'iyle uyuşuyor mu. Yakalama ayrıca boş RAM < 2 GiB iken durur.
+   Parçacık cache'inde ara karelerde APIC `affine` atılıyor: aynı sahnede 251 kare cache'le, `ram_bytes`
+   eskiden 2.74 GB idi (≈10.9 MB/kare) — düşmeli (~%15-30). Bozuksa: scrub'da parçacıklar bozuk görünür
+   ya da scrub sonrası oynatma sıçrar (resume anahtar kareden başlamıyor demektir).
+   + Parçacık kuantizasyonu (ara kareler): konum/hız/uvw 16-bit, düzgün skalerler (kütle, sıcaklık, bayrak,
+   etiket...) tek değere. Aynı sahnede (1M parçacık, 251 kare) `ram_bytes` 24.3 GB idi → ~9-12 GB beklenir.
+   Görsel: ara karede scrub'la, anahtar karedeki (25'in katı) görüntüyle yan yana — fark gözle görünmemeli.
+   Bozuksa: ara karede parçacık "titreşiyor"/gruplar atlıyor = uvw ya da konum aralığı yanlış.
+   ★ Sinsi: `fluid.get` kütle/sıcaklık okumaları ara kareye scrub'ta anahtar kareyle AYNI olmalı
+   (lossless sözleşmesi); farklıysa bir skaler yanlışlıkla kuantize olmuş demektir.
+   + GRANÜLER (991k parçacık sahnesi 17.4 GB/250 kare = 71 MB/kare idi): ara karelerde deformasyon gradyanı, stres,
+   plastik hacim/artış, kırılma geçmişi atılıyor (çözücü-içi; okuyan yok); damage/softening/hardening/yield/bond/
+   flags kayıpsız (üniformsa tek değer). Beklenen ≈ 71 → ~25-35 MB/kare. Bozuksa: ara kareye scrub'ta
+   `granular_damaged/detached` sayıları anahtar kareyle farklı çıkar (okunan alan kayıp). ★ Sinsi: ara kareden
+   oynatınca yığın "yumuşak/akışkan" davranır = ensureGranularStateSize varsayılanı (kimlik deformasyon) ile devam
+   ediyor, anahtar kareden değil — `simLiveVelocityValid` false olmalıydı.
+   ★ Sinsi: ara kareye scrub edip oynatınca sim "makul" ama sıvı yavaş/ağır davranır = affine sıfır kaldı,
+   `simLiveVelocityValid` false olmalıydı. İlk 25 karelik anahtar kareden devam ettiğini doğrula.
+
+0. **A/B ölçüm anahtarı (YENİ).** `fluid.set_splat` (RtApiFluid) `geometry`: `icosphere` = prosedürel küre bulutu,
+   `icosphere_mesh` = eski üçgen ikosfer (panelde de 3. seçenek). Aynı sahnede iki değer arasında
+   geçip kare süresi + VRAM'i karşılaştır; `fluid.get splat_triangles` prosedürelde 0, meshte 20<<2s.
+   Bozuksa: geçişte parçacıklar kayboluyorsa point_sphere_mode bayrağı yapısal değişimi tetiklemiyor
+   (ParticleRenderBridge ~1321). ★ Sinsi: iki mod aynı görünür ama ikisi de aynı yolu çalıştırıyordur —
+   `splat_triangles` ve VRAM farkı yoksa anahtar etkisiz.
+
+1. **Shader derleniyor mu?** `compile_shaders.bat` "sphere_closesthit" satırında OK.
+   Bozuksa: SPHERE_HIT dalındaki `VkGeometryData(...)` yapıcısı veya `foamSpheres`
+   tanımı (closesthit.rchit ~706, ~1175). Hata mesajı satırı yeterli.
+2. **Görünürlük (en hızlı görülen).** Solid'de sim 0. karede → Rendered'a geç: partiküller
+   ilk karede görünmeli. Oynat: 12. kare civarında kaybolma/geri gelme OLMAMALI.
+   Bozuksa: TLAS refit (updateInstanceTransforms, "sphere" bloğu) çalışmıyor ya da
+   `g_vulkan_rebuild_pending` yolu tetikleniyor (log: capacity). ★ Sinsi hâli:
+   partiküller "çoğu zaman" görünür, yalnızca bazı karelerde boş kalır — seyrek
+   atlama da bug'dır.
+3. **RayFusion/Solid ara sıra çizim atlama.** Aynı sim, RayFusion'da 100 kare oynat; atlama
+   olmamalı. Bozuksa ayrı bir neden (raster tarafı: rayFusionExcluded=point_sphere_mode).
+4. **Materyal özellikleri.** Splat materyaline SSS / bubble / interior depth ver, Rendered'da
+   bak: ikon küreyle aynı görünmeli. Bozuksa: matx/binding 24 okuması sphere varyantında
+   farklı davranıyor; ★ sinsi: "düz beyaz/saydam küre" makul görünür ama özellik yok.
+5. **Performans/bellek.** Sim oynarken kare süresi ve VRAM'i önceki (ikosfer) yolla karşılaştır.
+   Bu parti: tarama başına scratch create/destroy kalktı, buffer kapasiteyle ayrılıyor.
+   Hâlâ yüksekse: waitIdle + tek-seferlik komut + fence her karede (aşağıdaki not).
+
+---
+
+## Önceki parti (korunuyor — hâlâ derlenmemiş olabilir)
 
 ## Cihaz özellikleri + AS usage bitleri (2026-10-01) — YAZILDI, DERLENMEDİ
 
@@ -3726,3 +3788,187 @@ ilk ölçümde `total_ms=18,524`. İki eş dört-adım koşusunda count 100.000 
 centroid en büyük farkı yaklaşık `1,04e-10 m`, mean-speed farkı `5,39e-10 m/s`.
 GPU bit hash'i eşit değil; fiziksel fark 1e-6 kabul toleransının çok altında.
 Geçici domain kaldırıldı. Sonraki iş C2 aktif sıvı çalışma penceresi.
+
+
+## Granular authored stiffness and particle residency (2026-10-02)
+
+- Build the application; no shader source changed in this follow-up.
+- Empty, paused disposable scene: `python scripts/test/rt_test_granular_stiffness_residency_ipc.py`.
+  Checks >64 required substeps, legacy budgets 1/32/64, CPU planner, Vulkan
+  closed/open motion/material-coordinate agreement and transfer reduction.
+- Run existing granular CPU/Vulkan parity and soft-stability gates on a
+  disposable scene, and `rt_test_fluid_c1_residency_ipc.py` on an empty scene.
+- Supplied 991666-particle scene: rebuild old cache from an initial/full state;
+  expect 48 needed/run substeps and effective/requested Young ~=381300 Pa.
+  While fresh simulation advances, run externally:
+  `python scripts/test/probe_granular_transfer.py "Grid Domain 1" 15`.
+- Compare total time and bytes, not G2P alone: its execution wait may move to Advect.
+  Check fallback kernels and cache scrub/resume separately. Details:
+  [GRANULAR_SUBSTEP_RESIDENCY.md](GRANULAR_SUBSTEP_RESIDENCY.md).
+- Not run by Codex: project builds, live new-code simulation, shader failure
+  injection and existing scene cache reset. The open scene was not mutated.
+
+## G2 particle sphere volume floor (2026-10-03)
+
+- Uygulamayı derle; bu turda shader kaynağı değişmedi.
+- Başlangıç yoğunluğu kontrolü artık `Seed Particles Per Voxel` olarak görünür.
+  Yalnız `Seed Fluid Now` tarifini değiştirir. Point/Object Bounds/Mesh Surface
+  flow source yoğunluğu `Injected Particles / Sec` ile yazılır; PPC bu kaynakların
+  hızını çarpmaz.
+- `granul_test1.rtp` açıldıktan sonra önce **Sand** presetini yeniden seç. Ardından
+  yalnız istenen override'ları uygula: friction `52.7°`, Young `840500 Pa`.
+  `Custom` etiketi beklenir; cohesion `0`, tensile cutoff `0`, hardening `0`,
+  Poisson `0.25`, dilatancy `5`, fracture strain `0.02`, damage rate `8` kalmalı.
+- Splat Geometry bölümünde mevcut `radius_factor=0.09`, `size_multiplier=2.61`
+  korunabilir. 8 PPC için panel `Effective radius: 0.310 vx (particle volume
+  floor)` göstermeli; eski etkin değer `0.235 vx` idi.
+- Reset + Seed sonrası durgun yığında ve collider çevresinde büyük karanlık iç
+  boşluklar kapanmalı. Taneler bağımsız küre kalmalı; Surface SDF'ye geçmemeli.
+- PPC `4` yapıldığında etkin taban yaklaşık `0.391 vx`, PPC `8` yapıldığında
+  yaklaşık `0.310 vx` olmalı. Daha büyük elle yazılmış küre boyutu aynen kalmalı.
+  Etkin yarıçap canlı çözücünün malzeme-noktası hedefini okumalı; emitter-only
+  domainde kullanılmamış seed slider'ını okumamalı. `Scene Object / Mesh Group`
+  bu fiziksel sphere tabanından etkilenmemeli.
+- Aynı PPC, radius factor ve size multiplier ile Granular anahtarı açılıp
+  kapatıldığında etkin procedural-sphere yarıçapı değişmemeli. Hacim tabanı
+  liquid ve granular particle görünümlerine ortak uygulanır; panel etiketi
+  `particle volume floor` olmalıdır.
+- Malzeme davranışı için cohesion/tensile sayaçları kuru Sand'de sıfır kalmalı;
+  `stiffness_below_load=false` ve effective/requested Young yakın olmalı.
+- Codex derleme veya yeni kodla canlı uygulama doğrulaması çalıştırmadı.
+
+## G3 fluid virtual particle spheres — Vulkan RT + RayFusion (2026-10-03)
+
+- Önce `RayTrophiStudio/compile_shaders.bat` ile
+  `fluid_sphere_proxy.vert -> fluid_sphere_proxy.spv` üret, sonra uygulamayı
+  derle. Codex talimat gereği shader veya proje derlemesi çalıştırmadı.
+- `granul_test1.rtp` içinde Sand presetini yeniden seçip Reset + Seed yap.
+  Solid/Scene (RayFusion) görünümünde her fizik taşıyıcısı panelde istenen sayıda
+  küçük tanecik olarak görünmeli; hareket sırasında çocuk kümeleri taşıyıcıyla
+  kararlı hareket etmeli, titreşen/rastgele yeniden dağılım olmamalı.
+- Çocuk yerleşimi artık her taşıyıcıda eksene hizalı aynı küpü tekrarlamaz.
+  Taşıyıcı/çift kimliğinden türetilen kararlı 3B yönler ve radyal yayılım
+  kullanır. Karşılıklı çiftler küme merkezini taşıyıcının üzerinde tutar.
+- Splat Geometry panelindeki `Virtual Grains per Particle` 1..32 aralığındadır;
+  `Grain Size Variation` 0..0,75 aralığında deterministik çap farkı verir.
+  Karşılıklı çiftlerin küresel hacmi normalize edilir; bu ayarlar solver
+  parçacık sayısı, kütle veya yoğunluğu değiştirmez.
+- Granular domainlerde `Physical Granular Carriers` varsayılan olarak açıktır.
+  Bu modda ana kum gövdesi için `primary_visual_children=1` olmalı ve her
+  görünen sphere gerçek bir MPM taşıyıcısını izlemelidir. Kapalı olduğunda sanal
+  çocuklar düşük çözünürlük boşluk doldurma önizlemesi olarak yeniden kullanılır.
+  Whitewater çocukları bu ana gövde seçiminden bağımsızdır.
+- 298³ canlı sahne için eski binary ölçümü: 191.666 fizik taşıyıcısı, 3 etkin
+  çocuk ve 574.998 görünür sphere. Yeni build'de aynı sahneyi Reset + Reseed
+  ettikten sonra `granular_physical_carriers=true`,
+  `primary_visual_children=1` ve ana gövde görünür sayısı 191.666 olmalı.
+  Sphere'ler taşıyıcı çevresinde üçlü bağlı kümeler oluşturmamalı. Bu kabul
+  gerçek tane-tane yuvarlanma iddiası değildir; MPM taşıyıcılarında orientasyon,
+  açısal hız veya DEM temas çözümü yoktur.
+- Aynı sahnede `granular_young_modulus=200000`, yük için gereken değer 446.058 Pa
+  ve `granular_stiffness_below_load=true` ölçüldü. Görsel A/B ile fizik A/B'yi
+  karıştırma. Yük davranışı testinde önce paneldeki gereken değerin üstüne çıkıp
+  uyarının kapanmasını doğrula; aynı voxel/dt için yaklaşık 500 kPa değeri wave
+  substep sayısını kabaca 80'den 127'ye çıkaracağından toplam süreyi de kaydet.
+- `Virtual Grain Budget (millions)` kullanıcı kontrolündedir ve domain başına
+  1..32 milyon görünür küre aralığını kabul eder. Etkin çocuk sayısı canlı
+  parçacık sayısından değil `Max Particles + Max Foam` kapasitesi ve bu bütçeden
+  hesaplanır; simülasyon ilerlerken 8 -> 7 gibi sessiz topoloji değişimi
+  olmamalıdır.
+- `fluid.get` ve `fluid.list_domains` içindeki `virtual_grains_requested`,
+  `virtual_grains_effective`, `primary_visual_children`,
+  `whitewater_visual_children`, `granular_physical_carriers`,
+  `virtual_grain_count`, `virtual_grain_budget`,
+  `virtual_grain_rt_estimated_bytes` ve `grain_size_variation` panelle aynı
+  kanonik ayar/istatistiği raporlamalı. RT tahmini hızlandırma yapısı scratch
+  belleğini içermez.
+- `viewport.frame_telemetry` içindeki `sphere_impostors_drawn` yaklaşık
+  `virtual_grain_count` olmalı. Canlı parçacık sayısı artarken
+  `virtual_grains_effective` değişmemeli; yalnız kullanıcı çocuk sayısını,
+  bütçeyi veya `Max Particles` kapasitesini değiştirdiğinde yeniden hesaplanmalı.
+- 2026-10-03 ilk canlı okumada 100.000 parçacık için
+  `sphere_impostors_uploaded=100000` ve `sphere_impostors_drawn=100000` görüldü;
+  bu doğrudan GPU proxy yolunun değil CPU ebeveyn fallback'inin çalıştığını
+  gösterir. Kaynak `fluid_sphere_proxy.vert`, mevcut `.spv` ikilisinden daha
+  yeniydi. Shader derlemesinden sonra bu sahnede upload sayısı 100.000 olmamalı,
+  draw sayısı yaklaşık 800.000 olmalı.
+- Rendered/Vulkan RT görünümünde aynı tane yarıçapı ve aynı sekizli yerleşim
+  görünmeli. Tek birleşik procedural-sphere BLAS kullanılmalı; TLAS instance
+  sayısı parçacık veya çocuk sayısıyla büyümemeli.
+- Bu görsel çoğaltma artık yalnız granular presetine bağlı değildir; prosedürel
+  sphere kullanan bütün fluid domainlerinde çalışır. Parçacık hacim tabanı liquid
+  ve granular procedural sphere yollarında ortaktır. Çocuk yayılımı yaklaşık
+  0,72 voxel hedefler. Her çocuk, en çok 1,8 voxel içindeki kararlı yakın taşıyıcı
+  adaylarının uzaklık ve yön ağırlıklı ortalamasına çekilir; aday bulunmazsa
+  deterministik serbest yayılım kullanılır.
+- Spray, foam ve bubble grupları aynı çocuk sayısı, varyasyon, bütçe ve komşuluk
+  sözleşmesini hem Vulkan RT hem RayFusion'da kullanmalıdır. `virtual_grain_count`
+  splat'e yönlenmiş whitewater örneklerini de içermelidir.
+- Bu tur tam hücre hash'i veya APIC grid hızından yeni örnek üretmez. Sonraki
+  kalite aşaması, kararlı örnek kimliğiyle gerçek hücre komşuluk buffer'ını ve
+  grid ağırlıklı hız taşınmasını kullanacaktır.
+- RayFusion sırasında `fluid_positions` için yeni kare başı CPU upload'u
+  oluşmamalı. Granüler `fluid.step_stats` fizik parçacık sayısı, solve transfer
+  byte'ları ve G2P/P2G çağrıları bu görsel çarpandan etkilenmemeli.
+- Splat/Surface/Fog karışık label sahnesinde yanlış parcel görünürse doğrudan
+  pull kabul edilmemiş demektir; CPU filtreli fallback doğru görünümü korumalı.
+- OptiX sonucu bu kabulün parçası değildir. OptiX uygulamasından önce CPU
+  yerleşim referansı ve Vulkan sonuçlarıyla sayısal merkez/radius karşılaştırması
+  eklenecek.
+- Ayar ve istatistik sözleşmesi için açık uygulamada dış terminalden
+  `python scripts/test/rt_test_granular_render_proxy_ipc.py "Grid Domain 1"`
+  çalıştır; test geçersiz aralıkları, get/list read-back'ini ve bütçe sonrası
+  toplam görsel tane hesabını doğrular, önceki ayarları geri yükler.
+- Kum materyalinde `Object Info > Random` çıkışını bir Color Ramp veya Hue
+  zinciri üzerinden Principled Base Color'a bağla. Rendered/Vulkan RT'de her
+  procedural sphere farklı bir değer almalı; taşıyıcı ve sanal çocuklar hareket
+  ederken kendi renkleri kareler arasında değişmemeli.
+- Material Preview/RayFusion'da üçgen-sphere fallback içindeki her taşıyıcı da
+  farklı ve kararlı renk almalı. Normal mesh/scatter nesnelerinin eski dünya
+  origin'i tabanlı Object Random davranışı korunmalı. Renk özelliği sphere
+  kaydını büyütmez; önceden padding olan alanı kullanır ve solver transferlerine
+  yeni buffer veya kare başı upload eklemez.
+- RayFusion üçgen-sphere fallback'i `Virtual Grains per Particle` sayısını RT
+  ile aynı uygulamalı. Çocuk merkezleri/radius değerleri ilk kurulumda ve her
+  transform sync sırasında ortak komşuluk çekirdeğinden çözülmeli; collider
+  teması veya akış sırasında ana taşıyıcıya çökme ve çocuk kaybı olmamalı.
+
+## 2026-10-04 kabul güncellemesi ve sonraki kapsam
+
+**C2b build kullanıcı tarafından başarılı doğrulandı.** Canlı occupancy/basınç
+ölçümü toplu kabulde yapılacak. Yeni kaynak partisi C3a ortak faz erişimi;
+kontrol listesi [MATTER_PHASE_GRID.md](MATTER_PHASE_GRID.md).
+
+**Güncel toplu build: C3b + splat taşıma düzeltmesi.** Bağımsız gaz/sıvı
+bounds/voxel, ortak UI/Python/IPC authoring, phase budget/allocation,
+serializer/cache ve karma preset göçü kaynakta tamamlandı. Tek derleme sonrası
+Matter phase probe, pause/taşıma, cache/scrub, save/load ve iki karma preset
+aynı kabul turunda kontrol edilecek. C3b C++/canlı kabul henüz yapılmadı.
+
+**C2b occupancy + basınç penceresi kabulü.** Kaynak kod hazır;
+kullanıcı test aralıklarını uzatmamızı istedi. Yeni 17 `_window.spv` varyantı
+ana shader batch'ine bağlı. Ayrı ayrı mikro kabul yerine
+`FLUID_ACTIVE_WINDOW.md` C2b checklist'ini tek partide çalıştır. Yeni alanlar:
+`occupancy_on_gpu`, `pressure_window_used`, `pressure_window_cells`.
+Önceki C2a canlı PASS bu yeni binary için kabul sayılmaz.
+
+Sonraki kod partisi artık kaynakta: **C2a Vulkan P2G normalize penceresi**.
+2026-10-04: kullanıcı derledi; dış IPC canlı matris PASS. Yerel geçici sıvıda
+1.200/34.848 hücre, periodic fallback'te pencere kapalı; geçici domain kaldırıldı.
+Probe varsayılan domain/hata kontrolü düzeltildi ve Release kopyası güncellendi.
+Sayısal eski-build A/B ve C2'nin occupancy/MGPCG kısmı hâlâ açık.
+Yeni `sim_fluid_normalize_window.comp` shader'ını ve uygulamayı kullanıcı
+derlemeli. Önceki kabul bu yeni partiyi kapsamaz. Kesin checklist:
+[FLUID_ACTIVE_WINDOW.md](FLUID_ACTIVE_WINDOW.md). Clear/occupancy/MGPCG henüz
+daraltılmadı; C2 açık kalır.
+
+Kullanıcı önceki değişiklikleri derlediğini ve sorunsuz çalıştığını bildirdi.
+Önceki partilerdeki derleme bekliyor ifadeleri tarihsel kayıttır. Bu bildirim
+sayısal korunum/performans, kolon/repose veya frame-cache resume testlerini
+kendiliğinden PASS yapmaz; bu ölçümler ayrı kabul kaydı olarak açık kalır.
+
+İlk plan güncellemesi yalnız belgeleri değiştirmişti; devamında C2a kodu eklendi
+ve yukarıdaki yeni shader/C++ derlemesi gerekli oldu. C4 ortak transfer ve
+contact sonrasında H1 hibrit yüzey taneleri uygulanır. Kimlik, tek fizik sahibi,
+çift impuls ve açısal momentum geçiş kapıları ana planın
+`C4–H1 veri ve momentum sözleşmesi (2026-10-04)` bölümünde tanımlıdır.

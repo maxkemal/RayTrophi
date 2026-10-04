@@ -190,10 +190,17 @@ struct InstanceGroup {
     // partitions the instances by source_index (foam type) and builds ONE
     // analytic sphere GAS per source — the whole set is 3 TLAS instances, not N.
     // instances[i].position = sphere centre (world), scale.x*0.5 = radius,
-    // source_index = which source/material (sphere GAS) it belongs to. Other
-    // backends (Vulkan / CPU) ignore this flag and keep the InstanceTransform
-    // path, so foam still renders there via the icosphere primitive.
+    // source_index = which source/material (sphere GAS) it belongs to. Vulkan
+    // consumes the same groups through one combined procedural-sphere BLAS;
+    // the CPU reference keeps the InstanceTransform path.
     bool point_sphere_mode = false;
+    // Render refinement shared by Vulkan RT and RayFusion. One physical carrier
+    // remains one solver particle; procedural sphere paths derive this many
+    // volume-preserving visual children. OptiX keeps the parent sphere until its
+    // CPU reference path is introduced.
+    uint8_t point_sphere_visual_children = 1;
+    float point_sphere_visual_size_variation = 0.0f;
+    float point_sphere_visual_spread_radius = 0.0f;
 
     // Targeting: allow scattering on TERRAIN (default) or on a specific MESH node
     enum class TargetType {

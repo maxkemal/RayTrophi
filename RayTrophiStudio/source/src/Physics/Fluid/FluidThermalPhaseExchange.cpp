@@ -5,6 +5,7 @@
 #include "MaterialStateField.h"
 #include "MatterExchangeLedger.h"
 #include "ParticleSimulation.h"
+#include "Fluid/MatterPhaseGrid.h"
 
 #include <algorithm>
 #include <cmath>
@@ -49,7 +50,7 @@ FluidThermalPhaseExchangeStats updateThermalFreezeAndRecord(
     const std::size_t count = particles.size();
 
     ensureFluidParticleRestMasses(
-        particles, params.chemistry_preset, state.voxel_size,
+        particles, params.chemistry_preset, liquidGrid(state).voxel_size,
         params.particles_per_cell);
 
     std::vector<uint8_t> was_frozen(count, 0u);
@@ -61,7 +62,7 @@ FluidThermalPhaseExchangeStats updateThermalFreezeAndRecord(
         }
     }
 
-    updateThermalFreeze(particles, state.grid, params, state.thermal_stats);
+    updateThermalFreeze(particles, liquidGrid(state), params, state.thermal_stats);
 
     std::map<PhaseKey, PhaseAccumulation> exchanges;
     for (std::size_t particle = 0; particle < count; ++particle) {

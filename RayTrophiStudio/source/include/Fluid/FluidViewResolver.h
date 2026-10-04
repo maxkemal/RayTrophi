@@ -153,6 +153,11 @@ FluidView defaultViewForMode(FluidRenderMode mode);
 // Distinct (tag, label) pairs present in `particles`. Parcels past the end of
 // the tag array count as untagged, exactly as the gathers treat them.
 std::vector<FluidViewKey> distinctViewKeys(const FluidParticles& particles);
+// Versioned form for per-frame consumers. SimulationGridDomainState::version
+// changes whenever particle state changes, so render/UI/API callers can share
+// one O(N) scan instead of independently walking a million-particle SoA.
+std::vector<FluidViewKey> cachedDistinctViewKeys(
+    const FluidParticles& particles, uint64_t state_version);
 
 FluidViewPlan resolveFluidViews(const SimulationGridDomainDesc& desc,
                                 const std::vector<FluidViewKey>& live_keys);

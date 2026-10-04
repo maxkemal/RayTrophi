@@ -10,6 +10,7 @@
 // pair is the layering case VULKAN_GAS_FLUID_LAYERING.md already validates.
 
 #include "scene_data.h"
+#include "Fluid/MatterPhaseGrid.h"
 
 #include "globals.h"
 #include "Fluid/FluidFogDensity.h"
@@ -66,7 +67,9 @@ void SceneData::syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
         return;
     }
 
-    const auto& grid = state.grid;
+    const auto& grid = matter_gas
+        ? RayTrophiSim::Fluid::gasGrid(state)
+        : RayTrophiSim::Fluid::liquidGrid(state);
     const std::size_t cells = static_cast<std::size_t>(grid.getCellCount());
     auto hide = [&]() {
         // Keep the slot and its id; an invisible volume leaves the packet

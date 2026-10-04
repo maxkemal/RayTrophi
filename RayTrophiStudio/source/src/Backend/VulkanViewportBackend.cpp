@@ -6,6 +6,7 @@
 #include "HittableInstance.h"
 #include "HittableList.h"
 #include "InstanceManager.h"
+#include "Fluid/FluidRenderProxy.h"
 #include "ParallelBVHNode.h"
 #include "Texture.h"
 #include "TerrainSemanticMap.h"
@@ -3792,6 +3793,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
             float model[16];
         } identityGpu{};
         matrixToGL(Matrix4x4::identity(), identityGpu.model);
+        identityGpu.model[3] = -1.0f;
         VulkanRT::BufferCreateInfo ici{};
         ici.size = sizeof(identityGpu);
         ici.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
@@ -7464,6 +7466,9 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         // particle born into an existing slot never reached raster until a
         // structural rebuild -- which the generation gate then skipped.
         const bool keepAllSlots = group.transient;
+        const size_t visualChildren = group.point_sphere_mode
+            ? std::max<size_t>(1u, group.point_sphere_visual_children)
+            : 1u;
         for (const auto& inst : group.instances) {
             if (!keepAllSlots &&
                 inst.scale.x == 0.0f &&
@@ -7474,7 +7479,8 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
             int srcIdx = inst.source_index;
             if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
             if (srcIdx < static_cast<int>(meta.entriesBySrc.size()))
-                totalValidScatterInstances += meta.entriesBySrc[srcIdx].size();
+                totalValidScatterInstances +=
+                    meta.entriesBySrc[srcIdx].size() * visualChildren;
         }
     }
 
@@ -7493,6 +7499,9 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
 
         const size_t count = group.instances.size();
         const bool keepAllSlots = group.transient;
+        const uint32_t visualChildren = group.point_sphere_mode
+            ? std::max<uint32_t>(1u, group.point_sphere_visual_children)
+            : 1u;
         std::vector<size_t> offsets(count + 1, 0);
         for (size_t i = 0; i < count; ++i) {
             if (!keepAllSlots &&
@@ -7505,11 +7514,14 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
             int srcIdx = group.instances[i].source_index;
             if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
             offsets[i + 1] = offsets[i] +
-                (srcIdx < static_cast<int>(entriesBySrc.size()) ? entriesBySrc[srcIdx].size() : 0);
+                (srcIdx < static_cast<int>(entriesBySrc.size())
+                    ? entriesBySrc[srcIdx].size() * visualChildren
+                    : 0);
         }
         std::vector<RasterInstance> localInstances(offsets.back());
 
-        auto fillRange = [&group, &entriesBySrc, &offsets, &localInstances, keepAllSlots](size_t start, size_t end) {
+        auto fillRange = [&group, &entriesBySrc, &offsets, &localInstances,
+                          keepAllSlots, visualChildren](size_t start, size_t end) {
             const std::string nodePrefix = "_inst_gid" + std::to_string(group.id) + "_";
             for (size_t i = start; i < end; ++i) {
                 const auto& inst = group.instances[i];
@@ -7524,18 +7536,42 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                 if (srcIdx >= static_cast<int>(entriesBySrc.size())) {
                     continue;  // invalid src — leave default-constructed (meshKey stays empty)
                 }
-                for (size_t part = 0; part < entriesBySrc[srcIdx].size(); ++part) {
-                    const auto& entry = entriesBySrc[srcIdx][part];
-                    auto& ri = localInstances[offsets[i] + part];
-                    ri.meshKey = entry.meshKey;
-                    ri.nodeName = nodePrefix + std::to_string(i);
-                    ri.transform = inst.toMatrix() * entry.sourceToScatter;
-                    ri.mask = zeroScale ? 0 : 0xFF;
-                    ri.simPoolSlot = keepAllSlots;
-                    ri.scatterGroupId = group.id;
-                    ri.rayFusionExcluded = group.rendered_rt_excluded;
-                    ri.scatterInstanceIndex = static_cast<uint32_t>(i);
-                    ri.scatterSourceTransform = entry.sourceToScatter;
+                for (uint32_t child = 0; child < visualChildren; ++child) {
+                    InstanceTransform visualTransform;
+                    if (!RayTrophiSim::Fluid::resolveFluidRenderProxyTransform(
+                            group,
+                            static_cast<uint32_t>(i),
+                            child,
+                            visualTransform)) {
+                        continue;
+                    }
+                    for (size_t part = 0;
+                         part < entriesBySrc[srcIdx].size();
+                         ++part) {
+                        const auto& entry = entriesBySrc[srcIdx][part];
+                        const size_t localIndex = offsets[i] +
+                            child * entriesBySrc[srcIdx].size() + part;
+                        auto& ri = localInstances[localIndex];
+                        ri.meshKey = entry.meshKey;
+                        ri.nodeName = nodePrefix + std::to_string(i) +
+                            "_c" + std::to_string(child);
+                        ri.transform = visualTransform.toMatrix() *
+                            entry.sourceToScatter;
+                        ri.mask = zeroScale ? 0 : 0xFF;
+                        ri.simPoolSlot = keepAllSlots;
+                        ri.scatterGroupId = group.id;
+                        if (group.point_sphere_mode) {
+                            ri.objectRandom =
+                                RayTrophiSim::Fluid::fluidRenderProxyObjectRandom(
+                                    group.id,
+                                    static_cast<uint32_t>(i),
+                                    child);
+                        }
+                        ri.rayFusionExcluded = group.rendered_rt_excluded;
+                        ri.scatterInstanceIndex = static_cast<uint32_t>(i);
+                        ri.fluidProxyChildIndex = static_cast<uint8_t>(child);
+                        ri.scatterSourceTransform = entry.sourceToScatter;
+                    }
                 }
             }
         };
@@ -7730,10 +7766,19 @@ void VulkanViewportBackend::syncRasterInstanceTransforms(
                             // the same live count: 49 -> 91 ms).
                             if (mask == 0) continue;
                         }
+                        InstanceTransform visualTransform;
+                        if (!RayTrophiSim::Fluid::resolveFluidRenderProxyTransform(
+                                *group,
+                                ri.scatterInstanceIndex,
+                                ri.fluidProxyChildIndex,
+                                visualTransform)) {
+                            continue;
+                        }
                         // Same composition as buildRasterGeometry. Dropping the
                         // source factor moved flat-source scatter by its
                         // recentering offset on the first transform sync.
-                        newTransform = inst.toMatrix() * ri.scatterSourceTransform;
+                        newTransform = visualTransform.toMatrix() *
+                            ri.scatterSourceTransform;
                         hasTransform = true;
                     }
                 }

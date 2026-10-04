@@ -23,7 +23,7 @@ hitAttributeEXT vec3 sphereNormal;   // world-space outward normal at the hit
 struct FoamSphereGPU {
     vec4 centerRadius;   // xyz = centre (world space), w = radius
     uint matId;          // foam material index (Spray / Foam / Bubble)
-    uint _p0;
+    float objectRandom;  // stable logical-sphere value for Object Info -> Random
     uint _p1;
     uint _p2;
 };

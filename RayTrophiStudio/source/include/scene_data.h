@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -10,6 +10,7 @@
 */
 #pragma once
 #include <HittableList.h>
+#include "Fluid/MatterPhaseConfig.h"
 #include "Animation/AnimationData.h"
 #include "AnimationController.h"
 #include "Animation/GeometryCache.h"
@@ -66,6 +67,7 @@ inline std::atomic<int> g_active_sdf_bakes{0};
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <type_traits>
 #include <limits>
 #include <iterator>
 #include <utility>
@@ -96,6 +98,13 @@ namespace OzzRuntime {
  * - cameras/lights: Scene lighting and viewpoints
  * - importedModelContexts: Keeps AssimpLoaders alive for animation
  */
+// Machine-dependent RAM policy for the timeline scrub cache; defined in
+// scene_ui.cpp beside the other Win32 memory query.
+// Ceiling = min(70% of physical RAM, physical RAM - 2 GiB), never below 1 GiB.
+std::size_t simFrameCacheBudgetFromHardware();
+// Physical RAM the OS reports as free right now (0 if the query fails).
+std::uint64_t queryAvailablePhysicalRamBytes();
+
 struct SceneData {
     RigAuthoring::ViewState rigView;
     SceneData() {
@@ -1539,9 +1548,7 @@ struct SceneData {
                     for (const auto& gd : sys.runtime->gridDomainStates()) {
                         if (!RayTrophiSim::simulationDomainHasLiquid(gd.type) || !gd.valid) continue;
                         const auto& liquid_grid =
-                            gd.type == RayTrophiSim::SimulationDomainType::Matter
-                                ? gd.matter_liquid_grid
-                                : gd.grid;
+                            RayTrophiSim::Fluid::liquidGrid(gd);
                         build_for(gd.particles, liquid_grid, kDomainLevelSet);
                     }
                 }
@@ -2217,8 +2224,26 @@ struct SceneData {
         // nothing and cost 22% of every frame.
         bool has_velocity = false;
         RayTrophiSim::SimFrameCompress::Field vel_x, vel_y, vel_z;
+        // Non-keyframe fluid particles: positions/velocity/uvw quantized, uniform
+        // scalars collapsed. Keyframes (has_velocity) keep exact arrays.
+        RayTrophiSim::SimFrameCompress::QuantVec3 q_position, q_velocity, q_uvw, q_uvw_b;
+        RayTrophiSim::SimFrameCompress::ConstScalar<float> k_mass_fraction, k_rest_mass,
+            k_temperature, k_combustible;
+        RayTrophiSim::SimFrameCompress::ConstScalar<uint32_t> k_flags, k_tag;
+        RayTrophiSim::SimFrameCompress::ConstScalar<uint8_t> k_model;
+        // Granular (MPM) state on non-keyframes. Solver-internal tensors that no
+        // renderer or readback consumes (deformation gradient, stress, plastic
+        // volume/increment, fracture history) are dropped and restored as the
+        // solver's own defaults; a resume always starts from a keyframe. The
+        // arrays that ARE read back (damage, softening, hardening, yield, bond,
+        // material flags) stay exact, collapsing only when uniform.
+        bool granular_dropped = false;
+        RayTrophiSim::SimFrameCompress::ConstScalar<float> k_g_softening, k_g_bond,
+            k_g_hardening, k_g_yield, k_g_damage;
+        RayTrophiSim::SimFrameCompress::ConstScalar<uint32_t> k_g_flags;
         std::size_t bytes() const {
-            return sizeof(CachedGridDomain) +
+            return q_position.bytes() + q_velocity.bytes() + q_uvw.bytes() + q_uvw_b.bytes() +
+                   sizeof(CachedGridDomain) +
                    RayTrophiSim::SimFrameCacheMemory::metaAllocationBytes(meta) +
                    density.bytes() + temperature.bytes() +
                    fuel.bytes() + interaction.bytes() +
@@ -2373,10 +2398,12 @@ struct SceneData {
     }
 
     static constexpr int kMaxCachedSimFrames = 600;
-    // Byte ceiling for the compressed grid scrub cache. With tile-sparse halves
-    // a 160x248x160 plume frame lands near 5 MiB, so this is on the order of a
-    // thousand frames — the frame cap above stays as the secondary guard.
-    static constexpr std::size_t kSimFrameCacheBudgetBytes = 4ull * 1024ull * 1024ull * 1024ull;
+    // The byte ceiling is derived from the machine (see
+    // simFrameCacheBudgetFromHardware), not a fixed 4 GiB: a fixed number is
+    // either wasted on a 64 GB workstation or reckless on an 8 GB laptop. The
+    // frame cap above stays as the secondary guard. Capture additionally stops
+    // when the OS has less than this much RAM free, whatever the ceiling says.
+    static constexpr std::uint64_t kSimCacheFreeRamHeadroomBytes = 2ull * 1024ull * 1024ull * 1024ull;
     // Store MAC velocity on every Nth cached frame only. See CachedGridDomain.
     static constexpr int kSimCacheVelocityKeyframeStride = 25;
 
@@ -2396,6 +2423,48 @@ struct SceneData {
             SFC::compress(st.grid.fuel,        nx, ny, nz, c.fuel);
             SFC::compress(st.grid.interaction, nx, ny, nz, c.interaction);
             c.has_velocity = with_velocity;
+            if (!with_velocity) {
+                // APIC affine matrices (36 B/particle) only matter to the solver,
+                // and a resume always starts from a velocity keyframe, so
+                // in-between frames drop them. Rendering and the mass/thermal
+                // readbacks never touch this field.
+                std::vector<RayTrophiSim::Fluid::AffineC>().swap(c.meta.particles.affine);
+                auto& pt = c.meta.particles;
+                auto packVec = [&](auto& vec, SFC::QuantVec3& q) {
+                    if (SFC::quantizeVec3(vec, q)) {
+                        std::remove_reference_t<decltype(vec)>().swap(vec);
+                    }
+                };
+                packVec(pt.position, c.q_position);
+                packVec(pt.velocity, c.q_velocity);
+                packVec(pt.uvw, c.q_uvw);
+                packVec(pt.uvw_b, c.q_uvw_b);
+                SFC::collapseIfUniform(pt.mass_fraction, c.k_mass_fraction);
+                SFC::collapseIfUniform(pt.rest_mass_kg, c.k_rest_mass);
+                SFC::collapseIfUniform(pt.temperature, c.k_temperature);
+                SFC::collapseIfUniform(pt.combustible_fraction, c.k_combustible);
+                SFC::collapseIfUniform(pt.flags, c.k_flags);
+                SFC::collapseIfUniform(pt.substance_tag, c.k_tag);
+                SFC::collapseIfUniform(pt.constitutive_model, c.k_model);
+                if (!pt.granular_deformation_col0.empty()) {
+                    c.granular_dropped = true;
+                    auto drop = [](auto& v) { std::remove_reference_t<decltype(v)>().swap(v); };
+                    drop(pt.granular_deformation_col0);
+                    drop(pt.granular_deformation_col1);
+                    drop(pt.granular_deformation_col2);
+                    drop(pt.granular_stress_diag);
+                    drop(pt.granular_stress_shear);
+                    drop(pt.granular_plastic_volume);
+                    drop(pt.granular_plastic_increment);
+                    drop(pt.granular_fracture_history);
+                    SFC::collapseIfUniform(pt.granular_softening, c.k_g_softening);
+                    SFC::collapseIfUniform(pt.granular_bond_scale, c.k_g_bond);
+                    SFC::collapseIfUniform(pt.granular_hardening, c.k_g_hardening);
+                    SFC::collapseIfUniform(pt.granular_yield_value, c.k_g_yield);
+                    SFC::collapseIfUniform(pt.granular_damage, c.k_g_damage);
+                    SFC::collapseIfUniform(pt.granular_material_flags, c.k_g_flags);
+                }
+            }
             if (with_velocity) {
                 // ★ MAC faces: each component is one wider on its own axis.
                 // Passing the cell dims here would silently truncate a face
@@ -2447,6 +2516,34 @@ struct SceneData {
                 SFC::zeroFill(st.grid.vel_x, static_cast<std::size_t>(nx + 1) * ny * nz);
                 SFC::zeroFill(st.grid.vel_y, static_cast<std::size_t>(nx) * (ny + 1) * nz);
                 SFC::zeroFill(st.grid.vel_z, static_cast<std::size_t>(nx) * ny * (nz + 1));
+            }
+            if (c.q_position.active()) SFC::dequantizeVec3(c.q_position, st.particles.position);
+            if (c.q_velocity.active()) SFC::dequantizeVec3(c.q_velocity, st.particles.velocity);
+            if (c.q_uvw.active())      SFC::dequantizeVec3(c.q_uvw, st.particles.uvw);
+            if (c.q_uvw_b.active())    SFC::dequantizeVec3(c.q_uvw_b, st.particles.uvw_b);
+            SFC::expandUniform(c.k_mass_fraction, st.particles.mass_fraction);
+            SFC::expandUniform(c.k_rest_mass, st.particles.rest_mass_kg);
+            SFC::expandUniform(c.k_temperature, st.particles.temperature);
+            SFC::expandUniform(c.k_combustible, st.particles.combustible_fraction);
+            SFC::expandUniform(c.k_flags, st.particles.flags);
+            SFC::expandUniform(c.k_tag, st.particles.substance_tag);
+            SFC::expandUniform(c.k_model, st.particles.constitutive_model);
+            if (c.granular_dropped) {
+                SFC::expandUniform(c.k_g_softening, st.particles.granular_softening);
+                SFC::expandUniform(c.k_g_bond, st.particles.granular_bond_scale);
+                SFC::expandUniform(c.k_g_hardening, st.particles.granular_hardening);
+                SFC::expandUniform(c.k_g_yield, st.particles.granular_yield_value);
+                SFC::expandUniform(c.k_g_damage, st.particles.granular_damage);
+                SFC::expandUniform(c.k_g_flags, st.particles.granular_material_flags);
+                // Fills only the arrays that were dropped (sized-to-n defaults:
+                // identity deformation, zero stress); present ones are kept.
+                st.particles.ensureGranularStateSize();
+            }
+            // Non-keyframes dropped the affine matrices; hand the solver a
+            // correctly SIZED zero array (zero = plain PIC), never a short one.
+            if (!c.has_velocity && st.particles.affine.size() != st.particles.position.size()) {
+                st.particles.affine.assign(st.particles.position.size(),
+                                           RayTrophiSim::Fluid::AffineC());
             }
             // Pressure and divergence are never cached; the solver rebuilds both.
             if (cells > 0u) {
@@ -2628,6 +2725,9 @@ struct SceneData {
                 // must tear its contribution down or the two paths fight.
                 const bool is_fluid_domain =
                     RayTrophiSim::simulationDomainHasLiquid(state.type);
+                const auto& render_grid = is_fluid_domain
+                    ? RayTrophiSim::Fluid::liquidGrid(state)
+                    : RayTrophiSim::Fluid::gasGrid(state);
                 RayTrophiSim::Fluid::FluidRenderMode fluid_mode =
                     (is_fluid_domain && d < domains.size())
                         ? domains[d].fluid_render_mode
@@ -2667,7 +2767,8 @@ struct SceneData {
                 if (is_fluid_domain && d < domains.size()) {
                     view_plan = RayTrophiSim::Fluid::resolveFluidViews(
                         domains[d],
-                        RayTrophiSim::Fluid::distinctViewKeys(state.particles));
+                        RayTrophiSim::Fluid::cachedDistinctViewKeys(
+                            state.particles, state.version));
                     // A Matter domain uses the secondary volume slot for its
                     // gas grid while the primary slot remains the liquid
                     // surface. The fog publisher recognizes Matter and reads
@@ -2692,7 +2793,7 @@ struct SceneData {
 
                 const bool renderable =
                     domain_render_enabled && system.visible && state.valid &&
-                    state.grid.nx > 0 && !fluid_skip_volume &&
+                    render_grid.nx > 0 && !fluid_skip_volume &&
                     // Volume mode needs density splatted; SurfaceSDF rebuilds
                     // its own density-proxy from particles, so it only needs
                     // particles to be present.
@@ -2718,18 +2819,18 @@ struct SceneData {
                     " sys_visible=" + (system.visible ? "1" : "0") +
                     " valid=" + (state.valid ? "1" : "0") +
                     " has_density=" + (has_density ? "1" : "0") +
-                    " res=" + std::to_string(state.grid.nx) + "x" +
-                        std::to_string(state.grid.ny) + "x" + std::to_string(state.grid.nz) +
+                    " res=" + std::to_string(render_grid.nx) + "x" +
+                        std::to_string(render_grid.ny) + "x" + std::to_string(render_grid.nz) +
                     // ★ Geometry of the domain itself. The black-band repro is
                     // decided at domain CREATION (a solid inside it at that
                     // moment triggers it; deleting the solid afterwards does
                     // not cure it), so the first thing to compare between a
                     // triggering and a clean run is whether the domain box came
                     // out the same size and in the same place at all.
-                    " voxel=" + std::to_string(state.grid.voxel_size) +
-                    " origin=(" + std::to_string(state.grid.origin.x) + "," +
-                        std::to_string(state.grid.origin.y) + "," +
-                        std::to_string(state.grid.origin.z) + ")" +
+                    " voxel=" + std::to_string(render_grid.voxel_size) +
+                    " origin=(" + std::to_string(render_grid.origin.x) + "," +
+                        std::to_string(render_grid.origin.y) + "," +
+                        std::to_string(render_grid.origin.z) + ")" +
                     " particles=" + std::to_string(state.particles.size()) +
                     " active_cells=" + std::to_string(state.active_density_cells));
 
@@ -2938,13 +3039,13 @@ struct SceneData {
                     const auto& lsp = domains[d].fluid_level_set_params;
                     uint64_t sdf_sig = 1469598103934665603ull;
                     sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(state.particles.size()));
-                    sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(state.grid.nx));
-                    sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(state.grid.ny));
-                    sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(state.grid.nz));
-                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(state.grid.voxel_size));
-                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(state.grid.origin.x));
-                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(state.grid.origin.y));
-                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(state.grid.origin.z));
+                    sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(render_grid.nx));
+                    sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(render_grid.ny));
+                    sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(render_grid.nz));
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(render_grid.voxel_size));
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(render_grid.origin.x));
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(render_grid.origin.y));
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(render_grid.origin.z));
                     sdf_sig = hash_combine_local(sdf_sig, quantize_local(domains[d].fluid_surface_band_voxels));
                     sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.kernel_radius_voxels));
                     sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.particle_radius_voxels));
@@ -3035,7 +3136,7 @@ struct SceneData {
                         const RayTrophiSim::Fluid::FluidViewSelection surface_selection{
                             &view_plan, RayTrophiSim::Fluid::FluidView::Surface};
                         RayTrophiSim::Fluid::buildLevelSet(
-                            state.particles, state.grid,
+                            state.particles, render_grid,
                             lsp, sdf_buf, &sdf_stats, &surface_selection);
                         if (d < system.domain_sdf_signatures.size()) {
                             system.domain_sdf_signatures[d] = sdf_sig;
@@ -3050,7 +3151,7 @@ struct SceneData {
                         if (d < system.domain_uvw_buffers.size()) {
                             uvw_rebuilt =
                                 RayTrophiSim::Fluid::buildMaterialCoordinateGrid(
-                                    state.particles, state.grid, lsp,
+                                    state.particles, render_grid, lsp,
                                     system.domain_uvw_buffers[d],
                                     &surface_selection);
                         }
@@ -3075,7 +3176,7 @@ struct SceneData {
                             }
                             composition_rebuilt =
                                 RayTrophiSim::Fluid::buildCompositionGrid(
-                                    state.particles, state.grid, lsp,
+                                    state.particles, render_grid, lsp,
                                     entries, entry_count,
                                     domains[d].fluid_surface_material_id,
                                     system.domain_composition_buffers[d],
@@ -3123,7 +3224,7 @@ struct SceneData {
                         // flowing sheets AND thick accumulated pools.
                         const float grad_width =
                             std::max(1.0f, domains[d].fluid_surface_band_voxels)
-                            * state.grid.voxel_size;
+                            * render_grid.voxel_size;
                         const float inv_w = 0.5f / grad_width;
                         for (std::size_t ci = 0; ci < cells; ++ci) {
                             float dval = 0.5f - sdf_buf[ci] * inv_w;
@@ -3162,7 +3263,7 @@ struct SceneData {
 
                 // Throttle the expensive (OpenVDB + NanoVDB + upload) rebuild.
                 const long long cells =
-                    static_cast<long long>(state.grid.nx) * state.grid.ny * state.grid.nz;
+                    static_cast<long long>(render_grid.nx) * render_grid.ny * render_grid.nz;
                 int stride = 1;
                 if (cells >= 160LL * 160 * 160) stride = 3;
                 else if (cells >= 104LL * 104 * 104) stride = 2;
@@ -3240,19 +3341,19 @@ struct SceneData {
                     // the GAS heat channel and its x3000 scale is gas-only.
                     const bool wants_temp =
                         wants_emission_temp && !is_fluid_domain &&
-                        !state.grid.temperature.empty();
+                        !render_grid.temperature.empty();
                     if (wants_temp) {
                         constexpr float kHeatToKelvin = 3000.0f;
-                        scaled_temp.resize(state.grid.temperature.size());
+                        scaled_temp.resize(render_grid.temperature.size());
                         for (std::size_t ci = 0; ci < scaled_temp.size(); ++ci) {
-                            scaled_temp[ci] = state.grid.temperature[ci] * kHeatToKelvin;
+                            scaled_temp[ci] = render_grid.temperature[ci] * kHeatToKelvin;
                         }
                         temp_ptr = scaled_temp.data();
                     }
 
                     const float* density_ptr = density_ptr_override
                         ? density_ptr_override
-                        : state.grid.density.data();
+                        : render_grid.density.data();
                     // The SurfaceSDF proxy may be on a refined grid; upload at its
                     // effective resolution. Same origin/extent, finer voxels. The
                     // sim-sized temperature array can't ride a refined upload, so
@@ -3264,10 +3365,10 @@ struct SceneData {
                         static_cast<std::size_t>(up_stats.eff_ny) *
                         static_cast<std::size_t>(up_stats.eff_nz) ==
                             system.domain_sdf_buffers[d].size();
-                    const int   up_nx    = refined_upload ? up_stats.eff_nx : state.grid.nx;
-                    const int   up_ny    = refined_upload ? up_stats.eff_ny : state.grid.ny;
-                    const int   up_nz    = refined_upload ? up_stats.eff_nz : state.grid.nz;
-                    const float up_voxel = refined_upload ? up_stats.eff_voxel : state.grid.voxel_size;
+                    const int   up_nx    = refined_upload ? up_stats.eff_nx : render_grid.nx;
+                    const int   up_ny    = refined_upload ? up_stats.eff_ny : render_grid.ny;
+                    const int   up_nz    = refined_upload ? up_stats.eff_nz : render_grid.nz;
+                    const float up_voxel = refined_upload ? up_stats.eff_voxel : render_grid.voxel_size;
                     const float* up_temp = density_ptr_override ? nullptr : temp_ptr;
 
                     // ── Volume whitewater: foam → THIS volume's temperature channel ──
@@ -3290,7 +3391,7 @@ struct SceneData {
                         RayTrophiSim::Fluid::whitewaterTypeWeights(
                             domains[d].fluid_foam_params, routed, weights);
                         RayTrophiSim::Fluid::splatFoamDensity(
-                            state.foam, up_nx, up_ny, up_nz, up_voxel, state.grid.origin,
+                            state.foam, up_nx, up_ny, up_nz, up_voxel, render_grid.origin,
                             foam_density, dpp, weights);
                         for (float& v : foam_density) v *= kFoamTempScale;
                         up_temp = foam_density.data();
@@ -3397,11 +3498,11 @@ struct SceneData {
                     mgr.clearLiveDenseGpuFields(id);
                 }
 
-                const Vec3 world_min = state.grid.origin;
-                const Vec3 world_max = state.grid.origin +
-                    Vec3(static_cast<float>(state.grid.nx) * state.grid.voxel_size,
-                         static_cast<float>(state.grid.ny) * state.grid.voxel_size,
-                         static_cast<float>(state.grid.nz) * state.grid.voxel_size);
+                const Vec3 world_min = render_grid.origin;
+                const Vec3 world_max = render_grid.origin +
+                    Vec3(static_cast<float>(render_grid.nx) * render_grid.voxel_size,
+                         static_cast<float>(render_grid.ny) * render_grid.voxel_size,
+                         static_cast<float>(render_grid.nz) * render_grid.voxel_size);
 
                 bool created = false;
                 bool became_visible = false;
@@ -3468,19 +3569,19 @@ struct SceneData {
                     // one matching the surface currently uploaded.
                     if (uvw_rebuilt && d < system.domain_uvw_buffers.size()) {
                         vol->render_isosurface_uvw_residual.swap(system.domain_uvw_buffers[d]);
-                        vol->render_isosurface_uvw_dim[0] = state.grid.nx;
-                        vol->render_isosurface_uvw_dim[1] = state.grid.ny;
-                        vol->render_isosurface_uvw_dim[2] = state.grid.nz;
+                        vol->render_isosurface_uvw_dim[0] = render_grid.nx;
+                        vol->render_isosurface_uvw_dim[1] = render_grid.ny;
+                        vol->render_isosurface_uvw_dim[2] = render_grid.nz;
                         // ★ Placement travels WITH the buffer, from the same
                         // grid, in the same statement. The consumer indexes in
                         // world space through these; taking them from anywhere
                         // else (the volume's render bounds, a cached copy) is
                         // how the field ends up stretched relative to the
                         // surface it describes.
-                        vol->render_isosurface_uvw_origin[0] = state.grid.origin.x;
-                        vol->render_isosurface_uvw_origin[1] = state.grid.origin.y;
-                        vol->render_isosurface_uvw_origin[2] = state.grid.origin.z;
-                        vol->render_isosurface_uvw_voxel = state.grid.voxel_size;
+                        vol->render_isosurface_uvw_origin[0] = render_grid.origin.x;
+                        vol->render_isosurface_uvw_origin[1] = render_grid.origin.y;
+                        vol->render_isosurface_uvw_origin[2] = render_grid.origin.z;
+                        vol->render_isosurface_uvw_voxel = render_grid.voxel_size;
                         ++vol->render_isosurface_uvw_version;
                     } else if (!uvw_rebuilt && surface_sdf_changed) {
                         // The surface rebuilt but the coordinate gather refused
@@ -3533,7 +3634,7 @@ struct SceneData {
                 if (domain_shader) {
                     vol->setShader(domain_shader);  // pick up live shader edits
                 }
-                vol->bindLiveVolume(id, state.grid.voxel_size, world_min, world_max);
+                vol->bindLiveVolume(id, render_grid.voxel_size, world_min, world_max);
 
                 if (created) {
                     // New hittable added to world.objects: rebuild GPU TLAS so it
@@ -3826,6 +3927,7 @@ struct SceneData {
             std::memcpy(&bits, &f, sizeof(bits));
             return static_cast<uint64_t>(bits);
         };
+        h = RayTrophiSim::Fluid::hashPhaseSettings(h, d);
         if (!RayTrophiSim::simulationDomainHasLiquid(d.type)) return h;
         h = mix(h, d.enabled ? 1ull : 0ull);
         h = mix(h, static_cast<uint64_t>(d.backend));
@@ -4804,8 +4906,8 @@ struct SceneData {
     std::size_t simFrameCacheCount() const { return sim_frame_cache_.size(); }
     // Compressed size of the grid scrub cache, and the ceiling capture stops at.
     std::size_t simFrameCacheBytes() const { return sim_frame_cache_bytes_; }
-    static constexpr std::size_t simFrameCacheBudgetBytes() {
-        return kSimFrameCacheBudgetBytes;
+    static std::size_t simFrameCacheBudgetBytes() {
+        return simFrameCacheBudgetFromHardware();
     }
     bool simFrameCacheRange(int& out_first, int& out_last) const {
         if (sim_frame_cache_.empty()) return false;
@@ -5855,7 +5957,8 @@ struct SceneData {
         const bool already_cached = sim_frame_cache_.find(frame) != sim_frame_cache_.end();
         if (!already_cached &&
             (static_cast<int>(sim_frame_cache_.size()) >= kMaxCachedSimFrames ||
-             sim_frame_cache_bytes_ >= kSimFrameCacheBudgetBytes)) {
+             sim_frame_cache_bytes_ >= simFrameCacheBudgetBytes() ||
+             queryAvailablePhysicalRamBytes() < kSimCacheFreeRamHeadroomBytes)) {
             // ★ Refuse rather than evict. A scrub cache that silently drops
             // frames the user believes are baked reads as "the sim changed when
             // I scrubbed back", which is indistinguishable from a solver bug.

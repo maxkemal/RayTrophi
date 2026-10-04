@@ -9,6 +9,7 @@
 
 #include "Fluid/APICFluidSolver.h"
 #include "Atmosphere/AtmosphereClimate.h"
+#include "Fluid/FluidParticleSeedPattern.h"
 #include "Fluid/FluidParticleRedistribution.h"
 #include "Fluid/SubstanceTag.h"   // kSubstanceUntagged (solid-phase resolution)
 #include "GridFluidSolver.h"
@@ -463,10 +464,16 @@ void seedBox(FluidParticles& particles,
     // target — the density-targeted pressure projection then expels them, so a
     // freshly seeded "resting tank" gushes upward on the first frames. Splitting
     // each cell into a regular sub-lattice (sub^3 slots) with one jittered point
-    // per occupied slot gives blue-noise-like uniform coverage, so the tank
-    // starts near hydrostatic equilibrium and the surface stays put.
-    const int sub = std::max(1, static_cast<int>(std::ceil(std::cbrt(
-        static_cast<double>(std::max(1, particles_per_cell))))));
+    // per occupied slot gives uniform coverage, so the tank starts near
+    // hydrostatic equilibrium and the surface stays put.
+    //
+    // The occupied slots must also be prefix-balanced. Lexicographic selection
+    // put 4 PPC into the same half of every 2x2x2 cell, leaving a coherent grid
+    // motif that remained visible when granular parcels were rendered as
+    // spheres. The focused seed-pattern module spreads every prefix through the
+    // voxel and rotates/reflects it per cell without adding render-time jitter.
+    const FluidSeedPattern seed_pattern = buildFluidSeedPattern(particles_per_cell);
+    const int sub = seed_pattern.subdivisions;
     const float inv_sub = 1.0f / static_cast<float>(sub);
 
     // Y-major iteration (j outer). When max_new_particles truncates the seed
@@ -481,19 +488,22 @@ void seedBox(FluidParticles& particles,
     for (int i = i0; i <= i1; ++i) {
         if (grid.isSolid(i, j, k)) continue;
         Vec3 cellMin = grid.origin + Vec3(i * h, j * h, k * h);
-        int placed = 0;
-        for (int sz = 0; sz < sub && placed < particles_per_cell; ++sz)
-        for (int sy = 0; sy < sub && placed < particles_per_cell; ++sy)
-        for (int sx = 0; sx < sub && placed < particles_per_cell; ++sx) {
+        for (int placed = 0; placed < particles_per_cell; ++placed) {
             if (emitted >= max_new_particles) return;
+            const FluidSeedSlot slot = orientFluidSeedSlot(
+                seed_pattern.slots[static_cast<std::size_t>(placed)],
+                sub,
+                i,
+                j,
+                k,
+                seed);
             // Sub-cell base corner + jitter confined to that sub-cell.
             Vec3 frac(
-                (static_cast<float>(sx) + U(rng)) * inv_sub,
-                (static_cast<float>(sy) + U(rng)) * inv_sub,
-                (static_cast<float>(sz) + U(rng)) * inv_sub);
+                (static_cast<float>(slot.x) + U(rng)) * inv_sub,
+                (static_cast<float>(slot.y) + U(rng)) * inv_sub,
+                (static_cast<float>(slot.z) + U(rng)) * inv_sub);
             particles.emit(cellMin + frac * h, Vec3(0, 0, 0), temperature_kelvin);
             ++emitted;
-            ++placed;
         }
     }
 }

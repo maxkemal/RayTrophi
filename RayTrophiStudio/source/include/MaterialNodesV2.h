@@ -1194,19 +1194,13 @@ namespace MaterialNodesV2 {
      * sharing a single material, each with its own tint / roughness / pattern phase.
      * Drive a ColorRamp or a Hue shift from Random, or offset a 3D noise by Location.
      *
-     * Random is hashed from the object's world ORIGIN, not from an instance id. The id
-     * looks like the natural key and is the one thing that cannot work here: the CPU
-     * numbers instances in Embree geomID order and the GPU in TLAS order, two orderings
-     * built independently of each other, so the same rock would be a different color in
-     * the CPU render than in the Vulkan RT render. The origin is a physical quantity both
-     * backends already hold, bit-for-bit (Matrix4x4 is float32 and the TLAS transform is
-     * a verbatim copy). Consequence to know about: two objects sitting at the EXACT same
-     * origin get the same Random — for scattered instances that never happens, and for a
-     * hand-placed pair it is fixed by nudging one of them.
+     * Regular objects hash their world origin because CPU and GPU instance orderings are
+     * independent. Procedural particle clouds are the exception: every sphere shares one
+     * TLAS origin, so the renderer supplies a stable group/parent/child identity value.
+     * That keeps each moving grain's Random, and therefore its hue, fixed over time.
      *
-     * There is deliberately no Object Index output: a stable index needs a real id
-     * plumbed into VkInstanceData and the shaders that read binding 5, which is a shader
-     * ABI change. Location + Random is what per-object variation actually wants.
+     * There is deliberately no Object Index output. Location + Random is the portable
+     * authoring surface for per-object and per-particle variation.
      */
     class ObjectInfoNode : public MaterialNodeBase {
     public:

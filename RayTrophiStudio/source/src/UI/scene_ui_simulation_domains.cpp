@@ -1,4 +1,5 @@
-﻿#include "scene_ui_forcefield.hpp"
+#include "scene_ui_forcefield.hpp"
+#include "Fluid/MatterPhaseConfig.h"
 #include "scene_ui_fluid_thermal.hpp"
 #include "scene_ui_fluid_labels.h"
 #include "ui_modern.h"
@@ -7,7 +8,10 @@
 #include "Fluid/FluidSplatMaterialAuthoring.h"
 #include "Fluid/FluidFogDensity.h"
 #include "Fluid/FluidGridResourceBudget.h"
+#include "Fluid/FluidParticleVisualRadius.h"
+#include "Fluid/FluidRenderProxy.h"
 #include "Fluid/FluidViewResolver.h"
+#include "Fluid/FluidActiveWindow.h"
 
 namespace ForceFieldUI {
 
@@ -242,7 +246,8 @@ void drawSimulationDomainControls(
             const auto& states = particles->gridDomainStates();
             const std::size_t di = static_cast<std::size_t>(selected_domain_index);
             if (di < states.size() && states[di].valid)
-                live_keys = RayTrophiSim::Fluid::distinctViewKeys(states[di].particles);
+                live_keys = RayTrophiSim::Fluid::cachedDistinctViewKeys(
+                    states[di].particles, states[di].version);
             view_plan = RayTrophiSim::Fluid::resolveFluidViews(domain, live_keys);
         }
         // The domain's fog volume, for the "edit fog medium" route (the medium
@@ -329,8 +334,12 @@ void drawSimulationDomainControls(
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Gas: smoke and fire on a grid.\n"
                                           "Liquid: water, honey, viscous or granular matter with APIC/FLIP particles.\n"
-                                          "Matter: both phases share one domain, bounds, sources and identity.");
+                                          "Matter: one domain identity, with independent gas and liquid grids.");
                     }
+                }
+
+                if (RayTrophiSim::Fluid::drawPhaseGridControls(domain)) {
+                    resetSimulationNow();
                 }
 
                 // Group 1: Compute & Backend
@@ -520,94 +529,7 @@ void drawSimulationDomainControls(
                 // resource-budget clamp enforces. This includes CPU source grids,
                 // Vulkan mirrors and scratch for every phase present in the domain.
                 {
-                    const int eff_cap = std::clamp(domain.max_auto_resolution, 32, 2048);
-                    const int eff_x = std::clamp(domain.resolution_x, 8, eff_cap);
-                    const int eff_y = std::clamp(domain.resolution_y, 8, eff_cap);
-                    const int eff_z = std::clamp(domain.resolution_z, 8, eff_cap);
-                    const auto resource_estimate = RayTrophiSim::Fluid::estimateGridResources(
-                        eff_x,
-                        eff_y,
-                        eff_z,
-                        RayTrophiSim::simulationDomainHasGas(domain.type),
-                        RayTrophiSim::simulationDomainHasLiquid(domain.type));
-                    const double grid_mb = static_cast<double>(resource_estimate.working_bytes) /
-                        (1024.0 * 1024.0);
-                    const double budget_mb = static_cast<double>(domain.resource_budget_mb);
-                    const double budget_fraction =
-                        domain.enforce_resource_budget && budget_mb > 0.0
-                            ? grid_mb / budget_mb
-                            : 0.0;
-                    const ImVec4 col =
-                        (domain.enforce_resource_budget && budget_fraction > 1.0)
-                            ? ImVec4(1.0f, 0.35f, 0.35f, 1.0f)
-                        : (domain.enforce_resource_budget && budget_fraction > 0.75)
-                            ? ImVec4(1.0f, 0.75f, 0.30f, 1.0f)
-                            : ImVec4(0.55f, 0.85f, 0.55f, 1.0f);
-                    if (domain.enforce_resource_budget) {
-                        ImGui::TextColored(
-                            col,
-                            "Effective: %dx%dx%d = %zu cells  (~%.0f MB / %u MB grid budget)",
-                            eff_x,
-                            eff_y,
-                            eff_z,
-                            resource_estimate.cell_count,
-                            grid_mb,
-                            domain.resource_budget_mb);
-                    } else {
-                        ImGui::TextColored(
-                            col,
-                            "Effective: %dx%dx%d = %zu cells  (~%.0f MB, grid budget disabled)",
-                            eff_x,
-                            eff_y,
-                            eff_z,
-                            resource_estimate.cell_count,
-                            grid_mb);
-                    }
-                    if (eff_x < domain.resolution_x || eff_y < domain.resolution_y || eff_z < domain.resolution_z) {
-                        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.30f, 1.0f),
-                                           "  (clamped by Max Auto Resolution = %d - raise it below to go higher)", eff_cap);
-                    }
-
-                    // *** THE ROW ABOVE PREVIEWS ONE CLAMP; THE SOLVER APPLIES TWO.
-                    //
-                    // Max Auto Resolution is mirrored here, but the adaptive CELL
-                    // BUDGET clamp (y-aspect headroom, 512^3 hard cap, and the
-                    // optional resource budget) runs only inside the solver, which
-                    // then writes the result back into the live state. So this row
-                    // could promise 160x315x160 while the grid being stepped was
-                    // 160x247x160 - and the memory figure beside it described a
-                    // grid that was never built. The Active Resolution row further
-                    // down had the truth all along, which is worse, not better: two
-                    // rows in one panel disagreeing, and the wrong one sitting next
-                    // to the slider where the decision is made.
-                    if (particles && selected_domain_index >= 0) {
-                        const auto& live_states = particles->gridDomainStates();
-                        const std::size_t live_index =
-                            static_cast<std::size_t>(selected_domain_index);
-                        if (live_index < live_states.size() && live_states[live_index].valid) {
-                            const auto& live = live_states[live_index];
-                            if (live.resolution_x > 0 && live.resolution_y > 0 && live.resolution_z > 0 &&
-                                (live.resolution_x != eff_x || live.resolution_y != eff_y ||
-                                 live.resolution_z != eff_z)) {
-                                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.30f, 1.0f),
-                                    "  in use: %dx%dx%d - the solver clamped this further",
-                                    live.resolution_x, live.resolution_y, live.resolution_z);
-                                if (ImGui::IsItemHovered()) {
-                                    ImGui::SetTooltip(
-                                        "The estimate above is what this panel asked for. The solver also\n"
-                                        "applies an adaptive cell budget and a hard 512^3 cap, then writes\n"
-                                        "the resolution it actually built back here.\n"
-                                        "Voxel size follows the value IN USE, not the requested one.");
-                                }
-                            }
-                        }
-                    }
-                    if (domain.enforce_resource_budget && budget_fraction > 1.0) {
-                        ImGui::SameLine();
-                        ImGui::TextColored(
-                            ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
-                            " - solver will reduce resolution");
-                    }
+                    RayTrophiSim::Fluid::drawPhaseResourceSummary(domain);
 
                     // **** THE ROW ABOVE IS THE LIVE GRID, AND IT IS NOT WHAT
                     // RUNS THE MACHINE OUT OF MEMORY. The timeline frame cache
@@ -965,10 +887,16 @@ void drawSimulationDomainControls(
                     }
 
                     ImGui::SetNextItemWidth(250.0f);
-                    ImGui::SliderInt("Particles Per Voxel", &domain.fluid_seed_particles_per_cell, 2, 16);
+                    ImGui::SliderInt(
+                        "Seed Particles Per Voxel",
+                        &domain.fluid_seed_particles_per_cell,
+                        2,
+                        16);
                     seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Particles spawned per grid cell. This is a STABILITY constant, not a\n"
+                        ImGui::SetTooltip("Particles created per grid cell by Seed Fluid Now. Flow Sources use\n"
+                                          "Injected Particles / Sec instead; this slider does not multiply point,\n"
+                                          "object-bounds or mesh-surface emission. This is a STABILITY constant, not a\n"
                                           "budget knob: at 1 ppc the cells can't build internal pressure and the\n"
                                           "liquid just collapses / settles slowly. Keep 4-8 for standard water.\n"
                                           "To fit a budget, change Voxel Size or Max Particles \xE2\x80\x94 not this.");
@@ -1386,7 +1314,9 @@ void drawSimulationDomainControls(
                         });
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Flow rate of liquid particles spawned per second.\n"
-                                              "Key this to animate a valve — open at one frame, throttled at another.");
+                                              "Key this to animate a valve — open at one frame, throttled at another.\n"
+                                              "Seed Particles Per Voxel applies only to Seed Fluid Now; flow-source\n"
+                                              "density is authored by this rate and the source's volume or surface.");
                         }
                         source.fluid_particles_per_second = std::max(0.0f, source.fluid_particles_per_second);
                     } else {
@@ -2044,15 +1974,8 @@ void drawSimulationDomainControls(
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip("Elastic stiffness before plastic yield. Higher values reduce the soft/rubber\n"
                                               "compression seen on impact but require more granular solver substeps.\n"
-                                              "The runtime may cap the effective value for elastic CFL stability.");
-                        granular_edited |= ImGui::DragInt("Max Granular Solver Substeps",
-                                                          &fp.granular_max_solver_substeps,
-                                                          1.0f, 1, 64);
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Maximum full P2G-grid-G2P elastic substeps per frame.\n"
-                                              "Raise until Effective Young matches Requested Young. This is a\n"
-                                              "real solver-quality cost: 15 substeps can cost about 15x one step.\n"
-                                              "The density/render bridge still runs once after the final substep.");
+                                              "Adaptive substeps preserve the requested stiffness for elastic CFL stability.");
+                        ImGui::TextDisabled("Granular substeps: adaptive (stiffness preserved)");
                         granular_edited |= ImGui::SliderFloat("Poisson Ratio", &fp.granular_poisson_ratio, 0.0f, 0.49f, "%.3f");
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip("Couples axial compression to sideways expansion in the elastic response.\n"
@@ -3304,9 +3227,9 @@ void drawSimulationDomainControls(
                     if (view_plan.splat &&
                         UIWidgets::CollapsingHeader("Splat Geometry & Preview",
                             current_mode_idx == 0 ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
-                        const char* geometry_modes[] = { "Built-in Icosphere", "Scene Object / Mesh Group" };
-                        int geometry_mode = domain.fluid_particle_geometry_mode == 1 ? 1 : 0;
-                        if (ImGui::Combo("Geometry Source", &geometry_mode, geometry_modes, 2)) {
+                        const char* geometry_modes[] = { "Procedural Spheres (RT)", "Scene Object / Mesh Group", "Icosphere Mesh (triangles)" };
+                        int geometry_mode = std::clamp(domain.fluid_particle_geometry_mode, 0, 2);
+                        if (ImGui::Combo("Geometry Source", &geometry_mode, geometry_modes, 3)) {
                             domain.fluid_particle_geometry_mode = geometry_mode;
                             scene.requestSimulationTimelineRenderResync();
                             ui_ctx.start_render = true;
@@ -3406,6 +3329,143 @@ void drawSimulationDomainControls(
                         ImGui::Separator();
                         ImGui::DragFloat("Voxel Radius Factor##DomainFluid", &domain.fluid_particle_radius_factor, 0.01f, 0.05f, 1.5f, "%.2f");
                         ImGui::DragFloat("Visual Size Multiplier##DomainFluid", &domain.fluid_particle_size_multiplier, 0.01f, 0.05f, 8.0f, "%.2f");
+                        if (geometry_mode == 0) {
+                            bool physical_granular_carriers =
+                                domain.fluid_granular_physical_carriers;
+                            const bool physical_mode_changed =
+                                domain.fluid_params.granular_enabled &&
+                                ImGui::Checkbox(
+                                    "Physical Granular Carriers##DomainFluid",
+                                    &physical_granular_carriers);
+                            if (domain.fluid_params.granular_enabled &&
+                                ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "Draw one sphere per physical MPM carrier. This removes attached\n"
+                                    "virtual clusters so individual carrier motion remains visible.\n"
+                                    "Disable only for low-resolution gap-filling previews.");
+                            }
+                            int virtual_grains = std::clamp(
+                                domain.fluid_particle_visual_children, 1, 32);
+                            float size_variation = std::clamp(
+                                domain.fluid_particle_visual_size_variation,
+                                0.0f,
+                                0.75f);
+                            int budget_millions = static_cast<int>(std::clamp(
+                                (domain.fluid_particle_visual_budget + 999999ull) /
+                                    1000000ull,
+                                1ull,
+                                32ull));
+                            const bool count_changed = ImGui::SliderInt(
+                                "Virtual Children per Particle##DomainFluid",
+                                &virtual_grains,
+                                1,
+                                32);
+                            const bool variation_changed = ImGui::SliderFloat(
+                                "Child Size Variation##DomainFluid",
+                                &size_variation,
+                                0.0f,
+                                0.75f,
+                                "%.2f");
+                            const bool budget_changed = ImGui::SliderInt(
+                                "Virtual Sphere Budget (millions)##DomainFluid",
+                                &budget_millions,
+                                1,
+                                32);
+                            if (count_changed || variation_changed || budget_changed ||
+                                physical_mode_changed) {
+                                rtapi::FluidSplatGeometryPatch patch;
+                                patch.virtual_grains = virtual_grains;
+                                patch.grain_size_variation = size_variation;
+                                patch.granular_physical_carriers =
+                                    physical_granular_carriers;
+                                patch.virtual_grain_budget =
+                                    static_cast<uint64_t>(budget_millions) * 1000000ull;
+                                rtapi::setFluidSplatGeometry(domain.name, patch);
+                            }
+                            const auto& domain_states = particles->gridDomainStates();
+                            uint64_t primary_count = 0;
+                            uint64_t whitewater_count = 0;
+                            if (static_cast<std::size_t>(selected_domain_index) <
+                                    domain_states.size() &&
+                                domain_states[static_cast<std::size_t>(
+                                    selected_domain_index)].valid) {
+                                const auto& live_state = domain_states[
+                                    static_cast<std::size_t>(selected_domain_index)];
+                                const auto view_plan =
+                                    RayTrophiSim::Fluid::resolveFluidViews(
+                                        domain,
+                                        RayTrophiSim::Fluid::cachedDistinctViewKeys(
+                                            live_state.particles,
+                                            live_state.version));
+                                const auto particle_counts =
+                                    RayTrophiSim::Fluid::countParticlesPerView(
+                                        view_plan,
+                                        live_state.particles);
+                                const auto whitewater_counts =
+                                    domain.fluid_foam_params.enabled
+                                    ? RayTrophiSim::Fluid::countWhitewaterPerView(
+                                          view_plan,
+                                          live_state.foam.type)
+                                    : RayTrophiSim::Fluid::FluidViewCounts{};
+                                primary_count = particle_counts.splat;
+                                whitewater_count = whitewater_counts.splat;
+                            }
+                            const uint32_t effective_grains =
+                                RayTrophiSim::Fluid::limitFluidRenderProxyChildren(
+                                    static_cast<uint32_t>(virtual_grains),
+                                    RayTrophiSim::Fluid::
+                                        fluidRenderProxyCarrierCapacity(
+                                            domain.fluid_max_particles,
+                                            domain.fluid_foam_params.enabled
+                                                ? domain.fluid_foam_params.max_foam
+                                                : 0u),
+                                    static_cast<uint64_t>(budget_millions) *
+                                        1000000ull);
+                            const uint32_t primary_children =
+                                domain.fluid_params.granular_enabled &&
+                                    physical_granular_carriers
+                                ? 1u
+                                : effective_grains;
+                            const uint64_t visual_count =
+                                primary_count * primary_children +
+                                whitewater_count * effective_grains;
+                            const uint64_t estimated_rt_bytes = visual_count *
+                                RayTrophiSim::Fluid::
+                                    kFluidRenderProxyRtBytesPerSphereEstimate;
+                            ImGui::TextDisabled(
+                                "Visual spheres: %llu (primary %u, whitewater %u), RT input ~%.1f MiB",
+                                static_cast<unsigned long long>(visual_count),
+                                primary_children,
+                                effective_grains,
+                                static_cast<double>(estimated_rt_bytes) /
+                                    (1024.0 * 1024.0));
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "The effective count is fixed from Max Particles and this budget,\n"
+                                    "so it does not change as the live particle count changes. The RT\n"
+                                    "estimate covers proxy inputs before acceleration-structure scratch.\n"
+                                    "Diameter variation is deterministic and volume-normalized.");
+                            }
+                        }
+                        const RayTrophiSim::Fluid::FluidParticleVisualRadius visual_radius =
+                            RayTrophiSim::Fluid::resolveFluidParticleVisualRadius(
+                                domain.fluid_params.granular_enabled,
+                                geometry_mode != 1,
+                                domain.fluid_params.particles_per_cell,
+                                domain.fluid_particle_radius_factor,
+                                domain.fluid_particle_size_multiplier);
+                        if (visual_radius.material_point_floor_applied) {
+                            ImGui::TextDisabled(
+                                "Effective radius: %.3f vx (particle volume floor)",
+                                visual_radius.effective_voxels);
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "Each seeded material point represents 1/PPC of a voxel's volume.\n"
+                                    "All procedural fluid spheres use the same minimum, so changing\n"
+                                    "between liquid and granular does not change apparent radius.\n"
+                                    "Larger authored sphere sizes are preserved.");
+                            }
+                        }
                         if (geometry_mode == 0)
                             ImGui::SliderInt("Sphere Subdivision Detail##DomainFluid", &domain.fluid_particle_subdivisions, 0, 3);
                         if (ImGui::IsItemHovered()) {
@@ -4425,6 +4485,7 @@ void drawSimulationDomainControls(
                     }
                     blk.Total("Step total", step_total);
                     blk.Time("P2G", fs.p2g_ms, fs.p2g_on_gpu ? "GPU" : "CPU", 1);
+                    RayTrophiSim::Fluid::ActiveWindow::drawDiagnostics(blk, fs);
                     blk.Time("Pressure", fs.pressure_ms,
                              domain.fluid_params.granular_enabled &&
                              fs.p2g_on_gpu && fs.g2p_on_gpu
@@ -4485,11 +4546,8 @@ void drawSimulationDomainControls(
                                   fs.granular_strain_substeps, fs.granular_strain_rate);
                         blk.Value("Granular solver substeps run", "%d",
                                   fs.granular_solver_substeps);
-                        // ★ THE ROW THAT MATTERS WHEN A PILE EXPLODES. Non-zero
-                        // means the subcycle could not cover the motion and the
-                        // stress kernel clamped dt*C to stay finite: the step
-                        // survived, it was not correct. Raise
-                        // granular_max_solver_substeps until this reads 0.
+                        // An impact can exceed the rate measured at frame start;
+                        // the constitutive limiter reports that local loss of resolution.
                         if (fs.granular_strain_limited_particles > 0) {
                             blk.Value("Granular strain-rate CLAMPED", "%zu particles",
                                       fs.granular_strain_limited_particles);

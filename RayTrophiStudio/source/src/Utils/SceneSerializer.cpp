@@ -1,4 +1,5 @@
 #include "SceneSerializer.h"
+#include "Fluid/MatterPhaseConfig.h"
 #include "globals.h"
 #include "Renderer.h"
 #include "OptixWrapper.h"
@@ -331,6 +332,7 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["use_sparse_tiles"] = d.use_sparse_tiles;
     j["render_to_nanovdb"] = d.render_to_nanovdb;
     j["bounds_min"] = vec3ToJson(d.bounds_min);
+    j["phase_grids"] = RayTrophiSim::Fluid::phaseSettingsJson(d);
     j["bounds_max"] = vec3ToJson(d.bounds_max);
     j["resolution_x"] = d.resolution_x;
     j["resolution_y"] = d.resolution_y;
@@ -455,6 +457,12 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_particle_color"] = vec3ToJson(d.fluid_particle_color);
     j["fluid_particle_radius_factor"] = d.fluid_particle_radius_factor;
     j["fluid_particle_size_multiplier"] = d.fluid_particle_size_multiplier;
+    j["fluid_particle_visual_children"] = d.fluid_particle_visual_children;
+    j["fluid_particle_visual_size_variation"] =
+        d.fluid_particle_visual_size_variation;
+    j["fluid_granular_physical_carriers"] =
+        d.fluid_granular_physical_carriers;
+    j["fluid_particle_visual_budget"] = d.fluid_particle_visual_budget;
     j["fluid_particle_subdivisions"] = d.fluid_particle_subdivisions;
     j["fluid_particle_geometry_mode"] = d.fluid_particle_geometry_mode;
     j["fluid_particle_geometry_source"] = d.fluid_particle_geometry_source;
@@ -559,6 +567,7 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("max_auto_resolution")) d.max_auto_resolution = j["max_auto_resolution"];
     if (j.contains("voxel_size")) d.voxel_size = j["voxel_size"];
     if (j.contains("padding")) d.padding = j["padding"];
+    RayTrophiSim::Fluid::loadPhaseSettings(j, d);
     if (j.contains("adaptive_lock_floor")) d.adaptive_lock_floor = j["adaptive_lock_floor"];
     if (j.contains("adaptive_floor_y")) d.adaptive_floor_y = j["adaptive_floor_y"];
     if (j.contains("channels")) d.channels = j["channels"];
@@ -696,6 +705,25 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_particle_color")) d.fluid_particle_color = jsonToVec3(j["fluid_particle_color"]);
     if (j.contains("fluid_particle_radius_factor")) d.fluid_particle_radius_factor = j["fluid_particle_radius_factor"];
     if (j.contains("fluid_particle_size_multiplier")) d.fluid_particle_size_multiplier = j["fluid_particle_size_multiplier"];
+    if (j.contains("fluid_particle_visual_children")) {
+        d.fluid_particle_visual_children = j["fluid_particle_visual_children"];
+    } else if (j.contains("fluid_granular_visual_children")) {
+        d.fluid_particle_visual_children = j["fluid_granular_visual_children"];
+    }
+    if (j.contains("fluid_particle_visual_size_variation")) {
+        d.fluid_particle_visual_size_variation =
+            j["fluid_particle_visual_size_variation"];
+    } else if (j.contains("fluid_granular_visual_size_variation")) {
+        d.fluid_particle_visual_size_variation =
+            j["fluid_granular_visual_size_variation"];
+    }
+    if (j.contains("fluid_particle_visual_budget")) {
+        d.fluid_particle_visual_budget = j["fluid_particle_visual_budget"];
+    }
+    if (j.contains("fluid_granular_physical_carriers")) {
+        d.fluid_granular_physical_carriers =
+            j["fluid_granular_physical_carriers"];
+    }
     if (j.contains("fluid_particle_subdivisions")) d.fluid_particle_subdivisions = j["fluid_particle_subdivisions"];
     if (j.contains("fluid_particle_geometry_mode")) d.fluid_particle_geometry_mode = j["fluid_particle_geometry_mode"];
     if (j.contains("fluid_particle_geometry_source")) d.fluid_particle_geometry_source = j["fluid_particle_geometry_source"];

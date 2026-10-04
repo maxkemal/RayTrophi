@@ -1,0 +1,736 @@
+{
+  "domain": "Grid Domain 1",
+  "dt": 0.041666666666666664,
+  "gpu_timing": true,
+  "samples": [
+    {
+      "sample": 1,
+      "info": {
+        "particle_count": 991666,
+        "granular_required_substeps": 48,
+        "granular_solver_substeps": 48,
+        "granular_young_modulus": 381300.0,
+        "granular_effective_young_modulus": 381300.0,
+        "granular_stiffness_capped": false,
+        "granular_invalid": 0,
+        "granular_max_damage": 0.0
+      },
+      "stats": {
+        "advect_ms": 4.868600368499756,
+        "batch_end_calls": 9,
+        "batch_end_ms": 149.82409999999996,
+        "density_ms": 6.737599849700928,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 1734.0398000000005,
+        "dispatch_calls": 1107,
+        "download_bytes": 204317592,
+        "download_call_ms": 5.2627000000000015,
+        "download_calls": 21,
+        "g2p_ms": 139.4770050048828,
+        "g2p_on_gpu": true,
+        "gpu_status": "GPU on Vulkan Simulation Compute: P2G/pressure(MGPCG)/G2P/density/advect+boundaries. Reseed topology CPU. forces GPU.",
+        "measured": true,
+        "ok": true,
+        "p2g_ms": 1739.378173828125,
+        "p2g_on_gpu": true,
+        "particle_count": 991666,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "synchronize_calls": 2,
+        "synchronize_ms": 29.3426,
+        "total_ms": 2003.232421875,
+        "upload_bytes": 184061632,
+        "upload_call_ms": 13.901000000000002,
+        "upload_calls": 20
+      },
+      "gpu_stages": {
+        "gather": {
+          "ms": 190.43020800000005,
+          "calls": 48
+        },
+        "stress": {
+          "ms": 25.835519999999985,
+          "calls": 48
+        },
+        "stress_p2g": {
+          "ms": 391.44140800000014,
+          "calls": 144
+        },
+        "settle": {
+          "ms": 6.430719999999996,
+          "calls": 48
+        },
+        "advect": {
+          "ms": 43.83616000000001,
+          "calls": 48
+        },
+        "occupancy": {
+          "ms": 13.591552,
+          "calls": 96
+        }
+      },
+      "gpu_kernels": {
+        "enabled": true,
+        "kernels": [
+          {
+            "calls": 144,
+            "kernel": "sim_fluid_p2g_scatter",
+            "ms": 1106.6729280000002
+          },
+          {
+            "calls": 144,
+            "kernel": "sim_fluid_granular_stress_p2g",
+            "ms": 391.44140800000014
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_g2p",
+            "ms": 190.43020800000005
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_advect_tail",
+            "ms": 43.83616000000001
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_granular_stress_update",
+            "ms": 25.835519999999985
+          },
+          {
+            "calls": 336,
+            "kernel": "sim_fluid_clear_float",
+            "ms": 13.751616000000041
+          },
+          {
+            "calls": 96,
+            "kernel": "sim_fluid_occupancy",
+            "ms": 13.591552
+          },
+          {
+            "calls": 144,
+            "kernel": "sim_fluid_p2g_normalize",
+            "ms": 12.702720000000022
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_zero_solid_faces",
+            "ms": 7.057407999999992
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_granular_settle",
+            "ms": 6.430719999999996
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_particle_integrate_forces",
+            "ms": 3.969344
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_splat",
+            "ms": 1.05984
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_clear",
+            "ms": 0.026624
+          }
+        ],
+        "supported": true,
+        "total_ms": 1816.8060480000006
+      }
+    },
+    {
+      "sample": 2,
+      "info": {
+        "particle_count": 991666,
+        "granular_required_substeps": 48,
+        "granular_solver_substeps": 48,
+        "granular_young_modulus": 381300.0,
+        "granular_effective_young_modulus": 381300.0,
+        "granular_stiffness_capped": false,
+        "granular_invalid": 0,
+        "granular_max_damage": 0.0
+      },
+      "stats": {
+        "advect_ms": 4.860199928283691,
+        "batch_end_calls": 9,
+        "batch_end_ms": 150.43460000000002,
+        "density_ms": 6.9156999588012695,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 1490.1695000000007,
+        "dispatch_calls": 1107,
+        "download_bytes": 204317592,
+        "download_call_ms": 1.5521999999999996,
+        "download_calls": 21,
+        "g2p_ms": 140.07101440429688,
+        "g2p_on_gpu": true,
+        "gpu_status": "GPU on Vulkan Simulation Compute: P2G/pressure(MGPCG)/G2P/density/advect+boundaries. Reseed topology CPU. forces GPU.",
+        "measured": true,
+        "ok": true,
+        "p2g_ms": 1495.3287353515625,
+        "p2g_on_gpu": true,
+        "particle_count": 991666,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "synchronize_calls": 2,
+        "synchronize_ms": 3.7363,
+        "total_ms": 1729.6962890625,
+        "upload_bytes": 184061632,
+        "upload_call_ms": 14.1601,
+        "upload_calls": 20
+      },
+      "gpu_stages": {
+        "gather": {
+          "ms": 189.43795200000002,
+          "calls": 48
+        },
+        "stress": {
+          "ms": 25.87647999999999,
+          "calls": 48
+        },
+        "stress_p2g": {
+          "ms": 349.2413439999999,
+          "calls": 144
+        },
+        "settle": {
+          "ms": 6.399999999999995,
+          "calls": 48
+        },
+        "advect": {
+          "ms": 43.392160000000025,
+          "calls": 48
+        },
+        "occupancy": {
+          "ms": 13.40006400000001,
+          "calls": 96
+        }
+      },
+      "gpu_kernels": {
+        "enabled": true,
+        "kernels": [
+          {
+            "calls": 144,
+            "kernel": "sim_fluid_p2g_scatter",
+            "ms": 943.1272320000002
+          },
+          {
+            "calls": 144,
+            "kernel": "sim_fluid_granular_stress_p2g",
+            "ms": 349.2413439999999
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_g2p",
+            "ms": 189.43795200000002
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_advect_tail",
+            "ms": 43.392160000000025
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_granular_stress_update",
+            "ms": 25.87647999999999
+          },
+          {
+            "calls": 96,
+            "kernel": "sim_fluid_occupancy",
+            "ms": 13.40006400000001
+          },
+          {
+            "calls": 336,
+            "kernel": "sim_fluid_clear_float",
+            "ms": 9.456480000000003
+          },
+          {
+            "calls": 144,
+            "kernel": "sim_fluid_p2g_normalize",
+            "ms": 9.079808000000016
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_zero_solid_faces",
+            "ms": 6.952095999999994
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_granular_settle",
+            "ms": 6.399999999999995
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_splat",
+            "ms": 1.061888
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_particle_integrate_forces",
+            "ms": 0.109568
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_clear",
+            "ms": 0.026624
+          }
+        ],
+        "supported": true,
+        "total_ms": 1597.5616960000002
+      }
+    },
+    {
+      "sample": 3,
+      "info": {
+        "particle_count": 991666,
+        "granular_required_substeps": 48,
+        "granular_solver_substeps": 48,
+        "granular_young_modulus": 381300.0,
+        "granular_effective_young_modulus": 381300.0,
+        "granular_stiffness_capped": false,
+        "granular_invalid": 0,
+        "granular_max_damage": 0.0
+      },
+      "stats": {
+        "advect_ms": 4.687300205230713,
+        "batch_end_calls": 9,
+        "batch_end_ms": 154.5138,
+        "density_ms": 6.683700084686279,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 1527.3997000000002,
+        "dispatch_calls": 1107,
+        "download_bytes": 204317592,
+        "download_call_ms": 1.4763999999999993,
+        "download_calls": 21,
+        "g2p_ms": 144.75799560546875,
+        "g2p_on_gpu": true,
+        "gpu_status": "GPU on Vulkan Simulation Compute: P2G/pressure(MGPCG)/G2P/density/advect+boundaries. Reseed topology CPU. forces GPU.",
+        "measured": true,
+        "ok": true,
+        "p2g_ms": 1533.0789794921875,
+        "p2g_on_gpu": true,
+        "particle_count": 991666,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "synchronize_calls": 2,
+        "synchronize_ms": 3.7743,
+        "total_ms": 1767.9490966796875,
+        "upload_bytes": 184061632,
+        "upload_call_ms": 14.4346,
+        "upload_calls": 20
+      },
+      "gpu_stages": {
+        "gather": {
+          "ms": 193.54009599999992,
+          "calls": 48
+        },
+        "stress": {
+          "ms": 27.75347199999999,
+          "calls": 48
+        },
+        "stress_p2g": {
+          "ms": 364.03711999999985,
+          "calls": 144
+        },
+        "settle": {
+          "ms": 6.800383999999994,
+          "calls": 48
+        },
+        "advect": {
+          "ms": 45.73452800000001,
+          "calls": 48
+        },
+        "occupancy": {
+          "ms": 13.405184000000006,
+          "calls": 96
+        }
+      },
+      "gpu_kernels": {
+        "enabled": true,
+        "kernels": [
+          {
+            "calls": 144,
+            "kernel": "sim_fluid_p2g_scatter",
+            "ms": 962.0871360000006
+          },
+          {
+            "calls": 144,
+            "kernel": "sim_fluid_granular_stress_p2g",
+            "ms": 364.03711999999985
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_g2p",
+            "ms": 193.54009599999992
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_advect_tail",
+            "ms": 45.73452800000001
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_granular_stress_update",
+            "ms": 27.75347199999999
+          },
+          {
+            "calls": 96,
+            "kernel": "sim_fluid_occupancy",
+            "ms": 13.405184000000006
+          },
+          {
+            "calls": 144,
+            "kernel": "sim_fluid_p2g_normalize",
+            "ms": 9.69216000000002
+          },
+          {
+            "calls": 336,
+            "kernel": "sim_fluid_clear_float",
+            "ms": 8.915167999999992
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_zero_solid_faces",
+            "ms": 7.452735999999995
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_granular_settle",
+            "ms": 6.800383999999994
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_splat",
+            "ms": 1.0629119999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_particle_integrate_forces",
+            "ms": 0.128
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_clear",
+            "ms": 0.027648
+          }
+        ],
+        "supported": true,
+        "total_ms": 1640.6365440000004
+      }
+    },
+    {
+      "sample": 4,
+      "info": {
+        "particle_count": 991666,
+        "granular_required_substeps": 48,
+        "granular_solver_substeps": 48,
+        "granular_young_modulus": 381300.0,
+        "granular_effective_young_modulus": 381300.0,
+        "granular_stiffness_capped": false,
+        "granular_invalid": 0,
+        "granular_max_damage": 0.0
+      },
+      "stats": {
+        "advect_ms": 4.792999744415283,
+        "batch_end_calls": 9,
+        "batch_end_ms": 149.1688,
+        "density_ms": 6.587900161743164,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 1493.4220000000018,
+        "dispatch_calls": 1107,
+        "download_bytes": 204317592,
+        "download_call_ms": 1.6548999999999994,
+        "download_calls": 21,
+        "g2p_ms": 139.40579223632812,
+        "g2p_on_gpu": true,
+        "gpu_status": "GPU on Vulkan Simulation Compute: P2G/pressure(MGPCG)/G2P/density/advect+boundaries. Reseed topology CPU. forces GPU.",
+        "measured": true,
+        "ok": true,
+        "p2g_ms": 1499.320556640625,
+        "p2g_on_gpu": true,
+        "particle_count": 991666,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "synchronize_calls": 2,
+        "synchronize_ms": 4.1825,
+        "total_ms": 1728.681396484375,
+        "upload_bytes": 184061632,
+        "upload_call_ms": 15.694200000000002,
+        "upload_calls": 20
+      },
+      "gpu_stages": {
+        "gather": {
+          "ms": 190.357504,
+          "calls": 48
+        },
+        "stress": {
+          "ms": 25.850879999999993,
+          "calls": 48
+        },
+        "stress_p2g": {
+          "ms": 349.70931199999984,
+          "calls": 144
+        },
+        "settle": {
+          "ms": 6.387711999999997,
+          "calls": 48
+        },
+        "advect": {
+          "ms": 44.13599999999998,
+          "calls": 48
+        },
+        "occupancy": {
+          "ms": 13.828096000000004,
+          "calls": 96
+        }
+      },
+      "gpu_kernels": {
+        "enabled": true,
+        "kernels": [
+          {
+            "calls": 144,
+            "kernel": "sim_fluid_p2g_scatter",
+            "ms": 944.7678399999992
+          },
+          {
+            "calls": 144,
+            "kernel": "sim_fluid_granular_stress_p2g",
+            "ms": 349.70931199999984
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_g2p",
+            "ms": 190.357504
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_advect_tail",
+            "ms": 44.13599999999998
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_granular_stress_update",
+            "ms": 25.850879999999993
+          },
+          {
+            "calls": 96,
+            "kernel": "sim_fluid_occupancy",
+            "ms": 13.828096000000004
+          },
+          {
+            "calls": 336,
+            "kernel": "sim_fluid_clear_float",
+            "ms": 9.312607999999994
+          },
+          {
+            "calls": 144,
+            "kernel": "sim_fluid_p2g_normalize",
+            "ms": 9.090048000000019
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_zero_solid_faces",
+            "ms": 7.176191999999994
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_granular_settle",
+            "ms": 6.387711999999997
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_splat",
+            "ms": 1.0629119999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_particle_integrate_forces",
+            "ms": 0.11161599999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_clear",
+            "ms": 0.025599999999999998
+          }
+        ],
+        "supported": true,
+        "total_ms": 1601.8163199999988
+      }
+    },
+    {
+      "sample": 5,
+      "info": {
+        "particle_count": 991666,
+        "granular_required_substeps": 48,
+        "granular_solver_substeps": 48,
+        "granular_young_modulus": 381300.0,
+        "granular_effective_young_modulus": 381300.0,
+        "granular_stiffness_capped": false,
+        "granular_invalid": 0,
+        "granular_max_damage": 0.0
+      },
+      "stats": {
+        "advect_ms": 67.97201538085938,
+        "batch_end_calls": 10,
+        "batch_end_ms": 161.21610000000004,
+        "density_ms": 7.377600193023682,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 1480.7079000000012,
+        "dispatch_calls": 1107,
+        "download_bytes": 216217584,
+        "download_call_ms": 1.5147999999999993,
+        "download_calls": 22,
+        "g2p_ms": 87.38600158691406,
+        "g2p_on_gpu": true,
+        "gpu_status": "GPU on Vulkan Simulation Compute: P2G/pressure(MGPCG)/G2P/density/advect+boundaries. Reseed topology CPU. forces GPU.",
+        "measured": true,
+        "ok": true,
+        "p2g_ms": 1486.1788330078125,
+        "p2g_on_gpu": true,
+        "particle_count": 991666,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "synchronize_calls": 2,
+        "synchronize_ms": 3.7309,
+        "total_ms": 1728.5556640625,
+        "upload_bytes": 184061632,
+        "upload_call_ms": 14.3217,
+        "upload_calls": 20
+      },
+      "gpu_stages": {
+        "gather": {
+          "ms": 189.18400000000003,
+          "calls": 48
+        },
+        "stress": {
+          "ms": 26.34444799999999,
+          "calls": 48
+        },
+        "stress_p2g": {
+          "ms": 347.5916799999999,
+          "calls": 144
+        },
+        "settle": {
+          "ms": 6.424575999999996,
+          "calls": 48
+        },
+        "advect": {
+          "ms": 44.449023999999994,
+          "calls": 48
+        },
+        "occupancy": {
+          "ms": 13.625344000000005,
+          "calls": 96
+        }
+      },
+      "gpu_kernels": {
+        "enabled": true,
+        "kernels": [
+          {
+            "calls": 144,
+            "kernel": "sim_fluid_p2g_scatter",
+            "ms": 940.2818559999998
+          },
+          {
+            "calls": 144,
+            "kernel": "sim_fluid_granular_stress_p2g",
+            "ms": 347.5916799999999
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_g2p",
+            "ms": 189.18400000000003
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_advect_tail",
+            "ms": 44.449023999999994
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_granular_stress_update",
+            "ms": 26.34444799999999
+          },
+          {
+            "calls": 96,
+            "kernel": "sim_fluid_occupancy",
+            "ms": 13.625344000000005
+          },
+          {
+            "calls": 144,
+            "kernel": "sim_fluid_p2g_normalize",
+            "ms": 9.053184000000016
+          },
+          {
+            "calls": 336,
+            "kernel": "sim_fluid_clear_float",
+            "ms": 9.033599999999995
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_zero_solid_faces",
+            "ms": 6.959551999999992
+          },
+          {
+            "calls": 48,
+            "kernel": "sim_fluid_granular_settle",
+            "ms": 6.424575999999996
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_splat",
+            "ms": 1.063936
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_particle_integrate_forces",
+            "ms": 0.11856
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_clear",
+            "ms": 0.026784
+          }
+        ],
+        "supported": true,
+        "total_ms": 1594.1565439999995
+      }
+    }
+  ],
+  "mean": {
+    "total_ms": 1791.6229736328125,
+    "upload_bytes": 184061632,
+    "download_bytes": 206697590.4,
+    "batch_end_calls": 9.2,
+    "batch_end_ms": 153.03148000000002,
+    "synchronize_calls": 2,
+    "synchronize_ms": 8.95332
+  }
+}

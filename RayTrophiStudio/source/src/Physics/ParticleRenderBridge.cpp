@@ -28,6 +28,7 @@
 */
 
 #include "scene_data.h"
+#include "Fluid/MatterPhaseGrid.h"
 #include "InstanceManager.h"
 #include "InstanceGroup.h"
 #include "Triangle.h"
@@ -39,6 +40,8 @@
 #include "PrincipledBSDF.h"
 #include "PBRMaterialSnapshot.h"
 #include "Fluid/FluidFoam.h"
+#include "Fluid/FluidParticleVisualRadius.h"
+#include "Fluid/FluidRenderProxy.h"
 #include "Fluid/FluidSplatMaterialPolicy.h"
 #include "Fluid/FluidViewResolver.h"
 #include "globals.h"
@@ -49,6 +52,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -798,6 +802,7 @@ namespace {
 struct FluidSourceState {
     uint64_t signature = 0;
     uint64_t content_hash = 1;
+    uint64_t state_version = std::numeric_limits<uint64_t>::max();
     std::size_t drawn_count = 0;
     // Domain splats keep one stable instance-slot range per material source.
     // Reseed/compaction may reorder particles, but it must never change the
@@ -996,6 +1001,12 @@ void SceneData::syncFluidParticleRenderInstances(bool enable_rt_geometry) {
             g_fluid_source_state.erase(obj.render_instance_group_id);
         }
         group->transient = true;
+        const bool procedural_splats =
+            obj.render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles;
+        if (group->point_sphere_mode != procedural_splats) {
+            group->point_sphere_mode = procedural_splats;
+            structural_change = true;
+        }
 
         FluidSourceState& st = g_fluid_source_state[obj.render_instance_group_id];
         const uint64_t sig = fluidRenderSignature(obj);
@@ -1169,7 +1180,8 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             RayTrophiSim::Fluid::FluidViewPlan view_plan;
             if (is_fluid && d < domains.size()) {
                 view_plan = RayTrophiSim::Fluid::resolveFluidViews(
-                    domains[d], RayTrophiSim::Fluid::distinctViewKeys(state.particles));
+                    domains[d], RayTrophiSim::Fluid::cachedDistinctViewKeys(
+                        state.particles, state.version));
             }
 
             // Solid, Matcap, Material Preview and RayFusion share the native
@@ -1307,8 +1319,48 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 group->rendered_rt_excluded = !has_explicit_splats;
                 structural_change = true;
             }
-            group->raster_sphere_candidate = dconfig.fluid_particle_geometry_mode == 0;
-
+            group->raster_sphere_candidate = dconfig.fluid_particle_geometry_mode != 1;
+            const bool procedural_splats =
+                dconfig.fluid_particle_geometry_mode == 0 && has_explicit_splats;
+            if (group->point_sphere_mode != procedural_splats) {
+                group->point_sphere_mode = procedural_splats;
+                structural_change = true;
+            }
+            const uint32_t requested_visual_children =
+                dconfig.fluid_params.granular_enabled &&
+                    dconfig.fluid_granular_physical_carriers
+                ? 1u
+                : static_cast<uint32_t>(std::clamp(
+                      dconfig.fluid_particle_visual_children,
+                      1,
+                      static_cast<int>(
+                          RayTrophiSim::Fluid::kFluidRenderProxyMaxChildren)));
+            const uint32_t effective_visual_children =
+                RayTrophiSim::Fluid::limitFluidRenderProxyChildren(
+                    requested_visual_children,
+                    RayTrophiSim::Fluid::fluidRenderProxyCarrierCapacity(
+                        dconfig.fluid_max_particles,
+                        dconfig.fluid_foam_params.enabled
+                            ? dconfig.fluid_foam_params.max_foam
+                            : 0u),
+                    dconfig.fluid_particle_visual_budget);
+            const uint8_t visual_children = procedural_splats
+                ? static_cast<uint8_t>(effective_visual_children)
+                : 1u;
+            if (group->point_sphere_visual_children != visual_children) {
+                group->point_sphere_visual_children = visual_children;
+                structural_change = true;
+            }
+            const float visual_size_variation = procedural_splats
+                ? std::clamp(
+                      dconfig.fluid_particle_visual_size_variation,
+                      0.0f,
+                      RayTrophiSim::Fluid::kFluidRenderProxyMaxSizeVariation)
+                : 0.0f;
+            if (group->point_sphere_visual_size_variation != visual_size_variation) {
+                group->point_sphere_visual_size_variation = visual_size_variation;
+                structural_change = true;
+            }
             // Source rebuild on geometry/material-routing changes. Scene mesh
             // faces keep their authored materials unless an explicit binding
             // requests a uniform override.
@@ -1317,8 +1369,23 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             sig = hashCombine(sig, quantize(dconfig.fluid_particle_color.y));
             sig = hashCombine(sig, quantize(dconfig.fluid_particle_color.z));
             sig = hashCombine(sig, quantize(dconfig.fluid_particle_radius_factor));
+            sig = hashCombine(sig, quantize(dconfig.fluid_particle_size_multiplier));
+            sig = hashCombine(sig, static_cast<uint64_t>(
+                std::max(dconfig.fluid_particle_visual_children, 1)));
+            sig = hashCombine(
+                sig, quantize(dconfig.fluid_particle_visual_size_variation));
+            sig = hashCombine(
+                sig,
+                dconfig.fluid_granular_physical_carriers ? 1ull : 0ull);
+            sig = hashCombine(sig, dconfig.fluid_particle_visual_budget);
+            sig = hashCombine(sig, dconfig.fluid_params.granular_enabled ? 1ull : 0ull);
+            sig = hashCombine(sig, static_cast<uint64_t>(
+                std::max(dconfig.fluid_params.particles_per_cell, 1)));
             sig = hashCombine(sig, quantize(dconfig.fluid_particle_emission));
             sig = hashCombine(sig, dconfig.fluid_particle_emissive ? 1ull : 0ull);
+            sig = hashCombine(sig, static_cast<uint64_t>(dconfig.fluid_render_mode));
+            sig = hashCombine(sig, static_cast<uint64_t>(dconfig.fluid_max_particles));
+            sig = hashCombine(sig, needs_raster_sdf_proxy ? 1ull : 0ull);
             sig = hashCombine(sig, static_cast<uint64_t>(
                 std::max(0, std::min(dconfig.fluid_particle_subdivisions, 3))));
             sig = hashCombine(sig, static_cast<uint64_t>(dconfig.fluid_particle_geometry_mode));
@@ -1338,8 +1405,15 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 sig = hashCombine(sig, static_cast<uint64_t>(static_cast<uint32_t>(b.material_id)));
                 sig = hashCombine(sig, static_cast<uint64_t>(b.representation));
             }
+            for (const auto route : dconfig.fluid_label_routes) {
+                sig = hashCombine(sig, static_cast<uint64_t>(route));
+            }
 
             FluidSourceState& st = g_fluid_source_state[group_id];
+            if (!group->sources.empty() && st.signature == sig &&
+                st.state_version == state.version && st.content_hash != 0u) {
+                continue;
+            }
             if (group->sources.empty() || st.signature != sig ||
                 st.source_material_keys.size() != group->sources.size()) {
                 group->sources.clear();
@@ -1485,13 +1559,30 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 structural_change = true;
             }
 
-            const float voxel  = std::max(1e-4f, state.grid.voxel_size);
-            const float radius = std::max(1e-4f,
-                voxel * dconfig.fluid_particle_radius_factor *
-                dconfig.fluid_particle_size_multiplier);
+            const float voxel = std::max(1e-4f, RayTrophiSim::Fluid::liquidGrid(state).voxel_size);
+            const RayTrophiSim::Fluid::FluidParticleVisualRadius visual_radius =
+                RayTrophiSim::Fluid::resolveFluidParticleVisualRadius(
+                    dconfig.fluid_params.granular_enabled,
+                    dconfig.fluid_particle_geometry_mode != 1,
+                    dconfig.fluid_params.particles_per_cell,
+                    dconfig.fluid_particle_radius_factor,
+                    dconfig.fluid_particle_size_multiplier);
+            const float radius = std::max(
+                1e-4f,
+                voxel * visual_radius.effective_voxels);
+            const float visual_spread_radius = procedural_splats
+                ? std::max(
+                      0.0f,
+                      voxel * RayTrophiSim::Fluid::kFluidRenderProxyFillSupportVoxels -
+                          radius / std::cbrt(static_cast<float>(visual_children)))
+                : 0.0f;
+            if (group->point_sphere_visual_spread_radius != visual_spread_radius) {
+                group->point_sphere_visual_spread_radius = visual_spread_radius;
+                structural_change = true;
+            }
             const float diam = radius * 2.0f;  // unit-diameter primitives -> scale = diameter
 
-            uint64_t content = 1469598103934665603ull;
+            uint64_t content = hashCombine(1469598103934665603ull, state.version);
             std::size_t drawn = 0;
             std::size_t slot_base = 0;
             for (std::size_t si = 0; si < source_particles.size(); ++si) {
@@ -1514,9 +1605,6 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                     }
                     tr.position = p;
                     tr.scale = Vec3(diam, diam, diam);
-                    content = hashCombine(content, quantize(p.x));
-                    content = hashCombine(content, quantize(p.y));
-                    content = hashCombine(content, quantize(p.z));
                     ++drawn;
                 }
                 slot_base += source_cap;
@@ -1526,11 +1614,15 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
 
             if (structural_change) {
                 st.content_hash = content;
+                st.state_version = state.version;
                 group->gpu_dirty = true;
             } else if (content != st.content_hash) {
                 st.content_hash = content;
+                st.state_version = state.version;
                 group->gpu_dirty = true;
                 motion_change = true;
+            } else {
+                st.state_version = state.version;
             }
         }
     }
@@ -1633,7 +1725,8 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
             // pool even on frames with no particle of that type.
             const RayTrophiSim::Fluid::FluidViewPlan ww_plan = base_ok
                 ? RayTrophiSim::Fluid::resolveFluidViews(
-                      domains[d], RayTrophiSim::Fluid::distinctViewKeys(state.particles))
+                      domains[d], RayTrophiSim::Fluid::cachedDistinctViewKeys(
+                          state.particles, state.version))
                 : RayTrophiSim::Fluid::FluidViewPlan{};
             const auto splat_types = ww_plan.whitewaterTypesIn(RayTrophiSim::Fluid::FluidView::Splat);
             const bool wants = base_ok && (splat_types[0] || splat_types[1] || splat_types[2]);
@@ -1666,8 +1759,37 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
             group->transient = true;
             // OptiX renders foam as analytic sphere GAS (one per type) instead of
             // one TLAS instance per particle — see InstanceGroup::point_sphere_mode.
-            // Vulkan / CPU ignore the flag and keep the icosphere instance path.
+            // Vulkan RT and RayFusion consume the shared visual-child metadata;
+            // OptiX keeps its existing analytic parent-sphere path for now.
             group->point_sphere_mode = true;
+            group->raster_sphere_candidate = true;
+            const uint32_t requested_visual_children =
+                static_cast<uint32_t>(std::clamp(
+                    dconfig.fluid_particle_visual_children,
+                    1,
+                    static_cast<int>(
+                        RayTrophiSim::Fluid::kFluidRenderProxyMaxChildren)));
+            const uint8_t visual_children = static_cast<uint8_t>(
+                RayTrophiSim::Fluid::limitFluidRenderProxyChildren(
+                    requested_visual_children,
+                    RayTrophiSim::Fluid::fluidRenderProxyCarrierCapacity(
+                        dconfig.fluid_max_particles,
+                        fparams.max_foam),
+                    dconfig.fluid_particle_visual_budget));
+            if (group->point_sphere_visual_children != visual_children) {
+                group->point_sphere_visual_children = visual_children;
+                structural_change = true;
+            }
+            const float visual_size_variation = std::clamp(
+                dconfig.fluid_particle_visual_size_variation,
+                0.0f,
+                RayTrophiSim::Fluid::kFluidRenderProxyMaxSizeVariation);
+            if (group->point_sphere_visual_size_variation !=
+                visual_size_variation) {
+                group->point_sphere_visual_size_variation =
+                    visual_size_variation;
+                structural_change = true;
+            }
             FluidSourceState& st = g_fluid_source_state[group_id];
 
             // ── SPHERES: three instanced sources per foam type. ──
@@ -1733,8 +1855,21 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
             std::vector<InstanceTransform>& inst = group->instances;
             if (inst.size() != cap) { inst.resize(cap); structural_change = true; }
 
-            const float voxel  = std::max(1e-4f, state.grid.voxel_size);
+            const auto& liquid_grid = RayTrophiSim::Fluid::liquidGrid(state);
+            const float voxel = std::max(1e-4f, liquid_grid.voxel_size);
             const float radius = std::max(1e-4f, voxel * fparams.render_radius_voxels);
+            const float child_radius = radius /
+                std::cbrt(static_cast<float>(visual_children));
+            const float visual_spread_radius = std::max(
+                0.0f,
+                voxel * RayTrophiSim::Fluid::kFluidRenderProxyFillSupportVoxels -
+                    child_radius);
+            if (group->point_sphere_visual_spread_radius !=
+                visual_spread_radius) {
+                group->point_sphere_visual_spread_radius =
+                    visual_spread_radius;
+                structural_change = true;
+            }
             const float diam   = radius * 2.0f;
             uint64_t content = 1469598103934665603ull;
             content = hashCombine(content, state.version);
@@ -1745,11 +1880,11 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
             const std::vector<float>& sdf_buf = system.domain_sdf_buffers[d];
             const auto& lsp = dconfig.fluid_level_set_params;
             const int m = std::clamp(lsp.surface_resolution_multiplier, 1, 4);
-            const int nx = state.grid.nx * m;
-            const int ny = state.grid.ny * m;
-            const int nz = state.grid.nz * m;
-            const float sdf_voxel = (m > 1) ? (state.grid.voxel_size / static_cast<float>(m)) : state.grid.voxel_size;
-            const Vec3 origin = state.grid.origin;
+            const int nx = liquid_grid.nx * m;
+            const int ny = liquid_grid.ny * m;
+            const int nz = liquid_grid.nz * m;
+            const float sdf_voxel = liquid_grid.voxel_size / static_cast<float>(m);
+            const Vec3 origin = liquid_grid.origin;
             const bool has_sdf = !sdf_buf.empty() && sdf_buf.size() == static_cast<size_t>(nx) * ny * nz;
 
             auto sampleSdfDensity = [&](const Vec3& pos) -> float {

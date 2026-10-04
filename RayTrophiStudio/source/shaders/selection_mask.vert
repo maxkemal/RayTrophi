@@ -20,7 +20,9 @@ layout(push_constant) uniform SelectionMaskPushConstants {
 } pc;
 
 void main() {
-    mat4 model = mat4(inModelCol0, inModelCol1, inModelCol2, inModelCol3);
+    vec4 modelCol0 = inModelCol0;
+    modelCol0.w = 0.0;
+    mat4 model = mat4(modelCol0, inModelCol1, inModelCol2, inModelCol3);
     gl_Position = pc.viewProj * (model * vec4(inPosition, 1.0));
     vMask = pc.maskValue.x;
 }

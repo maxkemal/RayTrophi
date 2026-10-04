@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "ParticleSimulation.h"
+#include "Fluid/MatterPhaseGrid.h"
 #include "ParticleSystemUsage.h"
 #include "ProjectManager.h"
 #include "TriangleMesh.h"
@@ -1193,9 +1194,15 @@ Result getFluidStepStats(const std::string& domain_id_or_name, FluidStepStats& o
     if (!out.measured) return Result::success();
 
     const auto& fluid = state.fluid_stats;
-    out.resolution[0] = state.resolution_x;
-    out.resolution[1] = state.resolution_y;
-    out.resolution[2] = state.resolution_z;
+    out.normalize_window_used = fluid.normalize_window_used;
+    out.normalize_window_cells = fluid.normalize_window_used ? fluid.normalize_window_cells : 0;
+    out.full_grid_cells = fluid.grid_cell_count;
+    out.pressure_window_used = fluid.pressure_on_gpu && fluid.pressure_window_used;
+    out.pressure_window_cells = out.pressure_window_used ? fluid.pressure_window_cells : 0;
+    out.occupancy_on_gpu = fluid.occupancy_on_gpu;
+    out.resolution[0] = RayTrophiSim::Fluid::liquidGrid(state).nx;
+    out.resolution[1] = RayTrophiSim::Fluid::liquidGrid(state).ny;
+    out.resolution[2] = RayTrophiSim::Fluid::liquidGrid(state).nz;
     out.particle_count = state.particles.size();
     out.gpu_status = fluid.gpu_status;
     out.p2g_on_gpu = fluid.p2g_on_gpu;

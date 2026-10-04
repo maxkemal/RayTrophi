@@ -7,6 +7,7 @@
 #include "MaterialStateField.h"
 #include "MatterExchangeLedger.h"
 #include "ParticleSimulation.h"
+#include "Fluid/MatterPhaseGrid.h"
 
 #include <algorithm>
 #include <cmath>
@@ -25,12 +26,6 @@ struct ExchangeAccumulation {
     Vec3 momentum_kg_m_s;
 };
 
-bool overlaps(const SimulationGridDomainDesc& a,
-              const SimulationGridDomainDesc& b) {
-    const Vec3 lo = Vec3::max(a.bounds_min, b.bounds_min);
-    const Vec3 hi = Vec3::min(a.bounds_max, b.bounds_max);
-    return lo.x < hi.x && lo.y < hi.y && lo.z < hi.z;
-}
 
 } // namespace
 
@@ -47,16 +42,17 @@ FluidMistPhaseExchangeStats transferMistToGas(
         !simulationDomainHasGas(gas_domain.type) ||
         !fluid_state.valid || !gas_state.valid ||
         fluid_state.particles.empty() ||
-        !overlaps(fluid_domain, gas_domain)) {
+        !gridsOverlap(liquidGrid(fluid_state), gasGrid(gas_state))) {
         return stats;
     }
 
     FluidParticles& particles = fluid_state.particles;
+    const float liquid_voxel = liquidGrid(fluid_state).voxel_size;
     ensureFluidParticleRestMasses(
         particles, fluid_domain.fluid_params.chemistry_preset,
-        fluid_state.voxel_size, fluid_domain.fluid_params.particles_per_cell);
+        liquid_voxel, fluid_domain.fluid_params.particles_per_cell);
 
-    FluidSim::FluidGrid& gas = gas_state.grid;
+    FluidSim::FluidGrid& gas = gasGrid(gas_state);
     const std::size_t cell_count = gas.getCellCount();
     if (gas.density.size() != cell_count || gas.temperature.size() != cell_count ||
         gas.fuel.size() != cell_count || !(gas.voxel_size > 1.0e-6f)) {
@@ -70,8 +66,8 @@ FluidMistPhaseExchangeStats transferMistToGas(
         1.0f, fluid_domain.thermal_ambient_kelvin);
     const float inv_gas_voxel = 1.0f / gas.voxel_size;
     const float fluid_cell_volume = std::max(
-        fluid_state.voxel_size * fluid_state.voxel_size *
-            fluid_state.voxel_size,
+        liquid_voxel * liquid_voxel *
+            liquid_voxel,
         1.0e-12f);
     std::map<std::string, ExchangeAccumulation> exchanges;
 
@@ -173,7 +169,7 @@ bool advectGasPhaseInventory(
         !(dt > 0.0f) || !std::isfinite(dt)) {
         return false;
     }
-    const std::size_t cell_count = gas_state.grid.getCellCount();
+    const std::size_t cell_count = gasGrid(gas_state).getCellCount();
     if (gas_state.gas_phase_mass_kg.size() != cell_count ||
         gas_state.gas_phase_energy_j.size() != cell_count) {
         return false;
@@ -189,7 +185,7 @@ bool advectGasPhaseInventory(
         }
         if (!(before > 0.0)) return;
         GridFluid::advectPassiveScalarField(
-            gas_state.grid, params, field, 0.0f, dt);
+            gasGrid(gas_state), params, field, 0.0f, dt);
         double after = 0.0;
         for (float& value : field) {
             if (!std::isfinite(value) || value < 0.0f) {

@@ -5,6 +5,7 @@
 #include "Fluid/SubstanceTag.h"
 #include "MaterialStateField.h"
 #include "ParticleSimulation.h"
+#include "Fluid/MatterPhaseGrid.h"
 
 #include <algorithm>
 #include <cmath>
@@ -37,7 +38,7 @@ FluidGasMovingBoundaryStats buildFluidGasMovingBoundary(
 
     const SimulationGridDomainDesc& gas_domain = domains[gas_domain_index];
     const SimulationGridDomainState& gas_state = states[gas_domain_index];
-    const FluidSim::FluidGrid& gas = gas_state.grid;
+    const FluidSim::FluidGrid& gas = gasGrid(gas_state);
     const std::size_t cell_count = gas.getCellCount();
     if (!gas_domain.enabled || !simulationDomainHasGas(gas_domain.type) ||
         !gas_state.valid || cell_count == 0 || !(gas.voxel_size > 0.0f)) {

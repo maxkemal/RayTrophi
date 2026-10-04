@@ -287,6 +287,96 @@ inline void zeroFill(std::vector<float>& dst, std::size_t count) {
     dst.assign(count, 0.0f);
 }
 
+// ── Per-particle compact encodings (non-keyframe scrub frames only) ──────────
+//
+// A Vec3 stream stored as three 16-bit lattice indices over its own per-axis
+// [lo, hi] range. The step is range/65535 (~0.08 mm over a 5 m domain), far
+// below a voxel. This is a DELIBERATE loss, applied only to frames that are
+// never resumed from; keyframes keep the exact arrays.
+struct QuantVec3 {
+    float lo[3] = {0.0f, 0.0f, 0.0f};
+    float step[3] = {0.0f, 0.0f, 0.0f};
+    std::size_t count = 0;
+    std::vector<uint16_t> q;   // 3 per element
+    bool active() const { return count != 0u; }
+    std::size_t bytes() const { return q.capacity() * sizeof(uint16_t); }
+};
+
+// Returns false (and leaves `out` inactive) when the stream holds a non-finite
+// value: encoding it would silently turn NaN into a real coordinate, and the
+// caller then keeps the raw array.
+template <class V>
+bool quantizeVec3(const std::vector<V>& src, QuantVec3& out) {
+    out = QuantVec3{};
+    if (src.empty()) return false;
+    float lo[3] = { src[0].x, src[0].y, src[0].z };
+    float hi[3] = { lo[0], lo[1], lo[2] };
+    for (const V& v : src) {
+        const float c[3] = { v.x, v.y, v.z };
+        for (int a = 0; a < 3; ++a) {
+            if (!std::isfinite(c[a])) return false;
+            lo[a] = std::min(lo[a], c[a]);
+            hi[a] = std::max(hi[a], c[a]);
+        }
+    }
+    out.count = src.size();
+    out.q.resize(src.size() * 3u);
+    for (int a = 0; a < 3; ++a) {
+        out.lo[a] = lo[a];
+        out.step[a] = hi[a] > lo[a] ? (hi[a] - lo[a]) / 65535.0f : 0.0f;
+    }
+    for (std::size_t i = 0; i < src.size(); ++i) {
+        const float c[3] = { src[i].x, src[i].y, src[i].z };
+        for (int a = 0; a < 3; ++a) {
+            const float t = out.step[a] > 0.0f ? (c[a] - out.lo[a]) / out.step[a] : 0.0f;
+            out.q[i * 3u + a] = static_cast<uint16_t>(std::clamp(t + 0.5f, 0.0f, 65535.0f));
+        }
+    }
+    return true;
+}
+
+template <class V>
+void dequantizeVec3(const QuantVec3& in, std::vector<V>& dst) {
+    dst.resize(in.count);
+    for (std::size_t i = 0; i < in.count; ++i) {
+        dst[i].x = in.lo[0] + in.step[0] * static_cast<float>(in.q[i * 3u + 0]);
+        dst[i].y = in.lo[1] + in.step[1] * static_cast<float>(in.q[i * 3u + 1]);
+        dst[i].z = in.lo[2] + in.step[2] * static_cast<float>(in.q[i * 3u + 2]);
+    }
+}
+
+// A per-particle scalar that is bit-identical for every particle (a pool of one
+// substance at ambient temperature, intact mass, ...) collapses to one value.
+// LOSSLESS: anything that varies stays a raw array, so mass and thermal
+// readbacks of a scrubbed frame are exact, never a default standing in for a
+// measurement.
+template <class T>
+struct ConstScalar {
+    bool constant = false;
+    std::size_t count = 0;
+    T value{};
+};
+
+// Collapses `v` into `out` when uniform and frees the array; leaves it alone
+// otherwise.
+template <class T>
+void collapseIfUniform(std::vector<T>& v, ConstScalar<T>& out) {
+    out = ConstScalar<T>{};
+    if (v.empty()) return;
+    for (std::size_t i = 1; i < v.size(); ++i) {
+        if (std::memcmp(&v[i], &v[0], sizeof(T)) != 0) return;
+    }
+    out.constant = true;
+    out.count = v.size();
+    out.value = v[0];
+    std::vector<T>().swap(v);
+}
+
+template <class T>
+void expandUniform(const ConstScalar<T>& in, std::vector<T>& v) {
+    if (in.constant) v.assign(in.count, in.value);
+}
+
 } // namespace SimFrameCompress
 } // namespace RayTrophiSim
 

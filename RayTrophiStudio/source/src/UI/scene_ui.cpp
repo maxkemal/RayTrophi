@@ -99,6 +99,26 @@
 // System RAM query for the "RAM sim cache is large, bake to disk" nudge. Declared in
 // scene_ui_forcefield.hpp (which is included before <windows.h>), defined here where
 // the Win32 API is available.
+std::uint64_t queryAvailablePhysicalRamBytes() {
+    MEMORYSTATUSEX ms; ms.dwLength = sizeof(ms);
+    if (GlobalMemoryStatusEx(&ms)) return static_cast<std::uint64_t>(ms.ullAvailPhys);
+    return 0;
+}
+
+std::size_t simFrameCacheBudgetFromHardware() {
+    // Total RAM is constant for the process; query once.
+    static const std::size_t budget = [] {
+        constexpr std::uint64_t kGiB = 1024ull * 1024ull * 1024ull;
+        MEMORYSTATUSEX ms; ms.dwLength = sizeof(ms);
+        if (!GlobalMemoryStatusEx(&ms) || ms.ullTotalPhys == 0) return std::size_t(4) * kGiB;
+        const std::uint64_t total = ms.ullTotalPhys;
+        const std::uint64_t by_fraction = total / 10ull * 7ull;
+        const std::uint64_t by_headroom = total > 2ull * kGiB ? total - 2ull * kGiB : 0ull;
+        return static_cast<std::size_t>((std::max)(kGiB, (std::min)(by_fraction, by_headroom)));
+    }();
+    return budget;
+}
+
 namespace ForceFieldUI {
     std::uint64_t queryTotalPhysicalRamBytes() {
         MEMORYSTATUSEX ms; ms.dwLength = sizeof(ms);

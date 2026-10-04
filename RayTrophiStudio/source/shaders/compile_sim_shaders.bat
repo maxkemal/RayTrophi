@@ -17,6 +17,7 @@ glslc "%SHADER_DIR%sim_fluid_clear_float.comp"        -o "%SHADER_DIR%sim_fluid_
 glslc "%SHADER_DIR%sim_fluid_particle_forces.comp"    -o "%SHADER_DIR%sim_fluid_particle_forces.spv"    --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_fluid_p2g_scatter.comp"        -o "%SHADER_DIR%sim_fluid_p2g_scatter.spv"        --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_fluid_p2g_normalize.comp"      -o "%SHADER_DIR%sim_fluid_p2g_normalize.spv"      --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_fluid_normalize_window.comp"   -o "%SHADER_DIR%sim_fluid_normalize_window.spv"   --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_fluid_density_splat.comp"      -o "%SHADER_DIR%sim_fluid_density_splat.spv"      --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_fluid_density_clear.comp"     -o "%SHADER_DIR%sim_fluid_density_clear.spv"     --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_fluid_surface_combustion.comp" -o "%SHADER_DIR%sim_fluid_surface_combustion.spv" --target-env=vulkan1.2
@@ -54,4 +55,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
+call "%SHADER_DIR%compile_fluid_window_shaders.bat" glslc
+if errorlevel 1 exit /b 1
 echo OK: All simulation shaders compiled successfully.

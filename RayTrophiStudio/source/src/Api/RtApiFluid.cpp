@@ -15,7 +15,9 @@
 #include "Fluid/FluidViewResolver.h"
 #include "Fluid/APICFluidSolver.h"
 #include "Fluid/FluidSplatMaterialAuthoring.h"
+#include "Fluid/FluidRenderProxy.h"
 #include "ParticleSimulation.h"
+#include "Fluid/MatterPhaseGrid.h"
 #include "MaterialStateField.h"
 #include "MaterialManager.h"
 #include "VolumeShader.h"
@@ -180,7 +182,7 @@ void fillFluidViews(const RayTrophiSim::SimulationGridDomainDesc& d,
     if (!RayTrophiSim::simulationDomainHasLiquid(d.type)) return;
     info.label_routes = RayTrophiSim::Fluid::labelRoutesToNames(d.fluid_label_routes);
     const std::vector<RayTrophiSim::Fluid::FluidViewKey> live = state
-        ? RayTrophiSim::Fluid::distinctViewKeys(state->particles)
+        ? RayTrophiSim::Fluid::cachedDistinctViewKeys(state->particles, state->version)
         : std::vector<RayTrophiSim::Fluid::FluidViewKey>{};
     const RayTrophiSim::Fluid::FluidViewPlan plan = RayTrophiSim::Fluid::resolveFluidViews(d, live);
     int surface_id = -1, fog_id = -1;
@@ -228,6 +230,10 @@ void fillFluidViews(const RayTrophiSim::SimulationGridDomainDesc& d,
     info.views_measured = state != nullptr;
 }
 
+void finalizeFluidRenderProxyStats(
+    const RayTrophiSim::SimulationGridDomainDesc& d,
+    FluidDomainInfo& info);
+
 // Report the isosurface material by NAME. Lives on the grid descriptor rather
 // than in APICSolverParams (it is a look, not rheology), so it needs its own
 // helper next to fillFluidRheology instead of riding along inside it.
@@ -245,15 +251,31 @@ void fillFluidSurfaceMaterial(const RayTrophiSim::SimulationGridDomainDesc& d,
     info.solid_phase_fill = d.fluid_solid_phase_fill;
     info.uvw_refresh_period = d.fluid_params.uvw_refresh_period;
     info.splat_material = RayTrophiSim::Fluid::fluidSplatMaterialName(d);
-    info.splat_geometry =
-        d.fluid_particle_geometry_mode == 1 ? "scene_object" : "icosphere";
+    info.splat_geometry = d.fluid_particle_geometry_mode == 1 ? "scene_object"
+        : d.fluid_particle_geometry_mode == 2 ? "icosphere_mesh" : "icosphere";
     info.splat_geometry_source = d.fluid_particle_geometry_source;
     info.splat_subdivisions = std::clamp(d.fluid_particle_subdivisions, 0, 3);
     // Same clamp the bridge applies; 20 * 4^level icosahedron faces.
-    info.splat_triangles = d.fluid_particle_geometry_mode == 1
-        ? 0 : 20 << (2 * info.splat_subdivisions);
+    // 'icosphere' is the procedural sphere cloud on RT (no triangles);
+    // 'icosphere_mesh' is the triangle icosphere.
+    info.splat_triangles = d.fluid_particle_geometry_mode == 2
+        ? (20 << (2 * info.splat_subdivisions)) : 0;
     info.splat_radius_factor = d.fluid_particle_radius_factor;
     info.splat_size_multiplier = d.fluid_particle_size_multiplier;
+    info.virtual_grains_requested = std::clamp(
+        d.fluid_particle_visual_children,
+        1,
+        static_cast<int>(RayTrophiSim::Fluid::kFluidRenderProxyMaxChildren));
+    info.grain_size_variation = std::clamp(
+        d.fluid_particle_visual_size_variation,
+        0.0f,
+        RayTrophiSim::Fluid::kFluidRenderProxyMaxSizeVariation);
+    info.granular_physical_carriers =
+        d.fluid_granular_physical_carriers;
+    info.virtual_grain_budget = std::clamp(
+        d.fluid_particle_visual_budget,
+        RayTrophiSim::Fluid::kFluidRenderProxyMinVisualSphereBudget,
+        RayTrophiSim::Fluid::kFluidRenderProxyMaxVisualSphereBudget);
     info.fog_spread_voxels = d.fluid_fog_spread_voxels;
     info.max_particles = d.fluid_max_particles;
 
@@ -482,13 +504,13 @@ void fillFluidDensityStats(const RayTrophiSim::SimulationGridDomainState& state,
 
 void fillFluidMaterialCoords(const RayTrophiSim::SimulationGridDomainState& state,
                              FluidDomainInfo& info) {
-    info.uvw_dim[0] = state.grid.nx;
-    info.uvw_dim[1] = state.grid.ny;
-    info.uvw_dim[2] = state.grid.nz;
-    info.uvw_origin[0] = state.grid.origin.x;
-    info.uvw_origin[1] = state.grid.origin.y;
-    info.uvw_origin[2] = state.grid.origin.z;
-    info.uvw_voxel = state.grid.voxel_size;
+    info.uvw_dim[0] = RayTrophiSim::Fluid::liquidGrid(state).nx;
+    info.uvw_dim[1] = RayTrophiSim::Fluid::liquidGrid(state).ny;
+    info.uvw_dim[2] = RayTrophiSim::Fluid::liquidGrid(state).nz;
+    info.uvw_origin[0] = RayTrophiSim::Fluid::liquidGrid(state).origin.x;
+    info.uvw_origin[1] = RayTrophiSim::Fluid::liquidGrid(state).origin.y;
+    info.uvw_origin[2] = RayTrophiSim::Fluid::liquidGrid(state).origin.z;
+    info.uvw_voxel = RayTrophiSim::Fluid::liquidGrid(state).voxel_size;
 
     const auto& parts = state.particles;
     const std::size_t n = parts.size();
@@ -702,7 +724,8 @@ Result setFluidSplatGeometry(const std::string& domain_id_or_name,
     if (patch.geometry) {
         if (*patch.geometry == "icosphere") geometry_mode = 0;
         else if (*patch.geometry == "scene_object") geometry_mode = 1;
-        else return Result::fail("geometry must be 'icosphere' or 'scene_object'");
+        else if (*patch.geometry == "icosphere_mesh") geometry_mode = 2;
+        else return Result::fail("geometry must be 'icosphere', 'icosphere_mesh' or 'scene_object'");
     }
     if (patch.subdivisions && (*patch.subdivisions < 0 || *patch.subdivisions > 3))
         return Result::fail("subdivisions must be in [0, 3]");
@@ -710,6 +733,25 @@ Result setFluidSplatGeometry(const std::string& domain_id_or_name,
         return Result::fail("radius_factor must be in [0.05, 1.5]");
     if (!finiteIn(patch.size_multiplier, 0.05f, 8.0f))
         return Result::fail("size_multiplier must be in [0.05, 8]");
+    if (patch.virtual_grains &&
+        (*patch.virtual_grains < 1 ||
+         *patch.virtual_grains > static_cast<int>(
+             RayTrophiSim::Fluid::kFluidRenderProxyMaxChildren))) {
+        return Result::fail("virtual_grains must be in [1, 32]");
+    }
+    if (!finiteIn(
+            patch.grain_size_variation,
+            0.0f,
+            RayTrophiSim::Fluid::kFluidRenderProxyMaxSizeVariation)) {
+        return Result::fail("grain_size_variation must be in [0, 0.75]");
+    }
+    if (patch.virtual_grain_budget &&
+        (*patch.virtual_grain_budget <
+             RayTrophiSim::Fluid::kFluidRenderProxyMinVisualSphereBudget ||
+         *patch.virtual_grain_budget >
+             RayTrophiSim::Fluid::kFluidRenderProxyMaxVisualSphereBudget)) {
+        return Result::fail("virtual_grain_budget must be in [1000000, 32000000]");
+    }
     if (patch.geometry_source && !patch.geometry_source->empty() &&
         !g_ctx->scene.hasLiveSimulationObject(*patch.geometry_source))
         return Result::fail("geometry_source is not a live scene object: " +
@@ -731,6 +773,19 @@ Result setFluidSplatGeometry(const std::string& domain_id_or_name,
     if (patch.subdivisions) dom->fluid_particle_subdivisions = *patch.subdivisions;
     if (patch.radius_factor) dom->fluid_particle_radius_factor = *patch.radius_factor;
     if (patch.size_multiplier) dom->fluid_particle_size_multiplier = *patch.size_multiplier;
+    if (patch.virtual_grains) {
+        dom->fluid_particle_visual_children = *patch.virtual_grains;
+    }
+    if (patch.grain_size_variation) {
+        dom->fluid_particle_visual_size_variation = *patch.grain_size_variation;
+    }
+    if (patch.granular_physical_carriers) {
+        dom->fluid_granular_physical_carriers =
+            *patch.granular_physical_carriers;
+    }
+    if (patch.virtual_grain_budget) {
+        dom->fluid_particle_visual_budget = *patch.virtual_grain_budget;
+    }
 
     // Same commit as the panel: the bridge rebuilds its source on the next
     // update from the current particles; no simulation reset.
@@ -1247,7 +1302,8 @@ Result getFluidWhitewater(const std::string& domain_id_or_name,
     stats = WhitewaterStats{};
     const auto* state = liveStateFor(*domain);
     const RayTrophiSim::Fluid::FluidViewPlan plan = RayTrophiSim::Fluid::resolveFluidViews(
-        *domain, state ? RayTrophiSim::Fluid::distinctViewKeys(state->particles)
+        *domain, state ? RayTrophiSim::Fluid::cachedDistinctViewKeys(
+                             state->particles, state->version)
                        : std::vector<RayTrophiSim::Fluid::FluidViewKey>{});
     using RayTrophiSim::Fluid::FoamType;
     auto viewName = [&plan](FoamType t) {
@@ -1605,6 +1661,7 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
                 fillFluidSolidPhase(states[gd_index], out_info);
             }
         }
+        finalizeFluidRenderProxyStats(*gd, out_info);
         return Result::success();
     }
 
@@ -1704,6 +1761,7 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
             fillFluidDensityStats(states[index], out_info);
             fillFluidSolidPhase(states[index], out_info);
         }
+        finalizeFluidRenderProxyStats(*grid_dom, out_info);
     }
     return Result::success();
 }
@@ -1777,6 +1835,7 @@ Result listFluidDomains(std::vector<rtapi::FluidDomainInfo>& out_domains) {
                     fillFluidSolidPhase(states[index], info);
                 }
             }
+            finalizeFluidRenderProxyStats(d, info);
             out_domains.push_back(std::move(info));
         }
     }
@@ -2947,6 +3006,49 @@ std::string flowModeToString(RayTrophiSim::SimulationFlowSourceMode mode) {
         case RayTrophiSim::SimulationFlowSourceMode::MeshSurface: return "mesh_surface";
         default: return "point";
     }
+}
+
+void finalizeFluidRenderProxyStats(
+    const RayTrophiSim::SimulationGridDomainDesc& d,
+    FluidDomainInfo& info) {
+    const bool refines_primary = d.fluid_particle_geometry_mode == 0;
+    const bool refines_whitewater = d.fluid_foam_params.enabled;
+    info.virtual_grains_effective = refines_primary || refines_whitewater
+        ? static_cast<int>(RayTrophiSim::Fluid::limitFluidRenderProxyChildren(
+              static_cast<uint32_t>(info.virtual_grains_requested),
+              RayTrophiSim::Fluid::fluidRenderProxyCarrierCapacity(
+                  d.fluid_max_particles,
+                  d.fluid_foam_params.enabled
+                      ? d.fluid_foam_params.max_foam
+                      : 0u),
+              info.virtual_grain_budget))
+        : 1;
+    info.primary_visual_children = refines_primary &&
+        !(d.fluid_params.granular_enabled &&
+          d.fluid_granular_physical_carriers)
+        ? info.virtual_grains_effective
+        : 1;
+    info.whitewater_visual_children = refines_whitewater
+        ? info.virtual_grains_effective
+        : 1;
+    uint64_t rendered_spheres = refines_primary
+        ? static_cast<uint64_t>(info.particle_count) *
+              static_cast<uint64_t>(info.primary_visual_children)
+        : static_cast<uint64_t>(info.particle_count);
+    if (info.views_measured) {
+        rendered_spheres = 0;
+        for (const auto& view : info.views) {
+            if (view.view == "splat") {
+                rendered_spheres += view.particles *
+                    static_cast<uint64_t>(info.primary_visual_children);
+                rendered_spheres += view.whitewater *
+                    static_cast<uint64_t>(info.whitewater_visual_children);
+            }
+        }
+    }
+    info.virtual_grain_count = rendered_spheres;
+    info.virtual_grain_rt_estimated_bytes = info.virtual_grain_count *
+        RayTrophiSim::Fluid::kFluidRenderProxyRtBytesPerSphereEstimate;
 }
 
 SimulationFlowSourceInfo flowInfoFromDesc(

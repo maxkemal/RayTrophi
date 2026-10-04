@@ -204,7 +204,6 @@ inline bool ensureBuffers(SimulationComputeContext& compute, GpuBuffers& b,
     b.softening = make("granular_softening", bytes_f32, rw);
     b.bond_scale = make("granular_bond_scale", bytes_f32, rw);
     b.hardening = make("granular_hardening", bytes_f32, rw);
-    b.material_flags = make("granular_material_flags", bytes_u32, rw);
     b.stress_diag = make("granular_stress_diag", bytes_vec, rw);
     b.stress_shear = make("granular_stress_shear", bytes_vec, rw);
     b.yield_value = make("granular_yield_value", bytes_f32, rw);
@@ -237,7 +236,6 @@ inline bool uploadState(SimulationComputeContext& compute, const FluidParticles&
     ok = ok && compute.uploadBuffer(b.softening, p.granular_softening.data(), n * sizeof(float));
     ok = ok && compute.uploadBuffer(b.bond_scale, p.granular_bond_scale.data(), n * sizeof(float));
     ok = ok && compute.uploadBuffer(b.hardening, p.granular_hardening.data(), n * sizeof(float));
-    ok = ok && compute.uploadBuffer(b.material_flags, p.granular_material_flags.data(), n * sizeof(uint32_t));
     ok = ok && compute.uploadBuffer(b.stress_diag, p.granular_stress_diag.data(), n * sizeof(Vec3));
     ok = ok && compute.uploadBuffer(b.stress_shear, p.granular_stress_shear.data(), n * sizeof(Vec3));
     ok = ok && compute.uploadBuffer(b.damage, p.granular_damage.data(), n * sizeof(float));

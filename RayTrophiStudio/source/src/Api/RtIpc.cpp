@@ -1,4 +1,5 @@
 #include "RtPostBindings.h"
+#include "RtPhaseGrid.h"
 #include "RtFluidLabelBindings.h"
 #include "RtViewportCutoutBindings.h"
 #include "RtRasterDiagnosticsBindings.h"
@@ -696,6 +697,10 @@ json dispatchMethod(const std::string& method, const json& params) {
     // cut/dissolve/weld operators) runs through enqueueQuery so the frame loop
     // owns the topology change, unlike the read-only tool catalogue above.
     json mesh_edit_result;
+    nlohmann::json phase_grid_result;
+    if (dispatchPhaseGridIpc(method, params,
+        [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
+        phase_grid_result)) return phase_grid_result;
     if (dispatchMeshEditIpc(method, params, [](RtIpcTemplateQuery q) { return enqueueQuery(std::move(q)); }, mesh_edit_result)) return mesh_edit_result;
 
     json post_result;
@@ -2894,6 +2899,17 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"splat_triangles", info.splat_triangles},
                         {"splat_radius_factor", info.splat_radius_factor},
                         {"splat_size_multiplier", info.splat_size_multiplier},
+                        {"virtual_grains_requested", info.virtual_grains_requested},
+                        {"virtual_grains_effective", info.virtual_grains_effective},
+                        {"primary_visual_children", info.primary_visual_children},
+                        {"whitewater_visual_children", info.whitewater_visual_children},
+                        {"granular_physical_carriers",
+                         info.granular_physical_carriers},
+                        {"virtual_grain_count", info.virtual_grain_count},
+                        {"virtual_grain_budget", info.virtual_grain_budget},
+                        {"virtual_grain_rt_estimated_bytes",
+                         info.virtual_grain_rt_estimated_bytes},
+                        {"grain_size_variation", info.grain_size_variation},
                         {"fog_spread_voxels", info.fog_spread_voxels},
                         {"particle_kelvin_measured", info.particle_kelvin_measured},
                         {"particle_min_kelvin", info.particle_min_kelvin},
@@ -3056,6 +3072,17 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"splat_triangles", info.splat_triangles},
                     {"splat_radius_factor", info.splat_radius_factor},
                     {"splat_size_multiplier", info.splat_size_multiplier},
+                    {"virtual_grains_requested", info.virtual_grains_requested},
+                    {"virtual_grains_effective", info.virtual_grains_effective},
+                    {"primary_visual_children", info.primary_visual_children},
+                    {"whitewater_visual_children", info.whitewater_visual_children},
+                    {"granular_physical_carriers",
+                     info.granular_physical_carriers},
+                    {"virtual_grain_count", info.virtual_grain_count},
+                    {"virtual_grain_budget", info.virtual_grain_budget},
+                    {"virtual_grain_rt_estimated_bytes",
+                     info.virtual_grain_rt_estimated_bytes},
+                    {"grain_size_variation", info.grain_size_variation},
                     {"fog_spread_voxels", info.fog_spread_voxels},
                     {"particle_kelvin_measured", info.particle_kelvin_measured},
                     {"particle_min_kelvin", info.particle_min_kelvin},
@@ -6257,6 +6284,17 @@ json dispatchMethod(const std::string& method, const json& params) {
             patch.radius_factor = params.at("radius_factor").get<float>();
         if (params.contains("size_multiplier"))
             patch.size_multiplier = params.at("size_multiplier").get<float>();
+        if (params.contains("virtual_grains"))
+            patch.virtual_grains = requireInt(params, "virtual_grains");
+        if (params.contains("grain_size_variation"))
+            patch.grain_size_variation =
+                params.at("grain_size_variation").get<float>();
+        if (params.contains("granular_physical_carriers"))
+            patch.granular_physical_carriers =
+                requireBool(params, "granular_physical_carriers");
+        if (params.contains("virtual_grain_budget"))
+            patch.virtual_grain_budget =
+                params.at("virtual_grain_budget").get<uint64_t>();
         return enqueueResult([domain, patch](UIContext&) {
             return rtapi::setFluidSplatGeometry(domain, patch);
         });
@@ -6504,6 +6542,12 @@ json dispatchMethod(const std::string& method, const json& params) {
             json j{{"ok", true}, {"measured", s.measured}};
             if (!s.measured) return j;
             j["resolution"] = json::array({s.resolution[0], s.resolution[1], s.resolution[2]});
+            j["normalize_window_used"] = s.normalize_window_used;
+            j["normalize_window_cells"] = s.normalize_window_cells;
+            j["full_grid_cells"] = s.full_grid_cells;
+            j["pressure_window_used"] = s.pressure_window_used;
+            j["pressure_window_cells"] = s.pressure_window_cells;
+            j["occupancy_on_gpu"] = s.occupancy_on_gpu;
             j["particle_count"] = s.particle_count;
             j["gpu_status"] = s.gpu_status;
             j["p2g_on_gpu"] = s.p2g_on_gpu;

@@ -282,6 +282,12 @@
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterPhaseSettings.h" />
+    <ClInclude Include="source\include\Fluid\MatterPhaseConfig.h" />
+    <ClInclude Include="source\src\Api\RtPhaseGrid.h" />
+    <ClInclude Include="source\src\Physics\Fluid\MatterDomainSynchronization.inl" />
+    <ClInclude Include="source\src\Physics\Fluid\MatterDomainRestore.inl" />
+    <ClInclude Include="source\src\Physics\Fluid\MatterDomainSources.inl" />
     <ClInclude Include="source\include\PostProcess\ColorMath.h" />
     <ClInclude Include="source\include\PostProcess\Exposure.h" />
     <ClInclude Include="source\include\PostProcess\PostService.h" />
@@ -375,6 +381,11 @@
     <ClInclude Include="external\xatlas\source\xatlas\xatlas.h" Condition="'$(RayTrophiHasXatlas)'=='true' and !Exists('$(ProjectDir)external\xatlas\xatlas.h')" />
     <ClInclude Include="source\src\UI\scene_ui_nodeeditor.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_node_palette.hpp" />
+    <ClCompile Include="source\src\Api\RtApiPhaseGrid.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcPhaseGrid.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonPhaseGrid.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterPhaseConfig.cpp" />
+    <ClCompile Include="source\src\UI\MatterPhaseGridControls.cpp" />
     <ClCompile Include="source\src\PostProcess\PostSurface.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_node_palette.cpp" />
     <ClInclude Include="source\src\UI\scene_ui_river.hpp" />
@@ -556,7 +567,16 @@
     <ClInclude Include="source\include\Fluid\MatterConstitutive.h" />
     <ClInclude Include="source\include\Fluid\FluidGpuParticleUpload.h" />
     <ClInclude Include="source\include\Fluid\FluidGpuFlipSnapshot.h" />
+    <ClInclude Include="source\src\Physics\Fluid\FluidGpuOccupancy.inl" />
+    <None Include="source\shaders\sim_fluid_occupancy.comp" />
     <ClInclude Include="source\include\Fluid\APICFluidSolver.h" />
+    <ClInclude Include="source\include\Fluid\FluidParticleSeedPattern.h" />
+    <ClInclude Include="source\include\Fluid\FluidParticleVisualRadius.h" />
+    <ClInclude Include="source\include\Fluid\FluidRenderProxy.h" />
+    <ClInclude Include="source\include\Fluid\FluidActiveWindow.h" />
+    <ClInclude Include="source\include\Fluid\FluidActivePressure.h" />
+    <ClInclude Include="source\include\Fluid\MatterPhaseGrid.h" />
+    <ClInclude Include="source\src\Physics\Fluid\FluidGpuPressure.inl" />
     <ClInclude Include="source\include\Fluid\FluidParticleSolidRecovery.h" />
     <ClInclude Include="source\include\Fluid\FluidObject.h" />
     <ClInclude Include="source\include\Fluid\FluidSimulationSystem.h" />
@@ -1480,6 +1500,7 @@
     <ClCompile Include="source\src\Backend\VulkanDevicePipelines.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend_Raster.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanBackend_Spheres.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend_Pose.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
     <ClCompile Include="source\src\Backend\VulkanSkinningBatch.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend_Volumes.cpp" />
@@ -1861,6 +1882,9 @@
     <ClCompile Include="source\src\Physics\AshDebrisSerialization.cpp" />
     <ClCompile Include="source\src\Physics\FractureSourceAdapter.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\APICFluidSolver.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\FluidParticleSeedPattern.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\FluidParticleVisualRadius.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\FluidRenderProxy.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidDomainParticleAuthoring.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidDomainRenderLifecycle.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidFogDensity.cpp" />

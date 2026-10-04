@@ -3,3 +3,4 @@
 
 // Published only by the viewport owning the opaque sphere pipeline.
 inline std::atomic<bool> g_sphere_impostor_ready{false};
+inline std::atomic<bool> g_fluid_sphere_proxy_ready{false};

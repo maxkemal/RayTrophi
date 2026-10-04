@@ -760,7 +760,9 @@ public:
     bool     updateFoamSphereBLAS(uint32_t blasIndex, const std::vector<VkAabbPositionsKHR>& aabbs);
     // Upload the combined foam sphere SSBO (FoamSphereGPU[count], 32 bytes each)
     // to binding 18.
-    void     updateFoamSphereBuffer(const void* data, uint32_t count);
+    bool     updateFoamSphereBuffer(const void* data,
+                                    uint32_t count,
+                                    uint32_t capacity = 0);
 
     /**
      * @brief Upload hair segment and material GPU buffers.
@@ -778,6 +780,13 @@ public:
     /// always last, so its offset is 1 + the optional groups before it.
     uint32_t getSphereSbtOffset() const {
         return 1u + (m_hasVolumeShaders ? 1u : 0u) + (m_hasHairShaders ? 1u : 0u);
+    }
+    bool hasSphereShaders() const { return m_hasSphereShaders; }
+    // Before the lazy RT pipeline exists, defer point-sphere groups instead of
+    // building their million-entry triangle fallback. Once pipeline creation
+    // has resolved optional shader availability, this returns the real choice.
+    bool shouldUseProceduralSpherePath() const {
+        return m_rtPipeline == VK_NULL_HANDLE || m_hasSphereShaders;
     }
     
     const BufferHandle& getHairMaterialBuffer() const { return m_hairMaterialBuffer; }
@@ -1574,7 +1583,8 @@ private:
     VkBuffer              m_hairExpandDescBuffers[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
 
     // Foam point-sphere buffer (binding 18). One combined buffer for the whole
-    // foam cloud: { vec4 centreRadius, uint matId, uint pad[3] } per sphere,
+    // sphere cloud: { vec4 centreRadius, uint matId, float objectRandom,
+    // uint pad[2] } per sphere,
     // indexed by gl_PrimitiveID in sphere_intersection.rint / sphere_closesthit.
     // Kept persistently bound (dummy 1-element until foam exists) so binding 18
     // is always valid; the foam consumer re-uploads it each frame.
@@ -1752,6 +1762,16 @@ struct SelectionOutlineParams {
     float occludedColor[4]  = { 0.63f, 0.63f, 0.63f, 0.47f };
     float thicknessPx = 1.0f;
 };
+
+// Host mirror of binding 18 in the procedural sphere shaders.
+struct alignas(16) VulkanProceduralSphereRecord {
+    float centerRadius[4];
+    uint32_t materialId = 0;
+    float objectRandom = 0.0f;
+    uint32_t padding[2] = {0, 0};
+};
+static_assert(sizeof(VulkanProceduralSphereRecord) == 32,
+              "Sphere shader ABI requires 32-byte records");
 
 /**
  * @brief Vulkan implementation of IBackend
@@ -2683,6 +2703,17 @@ protected:
         VkPipeline sphereImpostorPipeline = VK_NULL_HANDLE;
         VulkanRT::BufferHandle sphereImpostorBuffer;
         std::vector<SphereImpostorInstance> sphereImpostorsUploaded;
+        VkPipeline fluidSphereProxyPipeline = VK_NULL_HANDLE;
+        VkPipelineLayout fluidSphereProxyPipelineLayout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout fluidSphereProxyDescLayout = VK_NULL_HANDLE;
+        VkDescriptorPool fluidSphereProxyDescPool = VK_NULL_HANDLE;
+        uint32_t fluidSphereProxyDescCapacity = 0;
+        struct FluidSphereProxySlot {
+            VkDescriptorSet set = VK_NULL_HANDLE;
+            uint64_t positionBuffer = 0;
+        };
+        std::vector<FluidSphereProxySlot> fluidSphereProxySlots;
+        std::vector<FluidSphereProxyDraw> fluidSphereProxyDraws;
         uint32_t particleAddVertexCount = 0;
         VulkanRT::BufferHandle particleAlphaVertexBuffer;
         uint32_t particleAlphaVertexCount = 0;
@@ -3036,13 +3067,20 @@ protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapan
     // Volume instance tracking for Vulkan volume rendering
     uint32_t m_volumeBlasIndex = UINT32_MAX; // Shared AABB BLAS for all volumes
 
-    // Foam / fluid-splat point-sphere tracking. A point_sphere_mode InstanceGroup
-    // becomes ONE AABB BLAS (binding-18 sphere SSBO) + ONE TLAS instance instead of
-    // N per-particle instances. The BLAS is refit in place each frame via
-    // updateFoamSphereBLAS(); a pool-capacity change forces a full rebuild.
+    // Foam / fluid-splat point-sphere tracking. All point_sphere_mode groups become
+    // ONE AABB BLAS (binding-18 sphere SSBO) + ONE TLAS instance instead of N
+    // per-particle instances. A pool-capacity change forces a full rebuild.
     uint32_t m_foamSphereBlasIndex   = UINT32_MAX; // index into m_device->m_blasList
-    int      m_foamSphereGroupId     = -1;         // owning InstanceGroup::id
-    uint32_t m_foamSpherePoolCapacity = 0;         // stable primitive count for refit
+    uint32_t m_foamSpherePoolCapacity = 0;         // combined stable primitive capacity
+    uint32_t m_foamSphereTlasIndex = UINT32_MAX;   // identity instance in m_vkInstances
+    std::vector<VkAabbPositionsKHR> m_foamSphereAabbs;
+    std::vector<VulkanProceduralSphereRecord> m_foamSphereRecords;
+
+    bool appendProceduralSphereCloud(
+        std::vector<VulkanRT::TLASInstance>& instances,
+        std::vector<std::shared_ptr<Hittable>>& instanceSources);
+    bool updateProceduralSphereCloud(bool& tlasMaskChanged);
+    bool finalizeDeferredProceduralSphereCloud();
 
     // TLAS storage for updates
     std::vector<VulkanRT::TLASInstance> m_vkInstances;
@@ -3162,7 +3200,11 @@ protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapan
         // Slot of a simulation splat pool. Its mask follows the slot's scale
         // (0 = empty slot), so mask 0 here means "no particle", not "hidden".
         bool simPoolSlot = false;
+        // Negative keeps normal Object Info origin hashing. Particle spheres
+        // carry a stable logical identity so moving grains keep their colour.
+        float objectRandom = -1.0f;
         uint32_t scatterInstanceIndex = UINT32_MAX;
+        uint8_t fluidProxyChildIndex = 0;
         Matrix4x4 scatterSourceTransform = Matrix4x4::identity();
         int8_t scatterLodHint = -1; // -1=reclassify, 0=full, 1=proxy during paint
     };

@@ -5,6 +5,7 @@
 #include "MaterialStateField.h"
 #include "MatterExchangeLedger.h"
 #include "ParticleSimulation.h"
+#include "Fluid/MatterPhaseGrid.h"
 
 #include <algorithm>
 #include <cmath>
@@ -24,12 +25,6 @@ struct ExchangeAccumulation {
     Vec3 momentum_kg_m_s;
 };
 
-bool overlaps(const SimulationGridDomainDesc& a,
-              const SimulationGridDomainDesc& b) {
-    const Vec3 lo = Vec3::max(a.bounds_min, b.bounds_min);
-    const Vec3 hi = Vec3::min(a.bounds_max, b.bounds_max);
-    return lo.x < hi.x && lo.y < hi.y && lo.z < hi.z;
-}
 
 float gasTemperatureKelvin(float temperature, float ambient_kelvin) {
     if (temperature > 20.0f) return temperature;
@@ -83,20 +78,18 @@ FluidCombustionExchangeStats transferFluidCombustionToGas(
         !simulationDomainHasLiquid(fluid_domain.type) ||
         !simulationDomainHasGas(gas_domain.type) || !gas_domain.fire_enabled ||
         !fluid_state.valid || !gas_state.valid || fluid_state.particles.empty() ||
-        !(dt > 0.0f) || !std::isfinite(dt) || !overlaps(fluid_domain, gas_domain)) {
+        !(dt > 0.0f) || !std::isfinite(dt) || !gridsOverlap(liquidGrid(fluid_state), gasGrid(gas_state))) {
         return stats;
     }
 
     FluidParticles& particles = fluid_state.particles;
+    const float liquid_voxel = liquidGrid(fluid_state).voxel_size;
     ensureFluidParticleRestMasses(
         particles, fluid_domain.fluid_params.chemistry_preset,
-        fluid_state.voxel_size, fluid_domain.fluid_params.particles_per_cell);
+        liquid_voxel, fluid_domain.fluid_params.particles_per_cell);
 
-    FluidSim::FluidGrid& gas = gas_state.grid;
-    const FluidSim::FluidGrid& liquid =
-        fluid_domain.type == SimulationDomainType::Matter
-            ? fluid_state.matter_liquid_grid
-            : fluid_state.grid;
+    FluidSim::FluidGrid& gas = gasGrid(gas_state);
+    const FluidSim::FluidGrid& liquid = liquidGrid(fluid_state);
     const std::size_t cell_count = gas.getCellCount();
     if (gas.temperature.size() != cell_count || gas.fuel.size() != cell_count ||
         gas.density.size() != cell_count || gas.interaction.size() != cell_count ||
@@ -119,7 +112,7 @@ FluidCombustionExchangeStats transferFluidCombustionToGas(
         0.0f, fluid_domain.fluid_combustion_smoke_yield);
     const float inv_gas_voxel = 1.0f / gas.voxel_size;
     const float fluid_cell_volume = std::max(
-        fluid_state.voxel_size * fluid_state.voxel_size * fluid_state.voxel_size,
+        liquid_voxel * liquid_voxel * liquid_voxel,
         1.0e-12f);
     std::map<std::string, ExchangeAccumulation> exchanges;
 

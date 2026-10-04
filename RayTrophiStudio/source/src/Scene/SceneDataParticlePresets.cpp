@@ -1,4 +1,5 @@
 #include "scene_data.h"
+#include "Fluid/MatterPhaseConfig.h"
 
 // Embedded production presets stay out of SceneData's foundational header.
 // This translation unit owns authored particle, gas, and fluid configurations;
@@ -595,6 +596,7 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 gas.shader->name="Burning Fuel Fire";
                 gas.fluid_fog_shader = gas.shader;
                 gas.shader = liquid.shader;
+                RayTrophiSim::Fluid::adoptPresetPhaseGrids(gas, gas, liquid);
                 gas.fluid_params = liquid.fluid_params;
                 gas.fluid_render_mode = liquid.fluid_render_mode;
                 gas.fluid_seed_min = liquid.fluid_seed_min;
@@ -727,6 +729,7 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 gas.shader->emission.temperature_max = 1850.0f;
                 gas.fluid_fog_shader = gas.shader;
                 gas.shader = liquid.shader;
+                RayTrophiSim::Fluid::adoptPresetPhaseGrids(gas, gas, liquid);
                 gas.fluid_params = liquid.fluid_params;
                 gas.fluid_max_particles = liquid.fluid_max_particles;
                 gas.fluid_render_mode = liquid.fluid_render_mode;

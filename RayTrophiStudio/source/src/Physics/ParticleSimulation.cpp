@@ -1,4 +1,6 @@
-﻿#include "ParticleSimulation.h"
+#include "ParticleSimulation.h"
+#include "Fluid/MatterPhaseConfig.h"
+#include "Fluid/MatterPhaseGrid.h"
 #include "Fluid/FluidParticleSolidRecovery.h"
 #include "Fluid/FluidParticleLabelsGpu.h"
 #include "Fluid/FluidMistCoupling.h"
@@ -11,8 +13,11 @@
 #include "Fluid/FluidLevelSet.h"   // buildSubstanceViscosityField
 #include "Fluid/SubstanceTag.h"
 #include "Fluid/GranularGpuDispatch.h"
+#include "Fluid/GranularStepPolicy.h"
 #include "Fluid/FluidGpuParticleUpload.h"
 #include "Fluid/FluidGpuFlipSnapshot.h"
+#include "Fluid/FluidActiveWindow.h"
+#include "Fluid/FluidActivePressure.h"
 #include "KinematicColliderVoxelizer.h"
 
 #include "GridFluidSolver.h"
@@ -25,6 +30,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <type_traits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -2298,6 +2304,15 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
     constants.voxel_size = grid.voxel_size;
 
     constexpr uint32_t threads = 256;
+    const auto active_window = Fluid::ActiveWindow::plan(
+        state.particles.position, state.particles.velocity, grid.origin,
+        grid.voxel_size, dt, grid.nx, grid.ny, grid.nz,
+        !granular && compute->backendType() == ComputeBackendType::VulkanCompute &&
+        fluid_params.boundary != Fluid::APICSolverParams::BoundaryMode::Periodic);
+    const bool window_normalize = active_window.bounded &&
+        compute->backendType() == ComputeBackendType::VulkanCompute;
+    gpu_buffers.fluid_normalize_window_cells = active_window.cells();
+    gpu_buffers.fluid_normalize_window_used = window_normalize;
     bool ok = true;
     for (int comp = 0; comp < 3 && ok; ++comp) {
         constants.component = comp;
@@ -2340,7 +2355,11 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
 
         cmd.kernel = "sim_fluid_p2g_normalize";
         cmd.groups.groups_x = (field_count + threads - 1u) / threads;
-        ok = ok && compute->dispatch(cmd);
+        ok = ok && (window_normalize
+            ? Fluid::ActiveWindow::normalize(*compute, active_window, grid.nx, grid.ny,
+                                            grid.nz, comp, velocity_fields[comp],
+                                            weight_fields[comp])
+            : compute->dispatch(cmd));
     }
     const auto p2g_phase2 = SimulationClock::now(); // dispatches recorded
 
@@ -3131,7 +3150,7 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
     }
 
     const uint32_t cell_count = static_cast<uint32_t>(grid.getCellCount());
-    if (fluid_mask_cpu.size() < cell_count) return false;
+    if (fluid_mask_cpu.size() < cell_count && !gpu_buffers.fluid_mask_device_valid) return false;
 
     // Solid velocities, deinterleaved. Zero when the grid carries no colliders —
     // with wall_slip=0 the walls then hold the fluid still, which is what a
@@ -3171,8 +3190,9 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
         // cell_count, NOT fluid_mask_cpu.size(): the caller's scratch is
         // function-static and grow-only, so a smaller domain later in the same
         // session would otherwise overflow its correctly-sized buffer.
-        compute->uploadBuffer(gpu_buffers.fluid_mask, fluid_mask_cpu.data(),
-                              cell_count * sizeof(float)) &&
+        Fluid::ActiveWindow::uploadPreparedMask(
+            *compute, gpu_buffers.fluid_mask, fluid_mask_cpu, cell_count,
+            gpu_buffers.fluid_mask_device_valid) &&
         compute->uploadBuffer(gpu_buffers.var_svx, svx_host.data(), cell_count * sizeof(float)) &&
         compute->uploadBuffer(gpu_buffers.var_svy, svy_host.data(), cell_count * sizeof(float)) &&
         compute->uploadBuffer(gpu_buffers.var_svz, svz_host.data(), cell_count * sizeof(float));
@@ -3245,833 +3265,7 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
     return true;
 }
 
-bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
-                              const Fluid::APICSolverParams& fluid_params,
-                              float dt,
-                              SimulationComputeContext* compute,
-                              SimulationGridDomainComputeBuffers& gpu_buffers,
-                              const std::vector<float>& fluid_mask_cpu,
-                              Fluid::APICSolverStats* mgpcg_stats = nullptr) {
-    auto& grid = state.grid;
-    if (!compute || !compute->supportsDispatch() || dt <= 0.0f ||
-        grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 ||
-        grid.vel_x.empty() || grid.vel_y.empty() || grid.vel_z.empty() ||
-        grid.pressure.size() != grid.getCellCount() ||
-        grid.divergence.size() != grid.getCellCount()) {
-        return false;
-    }
-    // Name the missing buffer once. At high resolution these are the allocations
-    // that fail first — the CG scratch alone is five full cell-sized float fields
-    // on top of the solver's own — and an invalid handle here used to return false
-    // into a caller that reported "(CPU)" without explaining anything.
-    auto reportMissing = [&](const char* which) {
-        // Keyed, not one-shot: a second domain (or a new project in the same
-        // session) failing on a different buffer must not be swallowed because an
-        // earlier one already reported.
-        const std::string key =
-            std::string(which) + "|" + std::to_string(grid.getCellCount());
-        static std::string last_key;
-        if (key != last_key) {
-            last_key = key;
-            SCENE_LOG_WARN("[SimCompute] GPU MGPCG pressure unavailable: " +
-                           std::string(which) + " buffer not allocated (cells=" +
-                           std::to_string(grid.getCellCount()) +
-                           "). Most likely out of VRAM at this resolution.");
-        }
-        return false;
-    };
-    // Every other way out of this function used to be a bare `return false`, which
-    // is how a fallback with a known stage ("MGPCG pressure projection") still left
-    // no idea WHICH step inside it gave up. Keyed like reportMissing so a later
-    // domain or a new project in the same session is not swallowed.
-    auto bail = [&](const char* where) {
-        const std::string key =
-            std::string(where) + "|" + std::to_string(grid.getCellCount());
-        static std::string last_key;
-        if (key != last_key) {
-            last_key = key;
-            SCENE_LOG_WARN("[SimCompute] GPU MGPCG gave up at: " + std::string(where) +
-                           " (cells=" + std::to_string(grid.getCellCount()) + ")");
-        }
-        return false;
-    };
-
-    if (!gpu_buffers.vel_x.valid())      return reportMissing("vel_x");
-    if (!gpu_buffers.vel_y.valid())      return reportMissing("vel_y");
-    if (!gpu_buffers.vel_z.valid())      return reportMissing("vel_z");
-    if (!gpu_buffers.pressure.valid())   return reportMissing("pressure");
-    if (!gpu_buffers.divergence.valid()) return reportMissing("divergence");
-    if (!gpu_buffers.fluid_mask.valid()) return reportMissing("fluid_mask");
-    // CG scratch missing → signal fallback to the SOR / CPU PCG path.
-    if (!gpu_buffers.cg_residual.valid()) return reportMissing("cg_residual");
-    if (!gpu_buffers.cg_z.valid())        return reportMissing("cg_z");
-    if (!gpu_buffers.cg_search.valid())   return reportMissing("cg_search");
-    if (!gpu_buffers.cg_As.valid())       return reportMissing("cg_As");
-    if (!gpu_buffers.cg_diag.valid())     return reportMissing("cg_diag");
-    if (!gpu_buffers.cg_partials.valid()) return reportMissing("cg_partials");
-
-    const uint32_t threads     = 256; // must match the device block size (256)
-    const uint32_t cell_count  = static_cast<uint32_t>(grid.getCellCount());
-    const uint32_t cell_groups = (cell_count + threads - 1u) / threads;
-    const uint32_t max_faces   = static_cast<uint32_t>(
-        std::max({grid.vel_x.size(), grid.vel_y.size(), grid.vel_z.size()}));
-
-    // Upload velocity (already reflects boundary + viscosity from CPU) + mask.
-    // Batched: one submission instead of four (Vulkan submit+fence per copy).
-    const auto mg_upload_begin = SimulationClock::now();
-    compute->beginTransferBatch();
-    bool ok = compute->uploadBuffer(gpu_buffers.vel_x,      grid.vel_x.data(),      grid.vel_x.size() * sizeof(float)) &&
-              compute->uploadBuffer(gpu_buffers.vel_y,      grid.vel_y.data(),      grid.vel_y.size() * sizeof(float)) &&
-              compute->uploadBuffer(gpu_buffers.vel_z,      grid.vel_z.data(),      grid.vel_z.size() * sizeof(float)) &&
-              // cell_count, NOT fluid_mask_cpu.size(): the caller's scratch vector is
-              // function-static and grow-only (buildFluidMaskFromParticles keeps the
-              // high-water mark to avoid reallocating every step). Run a 4.6M-cell
-              // domain, then open a new project with a 125k-cell one in the SAME
-              // session and the vector is still 4.6M long — uploading its full size
-              // into the correctly-sized 125k buffer overflows it, uploadBuffer
-              // returns false, and the whole pressure+G2P path silently drops to the
-              // CPU. Only the live cells are ever read by the kernels anyway.
-              compute->uploadBuffer(gpu_buffers.fluid_mask, fluid_mask_cpu.data(),
-                                    cell_count * sizeof(float));
-    ok = compute->endTransferBatch() && ok;
-    if (!ok) return bail("velocity + fluid_mask upload");
-    const float mg_upload_ms = elapsedMilliseconds(mg_upload_begin, SimulationClock::now());
-
-    const bool is_variational = fluid_params.variational_solids &&
-                                (grid.u_weight.size() == grid.vel_x.size()) &&
-                                (grid.v_weight.size() == grid.vel_y.size()) &&
-                                (grid.w_weight.size() == grid.vel_z.size()) &&
-                                gpu_buffers.var_u_weight.valid() &&
-                                gpu_buffers.var_v_weight.valid() &&
-                                gpu_buffers.var_w_weight.valid() &&
-                                gpu_buffers.var_svx.valid() &&
-                                gpu_buffers.var_svy.valid() &&
-                                gpu_buffers.var_svz.valid();
-
-    const bool is_gfm = fluid_params.ghost_fluid_surface &&
-                        (grid.fluid_phi.size() == cell_count) &&
-                        gpu_buffers.var_fluid_phi.valid();
-
-    if (is_variational) {
-        // Convert and upload weights
-        std::vector<float> uw_float(grid.u_weight.size());
-        std::vector<float> vw_float(grid.v_weight.size());
-        std::vector<float> ww_float(grid.w_weight.size());
-        for (std::size_t i = 0; i < grid.u_weight.size(); ++i) uw_float[i] = FluidSim::FluidGrid::weightToFloat(grid.u_weight[i]);
-        for (std::size_t i = 0; i < grid.v_weight.size(); ++i) vw_float[i] = FluidSim::FluidGrid::weightToFloat(grid.v_weight[i]);
-        for (std::size_t i = 0; i < grid.w_weight.size(); ++i) ww_float[i] = FluidSim::FluidGrid::weightToFloat(grid.w_weight[i]);
-
-        ok = ok && compute->uploadBuffer(gpu_buffers.var_u_weight, uw_float.data(), uw_float.size() * sizeof(float));
-        ok = ok && compute->uploadBuffer(gpu_buffers.var_v_weight, vw_float.data(), vw_float.size() * sizeof(float));
-        ok = ok && compute->uploadBuffer(gpu_buffers.var_w_weight, ww_float.data(), ww_float.size() * sizeof(float));
-
-        // Deinterleave and upload solid velocities
-        std::vector<float> svx(cell_count, 0.0f);
-        std::vector<float> svy(cell_count, 0.0f);
-        std::vector<float> svz(cell_count, 0.0f);
-        if (grid.solid_vel.size() == cell_count) {
-            for (std::size_t i = 0; i < cell_count; ++i) {
-                svx[i] = grid.solid_vel[i].x;
-                svy[i] = grid.solid_vel[i].y;
-                svz[i] = grid.solid_vel[i].z;
-            }
-        }
-        ok = ok && compute->uploadBuffer(gpu_buffers.var_svx, svx.data(), svx.size() * sizeof(float));
-        ok = ok && compute->uploadBuffer(gpu_buffers.var_svy, svy.data(), svy.size() * sizeof(float));
-        ok = ok && compute->uploadBuffer(gpu_buffers.var_svz, svz.data(), svz.size() * sizeof(float));
-    }
-
-    if (is_gfm) {
-        ok = ok && compute->uploadBuffer(gpu_buffers.var_fluid_phi, grid.fluid_phi.data(), grid.fluid_phi.size() * sizeof(float));
-    }
-    if (!ok) return bail("variational weight / solid-velocity upload");
-
-    GridProjectionGpuConstants c;
-    c.nx         = grid.nx;
-    c.ny         = grid.ny;
-    c.nz         = grid.nz;
-    // Mirror the domain wall mode onto the GPU MGPCG projection (0=open,
-    // 1=closed, 2=periodic) so an Open domain treats its bounding walls as
-    // p=0 outflow on the GPU exactly like the CPU free-surface solver. Without
-    // this the GPU path always sealed the walls regardless of the UI setting.
-    c.boundary   = (fluid_params.boundary == Fluid::APICSolverParams::BoundaryMode::Open)     ? 0
-                 : (fluid_params.boundary == Fluid::APICSolverParams::BoundaryMode::Periodic) ? 2
-                 : 1;
-    c.voxel_size = grid.voxel_size;
-    c.dt         = dt;
-    c.sor_omega  = 0.0f; // reused to carry CG alpha/beta per dispatch
-    c.iterations = 0;
-    c.parity     = 0;
-    // Bridson density-targeted projection (mask carries per-cell particle count).
-    c.density_correction = fluid_params.density_correction;
-    c.particles_per_cell = fluid_params.particles_per_cell;
-    c.variational        = is_variational ? 1 : 0;
-    c.gfm_active         = is_gfm ? 1 : 0;
-
-    ComputeDispatch cmd;
-    cmd.constants      = &c;
-    cmd.constants_size = sizeof(c);
-
-    auto dispatch1 = [&](const char* kernel, ComputeBufferHandle* bufs, int n, uint32_t groups) -> bool {
-        cmd.kernel          = kernel;
-        cmd.buffers         = bufs;
-        cmd.buffer_count    = n;
-        cmd.constants       = &c;
-        cmd.constants_size  = sizeof(c);
-        cmd.groups.groups_x = groups;
-        cmd.groups.groups_y = 1;
-        cmd.groups.groups_z = 1;
-        return compute->dispatch(cmd);
-    };
-
-    // divergence = (div u)/h  (positive; the residual_init kernel negates it).
-    // Both GPU backends now carry the fluid-mask-aware path that mirrors the
-    // CPU free-surface solver: solid neighbours contribute zero flux, and later
-    // gradient subtraction updates only fluid/air faces while zeroing true
-    // solid faces. Vulkan now also carries the variational (fractional face
-    // weight) system through the *_var kernel variants; only GFM still routes
-    // to the CPU there.
-    const bool use_cuda_fluid_projection =
-        compute->backendType() == ComputeBackendType::CUDA ||
-        compute->backendType() == ComputeBackendType::VulkanCompute;
-
-    // Faz 1 Vulkan MGPCG port covers only the PLAIN free-surface system. When
-    // the sim actually carries variational solid weights or a GFM level set,
-    // the Vulkan kernels would silently solve the wrong (binary-solid) matrix —
-    // fall back to the CPU PCG, which fully supports both.
-    // Variational solid weights ARE implemented on Vulkan now, through the *_var
-    // kernel variants selected by varKernel() below. GFM is not: porting both
-    // matrix changes in one go would make any regression impossible to attribute,
-    // so ghost-fluid domains still take the CPU PCG.
-    if (compute->backendType() == ComputeBackendType::VulkanCompute && is_gfm) {
-        // A missing FEATURE, not a failure, and it costs the whole GPU
-        // pressure+G2P path — so it says so. This used to be a bare return, which
-        // is why a domain with the option merely switched on looked like the GPU
-        // had broken at high resolution.
-        static bool logged = false;
-        if (!logged) {
-            logged = true;
-            SCENE_LOG_WARN(
-                "[SimCompute] Vulkan MGPCG does not implement the ghost-fluid "
-                "surface; pressure + G2P run on the CPU for this domain. Turn GFM "
-                "off to keep the solve on the GPU, or use the CUDA backend.");
-        }
-        return false;
-    }
-
-    // The domain WANTS variational coupling and the grid carries the weights, but
-    // the device buffers for them are missing. Solving anyway would quietly use the
-    // binary-solid matrix — a wrong answer that looks like a working GPU solve,
-    // which is worse than being slow. Hand it to the CPU instead.
-    if (fluid_params.variational_solids &&
-        grid.u_weight.size() == grid.vel_x.size() && !is_variational) {
-        static bool logged = false;
-        if (!logged) {
-            logged = true;
-            SCENE_LOG_WARN("[SimCompute] variational solid weights requested but their "
-                           "GPU buffers are unavailable; falling back to the CPU PCG "
-                           "rather than solving the binary-solid system.");
-        }
-        return false;
-    }
-
-    // On Vulkan the variational system lives in separate kernels (the registry
-    // binds a fixed buffer count per name). CUDA keeps one name and switches on
-    // the dispatch's buffer_count, so it must NOT get the suffix.
-    const bool vulkan_variational =
-        is_variational && compute->backendType() == ComputeBackendType::VulkanCompute;
-    auto varKernel = [vulkan_variational](const char* plain, const char* var) {
-        return vulkan_variational ? var : plain;
-    };
-    ComputeBufferHandle proj_bufs[5] = {
-        gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z,
-        gpu_buffers.pressure, gpu_buffers.divergence
-    };
-    ComputeBufferHandle fluid_divergence_bufs[11];
-    fluid_divergence_bufs[0] = gpu_buffers.vel_x;
-    fluid_divergence_bufs[1] = gpu_buffers.vel_y;
-    fluid_divergence_bufs[2] = gpu_buffers.vel_z;
-    fluid_divergence_bufs[3] = gpu_buffers.fluid_mask;
-    fluid_divergence_bufs[4] = gpu_buffers.divergence;
-    if (is_variational) {
-        fluid_divergence_bufs[5] = gpu_buffers.var_u_weight;
-        fluid_divergence_bufs[6] = gpu_buffers.var_v_weight;
-        fluid_divergence_bufs[7] = gpu_buffers.var_w_weight;
-        fluid_divergence_bufs[8] = gpu_buffers.var_svx;
-        fluid_divergence_bufs[9] = gpu_buffers.var_svy;
-        fluid_divergence_bufs[10] = gpu_buffers.var_svz;
-    }
-    const int div_buf_count = is_variational ? 11 : 5;
-
-    ok = dispatch1(use_cuda_fluid_projection
-                       ? varKernel("sim_fluid_divergence", "sim_fluid_divergence_var")
-                       : "sim_grid_divergence",
-                   use_cuda_fluid_projection ? fluid_divergence_bufs : proj_bufs,
-                   use_cuda_fluid_projection ? div_buf_count : 5,
-                   cell_groups);
-
-    // diag = #in-bounds neighbours (fluid rows; 0 elsewhere).
-    {
-        ComputeBufferHandle b[6];
-        b[0] = gpu_buffers.fluid_mask;
-        b[1] = gpu_buffers.cg_diag;
-        int diag_buf_count = 2;
-        if (is_variational) {
-            b[2] = gpu_buffers.var_u_weight;
-            b[3] = gpu_buffers.var_v_weight;
-            b[4] = gpu_buffers.var_w_weight;
-            diag_buf_count = 5;
-        }
-        if (is_gfm) {
-            b[diag_buf_count] = gpu_buffers.var_fluid_phi;
-            diag_buf_count++;
-        }
-        ok = ok && dispatch1(varKernel("sim_fluid_cg_build_diag",
-                                       "sim_fluid_cg_build_diag_var"),
-                             b, diag_buf_count, cell_groups);
-    }
-    // r = -div*h*h/dt at fluid cells; pressure reset to 0.
-    { ComputeBufferHandle b[4] = { gpu_buffers.divergence, gpu_buffers.fluid_mask,
-                                   gpu_buffers.cg_residual, gpu_buffers.pressure };
-      ok = ok && dispatch1("sim_fluid_cg_residual_init", b, 4, cell_groups); }
-    if (!ok) return bail("divergence / build_diag / residual_init dispatch");
-
-    const bool use_cuda_fused_reductions = compute->backendType() == ComputeBackendType::CUDA;
-
-    // Reduction helpers: dispatch a reducing kernel, sync, download the per-block
-    // double partials, sum on host. Function-static host buffer avoids per-call
-    // heap churn (grows with the block count as needed).
-    const uint32_t dot_blocks = cell_groups;
-    static std::vector<double> cg_partials_host;
-    if (cg_partials_host.size() < dot_blocks) cg_partials_host.assign(dot_blocks, 0.0);
-    float dot_ms = 0.0f;
-    int dot_count = 0;
-    bool used_multigrid = false;
-    auto finishReduction = [&](const auto& dot_begin, double& out) -> bool {
-        compute->synchronize();
-        if (!compute->downloadBuffer(gpu_buffers.cg_partials, cg_partials_host.data(),
-                                     dot_blocks * sizeof(double)))
-            return bail("cg_partials download");
-        double sum = 0.0;
-        for (uint32_t bi = 0; bi < dot_blocks; ++bi) sum += cg_partials_host[bi];
-        out = sum;
-        dot_ms += elapsedMilliseconds(dot_begin, SimulationClock::now());
-        ++dot_count;
-        return true;
-    };
-    auto dotProduct = [&](ComputeBufferHandle x, ComputeBufferHandle y, double& out) -> bool {
-        const auto dot_begin = SimulationClock::now();
-        ComputeBufferHandle b[3] = { x, y, gpu_buffers.cg_partials };
-        if (!dispatch1("sim_fluid_cg_dot", b, 3, dot_blocks)) return bail("cg_dot dispatch");
-        return finishReduction(dot_begin, out);
-    };
-
-    auto mgLevelValid = [](const SimulationGridDomainMGLevelBuffers& level) -> bool {
-        return level.nx > 0 && level.ny > 0 && level.nz > 0 &&
-               level.mask.valid() && level.rhs.valid() &&
-               level.z.valid() && level.diag.valid();
-    };
-    auto dispatchCellKernel = [&](const char* kernel,
-                                  ComputeBufferHandle* bufs,
-                                  int n,
-                                  GridProjectionGpuConstants& pc) -> bool {
-        cmd.kernel          = kernel;
-        cmd.buffers         = bufs;
-        cmd.buffer_count    = n;
-        cmd.constants       = &pc;
-        cmd.constants_size  = sizeof(pc);
-        const uint32_t groups = (static_cast<uint32_t>(pc.nx) *
-                                 static_cast<uint32_t>(pc.ny) *
-                                 static_cast<uint32_t>(pc.nz) + threads - 1u) / threads;
-        cmd.groups.groups_x = std::max(1u, groups);
-        cmd.groups.groups_y = 1;
-        cmd.groups.groups_z = 1;
-        return compute->dispatch(cmd);
-    };
-    auto zeroCells = [&](ComputeBufferHandle values, int nx, int ny, int nz) -> bool {
-        GridProjectionGpuConstants pc = c;
-        pc.nx = nx;
-        pc.ny = ny;
-        pc.nz = nz;
-        ComputeBufferHandle b[1] = { values };
-        return dispatchCellKernel("sim_fluid_mg_zero", b, 1, pc);
-    };
-    auto buildDiag = [&](ComputeBufferHandle mask, ComputeBufferHandle diag,
-                         int nx, int ny, int nz) -> bool {
-        GridProjectionGpuConstants pc = c;
-        pc.nx = nx;
-        pc.ny = ny;
-        pc.nz = nz;
-        ComputeBufferHandle b[2] = { mask, diag };
-        return dispatchCellKernel("sim_fluid_cg_build_diag", b, 2, pc);
-    };
-    auto smoothLevel = [&](ComputeBufferHandle rhs, ComputeBufferHandle mask,
-                           ComputeBufferHandle diag, ComputeBufferHandle z,
-                           int nx, int ny, int nz, int sweeps) -> bool {
-        GridProjectionGpuConstants pc = c;
-        pc.nx = nx;
-        pc.ny = ny;
-        pc.nz = nz;
-        pc.sor_omega = 0.8f;
-        ComputeBufferHandle b[4] = { rhs, mask, diag, z };
-        for (int sweep = 0; sweep < sweeps; ++sweep) {
-            pc.parity = 0;
-            if (!dispatchCellKernel("sim_fluid_mg_rbgs", b, 4, pc)) return false;
-            pc.parity = 1;
-            if (!dispatchCellKernel("sim_fluid_mg_rbgs", b, 4, pc)) return false;
-        }
-        return true;
-    };
-    auto restrictLevel = [&](ComputeBufferHandle fine_rhs, ComputeBufferHandle fine_mask,
-                             int fine_nx, int fine_ny, int fine_nz,
-                             SimulationGridDomainMGLevelBuffers& coarse) -> bool {
-        GridMGGpuConstants mgc;
-        mgc.fine_nx = fine_nx;
-        mgc.fine_ny = fine_ny;
-        mgc.fine_nz = fine_nz;
-        mgc.coarse_nx = coarse.nx;
-        mgc.coarse_ny = coarse.ny;
-        mgc.coarse_nz = coarse.nz;
-        ComputeBufferHandle b[4] = { fine_rhs, fine_mask, coarse.rhs, coarse.mask };
-        cmd.kernel = "sim_fluid_mg_restrict";
-        cmd.buffers = b;
-        cmd.buffer_count = 4;
-        cmd.constants = &mgc;
-        cmd.constants_size = sizeof(mgc);
-        const uint32_t groups =
-            (static_cast<uint32_t>(coarse.nx) *
-             static_cast<uint32_t>(coarse.ny) *
-             static_cast<uint32_t>(coarse.nz) + threads - 1u) / threads;
-        cmd.groups.groups_x = std::max(1u, groups);
-        cmd.groups.groups_y = 1;
-        cmd.groups.groups_z = 1;
-        return compute->dispatch(cmd);
-    };
-    auto prolongateAdd = [&](const SimulationGridDomainMGLevelBuffers& coarse,
-                             ComputeBufferHandle fine_mask,
-                             ComputeBufferHandle fine_z,
-                             int fine_nx, int fine_ny, int fine_nz) -> bool {
-        GridMGGpuConstants mgc;
-        mgc.fine_nx = fine_nx;
-        mgc.fine_ny = fine_ny;
-        mgc.fine_nz = fine_nz;
-        mgc.coarse_nx = coarse.nx;
-        mgc.coarse_ny = coarse.ny;
-        mgc.coarse_nz = coarse.nz;
-        ComputeBufferHandle b[3] = { coarse.z, fine_mask, fine_z };
-        cmd.kernel = "sim_fluid_mg_prolongate_add";
-        cmd.buffers = b;
-        cmd.buffer_count = 3;
-        cmd.constants = &mgc;
-        cmd.constants_size = sizeof(mgc);
-        const uint32_t groups =
-            (static_cast<uint32_t>(fine_nx) *
-             static_cast<uint32_t>(fine_ny) *
-             static_cast<uint32_t>(fine_nz) + threads - 1u) / threads;
-        cmd.groups.groups_x = std::max(1u, groups);
-        cmd.groups.groups_y = 1;
-        cmd.groups.groups_z = 1;
-        return compute->dispatch(cmd);
-    };
-    auto mgPrecondition = [&]() -> bool {
-        if (is_variational || !fluid_params.pressure_multigrid_preconditioner ||
-            !use_cuda_fused_reductions ||
-            gpu_buffers.mg_levels.empty()) {
-            return false;
-        }
-        for (const auto& level : gpu_buffers.mg_levels) {
-            if (!mgLevelValid(level)) return false;
-        }
-
-        ComputeBufferHandle fine_rhs = gpu_buffers.cg_residual;
-        ComputeBufferHandle fine_mask = gpu_buffers.fluid_mask;
-        int fine_nx = grid.nx;
-        int fine_ny = grid.ny;
-        int fine_nz = grid.nz;
-        for (auto& level : gpu_buffers.mg_levels) {
-            if (!restrictLevel(fine_rhs, fine_mask, fine_nx, fine_ny, fine_nz, level)) return false;
-            if (!buildDiag(level.mask, level.diag, level.nx, level.ny, level.nz)) return false;
-            if (!zeroCells(level.z, level.nx, level.ny, level.nz)) return false;
-            fine_rhs = level.rhs;
-            fine_mask = level.mask;
-            fine_nx = level.nx;
-            fine_ny = level.ny;
-            fine_nz = level.nz;
-        }
-
-        auto& coarsest = gpu_buffers.mg_levels.back();
-        if (!smoothLevel(coarsest.rhs, coarsest.mask, coarsest.diag, coarsest.z,
-                         coarsest.nx, coarsest.ny, coarsest.nz, 12)) return false;
-
-        for (int li = static_cast<int>(gpu_buffers.mg_levels.size()) - 2; li >= 0; --li) {
-            auto& coarse = gpu_buffers.mg_levels[static_cast<std::size_t>(li + 1)];
-            auto& fine = gpu_buffers.mg_levels[static_cast<std::size_t>(li)];
-            if (!prolongateAdd(coarse, fine.mask, fine.z, fine.nx, fine.ny, fine.nz)) return false;
-            if (!smoothLevel(fine.rhs, fine.mask, fine.diag, fine.z,
-                             fine.nx, fine.ny, fine.nz, 2)) return false;
-        }
-
-        auto& first_coarse = gpu_buffers.mg_levels.front();
-        if (!zeroCells(gpu_buffers.cg_z, grid.nx, grid.ny, grid.nz)) return false;
-        if (!prolongateAdd(first_coarse, gpu_buffers.fluid_mask, gpu_buffers.cg_z,
-                           grid.nx, grid.ny, grid.nz)) return false;
-        if (!smoothLevel(gpu_buffers.cg_residual, gpu_buffers.fluid_mask, gpu_buffers.cg_diag,
-                         gpu_buffers.cg_z, grid.nx, grid.ny, grid.nz, 2)) return false;
-        return true;
-    };
-    auto jacobiAndDot = [&](double& out) -> bool {
-        if (mgPrecondition()) {
-            used_multigrid = true;
-            return dotProduct(gpu_buffers.cg_residual, gpu_buffers.cg_z, out);
-        }
-        if (use_cuda_fused_reductions) {
-            const auto dot_begin = SimulationClock::now();
-            ComputeBufferHandle b[4] = { gpu_buffers.cg_residual, gpu_buffers.cg_diag,
-                                         gpu_buffers.cg_z, gpu_buffers.cg_partials };
-            if (!dispatch1("sim_fluid_cg_jacobi_dot", b, 4, dot_blocks))
-                return bail("cg_jacobi_dot dispatch");
-            return finishReduction(dot_begin, out);
-        }
-        { ComputeBufferHandle b[3] = { gpu_buffers.cg_residual, gpu_buffers.cg_diag, gpu_buffers.cg_z };
-          if (!dispatch1("sim_fluid_cg_jacobi", b, 3, cell_groups))
-              return bail("cg_jacobi dispatch"); }
-        return dotProduct(gpu_buffers.cg_residual, gpu_buffers.cg_z, out);
-    };
-    auto spmvAndDot = [&](double& out) -> bool {
-        if (use_cuda_fused_reductions) {
-            const auto dot_begin = SimulationClock::now();
-            ComputeBufferHandle b[8] = { gpu_buffers.cg_search, gpu_buffers.fluid_mask,
-                                         gpu_buffers.cg_diag, gpu_buffers.cg_As,
-                                         gpu_buffers.cg_partials };
-            int spmv_buf_count = 5;
-            if (is_variational) {
-                b[5] = gpu_buffers.var_u_weight;
-                b[6] = gpu_buffers.var_v_weight;
-                b[7] = gpu_buffers.var_w_weight;
-                spmv_buf_count = 8;
-            }
-            if (!dispatch1("sim_fluid_cg_spmv_dot", b, spmv_buf_count, dot_blocks)) return false;
-            return finishReduction(dot_begin, out);
-        }
-        {
-            ComputeBufferHandle b[7] = { gpu_buffers.cg_search, gpu_buffers.fluid_mask,
-                                         gpu_buffers.cg_diag, gpu_buffers.cg_As };
-            int spmv_buf_count = 4;
-            if (is_variational) {
-                b[4] = gpu_buffers.var_u_weight;
-                b[5] = gpu_buffers.var_v_weight;
-                b[6] = gpu_buffers.var_w_weight;
-                spmv_buf_count = 7;
-            }
-            if (!dispatch1(varKernel("sim_fluid_cg_spmv", "sim_fluid_cg_spmv_var"),
-                           b, spmv_buf_count, cell_groups)) return bail("cg_spmv dispatch");
-        }
-        return dotProduct(gpu_buffers.cg_search, gpu_buffers.cg_As, out);
-    };
-
-    const double rel_tol_pre = std::clamp(static_cast<double>(fluid_params.pressure_relative_residual),
-                                          1.0e-8, 1.0e-2);
-    const double tol_pre     = rel_tol_pre * rel_tol_pre;             // relative on r.z
-    const int    max_iter_pre = std::max(1, fluid_params.pressure_iterations);
-
-    // ── GPU fast path: device-resident CG scalars ────────────────────────────
-    // The generic loop below downloads a dot product TWICE per iteration —
-    // a full vkQueueSubmit/vkWaitForFences on Vulkan, a blocking stream sync
-    // on CUDA (the HUD's "MGPCG dot sync" measured that at ~80% of the CUDA
-    // pressure solve). Here alpha/beta/sigma live in a 7-double GPU buffer
-    // (sim_fluid_cg_scalar_step tree-reduces the block partials on 256
-    // threads); the host only synchronizes + downloads 56 bytes every K
-    // iterations for the convergence check. Fused kernels (spmv+dot,
-    // jacobi+dot, paired axpy) keep it at 6 dispatches per iteration.
-    // GFM stays on the generic loop, and CUDA keeps the generic loop when the
-    // multigrid preconditioner is available — this branch is Jacobi-only and must
-    // not silently swap the preconditioner.
-    // Vulkan may now take this loop WITH variational weights: its fused spmv+dot
-    // dispatch below binds them and selects sim_fluid_cg_spmv_dot_var, and every
-    // other kernel here is matrix-free apart from `diag`, which is already the
-    // variational diagonal. That matters a lot: on the generic loop each dot costs
-    // a submit+fence, measured at 216.96 ms across 193 syncs on a 4.6M-cell domain
-    // — more than the arithmetic. CUDA keeps the old exclusion because its dispatch
-    // in this loop still binds the plain 5-buffer form.
-    const bool device_scalar_cg =
-        gpu_buffers.cg_scalars.valid() && !is_gfm &&
-        (compute->backendType() == ComputeBackendType::VulkanCompute ||
-         (compute->backendType() == ComputeBackendType::CUDA && !is_variational &&
-          (!fluid_params.pressure_multigrid_preconditioner ||
-           gpu_buffers.mg_levels.empty())));
-    if (device_scalar_cg) {
-        const auto mg_loop_begin = SimulationClock::now();
-        c.iterations = static_cast<int>(dot_blocks); // partials count for scalar_step
-
-        // z = M^-1 r + partials(r.z) fused ; sigma0 ; s = z
-        { ComputeBufferHandle b[4] = { gpu_buffers.cg_residual, gpu_buffers.cg_diag,
-                                       gpu_buffers.cg_z, gpu_buffers.cg_partials };
-          ok = dispatch1("sim_fluid_cg_jacobi_dot", b, 4, dot_blocks); }
-        c.parity = 0; // op: sigma = sum; sigma0 = sigma
-        { ComputeBufferHandle b[2] = { gpu_buffers.cg_partials, gpu_buffers.cg_scalars };
-          ok = ok && dispatch1("sim_fluid_cg_scalar_step", b, 2, 1); }
-        { ComputeBufferHandle b[2] = { gpu_buffers.cg_search, gpu_buffers.cg_z };
-          ok = ok && dispatch1("sim_fluid_cg_copy", b, 2, cell_groups); }
-
-        constexpr int kCheckEvery = 8;
-        double host_scalars[7] = {};
-        int done_iters = 0;
-        while (ok && done_iters < max_iter_pre) {
-            const int batch = std::min(kCheckEvery, max_iter_pre - done_iters);
-            for (int k = 0; k < batch && ok; ++k) {
-                // As = A s + partials(s.As) fused ; alpha = sigma/sAs
-                { ComputeBufferHandle b[8] = { gpu_buffers.cg_search, gpu_buffers.fluid_mask,
-                                               gpu_buffers.cg_diag, gpu_buffers.cg_As,
-                                               gpu_buffers.cg_partials };
-                  int n = 5;
-                  if (vulkan_variational) {
-                      b[5] = gpu_buffers.var_u_weight;
-                      b[6] = gpu_buffers.var_v_weight;
-                      b[7] = gpu_buffers.var_w_weight;
-                      n = 8;
-                  }
-                  ok = dispatch1(varKernel("sim_fluid_cg_spmv_dot",
-                                           "sim_fluid_cg_spmv_dot_var"),
-                                 b, n, dot_blocks); }
-                c.parity = 1; // op: sAs + alpha
-                { ComputeBufferHandle b[2] = { gpu_buffers.cg_partials, gpu_buffers.cg_scalars };
-                  ok = ok && dispatch1("sim_fluid_cg_scalar_step", b, 2, 1); }
-                // p += alpha s ; r -= alpha As (fused pair)
-                { ComputeBufferHandle b[5] = { gpu_buffers.pressure, gpu_buffers.cg_search,
-                                               gpu_buffers.cg_residual, gpu_buffers.cg_As,
-                                               gpu_buffers.cg_scalars };
-                  ok = ok && dispatch1("sim_fluid_cg_axpy2_dev", b, 5, cell_groups); }
-                // z = M^-1 r + partials(r.z) fused ; sigma_new ; beta
-                { ComputeBufferHandle b[4] = { gpu_buffers.cg_residual, gpu_buffers.cg_diag,
-                                               gpu_buffers.cg_z, gpu_buffers.cg_partials };
-                  ok = ok && dispatch1("sim_fluid_cg_jacobi_dot", b, 4, dot_blocks); }
-                c.parity = 2; // op: sigma_new + beta (+ sigma = sigma_new)
-                { ComputeBufferHandle b[2] = { gpu_buffers.cg_partials, gpu_buffers.cg_scalars };
-                  ok = ok && dispatch1("sim_fluid_cg_scalar_step", b, 2, 1); }
-                // s = z + beta s
-                { ComputeBufferHandle b[3] = { gpu_buffers.cg_search, gpu_buffers.cg_z, gpu_buffers.cg_scalars };
-                  ok = ok && dispatch1("sim_fluid_cg_zpby_dev", b, 3, cell_groups); }
-            }
-            if (!ok) break;
-            done_iters += batch;
-
-            // Batched download = barrier + copy recorded into the same command
-            // buffer, then ONE submit+fence for the whole K-iteration block
-            // (the old synchronize + immediate download cost two fences).
-            const auto dot_begin = SimulationClock::now();
-            compute->beginTransferBatch();
-            bool check_ok = compute->downloadBuffer(gpu_buffers.cg_scalars,
-                                                    host_scalars, sizeof(host_scalars));
-            check_ok = compute->endTransferBatch() && check_ok;
-            if (!check_ok) {
-                ok = false;
-                break;
-            }
-            dot_ms += elapsedMilliseconds(dot_begin, SimulationClock::now());
-            ++dot_count;
-
-            const double sigma0_dev    = host_scalars[1];
-            const double sigma_new_dev = host_scalars[5];
-            if (host_scalars[6] != 0.0) break;              // degenerate (no fluid rows)
-            if (sigma0_dev <= 0.0) break;                    // nothing to solve
-            if (sigma_new_dev <= tol_pre * sigma0_dev) break; // converged
-        }
-        if (!ok) return bail("device-scalar CG loop");
-
-        if (mgpcg_stats) {
-            mgpcg_stats->pressure_cg_iterations = done_iters;
-            mgpcg_stats->pressure_cg_max_iterations = max_iter_pre;
-            mgpcg_stats->pressure_cg_dot_count = dot_count;
-            mgpcg_stats->pressure_cg_dot_ms = dot_ms;
-            mgpcg_stats->pressure_cg_multigrid = false;
-            mgpcg_stats->pressure_cg_final_relative_residual =
-                (host_scalars[1] > 0.0)
-                    ? std::sqrt(std::max(0.0, host_scalars[5]) / host_scalars[1])
-                    : 0.0;
-        }
-
-        // Subtract pressure gradient from velocity (shared tail below expects
-        // the generic loop's locals — do it here and return directly).
-        ComputeBufferHandle vk_grad_bufs[11] = {
-            gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z,
-            gpu_buffers.pressure, gpu_buffers.fluid_mask
-        };
-        int vk_grad_count = 5;
-        if (vulkan_variational) {
-            vk_grad_bufs[5]  = gpu_buffers.var_u_weight;
-            vk_grad_bufs[6]  = gpu_buffers.var_v_weight;
-            vk_grad_bufs[7]  = gpu_buffers.var_w_weight;
-            vk_grad_bufs[8]  = gpu_buffers.var_svx;
-            vk_grad_bufs[9]  = gpu_buffers.var_svy;
-            vk_grad_bufs[10] = gpu_buffers.var_svz;
-            vk_grad_count = 11;
-        }
-        cmd.kernel          = varKernel("sim_fluid_subtract_gradient",
-                                        "sim_fluid_subtract_gradient_var");
-        cmd.buffers         = vk_grad_bufs;
-        cmd.buffer_count    = vk_grad_count;
-        cmd.constants       = &c;
-        cmd.constants_size  = sizeof(c);
-        cmd.groups.groups_x = (max_faces + threads - 1u) / threads;
-        cmd.groups.groups_y = 1;
-        cmd.groups.groups_z = 1;
-        const auto mg_tail_begin = SimulationClock::now();
-        ok = compute->dispatch(cmd);
-
-        // No synchronize(): the download batch flushes gradient dispatch +
-        // downloads in one submit (see the P2G tail note).
-        compute->beginTransferBatch();
-        ok = ok &&
-             compute->downloadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
-             compute->downloadBuffer(gpu_buffers.vel_y, grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
-             compute->downloadBuffer(gpu_buffers.vel_z, grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
-        ok = compute->endTransferBatch() && ok;
-
-        // Phase breakdown, averaged and logged every ~240 substeps (see the
-        // matching block in runGpuFluidP2G). cg=init+iterations+syncs,
-        // tail=gradient dispatch+sync+velocity download.
-        {
-            static float s_up = 0.0f, s_cg = 0.0f, s_tail = 0.0f;
-            static float s_iters = 0.0f;
-            static int   s_n = 0;
-            s_up   += mg_upload_ms;
-            s_cg   += elapsedMilliseconds(mg_loop_begin, mg_tail_begin);
-            s_tail += elapsedMilliseconds(mg_tail_begin, SimulationClock::now());
-            s_iters += static_cast<float>(done_iters);
-            if (++s_n >= 240) {
-                const float inv = 1.0f / static_cast<float>(s_n);
-                SCENE_LOG_INFO("[FluidGPU MGPCG avg ms] backend=" + std::string(compute->backendName()) +
-                               " mode=dev-scalar" +
-                               " upload=" + std::to_string(s_up * inv) +
-                               " cg_loop=" + std::to_string(s_cg * inv) +
-                               " grad+download=" + std::to_string(s_tail * inv) +
-                               " iters=" + std::to_string(s_iters * inv) +
-                               " cells=" + std::to_string(cell_count));
-                s_up = s_cg = s_tail = s_iters = 0.0f;
-                s_n = 0;
-            }
-        }
-        return ok;
-    }
-
-    const auto mg_loop_begin = SimulationClock::now();
-    double sigma = 0.0;
-    if (!jacobiAndDot(sigma)) return false;
-    // s = z
-    { ComputeBufferHandle b[2] = { gpu_buffers.cg_search, gpu_buffers.cg_z };
-      if (!dispatch1("sim_fluid_cg_copy", b, 2, cell_groups)) return false; }
-
-    const double sigma0   = sigma;
-    const double tol      = tol_pre;                                  // relative on r.z
-    const int    max_iter = max_iter_pre;
-    int iterations_used = 0;
-
-    if (sigma0 > 0.0) {
-        for (int iter = 0; iter < max_iter; ++iter) {
-            double sAs = 0.0;
-            if (!spmvAndDot(sAs)) { ok = false; break; }
-            if (std::abs(sAs) < 1e-30) break; // degenerate (no fluid rows)
-            const float alpha = static_cast<float>(sigma / sAs);
-
-            // p += alpha s
-            c.sor_omega = alpha;
-            { ComputeBufferHandle b[2] = { gpu_buffers.pressure, gpu_buffers.cg_search };
-              if (!dispatch1("sim_fluid_cg_axpy", b, 2, cell_groups)) { ok = false; break; } }
-            // r -= alpha As
-            c.sor_omega = -alpha;
-            { ComputeBufferHandle b[2] = { gpu_buffers.cg_residual, gpu_buffers.cg_As };
-              if (!dispatch1("sim_fluid_cg_axpy", b, 2, cell_groups)) { ok = false; break; } }
-
-            double sigma_new = 0.0;
-            if (!jacobiAndDot(sigma_new)) { ok = false; break; }
-            iterations_used = iter + 1;
-            if (sigma_new <= tol * sigma0) { sigma = sigma_new; break; }
-
-            const float beta = static_cast<float>(sigma_new / sigma);
-            // s = z + beta s
-            c.sor_omega = beta;
-            { ComputeBufferHandle b[2] = { gpu_buffers.cg_search, gpu_buffers.cg_z };
-              if (!dispatch1("sim_fluid_cg_zpby", b, 2, cell_groups)) { ok = false; break; } }
-            sigma = sigma_new;
-        }
-    }
-    if (!ok) return false;
-    if (mgpcg_stats) {
-        mgpcg_stats->pressure_cg_iterations = iterations_used;
-        mgpcg_stats->pressure_cg_max_iterations = max_iter;
-        mgpcg_stats->pressure_cg_dot_count = dot_count;
-        mgpcg_stats->pressure_cg_dot_ms = dot_ms;
-        mgpcg_stats->pressure_cg_multigrid = used_multigrid;
-        mgpcg_stats->pressure_cg_final_relative_residual =
-            sigma0 > 0.0 ? std::sqrt(std::max(0.0, sigma) / sigma0) : 0.0;
-    }
-
-    // Subtract pressure gradient from velocity.
-    ComputeBufferHandle fluid_gradient_bufs[12];
-    fluid_gradient_bufs[0] = gpu_buffers.vel_x;
-    fluid_gradient_bufs[1] = gpu_buffers.vel_y;
-    fluid_gradient_bufs[2] = gpu_buffers.vel_z;
-    fluid_gradient_bufs[3] = gpu_buffers.pressure;
-    fluid_gradient_bufs[4] = gpu_buffers.fluid_mask;
-    if (is_variational) {
-        fluid_gradient_bufs[5] = gpu_buffers.var_u_weight;
-        fluid_gradient_bufs[6] = gpu_buffers.var_v_weight;
-        fluid_gradient_bufs[7] = gpu_buffers.var_w_weight;
-        fluid_gradient_bufs[8] = gpu_buffers.var_svx;
-        fluid_gradient_bufs[9] = gpu_buffers.var_svy;
-        fluid_gradient_bufs[10] = gpu_buffers.var_svz;
-    }
-    int grad_buf_count = is_variational ? 11 : 5;
-    if (is_gfm) {
-        fluid_gradient_bufs[grad_buf_count] = gpu_buffers.var_fluid_phi;
-        grad_buf_count++;
-    }
-
-    cmd.kernel          = use_cuda_fluid_projection
-        ? varKernel("sim_fluid_subtract_gradient", "sim_fluid_subtract_gradient_var")
-        : "sim_grid_subtract_gradient";
-    cmd.buffers         = use_cuda_fluid_projection ? fluid_gradient_bufs : proj_bufs;
-    cmd.buffer_count    = use_cuda_fluid_projection ? grad_buf_count : 5;
-    cmd.groups.groups_x = (max_faces + threads - 1u) / threads;
-    cmd.groups.groups_y = 1;
-    cmd.groups.groups_z = 1;
-    const auto mg_tail_begin = SimulationClock::now();
-    ok = compute->dispatch(cmd);
-
-    // Download updated velocities for CPU boundary re-enforcement and G2P.
-    // No synchronize(): the batch flushes in one submit (see the P2G note).
-    compute->beginTransferBatch();
-    ok = ok &&
-         compute->downloadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
-         compute->downloadBuffer(gpu_buffers.vel_y, grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
-         compute->downloadBuffer(gpu_buffers.vel_z, grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
-    ok = compute->endTransferBatch() && ok;
-
-    // Phase breakdown for the generic/CUDA path — mirrors the Vulkan
-    // device-scalar branch above so both backends print a comparable line.
-    {
-        static float s_up = 0.0f, s_cg = 0.0f, s_tail = 0.0f;
-        static float s_iters = 0.0f;
-        static int   s_n = 0;
-        s_up   += mg_upload_ms;
-        s_cg   += elapsedMilliseconds(mg_loop_begin, mg_tail_begin);
-        s_tail += elapsedMilliseconds(mg_tail_begin, SimulationClock::now());
-        s_iters += static_cast<float>(iterations_used);
-        if (++s_n >= 240) {
-            const float inv = 1.0f / static_cast<float>(s_n);
-            SCENE_LOG_INFO("[FluidGPU MGPCG avg ms] backend=" + std::string(compute->backendName()) +
-                           " mode=generic" +
-                           " upload=" + std::to_string(s_up * inv) +
-                           " cg_loop=" + std::to_string(s_cg * inv) +
-                           " grad+download=" + std::to_string(s_tail * inv) +
-                           " iters=" + std::to_string(s_iters * inv) +
-                           " cells=" + std::to_string(cell_count));
-            s_up = s_cg = s_tail = s_iters = 0.0f;
-            s_n = 0;
-        }
-    }
-    return ok;
-}
+#include "Fluid/FluidGpuPressure.inl"
 
 // GPU G2P gather.
 // Expects vel_x/y/z already uploaded (post-pressure) and, for FLIP,
@@ -4079,313 +3273,8 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
 // Downloads updated particle velocities + affine to CPU when done, unless the
 // Vulkan advect tail will consume them immediately and publish one combined
 // position/velocity/affine snapshot.
-bool runGpuFluidG2P(SimulationGridDomainState& state,
-                    const Fluid::APICSolverParams& fluid_params,
-                    float dt,
-                    SimulationComputeContext* compute,
-                    SimulationGridDomainComputeBuffers& gpu_buffers,
-                    bool has_flip_snapshot,
-                    bool download_granular_state = true,
-                    bool reuse_particle_velocity = false,
-                    bool reuse_projected_grid_velocity = false,
-                    bool defer_particle_download = false) {
-    auto& grid      = state.grid;
-    auto& particles = state.particles;
-    const std::size_t n = particles.size();
-    if (!compute || !compute->supportsDispatch() || n == 0 || dt <= 0.0f ||
-        grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0) {
-        return false;
-    }
-    if (!gpu_buffers.fluid_positions.valid() ||
-        !gpu_buffers.fluid_velocities.valid() ||
-        !gpu_buffers.fluid_affine.valid()     ||
-        !gpu_buffers.vel_x.valid()            ||
-        !gpu_buffers.vel_y.valid()            ||
-        !gpu_buffers.vel_z.valid()            ||
-        !gpu_buffers.fluid_mask.valid()) {
-        return false;
-    }
-
-    // The caller vouches that the device vel_* is the field G2P must sample:
-    // either the Vulkan projection with no solids (a host-only solid-face clamp
-    // would otherwise make the host copy the authoritative one), or the granular
-    // resident chain, which clamps on the device (sim_fluid_zero_solid_faces).
-    const bool grid_velocity_is_current =
-        reuse_projected_grid_velocity &&
-        compute->backendType() == ComputeBackendType::VulkanCompute;
-    bool ok = true;
-
-    // FLIP snapshot was prepared in scratch before pressure, either by a
-    // device copy or by the host-upload fallback.
-    if (has_flip_snapshot &&
-        gpu_buffers.scratch_vel_x.valid() &&
-        gpu_buffers.scratch_vel_y.valid() &&
-        gpu_buffers.scratch_vel_z.valid()) {
-        // No additional transfer is needed here.
-    } else {
-        has_flip_snapshot = false;
-    }
-
-    // P2G only reads particle velocity. If its full particle upload is still
-    // current, G2P can use that device copy for the FLIP v_old term.
-    const bool velocity_is_current =
-        reuse_particle_velocity &&
-        FluidGpuParticleUpload::canReuse(gpu_buffers, *compute, n);
-    if (!grid_velocity_is_current || !velocity_is_current) {
-        compute->beginTransferBatch();
-        if (!grid_velocity_is_current) {
-            ok = compute->uploadBuffer(
-                     gpu_buffers.vel_x, grid.vel_x.data(),
-                     grid.vel_x.size() * sizeof(float)) &&
-                 compute->uploadBuffer(
-                     gpu_buffers.vel_y, grid.vel_y.data(),
-                     grid.vel_y.size() * sizeof(float)) &&
-                 compute->uploadBuffer(
-                     gpu_buffers.vel_z, grid.vel_z.data(),
-                     grid.vel_z.size() * sizeof(float));
-        }
-        if (!velocity_is_current) {
-            ok = ok && compute->uploadBuffer(gpu_buffers.fluid_velocities,
-                                             particles.velocity.data(),
-                                             n * sizeof(Vec3));
-        }
-        ok = compute->endTransferBatch() && ok;
-    }
-    if (!ok) return false;
-
-    FluidG2PGpuConstants c;
-    c.nx                = grid.nx;
-    c.ny                = grid.ny;
-    c.nz                = grid.nz;
-    c.particle_count    = static_cast<int>(std::min<std::size_t>(n, static_cast<std::size_t>(std::numeric_limits<int>::max())));
-    c.origin_x          = grid.origin.x;
-    c.origin_y          = grid.origin.y;
-    c.origin_z          = grid.origin.z;
-    c.voxel_size        = grid.voxel_size;
-    c.flip_blend        = std::clamp(fluid_params.flip_blend, 0.0f, 1.0f);
-    c.apic_blend        = std::clamp(fluid_params.apic_blend, 0.0f, 1.0f);
-    c.internal_friction = fluid_params.granular_enabled ? 0.0f
-                                                         : fluid_params.internal_friction;
-    c.max_velocity      = fluid_params.max_velocity;
-    c.dt                = dt;
-    c.has_flip_snapshot = has_flip_snapshot ? 1 : 0;
-    // Same limiter on both GPU backends (the Vulkan g2p shader now carries the
-    // fluid_mask binding + wall-axis damping, 1:1 with the CUDA kernel).
-    c.use_solid_flip_limiter =
-        (compute->backendType() == ComputeBackendType::CUDA ||
-         compute->backendType() == ComputeBackendType::VulkanCompute) ? 1 : 0;
-    c.affine_damping    = fluid_params.affine_damping;
-    c.max_affine        = fluid_params.max_affine;
-
-    constexpr uint32_t threads = 256;
-    ComputeBufferHandle bufs[10] = {
-        gpu_buffers.fluid_positions,
-        gpu_buffers.fluid_velocities,
-        gpu_buffers.fluid_affine,
-        gpu_buffers.vel_x,
-        gpu_buffers.vel_y,
-        gpu_buffers.vel_z,
-        gpu_buffers.scratch_vel_x,  // pre-projection snapshot (or unused)
-        gpu_buffers.scratch_vel_y,
-        gpu_buffers.scratch_vel_z,
-        gpu_buffers.fluid_mask
-    };
-    ComputeDispatch cmd;
-    cmd.kernel         = "sim_fluid_g2p";
-    cmd.buffers        = bufs;
-    cmd.buffer_count   = 10;
-    cmd.constants      = &c;
-    cmd.constants_size = sizeof(c);
-    cmd.groups.groups_x = (static_cast<uint32_t>(c.particle_count) + threads - 1u) / threads;
-    ok = compute->dispatch(cmd);
-
-    if (ok && fluid_params.granular_enabled) {
-        Fluid::Granular::Parameters gp;
-        constexpr float deg_to_rad = 0.017453292519943295f;
-        gp.friction_angle_radians = fluid_params.granular_friction_angle_degrees * deg_to_rad;
-        gp.cohesion = fluid_params.granular_cohesion;
-        gp.dilatancy = fluid_params.granular_dilatancy_degrees * deg_to_rad;
-        gp.hardening = fluid_params.granular_hardening;
-        gp.tensile_cutoff = fluid_params.granular_tensile_cutoff;
-        const auto elastic_step = Fluid::Granular::elasticStepInfo(
-            fluid_params.granular_young_modulus, state.grid.voxel_size, dt);
-        ok = Fluid::Granular::dispatchStressUpdate(
-            *compute, gpu_buffers.granular, gpu_buffers.fluid_affine, n, dt, gp,
-            elastic_step.effective_young_modulus,
-            fluid_params.granular_poisson_ratio,
-            fluid_params.granular_fracture_strain,
-            fluid_params.granular_damage_rate,
-            fluid_params.granular_healing_rate,
-            fluid_params.granular_rebonding);
-        if (ok) {
-            ok = Fluid::Granular::dispatchSettle(
-                *compute, gpu_buffers.granular,
-                gpu_buffers.fluid_velocities, n, dt);
-        }
-    }
-
-    if (defer_particle_download) {
-        return ok;
-    }
-
-    // No synchronize(): the download batch flushes uploads+dispatch+downloads
-    // in one submit (see the P2G tail note).
-    compute->beginTransferBatch();
-    ok = ok &&
-         compute->downloadBuffer(gpu_buffers.fluid_velocities,
-                                 particles.velocity.data(),
-                                 n * sizeof(Vec3)) &&
-         compute->downloadBuffer(gpu_buffers.fluid_affine,
-                                 particles.affine.data(),
-                                 n * sizeof(Fluid::AffineC));
-    if (ok && fluid_params.granular_enabled && download_granular_state) {
-        ok = compute->downloadBuffer(gpu_buffers.granular.stress_diag,
-                                     particles.granular_stress_diag.data(), n * sizeof(Vec3)) && ok;
-        ok = compute->downloadBuffer(gpu_buffers.granular.stress_shear,
-                                     particles.granular_stress_shear.data(), n * sizeof(Vec3)) && ok;
-        ok = compute->downloadBuffer(gpu_buffers.granular.plastic_volume,
-                                     particles.granular_plastic_volume.data(), n * sizeof(float)) && ok;
-        ok = compute->downloadBuffer(gpu_buffers.granular.state_flags,
-                                     particles.granular_material_flags.data(), n * sizeof(uint32_t)) && ok;
-        ok = compute->downloadBuffer(gpu_buffers.granular.yield_value,
-                                     particles.granular_yield_value.data(), n * sizeof(float)) && ok;
-        ok = compute->downloadBuffer(gpu_buffers.granular.plastic_increment,
-                                     particles.granular_plastic_increment.data(), n * sizeof(float)) && ok;
-        ok = compute->downloadBuffer(gpu_buffers.granular.damage,
-                                     particles.granular_damage.data(), n * sizeof(float)) && ok;
-        ok = compute->downloadBuffer(gpu_buffers.granular.hardening,
-                                     particles.granular_hardening.data(), n * sizeof(float)) && ok;
-        ok = compute->downloadBuffer(gpu_buffers.granular.fracture_history,
-                                     particles.granular_fracture_history.data(), n * sizeof(float)) && ok;
-        ok = compute->downloadBuffer(gpu_buffers.granular.deformation_col0,
-                                     particles.granular_deformation_col0.data(), n * sizeof(Vec3)) && ok;
-        ok = compute->downloadBuffer(gpu_buffers.granular.deformation_col1,
-                                     particles.granular_deformation_col1.data(), n * sizeof(Vec3)) && ok;
-        ok = compute->downloadBuffer(gpu_buffers.granular.deformation_col2,
-                                     particles.granular_deformation_col2.data(), n * sizeof(Vec3)) && ok;
-    }
-    ok = compute->endTransferBatch() && ok;
-    return ok;
-}
-
-bool runGpuFluidAdvectTail(SimulationGridDomainState& state,
-                           const Fluid::APICSolverParams& params,
-                           float dt,
-                           SimulationComputeContext* compute,
-                           SimulationGridDomainComputeBuffers& buffers,
-                           int* executed_substeps = nullptr,
-                           bool download_affine = false,
-                           bool* deferred_g2p_available = nullptr) {
-    if (executed_substeps) *executed_substeps = 0;
-    if (deferred_g2p_available) *deferred_g2p_available = !download_affine;
-    auto& particles = state.particles;
-    auto& grid = state.grid;
-    const std::size_t n = particles.size();
-    if (!compute ||
-        compute->backendType() != ComputeBackendType::VulkanCompute ||
-        !compute->supportsDispatch() || n == 0 || dt <= 0.0f) {
-        return false;
-    }
-    ComputeBufferHandle bufs[9] = {
-        buffers.fluid_positions, buffers.fluid_velocities,
-        buffers.vel_x, buffers.vel_y, buffers.vel_z,
-        buffers.fluid_mask, buffers.var_svx, buffers.var_svy, buffers.var_svz
-    };
-    for (const auto& handle : bufs) {
-        if (!handle.valid()) {
-            if (download_affine && buffers.fluid_velocities.valid() &&
-                buffers.fluid_affine.valid()) {
-                compute->beginTransferBatch();
-                bool recovered = compute->downloadBuffer(
-                    buffers.fluid_velocities,
-                    particles.velocity.data(), n * sizeof(Vec3));
-                recovered = compute->downloadBuffer(
-                    buffers.fluid_affine,
-                    particles.affine.data(), n * sizeof(Fluid::AffineC)) && recovered;
-                recovered = compute->endTransferBatch() && recovered;
-                if (deferred_g2p_available) *deferred_g2p_available = recovered;
-                if (!recovered) {
-                    SCENE_LOG_WARN("[SimCompute] deferred G2P readback failed after "
-                                   "advect-tail buffer validation failed.");
-                }
-            }
-            return false;
-        }
-    }
-
-    FluidAdvectTailGpuConstants c;
-    c.nx = grid.nx; c.ny = grid.ny; c.nz = grid.nz;
-    c.particle_count = static_cast<int>(std::min<std::size_t>(
-        n, static_cast<std::size_t>(std::numeric_limits<int>::max())));
-    const int boundary_mode =
-        params.boundary == Fluid::APICSolverParams::BoundaryMode::Open ? 1 :
-        params.boundary == Fluid::APICSolverParams::BoundaryMode::Periodic ? 2 : 0;
-    // Bits 0..1 retain the boundary enum; bit 2 selects Lagrangian MPM
-    // advection. Reuse the existing word so the 64-byte push ABI is unchanged.
-    c.boundary = boundary_mode | (params.granular_enabled ? 4 : 0);
-    c.origin_x = grid.origin.x; c.origin_y = grid.origin.y; c.origin_z = grid.origin.z;
-    c.voxel_size = grid.voxel_size; c.dt = dt;
-    c.velocity_damping = std::clamp(params.velocity_damping, 0.0f, 1.0f);
-    c.max_velocity = params.max_velocity;
-    c.wall_damping = params.wall_damping;
-    c.air_drag = params.air_drag;
-    {
-        const Vec3 air = Fluid::atmosphereAirVelocity(params);
-        c.air_wind_x = air.x; c.air_wind_y = air.y; c.air_wind_z = air.z;
-    }
-    c.air_threshold = std::max(1, params.reseed_min_per_cell);
-    const float safe_cfl = std::max(params.cfl, 0.05f);
-    c.substeps = std::clamp(
-        static_cast<int>(std::ceil(std::max(0.0f, params.max_velocity) * dt /
-                                   std::max(grid.voxel_size * safe_cfl, 1.0e-6f))),
-        1, std::max(1, params.max_substeps));
-
-    ComputeDispatch cmd;
-    cmd.kernel = "sim_fluid_advect_tail";
-    cmd.buffers = bufs;
-    cmd.buffer_count = 9;
-    cmd.constants = &c;
-    cmd.constants_size = sizeof(c);
-    cmd.groups.groups_x = (static_cast<uint32_t>(c.particle_count) + 255u) / 256u;
-    const bool dispatched = compute->dispatch(cmd);
-    compute->beginTransferBatch();
-    bool ok = true;
-    if (dispatched) {
-        ok = compute->downloadBuffer(buffers.fluid_positions,
-                                     particles.position.data(), n * sizeof(Vec3)) &&
-             compute->downloadBuffer(buffers.fluid_velocities,
-                                     particles.velocity.data(), n * sizeof(Vec3));
-    } else if (download_affine) {
-        // G2P succeeded but the device tail did not dispatch. Bring its output
-        // home so Call 2 can run the correct host tail instead of consuming the
-        // previous frame's velocity.
-        ok = compute->downloadBuffer(buffers.fluid_velocities,
-                                     particles.velocity.data(), n * sizeof(Vec3));
-    }
-    if (download_affine) {
-        ok = compute->downloadBuffer(buffers.fluid_affine,
-                                     particles.affine.data(),
-                                     n * sizeof(Fluid::AffineC)) && ok;
-    }
-    ok = compute->endTransferBatch() && ok;
-    if (deferred_g2p_available) *deferred_g2p_available = ok;
-    if (!dispatched || !ok) return false;
-    if (executed_substeps) *executed_substeps = c.substeps;
-
-    if (params.boundary == Fluid::APICSolverParams::BoundaryMode::Open) {
-        Vec3 mn, mx;
-        grid.getWorldBounds(mn, mx);
-        for (std::size_t pi = particles.size(); pi-- > 0;) {
-            const Vec3& p = particles.position[pi];
-            if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
-                p.x < mn.x || p.x > mx.x || p.y < mn.y || p.y > mx.y ||
-                p.z < mn.z || p.z > mx.z) {
-                particles.removeSwap(pi);
-            }
-        }
-    }
-    return true;
-}
+#include "Fluid/FluidGpuOccupancy.inl"
+#include "Fluid/FluidGpuTransferStages.inl"
 
 bool uploadGpuGasColliderFields(
     const FluidSim::FluidGrid& grid,
@@ -7569,6 +6458,7 @@ void ParticleSimulationSystem::clear() {
     alive_count_ = 0;
     for (auto& source : flow_sources_) {
         source.fluid_emit_accumulator = 0.0f;
+        source.fluid_emit_sample_serial = 0;
         source.total_emitted_particles = 0;
         // Re-arm the parent motion sampler. Without this a rewind measures the
         // parent's velocity across the whole timeline jump and the first frame
@@ -7622,6 +6512,7 @@ ParticleSimulationRuntimeState ParticleSimulationSystem::captureRuntimeState() c
     state.flow_total_emitted_particles.reserve(flow_sources_.size());
     for (const auto& source : flow_sources_) {
         state.flow_emit_accumulators.push_back(source.fluid_emit_accumulator);
+        state.flow_emit_sample_serials.push_back(source.fluid_emit_sample_serial);
         state.flow_total_emitted_particles.push_back(source.total_emitted_particles);
     }
 
@@ -7648,6 +6539,9 @@ void ParticleSimulationSystem::restoreRuntimeState(const ParticleSimulationRunti
     for (std::size_t i = 0; i < flow_count; ++i) {
         flow_sources_[i].fluid_emit_accumulator = state.flow_emit_accumulators[i];
         flow_sources_[i].total_emitted_particles = state.flow_total_emitted_particles[i];
+        flow_sources_[i].fluid_emit_sample_serial = i < state.flow_emit_sample_serials.size()
+            ? state.flow_emit_sample_serials[i] : static_cast<uint64_t>(
+                std::max(state.flow_total_emitted_particles[i], 0));
     }
 
     prev_collider_centers_ = state.previous_collider_centers;
@@ -8372,68 +7266,7 @@ void ParticleSimulationSystem::setGridDomainBoundsResolver(
     grid_domain_bounds_resolver_ = std::move(resolver);
 }
 
-void ParticleSimulationSystem::rebaseRestoredGridDomainStates() {
-    const std::size_t count = std::min(grid_domain_states_.size(), grid_domains_.size());
-    for (std::size_t i = 0; i < count; ++i) {
-        const SimulationGridDomainDesc& domain = grid_domains_[i];
-        SimulationGridDomainState& state = grid_domain_states_[i];
-        if (!state.valid) continue;
-        // ★★★ ManualBox ONLY, and the reason is a timing one. For ObjectBounds /
-        // Adaptive the descriptor bounds are DERIVED: synchronizeGridDomains()
-        // rewrites them from the resolver, and applySimSourceObjectPosesForFrame()
-        // does not run until AFTER this restore. So at this instant the desc
-        // still describes some other frame's pose, and rebasing onto it would
-        // slide the whole bake a little on every scrub -- a drift that looks
-        // like motion rather than like a bug. Those modes keep the verbatim
-        // restore they always had; their bounds follow their object anyway.
-        if (domain.source_mode != SimulationGridDomainSourceMode::ManualBox) continue;
-
-        // Same expression synchronizeGridDomains() uses to derive state bounds,
-        // so a domain that has NOT moved produces an exactly zero delta and
-        // falls out below instead of drifting by a rounding step every scrub.
-        const float padding = std::max(0.0f, domain.padding);
-        const Vec3 live_min = Vec3::min(domain.bounds_min, domain.bounds_max) - Vec3(padding);
-        const Vec3 live_max = Vec3::max(domain.bounds_min, domain.bounds_max) + Vec3(padding);
-
-        const Vec3 delta = live_min - state.bounds_min;
-        if (std::abs(delta.x) < 1e-6f && std::abs(delta.y) < 1e-6f && std::abs(delta.z) < 1e-6f) {
-            continue;
-        }
-
-        // Pure-translation gate. A changed extent or voxel size means the grid
-        // layout itself differs, so the cached cells do not correspond to the
-        // live ones and shifting them would be a lie with the right shape.
-        const Vec3 live_extent = live_max - live_min;
-        const Vec3 cached_extent = state.bounds_max - state.bounds_min;
-        const Vec3 extent_error = live_extent - cached_extent;
-        if (std::abs(extent_error.x) > 1e-3f ||
-            std::abs(extent_error.y) > 1e-3f ||
-            std::abs(extent_error.z) > 1e-3f) {
-            continue;
-        }
-        if (std::abs(state.grid.voxel_size - domain.voxel_size) > 1e-6f) continue;
-
-        state.bounds_min += delta;
-        state.bounds_max += delta;
-        state.grid.origin += delta;
-
-        // Fluid particles are world-space and must come along. Velocity is a
-        // DIRECTION and is left alone; translating it would inject a phantom
-        // drift on the first replayed step.
-        for (Vec3& position : state.particles.position) position += delta;
-        // ★ Material coordinates start life as a copy of the world position
-        // (uvw == position for resting material) and are addressed in the same
-        // world frame, so they translate with it. Leaving them behind shifts
-        // every UVW-projected texture on the surface by the move distance --
-        // visible as the material sliding across the liquid, not as an error.
-        for (Vec3& uvw : state.particles.uvw)   uvw += delta;
-        for (Vec3& uvw : state.particles.uvw_b) uvw += delta;
-        for (Vec3& position : state.foam.position) position += delta;
-
-        // The published snapshot genuinely changed; consumers key off this.
-        ++state.version;
-    }
-}
+#include "Fluid/MatterDomainRestore.inl"
 
 int ParticleSimulationSystem::translateGridDomain(std::size_t domain_index, const Vec3& delta) {
     if (domain_index >= grid_domains_.size()) return 0;
@@ -8825,918 +7658,9 @@ void ParticleSimulationSystem::synchronizeGridDomainsNow() {
     synchronizeGridDomains();
 }
 
-void ParticleSimulationSystem::synchronizeGridDomains() {
-    if (grid_domain_states_.size() != grid_domains_.size()) {
-        grid_domain_states_.resize(grid_domains_.size());
-    }
+#include "Fluid/MatterDomainSynchronization.inl"
 
-    for (std::size_t i = 0; i < grid_domains_.size(); ++i) {
-        auto& domain = grid_domains_[i];
-        auto& state = grid_domain_states_[i];
-
-        // Do not re-derive coupling flags from the material preset here.
-        // These fields are editable domain overrides; doing that every sync
-        // made the Water preset's non-flammable default silently uncheck
-        // "Enable Flammable Surface" and prevented manual ignition tests.
-        // Preset constructors may initialize them, but live UI/project values
-        // must remain authoritative after synchronization.
-
-        Vec3 bounds_min = domain.bounds_min;
-        Vec3 bounds_max = domain.bounds_max;
-        float current_padding = std::max(0.0f, domain.padding);
-
-        if (domain.source_mode == SimulationGridDomainSourceMode::ObjectBounds && grid_domain_bounds_resolver_) {
-            Vec3 resolved_min = bounds_min;
-            Vec3 resolved_max = bounds_max;
-            if (grid_domain_bounds_resolver_(domain, resolved_min, resolved_max)) {
-                bounds_min = resolved_min;
-                bounds_max = resolved_max;
-                domain.bounds_min = resolved_min;
-                domain.bounds_max = resolved_max;
-            }
-        } else if (domain.source_mode == SimulationGridDomainSourceMode::Adaptive) {
-            current_padding = 0.0f; // Padding handled internally to preserve floor locking
-            Vec3 min_p(1.0e10f, 1.0e10f, 1.0e10f);
-            Vec3 max_p(-1.0e10f, -1.0e10f, -1.0e10f);
-            bool has_particles = false;
-
-            if (simulationDomainHasLiquid(domain.type)) {
-                if (!state.particles.position.empty()) {
-                    for (const auto& pos : state.particles.position) {
-                        min_p = Vec3::min(min_p, pos);
-                        max_p = Vec3::max(max_p, pos);
-                    }
-                    has_particles = true;
-                }
-            } else {
-                const std::size_t num_particles = buffers_.alive.size();
-                for (std::size_t p = 0; p < num_particles; ++p) {
-                    if (buffers_.alive[p] != 0u) {
-                        Vec3 pos(buffers_.position_x[p], buffers_.position_y[p], buffers_.position_z[p]);
-                        min_p = Vec3::min(min_p, pos);
-                        max_p = Vec3::max(max_p, pos);
-                        has_particles = true;
-                    }
-                }
-            }
-
-            if (has_particles) {
-                float pad_val = std::max(0.0f, domain.padding);
-                if (pad_val < 1.0e-5f) {
-                    pad_val = std::max(domain.voxel_size * 3.0f, 0.05f);
-                }
-                min_p = min_p - Vec3(pad_val, pad_val, pad_val);
-                max_p = max_p + Vec3(pad_val, pad_val, pad_val);
-
-                if (domain.adaptive_lock_floor) {
-                    min_p.y = domain.adaptive_floor_y;
-                }
-
-                // Grid snapping to voxel size to completely eliminate sub-voxel jitter
-                const float voxel_size = domain.voxel_size > 1.0e-6f ? domain.voxel_size : 0.1f;
-                min_p.x = std::floor(min_p.x / voxel_size) * voxel_size;
-                min_p.y = std::floor(min_p.y / voxel_size) * voxel_size;
-                min_p.z = std::floor(min_p.z / voxel_size) * voxel_size;
-
-                max_p.x = std::ceil(max_p.x / voxel_size) * voxel_size;
-                max_p.y = std::ceil(max_p.y / voxel_size) * voxel_size;
-                max_p.z = std::ceil(max_p.z / voxel_size) * voxel_size;
-
-                bounds_min = min_p;
-                bounds_max = max_p;
-                domain.bounds_min = bounds_min;
-                domain.bounds_max = bounds_max;
-            }
-        }
-
-        const Vec3 mn = Vec3::min(bounds_min, bounds_max) - current_padding;
-        const Vec3 mx = Vec3::max(bounds_min, bounds_max) + current_padding;
-        const Vec3 extent = mx - mn;
-        const float max_extent = std::max({ extent.x, extent.y, extent.z, 0.001f });
-
-        const int max_auto_res = std::clamp(domain.max_auto_resolution, 32, 512);
-        int res_x, res_y, res_z;
-        float voxel_size;
-
-        if (domain.preserve_voxel_size_on_resize && domain.voxel_size > 1e-6f) {
-            voxel_size = domain.voxel_size;
-            res_x = std::clamp(static_cast<int>(std::ceil(std::max(extent.x, 0.001f) / voxel_size)), 8, max_auto_res);
-            res_y = std::clamp(static_cast<int>(std::ceil(std::max(extent.y, 0.001f) / voxel_size)), 8, max_auto_res);
-            res_z = std::clamp(static_cast<int>(std::ceil(std::max(extent.z, 0.001f) / voxel_size)), 8, max_auto_res);
-        } else {
-            // Derive per-axis cell counts proportionally from physical extents at the
-            // finest voxel_size the max_auto_res allows (max_extent / max_auto_res).
-            // This prevents the classic "large flat domain" problem: when all three
-            // axes start at max_auto_res and budget clamping reduces them equally, the
-            // thin Y axis loses cells disproportionately because max_extent/max_auto_res
-            // gives a coarse voxel for the short dimension.
-            voxel_size = max_extent / static_cast<float>(max_auto_res);
-            res_x = std::clamp(static_cast<int>(std::ceil(std::max(extent.x, 0.001f) / voxel_size)), 8, 1024);
-            res_y = std::clamp(static_cast<int>(std::ceil(std::max(extent.y, 0.001f) / voxel_size)), 8, 1024);
-            res_z = std::clamp(static_cast<int>(std::ceil(std::max(extent.z, 0.001f) / voxel_size)), 8, 1024);
-            domain.voxel_size = voxel_size;
-        }
-
-        // max_auto_resolution is the single authority for grid density: the
-        // per-axis clamps above already cap every axis at max_auto_res, so the
-        // total can never exceed max_auto_res^3. Deriving the cell budget from
-        // that same knob makes the UI honest — "Max Auto Resolution = 512" means
-        // the solver may actually reach 512 per axis (voxel size permitting),
-        // instead of a hidden fixed cell cap silently collapsing a 2 m cube to
-        // ~80^3 (= 25 mm voxels). The y-aspect term keeps the extra headroom for
-        // flat domains (thin Y) where allocated cells are dominated by empty
-        // space above the slab; it only ever raises an already-non-binding
-        // budget. A high absolute ceiling remains purely as an OOM guard — the
-        // UI's live cell-count + memory preview is the real guardrail for the
-        // user's explicit choice. (GPU backends can lift this further once the
-        // MGPCG path is live-wired.)
-        const std::size_t knob_budget =
-            static_cast<std::size_t>(max_auto_res) *
-            static_cast<std::size_t>(max_auto_res) *
-            static_cast<std::size_t>(max_auto_res);
-        constexpr std::size_t MAX_GRID_DOMAIN_CELLS_HARD_CAP = 134217728; // 512^3 OOM guard
-        // Flat-domain headroom is capped at 4x knob^3. The old 0.01 floor let a
-        // thin-Y domain inflate the budget up to 100x — with knob=512 that meant
-        // sailing straight into the hard cap (134M cells), and the real memory
-        // hog scales with CELLS: ~8 particles/fluid-cell x 64B (SoA pos/vel/
-        // affine/flags) + CPU grid ~37B/cell + GPU mirrors ~70B/cell => tens of
-        // GB. 4x keeps the thin-slab benefit without the runaway footprint.
-        const float y_aspect = std::clamp(extent.y / max_extent, 0.25f, 1.0f);
-        const std::size_t adaptive_budget = std::min(
-            static_cast<std::size_t>(static_cast<double>(knob_budget) / static_cast<double>(y_aspect)),
-            MAX_GRID_DOMAIN_CELLS_HARD_CAP);
-        clampGridResolutionToCellBudget(res_x, res_y, res_z, adaptive_budget);
-
-        // Production safety gate. Account for the CPU source grid, persistent
-        // Vulkan mirrors and solver scratch rather than showing an optimistic
-        // density-only estimate. The clamp is proportional, so domain aspect
-        // ratio and complete world-space coverage are preserved.
-        if (domain.enforce_resource_budget && domain.resource_budget_mb > 0u) {
-            const std::size_t budget_bytes =
-                static_cast<std::size_t>(domain.resource_budget_mb) * 1024u * 1024u;
-            const std::size_t budget_cells = Fluid::gridCellBudget(
-                budget_bytes,
-                simulationDomainHasGas(domain.type),
-                simulationDomainHasLiquid(domain.type));
-            clampGridResolutionToCellBudget(res_x, res_y, res_z, budget_cells);
-        }
-
-        // The grid is a single-voxel-size (cubic) MAC grid, so each axis spans
-        // exactly res_i * voxel_size. To COVER the whole domain box on every
-        // axis we must pick the COARSEST per-axis voxel (extent_i / res_i): that
-        // guarantees res_i * voxel_size >= extent_i for all i. Taking the
-        // minimum instead under-covers the longest axis whenever the per-axis
-        // resolutions are not perfectly proportional — which happens routinely
-        // because a thin axis gets clamped UP to the 8-cell floor (giving it a
-        // finer voxel) or the budget clamp shrinks the largest axis. The classic
-        // symptom is a tall object whose Y is silently cropped (e.g. a 10 m
-        // column rendered as 8 m) — i.e. the domain looks flattened even though
-        // the bounds carry the object's true width/height/depth. Using max keeps
-        // the aspect ratio intact; the off-axis over-coverage is at most one
-        // extra voxel of headroom (harmless padding at the walls).
-        const float vs_x = extent.x / static_cast<float>(std::max(res_x, 1));
-        const float vs_y = extent.y / static_cast<float>(std::max(res_y, 1));
-        const float vs_z = extent.z / static_cast<float>(std::max(res_z, 1));
-        voxel_size = std::max({ vs_x, vs_y, vs_z });
-        if (voxel_size < 1e-6f) {
-            voxel_size = max_extent / static_cast<float>(std::max({ res_x, res_y, res_z, 1 }));
-        }
-        domain.voxel_size = voxel_size;
-        domain.resolution_x = res_x;
-        domain.resolution_y = res_y;
-        domain.resolution_z = res_z;
-        domain.max_auto_resolution = max_auto_res;
-
-        // ★ Combustion needs the Fuel channel, but Fuel is NOT in
-        // defaultGridDomainChannels(). A gas domain with fire_enabled and no
-        // Fuel channel silently drops every fuel deposit and every fuel-bearing
-        // flow source — the domain looks configured for fire and simply never
-        // ignites. Provision it here, in the one place every domain passes
-        // through, so the requirement cannot be forgotten from the UI, from a
-        // preset, or from a script. Written back to the desc so the panel and
-        // the saved project agree with what the solver actually allocated.
-        if (simulationDomainHasGas(domain.type) && domain.fire_enabled) {
-            domain.channels |=
-                static_cast<uint32_t>(SimulationGridDomainChannelFlags::Fuel) |
-                static_cast<uint32_t>(SimulationGridDomainChannelFlags::Temperature);
-        }
-        const uint32_t channels = domain.channels;
-        // Liquid domains skip the combustion channels (temperature/fuel/
-        // interaction) entirely — 3 floats/cell saved, which matters at high
-        // resolution. A type switch (Fluid <-> Gas) must force a re-allocate
-        // even when the resolution is unchanged.
-        const bool wants_gas_channels = simulationDomainHasGas(domain.type);
-        const bool layout_changed =
-            !state.valid ||
-            state.resolution_x != res_x ||
-            state.resolution_y != res_y ||
-            state.resolution_z != res_z ||
-            state.channels != channels ||
-            state.grid.allocate_gas_channels != wants_gas_channels;
-        if (layout_changed) {
-            state.grid.sparse_mode_enabled = domain.use_sparse_tiles || (domain.backend == SimulationDomainBackend::CPU_SparseVDB);
-            state.grid.allocate_gas_channels = wants_gas_channels;
-            state.grid.resize(res_x, res_y, res_z, voxel_size, mn);
-            // Physical kg/J sidecars are allocated lazily by liquid->gas
-            // exchange. Plain gas domains and Matter domains before their first
-            // transfer must not pay two full-grid CPU advections of zero data.
-            state.gas_phase_mass_kg.clear();
-            state.gas_phase_energy_j.clear();
-            ++state.version;
-        } else {
-            // Object-bound domains can translate/scale without a resolution
-            // change; keep the field contents but follow the new origin.
-            state.grid.origin = mn;
-            state.grid.voxel_size = voxel_size;
-        }
-
-        if (domain.type == SimulationDomainType::Matter) {
-            const bool liquid_layout_changed =
-                state.matter_liquid_grid.nx != res_x ||
-                state.matter_liquid_grid.ny != res_y ||
-                state.matter_liquid_grid.nz != res_z ||
-                state.matter_liquid_grid.allocate_gas_channels;
-            if (liquid_layout_changed) {
-                state.matter_liquid_grid.sparse_mode_enabled =
-                    domain.use_sparse_tiles ||
-                    domain.backend == SimulationDomainBackend::CPU_SparseVDB;
-                state.matter_liquid_grid.allocate_gas_channels = false;
-                state.matter_liquid_grid.resize(
-                    res_x, res_y, res_z, voxel_size, mn);
-            } else {
-                state.matter_liquid_grid.origin = mn;
-                state.matter_liquid_grid.voxel_size = voxel_size;
-            }
-        } else if (state.matter_liquid_grid.getCellCount() > 0) {
-            state.matter_liquid_grid = FluidSim::FluidGrid{};
-        }
-
-        state.type = domain.type;
-        // ★★ Do NOT clear the motion delta here. It is produced by this sync but
-        // CONSUMED by the fluid step, and the two do not run in lockstep: the
-        // domain gizmo calls synchronizeGridDomainsNow() on every drag frame so
-        // the viewport box follows the cursor. Clearing per sync meant the drag's
-        // delta was recorded and then wiped by the very next sync before any step
-        // could read it — the liquid was carried rigidly with the box (below) but
-        // never received the velocity impulse, so it never sloshed. Accumulate,
-        // and let the consumer clear it.
-        if (!simulationDomainHasLiquid(domain.type)) {
-            state.domain_motion_delta = Vec3(0.0f, 0.0f, 0.0f);
-        }
-
-        // Fluid seed AABB follows the domain's translation but NOT its resize.
-        // We compare the corner deltas: if both corners shifted by the same
-        // vector the user translated the domain → glue the seed to it. If
-        // only one corner moved the user is dragging an extent → keep the
-        // seed in place (its absolute world coords stay valid).
-        if (simulationDomainHasLiquid(domain.type)) {
-            if (domain.fluid_seed_anchor_min.x > -9.99e9f) {
-                const Vec3 delta_min = mn - domain.fluid_seed_anchor_min;
-                const Vec3 delta_max = mx - domain.fluid_seed_anchor_max;
-                const Vec3 diff = delta_max - delta_min;
-                const float diff_mag = std::abs(diff.x) + std::abs(diff.y) + std::abs(diff.z);
-                const float trans_mag = std::abs(delta_min.x) + std::abs(delta_min.y) + std::abs(delta_min.z);
-                if (diff_mag < 1e-4f && trans_mag > 1e-6f) {
-                    domain.fluid_seed_min = domain.fluid_seed_min + delta_min;
-                    domain.fluid_seed_max = domain.fluid_seed_max + delta_min;
-                    state.domain_motion_delta = state.domain_motion_delta + delta_min;
-                    for (Vec3& p : state.particles.position) {
-                        p = p + delta_min;
-                    }
-                }
-            } else {
-                // First sync as a fluid domain. Drop a sensible default seed
-                // AABB inside the domain (upper half, quarter-sized) so the
-                // user sees the cyan box inside the bounds instead of stuck
-                // at the legacy (0..1, 1..1.5, 0..1) world coords that may
-                // be far outside an arbitrary domain center.
-                const Vec3 domain_extent = mx - mn;
-                const Vec3 seed_extent = Vec3(domain_extent.x * 0.45f,
-                                              domain_extent.y * 0.35f,
-                                              domain_extent.z * 0.45f);
-                const Vec3 current_center = (mn + mx) * 0.5f;
-                const Vec3 seed_center = Vec3(current_center.x,
-                                              mn.y + domain_extent.y * 0.75f,
-                                              current_center.z);
-                domain.fluid_seed_min = seed_center - seed_extent * 0.5f;
-                domain.fluid_seed_max = seed_center + seed_extent * 0.5f;
-            }
-            domain.fluid_seed_anchor_min = mn;
-            domain.fluid_seed_anchor_max = mx;
-        }
-
-        state.bounds_min = mn;
-        state.bounds_max = mx;
-        state.resolution_x = res_x;
-        state.resolution_y = res_y;
-        state.resolution_z = res_z;
-        state.voxel_size = voxel_size;
-        state.channels = channels;
-        state.valid = domain.enabled && res_x > 0 && res_y > 0 && res_z > 0;
-        state.active_density_cells = 0;
-        state.max_density = 0.0f;
-        state.active_density_min[0] = state.active_density_min[1] =
-            state.active_density_min[2] = 0;
-        state.active_density_max[0] = state.active_density_max[1] =
-            state.active_density_max[2] = -1;
-
-        // Fluid-only: process a pending seed request from the UI. The legacy
-        // FluidObject seeded directly from the panel; the unified path keeps
-        // the seed deferred so it applies on the next sim tick with a freshly
-        // resized grid.
-        if (simulationDomainHasLiquid(domain.type) &&
-            domain.fluid_pending_seed && state.valid) {
-            if (domain.fluid_replace_on_seed) {
-                state.particles.clear();
-                state.foam.clear();   // drop stale whitewater with the old liquid
-            }
-            // Resolve the effective seed AABB. FillLevel mode treats the domain
-            // as a resting tank: fill the whole footprint from the floor up to
-            // fluid_fill_level of the domain height (skips the long emission /
-            // settling transient for standing water). SeedBox uses the explicit
-            // user AABB. Particles are emitted at rest (v=0) by seedBox either
-            // way, so the result starts in hydrostatic balance.
-            const std::size_t seed_budget =
-                state.particles.size() < domain.fluid_max_particles
-                    ? domain.fluid_max_particles - state.particles.size()
-                    : 0u;
-
-            // ppc is a STABILITY constant, not a budget knob: it must stay > 1 so
-            // the cells carry enough samples to build real internal pressure
-            // (incompressibility). At 1 ppc the liquid is under-resolved and just
-            // collapses. So ppc is fixed and, when the budget can't afford the
-            // full target fill, the fill HEIGHT drops instead (complete layers
-            // from the floor up) — fully-resolved, stable, pile-free.
-            const int ppc = std::max(1, domain.fluid_seed_particles_per_cell);
-
-            Vec3 seed_lo = domain.fluid_seed_min;
-            Vec3 seed_hi = domain.fluid_seed_max;
-            if (domain.fluid_seed_mode == FluidSeedMode::FillLevel) {
-                computeFluidFillSeedAABB(state.bounds_min, state.bounds_max,
-                                         state.grid.voxel_size,
-                                         domain.fluid_fill_level,
-                                         domain.fluid_fill_wall_margin,
-                                         ppc, seed_budget,
-                                         seed_lo, seed_hi);
-            }
-
-            // The seeded density IS the rest density: couple the solver's
-            // density-correction target to the seeded ppc so a freshly filled
-            // tank starts at exactly "target per cell" (over == 0). Without this,
-            // a seed denser than the fixed default target makes every cell
-            // over-populated and the density-targeted pressure projection
-            // permanently expels particles upward (the tank "rises").
-            domain.fluid_params.particles_per_cell = ppc;
-            // Stable per-domain seed: index-based, so jitter patterns are
-            // reproducible across runs and don't depend on heap addresses
-            // (the desc vector can reallocate as domains are added).
-            const std::size_t seed_begin = state.particles.size();
-            Fluid::seedBox(state.particles,
-                           state.grid,
-                           seed_lo,
-                           seed_hi,
-                           ppc,
-                           /*seed=*/static_cast<uint32_t>(i + 1u) * 2654435761u,
-                           seed_budget,
-                           fluidDomainAmbientKelvin(domain, world_thermal_));
-            const auto seed_model = domain.fluid_params.granular_enabled
-                ? Fluid::MatterConstitutiveModel::Granular
-                : Fluid::MatterConstitutiveModel::Fluid;
-            for (std::size_t particle = seed_begin;
-                 particle < state.particles.constitutive_model.size();
-                 ++particle) {
-                state.particles.constitutive_model[particle] =
-                    static_cast<uint8_t>(seed_model);
-            }
-            domain.fluid_pending_seed = false;
-        }
-    }
-}
-
-void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
-    float dt,
-    float time_seconds,
-    int frame,
-    SimulationComputeContext* compute) {
-    if (flow_sources_.empty() || grid_domain_states_.empty()) {
-        return;
-    }
-
-    const float time_scale = std::max(0.0f, dt);
-    // Parent motion first, unconditionally — see advanceFlowSourceMotion().
-    advanceFlowSourceMotion(dt, frame);
-    for (auto& source : flow_sources_) {
-        const SimulationFlowSourceFrame resolved = resolveFlowSourceFrame(source, frame);
-        const SimulationFlowSourceDesc::Keyframe& keyed = resolved.keyed;
-        if (resolved.parent_missing) continue;
-        if (!keyed.enabled ||
-            source.domain_index < 0 ||
-            source.domain_index >= static_cast<int>(grid_domain_states_.size())) {
-            continue;
-        }
-
-        // Time Limit check (Houdini/Blender flow emitter style)
-        if (source.use_time_limit) {
-            if (time_seconds < source.start_time || time_seconds > source.end_time) {
-                continue;
-            }
-        }
-
-        auto& state = grid_domain_states_[static_cast<std::size_t>(source.domain_index)];
-        if (!state.valid) {
-            continue;
-        }
-        // Fluid (APIC liquid) flow sources spawn particles instead of
-        // injecting density. Spawn rate accumulator survives across steps so
-        // fractional rate*dt counts emit correctly. Capped by the domain's
-        // max_particles.
-        const bool liquid_source = simulationDomainHasLiquid(state.type) &&
-            (!simulationDomainHasGas(state.type) ||
-             source.phase == SimulationFlowSourceDesc::Phase::Liquid);
-        if (liquid_source) {
-            const auto& fluid_domain = grid_domains_[static_cast<std::size_t>(source.domain_index)];
-            const float rate = std::max(0.0f, keyed.flow_rate);
-            source.fluid_emit_accumulator += rate * std::max(0.0f, dt);
-            int emit_count = static_cast<int>(source.fluid_emit_accumulator);
-            if (emit_count <= 0) continue;
-            source.fluid_emit_accumulator -= static_cast<float>(emit_count);
-
-            // Hysteresis gate: reseed trims over-populated cells every step,
-            // creating a small capacity gap even at max_particles. Without a
-            // dead-band, the emitter fills that gap each step producing a
-            // visible "trickle" of particles at full capacity.
-            // Only allow emission when at least 1% capacity is available so
-            // normal filling (empty → full) is unaffected but steady-state
-            // at-max oscillation is suppressed.
-            // ★ fluid_max_particles is a RESOURCE ceiling (memory/perf), not a
-            // budget on how much material may ever be introduced. An emitter
-            // authored as a continuous source is SUPPOSED to keep replacing what
-            // burns away; bounding total emission is what use_particle_limit and
-            // use_time_limit on the source are for.
-            //
-            // ★★ A previous revision subtracted state.burned_particles here so
-            // burned mass could not fund new emission. It was reverted: it
-            // silently repurposed the ceiling, and it would have throttled every
-            // ordinary fountain draining through an open boundary too. The
-            // counter is kept as telemetry only — read it, do not gate on it.
-            const std::size_t max_p = fluid_domain.fluid_max_particles;
-            const std::size_t cur_p = state.particles.size();
-            const std::size_t dead_band = std::max<std::size_t>(1u, max_p / 100u);
-            const std::size_t remaining =
-                (cur_p + dead_band < max_p) ? (max_p - cur_p) : 0u;
-            emit_count = std::min<int>(emit_count, static_cast<int>(remaining));
-            if (emit_count <= 0) continue;
-
-            // Particle budget limit check
-            if (source.use_particle_limit) {
-                int limit_rem = source.max_emitted_particles - source.total_emitted_particles;
-                if (limit_rem <= 0) {
-                    continue;
-                }
-                emit_count = std::min<int>(emit_count, limit_rem);
-            }
-            if (emit_count <= 0) continue;
-
-            // Emission frame: keyframe channels + object parenting already
-            // folded in. Using the resolved values (rather than the raw desc)
-            // is what lets a nozzle ride a moving hose and be keyed at once.
-            const Vec3  emit_origin = resolved.position;
-            const float emit_radius = std::max(1e-4f, keyed.radius);
-
-            // Resolve spawn volume for ObjectBounds; Point uses the resolved
-            // origin + radius sphere; MeshSurface samples per-particle below.
-            Vec3 bounds_min = emit_origin - Vec3(emit_radius);
-            Vec3 bounds_max = emit_origin + Vec3(emit_radius);
-            if (source.source_mode == SimulationFlowSourceMode::ObjectBounds && flow_source_bounds_resolver_) {
-                Vec3 resolved_min, resolved_max;
-                if (flow_source_bounds_resolver_(source, resolved_min, resolved_max)) {
-                    bounds_min = Vec3::min(resolved_min, resolved_max);
-                    bounds_max = Vec3::max(resolved_min, resolved_max);
-                }
-            }
-            // Over-pack guard: a high particles/sec dumped into a small spawn
-            // volume in ONE step stacks dozens of particles into a single cell.
-            // The density-correction term then sees a huge overshoot and blasts
-            // them outward laterally — the source "splatters" into a disc/plate.
-            // Cap this step's emission at what the spawn volume can physically
-            // hold at peak packing, and return the surplus to the accumulator so
-            // it emits over the following steps instead of all at once. (Mesh
-            // surface emission spreads over an area, so it is left uncapped.)
-            if (source.source_mode != SimulationFlowSourceMode::MeshSurface) {
-                const float h = std::max(1e-4f, state.grid.voxel_size);
-                float spawn_volume;
-                if (source.source_mode == SimulationFlowSourceMode::ObjectBounds) {
-                    const Vec3 ext = bounds_max - bounds_min;
-                    spawn_volume = std::max(0.0f, ext.x) * std::max(0.0f, ext.y) * std::max(0.0f, ext.z);
-                } else {
-                    const float r = emit_radius;
-                    spawn_volume = (4.0f / 3.0f) * 3.14159265358979f * r * r * r;
-                }
-                const double spawn_cells = std::max(1.0, static_cast<double>(spawn_volume) / (h * h * h));
-                const int pack_ceiling = std::max({ fluid_domain.fluid_params.particles_per_cell,
-                                                    fluid_domain.fluid_params.reseed_max_per_cell, 1 });
-                const int cap = std::max(1, static_cast<int>(spawn_cells * static_cast<double>(pack_ceiling)));
-                if (emit_count > cap) {
-                    // Keep at most one locally packable batch as debt. Returning
-                    // every rejected particle made the accumulator grow without
-                    // bound whenever authored rate exceeded local capacity; a
-                    // later radius/keyframe change then released that history as
-                    // the delayed particle avalanche mistaken for a seed replay.
-                    const int deferred = std::min(emit_count - cap, cap);
-                    source.fluid_emit_accumulator += static_cast<float>(deferred);
-                    emit_count = cap;
-                }
-            }
-
-            // What this source is pouring. Empty name -> untagged, which the
-            // consumers read as "use the domain's single material" — the exact
-            // behaviour every existing scene has.
-            const uint32_t emit_substance =
-                RayTrophiSim::Fluid::substanceTag(source.fluid_substance);
-            RayTrophiSim::Fluid::MatterConstitutiveModel emit_model =
-                source.initial_constitutive_model;
-            if (emit_model == RayTrophiSim::Fluid::MatterConstitutiveModel::Auto &&
-                !source.fluid_substance.empty()) {
-                const auto binding = std::find_if(
-                    fluid_domain.fluid_substance_materials.begin(),
-                    fluid_domain.fluid_substance_materials.end(),
-                    [&](const auto& entry) {
-                        return entry.substance == source.fluid_substance;
-                    });
-                if (binding != fluid_domain.fluid_substance_materials.end()) {
-                    emit_model = binding->constitutive_model;
-                }
-            }
-            if (emit_model == RayTrophiSim::Fluid::MatterConstitutiveModel::Auto &&
-                !source.fluid_substance.empty()) {
-                if (const SubstanceProfile* profile =
-                        tryFindSubstance(source.fluid_substance)) {
-                    emit_model = profile->default_constitutive_model;
-                }
-            }
-            if (emit_model == RayTrophiSim::Fluid::MatterConstitutiveModel::Auto) {
-                emit_model = fluid_domain.fluid_params.granular_enabled
-                    ? RayTrophiSim::Fluid::MatterConstitutiveModel::Granular
-                    : RayTrophiSim::Fluid::MatterConstitutiveModel::Fluid;
-            }
-            // Birth temperature, Kelvin. ★ This used to be a literal 0.0f —
-            // every emitted parcel was born at absolute zero, contradicting the
-            // FluidParticles note that emit starts at ambient. Harmless while
-            // nothing read the field; the thermal-liquid chain would freeze such
-            // a parcel on its first contact.
-            const float emit_kelvin =
-                source.fluid_temperature_override
-                    ? std::max(1.0f, source.fluid_temperature_kelvin)
-                    : (static_cast<std::size_t>(source.domain_index) < grid_domains_.size()
-                           ? fluidDomainAmbientKelvin(
-                                 grid_domains_[static_cast<std::size_t>(source.domain_index)],
-                                 world_thermal_)
-                           : world_thermal_.ambientKelvin());
-
-            // Per-source-per-particle hash seed so jitter is deterministic but
-            // not synchronized across sources.
-            const uint32_t source_seed_base =
-                static_cast<uint32_t>(reinterpret_cast<std::uintptr_t>(&source) >> 4) *
-                    2654435761u;
-            // Include the lifetime emission serial. Using only the per-step p
-            // index respawned the exact same sample positions every frame; APIC
-            // reseed then trimmed the stacked particles and a continuous hose
-            // looked like a one-shot SeedBox event.
-            const uint32_t emission_serial_base =
-                static_cast<uint32_t>(std::max(0, source.total_emitted_particles));
-
-            state.particles.reserve(state.particles.size() + static_cast<std::size_t>(emit_count));
-            for (int p = 0; p < emit_count; ++p) {
-                const uint32_t s =
-                    source_seed_base ^
-                    ((emission_serial_base + static_cast<uint32_t>(p)) *
-                     2246822519u);
-                const float u1 = hashUnitFloat(s);
-                const float u2 = hashUnitFloat(s ^ 0xdeadbeefu);
-                const float u3 = hashUnitFloat(s ^ 0x9e3779b9u);
-                Vec3 spawn_pos;
-                Vec3 spawn_normal(0.0f, 0.0f, 0.0f); // valid only for MeshSurface
-                if (source.source_mode == SimulationFlowSourceMode::MeshSurface && flow_source_surface_sampler_) {
-                    ParticleSurfaceSample sample;
-                    if (flow_source_surface_sampler_(source, s, sample)) {
-                        // Offset slightly along normal so particles spawn just
-                        // off the surface, not embedded.
-                        spawn_pos = sample.position + sample.normal * std::max(0.001f, emit_radius * 0.25f);
-                        spawn_normal = sample.normal;
-                    } else {
-                        spawn_pos = emit_origin;
-                    }
-                } else if (source.source_mode == SimulationFlowSourceMode::ObjectBounds) {
-                    spawn_pos.x = bounds_min.x + u1 * (bounds_max.x - bounds_min.x);
-                    spawn_pos.y = bounds_min.y + u2 * (bounds_max.y - bounds_min.y);
-                    spawn_pos.z = bounds_min.z + u3 * (bounds_max.z - bounds_min.z);
-                } else {
-                    // Point: rejection sample inside unit sphere then scale.
-                    Vec3 d(u1 * 2.0f - 1.0f, u2 * 2.0f - 1.0f, u3 * 2.0f - 1.0f);
-                    const float r2 = d.x * d.x + d.y * d.y + d.z * d.z;
-                    if (r2 > 1.0f) {
-                        const float inv = 1.0f / std::sqrt(r2);
-                        d = d * (inv * std::cbrt(hashUnitFloat(s ^ 0x68e31da4u)));
-                    }
-                    spawn_pos = emit_origin + d * emit_radius;
-                }
-                // Break the laminar stream: an APIC liquid has nothing to
-                // disperse a column of identical-velocity particles mid-air, so
-                // without a per-particle perturbation the emitted mass falls as
-                // a coherent sheet/plate. Add random jitter scaled by the
-                // emission speed (0 spread => exact source.velocity, laminar).
-                Vec3 emit_vel = resolved.velocity;
-                // MeshSurface + emit-along-normal: redirect the emission speed
-                // along the local surface normal so the liquid sprays off the
-                // geometry instead of all moving in one global direction.
-                if (source.fluid_emit_along_normal &&
-                    source.source_mode == SimulationFlowSourceMode::MeshSurface) {
-                    const float nlen = spawn_normal.length();
-                    if (nlen > 1e-5f) {
-                        // Speed comes from the resolved vector so a parented
-                        // nozzle still emits at its authored rate; only the
-                        // DIRECTION is taken from the surface.
-                        emit_vel = spawn_normal * (resolved.velocity.length() / nlen);
-                    }
-                }
-                if (source.fluid_velocity_spread > 0.0f) {
-                    const float jitter_mag = source.fluid_velocity_spread * emit_vel.length();
-                    if (jitter_mag > 1e-6f) {
-                        const uint32_t vs = s ^ 0x1b56c4e9u;
-                        const Vec3 jitter(
-                            hashUnitFloat(vs)               * 2.0f - 1.0f,
-                            hashUnitFloat(vs ^ 0x7feb352du) * 2.0f - 1.0f,
-                            hashUnitFloat(vs ^ 0x846ca68bu) * 2.0f - 1.0f);
-                        emit_vel = emit_vel + jitter * jitter_mag;
-                    }
-                }
-                // ★ Hashed ONCE per source per step, not per particle: it is a
-                // property of the source, and hashing a string inside the spawn
-                // loop would put a per-character cost on every emitted particle
-                // for a value that cannot change between them.
-                state.particles.emit(
-                    spawn_pos, emit_vel, emit_kelvin, 0.0f, emit_substance,
-                    nullptr, nullptr, 0.0f, emit_model);
-            }
-            source.total_emitted_particles += emit_count;
-            continue;
-        }
-
-        // Parented sources emit at the resolved world point. ObjectBounds /
-        // MeshSurface modes overwrite this below from the bounds resolver —
-        // those modes ARE an object binding, so the geometry wins over a
-        // parent offset rather than the two fighting.
-        Vec3 source_center = resolved.position;
-        float source_radius = std::max(0.001f, keyed.radius);
-        Vec3 source_min = source_center - Vec3(source_radius);
-        Vec3 source_max = source_center + Vec3(source_radius);
-        if ((source.source_mode == SimulationFlowSourceMode::ObjectBounds ||
-            source.source_mode == SimulationFlowSourceMode::MeshSurface) &&
-            flow_source_bounds_resolver_) {
-            Vec3 resolved_min;
-            Vec3 resolved_max;
-            if (!flow_source_bounds_resolver_(source, resolved_min, resolved_max)) {
-                continue;
-            }
-            const Vec3 mn = Vec3::min(resolved_min, resolved_max);
-            const Vec3 mx = Vec3::max(resolved_min, resolved_max);
-            source_center = (mn + mx) * 0.5f;
-            source_min = mn;
-            source_max = mx;
-        }
-        const Vec3 source_half_extent =
-            (source.source_mode == SimulationFlowSourceMode::ObjectBounds)
-                ? (source_max - source_min) * 0.5f
-                : Vec3(source_radius);
-
-        // Mesh-surface gas is represented by a deterministic set of area-weighted
-        // surface samples and a shell thickness controlled by Source Radius.
-        std::vector<Vec3> gas_surface_samples;
-        if (source.source_mode == SimulationFlowSourceMode::MeshSurface) {
-            if (!flow_source_surface_sampler_) continue;
-            constexpr uint32_t kGasSurfaceSamples = 128u;
-            gas_surface_samples.reserve(kGasSurfaceSamples);
-            for (uint32_t sample_index = 0; sample_index < kGasSurfaceSamples; ++sample_index) {
-                ParticleSurfaceSample sample;
-                const uint32_t seed =
-                    0x9e3779b9u ^ (sample_index * 2246822519u);
-                if (flow_source_surface_sampler_(source, seed, sample)) {
-                    gas_surface_samples.push_back(sample.position);
-                }
-            }
-            if (gas_surface_samples.empty()) continue;
-            source_min = source_min - Vec3(source_radius);
-            source_max = source_max + Vec3(source_radius);
-        }
-
-        const Vec3 mn = state.bounds_min;
-        const Vec3 mx = state.bounds_max;
-        if (source_max.x < mn.x || source_min.x > mx.x ||
-            source_max.y < mn.y || source_min.y > mx.y ||
-            source_max.z < mn.z || source_min.z > mx.z) {
-            continue;
-        }
-
-        FluidSim::FluidGrid& grid = state.grid;
-        if (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0) {
-            continue;
-        }
-
-        // Cell range overlapping the source sphere (grid space).
-        float fi0, fj0, fk0, fi1, fj1, fk1;
-        grid.worldToGrid(source_min, fi0, fj0, fk0);
-        grid.worldToGrid(source_max, fi1, fj1, fk1);
-        const int min_x = std::clamp(static_cast<int>(std::floor(fi0)), 0, grid.nx - 1);
-        const int max_x = std::clamp(static_cast<int>(std::ceil(fi1)), 0, grid.nx - 1);
-        const int min_y = std::clamp(static_cast<int>(std::floor(fj0)), 0, grid.ny - 1);
-        const int max_y = std::clamp(static_cast<int>(std::ceil(fj1)), 0, grid.ny - 1);
-        const int min_z = std::clamp(static_cast<int>(std::floor(fk0)), 0, grid.nz - 1);
-        const int max_z = std::clamp(static_cast<int>(std::ceil(fk1)), 0, grid.nz - 1);
-
-        const float inv_radius = 1.0f / source_radius;
-        const float falloff = std::max(0.0f, keyed.falloff);
-        const int range_nx = max_x - min_x + 1;
-        const int range_ny = max_y - min_y + 1;
-        std::vector<float> gas_surface_weights;
-        if (source.source_mode == SimulationFlowSourceMode::MeshSurface) {
-            const int range_nz = max_z - min_z + 1;
-            gas_surface_weights.assign(
-                static_cast<std::size_t>(range_nx) *
-                    static_cast<std::size_t>(range_ny) *
-                    static_cast<std::size_t>(range_nz),
-                0.0f);
-            const int cell_radius = std::max(
-                1, static_cast<int>(std::ceil(source_radius /
-                                              std::max(grid.voxel_size, 1e-6f))));
-            for (const Vec3& sample : gas_surface_samples) {
-                float sample_x, sample_y, sample_z;
-                grid.worldToGrid(sample, sample_x, sample_y, sample_z);
-                const int center_x = static_cast<int>(std::floor(sample_x));
-                const int center_y = static_cast<int>(std::floor(sample_y));
-                const int center_z = static_cast<int>(std::floor(sample_z));
-                for (int z = std::max(min_z, center_z - cell_radius);
-                     z <= std::min(max_z, center_z + cell_radius);
-                     ++z) {
-                    for (int y = std::max(min_y, center_y - cell_radius);
-                         y <= std::min(max_y, center_y + cell_radius);
-                         ++y) {
-                        for (int x = std::max(min_x, center_x - cell_radius);
-                             x <= std::min(max_x, center_x + cell_radius);
-                             ++x) {
-                            const float distance =
-                                (grid.gridToWorld(x, y, z) - sample).length();
-                            if (distance > source_radius) continue;
-                            const float normalized = distance * inv_radius;
-                            const float shell_weight = falloff <= 0.0f
-                                ? 1.0f
-                                : std::pow(std::max(0.0f, 1.0f - normalized),
-                                           falloff);
-                            const std::size_t local =
-                                static_cast<std::size_t>(x - min_x) +
-                                static_cast<std::size_t>(y - min_y) *
-                                    static_cast<std::size_t>(range_nx) +
-                                static_cast<std::size_t>(z - min_z) *
-                                    static_cast<std::size_t>(range_nx) *
-                                    static_cast<std::size_t>(range_ny);
-                            gas_surface_weights[local] =
-                                std::max(gas_surface_weights[local], shell_weight);
-                        }
-                    }
-                }
-            }
-        }
-        const bool write_density = hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Density);
-        const bool write_temperature = hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Temperature);
-        const bool write_fuel = hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Fuel);
-        const bool write_pressure = hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Pressure);
-        const bool write_velocity = hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Velocity);
-        const float density_amount = keyed.density * time_scale;
-        const float temperature_amount = keyed.temperature * time_scale;
-        const float fuel_amount = keyed.fuel * time_scale;
-        const float velocity_blend =
-            1.0f - std::exp(-std::max(0.0f, keyed.velocity_coupling) * time_scale);
-
-        // Keep the small authored-source deposit on the host for now. The gas
-        // solve uploads these freshly injected scalar/velocity fields below and
-        // then performs advection, combustion, forces and projection on Vulkan.
-        // The former direct-GPU shortcut returned here, after which the normal
-        // host publication uploaded the still-empty CPU arrays over the same
-        // buffers and silently erased point sources (notably the pilot flame).
-        // A future fully-resident source path must carry residency through the
-        // velocity and scalar upload gates; dispatching only this isolated stage
-        // is incorrect.
-
-        auto sourceWeightAt = [&](const Vec3& sample_position) {
-            float normalized_distance = 0.0f;
-            if (source.source_mode == SimulationFlowSourceMode::ObjectBounds) {
-                const Vec3 q = sample_position - source_center;
-                normalized_distance = std::max({
-                    std::abs(q.x) / std::max(source_half_extent.x, 1e-6f),
-                    std::abs(q.y) / std::max(source_half_extent.y, 1e-6f),
-                    std::abs(q.z) / std::max(source_half_extent.z, 1e-6f)});
-            } else if (source.source_mode == SimulationFlowSourceMode::MeshSurface) {
-                float nearest_sq = std::numeric_limits<float>::max();
-                for (const Vec3& surface_sample : gas_surface_samples) {
-                    const Vec3 delta = sample_position - surface_sample;
-                    nearest_sq = std::min(
-                        nearest_sq,
-                        delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
-                }
-                normalized_distance = std::sqrt(nearest_sq) * inv_radius;
-            } else {
-                normalized_distance =
-                    (sample_position - source_center).length() * inv_radius;
-            }
-            if (normalized_distance > 1.0f) return 0.0f;
-            return falloff <= 0.0f
-                ? 1.0f
-                : std::pow(std::max(0.0f, 1.0f - normalized_distance), falloff);
-        };
-
-        #pragma omp parallel for collapse(2) schedule(static)
-        for (int z = min_z; z <= max_z; ++z) {
-            for (int y = min_y; y <= max_y; ++y) {
-                for (int x = min_x; x <= max_x; ++x) {
-                    const Vec3 cell_center = grid.gridToWorld(x, y, z);
-                    float weight = 0.0f;
-                    if (source.source_mode == SimulationFlowSourceMode::MeshSurface) {
-                        const std::size_t local =
-                            static_cast<std::size_t>(x - min_x) +
-                            static_cast<std::size_t>(y - min_y) *
-                                static_cast<std::size_t>(range_nx) +
-                            static_cast<std::size_t>(z - min_z) *
-                                static_cast<std::size_t>(range_nx) *
-                                static_cast<std::size_t>(range_ny);
-                        const float shell_weight = gas_surface_weights[local];
-                        if (shell_weight <= 0.0f) continue;
-                        weight = shell_weight;
-                    } else {
-                        weight = sourceWeightAt(cell_center);
-                    }
-                    if (weight <= 0.0f) continue;
-                    const std::size_t cell = grid.cellIndex(x, y, z);
-
-                    if (write_density) {
-                        grid.density[cell] += density_amount * weight;
-                    }
-                    if (write_temperature) {
-                        grid.temperature[cell] += temperature_amount * weight;
-                    }
-                    if (write_fuel) {
-                        grid.fuel[cell] += fuel_amount * weight;
-                    }
-                    if (write_pressure) {
-                        grid.pressure[cell] += density_amount * 0.2f * weight;
-                    }
-                }
-            }
-        }
-        if (write_velocity && velocity_blend > 0.0f) {
-            // Each loop owns one MAC face. This avoids the old cell-parallel
-            // overlapping writes and relaxes toward an inflow velocity instead
-            // of adding kinetic energy forever.
-            #pragma omp parallel for collapse(2) schedule(static)
-            for (int z = min_z; z <= max_z; ++z)
-                for (int y = min_y; y <= max_y; ++y)
-                    for (int x = min_x; x <= std::min(grid.nx, max_x + 1); ++x) {
-                        const Vec3 p = grid.origin +
-                            Vec3(static_cast<float>(x),
-                                 static_cast<float>(y) + 0.5f,
-                                 static_cast<float>(z) + 0.5f) * grid.voxel_size;
-                        const float blend =
-                            std::clamp(velocity_blend * sourceWeightAt(p), 0.0f, 1.0f);
-                        float& value = grid.velXAt(x, y, z);
-                        value += (resolved.velocity.x - value) * blend;
-                    }
-            #pragma omp parallel for collapse(2) schedule(static)
-            for (int z = min_z; z <= max_z; ++z)
-                for (int y = min_y; y <= std::min(grid.ny, max_y + 1); ++y)
-                    for (int x = min_x; x <= max_x; ++x) {
-                        const Vec3 p = grid.origin +
-                            Vec3(static_cast<float>(x) + 0.5f,
-                                 static_cast<float>(y),
-                                 static_cast<float>(z) + 0.5f) * grid.voxel_size;
-                        const float blend =
-                            std::clamp(velocity_blend * sourceWeightAt(p), 0.0f, 1.0f);
-                        float& value = grid.velYAt(x, y, z);
-                        value += (resolved.velocity.y - value) * blend;
-                    }
-            #pragma omp parallel for collapse(2) schedule(static)
-            for (int z = min_z; z <= std::min(grid.nz, max_z + 1); ++z)
-                for (int y = min_y; y <= max_y; ++y)
-                    for (int x = min_x; x <= max_x; ++x) {
-                        const Vec3 p = grid.origin +
-                            Vec3(static_cast<float>(x) + 0.5f,
-                                 static_cast<float>(y) + 0.5f,
-                                 static_cast<float>(z)) * grid.voxel_size;
-                        const float blend =
-                            std::clamp(velocity_blend * sourceWeightAt(p), 0.0f, 1.0f);
-                        float& value = grid.velZAt(x, y, z);
-                        value += (resolved.velocity.z - value) * blend;
-                    }
-        }
-    }
-}
+#include "Fluid/MatterDomainSources.inl"
 
 void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context) {
     matter_exchange_ledger_.beginStep(++matter_exchange_step_);
@@ -10279,18 +8203,12 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
 
         const bool matter_domain =
             state.type == SimulationDomainType::Matter;
-        if (matter_domain) {
-            // Gas remains the externally visible `grid`; swap APIC scratch in
-            // only for the liquid half of this ordered two-phase step. Its
-            // device allocation crosses the same boundary, so the gas fields
-            // stay resident while APIC runs.
-            std::swap(state.grid, state.matter_liquid_grid);
-            if (i < grid_domain_compute_buffers_.size() &&
-                i < matter_liquid_compute_buffers_.size()) {
-                std::swap(grid_domain_compute_buffers_[i],
-                          matter_liquid_compute_buffers_[i]);
-            }
-        }
+        Fluid::MatterLiquidScope liquid_scope(
+            state,
+            i < grid_domain_compute_buffers_.size()
+                ? &grid_domain_compute_buffers_[i] : nullptr,
+            i < matter_liquid_compute_buffers_.size()
+                ? &matter_liquid_compute_buffers_[i] : nullptr);
 
         // Fluid (APIC liquid) domains route to a different solver. The MAC
         // grid is used as scratch (vel_x/vel_y/vel_z + pressure/divergence);
@@ -10747,8 +8665,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 granular_strain_rate, granular_overburden,
                 granular_load.softening_min);
             const int granular_solver_substeps = fluid_params.granular_enabled
-                ? std::clamp(granular_frame_elastic.required_substeps, 1,
-                             fluid_params.granular_max_solver_substeps)
+                ? Fluid::Granular::solverSubsteps(granular_frame_elastic)
                 : 1;
             // ★ A material too soft for its own overburden is not a tuning
             // choice, it is outside the corotational model's domain: holding
@@ -10832,8 +8749,13 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 context.compute->backendType() == ComputeBackendType::VulkanCompute &&
                 context.compute->supportsDispatch() &&
                 i < grid_domain_compute_buffers_.size();
-            // True while the host grid.vel_* is stale and the device holds the
-            // only current copy.
+            GranularParticleResidency particle_residency(
+                state, context.compute,
+                i < grid_domain_compute_buffers_.size()
+                    ? &grid_domain_compute_buffers_[i] : nullptr,
+                granular_grid_can_stay_on_device &&
+                    fluid_params.boundary == Fluid::APICSolverParams::BoundaryMode::Closed);
+            // True while grid.vel_* on the host is stale.
             bool grid_velocity_device_only = false;
             // Solid velocity is frame-constant (voxelized before this loop), so
             // it is deinterleaved and uploaded once, not once per substep.
@@ -10857,6 +8779,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             for (int granular_substep = 0;
                  granular_substep < granular_solver_substeps;
                  ++granular_substep) {
+                if (!particle_residency.prepare()) {
+                    granular_substep_failed = true;
+                    break;
+                }
             const std::size_t granular_particle_count_before = state.particles.size();
             const float dt = granular_frame_dt /
                 static_cast<float>(granular_solver_substeps);
@@ -10885,7 +8811,8 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                                                                      step_params,
                                                                      dt,
                                                                      !granular_state_resident,
-                                                                     granular_substep == 0,
+                                                                     granular_substep == 0 ||
+                                                                         particle_residency.hostStale(),
                                                                      !granular_grid_can_stay_on_device);
                         if (step_params.p2g_precomputed &&
                             granular_state_can_stay_resident)
@@ -10918,6 +8845,11 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             //   Any GPU step failing falls back to the full CPU step below,
             //   which re-runs P2G and therefore redoes viscosity itself — the
             //   device result is discarded rather than applied twice.
+            if (!step_params.p2g_precomputed && !particle_residency.recover()) {
+                granular_substep_failed = true;
+                break;
+            }
+
             float gpu_g2p_ms = 0.0f;
             float gpu_advect_ms = 0.0f;
             int gpu_advect_substeps = 0;
@@ -10929,6 +8861,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             Fluid::APICSolverStats gpu_mgpcg_stats;
 
             const bool try_gpu_g2p =
+                fluid_gpu_requested &&
                 fluid_params.free_surface &&
                 // Periodic boundaries need the wrap-coupled CPU PCG (the GPU MGPCG
                 // still treats out-of-grid as solid, i.e. behaves as Closed); fall
@@ -11012,41 +8945,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     // pressure matrix both classify faces with it.
                     static std::vector<float> s_fluid_mask_gpu; // function-static scratch
                     if (upload_ok) {
-                        buildFluidMaskFromParticles(state.grid, state.particles, s_fluid_mask_gpu);
-                        if (fluid_params.granular_enabled) {
-                            const std::size_t cell_count = state.grid.getCellCount();
-                            context.compute->beginTransferBatch();
-                            upload_ok =
-                                context.compute->uploadBuffer(gpu_buffers.fluid_mask,
-                                    s_fluid_mask_gpu.data(), cell_count * sizeof(float));
-                            // Colliders are voxelized before the substep loop, so
-                            // solid_vel cannot change inside it: one upload per
-                            // frame. Nothing else writes var_sv* during a granular
-                            // frame (the device viscosity uploads the same field,
-                            // MGPCG does not run for granular).
-                            if (upload_ok && !granular_solid_velocity_uploaded) {
-                                static std::vector<float> s_granular_svx, s_granular_svy, s_granular_svz;
-                                s_granular_svx.assign(cell_count, 0.0f);
-                                s_granular_svy.assign(cell_count, 0.0f);
-                                s_granular_svz.assign(cell_count, 0.0f);
-                                if (state.grid.solid_vel.size() == cell_count) {
-                                    for (std::size_t c = 0; c < cell_count; ++c) {
-                                        s_granular_svx[c] = state.grid.solid_vel[c].x;
-                                        s_granular_svy[c] = state.grid.solid_vel[c].y;
-                                        s_granular_svz[c] = state.grid.solid_vel[c].z;
-                                    }
-                                }
-                                upload_ok =
-                                    context.compute->uploadBuffer(gpu_buffers.var_svx,
-                                        s_granular_svx.data(), cell_count * sizeof(float)) &&
-                                    context.compute->uploadBuffer(gpu_buffers.var_svy,
-                                        s_granular_svy.data(), cell_count * sizeof(float)) &&
-                                    context.compute->uploadBuffer(gpu_buffers.var_svz,
-                                        s_granular_svz.data(), cell_count * sizeof(float));
-                            }
-                            upload_ok = context.compute->endTransferBatch() && upload_ok;
-                            if (upload_ok) granular_solid_velocity_uploaded = true;
-                        }
+                        upload_ok = prepareGpuFluidMask(
+                            state, *context.compute, gpu_buffers, fluid_params,
+                            particle_residency, s_fluid_mask_gpu,
+                            granular_solid_velocity_uploaded);
                     }
 
                     // Device solid-face clamp for the resident chain. Reads the
@@ -11176,7 +9078,11 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                             (!fluid_params.granular_enabled &&
                                 !state.grid.hasAnySolid()) ||
                                 grid_velocity_device_only,
-                            combine_g2p_tail_readback);
+                            combine_g2p_tail_readback ||
+                                particle_residency.defer(granular_substep,
+                                                         granular_solver_substeps));
+                        particle_residency.afterG2P(g2p_on_gpu, granular_substep,
+                                                   granular_solver_substeps);
                         if (g2p_on_gpu) {
                             gpu_g2p_ms = elapsedMilliseconds(gpu_g2p_begin, SimulationClock::now());
                             for (std::size_t n = 0; n < s_solid_idx.size(); ++n) {
@@ -11202,7 +9108,14 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                                     context.compute, gpu_buffers,
                                     &gpu_advect_substeps,
                                     combine_g2p_tail_readback,
-                                    &deferred_g2p_available);
+                                    &deferred_g2p_available,
+                                    particle_residency.hostStale(),
+                                    particle_residency.tailDispatchFlag(),
+                                    particle_residency.retainPositions(fluid_params));
+                                if (!particle_residency.finishTail(particle_tail_on_gpu)) {
+                                    granular_substep_failed = true;
+                                    break;
+                                }
                                 if (combine_g2p_tail_readback &&
                                     !particle_tail_on_gpu &&
                                     !deferred_g2p_available) {
@@ -11261,6 +9174,14 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             // clamp never reached is still handled). Bring the field home first;
             // reading the stale copy would advect on the previous substep's
             // velocity - plausible, and wrong everywhere.
+            if (!(g2p_on_gpu && particle_tail_on_gpu)) {
+                if (!particle_residency.recover()) {
+                    granular_substep_failed = true;
+                    break;
+                }
+                granular_state_resident = false;
+            }
+
             if (grid_velocity_device_only && !(g2p_on_gpu && particle_tail_on_gpu)) {
                 if (!bring_grid_velocity_home()) {
                     SCENE_LOG_WARN("[SimCompute] granular grid velocity readback failed; "
@@ -11294,6 +9215,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 state.fluid_stats.pressure_cg_multigrid = gpu_mgpcg_stats.pressure_cg_multigrid;
                 state.fluid_stats.pressure_cg_final_relative_residual =
                     gpu_mgpcg_stats.pressure_cg_final_relative_residual;
+                state.fluid_stats.pressure_window_used =
+                    gpu_mgpcg_stats.pressure_window_used;
+                state.fluid_stats.pressure_window_cells =
+                    gpu_mgpcg_stats.pressure_window_cells;
                 if (fluid_params.granular_enabled &&
                     granular_substep + 1 == granular_solver_substeps) {
                     std::size_t yielded = 0, detached = 0, invalid = 0, sleeping = 0, damaged = 0;
@@ -11421,6 +9346,11 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             // One readback per frame instead of one per substep: everything after
             // the elastic subcycle (cache, stats, render bridge, serialization)
             // sees the same host grid.vel_* the old per-substep round trip left.
+            if (!particle_residency.recover()) {
+                state.fluid_stats.gpu_fallback = true;
+                continue;
+            }
+
             if (grid_velocity_device_only && !bring_grid_velocity_home()) {
                 SCENE_LOG_WARN("[SimCompute] granular grid velocity end-of-frame readback "
                                "failed; host grid velocity is one frame stale.");
@@ -11447,10 +9377,8 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     granular_frame_elastic.required_substeps;
                 state.fluid_stats.granular_solver_substeps = granular_solver_substeps;
                 state.fluid_stats.granular_stiffness_capped = resolved_elastic.capped;
-                // ★ required vs solver substeps is the pair that matters: equal
-                // means the subcycle was granted, solver < required means
-                // granular_max_solver_substeps clamped it and the shader clamp
-                // is carrying the difference (see strain_limited_particles).
+                // Adaptive subcycling grants the full wave/strain request;
+                // the legacy budget cannot change the authored material.
                 state.fluid_stats.granular_wave_substeps =
                     granular_frame_elastic.wave_substeps;
                 state.fluid_stats.granular_strain_substeps =
@@ -11641,6 +9569,14 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             state.fluid_stats.density_ms           = elapsedMilliseconds(density_begin, density_end);
             state.fluid_stats.density_on_gpu       = density_on_gpu;
             state.fluid_stats.active_fluid_cells   = state.active_density_cells;
+            if (i < grid_domain_compute_buffers_.size()) {
+                state.fluid_stats.normalize_window_cells =
+                    grid_domain_compute_buffers_[i].fluid_normalize_window_cells;
+                state.fluid_stats.normalize_window_used = state.fluid_stats.p2g_on_gpu &&
+                    grid_domain_compute_buffers_[i].fluid_normalize_window_used;
+                state.fluid_stats.occupancy_on_gpu = state.fluid_stats.g2p_on_gpu &&
+                    grid_domain_compute_buffers_[i].fluid_mask_device_valid;
+            }
             state.fluid_stats.forces_on_gpu        = gpu_integrated_forces && !force_fields_require_cpu;
             state.fluid_stats.gpu_requested        = fluid_gpu_requested;
             state.fluid_stats.gpu_compute_available = fluid_gpu_compute_available;
@@ -11712,12 +9648,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 fluid_step_begin, SimulationClock::now());
             }
             if (matter_domain) {
-                std::swap(state.grid, state.matter_liquid_grid);
-                if (i < grid_domain_compute_buffers_.size() &&
-                    i < matter_liquid_compute_buffers_.size()) {
-                    std::swap(grid_domain_compute_buffers_[i],
-                              matter_liquid_compute_buffers_[i]);
-                }
+                liquid_scope.restore();
                 const std::size_t carried = Fluid::applyMistGasDrag(
                     state, grid_domains_[i], state, dt);
                 if (carried > 0) {
@@ -13814,6 +11745,7 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.scratch2_vel_y);
     destroy(buffers.scratch2_vel_z);
     destroy(buffers.fluid_mask);
+    destroy(buffers.fluid_mask_solid_indices);
     destroy(buffers.fluid_surface_columns);
     destroy(buffers.fluid_combustion_state);
     destroy(buffers.label_bin_counts);

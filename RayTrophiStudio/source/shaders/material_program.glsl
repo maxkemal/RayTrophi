@@ -305,7 +305,9 @@ const int MP_ATTRIB_SLOTS = 4;
 //     float mp_traceAO(vec3 p, vec3 n, float dist, int samples, bool inside);
 // declaring the prototype BEFORE including this file. Stages where tracing is illegal
 // (shadow any-hit) or meaningless (ray-gen) simply leave it undefined -> AO reads 1.0.
-MatProgOut evalMaterialProgram(uint pc, vec2 uv, vec3 gpos, vec3 gnrm, float gpoint, vec3 gobj,
+MatProgOut evalMaterialProgramWithObjectRandom(
+                               uint pc, vec2 uv, vec3 gpos, vec3 gnrm,
+                               float gpoint, vec3 gobj, float gobjRandom,
                                float gattr[MP_ATTRIB_SLOTS], vec3 gobjp, vec3 gview,
                                float volDensity, float volTemperature, float volFlame,
                                float volFuel, vec3 volVelocity, vec3 volPosition,
@@ -570,7 +572,7 @@ MatProgOut evalMaterialProgram(uint pc, vec2 uv, vec3 gpos, vec3 gnrm, float gpo
         } else if (op == 20u) {    // ObjLocation
             r = gobj;
         } else if (op == 21u) {    // ObjRandom
-            r = vec3(mp_objectRandom01(gobj));
+            r = vec3(gobjRandom >= 0.0 ? gobjRandom : mp_objectRandom01(gobj));
         } else if (op == 22u) {    // Attribute (aux = interned slot)
             // 0 when the slot is out of range — the caller already reads 0 for a mesh with
             // no attribute block, and the CPU VM does the same. An unpainted mask must read
@@ -790,6 +792,24 @@ MatProgOut evalMaterialProgram(uint pc, vec2 uv, vec3 gpos, vec3 gnrm, float gpo
         pc += 8u;
     }
     return o;
+}
+
+// Existing mesh and volume callers keep origin-hashed Object Random. Procedural
+// sphere clouds and particle preview instances use the overload above because an
+// animated centre cannot serve as a stable random identity.
+MatProgOut evalMaterialProgram(uint pc, vec2 uv, vec3 gpos, vec3 gnrm,
+                               float gpoint, vec3 gobj,
+                               float gattr[MP_ATTRIB_SLOTS], vec3 gobjp, vec3 gview,
+                               float volDensity, float volTemperature, float volFlame,
+                               float volFuel, vec3 volVelocity, vec3 volPosition,
+                               vec3 volColor, vec3 volEmission, float volVoxelSize,
+                               vec3 volObjectPosition, float timelineTime) {
+    return evalMaterialProgramWithObjectRandom(
+        pc, uv, gpos, gnrm, gpoint, gobj, -1.0,
+        gattr, gobjp, gview,
+        volDensity, volTemperature, volFlame, volFuel,
+        volVelocity, volPosition, volColor, volEmission, volVoxelSize,
+        volObjectPosition, timelineTime);
 }
 
 #endif // MATERIAL_PROGRAM_GLSL

@@ -36,7 +36,17 @@ struct SpherePushConstants {
     int useMatcap;
     float overrides[9];
 };
+struct FluidSpherePushConstants {
+    SpherePushConstants sphere;
+    float childRadius;
+    float spreadRadius;
+    uint32_t parentCount;
+    uint32_t childrenPerParent;
+    float sizeVariation;
+};
 static_assert(sizeof(SpherePushConstants) == 168, "Must match solid pipeline layout");
+static_assert(sizeof(FluidSpherePushConstants) == 188,
+              "Must match fluid_sphere_proxy.vert push constants");
 static_assert(sizeof(ParticlePushConstants) == 112,
               "particle push constants must stay within the guaranteed 128 bytes");
 
@@ -103,6 +113,26 @@ VkPipelineLayout createParticlePipelineLayout(VkDevice device,
     plci.pPushConstantRanges = &range;
     VkPipelineLayout layout = VK_NULL_HANDLE;
     if (vkCreatePipelineLayout(device, &plci, nullptr, &layout) != VK_SUCCESS) {
+        return VK_NULL_HANDLE;
+    }
+    return layout;
+}
+
+VkPipelineLayout createFluidSpherePipelineLayout(
+    VkDevice device,
+    const VkDescriptorSetLayout sets[2]) {
+    VkPushConstantRange range{};
+    range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    range.offset = 0;
+    range.size = sizeof(FluidSpherePushConstants);
+    VkPipelineLayoutCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    info.setLayoutCount = 2;
+    info.pSetLayouts = sets;
+    info.pushConstantRangeCount = 1;
+    info.pPushConstantRanges = &range;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (vkCreatePipelineLayout(device, &info, nullptr, &layout) != VK_SUCCESS) {
         return VK_NULL_HANDLE;
     }
     return layout;
@@ -262,6 +292,40 @@ void VulkanViewportBackend::ensureParticleBillboardPipelines(const std::string& 
         }
     }
 
+    if (iv.fluidSphereProxyDescLayout == VK_NULL_HANDLE) {
+        iv.fluidSphereProxyDescLayout = createStorageLayout(vkDevice, 1);
+    }
+    if (iv.fluidSphereProxyPipelineLayout == VK_NULL_HANDLE &&
+        iv.matcapDescLayout != VK_NULL_HANDLE &&
+        iv.fluidSphereProxyDescLayout != VK_NULL_HANDLE) {
+        const VkDescriptorSetLayout sets[2] = {
+            iv.matcapDescLayout, iv.fluidSphereProxyDescLayout};
+        iv.fluidSphereProxyPipelineLayout =
+            createFluidSpherePipelineLayout(vkDevice, sets);
+    }
+    if (iv.fluidSphereProxyPipeline == VK_NULL_HANDLE &&
+        iv.fluidSphereProxyPipelineLayout != VK_NULL_HANDLE) {
+        VkShaderModule vert = createModule(vkDevice, shaderDir + "/fluid_sphere_proxy.spv");
+        VkShaderModule frag = createModule(vkDevice, shaderDir + "/sphere_impostor_frag.spv");
+        if (vert && frag) {
+            VkPipeline unused = VK_NULL_HANDLE;
+            createBillboardPipelines(
+                vkDevice, iv.renderPass, iv.fluidSphereProxyPipelineLayout,
+                vert, frag, false, iv.fluidSphereProxyPipeline, unused, true);
+        }
+        if (vert) vkDestroyShaderModule(vkDevice, vert, nullptr);
+        if (frag) vkDestroyShaderModule(vkDevice, frag, nullptr);
+        if (iv.fluidSphereProxyPipeline == VK_NULL_HANDLE) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                SCENE_LOG_WARN(
+                    "[Particles] fluid_sphere_proxy.spv unavailable; using CPU sphere upload.");
+            }
+        }
+    }
+    g_fluid_sphere_proxy_ready = iv.fluidSphereProxyPipeline != VK_NULL_HANDLE;
+
     if (iv.particleDescLayout == VK_NULL_HANDLE) {
         iv.particleDescLayout = createStorageLayout(vkDevice, 2);  // LUT, row lookup
         if (iv.particleDescLayout == VK_NULL_HANDLE) {
@@ -354,6 +418,46 @@ void VulkanViewportBackend::recordParticleBillboards(VkCommandBuffer cmd,
                                                      const float viewGL[16]) {
     auto& iv = m_interactiveViewport;
     m_sphereImpostorsDrawn = 0;
+    if (iv.fluidSphereProxyPipeline && iv.fluidSphereProxyPipelineLayout &&
+        iv.matcapDescSet) {
+        bool bound = false;
+        const std::size_t count = std::min(
+            iv.fluidSphereProxyDraws.size(), iv.fluidSphereProxySlots.size());
+        for (std::size_t i = 0; i < count; ++i) {
+            const FluidSphereProxyDraw& draw = iv.fluidSphereProxyDraws[i];
+            const VkDescriptorSet proxySet = iv.fluidSphereProxySlots[i].set;
+            if (!proxySet || draw.parent_count == 0 ||
+                draw.children_per_parent == 0 || !(draw.child_radius > 0.0f)) {
+                continue;
+            }
+            if (!bound) {
+                vkCmdBindPipeline(
+                    cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, iv.fluidSphereProxyPipeline);
+                bound = true;
+            }
+            const VkDescriptorSet sets[2] = {iv.matcapDescSet, proxySet};
+            vkCmdBindDescriptorSets(
+                cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                iv.fluidSphereProxyPipelineLayout, 0, 2, sets, 0, nullptr);
+            FluidSpherePushConstants pc{};
+            std::memcpy(pc.sphere.viewProj, viewProjGL, sizeof(pc.sphere.viewProj));
+            std::memcpy(pc.sphere.view, viewGL, sizeof(pc.sphere.view));
+            pc.sphere.useMatcap = m_viewportMode == ViewportMode::Matcap
+                ? (iv.matcapUserLoaded ? 1 : iv.matcapPreset) : 0;
+            pc.childRadius = draw.child_radius;
+            pc.spreadRadius = draw.spread_radius;
+            pc.parentCount = draw.parent_count;
+            pc.childrenPerParent = draw.children_per_parent;
+            pc.sizeVariation = draw.size_variation;
+            vkCmdPushConstants(
+                cmd, iv.fluidSphereProxyPipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(pc), &pc);
+            vkCmdDraw(cmd, 6, draw.parent_count * draw.children_per_parent, 0, 0);
+            m_sphereImpostorsDrawn +=
+                static_cast<uint64_t>(draw.parent_count) * draw.children_per_parent;
+        }
+    }
     if (iv.sphereImpostorPipeline && iv.sphereImpostorBuffer.buffer &&
         iv.matcapDescSet && !iv.sphereImpostorsUploaded.empty() &&
         (m_viewportMode == ViewportMode::Solid || m_viewportMode == ViewportMode::Matcap)) {
@@ -371,7 +475,7 @@ void VulkanViewportBackend::recordParticleBillboards(VkCommandBuffer cmd,
         VkDeviceSize offset = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &iv.sphereImpostorBuffer.buffer, &offset);
         vkCmdDraw(cmd, 6, static_cast<uint32_t>(iv.sphereImpostorsUploaded.size()), 0, 0);
-        m_sphereImpostorsDrawn = iv.sphereImpostorsUploaded.size();
+        m_sphereImpostorsDrawn += iv.sphereImpostorsUploaded.size();
     }
     if (iv.particlePipelineLayout == VK_NULL_HANDLE || iv.particleDescSet == VK_NULL_HANDLE ||
         !iv.particleLutBuffer.buffer || !iv.particleRowLookupBuffer.buffer ||
@@ -453,6 +557,27 @@ void VulkanViewportBackend::destroyParticleBillboardResources(bool keepPipeline)
             vkDestroyPipeline(vkDevice, iv.sphereImpostorPipeline, nullptr);
             iv.sphereImpostorPipeline = VK_NULL_HANDLE;
         }
+        if (iv.fluidSphereProxyPipeline) {
+            vkDestroyPipeline(vkDevice, iv.fluidSphereProxyPipeline, nullptr);
+            iv.fluidSphereProxyPipeline = VK_NULL_HANDLE;
+        }
+        g_fluid_sphere_proxy_ready = false;
+        if (iv.fluidSphereProxyPipelineLayout) {
+            vkDestroyPipelineLayout(
+                vkDevice, iv.fluidSphereProxyPipelineLayout, nullptr);
+            iv.fluidSphereProxyPipelineLayout = VK_NULL_HANDLE;
+        }
+        if (iv.fluidSphereProxyDescPool) {
+            vkDestroyDescriptorPool(vkDevice, iv.fluidSphereProxyDescPool, nullptr);
+            iv.fluidSphereProxyDescPool = VK_NULL_HANDLE;
+        }
+        if (iv.fluidSphereProxyDescLayout) {
+            vkDestroyDescriptorSetLayout(
+                vkDevice, iv.fluidSphereProxyDescLayout, nullptr);
+            iv.fluidSphereProxyDescLayout = VK_NULL_HANDLE;
+        }
+        iv.fluidSphereProxyDescCapacity = 0;
+        iv.fluidSphereProxySlots.clear();
     }
     if (!keepPipeline) {
         for (VkPipeline* p : {&iv.particleAddPipeline, &iv.particleAlphaPipeline,
@@ -490,6 +615,7 @@ void VulkanViewportBackend::destroyParticleBillboardResources(bool keepPipeline)
     // resize does not touch; they survive keepPipeline. The draw list does not:
     // the next upload re-states it.
     iv.particlePulledDraws.clear();
+    iv.fluidSphereProxyDraws.clear();
     if (iv.particleAddVertexBuffer.buffer) {
         m_device->destroyBuffer(iv.particleAddVertexBuffer);
     }
@@ -598,6 +724,84 @@ void VulkanBackendAdapter::uploadParticleBillboards(const ParticleBillboardUploa
             }
         }
     }
+    bool fluidProxyChanged =
+        data.fluid_sphere_proxies.size() != iv.fluidSphereProxyDraws.size();
+    for (std::size_t i = 0;
+         !fluidProxyChanged && i < data.fluid_sphere_proxies.size();
+         ++i) {
+        const auto& incoming = data.fluid_sphere_proxies[i];
+        const auto& current = iv.fluidSphereProxyDraws[i];
+        fluidProxyChanged =
+            incoming.position_buffer != current.position_buffer ||
+            incoming.parent_count != current.parent_count ||
+            incoming.children_per_parent != current.children_per_parent ||
+            incoming.child_radius != current.child_radius ||
+            incoming.spread_radius != current.spread_radius ||
+            incoming.state_version != current.state_version;
+    }
+    iv.fluidSphereProxyDraws = data.fluid_sphere_proxies;
+    if (!data.fluid_sphere_proxies.empty() &&
+        iv.fluidSphereProxyDescLayout != VK_NULL_HANDLE) {
+        const uint32_t needed =
+            static_cast<uint32_t>(data.fluid_sphere_proxies.size());
+        if (needed > iv.fluidSphereProxyDescCapacity) {
+            if (iv.fluidSphereProxyDescPool != VK_NULL_HANDLE) {
+                vkDestroyDescriptorPool(
+                    vkDevice, iv.fluidSphereProxyDescPool, nullptr);
+                iv.fluidSphereProxyDescPool = VK_NULL_HANDLE;
+            }
+            iv.fluidSphereProxySlots.clear();
+            iv.fluidSphereProxyDescCapacity = 0;
+            uint32_t capacity = 4;
+            while (capacity < needed) capacity *= 2;
+            VkDescriptorPoolSize poolSize{};
+            poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            poolSize.descriptorCount = capacity;
+            VkDescriptorPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolInfo.poolSizeCount = 1;
+            poolInfo.pPoolSizes = &poolSize;
+            poolInfo.maxSets = capacity;
+            if (vkCreateDescriptorPool(
+                    vkDevice, &poolInfo, nullptr,
+                    &iv.fluidSphereProxyDescPool) == VK_SUCCESS) {
+                std::vector<VkDescriptorSetLayout> layouts(
+                    capacity, iv.fluidSphereProxyDescLayout);
+                std::vector<VkDescriptorSet> sets(capacity, VK_NULL_HANDLE);
+                VkDescriptorSetAllocateInfo alloc{};
+                alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+                alloc.descriptorPool = iv.fluidSphereProxyDescPool;
+                alloc.descriptorSetCount = capacity;
+                alloc.pSetLayouts = layouts.data();
+                if (vkAllocateDescriptorSets(vkDevice, &alloc, sets.data()) == VK_SUCCESS) {
+                    iv.fluidSphereProxySlots.resize(capacity);
+                    for (uint32_t i = 0; i < capacity; ++i) {
+                        iv.fluidSphereProxySlots[i].set = sets[i];
+                    }
+                    iv.fluidSphereProxyDescCapacity = capacity;
+                }
+            }
+        }
+        const std::size_t proxyCount = std::min(
+            data.fluid_sphere_proxies.size(), iv.fluidSphereProxySlots.size());
+        for (std::size_t i = 0; i < proxyCount; ++i) {
+            auto& slot = iv.fluidSphereProxySlots[i];
+            const uint64_t buffer = data.fluid_sphere_proxies[i].position_buffer;
+            if (slot.positionBuffer == buffer || !slot.set || buffer == 0) continue;
+            VkDescriptorBufferInfo info{};
+            info.buffer = toVkBuffer(buffer);
+            info.range = VK_WHOLE_SIZE;
+            VkWriteDescriptorSet write{};
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = slot.set;
+            write.dstBinding = 0;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            write.pBufferInfo = &info;
+            vkUpdateDescriptorSets(vkDevice, 1, &write, 0, nullptr);
+            slot.positionBuffer = buffer;
+        }
+    }
     const uint32_t prevAlpha = iv.particleAlphaVertexCount;
     uploadGroup(data.additive, iv.particleAddVertexBuffer, iv.particleAddVertexCount);
     uploadGroup(data.alpha, iv.particleAlphaVertexBuffer, iv.particleAlphaVertexCount);
@@ -691,7 +895,7 @@ void VulkanBackendAdapter::uploadParticleBillboards(const ParticleBillboardUploa
 
     // Re-render only when there is something to show or something just cleared.
     if (iv.particleAddVertexCount || iv.particleAlphaVertexCount || prevAdd || prevAlpha ||
-        pulledChanged || spheresChanged) {
+        pulledChanged || spheresChanged || fluidProxyChanged) {
         iv.dirty = true;
         m_currentSamples = 0;
     }

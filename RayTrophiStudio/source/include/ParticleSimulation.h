@@ -10,9 +10,11 @@
 #include "Fluid/FluidThermalLiquid.h"
 #include "Fluid/FluidFoam.h"
 #include "Fluid/FluidRenderMode.h"
+#include "Fluid/FluidRenderProxy.h"
 #include "Fluid/GranularGpuState.h"
 #include "Fluid/SubstanceTag.h"
 #include "Fluid/MatterConstitutive.h"
+#include "Fluid/MatterPhaseSettings.h"
 #include "GridFluidSolver.h"   // GridFluid::GasSolverStats (gas step telemetry)
 #include "VolumeShader.h"
 #include "SimulationWorld.h"
@@ -351,6 +353,8 @@ struct SimulationGridDomainDesc {
     // memory can sustain (512+). Set automatically by the Cinema profile.
     float voxel_size = 0.1f;
     float padding = 0.0f;
+    Fluid::MatterPhaseSettings gas_phase_grid;
+    Fluid::MatterPhaseSettings liquid_phase_grid;
     bool adaptive_lock_floor = true;
     float adaptive_floor_y = 0.0f;
     uint32_t channels = defaultGridDomainChannels();
@@ -633,12 +637,21 @@ struct SimulationGridDomainDesc {
     Vec3  fluid_particle_color = Vec3(0.40f, 0.65f, 0.95f);
     float fluid_particle_radius_factor = 0.45f;
     float fluid_particle_size_multiplier = 1.0f;
+    // Render-only particle refinement. Solver particle count and mass are
+    // unchanged; Vulkan raster/RT derive virtual children on demand. Granular
+    // domains default to one visible sphere per physical MPM carrier.
+    int   fluid_particle_visual_children = 8;
+    float fluid_particle_visual_size_variation = 0.22f;
+    bool  fluid_granular_physical_carriers = true;
+    uint64_t fluid_particle_visual_budget =
+        Fluid::kFluidRenderProxyDefaultVisualSphereBudget;
     // Icosphere subdivision 0..3 = 20/80/320/1280 triangles per splat. Default
     // 0: a dense splat pool reads as a surface long before facets show, and
     // each level multiplies raster triangles and RT BLAS memory by four.
     int   fluid_particle_subdivisions = 0;
     // Geometry instanced at each splat. 0 = built-in icosphere; 1 = triangles
-    // belonging to the named scene node, recentered and normalized once.
+    // belonging to the named scene node, recentered and normalized once;
+    // 2 = icosphere as triangles on RT (mode 0 is the procedural sphere cloud there).
     int   fluid_particle_geometry_mode = 0;
     std::string fluid_particle_geometry_source;
     bool  fluid_particle_emissive = false;
@@ -1034,9 +1047,15 @@ struct SimulationGridDomainState {
     FluidSim::FluidGrid grid;
     // Matter domains keep gas in `grid` (the renderer and gas solver's existing
     // authority) and APIC scratch in this parallel grid. Both share the same
-    // bounds, resolution and voxel size; particles remain the liquid authority.
+    // initial layout; phase consumers select their grid through MatterPhaseGrid.
+    // Particles remain the liquid authority.
     // Legacy Gas/Fluid domains leave it empty, preserving their storage/layout.
     FluidSim::FluidGrid matter_liquid_grid;
+    bool matter_liquid_active = false;
+    Vec3 logical_bounds_min;
+    Vec3 logical_bounds_max;
+    bool logical_bounds_valid = false;
+    uint64_t phase_config_hash = 0;
     // Physical gas-phase inventory. The legacy gas density/fuel/temperature
     // channels are dimensionless solver/render tracers; these sidecars carry
     // the kg and J deposited by phase exchange without changing that ABI.
@@ -1387,6 +1406,8 @@ struct SimulationGridDomainComputeBuffers {
     // Float buffer (0.0f = air, 1.0f = fluid cell). Rebuilt from particle
     // positions every step before GPU pressure projection.
     ComputeBufferHandle fluid_mask;
+    // Compact, frame-constant collider cells for GPU granular occupancy.
+    ComputeBufferHandle fluid_mask_solid_indices;
     // APIC Wind surface-drag: one ordered-float height per XZ grid column.
     ComputeBufferHandle fluid_surface_columns;
     // Two float planes per fluid cell: thermally accumulated surface
@@ -1444,6 +1465,9 @@ struct SimulationGridDomainComputeBuffers {
     std::vector<SimulationGridDomainMGLevelBuffers> mg_levels;
     std::size_t fluid_particle_capacity = 0;
     std::size_t fluid_uploaded_particle_count = 0;
+    uint64_t fluid_normalize_window_cells = 0;
+    bool fluid_normalize_window_used = false;
+    bool fluid_mask_device_valid = false;
     int resolution_x = 0;
     int resolution_y = 0;
     int resolution_z = 0;
@@ -1586,6 +1610,7 @@ struct SimulationFlowSourceDesc {
     bool  fluid_temperature_override = false;
     float fluid_temperature_kelvin = 353.0f;
     float fluid_emit_accumulator = 0.0f;
+    uint64_t fluid_emit_sample_serial = 0;
     // Dynamic emission limits (Houdini/Blender style flow controls)
     bool use_time_limit = false;
     float start_time = 0.0f;
@@ -1927,6 +1952,16 @@ struct ParticleResidentDrawBuffers {
     uint64_t state_version = 0;
 };
 
+// Device-resident APIC carrier positions exposed to render-only consumers.
+// The buffer contains tightly packed Vec3 records and remains owned by the
+// simulation compute context. Consumers must compare `device` before binding.
+struct FluidResidentPositionBuffer {
+    void* device = nullptr;
+    void* positions = nullptr;
+    uint32_t particle_count = 0;
+    uint64_t state_version = 0;
+};
+
 // Host snapshots of device kinematics, cumulative since the runtime was made.
 struct ParticleHostSnapshotStats {
     uint64_t synchronous_count = 0;  // a consumer paid its own synchronisation
@@ -2040,6 +2075,7 @@ struct ParticleSimulationRuntimeState {
     std::vector<float> emitter_accumulators;
     std::vector<uint8_t> emitter_burst_consumed;
     std::vector<float> flow_emit_accumulators;
+    std::vector<uint64_t> flow_emit_sample_serials;
     std::vector<int> flow_total_emitted_particles;
     std::vector<Vec3> previous_collider_centers;
     std::vector<uint8_t> previous_collider_center_valid;
@@ -2245,6 +2281,10 @@ public:
     SimulationGasGpuFieldView gasGpuFieldView(
         std::size_t domain_index,
         const SimulationComputeContext& compute) const;
+    bool fluidResidentPositionBuffer(
+        std::size_t domain_index,
+        const SimulationComputeContext& compute,
+        FluidResidentPositionBuffer& out) const;
 
     /// Read a GPU-resident gas domain's density and temperature grids back to
     /// the host.
