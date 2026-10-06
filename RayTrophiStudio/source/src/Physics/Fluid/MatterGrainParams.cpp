@@ -21,6 +21,7 @@ nlohmann::json matterGrainParamsToJson(const MatterGrainParams& p) {
         {"packing_fraction", p.packing_fraction},
         {"fluid_coupling", p.fluid_coupling},
         {"drag_viscosity_pa_s", p.drag_viscosity_pa_s},
+        {"volume_exclusion", p.volume_exclusion},
         {"max_substeps", p.max_substeps}};
 }
 
@@ -38,7 +39,8 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
             return false;
         }
         const bool integer = it.key() == "max_substeps" || it.key() == "contact_resolution";
-        const bool boolean = it.key() == "enabled" || it.key() == "fluid_coupling";
+        const bool boolean = it.key() == "enabled" || it.key() == "fluid_coupling" ||
+            it.key() == "volume_exclusion";
         if ((boolean && !it.value().is_boolean()) ||
             (integer && !it.value().is_number_integer()) ||
             (!boolean && !integer &&
@@ -61,6 +63,7 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
         candidate.packing_fraction = patch.value("packing_fraction", p.packing_fraction);
         candidate.fluid_coupling = patch.value("fluid_coupling", p.fluid_coupling);
         candidate.drag_viscosity_pa_s = patch.value("drag_viscosity_pa_s", p.drag_viscosity_pa_s);
+        candidate.volume_exclusion = patch.value("volume_exclusion", p.volume_exclusion);
         const auto steps = patch.value("max_substeps", double(p.max_substeps));
         if (steps < 1 || steps > 4096) {
             throw std::runtime_error("max_substeps must be 1..4096");

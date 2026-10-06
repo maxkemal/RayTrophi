@@ -130,6 +130,59 @@ int main() {
     // A changed population is refused, never silently merged.
     l.removeSwap(1);
     assert(!mergeMatterGrainOwners(mixed, l, g, error));
+    // B5 porosity: a cell packed with grains closes its faces by its solid
+    // fraction (capped at 1 - minimum voidage); restore gives back the grid.
+    {
+        FluidSim::FluidGrid grid(4, 4, 4, .1f, Vec3(0.0f, 0.0f, 0.0f));
+        FluidParticles packed;
+        // 8 grains r=.025 centred in cell (1,1,1): weights 1, volume 8*6.5e-5.
+        for (int s = 0; s < 8; ++s) {
+            emit(packed, Vec3(.15f, .15f, .15f), Vec3(0.0f, -.5f, 0.0f), .1f,
+                 MatterConstitutiveModel::Granular);
+        }
+        MatterGrainPorosityBackup backup;
+        MatterGrainStepReport porous_report;
+        applyMatterGrainPorosity(grid, packed, .025f, false, .3f, backup, porous_report);
+        const float phi = 8.0f * 4.18879f * .025f * .025f * .025f / (.1f * .1f * .1f);
+        std::printf("porous cells %zu max phi %.4f expected %.4f\n", porous_report.porous_cells,
+            porous_report.max_solid_fraction, phi);
+        assert(porous_report.porous_cells == 1);
+        assert(std::abs(porous_report.max_solid_fraction - phi) < 1e-4f);
+        // The +x face of cell (1,1,1) borders an empty cell: phi/2 closed.
+        const int expected = static_cast<int>(std::lround(255.0f * (1.0f - .5f * phi)));
+        assert(grid.u_weight[grid.velXIndex(2, 1, 1)] == expected);
+        assert(grid.u_weight[grid.velXIndex(3, 1, 1)] == 255);
+        assert(std::abs(grid.solid_vel[grid.cellIndex(1, 1, 1)].y + .5f) < 1e-6f);
+        restoreMatterGrainPorosity(grid, backup);
+        assert(grid.u_weight.empty() || grid.u_weight[grid.velXIndex(2, 1, 1)] == 255);
+    }
+    // B5 pressure force: hydrostatic kinematic pressure p = g (H - y) in a
+    // full tank gives exactly Archimedes, -rho V g.
+    {
+        MatterGrainCouplingFrame tank;
+        assert(buildMatterGrainLiquidField(liquid, grains, r, static_cast<FluidChemistryPreset>(0),
+            Vec3(0.0f, 0.0f, 0.0f), n, 2 * n, n, h, tank.field, error));
+        MatterGrainStepReport tank_report;
+        prepareMatterGrainCoupling(grains, params, Vec3(0.0f, -9.81f, 0.0f), dt, tank, tank_report);
+        const std::size_t cells = static_cast<std::size_t>(n) * 2 * n * n;
+        std::vector<float> pressure(cells, 0.0f), mask(cells, 0.0f);
+        for (int k = 0; k < n; ++k)
+            for (int j = 0; j < 2 * n; ++j)
+                for (int i = 0; i < n; ++i) {
+                    const std::size_t c = (static_cast<std::size_t>(k) * 2 * n + j) * n + i;
+                    if (j < n) {  // liquid up to y = .4
+                        mask[c] = 8.0f;
+                        pressure[c] = 9.81f * (n * h - (j + .5f) * h);
+                    }
+                }
+        applyMatterGrainPressureForce(pressure, mask, grains, r, dt, tank, tank_report);
+        const float archimedes = 1000.0f * 4.18879f * r * r * r * 9.81f / grain_mass;
+        std::printf("pressure accel %.4f archimedes %.4f\n",
+            tank.inputs[0].buoyancy_acceleration.y, archimedes);
+        assert(tank_report.pressure_force);
+        assert(std::abs(tank.inputs[0].buoyancy_acceleration.y - archimedes) < .02f * archimedes);
+        assert(tank.inputs[1].buoyancy_acceleration.length() == 0.0f);  // dry grain
+    }
     std::printf("PASS grain liquid coupling contract\n");
     return 0;
 }

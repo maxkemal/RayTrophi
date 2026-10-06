@@ -73,7 +73,14 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     auto liquid = Fluid::selectMatterParticles(state.particles, liquid_order);
     auto grains = Fluid::selectMatterParticles(state.particles, grain_order);
     Fluid::APICSolverStats stats;
+    Fluid::MatterGrainStepReport report;
+    report.liquid_parcels = liquid.size();
     const auto budget = params.mixed_working_set_budget_bytes;
+    const bool coupled = !liquid.empty() && !grains.empty() && params.grain.fluid_coupling;
+    // B5: the liquid projection sees the grains' volume; the grains then take
+    // the projection's pressure gradient instead of hydrostatic buoyancy.
+    const bool exclude = coupled && params.grain.volume_exclusion;
+    std::vector<float> liquid_pressure, liquid_mask;
 
     // 1. Liquid owner. The mixed driver steps state.particles, so the liquid
     // subset is swapped in for the call and swapped back on every path.
@@ -89,11 +96,30 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             error = "grain domain: liquid lane GPU buffers could not be allocated";
             return false;
         }
+        // The porous weights and grain velocities live in the grid only for
+        // this liquid step; the collider weight cache sees its own values back.
+        struct RestorePorosity {
+            FluidSim::FluidGrid& grid;
+            Fluid::MatterGrainPorosityBackup backup;
+            SimulationGridDomainComputeBuffers& buffers;
+            ~RestorePorosity() {
+                Fluid::restoreMatterGrainPorosity(grid, backup);
+                buffers.porous_solid_velocity = false;
+            }
+        } porosity{state.grid, {}, buffers};
         // Grains meet colliders as spheres; liquid parcels still need the
         // solid-cell recovery the plain liquid path runs before P2G.
         Fluid::recoverParticlesFromSolidCells(state.particles, state.grid);
         auto liquid_params = params;
         liquid_params.granular_enabled = false;
+        if (exclude) {
+            // Pore fraction never below .3: a packed bed is ~.36-.4, and a
+            // face closed further would stall the projection's CG.
+            Fluid::applyMatterGrainPorosity(state.grid, grains, params.grain.radius_m,
+                params.variational_solids, .3f, porosity.backup, report);
+            buffers.porous_solid_velocity = true;
+            liquid_params.variational_solids = true;
+        }
         if (!runGpuFluidParticleIntegrateForces(state, liquid_params, Vec3(0.0f, 0.0f, 0.0f), dt,
                 time_seconds, nullptr, compute, buffers)) {
             error = "grain domain: liquid force integration failed";
@@ -106,17 +132,29 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             return false;
         }
         stats = state.fluid_stats;
+        if (exclude) {
+            const std::size_t cells = state.grid.getCellCount();
+            liquid_pressure.resize(cells);
+            liquid_mask.resize(cells);
+            compute->beginTransferBatch();
+            bool read = compute->downloadBuffer(buffers.pressure, liquid_pressure.data(),
+                cells * sizeof(float));
+            read = compute->downloadBuffer(buffers.fluid_mask, liquid_mask.data(),
+                cells * sizeof(float)) && read;
+            read = compute->endTransferBatch() && read;
+            if (!read) {
+                error = "grain domain: liquid pressure readback failed";
+                return false;
+            }
+        }
     }
 
     // 2-4. Grain owner with the liquid coupling.
-    Fluid::MatterGrainStepReport report;
-    report.liquid_parcels = liquid.size();
     if (!grains.empty()) {
         if (!buffers.matter_runtime) {
             buffers.matter_runtime = std::make_shared<Fluid::MatterGpuRuntime>();
         }
         Fluid::MatterGrainCouplingFrame frame;
-        const bool coupled = !liquid.empty() && params.grain.fluid_coupling;
         if (coupled) {
             if (!Fluid::buildMatterGrainLiquidField(liquid, grains, params.grain.radius_m,
                     params.chemistry_preset, state.grid.origin, state.grid.nx, state.grid.ny,
@@ -125,6 +163,11 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             }
             Fluid::prepareMatterGrainCoupling(grains, params.grain, params.gravity, dt,
                 frame, report);
+            if (exclude) {
+                Fluid::applyMatterGrainPressureForce(liquid_pressure, liquid_mask, grains,
+                    params.grain.radius_m, dt, frame, report);
+            }
+            report.volume_exclusion = exclude;
         }
         std::vector<Fluid::MatterGrainCouplingOutput> drag;
         const std::size_t grain_budget = budget > stats.mixed_working_set_bytes
@@ -162,8 +205,9 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         ? "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin"
         : grains.empty() ? "Grain domain: liquid lane only (Vulkan indexed transfer)"
         : std::string("Grain + liquid: DEM grains, Vulkan liquid lane, ") +
-            (report.coupling_enabled ? "implicit drag + buoyancy coupling"
-                                     : "coupling OFF (pass-through)");
+            (!report.coupling_enabled ? "coupling OFF (pass-through)"
+             : report.volume_exclusion ? "porous projection + pressure force + implicit drag"
+                                       : "implicit drag + hydrostatic buoyancy");
     state.fluid_stats = stats;
     return true;
 }

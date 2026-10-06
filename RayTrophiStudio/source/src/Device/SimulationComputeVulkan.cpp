@@ -1088,6 +1088,10 @@ private:
             { "sim_fluid_divergence_var",           "sim_fluid_divergence_var.spv",       11, 52 },
             { "sim_fluid_divergence_var_window", "sim_fluid_divergence_var_window.spv",
               11, 76 },
+            // Porous grains (H1 B5): var divergence whose non-solid faces take
+            // the grains' velocity for their closed part. Matter path only, so
+            // never windowed.
+            { "sim_fluid_divergence_porous",        "sim_fluid_divergence_porous.spv",    11, 52 },
             { "sim_fluid_subtract_gradient_var",    "sim_fluid_subtract_gradient_var.spv",11, 52 },
             { "sim_fluid_cg_build_diag_var",        "sim_fluid_cg_build_diag_var.spv",     5, 52 },
             { "sim_fluid_cg_build_diag_var_window", "sim_fluid_cg_build_diag_var_window.spv",
