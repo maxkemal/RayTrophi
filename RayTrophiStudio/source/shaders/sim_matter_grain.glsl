@@ -54,7 +54,7 @@ const uint BUCKET = 16u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 12u;
+const uint REVISION = 13u;
 
 uint readBank() { return pc.substep.x & 1u; }
 uint writeBank() { return readBank() ^ 1u; }
@@ -245,13 +245,16 @@ void xpbdConstraint(vec3 n, float penetration, vec3 motion, float wi, float wj,
 void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
              vec3 spin, float inv_inertia, float other_inv_inertia,
              float effective_radius, float inverse_tangent_mass,
-             inout vec3 force, inout vec3 torque) {
+             float inverse_normal_mass, inout vec3 force, inout vec3 torque) {
     if (overlap <= 0.0) return;
     ++g_contacts;
     float dt = pc.step_contact.x;
     float k = pc.high_stiffness.w;
     float normal_speed = dot(relative,n);
-    float fn = max(0.0, k*overlap-pc.step_contact.y*normal_speed);
+    // step_contact.y is the damping ratio of the material's restitution;
+    // c = 2 zeta sqrt(k m_eff) gives every contact the same rebound.
+    float cn = 2.0*pc.step_contact.y*sqrt(k/inverse_normal_mass);
+    float fn = max(0.0, k*overlap-cn*normal_speed);
     vec3 tangential, rolling;
     previousSprings(i, key, tangential, rolling);
 
@@ -387,7 +390,7 @@ void main() {
                     float jm = 1.0/masses[j], ji = 2.5*jm/(r*r);
                     vec3 relative = v+cross(w,arm)-velocity(j,bank)-cross(wj,-arm);
                     contact(i,ids[j],n,2.0*r-d,arm,relative,w-wj,ii,ji,.5*r,
-                        im+jm+dot(arm,arm)*(ii+ji),f,t);
+                        im+jm+dot(arm,arm)*(ii+ji),im+jm,f,t);
                 }
             }
         }
@@ -402,7 +405,7 @@ void main() {
             xpbdConstraint(n,r-predicted_distance,(own_pred-p)+h*cross(w,arm),im,0.0,arm,ii);
         } else {
             contact(i,WALL_KEY|uint(2*axis+side),n,r-distance,arm,v+cross(w,arm),w,ii,0.0,r,
-                im+r*r*ii,f,t);
+                im+r*r*ii,im,f,t);
         }
     }
     // Balanced BVH, up to four independent support features. Connected
@@ -484,7 +487,7 @@ void main() {
             xpbdConstraint(n,r-predicted_distance,(own_pred-p)+h*cross(w,arm),im,0.0,arm,ii);
         } else {
             contact(i,manifold_key[m],n,r-manifold_d[m],arm,v+cross(w,arm),w,ii,0.0,r,
-                im+r*r*ii,f,t);
+                im+r*r*ii,im,f,t);
         }
     }
     // The contact budget sizes DEM spring history; XPBD keeps none.

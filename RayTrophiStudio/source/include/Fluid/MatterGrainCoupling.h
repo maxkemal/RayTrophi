@@ -47,6 +47,7 @@ struct MatterGrainLiquidField {
     std::vector<double> mass;         // liquid kg
     std::vector<double> volume;       // liquid m^3
     std::vector<double> momentum[3];  // liquid kg m/s
+    std::vector<double> viscosity;    // sum of mass x dynamic viscosity, kg Pa s
     std::vector<double> solid;        // grain m^3 (trilinear volume weights)
     std::vector<int> parcel_cell;     // liquid parcel -> cell, -1 outside
 };

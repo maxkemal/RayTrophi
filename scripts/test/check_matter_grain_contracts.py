@@ -135,9 +135,19 @@ def main():
     assert 'MatterConstitutiveModel::Granular' in birth_filter, 'liquid parcels must not block grain births'
     assert 'emit_model == RayTrophiSim::Fluid::MatterConstitutiveModel::Granular;' in births
     params_src = read('src/Physics/Fluid/MatterGrainParams.cpp')
-    assert '"fluid_coupling"' in params_src and '"drag_viscosity_pa_s"' in params_src
+    assert '"fluid_coupling"' in params_src and '"restitution"' in params_src
+    # One physical value, one home: drag reads the liquid substance viscosity,
+    # and restitution replaced the per-domain normal damping (old scenes convert).
+    assert 'drag_viscosity_pa_s was removed' in params_src
+    assert 'normal_damping_n_s_m was replaced by restitution' in params_src
+    assert 'json.erase("normal_damping_n_s_m")' in params_src
+    coupling_src = read('src/Physics/Fluid/MatterGrainCoupling.cpp')
+    assert 'liquid_kinematic_viscosity' in coupling_src and 'viscous_mass / liquid_mass' in coupling_src
+    shader_src = read('shaders/sim_matter_grain.glsl')
+    assert 'float cn = 2.0*pc.step_contact.y*sqrt(k/inverse_normal_mass);' in shader_src
+    assert 'im+jm,f,t);' in shader_src and shader_src.count('im,f,t);') == 2
     ui = read('src/UI/MatterGrainControls.cpp')
-    assert 'p.fluid_coupling' in ui and 'p.drag_viscosity_pa_s' in ui
+    assert 'p.fluid_coupling' in ui and 'p.restitution' in ui
     bridge = read('src/Physics/ParticleRenderBridge.cpp')
     assert 'const float d = grain ? diam : liquid_diam;' in bridge
     assert '--coexist-only' in runtime_test

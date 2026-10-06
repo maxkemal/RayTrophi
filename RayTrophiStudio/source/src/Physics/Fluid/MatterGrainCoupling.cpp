@@ -3,6 +3,7 @@
 #include "Fluid/FluidPhysicalMass.h"
 #include "Fluid/FluidThermalLiquid.h"
 #include "Fluid/SubstanceTag.h"
+#include "MaterialStateField.h"
 
 #include <algorithm>
 #include <cmath>
@@ -102,8 +103,9 @@ bool buildMatterGrainLiquidField(const FluidParticles& liquid, const FluidPartic
         axis.assign(cells, 0.0);
     }
     f.solid.assign(cells, 0.0);
+    f.viscosity.assign(cells, 0.0);
     f.parcel_cell.assign(liquid.size(), -1);
-    std::unordered_map<uint32_t, double> density_by_tag;
+    std::unordered_map<uint32_t, double> density_by_tag, viscosity_by_tag;
     for (std::size_t p = 0; p < liquid.size(); ++p) {
         const Vec3& x = liquid.position[p];
         const int i = static_cast<int>(std::floor((x.x - origin.x) / h));
@@ -125,8 +127,19 @@ bool buildMatterGrainLiquidField(const FluidParticles& liquid, const FluidPartic
                 MatterConstitutiveModel::Fluid, false);
             found = density_by_tag.emplace(tag, density > 0.0 ? density : 1000.0).first;
         }
+        // Dynamic viscosity of the parcel's own substance (water 1e-3 Pa s
+        // when the tag names no profile, as density falls back to 1000).
+        auto viscous = viscosity_by_tag.find(tag);
+        if (viscous == viscosity_by_tag.end()) {
+            const auto* profile = resolveFluidSubstanceProfile(tag, chemistry_preset);
+            const double mu = profile ? double(profile->liquid_kinematic_viscosity) *
+                profile->liquid_density : 1.0e-3;
+            viscous = viscosity_by_tag.emplace(tag,
+                std::isfinite(mu) && mu > 0.0 ? mu : 1.0e-3).first;
+        }
         const auto c = cellIndex(f, i, j, k);
         f.parcel_cell[p] = static_cast<int>(c);
+        f.viscosity[c] += mass * viscous->second;
         f.mass[c] += mass;
         f.volume[c] += mass / found->second;
         f.momentum[0][c] += mass * liquid.velocity[p].x;
@@ -174,6 +187,7 @@ void prepareMatterGrainCoupling(const FluidParticles& grains, const MatterGrainP
         double w[8];
         neighbours(f, grains.position[g], c, w);
         double weight = 0.0, liquid_mass = 0.0, liquid_volume = 0.0, solid = 0.0, wet = 0.0;
+        double viscous_mass = 0.0;
         double lump = 0.0, lump_momentum[3] = {};
         double share[8] = {};
         for (int n = 0; n < 8; ++n) {
@@ -183,6 +197,8 @@ void prepareMatterGrainCoupling(const FluidParticles& grains, const MatterGrainP
             weight += w[n];
             liquid_mass += w[n] * f.mass[c[n]];
             liquid_volume += w[n] * f.volume[c[n]];
+            viscous_mass += c[n] < static_cast<int>(f.viscosity.size())
+                ? w[n] * f.viscosity[c[n]] : 0.0;
             solid += w[n] * f.solid[c[n]];
             // A cell counts as liquid once its parcels fill half its pores
             // (the pressure solve's own liquid test is one parcel in eight);
@@ -220,7 +236,7 @@ void prepareMatterGrainCoupling(const FluidParticles& grains, const MatterGrainP
             static_cast<float>(lump_momentum[1] / lump), static_cast<float>(lump_momentum[2] / lump));
         const double relative = (lump_velocity - grains.velocity[g]).length();
         const double beta = submerged * matterGrainDragCoefficient(2.0 * r, relative, density,
-            params.drag_viscosity_pa_s, voidage);
+            liquid_mass > 0.0 ? viscous_mass / liquid_mass : 1.0e-3, voidage);
         // Archimedes, hydrostatic: the displaced liquid's weight, upward.
         const double buoyancy = submerged * density * sphere / grain_mass;
         auto& in = frame.inputs[g];
