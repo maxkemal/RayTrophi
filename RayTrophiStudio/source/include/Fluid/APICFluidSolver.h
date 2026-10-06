@@ -28,6 +28,8 @@
 
 #include "../Vec3.h"
 #include "../FluidGrid.h"
+#include "MatterPoreExchange.h"
+#include "MatterGrain.h"
 #include "FluidParticles.h"
 #include <algorithm>
 #include <cstddef>
@@ -79,12 +81,23 @@ constexpr float kAtmosphereSurfaceCoupling = 4.0f;   // 1/s
 constexpr float kAtmosphereSurfaceDepth = 0.5f;      // m
 
 struct APICSolverParams;
+
+struct APICFlipSnapshot {
+    std::vector<float> x;
+    std::vector<float> y;
+    std::vector<float> z;
+};
 // The air velocity the solver sees: the climate wind when inherit_atmosphere,
 // else zero (local Wind force fields are separate and still apply). One
 // function for the CPU path and the GPU constants, so they cannot disagree.
 Vec3 atmosphereAirVelocity(const APICSolverParams& params);
 
 struct APICSolverParams {
+    MatterPoreParams pore_exchange;
+    MatterGrainParams grain;
+    // Internal reference execution controls; never select CPU for a GPU domain.
+    bool mixed_model_substep = false;
+    std::size_t mixed_working_set_budget_bytes = 512ull * 1024 * 1024;
     enum class FluidPreset : int;
     Vec3  gravity = Vec3(0.0f, -9.81f, 0.0f);
 
@@ -133,6 +146,8 @@ struct APICSolverParams {
     // Per-step multiplicative damping. 0.999 = ~0.1% energy loss per step
     // (matches numerical-only loss). The old 0.985 default ate ~1.5%/step,
     // ~30% per second at 60Hz — a major source of the "tired" liquid feel.
+    // Granular paths interpret this value at 60 Hz and scale by physical dt;
+    // liquid retains its per-outer-step multiplier. Elastic substeps preserve it.
     float velocity_damping = 0.999f;
     float wall_damping = 0.15f;
 
@@ -394,6 +409,7 @@ struct APICSolverParams {
     // membership test is a short linear scan resolved ONCE per particle per
     // step into a mask rather than per substep.
     const std::vector<uint32_t>* solid_substance_tags = nullptr;
+    // Granular affine retention uses the same 60 Hz time policy as velocity.
     float affine_damping = 0.98f;
     float max_affine = 80.0f;
 
@@ -442,6 +458,11 @@ struct APICSolverParams {
     // Was `stop_after_viscosity`: the stop point no longer implies viscosity ran
     // here, so the name had to move with the meaning.
     bool  stop_before_pressure = false;
+    // CPU multi-model stage boundary: project each model independently, then
+    // contact, then G2P/tail. Defaults preserve the existing single-model step.
+    bool stop_after_projection = false;
+    bool pressure_precomputed = false;
+    const APICFlipSnapshot* model_flip_snapshot = nullptr;
 
     // Use the free-surface pressure projection (treat empty cells as p=0)
     // instead of the gas-style fill-everywhere Poisson. Required for actual
@@ -851,6 +872,13 @@ struct APICSolverParams {
 };
 
 struct APICSolverStats {
+    bool mixed_model_step = false;
+    bool mixed_step_held = false;
+    int mixed_common_substeps = 0;
+    std::size_t mixed_contact_pairs = 0;
+    std::size_t mixed_working_set_bytes = 0;
+    double mixed_contact_energy_loss = 0.0;
+    MatterGrainStepReport grain_report; // dry grain candidate only
     float total_ms = 0.0f;
     float forces_ms = 0.0f;
     float p2g_ms = 0.0f;
@@ -921,6 +949,7 @@ struct APICSolverStats {
     // Material validity, not stability: the load the domain puts on its own
     // bottom layer, and the stiffness the small-strain model needs to carry it.
     float granular_overburden_pressure = 0.0f;
+    bool granular_load_measured = false;
     float granular_young_modulus_for_load = 0.0f;
     bool granular_stiffness_below_load = false;
     // Parcels of a SOLID-phase substance, and the cells they actually blocked
@@ -980,6 +1009,7 @@ struct APICSolverStats {
     bool  gpu_compute_available = false;
     bool  gpu_fallback = false;
     std::string compute_device = "CPU";
+    MatterPoreReport pore_exchange;
     std::string gpu_status = "CPU reference path";
 };
 

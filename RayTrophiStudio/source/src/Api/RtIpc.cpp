@@ -1,5 +1,6 @@
 #include "RtPostBindings.h"
 #include "RtPhaseGrid.h"
+#include "RtMatterModels.h"
 #include "RtFluidLabelBindings.h"
 #include "RtViewportCutoutBindings.h"
 #include "RtRasterDiagnosticsBindings.h"
@@ -358,6 +359,9 @@ json flowSourceToJson(const rtapi::SimulationFlowSourceInfo& s) {
         {"density", s.density}, {"temperature", s.temperature},
         {"fuel", s.fuel}, {"falloff", s.falloff},
         {"fluid_particles_per_second", s.fluid_particles_per_second},
+        {"particle_pool_weight", s.particle_pool_weight},
+        {"pool_requested_particles", s.pool_requested_particles},
+        {"pool_granted_particles", s.pool_granted_particles},
         {"fluid_velocity_spread", s.fluid_velocity_spread},
         {"fluid_emit_along_normal", s.fluid_emit_along_normal},
         // ★ Reported as the NAME, not as the hashed tag. The hash is an internal
@@ -396,6 +400,7 @@ void applyFlowSourceJson(rtapi::SimulationFlowSourceInfo& s, const json& p) {
     RT_FS_FIELD("fuel", fuel);
     RT_FS_FIELD("falloff", falloff);
     RT_FS_FIELD("fluid_particles_per_second", fluid_particles_per_second);
+    RT_FS_FIELD("particle_pool_weight", particle_pool_weight);
     RT_FS_FIELD("fluid_velocity_spread", fluid_velocity_spread);
     RT_FS_FIELD("fluid_emit_along_normal", fluid_emit_along_normal);
     RT_FS_FIELD("fluid_substance", fluid_substance);
@@ -698,6 +703,9 @@ json dispatchMethod(const std::string& method, const json& params) {
     // owns the topology change, unlike the read-only tool catalogue above.
     json mesh_edit_result;
     nlohmann::json phase_grid_result;
+    if (dispatchMatterModelIpc(method, params,
+        [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
+        phase_grid_result)) return phase_grid_result;
     if (dispatchPhaseGridIpc(method, params,
         [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
         phase_grid_result)) return phase_grid_result;
@@ -2911,6 +2919,12 @@ json dispatchMethod(const std::string& method, const json& params) {
                          info.virtual_grain_rt_estimated_bytes},
                         {"grain_size_variation", info.grain_size_variation},
                         {"fog_spread_voxels", info.fog_spread_voxels},
+                        {"fog_erosion_strength", info.fog_erosion_strength},
+                        {"fog_erosion_size", info.fog_erosion_size},
+                        {"fog_erosion_detail", info.fog_erosion_detail},
+                        {"fog_erosion_seed", info.fog_erosion_seed},
+                        {"fog_erosion_depth", info.fog_erosion_depth},
+                        {"fog_resolution_multiplier", info.fog_resolution_multiplier},
                         {"particle_kelvin_measured", info.particle_kelvin_measured},
                         {"particle_min_kelvin", info.particle_min_kelvin},
                         {"particle_max_kelvin", info.particle_max_kelvin},
@@ -3084,6 +3098,12 @@ json dispatchMethod(const std::string& method, const json& params) {
                      info.virtual_grain_rt_estimated_bytes},
                     {"grain_size_variation", info.grain_size_variation},
                     {"fog_spread_voxels", info.fog_spread_voxels},
+                    {"fog_erosion_strength", info.fog_erosion_strength},
+                    {"fog_erosion_size", info.fog_erosion_size},
+                    {"fog_erosion_detail", info.fog_erosion_detail},
+                    {"fog_erosion_seed", info.fog_erosion_seed},
+                    {"fog_erosion_depth", info.fog_erosion_depth},
+                    {"fog_resolution_multiplier", info.fog_resolution_multiplier},
                     {"particle_kelvin_measured", info.particle_kelvin_measured},
                     {"particle_min_kelvin", info.particle_min_kelvin},
                     {"particle_max_kelvin", info.particle_max_kelvin},
@@ -3494,7 +3514,10 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"max_steps", s.max_steps},
                 {"shadow_steps", s.shadow_steps},
                 {"shadow_stride", s.shadow_stride},
-                {"shadow_strength", s.shadow_strength}};
+                {"shadow_strength", s.shadow_strength},
+                {"random_walk", s.random_walk},
+                {"random_walk_max_events", s.random_walk_max_events},
+                {"random_walk_exact_events", s.random_walk_exact_events}};
         });
     }
     if (method == "gas.set_shader") {
@@ -3518,6 +3541,9 @@ json dispatchMethod(const std::string& method, const json& params) {
             RT_GASSHADER_JSON(shadow_steps, int);
             RT_GASSHADER_JSON(shadow_stride, int);
             RT_GASSHADER_JSON(shadow_strength, float);
+            RT_GASSHADER_JSON(random_walk, bool);
+            RT_GASSHADER_JSON(random_walk_max_events, int);
+            RT_GASSHADER_JSON(random_walk_exact_events, int);
 #undef RT_GASSHADER_JSON
             return rtapi::updateGasShaderSettings(domain, s);
         });
@@ -3728,26 +3754,40 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"scattering_coefficient", s.scattering_coefficient},
                 {"scattering_color", v3(s.scattering_color)},
                 {"anisotropy", s.anisotropy},
+                {"anisotropy_back", s.anisotropy_back},
+                {"lobe_mix", s.lobe_mix},
+                {"multi_scatter", s.multi_scatter},
                 {"absorption_coefficient", s.absorption_coefficient},
                 {"absorption_color", v3(s.absorption_color)},
                 {"voxel_step_multiplier", s.voxel_step_multiplier},
                 {"max_steps", s.max_steps},
                 {"shadow_steps", s.shadow_steps},
                 {"shadow_stride", s.shadow_stride},
-                {"shadow_strength", s.shadow_strength}};
+                {"shadow_strength", s.shadow_strength},
+                {"random_walk", s.random_walk},
+                {"random_walk_max_events", s.random_walk_max_events},
+                {"random_walk_exact_events", s.random_walk_exact_events}};
         });
     }
     if (method == "fluid.set_fog_shader") {
         std::string domain = requireString(params, "domain");
         // Parsed here so a malformed value fails the request, not the queue.
         std::optional<float> densityMul, densityCut, scatCoef, aniso, absCoef, stepMul, shadowStrength;
-        std::optional<int> maxSteps, shadowSteps, shadowStride;
+        std::optional<float> anisoBack, lobeMix, multiScatter;
+        std::optional<int> maxSteps, shadowSteps, shadowStride, rwMaxEvents, rwExactEvents;
+        if (params.contains("random_walk_exact_events")) rwExactEvents = requireInt(params, "random_walk_exact_events");
+        std::optional<bool> randomWalk;
+        if (params.contains("random_walk")) randomWalk = params.at("random_walk").get<bool>();
+        if (params.contains("random_walk_max_events")) rwMaxEvents = requireInt(params, "random_walk_max_events");
         std::optional<Vec3> scatColor, absColor;
         if (params.contains("density_multiplier")) densityMul = requireFloat(params, "density_multiplier");
         if (params.contains("density_cutoff")) densityCut = requireFloat(params, "density_cutoff");
         if (params.contains("scattering_coefficient")) scatCoef = requireFloat(params, "scattering_coefficient");
         if (params.contains("scattering_color")) scatColor = requireVec3(params, "scattering_color");
         if (params.contains("anisotropy")) aniso = requireFloat(params, "anisotropy");
+        if (params.contains("anisotropy_back")) anisoBack = requireFloat(params, "anisotropy_back");
+        if (params.contains("lobe_mix")) lobeMix = requireFloat(params, "lobe_mix");
+        if (params.contains("multi_scatter")) multiScatter = requireFloat(params, "multi_scatter");
         if (params.contains("absorption_coefficient")) absCoef = requireFloat(params, "absorption_coefficient");
         if (params.contains("absorption_color")) absColor = requireVec3(params, "absorption_color");
         if (params.contains("voxel_step_multiplier")) stepMul = requireFloat(params, "voxel_step_multiplier");
@@ -3764,6 +3804,9 @@ json dispatchMethod(const std::string& method, const json& params) {
             if (scatCoef) s.scattering_coefficient = *scatCoef;
             if (scatColor) s.scattering_color = *scatColor;
             if (aniso) s.anisotropy = *aniso;
+            if (anisoBack) s.anisotropy_back = *anisoBack;
+            if (lobeMix) s.lobe_mix = *lobeMix;
+            if (multiScatter) s.multi_scatter = *multiScatter;
             if (absCoef) s.absorption_coefficient = *absCoef;
             if (absColor) s.absorption_color = *absColor;
             if (stepMul) s.voxel_step_multiplier = *stepMul;
@@ -3771,6 +3814,9 @@ json dispatchMethod(const std::string& method, const json& params) {
             if (shadowSteps) s.shadow_steps = *shadowSteps;
             if (shadowStride) s.shadow_stride = *shadowStride;
             if (shadowStrength) s.shadow_strength = *shadowStrength;
+            if (randomWalk) s.random_walk = *randomWalk;
+            if (rwMaxEvents) s.random_walk_max_events = *rwMaxEvents;
+            if (rwExactEvents) s.random_walk_exact_events = *rwExactEvents;
             return rtapi::updateFluidFogShaderSettings(domain, s);
         });
     }
@@ -4617,6 +4663,25 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"debug_view_name", b.debug_view_name}};
         });
     }
+    if (method == "render.rt_pipeline_status") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::RtPipelineStatusInfo s = rtapi::rtPipelineStatus();
+            return json{{"available", s.available},
+                        {"backend", s.backend},
+                        {"rt_pipeline_state", s.state},
+                        {"awaiting_install", s.awaiting_install},
+                        {"compile_seconds", s.compile_seconds},
+                        // null = the driver gave no creation feedback, NOT a miss.
+                        {"cache_hit", s.cache_hit_known ? json(s.cache_hit) : json(nullptr)},
+                        {"cache_loaded", s.cache_loaded},
+                        {"cache_loaded_bytes", s.cache_loaded_bytes},
+                        {"cache_path", s.cache_path},
+                        {"cache_reject_reason", s.cache_reject_reason},
+                        {"deferred_threads", s.deferred_threads},
+                        {"build_count", s.build_count},
+                        {"error", s.error}};
+        });
+    }
     if (method == "render.set_settings") {
         // Keys written inline so the descriptor generator can read them.
         std::optional<int> maxB, diffB, transB, dv;
@@ -4683,6 +4748,12 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"medium_passes", s.medium_passes},
                 {"arbiter_started_inside", s.arbiter_started_inside},
                 {"arbiter_inside_found", s.arbiter_inside_found},
+                {"walk_paths", s.walk_paths},
+                {"walk_events", s.walk_events},
+                {"walk_probe_traces", s.walk_probe_traces},
+                {"walk_shadow_traces", s.walk_shadow_traces},
+                {"walk_shadow_skipped", s.walk_shadow_skipped},
+                {"walk_event_capped", s.walk_event_capped},
                 {"devices", devices}};
         });
     }
@@ -6305,6 +6376,18 @@ json dispatchMethod(const std::string& method, const json& params) {
         rtapi::FluidFogPatch patch;
         if (params.contains("spread_voxels"))
             patch.spread_voxels = params.at("spread_voxels").get<float>();
+        if (params.contains("erosion_strength"))
+            patch.erosion_strength = params.at("erosion_strength").get<float>();
+        if (params.contains("erosion_size"))
+            patch.erosion_size = params.at("erosion_size").get<float>();
+        if (params.contains("erosion_detail"))
+            patch.erosion_detail = params.at("erosion_detail").get<int>();
+        if (params.contains("erosion_seed"))
+            patch.erosion_seed = params.at("erosion_seed").get<int>();
+        if (params.contains("erosion_depth"))
+            patch.erosion_depth = params.at("erosion_depth").get<float>();
+        if (params.contains("resolution_multiplier"))
+            patch.resolution_multiplier = params.at("resolution_multiplier").get<int>();
         return enqueueResult([domain, patch](UIContext&) {
             return rtapi::setFluidFog(domain, patch);
         });

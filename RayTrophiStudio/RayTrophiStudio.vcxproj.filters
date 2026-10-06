@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
+    <None Include="source\src\Physics\Fluid\APICFluidStep.inl" />
     <Filter Include="Kaynak Dosyalar">
       <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
       <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
@@ -75,7 +76,43 @@
     <ClInclude Include="source\include\Fluid\MatterPhaseSettings.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterParticleIdentity.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterSolverStages.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterModelBatch.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterGpuPartition.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterGpuRuntime.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterGpuParticleLease.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterGpuModelView.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterMixedStep.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterMacContact.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterTransfer.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterModelService.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Fluid\MatterPhaseConfig.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtMatterModels.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\src\Api\RtPhaseGrid.h">
@@ -709,6 +746,42 @@
     </ClCompile>
     <ClCompile Include="source\src\Api\RtPythonPhaseGrid.cpp">
       <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterSolverStages.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterModelBatch.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGpuPartition.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGpuModelView.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterMixedStep.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterMacContact.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterTransfer.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterModelService.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\MatterModelControls.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMatterModels.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMatterModels.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonMatterModels.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\MatterPhaseConfig.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
@@ -1726,6 +1799,9 @@
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanRTPipelineBuild.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanBackend_Raster.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
@@ -2469,5 +2545,91 @@
   <ItemGroup>
     <ClInclude Include="source\src\Api\RtFluidLabelBindings.h" />
     <ClInclude Include="source\src\UI\scene_ui_fluid_labels.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="source\shaders\sim_matter_partition.comp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="source\src\Physics\Fluid\FluidGpuP2G.inl" />
+    <None Include="source\src\Physics\Fluid\FluidGpuViscosity.inl" />
+    <None Include="source\src\Physics\Fluid\FluidDomainStep.inl" />
+    <None Include="source\src\Physics\Fluid\MatterGpuStep.inl" />
+    <None Include="source\src\Physics\Fluid\MatterGpuRelease.inl" />
+    <None Include="source\shaders\sim_matter_p2g.comp" />
+    <None Include="source\shaders\sim_matter_g2p.comp" />
+    <None Include="source\shaders\sim_matter_stress_update.comp" />
+    <None Include="source\shaders\sim_matter_stress_p2g.comp" />
+    <None Include="source\shaders\sim_matter_settle.comp" />
+    <None Include="source\shaders\sim_matter_advect.comp" />
+    <None Include="source\shaders\sim_matter_occupancy.comp" />
+    <None Include="source\shaders\sim_matter_contact.comp" />
+    <None Include="source\shaders\sim_matter_copy.comp" />
+    <None Include="source\shaders\sim_matter_clear.comp" />
+    <None Include="source\shaders\sim_matter_zero_faces.comp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="source\shaders\sim_fluid_advect_tail.glsl" />
+    <None Include="source\shaders\sim_fluid_g2p.glsl" />
+    <None Include="source\shaders\sim_fluid_granular_settle.glsl" />
+    <None Include="source\shaders\sim_fluid_granular_stress_p2g.glsl" />
+    <None Include="source\shaders\sim_fluid_granular_stress_update.glsl" />
+    <None Include="source\shaders\sim_fluid_occupancy.glsl" />
+    <None Include="source\shaders\sim_fluid_p2g_scatter.glsl" />
+    <None Include="source\shaders\sim_fluid_zero_solid_faces.glsl" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterMaterialPreset.h" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterMaterialPreset.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterEmissionBudget.h" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterEmissionBudget.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterPoreExchange.h" />
+    <ClInclude Include="source\include\Fluid\MatterPoreAuthoring.h" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterPoreExchange.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterPoreAuthoring.cpp" />
+    <ClCompile Include="source\src\Api\RtApiMatterPores.cpp" />
+    <ClCompile Include="source\src\UI\MatterPoreControls.cpp" />
+    <None Include="source\shaders\sim_matter_pores.comp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterWetResponse.h" />
+    <ClInclude Include="source\include\Fluid\MatterAcceptanceMetrics.h" />
+    <ClInclude Include="source\include\Fluid\MatterGranularLoad.h" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGranularLoad.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterAcceptanceMetrics.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Physics\Fluid\MatterWetResponse.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterWetAppearance.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Physics\Fluid\MatterWetAppearance.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterGrain.h" />
+    <ClInclude Include="source\include\Fluid\MatterGrainBirth.h" />
+    <ClInclude Include="source\include\Fluid\MatterGrainGeometry.h" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainParams.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainBirth.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainDiagnostics.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainGpu.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainGeometry.cpp" />
+    <ClCompile Include="source\src\Api\RtApiMatterGrain.cpp" />
+    <ClCompile Include="source\src\UI\MatterGrainControls.cpp" />
+    <None Include="source\shaders\sim_matter_grain.glsl" />
+    <None Include="source\shaders\sim_matter_grain_clear.comp" />
+    <None Include="source\shaders\sim_matter_grain_hash.comp" />
+    <None Include="source\shaders\sim_matter_grain_step.comp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterGrainColliderBvh.h" />
+    <ClInclude Include="source\include\Fluid\MatterGrainStages.h" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainColliderBvh.cpp" />
   </ItemGroup>
 </Project>

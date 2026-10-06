@@ -1,0 +1,28 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer Models { uint model[]; };
+layout(set = 0, binding = 1) writeonly buffer FluidIndices { uint fluid_index[]; };
+layout(set = 0, binding = 2) writeonly buffer GranularIndices { uint granular_index[]; };
+layout(set = 0, binding = 3) buffer Counters { uint count[]; };
+layout(push_constant) uniform Params {
+    uint particle_count;
+    uint legacy_model;
+} pc;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= pc.particle_count) {
+        return;
+    }
+    uint resolved = model[index] == 0u ? pc.legacy_model : model[index];
+    if (resolved == 1u) {
+        uint slot = atomicAdd(count[0], 1u);
+        fluid_index[slot] = index;
+    } else if (resolved == 2u) {
+        uint slot = atomicAdd(count[1], 1u);
+        granular_index[slot] = index;
+    } else {
+        atomicAdd(count[resolved == 3u ? 2 : 3], 1u);
+    }
+}

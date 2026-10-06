@@ -44,6 +44,11 @@ OUTPUT = os.path.join(API, "RtIpcMethodDescriptors.cpp")
 # itself must never be parsed as one.
 SOURCES = [p for p in IPC_FILES
            if os.path.basename(p) != "RtIpcMethodDescriptors.cpp"]
+# Grain diagnostic passes the full request to its shared API service. Include
+# that reader so generated discovery follows its schema, not just the delegate.
+SOURCES.append(os.path.join(API, "RtApiGrainReference.cpp"))
+SOURCES.append(os.path.join(API, "RtApiMatterGrain.cpp"))
+SOURCES.append(os.path.join(API, "../Physics/Fluid/MatterGrainParams.cpp"))
 
 
 # ---------------------------------------------------------------------------

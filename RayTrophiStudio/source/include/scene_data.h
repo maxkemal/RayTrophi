@@ -10,6 +10,7 @@
 */
 #pragma once
 #include <HittableList.h>
+#include "Fluid/MatterGrainGeometry.h"
 #include "Fluid/MatterPhaseConfig.h"
 #include "Animation/AnimationData.h"
 #include "AnimationController.h"
@@ -4000,11 +4001,13 @@ struct SceneData {
         // writes them back per frame -- ParticleSimulation takes a COPY of
         // fluid_params before the substep loop rescales its damping fields, so
         // that rewrite cannot reach the domain and re-key the cache every tick.
+        h = mix(h, 2ull); // Physical mass policy revision: regime-aware dry density.
         h = mix(h, fp.granular_enabled ? 1ull : 0ull);
         h = mix(h, fb(fp.granular_friction_angle_degrees));
         h = mix(h, fb(fp.granular_cohesion));
         h = mix(h, fb(fp.granular_dilatancy_degrees));
         h = mix(h, fb(fp.granular_young_modulus));
+        h = mix(h, RayTrophiSim::Fluid::matterPoreSettingsHash(fp.pore_exchange));
         h = mix(h, fb(fp.granular_poisson_ratio));
         h = mix(h, fb(fp.granular_tensile_cutoff));
         h = mix(h, fb(fp.granular_hardening));
@@ -4230,6 +4233,7 @@ struct SceneData {
                 h = mix(h, qf(f.falloff));
                 h = mix(h, qf(f.velocity_coupling));
                 h = mix(h, qf(f.fluid_particles_per_second));
+                h = mix(h, qf(f.particle_pool_weight));
                 h = mix(h, qf(f.fluid_velocity_spread));
                 h = mix(h, f.fluid_emit_along_normal ? 1ull : 0ull);
                 h = mix(h, f.fluid_temperature_override ? 1ull : 0ull);
@@ -4599,6 +4603,7 @@ struct SceneData {
                 h = mix(h, qf(f.falloff));
                 h = mix(h, qf(f.velocity_coupling));
                 h = mix(h, qf(f.fluid_particles_per_second));
+                h = mix(h, qf(f.particle_pool_weight));
                 h = mix(h, qf(f.fluid_velocity_spread));
                 h = mix(h, f.fluid_emit_along_normal ? 1ull : 0ull);
                 h = mix(h, f.fluid_temperature_override ? 1ull : 0ull);
@@ -8937,6 +8942,14 @@ public:
                         return false;
                     }
                     return resolveObjectOBBForSimulation(collider.source_name, out_obb);
+                });
+            runtime.setGrainColliderMeshResolver(
+                [this](const RayTrophiSim::ParticleColliderDesc& collider,
+                       std::vector<RayTrophiSim::SurfaceMeshTriangle>& triangles,
+                       uint64_t& revision) {
+                    revision = g_scene_geometry_generation.load(std::memory_order_acquire);
+                    return RayTrophiSim::Fluid::collectFlatGrainCollider(
+                        world.objects, collider.source_name, triangles);
                 });
             runtime.setColliderMeshResolver(
                 [this](const RayTrophiSim::ParticleColliderDesc& collider,

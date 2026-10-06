@@ -822,6 +822,7 @@ bool VulkanDevice::initialize(bool preferHardwareRT, bool validationLayers) {
 
     if (hasHardwareRT()) {
         loadRayTracingFunctions();
+        loadRTPipelineCache();
         VK_INFO() << "[VulkanDevice] Hardware RT enabled ("
                   << (m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR ? "KHR" : "NV")
                   << ")" << std::endl;
@@ -851,6 +852,8 @@ bool VulkanDevice::initialize(bool preferHardwareRT, bool validationLayers) {
 
 void VulkanDevice::shutdown() {
     if (m_device) {
+        // First: a compile worker still uses the device, the layouts and the cache.
+        shutdownRTPipelineBuild();
         vkDeviceWaitIdle(m_device);
 
         {
@@ -1003,7 +1006,13 @@ void VulkanDevice::shutdown() {
         if (m_rtPipeline) vkDestroyPipeline(m_device, m_rtPipeline, nullptr);
         if (m_rtPipelineLayout) vkDestroyPipelineLayout(m_device, m_rtPipelineLayout, nullptr);
         if (m_rtDescriptorSetLayout) vkDestroyDescriptorSetLayout(m_device, m_rtDescriptorSetLayout, nullptr);
-        
+        // Nulled: requestRTPipelineBuild reuses an installed pipeline with the
+        // same shader hash and ensureRTPipelineLayouts reuses existing layouts,
+        // so a stale handle would survive a re-initialize as "ready".
+        m_rtPipeline = VK_NULL_HANDLE;
+        m_rtPipelineLayout = VK_NULL_HANDLE;
+        m_rtDescriptorSetLayout = VK_NULL_HANDLE;
+
         destroyBuffer(m_sbtBuffer);
         destroyBuffer(m_photonGridBuffer);
         destroyBuffer(m_photonVolGridBuffer);
@@ -1564,7 +1573,7 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     VkPhysicalDeviceScalarBlockLayoutFeatures scalarFeatures{};
     scalarFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES;
     // BISECT: enabling this coincided with the driver stalling inside
-    // vkCreateRayTracingPipelinesKHR (createRTPipeline, >1 min). Off until that is
+    // vkCreateRayTracingPipelinesKHR (RT pipeline build, >1 min). Off until that is
     // separated from the stageFlags fix; validation still reports the missing
     // feature as spirv-val noise, which the driver tolerated before.
     constexpr bool kEnableScalarBlockLayout = false;
@@ -1618,6 +1627,8 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     // so we latch the real post-create state into capabilities here.
     bool enabledDescIdx = (result == VK_SUCCESS) && canUseDescIdx;
     bool enabledSamplerAnisotropy = (result == VK_SUCCESS) && canUseSamplerAnisotropy;
+    // The fallback create below passes no extensions at all.
+    m_deferredHostOpsEnabled = (result == VK_SUCCESS) && hasDeferredOps;
     bool enabledAtomicFloat = (result == VK_SUCCESS) && canUseAtomicFloat;
     bool enabledShaderFloat64 = (result == VK_SUCCESS) && canUseShaderFloat64;
     bool enabledBDA = (result == VK_SUCCESS) && canUseBDA;
@@ -1755,6 +1766,14 @@ void VulkanDevice::loadRayTracingFunctions() {
     LOAD_VK_FUNC(GetRayTracingShaderGroupHandlesKHR);
     LOAD_VK_FUNC(CmdCopyAccelerationStructureKHR);
     LOAD_VK_FUNC(CmdWriteAccelerationStructuresPropertiesKHR);
+    if (m_deferredHostOpsEnabled) {
+        // Lets the RT pipeline compile run on several threads (VulkanRTPipelineBuild.cpp).
+        LOAD_VK_FUNC(CreateDeferredOperationKHR);
+        LOAD_VK_FUNC(DestroyDeferredOperationKHR);
+        LOAD_VK_FUNC(GetDeferredOperationMaxConcurrencyKHR);
+        LOAD_VK_FUNC(GetDeferredOperationResultKHR);
+        LOAD_VK_FUNC(DeferredOperationJoinKHR);
+    }
     #undef LOAD_VK_FUNC
     if (!fpGetBufferDeviceAddressKHR) {
         fpGetBufferDeviceAddressKHR =
@@ -3895,716 +3914,8 @@ void VulkanDevice::recordPhotonPass(VkCommandBuffer cmd) {
 // ========================================================================
 // RT Pipeline Creation
 // ========================================================================
-
-bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
-                                     const std::vector<std::uint32_t>& missSPV,
-                                     const std::vector<std::uint32_t>& closestHitSPV,
-                                     const std::vector<std::uint32_t>& anyHitSPV,
-                                     const std::vector<std::uint32_t>& volumeClosestHitSPV,
-                                     const std::vector<std::uint32_t>& volumeIntersectionSPV,
-                                     const std::vector<std::uint32_t>& hairClosestHitSPV,
-                                     const std::vector<std::uint32_t>& hairIntersectionSPV,
-                                     const std::vector<std::uint32_t>& shadowMissSPV,
-                                     const std::vector<std::uint32_t>& hairAnyHitSPV,
-                                     const std::vector<std::uint32_t>& sphereClosestHitSPV,
-                                     const std::vector<std::uint32_t>& sphereIntersectionSPV,
-                                     const std::vector<std::uint32_t>& photonRaygenSPV) {
-    if (!hasHardwareRT() || !fpCreateRayTracingPipelinesKHR) {
-        VK_ERROR() << "[VulkanDevice] Hardware RT not available" << std::endl;
-        return false;
-    }
-
-    VK_INFO() << "[VulkanDevice] Creating RT pipeline..." << std::endl;
-
-    // --- 1) Create shader modules ---
-    auto createModule = [&](const std::vector<std::uint32_t>& code) -> VkShaderModule {
-        // Reject truncated/stale files before handing them to the driver. The
-        // SPIR-V header is five words and starts with 0x07230203.
-        if (code.size() < 5 || code[0] != 0x07230203u) {
-            VK_ERROR() << "[VulkanDevice] Invalid SPIR-V module (words="
-                       << code.size() << ")" << std::endl;
-            return VK_NULL_HANDLE;
-        }
-        VkShaderModuleCreateInfo ci{};
-        ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        ci.codeSize = code.size() * sizeof(uint32_t);
-        ci.pCode = code.data();
-        VkShaderModule mod = VK_NULL_HANDLE;
-        const VkResult moduleResult =
-            vkCreateShaderModule(m_device, &ci, nullptr, &mod);
-        if (moduleResult != VK_SUCCESS) {
-            VK_ERROR() << "[VulkanDevice] vkCreateShaderModule failed: "
-                       << moduleResult << " (words=" << code.size() << ")"
-                       << std::endl;
-            return VK_NULL_HANDLE;
-        }
-        return mod;
-    };
-
-    VkShaderModule raygenModule  = raygenSPV.empty()              ? VK_NULL_HANDLE : createModule(raygenSPV);
-    VkShaderModule missModule    = missSPV.empty()                ? VK_NULL_HANDLE : createModule(missSPV);
-    VkShaderModule chitModule    = closestHitSPV.empty()          ? VK_NULL_HANDLE : createModule(closestHitSPV);
-    VkShaderModule anyhitModule  = anyHitSPV.empty()              ? VK_NULL_HANDLE : createModule(anyHitSPV);
-    VkShaderModule volChitModule = volumeClosestHitSPV.empty()    ? VK_NULL_HANDLE : createModule(volumeClosestHitSPV);
-    VkShaderModule volIntModule  = volumeIntersectionSPV.empty()  ? VK_NULL_HANDLE : createModule(volumeIntersectionSPV);
-    VkShaderModule hairChitModule= hairClosestHitSPV.empty()      ? VK_NULL_HANDLE : createModule(hairClosestHitSPV);
-    VkShaderModule hairIntModule = hairIntersectionSPV.empty()    ? VK_NULL_HANDLE : createModule(hairIntersectionSPV);
-    VkShaderModule shadowMissModule = shadowMissSPV.empty()       ? VK_NULL_HANDLE : createModule(shadowMissSPV);
-    VkShaderModule hairAnyHitModule = hairAnyHitSPV.empty()       ? VK_NULL_HANDLE : createModule(hairAnyHitSPV);
-    VkShaderModule sphereChitModule = sphereClosestHitSPV.empty()   ? VK_NULL_HANDLE : createModule(sphereClosestHitSPV);
-    VkShaderModule sphereIntModule  = sphereIntersectionSPV.empty() ? VK_NULL_HANDLE : createModule(sphereIntersectionSPV);
-    VkShaderModule photonRgenModule = photonRaygenSPV.empty()       ? VK_NULL_HANDLE : createModule(photonRaygenSPV);
-
-    bool hasVolume     = (volChitModule  != VK_NULL_HANDLE && volIntModule  != VK_NULL_HANDLE);
-    bool hasHair       = (hairChitModule != VK_NULL_HANDLE && hairIntModule != VK_NULL_HANDLE);
-    bool hasSphere     = (sphereChitModule != VK_NULL_HANDLE && sphereIntModule != VK_NULL_HANDLE);
-    bool hasShadowMiss = (shadowMissModule != VK_NULL_HANDLE);
-    bool hasPhoton     = (photonRgenModule != VK_NULL_HANDLE);
-
-    if (raygenModule == VK_NULL_HANDLE || missModule == VK_NULL_HANDLE || chitModule == VK_NULL_HANDLE) {
-        if (raygenModule) vkDestroyShaderModule(m_device, raygenModule, nullptr);
-        if (missModule)   vkDestroyShaderModule(m_device, missModule, nullptr);
-        if (chitModule)   vkDestroyShaderModule(m_device, chitModule, nullptr);
-        if (volChitModule)    vkDestroyShaderModule(m_device, volChitModule, nullptr);
-        if (volIntModule)     vkDestroyShaderModule(m_device, volIntModule, nullptr);
-        if (hairChitModule)   vkDestroyShaderModule(m_device, hairChitModule, nullptr);
-        if (hairIntModule)    vkDestroyShaderModule(m_device, hairIntModule, nullptr);
-        if (shadowMissModule) vkDestroyShaderModule(m_device, shadowMissModule, nullptr);
-        if (hairAnyHitModule) vkDestroyShaderModule(m_device, hairAnyHitModule, nullptr);
-        if (photonRgenModule) vkDestroyShaderModule(m_device, photonRgenModule, nullptr);
-        VK_ERROR() << "[VulkanDevice] Failed to load RT shader modules!" << std::endl;
-        return false;
-    }
-
-    // --- 2) Pipeline shader stages ---
-    // Stage order: raygen(0), primary_miss(1), [shadow_miss(2)?], closesthit(2or3),
-    //              [anyhit?], [vol_chit?], [vol_int?], [hair_chit?], [hair_int?]
-    std::vector<VkPipelineShaderStageCreateInfo> stages;
-    stages.reserve(11);
-
-    auto makeStage = [](VkShaderStageFlagBits stageBit, VkShaderModule mod) {
-        VkPipelineShaderStageCreateInfo s{};
-        s.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        s.stage  = stageBit;
-        s.module = mod;
-        s.pName  = "main";
-        return s;
-    };
-
-    // Raygen (stage 0)
-    uint32_t raygenStageIdx = (uint32_t)stages.size();
-    stages.push_back(makeStage(VK_SHADER_STAGE_RAYGEN_BIT_KHR, raygenModule));
-
-    // Primary miss (stage 1)
-    uint32_t primaryMissStageIdx = (uint32_t)stages.size();
-    stages.push_back(makeStage(VK_SHADER_STAGE_MISS_BIT_KHR, missModule));
-
-    // Shadow miss (optional, stage 2 when present)
-    uint32_t shadowMissStageIdx = VK_SHADER_UNUSED_KHR;
-    if (hasShadowMiss) {
-        shadowMissStageIdx = (uint32_t)stages.size();
-        stages.push_back(makeStage(VK_SHADER_STAGE_MISS_BIT_KHR, shadowMissModule));
-        VK_INFO() << "[VulkanDevice] Shadow miss shader loaded (stage=" << shadowMissStageIdx << ")" << std::endl;
-    }
-
-    // Triangle closest hit
-    uint32_t chitStageIdx = (uint32_t)stages.size();
-    stages.push_back(makeStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, chitModule));
-
-    // Triangle any hit (optional)
-    uint32_t anyhitStageIdx = VK_SHADER_UNUSED_KHR;
-    if (anyhitModule != VK_NULL_HANDLE) {
-        anyhitStageIdx = (uint32_t)stages.size();
-        stages.push_back(makeStage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR, anyhitModule));
-    }
-
-    // Volume shader stages (appended after triangle stages)
-    uint32_t volChitStageIdx = VK_SHADER_UNUSED_KHR;
-    uint32_t volIntStageIdx  = VK_SHADER_UNUSED_KHR;
-    if (hasVolume) {
-        volChitStageIdx = (uint32_t)stages.size();
-        stages.push_back(makeStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, volChitModule));
-        volIntStageIdx = (uint32_t)stages.size();
-        stages.push_back(makeStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, volIntModule));
-        VK_INFO() << "[VulkanDevice] Volume shaders loaded (closesthit stage=" << volChitStageIdx << ", intersection stage=" << volIntStageIdx << ")" << std::endl;
-    }
-
-    // Hair shader stages (appended last)
-    uint32_t hairChitStageIdx = VK_SHADER_UNUSED_KHR;
-    uint32_t hairIntStageIdx  = VK_SHADER_UNUSED_KHR;
-    if (hasHair) {
-        hairChitStageIdx = (uint32_t)stages.size();
-        stages.push_back(makeStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, hairChitModule));
-        hairIntStageIdx = (uint32_t)stages.size();
-        stages.push_back(makeStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, hairIntModule));
-
-        uint32_t hairAnyHitStageIdx = VK_SHADER_UNUSED_KHR;
-        if (hairAnyHitModule != VK_NULL_HANDLE) {
-            hairAnyHitStageIdx = (uint32_t)stages.size();
-            stages.push_back(makeStage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR, hairAnyHitModule));
-        }
-
-        VK_INFO() << "[VulkanDevice] Hair shaders loaded (closesthit stage=" << hairChitStageIdx
-                  << ", intersection stage=" << hairIntStageIdx
-                  << (hairAnyHitModule != VK_NULL_HANDLE ? ", anyhit stage=" + std::to_string(hairAnyHitStageIdx) : "") << ")" << std::endl;
-    }
-
-    // Foam point-sphere shader stages (appended last)
-    uint32_t sphereChitStageIdx = VK_SHADER_UNUSED_KHR;
-    uint32_t sphereIntStageIdx  = VK_SHADER_UNUSED_KHR;
-    if (hasSphere) {
-        sphereChitStageIdx = (uint32_t)stages.size();
-        stages.push_back(makeStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, sphereChitModule));
-        sphereIntStageIdx = (uint32_t)stages.size();
-        stages.push_back(makeStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, sphereIntModule));
-        VK_INFO() << "[VulkanDevice] Foam sphere shaders loaded (closesthit stage=" << sphereChitStageIdx
-                  << ", intersection stage=" << sphereIntStageIdx << ")" << std::endl;
-    }
-
-    // Photon caustic raygen (Faz 2) — SECOND raygen group in the same pipeline.
-    // Photons reuse the existing hit/miss shaders; tracePhotons() dispatches with
-    // its own SBT raygen region pointing at this group's handle.
-    uint32_t photonStageIdx = VK_SHADER_UNUSED_KHR;
-    if (hasPhoton) {
-        photonStageIdx = (uint32_t)stages.size();
-        stages.push_back(makeStage(VK_SHADER_STAGE_RAYGEN_BIT_KHR, photonRgenModule));
-        VK_INFO() << "[VulkanDevice] Photon caustic raygen loaded (stage=" << photonStageIdx << ")" << std::endl;
-    }
-
-    // --- 3) Shader groups ---
-    // Group layout:
-    //   [raygenGroupIdx]     General  — raygen
-    //   [missGroupIdx]       General  — primary miss (miss index 0)
-    //   [shadowMissGroupIdx] General  — shadow miss  (miss index 1, optional)
-    //   [triHitGroupIdx]     Triangles hit group (hit index 0)
-    //   [volHitGroupIdx]     Procedural hit group (hit index 1, optional)
-    //   [hairHitGroupIdx]    Procedural hit group (hit index 1 or 2, optional)
-    std::vector<VkRayTracingShaderGroupCreateInfoKHR> groups;
-
-    auto makeGeneralGroup = [](uint32_t stageIdx) {
-        VkRayTracingShaderGroupCreateInfoKHR g{};
-        g.sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
-        g.type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
-        g.generalShader      = stageIdx;
-        g.closestHitShader   = VK_SHADER_UNUSED_KHR;
-        g.anyHitShader       = VK_SHADER_UNUSED_KHR;
-        g.intersectionShader = VK_SHADER_UNUSED_KHR;
-        return g;
-    };
-
-    // Raygen group
-    uint32_t raygenGroupIdx = (uint32_t)groups.size();
-    groups.push_back(makeGeneralGroup(raygenStageIdx));
-
-    // Primary miss group
-    uint32_t missGroupIdx = (uint32_t)groups.size();
-    groups.push_back(makeGeneralGroup(primaryMissStageIdx));
-
-    // Shadow miss group (optional)
-    uint32_t shadowMissGroupIdx = missGroupIdx; // falls back if not present
-    if (hasShadowMiss) {
-        shadowMissGroupIdx = (uint32_t)groups.size();
-        groups.push_back(makeGeneralGroup(shadowMissStageIdx));
-    }
-
-    // Triangle hit group
-    uint32_t triHitGroupIdx = (uint32_t)groups.size();
-    {
-        VkRayTracingShaderGroupCreateInfoKHR g{};
-        g.sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
-        g.type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
-        g.generalShader      = VK_SHADER_UNUSED_KHR;
-        g.closestHitShader   = chitStageIdx;
-        g.anyHitShader       = anyhitStageIdx; // VK_SHADER_UNUSED_KHR when absent
-        g.intersectionShader = VK_SHADER_UNUSED_KHR;
-        groups.push_back(g);
-    }
-
-    // Volume procedural hit group (optional)
-    uint32_t volHitGroupIdx = triHitGroupIdx; // fallback
-    if (hasVolume) {
-        volHitGroupIdx = (uint32_t)groups.size();
-        VkRayTracingShaderGroupCreateInfoKHR g{};
-        g.sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
-        g.type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR;
-        g.generalShader      = VK_SHADER_UNUSED_KHR;
-        g.closestHitShader   = volChitStageIdx;
-        g.anyHitShader       = VK_SHADER_UNUSED_KHR;
-        g.intersectionShader = volIntStageIdx;
-        groups.push_back(g);
-        VK_INFO() << "[VulkanDevice] Volume procedural hit group added (group index " << volHitGroupIdx << ")" << std::endl;
-    }
-
-    // Hair procedural hit group (optional)
-    uint32_t hairHitGroupIdx = triHitGroupIdx; // fallback
-    if (hasHair) {
-        hairHitGroupIdx = (uint32_t)groups.size();
-        VkRayTracingShaderGroupCreateInfoKHR g{};
-        g.sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
-        g.type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR;
-        g.generalShader      = VK_SHADER_UNUSED_KHR;
-        g.closestHitShader   = hairChitStageIdx;
-        
-        // Use the newly added hair any-hit stage if available
-        uint32_t hairAhStage = VK_SHADER_UNUSED_KHR;
-        if (hairAnyHitModule != VK_NULL_HANDLE) {
-            // Find the stage index for hairAnyHitModule
-            for (size_t s = 0; s < stages.size(); ++s) {
-                if (stages[s].module == hairAnyHitModule) {
-                    hairAhStage = (uint32_t)s;
-                    break;
-                }
-            }
-        }
-        g.anyHitShader       = hairAhStage;
-        g.intersectionShader = hairIntStageIdx;
-        groups.push_back(g);
-        VK_INFO() << "[VulkanDevice] Hair procedural hit group added (group index " << hairHitGroupIdx << ")" << std::endl;
-    }
-
-    // Foam point-sphere procedural hit group (optional, always last)
-    uint32_t sphereHitGroupIdx = triHitGroupIdx; // fallback
-    if (hasSphere) {
-        sphereHitGroupIdx = (uint32_t)groups.size();
-        VkRayTracingShaderGroupCreateInfoKHR g{};
-        g.sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
-        g.type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR;
-        g.generalShader      = VK_SHADER_UNUSED_KHR;
-        g.closestHitShader   = sphereChitStageIdx;
-        g.anyHitShader       = VK_SHADER_UNUSED_KHR;
-        g.intersectionShader = sphereIntStageIdx;
-        groups.push_back(g);
-        VK_INFO() << "[VulkanDevice] Foam sphere procedural hit group added (group index " << sphereHitGroupIdx << ")" << std::endl;
-    }
-
-    // Photon raygen group — appended AFTER all hit groups so the contiguous
-    // miss/hit SBT regions keep their existing group indices.
-    uint32_t photonGroupIdx = VK_SHADER_UNUSED_KHR;
-    if (hasPhoton) {
-        photonGroupIdx = (uint32_t)groups.size();
-        groups.push_back(makeGeneralGroup(photonStageIdx));
-        VK_INFO() << "[VulkanDevice] Photon caustic raygen group added (group index " << photonGroupIdx << ")" << std::endl;
-    }
-
-    // --- 4) Descriptor set layout ---
-    // Binding  0: Output Image
-    // Binding  1: TLAS
-    // Binding  2: Materials SSBO
-    // Binding  3: Lights SSBO
-    // Binding  4: Geometry SSBO
-    // Binding  5: Instances SSBO
-    // Binding  6: Material textures (runtime array)
-    // Binding  7: World data SSBO
-    // Binding  8: Atmosphere LUT samplers (transmittance, skyview, multi-scatter, aerial perspective)
-    // Binding  9: Volume Instances SSBO
-    // Binding 10: Hair Segment SSBO
-    // Binding 11: Hair Material SSBO
-    // Binding 12: Terrain Layer SSBO
-    // Binding 13: Denoiser Beauty AOV
-    // Binding 14: Denoiser Albedo AOV
-    // Binding 15: Denoiser Normal AOV
-    // Binding 17: Stylize AOV
-    // Binding 18: Foam sphere SSBO (intersection + closest-hit)
-    // Binding 19: Photon caustic hash grid SSBO (photon raygen writes, camera
-    //             raygen debug-reads, closesthit gathers in Dilim 2)
-    VkDescriptorSetLayoutBinding bindings[36] = {};
-    bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-
-    bindings[1].binding = 1;
-    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-
-    bindings[2].binding = 2;
-    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[2].descriptorCount = 1;
-    bindings[2].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-
-    bindings[3].binding = 3;
-    bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[3].descriptorCount = 1;
-    // RAYGEN added for photon.rgen (light-side emission reads the light buffer)
-    bindings[3].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-
-    bindings[4].binding = 4;
-    bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[4].descriptorCount = 1;
-    bindings[4].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-
-    bindings[5].binding = 5;
-    bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[5].descriptorCount = 1;
-    bindings[5].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-
-    bindings[6].binding = 6;
-    bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    bindings[6].descriptorCount = static_cast<uint32_t>(Backend::VULKAN_TEXTURE_CAPACITY);
-    bindings[6].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-
-    bindings[7].binding = 7;
-    bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[7].descriptorCount = 1;
-    bindings[7].stageFlags = VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-
-    bindings[8].binding = 8;
-    bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    bindings[8].descriptorCount = 4;
-    // closesthit.rchit also samples the atmosphere LUTs (binding 8); a stage missing
-    // from stageFlags reads an undefined descriptor (validation: layout-07988).
-    bindings[8].stageFlags = VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-
-    bindings[9].binding = 9;
-    bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[9].descriptorCount = 1;
-    bindings[9].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_INTERSECTION_BIT_KHR;
-
-    // Binding 10: Hair Segment SSBO
-    // ANY_HIT added: hair_shadow_anyhit.rahit reads this to map gl_PrimitiveID → materialID
-    // for deep self-shadow. A shader stage touching a binding the layout doesn't expose to
-    // that stage makes the NVIDIA driver crash inside vkCreateRayTracingPipelinesKHR.
-    bindings[10].binding = 10;
-    bindings[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[10].descriptorCount = 1;
-    bindings[10].stageFlags = VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-
-    // Binding 11: Hair Material SSBO
-    // ANY_HIT added: hair_shadow_anyhit.rahit reads per-groom selfShadow strength.
-    bindings[11].binding = 11;
-    bindings[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[11].descriptorCount = 1;
-    bindings[11].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-
-    // Binding 12: Terrain Layer SSBO
-    bindings[12].binding = 12;
-    bindings[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[12].descriptorCount = 1;
-    bindings[12].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-
-    bindings[13].binding = 13;
-    bindings[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[13].descriptorCount = 1;
-    bindings[13].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-
-    bindings[14].binding = 14;
-    bindings[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[14].descriptorCount = 1;
-    bindings[14].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-
-    bindings[15].binding = 15;
-    bindings[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[15].descriptorCount = 1;
-    bindings[15].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-
-    bindings[16].binding = 16;
-    bindings[16].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[16].descriptorCount = 1;
-    bindings[16].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-
-    // Binding 17: Stylize AOV position+depth image (raygen-written, host-read)
-    bindings[17].binding = 17;
-    bindings[17].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[17].descriptorCount = 1;
-    bindings[17].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-
-    // Binding 18: Foam point-sphere SSBO (centre+radius+matId), read by the
-    // sphere intersection + closest-hit shaders.
-    bindings[18].binding = 18;
-    bindings[18].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[18].descriptorCount = 1;
-    bindings[18].stageFlags = VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-
-    // Binding 19: Photon caustic hash grid (header + cells, one SSBO)
-    bindings[19].binding = 19;
-    bindings[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[19].descriptorCount = 1;
-    bindings[19].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-
-    // Binding 20: VOLUME photon grid (Faz 2V — photon raygen deposits along
-    // flight segments, camera raygen marches/reads it back).
-    bindings[20].binding = 20;
-    bindings[20].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[20].descriptorCount = 1;
-    bindings[20].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-
-    // Binding 21: Path-stats AOV (Debug Visualizer) — raygen-written running
-    // average of path throughput (rgb) + bounce count (a); tonemap reads it.
-    bindings[21].binding = 21;
-    bindings[21].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[21].descriptorCount = 1;
-    bindings[21].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-
-    // Binding 22: Photon DIRECTION grid (Debug Visualizer view 5) — parallel
-    // to the volume grid; photon.rgen deposits, camera raygen reads. Declared
-    // by photon_grid.glsl, which closesthit also includes.
-    bindings[22].binding = 22;
-    bindings[22].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[22].descriptorCount = 1;
-    bindings[22].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-
-    // Binding 23: Faz 2b material-program VM stream (flattened node graphs),
-    // read by closest-hit's material_program.glsl interpreter.
-    bindings[23].binding = 23;
-    bindings[23].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[23].descriptorCount = 1;
-    bindings[23].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-
-    // Binding 24: COLD material fields (VkGpuMaterialExt) — the feature-gated
-    // half of the split material record (SSS/water/bubble/resin/dust). Only
-    // closesthit reads it; the shadow any-hit path stays entirely on the hot
-    // core buffer (binding 2).
-    bindings[24].binding = 24;
-    bindings[24].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[24].descriptorCount = 1;
-    // shadow_anyhit.rahit reads MaterialExt too (same validation rule as binding 8).
-    bindings[24].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-
-    // Bindings 25-28: fixed temporal ping-pong slots. Their descriptors never
-    // swap while an asynchronous frame is in flight; raygen selects read/write
-    // slots from the temporal frame parity.
-    for (uint32_t i = 25; i <= 28; ++i) {
-        bindings[i].binding = i;
-        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        bindings[i].descriptorCount = 1;
-        bindings[i].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-    }
-    bindings[29].binding = 29;
-    bindings[29].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[29].descriptorCount = 1;
-    bindings[29].stageFlags =
-        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-
-    // Bindings 30-35: cloud field (cloud_rt.glsl / cloud_common.glsl) --
-    // 30 base noise 3D, 31 detail 3D, 32 curl, 33 weather map, 34 CloudParams,
-    // 35 majorant map. Miss draws the clouds; closest-hit reads them for the
-    // sun's cloud shadow. Always written (writeRtCloudDescriptors).
-    for (uint32_t i = 30; i <= 35; ++i) {
-        bindings[i].binding = i;
-        bindings[i].descriptorType = (i == 34) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
-                                               : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[i].descriptorCount = 1;
-        bindings[i].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
-                                 VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    }
-
-    VkDescriptorSetLayoutCreateInfo dslCI{};
-    dslCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslCI.bindingCount =  36;
-    dslCI.pBindings = bindings;
-    vkCreateDescriptorSetLayout(m_device, &dslCI, nullptr, &m_rtDescriptorSetLayout);
-
-    // --- 5) Push constant range (camera data + rendering params) ---
-    VkPushConstantRange pushRange{};
-    pushRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-    pushRange.offset = 0;
-    pushRange.size = 256; // Matches the expanded CameraPushConstants payload.
-
-    // --- 6) Pipeline layout ---
-    VkPipelineLayoutCreateInfo plCI{};
-    plCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    plCI.setLayoutCount = 1;
-    plCI.pSetLayouts = &m_rtDescriptorSetLayout;
-    plCI.pushConstantRangeCount = 1;
-    plCI.pPushConstantRanges = &pushRange;
-    vkCreatePipelineLayout(m_device, &plCI, nullptr, &m_rtPipelineLayout);
-
-    // --- 7) Create RT pipeline ---
-    VkRayTracingPipelineCreateInfoKHR rtCI{};
-    rtCI.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
-    rtCI.stageCount = (uint32_t)stages.size();
-    rtCI.pStages = stages.data();
-    rtCI.groupCount = (uint32_t)groups.size();
-    rtCI.pGroups = groups.data();
-    rtCI.maxPipelineRayRecursionDepth = 2; // Required for shadow rays from closesthit
-    rtCI.layout = m_rtPipelineLayout;
-
-    VkResult result = fpCreateRayTracingPipelinesKHR(m_device, VK_NULL_HANDLE, VK_NULL_HANDLE,
-        1, &rtCI, nullptr, &m_rtPipeline);
-    // If pipeline creation fails and an any-hit module was provided, retry without any-hit
-    if (result != VK_SUCCESS && anyhitModule != VK_NULL_HANDLE) {
-        VK_WARN() << "[VulkanDevice] vkCreateRayTracingPipelinesKHR failed (with any-hit): " << result 
-                  << ". anyhitModule=" << (anyhitModule != VK_NULL_HANDLE ? "VALID" : "NULL")
-                  << " stages=" << stages.size() << " groups=" << groups.size()
-                  << ". Retrying without any-hit..." << std::endl;
-
-        // Rebuild stages without anyhit: raygen(0), primary_miss(1), [shadow_miss(2)?],
-        //   closesthit(2or3), [vol_chit?], [vol_int?], [hair_chit?], [hair_int?]
-        std::vector<VkPipelineShaderStageCreateInfo> stages2;
-        stages2.reserve(11);
-        uint32_t s2RaygenIdx = (uint32_t)stages2.size(); stages2.push_back(makeStage(VK_SHADER_STAGE_RAYGEN_BIT_KHR, raygenModule));
-        uint32_t s2PrimaryMissIdx = (uint32_t)stages2.size(); stages2.push_back(makeStage(VK_SHADER_STAGE_MISS_BIT_KHR, missModule));
-        uint32_t s2ShadowMissIdx = VK_SHADER_UNUSED_KHR;
-        if (hasShadowMiss) { s2ShadowMissIdx = (uint32_t)stages2.size(); stages2.push_back(makeStage(VK_SHADER_STAGE_MISS_BIT_KHR, shadowMissModule)); }
-        uint32_t s2ChitIdx = (uint32_t)stages2.size(); stages2.push_back(makeStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, chitModule));
-        // Re-add anyhit (opacity test for shadow rays) — this was the original failure point
-        uint32_t s2AnyHitIdx = VK_SHADER_UNUSED_KHR;
-        if (anyhitModule != VK_NULL_HANDLE) {
-            s2AnyHitIdx = (uint32_t)stages2.size(); stages2.push_back(makeStage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR, anyhitModule));
-        }
-
-        // Re-add volume stages with corrected indices
-        uint32_t s2VolChitIdx = VK_SHADER_UNUSED_KHR, s2VolIntIdx = VK_SHADER_UNUSED_KHR;
-        if (hasVolume && volChitModule != VK_NULL_HANDLE && volIntModule != VK_NULL_HANDLE) {
-            s2VolChitIdx = (uint32_t)stages2.size(); stages2.push_back(makeStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, volChitModule));
-            s2VolIntIdx  = (uint32_t)stages2.size(); stages2.push_back(makeStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, volIntModule));
-        } else if (hasVolume) {
-            hasVolume = false;
-        }
-
-        // Re-add hair stages with corrected indices
-        uint32_t s2HairChitIdx = VK_SHADER_UNUSED_KHR, s2HairIntIdx = VK_SHADER_UNUSED_KHR;
-        if (hasHair && hairChitModule != VK_NULL_HANDLE && hairIntModule != VK_NULL_HANDLE) {
-            s2HairChitIdx = (uint32_t)stages2.size(); stages2.push_back(makeStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, hairChitModule));
-            s2HairIntIdx  = (uint32_t)stages2.size(); stages2.push_back(makeStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, hairIntModule));
-        } else if (hasHair) {
-            hasHair = false;
-        }
-
-        // Re-add foam sphere stages with corrected indices
-        uint32_t s2SphereChitIdx = VK_SHADER_UNUSED_KHR, s2SphereIntIdx = VK_SHADER_UNUSED_KHR;
-        if (hasSphere && sphereChitModule != VK_NULL_HANDLE && sphereIntModule != VK_NULL_HANDLE) {
-            s2SphereChitIdx = (uint32_t)stages2.size(); stages2.push_back(makeStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, sphereChitModule));
-            s2SphereIntIdx  = (uint32_t)stages2.size(); stages2.push_back(makeStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, sphereIntModule));
-        } else if (hasSphere) {
-            hasSphere = false;
-        }
-
-        // Rebuild groups with corrected stage indices
-        groups.clear();
-        uint32_t r2RaygenGroup = (uint32_t)groups.size(); groups.push_back(makeGeneralGroup(s2RaygenIdx));
-        uint32_t r2MissGroup   = (uint32_t)groups.size(); groups.push_back(makeGeneralGroup(s2PrimaryMissIdx));
-        if (hasShadowMiss) { groups.push_back(makeGeneralGroup(s2ShadowMissIdx)); }
-        triHitGroupIdx = (uint32_t)groups.size();
-        { VkRayTracingShaderGroupCreateInfoKHR g{}; g.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR; g.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR; g.generalShader = VK_SHADER_UNUSED_KHR; g.closestHitShader = s2ChitIdx; g.anyHitShader = s2AnyHitIdx; g.intersectionShader = VK_SHADER_UNUSED_KHR; groups.push_back(g); }
-        if (hasVolume) { volHitGroupIdx = (uint32_t)groups.size(); VkRayTracingShaderGroupCreateInfoKHR g{}; g.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR; g.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR; g.generalShader = VK_SHADER_UNUSED_KHR; g.closestHitShader = s2VolChitIdx; g.anyHitShader = VK_SHADER_UNUSED_KHR; g.intersectionShader = s2VolIntIdx; groups.push_back(g); }
-        if (hasHair)   { hairHitGroupIdx = (uint32_t)groups.size(); VkRayTracingShaderGroupCreateInfoKHR g{}; g.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR; g.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR; g.generalShader = VK_SHADER_UNUSED_KHR; g.closestHitShader = s2HairChitIdx; g.anyHitShader = VK_SHADER_UNUSED_KHR; g.intersectionShader = s2HairIntIdx; groups.push_back(g); }
-        if (hasSphere) { sphereHitGroupIdx = (uint32_t)groups.size(); VkRayTracingShaderGroupCreateInfoKHR g{}; g.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR; g.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR; g.generalShader = VK_SHADER_UNUSED_KHR; g.closestHitShader = s2SphereChitIdx; g.anyHitShader = VK_SHADER_UNUSED_KHR; g.intersectionShader = s2SphereIntIdx; groups.push_back(g); }
-        // Photon raygen re-added last (same ordering contract as the primary path)
-        if (hasPhoton) {
-            uint32_t s2PhotonIdx = (uint32_t)stages2.size();
-            stages2.push_back(makeStage(VK_SHADER_STAGE_RAYGEN_BIT_KHR, photonRgenModule));
-            photonGroupIdx = (uint32_t)groups.size();
-            groups.push_back(makeGeneralGroup(s2PhotonIdx));
-        }
-        (void)r2RaygenGroup; (void)r2MissGroup;
-
-        rtCI.stageCount = (uint32_t)stages2.size();
-        rtCI.pStages = stages2.data();
-        rtCI.groupCount = (uint32_t)groups.size();
-        rtCI.pGroups = groups.data();
-
-        result = fpCreateRayTracingPipelinesKHR(m_device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &rtCI, nullptr, &m_rtPipeline);
-        if (result != VK_SUCCESS) {
-            VK_WARN() << "[VulkanDevice] Retry also failed: " << result << std::endl;
-        }
-    }
-
-    // Cleanup shader modules (safe after pipeline creation attempt)
-    if (raygenModule)     vkDestroyShaderModule(m_device, raygenModule, nullptr);
-    if (missModule)       vkDestroyShaderModule(m_device, missModule, nullptr);
-    if (chitModule)       vkDestroyShaderModule(m_device, chitModule, nullptr);
-    if (anyhitModule)     vkDestroyShaderModule(m_device, anyhitModule, nullptr);
-    if (volChitModule)    vkDestroyShaderModule(m_device, volChitModule, nullptr);
-    if (volIntModule)     vkDestroyShaderModule(m_device, volIntModule, nullptr);
-    if (hairChitModule)   vkDestroyShaderModule(m_device, hairChitModule, nullptr);
-    if (hairIntModule)    vkDestroyShaderModule(m_device, hairIntModule, nullptr);
-    if (shadowMissModule) vkDestroyShaderModule(m_device, shadowMissModule, nullptr);
-    if (hairAnyHitModule) vkDestroyShaderModule(m_device, hairAnyHitModule, nullptr);
-    if (sphereChitModule) vkDestroyShaderModule(m_device, sphereChitModule, nullptr);
-    if (sphereIntModule)  vkDestroyShaderModule(m_device, sphereIntModule, nullptr);
-    if (photonRgenModule) vkDestroyShaderModule(m_device, photonRgenModule, nullptr);
-
-    if (result != VK_SUCCESS) {
-        VK_ERROR() << "[VulkanDevice] vkCreateRayTracingPipelinesKHR failed: " << result << std::endl;
-        return false;
-    }
-
-    // --- 8) Build Shader Binding Table (SBT) ---
-    // Store hair/shadow/volume state as members for consistent use during rendering
-    m_hasVolumeShaders = hasVolume;
-    m_hasHairShaders   = hasHair;
-    m_hasSphereShaders = hasSphere;
-    m_hasShadowMiss    = hasShadowMiss;
-
-    uint32_t handleSize = m_capabilities.shaderGroupHandleSize;
-    uint32_t handleAlignment = m_capabilities.shaderGroupBaseAlignment;
-    if (handleAlignment == 0) handleAlignment = handleSize; // Fallback
-    if (handleSize == 0) {
-        VK_ERROR() << "[VulkanDevice] shaderGroupHandleSize is 0 — RT capabilities not queried!" << std::endl;
-        return false;
-    }
-    // groupCount must match the actual pipeline group count
-    uint32_t groupCount = (uint32_t)groups.size();
-
-    // Aligned handle size (each entry must be aligned)
-    uint32_t alignedHandleSize = (handleSize + (handleAlignment - 1)) & ~(handleAlignment - 1);
-
-    // Get shader group handles
-    uint32_t handleStorageSize = groupCount * handleSize;
-    std::vector<uint8_t> handleData(handleStorageSize);
-    VkResult sbtResult = fpGetRayTracingShaderGroupHandlesKHR(m_device, m_rtPipeline, 0, groupCount, handleStorageSize, handleData.data());
-    if (sbtResult != VK_SUCCESS) {
-        VK_ERROR() << "[VulkanDevice] fpGetRayTracingShaderGroupHandlesKHR failed: " << sbtResult << " (groupCount=" << groupCount << ", handleSize=" << handleSize << ")" << std::endl;
-        return false;
-    }
-
-    // SBT layout: [raygen | miss(s) | hit(s)] each entry aligned
-    uint64_t sbtSize = (uint64_t)alignedHandleSize * groupCount;
-
-    BufferCreateInfo sbtBufInfo;
-    sbtBufInfo.size = sbtSize;
-    sbtBufInfo.usage = BufferUsage::SHADER_BINDING | BufferUsage::TRANSFER_DST;
-    sbtBufInfo.location = MemoryLocation::CPU_TO_GPU;
-    m_sbtBuffer = createBuffer(sbtBufInfo);
-
-    // Write handles into SBT buffer with proper alignment
-    auto* mapped = (uint8_t*)mapBuffer(m_sbtBuffer);
-    for (uint32_t i = 0; i < groupCount; i++) {
-        memcpy(mapped + i * alignedHandleSize, handleData.data() + i * handleSize, handleSize);
-    }
-    unmapBuffer(m_sbtBuffer);
-
-    // Set SBT regions using explicit group indices
-    VkDeviceAddress sbtAddr = m_sbtBuffer.deviceAddress;
-
-    // Raygen region (always 1 entry)
-    m_sbtRaygenRegion.deviceAddress = sbtAddr + (VkDeviceAddress)raygenGroupIdx * alignedHandleSize;
-    m_sbtRaygenRegion.stride = alignedHandleSize;
-    m_sbtRaygenRegion.size   = alignedHandleSize;
-
-    // Miss region: primary_miss + optional shadow_miss (contiguous)
-    uint32_t numMissGroups = 1u + (hasShadowMiss ? 1u : 0u);
-    m_sbtMissRegion.deviceAddress = sbtAddr + (VkDeviceAddress)missGroupIdx * alignedHandleSize;
-    m_sbtMissRegion.stride = alignedHandleSize;
-    m_sbtMissRegion.size   = (VkDeviceSize)numMissGroups * alignedHandleSize;
-
-    // Hit region: triangle + optional volume + optional hair + optional sphere (contiguous)
-    uint32_t numHitGroups = 1u + (hasVolume ? 1u : 0u) + (hasHair ? 1u : 0u) + (hasSphere ? 1u : 0u);
-    m_sbtHitRegion.deviceAddress = sbtAddr + (VkDeviceAddress)triHitGroupIdx * alignedHandleSize;
-    m_sbtHitRegion.stride = alignedHandleSize;
-    m_sbtHitRegion.size   = (VkDeviceSize)numHitGroups * alignedHandleSize;
-
-    m_sbtCallableRegion = {}; // No callable shaders
-
-    // Photon caustic raygen region (Faz 2) — same SBT buffer, its own raygen slot.
-    m_hasPhotonRaygen = hasPhoton && (photonGroupIdx != VK_SHADER_UNUSED_KHR);
-    if (m_hasPhotonRaygen) {
-        m_sbtPhotonRegion.deviceAddress = sbtAddr + (VkDeviceAddress)photonGroupIdx * alignedHandleSize;
-        m_sbtPhotonRegion.stride = alignedHandleSize;
-        m_sbtPhotonRegion.size   = alignedHandleSize;
-    } else {
-        m_sbtPhotonRegion = {};
-    }
-
-    m_rtPipelineReady = true;
-    VK_INFO() << "[VulkanDevice] RT pipeline + SBT created successfully! (groups=" << groupCount
-              << ", volume=" << (m_hasVolumeShaders ? "YES" : "NO")
-              << ", hair="   << (m_hasHairShaders   ? "YES" : "NO")
-              << ", shadowMiss=" << (m_hasShadowMiss ? "YES" : "NO") << ")" << std::endl;
-    return true;
-}
+// Asynchronous since 2026-10-05: requestRTPipelineBuild / pollRTPipelineBuild in
+// VulkanRTPipelineBuild.cpp (worker compile, deferred host operations, disk cache).
 
 void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
                                      const ImageHandle* denoiserColorImage,
@@ -16455,6 +15766,102 @@ bool VulkanBackendAdapter::cloneRtObjectByNodeName(
     return true;
 }
 
+// Post-pipeline steps that used to follow the synchronous createRTPipeline in
+// renderProgressiveImpl; now run when an asynchronous build is installed (or an
+// unchanged pipeline is reused).
+void VulkanBackendAdapter::onRTPipelineInstalled() {
+    // updateGeometry can run before this lazy pipeline exists. In that
+    // phase point-sphere groups are deliberately omitted so they never
+    // create a huge temporary triangle TLAS. Now that the procedural
+    // hit group and its final SBT offset are known, build the compact
+    // sphere BLAS before the first trace/present.
+    if (!finalizeDeferredProceduralSphereCloud()) {
+        // Optional sphere shaders are missing or failed to initialize.
+        // Rebuild once with the ordinary triangle fallback now that
+        // shouldUseProceduralSpherePath() can make the final choice.
+        rebuildAccelerationStructure();
+        m_testInitialized = true;
+        updateGeometry(m_lastObjects);
+    }
+
+    // [FIX] Hair SBT offset correction after pipeline creation.
+    // When hair was uploaded during backend switch, the pipeline was not yet
+    // created so getHairSbtOffset() returned a stale value (default
+    // m_hasVolumeShaders=false). If the pipeline now reports volumes are
+    // present, the hair TLAS instances have the wrong sbtRecordOffset.
+    // Rebuild the TLAS with the corrected offset to ensure the correct hit
+    // shader is dispatched for hair geometry.
+    if (m_device->m_hasHairShaders && !m_hairVkInstances.empty()) {
+        uint32_t correctOffset = m_device->getHairSbtOffset();
+        bool needsTlasRebuild = false;
+        for (auto& hvi : m_hairVkInstances) {
+            if (hvi.sbtRecordOffset != correctOffset) {
+                hvi.sbtRecordOffset = correctOffset;
+                needsTlasRebuild = true;
+            }
+        }
+        if (needsTlasRebuild) {
+            std::vector<VulkanRT::TLASInstance> allInstances = m_vkInstances;
+            for (const auto& h : m_hairVkInstances) allInstances.push_back(h);
+            if (!allInstances.empty()) {
+                VulkanRT::TLASCreateInfo tlasInfo;
+                tlasInfo.instances   = allInstances;
+                tlasInfo.allowUpdate = false;
+                m_device->createTLAS(tlasInfo);
+                SCENE_LOG_INFO("[Vulkan] Hair SBT offset corrected after pipeline init (offset="
+                    + std::to_string(correctOffset) + ")");
+            }
+        }
+    }
+}
+
+// Raster stand-in while the RT pipeline compiles on its worker thread.
+// ★ OFF: the first switch to Rendered with it on crashed inside the NVIDIA
+// driver (access violation in nvoglv64.dll under endSingleTimeCommands at the
+// end of renderInteractiveViewportImpl, 2026-10-05). The compile itself only
+// creates shader modules and the pipeline (thread-safe per spec); the raster
+// pass ran in the same frame as the Rendered-mode geometry/TLAS rebuild and
+// was never validated against it. Until it is (validation layers on a
+// raster -> Rendered switch), Rendered re-presents the last frame while the
+// HUD reports the compile — the UI still never blocks.
+static constexpr bool kRasterWhileRTPipelineCompiles = false;
+
+// Draws m_rtFallbackRasterMode into the Rendered viewport while the RT pipeline
+// is compiling or failed. False = nothing drawn (no graphics queue, or the
+// raster path itself fell back into renderProgressive -- the guard stops that
+// recursion and the caller re-presents the cached frame).
+bool VulkanBackendAdapter::drawRasterWhileRTPipelineUnavailable(void* s, int width, int height,
+                                                                void* fb, void* tex) {
+    if (!kRasterWhileRTPipelineCompiles) return false;
+    if (m_inRTPipelineRasterFallback || !m_device || !m_device->supportsGraphicsQueue()) return false;
+    m_inRTPipelineRasterFallback = true;
+    m_rtFallbackRasterUsed = true;
+    const ViewportMode requestedMode = m_viewportMode;
+    m_viewportMode = m_rtFallbackRasterMode;
+    renderInteractiveViewport(s, width, height, fb, tex);
+    m_viewportMode = requestedMode;
+    m_inRTPipelineRasterFallback = false;
+    return true;
+}
+
+// Same teardown setViewportMode does on a raster -> Rendered switch, deferred
+// to the moment the RT pipeline is actually there to take over.
+void VulkanBackendAdapter::leaveRTPipelineRasterFallback() {
+    if (!m_rtFallbackRasterUsed) return;
+    m_rtFallbackRasterUsed = false;
+    if (m_device && m_device->isInitialized()) {
+        m_device->waitIdle();
+    }
+    destroyInteractiveViewportResourcesImpl(false);
+    m_interactiveViewport = {};
+    resetAccumulation();
+}
+
+Backend::RTPipelineStatus VulkanBackendAdapter::getRTPipelineStatus() const {
+    if (!m_device || !m_device->isInitialized()) return {};
+    return m_device->getRTPipelineStatus();
+}
+
 void VulkanBackendAdapter::setViewportMode(ViewportMode mode) {
     if (m_viewportMode == mode) return;
     const ViewportMode oldMode = m_viewportMode;
@@ -16465,12 +15872,24 @@ void VulkanBackendAdapter::setViewportMode(ViewportMode mode) {
     // Mark topology dirty so the next render triggers a full rebuild.
     if (oldMode != ViewportMode::Rendered && mode == ViewportMode::Rendered) {
         m_topology_dirty = true;
-        // Interactive solid/matcap resources must not leak into the RT rendered path.
-        if (m_device && m_device->isInitialized()) {
-            m_device->waitIdle();
+        m_rtFallbackRasterMode = oldMode;
+        // No RT pipeline yet: Rendered keeps drawing this raster mode while it
+        // compiles (minutes after a shader change), so keep its resources; they
+        // are torn down by leaveRTPipelineRasterFallback() once RT takes over.
+        const bool keepRasterForCompile = kRasterWhileRTPipelineCompiles &&
+            m_device && m_device->isInitialized() &&
+            m_device->hasHardwareRT() && m_device->supportsGraphicsQueue() &&
+            m_device->m_rtPipeline == VK_NULL_HANDLE;
+        if (keepRasterForCompile) {
+            m_rtFallbackRasterUsed = true;
+        } else {
+            // Interactive solid/matcap resources must not leak into the RT rendered path.
+            if (m_device && m_device->isInitialized()) {
+                m_device->waitIdle();
+            }
+            destroyInteractiveViewportResourcesImpl(false);
+            m_interactiveViewport = {};
         }
-        destroyInteractiveViewportResourcesImpl(false);
-        m_interactiveViewport = {};
     } else if (oldMode == ViewportMode::Rendered && mode != ViewportMode::Rendered) {
         // Re-entering interactive modes should rebuild cleanly from scratch.
         if (m_device && m_device->isInitialized()) {
@@ -16479,6 +15898,7 @@ void VulkanBackendAdapter::setViewportMode(ViewportMode mode) {
         destroyInteractiveViewportResourcesImpl(false);
         m_interactiveViewport = {};
         m_interactiveViewport.dirty = true;
+        m_rtFallbackRasterUsed = false;   // destroyed just above
     }
 
     resetAccumulation();
@@ -19142,59 +18562,58 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         ensureAtmosphereLUTPipeline(shaderDir);
 
         // Only create the heavy RT pipeline when the viewport mode requires it.
+        // ★★★ The compile runs on a worker: after a shader change it takes
+        // minutes and used to freeze the app right here. The viewport draws the
+        // raster mode meanwhile (below) and onRTPipelineInstalled() runs the
+        // post-pipeline steps once the build lands.
         if (m_viewportMode == ViewportMode::Rendered) {
-            if (!m_device->createRTPipeline(raygenSPV, missSPV, chitSPV, ahitSPV,
-                    volChitSPV, volIntSPV, hairChitSPV, hairIntSPV, shadowMissSPV, hairAhitSPV,
-                    sphereChitSPV, sphereIntSPV, photonRgenSPV)) {
-                SCENE_LOG_ERROR("[Vulkan] Failed to create RT Pipeline.");
-                return;
-            }
-            // updateGeometry can run before this lazy pipeline exists. In that
-            // phase point-sphere groups are deliberately omitted so they never
-            // create a huge temporary triangle TLAS. Now that the procedural
-            // hit group and its final SBT offset are known, build the compact
-            // sphere BLAS before the first trace/present.
-            if (!finalizeDeferredProceduralSphereCloud()) {
-                // Optional sphere shaders are missing or failed to initialize.
-                // Rebuild once with the ordinary triangle fallback now that
-                // shouldUseProceduralSpherePath() can make the final choice.
-                rebuildAccelerationStructure();
-                m_testInitialized = true;
-                updateGeometry(m_lastObjects);
+            VulkanRT::VulkanDevice::RTPipelineShaderSet rtShaders;
+            rtShaders.raygen             = std::move(raygenSPV);
+            rtShaders.miss               = std::move(missSPV);
+            rtShaders.closestHit         = std::move(chitSPV);
+            rtShaders.anyHit             = std::move(ahitSPV);
+            rtShaders.volumeClosestHit   = std::move(volChitSPV);
+            rtShaders.volumeIntersection = std::move(volIntSPV);
+            rtShaders.hairClosestHit     = std::move(hairChitSPV);
+            rtShaders.hairIntersection   = std::move(hairIntSPV);
+            rtShaders.hairAnyHit         = std::move(hairAhitSPV);
+            rtShaders.shadowMiss         = std::move(shadowMissSPV);
+            rtShaders.sphereClosestHit   = std::move(sphereChitSPV);
+            rtShaders.sphereIntersection = std::move(sphereIntSPV);
+            rtShaders.photonRaygen       = std::move(photonRgenSPV);
+            using RtState = Backend::RTPipelineStatus::State;
+            const RtState rtState = m_device->requestRTPipelineBuild(std::move(rtShaders));
+            if (rtState == RtState::Ready) {
+                // Same shaders as the installed pipeline: nothing to compile.
+                onRTPipelineInstalled();
+            } else if (rtState == RtState::Compiling) {
+                m_rtPipelineInstallPending = true;
+            } else {
+                SCENE_LOG_ERROR("[Vulkan] Failed to create RT Pipeline: " +
+                                m_device->getRTPipelineStatus().error);
             }
         } else {
             SCENE_LOG_INFO("[Vulkan] Skipping RT pipeline creation (not in Rendered mode)");
         }
+    }
 
-        // [FIX] Hair SBT offset correction after pipeline creation.
-        // When hair was uploaded during backend switch, the pipeline was not yet
-        // created so getHairSbtOffset() returned a stale value (default
-        // m_hasVolumeShaders=false). If the pipeline now reports volumes are
-        // present, the hair TLAS instances have the wrong sbtRecordOffset.
-        // Rebuild the TLAS with the corrected offset to ensure the correct hit
-        // shader is dispatched for hair geometry.
-        if (m_device->m_hasHairShaders && !m_hairVkInstances.empty()) {
-            uint32_t correctOffset = m_device->getHairSbtOffset();
-            bool needsTlasRebuild = false;
-            for (auto& hvi : m_hairVkInstances) {
-                if (hvi.sbtRecordOffset != correctOffset) {
-                    hvi.sbtRecordOffset = correctOffset;
-                    needsTlasRebuild = true;
-                }
-            }
-            if (needsTlasRebuild) {
-                std::vector<VulkanRT::TLASInstance> allInstances = m_vkInstances;
-                for (const auto& h : m_hairVkInstances) allInstances.push_back(h);
-                if (!allInstances.empty()) {
-                    VulkanRT::TLASCreateInfo tlasInfo;
-                    tlasInfo.instances   = allInstances;
-                    tlasInfo.allowUpdate = false;
-                    m_device->createTLAS(tlasInfo);
-                    SCENE_LOG_INFO("[Vulkan] Hair SBT offset corrected after pipeline init (offset="
-                        + std::to_string(correctOffset) + ")");
-                }
-            }
+    if (m_rtPipelineInstallPending) {
+        // Offline callers (animation/sequence render pass tex == nullptr) have
+        // no viewport to keep alive and need the pipeline for THIS frame.
+        if (m_device->pollRTPipelineBuild(/*block=*/tex == nullptr)) {
+            m_rtPipelineInstallPending = false;
+            leaveRTPipelineRasterFallback();
+            onRTPipelineInstalled();
+        } else if (m_device->getRTPipelineStatus().state != Backend::RTPipelineStatus::State::Compiling) {
+            m_rtPipelineInstallPending = false;   // failed; the status carries the error
         }
+    }
+    // No RT pipeline yet (compiling) or none at all (failed): draw the raster
+    // mode the user came from instead of a frozen frame. The HUD says why.
+    if (m_device->m_rtPipeline == VK_NULL_HANDLE && tex != nullptr &&
+        drawRasterWhileRTPipelineUnavailable(s, width, height, fb, tex)) {
+        s_idlePresentValid = false;
+        return;
     }
 
     // Safety: ensure pipeline is actually built and TLAS exist before proceeding to trace.
@@ -20486,6 +19905,11 @@ bool VulkanBackendAdapter::isAccumulationComplete() const {
     // renderInteractiveViewportImpl(). The main loop should keep calling renderProgressive()
     // so material/light/world edits can re-present immediately without waiting for camera motion.
     if (shouldUseInteractiveViewport()) {
+        return false;
+    }
+    // RT pipeline still compiling: renderProgressive must keep being called so
+    // it can poll the build and install it.
+    if (m_rtPipelineInstallPending) {
         return false;
     }
     // A pending tonemap-side refresh (sample heatmap toggle) must let one more

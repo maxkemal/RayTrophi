@@ -14,6 +14,7 @@
 #include "Fluid/GranularGpuState.h"
 #include "Fluid/SubstanceTag.h"
 #include "Fluid/MatterConstitutive.h"
+#include "Fluid/MatterGpuModelView.h"
 #include "Fluid/MatterPhaseSettings.h"
 #include "GridFluidSolver.h"   // GridFluid::GasSolverStats (gas step telemetry)
 #include "VolumeShader.h"
@@ -631,6 +632,24 @@ struct SimulationGridDomainDesc {
     // The raw splat reaches 8 cells per particle and draws spray as dots;
     // 0 draws it raw. Render-side only -- the solver's grid is not touched.
     float fluid_fog_spread_voxels = 1.5f;
+    // VolumeFog only: world-space fBm erosion of the spread density
+    // (Fluid::erodeFogDensity). Cuts thin regions into clumps while a cell at
+    // full rest packing (density 1) keeps its value. Applied to the grid before
+    // upload, so every backend draws the same field. strength 0 = off; size is
+    // the largest noise feature in WORLD units (scene metres), independent of
+    // voxel size and domain extent. World-anchored: clumps do not travel with
+    // moving material.
+    float fluid_fog_erosion_strength = 0.0f;
+    float fluid_fog_erosion_size = 0.2f;
+    int   fluid_fog_erosion_detail = 3;
+    int   fluid_fog_erosion_seed = 0;
+    // > 0: surface-band erosion for dense bodies, band thickness in WORLD units
+    // (Fluid::erodeFogDensity). 0 keeps the thin-fog remap above.
+    float fluid_fog_erosion_depth = 0.0f;
+    // VolumeFog only: the fog is splatted on a grid this many times finer than
+    // the solver grid (1..4), so its edges and clumps are not limited to the
+    // simulation cell. Render-side only; memory and upload grow with its cube.
+    int   fluid_fog_resolution_multiplier = 1;
 
     // Particle representation config for explicit spheres. Mirrors
     // ParticleSystemObject.
@@ -1180,7 +1199,11 @@ inline constexpr int kGasMajorantBlock = 8;
 // rather than dropping it.
 inline constexpr int kGasEmissiveListCapacity = 4096;
 
+namespace Fluid { struct MatterGpuRuntime; }
+
 struct SimulationGridDomainComputeBuffers {
+    Fluid::MatterGpuModelView matter_model;
+    std::shared_ptr<Fluid::MatterGpuRuntime> matter_runtime;
     ComputeBufferHandle vel_x;
     ComputeBufferHandle vel_y;
     ComputeBufferHandle vel_z;
@@ -1566,6 +1589,10 @@ struct SimulationFlowSourceDesc {
     // position; ObjectBounds → resolved AABB; MeshSurface → sampled points
     // on the source mesh). Initial particle velocity = `velocity` above.
     float fluid_particles_per_second = 1000.0f;
+    // Relative share of free live capacity, independent of lifetime emission limit.
+    float particle_pool_weight = 1.0f;
+    int pool_requested_particles = 0;
+    int pool_granted_particles = 0;
     // Emission velocity spread (fluid only). All particles otherwise inherit the
     // single `velocity` above verbatim, so an APIC liquid — which has no surface
     // tension or turbulence to break a laminar stream apart — keeps the emitted
@@ -2152,6 +2179,8 @@ public:
     void setColliderBoundsResolver(std::function<bool(const ParticleColliderDesc&, Vec3&, Vec3&)> resolver);
     void setColliderOBBResolver(std::function<bool(const ParticleColliderDesc&, ParticleColliderOBB&)> resolver);
     void setColliderMeshResolver(std::function<bool(const ParticleColliderDesc&, std::vector<SurfaceMeshTriangle>&, uint64_t&)> resolver);
+    void setGrainColliderMeshResolver(std::function<bool(const ParticleColliderDesc&,
+        std::vector<SurfaceMeshTriangle>&, uint64_t&)> resolver);
     void setKinematicColliderProvider(
         std::function<bool(int,
                            float,
@@ -2593,6 +2622,8 @@ private:
     std::function<bool(const ParticleColliderDesc&, Vec3&, Vec3&)> collider_bounds_resolver_;
     std::function<bool(const ParticleColliderDesc&, ParticleColliderOBB&)> collider_obb_resolver_;
     std::function<bool(const ParticleColliderDesc&, std::vector<SurfaceMeshTriangle>&, uint64_t&)> collider_mesh_resolver_;
+    std::function<bool(const ParticleColliderDesc&, std::vector<SurfaceMeshTriangle>&,
+        uint64_t&)> grain_collider_mesh_resolver_;
     std::function<bool(int,
                        float,
                        bool,

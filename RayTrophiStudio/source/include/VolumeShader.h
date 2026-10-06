@@ -66,6 +66,9 @@ struct GpuVolumeShaderData {
     float scatter_anisotropy_back = -0.3f; // G backward
     float scatter_lobe_mix = 0.7f;         // Forward/back blend
     float scatter_multi = 0.3f;            // Multi-scatter approximation
+    int   random_walk = 0;                 // 1 = path-traced multiple scattering (Vulkan RT)
+    int   random_walk_max_events = 32;    // scattering events per walk before it is cut
+    int   random_walk_exact_events = 4;    // true-phase events before the similarity switch
     
     // ─────────────────────────────────────────────────────────────────────────
     // ABSORPTION
@@ -266,6 +269,18 @@ public:
         float anisotropy_back = -0.3f;     ///< Backward scatter G (silver lining)
         float lobe_mix = 0.7f;             ///< Forward/back blend (1=all forward)
         float multi_scatter = 0.3f;        ///< Energy-conserving phase isotropization (0-1)
+        // Path-traced multiple scattering (Vulkan RT): a random walk of real
+        // scattering events inside the volume replaces the single-scatter march
+        // and its multi_scatter approximation (ignored while this is on).
+        // Needed for high-albedo media (snow, clouds) whose brightness comes
+        // from many bounces. Falls back to the march for emissive volumes,
+        // Volume Graph programs and overlapping media.
+        bool random_walk = false;
+        int  random_walk_max_events = 32;  ///< 8..512; a cut walk loses its remaining energy
+        /// 1..512: events walked with the TRUE phase and sigma before switching to
+        /// the similarity medium (sigma_s(1-g), isotropic). Cuts the event count of
+        /// forward-peaked media by ~1/(1-g); >= max events keeps the walk exact.
+        int  random_walk_exact_events = 4;
 
         // Serialization
         json toJson() const {
@@ -276,6 +291,9 @@ public:
             j["anisotropy_back"] = anisotropy_back;
             j["lobe_mix"] = lobe_mix;
             j["multi_scatter"] = multi_scatter;
+            j["random_walk"] = random_walk;
+            j["random_walk_max_events"] = random_walk_max_events;
+            j["random_walk_exact_events"] = random_walk_exact_events;
             return j;
         }
 
@@ -286,6 +304,9 @@ public:
             if (j.contains("anisotropy_back")) anisotropy_back = j["anisotropy_back"];
             if (j.contains("lobe_mix")) lobe_mix = j["lobe_mix"];
             if (j.contains("multi_scatter")) multi_scatter = j["multi_scatter"];
+            random_walk = j.value("random_walk", random_walk);
+            random_walk_max_events = j.value("random_walk_max_events", random_walk_max_events);
+            random_walk_exact_events = j.value("random_walk_exact_events", random_walk_exact_events);
         }
     } scattering;
     
@@ -593,6 +614,9 @@ public:
         gpu.scatter_anisotropy_back = scattering.anisotropy_back;
         gpu.scatter_lobe_mix = scattering.lobe_mix;
         gpu.scatter_multi = scattering.multi_scatter;
+        gpu.random_walk = scattering.random_walk ? 1 : 0;
+        gpu.random_walk_max_events = scattering.random_walk_max_events;
+        gpu.random_walk_exact_events = scattering.random_walk_exact_events;
         
         // Absorption
         gpu.absorption_color_r = static_cast<float>(absorption.color.x);

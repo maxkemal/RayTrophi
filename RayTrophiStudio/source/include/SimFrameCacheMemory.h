@@ -46,11 +46,17 @@ inline std::size_t metaAllocationBytes(const SimulationGridDomainState& state) {
     bytes += allocationBytes(grid.surface_dust_supply);
 
     const auto& particles = state.particles;
+    bytes += allocationBytes(particles.particle_id);
     bytes += allocationBytes(particles.position);
     bytes += allocationBytes(particles.velocity);
     bytes += allocationBytes(particles.affine);
     bytes += allocationBytes(particles.flags);
     bytes += allocationBytes(particles.mass_fraction);
+    bytes += allocationBytes(particles.rest_mass_kg);
+    bytes += allocationBytes(particles.pore_water_mass_kg);
+    bytes += allocationBytes(particles.pore_capacity_kg);
+    bytes += allocationBytes(particles.pore_porosity);
+    bytes += allocationBytes(particles.pore_water_energy_j);
     bytes += allocationBytes(particles.temperature);
     bytes += allocationBytes(particles.combustible_fraction);
     bytes += allocationBytes(particles.substance_tag);

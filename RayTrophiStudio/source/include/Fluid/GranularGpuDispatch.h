@@ -265,7 +265,7 @@ inline bool dispatchStressUpdate(SimulationComputeContext& compute,
                                 b.deformation_col1,b.deformation_col2,b.softening,b.bond_scale};
     ComputeDispatch cmd;cmd.kernel="sim_fluid_granular_stress_update";
     cmd.groups={(c.count+255u)/256u,1u,1u};cmd.buffers=bufs;cmd.buffer_count=15;
-    cmd.constants=&c;cmd.constants_size=sizeof(c);return compute.dispatch(cmd);
+    cmd.constants=&c;cmd.constants_size=sizeof(c);return dispatchMatterGpuModel(compute, cmd, b.matter_model);
 }
 
 inline bool dispatchStressP2G(SimulationComputeContext& compute,const GpuBuffers& b,
@@ -278,7 +278,7 @@ inline bool dispatchStressP2G(SimulationComputeContext& compute,const GpuBuffers
     c.inv_density=1.0f/std::max(density,1.0f);
     ComputeBufferHandle bufs[]={positions,b.stress_diag,b.stress_shear,momentum};
     ComputeDispatch cmd;cmd.kernel="sim_fluid_granular_stress_p2g";cmd.groups={(uint32_t(c.count)+255u)/256u,1u,1u};
-    cmd.buffers=bufs;cmd.buffer_count=4;cmd.constants=&c;cmd.constants_size=sizeof(c);return compute.dispatch(cmd);
+    cmd.buffers=bufs;cmd.buffer_count=4;cmd.constants=&c;cmd.constants_size=sizeof(c);return dispatchMatterGpuModel(compute, cmd, b.matter_model);
 }
 
 inline bool dispatchSettle(SimulationComputeContext& compute,const GpuBuffers& b,
@@ -288,7 +288,7 @@ inline bool dispatchSettle(SimulationComputeContext& compute,const GpuBuffers& b
     ComputeBufferHandle bufs[]={velocities,b.stress_diag,b.state_flags};
     ComputeDispatch cmd;cmd.kernel="sim_fluid_granular_settle";cmd.groups={(c.count+255u)/256u,1u,1u};
     cmd.buffers=bufs;cmd.buffer_count=3;cmd.constants=&c;cmd.constants_size=sizeof(c);
-    return compute.dispatch(cmd);
+    return dispatchMatterGpuModel(compute, cmd, b.matter_model);
 }
 
 } // namespace RayTrophiSim::Fluid::Granular

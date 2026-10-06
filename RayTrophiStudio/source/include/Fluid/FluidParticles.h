@@ -23,6 +23,7 @@
 
 #include "../Vec3.h"
 #include "MatterConstitutive.h"
+#include "MatterParticleIdentity.h"
 #include <vector>
 #include <cstdint>
 #include <cmath>
@@ -56,6 +57,13 @@ constexpr uint32_t kParticleFlagFrozen = 1u << 3;
 
 class FluidParticles {
 public:
+    std::vector<uint64_t> particle_id;
+    uint64_t next_particle_id = 1;
+
+    void ensureParticleIdentities() {
+        extendMatterParticleIds(particle_id, next_particle_id, position.size());
+    }
+
     std::vector<Vec3>     position;   // world space
     std::vector<Vec3>     velocity;   // world space, m/s
     std::vector<AffineC>  affine;     // APIC velocity gradient
@@ -71,6 +79,11 @@ public:
     // rest_mass_kg * delta(mass_fraction), so the source loss and target gain
     // can be recorded as the same MatterExchangeLedger event.
     std::vector<float>    rest_mass_kg;
+    // C5: stored water belongs to the carrier identity; saturation is derived.
+    std::vector<float>    pore_water_mass_kg;
+    std::vector<float>    pore_capacity_kg;
+    std::vector<float>    pore_porosity;
+    std::vector<float>    pore_water_energy_j;
     // ★★★ KELVIN, ABSOLUTE. Not the gas grid's convention.
     //
     // The gas grid stores temperature in EITHER normalised 0..1 OR Kelvin and
@@ -218,12 +231,17 @@ public:
     }
 
     void clear() {
+        particle_id.clear();
         position.clear();
         velocity.clear();
         affine.clear();
         flags.clear();
         mass_fraction.clear();
         rest_mass_kg.clear();
+        pore_water_mass_kg.clear();
+        pore_capacity_kg.clear();
+        pore_porosity.clear();
+        pore_water_energy_j.clear();
         temperature.clear();
         combustible_fraction.clear();
         substance_tag.clear();
@@ -263,12 +281,17 @@ public:
     }
 
     void reserve(size_t n) {
+        particle_id.reserve(n);
         position.reserve(n);
         velocity.reserve(n);
         affine.reserve(n);
         flags.reserve(n);
         mass_fraction.reserve(n);
         rest_mass_kg.reserve(n);
+        pore_water_mass_kg.reserve(n);
+        pore_capacity_kg.reserve(n);
+        pore_porosity.reserve(n);
+        pore_water_energy_j.reserve(n);
         temperature.reserve(n);
         combustible_fraction.reserve(n);
         substance_tag.reserve(n);
@@ -306,12 +329,19 @@ public:
               const Vec3* birth_uvw_b = nullptr,
               float physical_rest_mass_kg = 0.0f,
               MatterConstitutiveModel model = MatterConstitutiveModel::Auto) {
+        ensureParticleIdentities();
+        const uint64_t identity = allocateMatterParticleId(next_particle_id);
+        particle_id.push_back(identity);
         position.push_back(p);
         velocity.push_back(v);
         affine.emplace_back();
         flags.push_back(0u);
         mass_fraction.push_back(1.0f);
         rest_mass_kg.push_back(physical_rest_mass_kg);
+        pore_water_mass_kg.push_back(0.0f);
+        pore_capacity_kg.push_back(0.0f);
+        pore_porosity.push_back(0.0f);
+        pore_water_energy_j.push_back(0.0f);
         temperature.push_back(temp);
         combustible_fraction.push_back(combustible);
         substance_tag.push_back(material);
@@ -339,14 +369,20 @@ public:
 
     // Remove particle i in O(1) via swap-with-back. Order is not preserved.
     void removeSwap(size_t i) {
+        ensureParticleIdentities();
         size_t last = position.size() - 1;
         if (i != last) {
+            particle_id[i] = particle_id[last];
             position[i] = position[last];
             velocity[i] = velocity[last];
             affine[i]   = affine[last];
             flags[i]    = flags[last];
             mass_fraction[i] = mass_fraction[last];
             rest_mass_kg[i] = rest_mass_kg[last];
+            pore_water_mass_kg[i] = pore_water_mass_kg[last];
+            pore_capacity_kg[i] = pore_capacity_kg[last];
+            pore_porosity[i] = pore_porosity[last];
+            pore_water_energy_j[i] = pore_water_energy_j[last];
             temperature[i] = temperature[last];
             combustible_fraction[i] = combustible_fraction[last];
             substance_tag[i] = substance_tag[last];
@@ -369,11 +405,16 @@ public:
             if (i < uvw_b.size() && last < uvw_b.size()) uvw_b[i] = uvw_b[last];
         }
         position.pop_back();
+        particle_id.pop_back();
         velocity.pop_back();
         affine.pop_back();
         flags.pop_back();
         mass_fraction.pop_back();
         rest_mass_kg.pop_back();
+        pore_water_mass_kg.pop_back();
+        pore_capacity_kg.pop_back();
+        pore_porosity.pop_back();
+        pore_water_energy_j.pop_back();
         temperature.pop_back();
         combustible_fraction.pop_back();
         substance_tag.pop_back();
@@ -406,6 +447,7 @@ public:
     // not at the call site. A fourth place enumerating these arrays is a fourth
     // place to forget one, which is exactly how this bug happened.
     std::size_t compact(const std::vector<uint8_t>& remove_mask) {
+        ensureParticleIdentities();
         const std::size_t n = position.size();
         std::size_t write = 0;
         for (std::size_t i = 0; i < n; ++i) {
@@ -417,50 +459,74 @@ public:
         return write;
     }
 
+    // Exact snapshot copy, not birth: solver partitions preserve identity and
+    // every material/constitutive sidecar. Optional absent sidecars keep the
+    // destination default. Source and destination slots must already exist.
+    void copyParticleFrom(std::size_t dst, const FluidParticles& other, std::size_t src) {
+        if (dst >= size() || src >= other.size()) {
+            throw std::out_of_range("particle snapshot copy index");
+        }
+        auto copy = [&](auto& target, const auto& values) {
+            if (dst < target.size() && src < values.size()) {
+                target[dst] = values[src];
+            }
+        };
+        copy(particle_id, other.particle_id);
+        copy(position, other.position);
+        copy(velocity, other.velocity);
+        copy(affine, other.affine);
+        copy(flags, other.flags);
+        copy(mass_fraction, other.mass_fraction);
+        copy(rest_mass_kg, other.rest_mass_kg);
+        copy(pore_water_mass_kg, other.pore_water_mass_kg);
+        copy(pore_capacity_kg, other.pore_capacity_kg);
+        copy(pore_porosity, other.pore_porosity);
+        copy(pore_water_energy_j, other.pore_water_energy_j);
+        copy(temperature, other.temperature);
+        copy(combustible_fraction, other.combustible_fraction);
+        copy(substance_tag, other.substance_tag);
+        copy(constitutive_model, other.constitutive_model);
+        copy(uvw, other.uvw);
+        copy(uvw_b, other.uvw_b);
+        copy(granular_deformation_col0, other.granular_deformation_col0);
+        copy(granular_deformation_col1, other.granular_deformation_col1);
+        copy(granular_deformation_col2, other.granular_deformation_col2);
+        copy(granular_plastic_volume, other.granular_plastic_volume);
+        copy(granular_softening, other.granular_softening);
+        copy(granular_bond_scale, other.granular_bond_scale);
+        copy(granular_hardening, other.granular_hardening);
+        copy(granular_material_flags, other.granular_material_flags);
+        copy(granular_stress_diag, other.granular_stress_diag);
+        copy(granular_stress_shear, other.granular_stress_shear);
+        copy(granular_yield_value, other.granular_yield_value);
+        copy(granular_plastic_increment, other.granular_plastic_increment);
+        copy(granular_damage, other.granular_damage);
+        copy(granular_fracture_history, other.granular_fracture_history);
+    }
+
 private:
     // Copy particle `src` onto slot `dst`. Every optional sidecar is guarded by
     // its own length: granular arrays are empty on a pure liquid domain, and
     // uvw_b can lag by a step.
     void moveParticle(std::size_t dst, std::size_t src) {
-        position[dst] = position[src];
-        velocity[dst] = velocity[src];
-        affine[dst]   = affine[src];
-        flags[dst]    = flags[src];
-        mass_fraction[dst] = mass_fraction[src];
-        rest_mass_kg[dst] = rest_mass_kg[src];
-        temperature[dst] = temperature[src];
-        combustible_fraction[dst] = combustible_fraction[src];
-        substance_tag[dst] = substance_tag[src];
-        constitutive_model[dst] = constitutive_model[src];
-        uvw[dst] = uvw[src];
-        if (src < uvw_b.size() && dst < uvw_b.size()) uvw_b[dst] = uvw_b[src];
-        auto move = [&](auto& v) { if (src < v.size() && dst < v.size()) v[dst] = v[src]; };
-        move(granular_deformation_col0);
-        move(granular_deformation_col1);
-        move(granular_deformation_col2);
-        move(granular_plastic_volume);
-        move(granular_softening);
-        move(granular_bond_scale);
-        move(granular_hardening);
-        move(granular_material_flags);
-        move(granular_stress_diag);
-        move(granular_stress_shear);
-        move(granular_yield_value);
-        move(granular_plastic_increment);
-        move(granular_damage);
-        move(granular_fracture_history);
+        copyParticleFrom(dst, *this, src);
     }
 
     // Shrink every array that is currently in use. An array that was never
     // allocated (granular state on a liquid domain) stays empty — resizing it up
     // here would fabricate granular state for particles that have none.
     void resizeAll(std::size_t n) {
+        particle_id.resize(n);
         position.resize(n);
         velocity.resize(n);
         affine.resize(n);
         flags.resize(n);
         mass_fraction.resize(n);
         rest_mass_kg.resize(n);
+        pore_water_mass_kg.resize(n);
+        pore_capacity_kg.resize(n);
+        pore_porosity.resize(n);
+        pore_water_energy_j.resize(n);
         temperature.resize(n);
         combustible_fraction.resize(n);
         substance_tag.resize(n);

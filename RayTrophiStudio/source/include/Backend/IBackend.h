@@ -230,6 +230,27 @@ struct RayFusionSceneASStatus {
     std::string inactive_reason;
 };
 
+// Ray tracing pipeline build state (viewport HUD, render.rt_pipeline_status).
+// ★ The first RT pipeline compile after a shader change takes minutes and runs
+// on a worker; while it does, Rendered shows a raster mode. Without this value
+// an agent reading samples == 0 cannot tell "compiling" from "broken".
+struct RTPipelineStatus {
+    enum class State { None, Compiling, Ready, Failed };
+    bool available = false;        // false = this backend builds no RT pipeline
+    State state = State::None;
+    double compileSeconds = 0.0;   // running time while Compiling, last build's duration otherwise
+    bool awaitingInstall = false;  // Compiling: the worker finished; installs on the next Rendered frame
+    bool cacheHitKnown = false;    // driver returned creation feedback for the last build
+    bool cacheHit = false;         // last build was served from the on-disk VkPipelineCache
+    bool cacheLoaded = false;      // a valid cache file was loaded at device creation
+    uint64_t cacheLoadedBytes = 0;
+    std::string cachePath;         // empty = disk cache disabled or unresolved
+    std::string cacheRejectReason; // why an existing cache file was discarded, empty if none
+    uint32_t deferredThreads = 0;  // threads that joined the last build; 0 = synchronous call
+    uint32_t buildCount = 0;       // finished builds (success or failure) since device creation
+    std::string error;             // last failure, empty when none
+};
+
 struct GpuMemoryStats {
     uint64_t totalBytes = 0;
     uint64_t freeBytes = 0;
@@ -420,7 +441,9 @@ public:
     virtual void loadShaders(const ShaderProgramData& data) = 0;
     virtual BackendInfo getInfo() const = 0;
     virtual GpuMemoryStats getMemoryStats() const { return {}; }
-    
+    // available=false on backends that build no RT pipeline of their own.
+    virtual RTPipelineStatus getRTPipelineStatus() const { return {}; }
+
     // ========================================================================
     // Geometry Upload
     // ========================================================================

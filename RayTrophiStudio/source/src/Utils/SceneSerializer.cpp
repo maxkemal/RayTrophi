@@ -1,3 +1,5 @@
+#include "Fluid/MatterPoreAuthoring.h"
+#include "Fluid/MatterGrain.h"
 #include "SceneSerializer.h"
 #include "Fluid/MatterPhaseConfig.h"
 #include "globals.h"
@@ -448,6 +450,12 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_fill_wall_margin"] = d.fluid_fill_wall_margin;
     j["fluid_render_mode"] = (int)d.fluid_render_mode;
     j["fluid_fog_spread_voxels"] = d.fluid_fog_spread_voxels;
+    j["fluid_fog_erosion_strength"] = d.fluid_fog_erosion_strength;
+    j["fluid_fog_erosion_size"] = d.fluid_fog_erosion_size;
+    j["fluid_fog_erosion_detail"] = d.fluid_fog_erosion_detail;
+    j["fluid_fog_erosion_seed"] = d.fluid_fog_erosion_seed;
+    j["fluid_fog_erosion_depth"] = d.fluid_fog_erosion_depth;
+    j["fluid_fog_resolution_multiplier"] = d.fluid_fog_resolution_multiplier;
     {
         json routes = json::object();
         for (const auto& kv : RayTrophiSim::Fluid::labelRoutesToNames(d.fluid_label_routes))
@@ -469,6 +477,8 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_particle_emissive"] = d.fluid_particle_emissive;
     j["fluid_particle_emission"] = d.fluid_particle_emission;
     j["fluid_particle_material_id"] = d.fluid_particle_material_id;
+    j["matter_pore_exchange"] = RayTrophiSim::Fluid::matterPoreParamsToJson(d.fluid_params.pore_exchange);
+    j["matter_grain"] = RayTrophiSim::Fluid::matterGrainParamsToJson(d.fluid_params.grain);
     // `fluid_blend_substance_materials` was REMOVED, not renamed. It was a
     // domain-wide shading switch; sharpness is now per-substance `miscibility`.
     // Old files simply lack the new key and default to 1.0 = fully miscible,
@@ -695,6 +705,13 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_fill_wall_margin")) d.fluid_fill_wall_margin = j["fluid_fill_wall_margin"];
     if (j.contains("fluid_render_mode")) d.fluid_render_mode = RayTrophiSim::Fluid::fluidRenderModeFromStored(j["fluid_render_mode"].get<int>());
     if (j.contains("fluid_fog_spread_voxels")) d.fluid_fog_spread_voxels = j["fluid_fog_spread_voxels"];
+    d.fluid_fog_erosion_strength = j.value("fluid_fog_erosion_strength", d.fluid_fog_erosion_strength);
+    d.fluid_fog_erosion_size = j.value("fluid_fog_erosion_size", d.fluid_fog_erosion_size);
+    d.fluid_fog_erosion_detail = j.value("fluid_fog_erosion_detail", d.fluid_fog_erosion_detail);
+    d.fluid_fog_erosion_seed = j.value("fluid_fog_erosion_seed", d.fluid_fog_erosion_seed);
+    d.fluid_fog_erosion_depth = j.value("fluid_fog_erosion_depth", d.fluid_fog_erosion_depth);
+    d.fluid_fog_resolution_multiplier =
+        j.value("fluid_fog_resolution_multiplier", d.fluid_fog_resolution_multiplier);
     if (j.contains("fluid_label_routes") && j["fluid_label_routes"].is_object()) {
         for (auto it = j["fluid_label_routes"].begin(); it != j["fluid_label_routes"].end(); ++it) {
             if (it.value().is_string())
@@ -730,6 +747,12 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_particle_emissive")) d.fluid_particle_emissive = j["fluid_particle_emissive"];
     if (j.contains("fluid_particle_emission")) d.fluid_particle_emission = j["fluid_particle_emission"];
     if (j.contains("fluid_particle_material_id")) d.fluid_particle_material_id = j["fluid_particle_material_id"];
+    if (j.contains("matter_grain")) {
+        d.fluid_params.grain = RayTrophiSim::Fluid::matterGrainParamsFromJson(j.at("matter_grain"));
+    }
+    if (j.contains("matter_pore_exchange")) {
+        d.fluid_params.pore_exchange = RayTrophiSim::Fluid::matterPoreParamsFromJson(j.at("matter_pore_exchange"));
+    }
 
     // LevelSetParams
     if (j.contains("fluid_level_set_params")) {
@@ -809,6 +832,10 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("turbulence_lacunarity")) d.turbulence_lacunarity = j["turbulence_lacunarity"];
     if (j.contains("turbulence_persistence")) d.turbulence_persistence = j["turbulence_persistence"];
     if (j.contains("turbulence_speed")) d.turbulence_speed = j["turbulence_speed"];
+    std::string grain_error;
+    if (!RayTrophiSim::Fluid::validateMatterGrainDomain(d, d.fluid_params.grain, grain_error)) {
+        throw std::runtime_error(grain_error);
+    }
     return d;
 }
 
@@ -834,6 +861,7 @@ json flowSourceToJson(const RayTrophiSim::SimulationFlowSourceDesc& fs) {
     j["fluid_velocity_spread"] = fs.fluid_velocity_spread;
     j["fluid_emit_along_normal"] = fs.fluid_emit_along_normal;
     j["fluid_substance"] = fs.fluid_substance;
+    j["particle_pool_weight"] = fs.particle_pool_weight;
     j["initial_constitutive_model"] =
         RayTrophiSim::Fluid::matterConstitutiveModelName(
             fs.initial_constitutive_model);
@@ -869,6 +897,7 @@ RayTrophiSim::SimulationFlowSourceDesc jsonToFlowSource(const json& j) {
     if (j.contains("fluid_velocity_spread")) fs.fluid_velocity_spread = j["fluid_velocity_spread"];
     if (j.contains("fluid_emit_along_normal")) fs.fluid_emit_along_normal = j["fluid_emit_along_normal"];
     if (j.contains("fluid_substance")) fs.fluid_substance = j["fluid_substance"];
+    fs.particle_pool_weight = j.value("particle_pool_weight", 1.0f);
     if (j.contains("initial_constitutive_model")) {
         RayTrophiSim::Fluid::parseMatterConstitutiveModel(
             j["initial_constitutive_model"].get<std::string>(),

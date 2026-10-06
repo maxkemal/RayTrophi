@@ -1770,6 +1770,12 @@ VolumeInstrumentationInfo volumeStats() {
     out.medium_passes = s.mediumPasses;
     out.arbiter_started_inside = s.arbiterStartedInside;
     out.arbiter_inside_found = s.arbiterInsideFound;
+    out.walk_paths = s.walkPaths;
+    out.walk_events = s.walkEvents;
+    out.walk_probe_traces = s.walkProbeTraces;
+    out.walk_shadow_traces = s.walkShadowTraces;
+    out.walk_shadow_skipped = s.walkShadowSkipped;
+    out.walk_event_capped = s.walkEventCapped;
     return out;
 }
 

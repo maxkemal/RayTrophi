@@ -58,6 +58,8 @@ def namespace_table(source):
 
 def required(method, namespaces):
     """Mirror of RtIpcSecurity.cpp::requiredCapabilities (name-level only)."""
+    if method in ("fluid.grain_reference", "fluid.matter_models", "fluid.grain_settings"):
+        return "Read"
     if method == "ipc.admin.audit.export":
         return "Admin|FilesWrite"
     if method.startswith("ipc.admin."):
@@ -76,6 +78,10 @@ def required(method, namespaces):
                   "terrain.export_heightmap",
                   "paint.export_channel", "scene.export_gltf"):
         return "FilesWrite"
+    # Read-only RT pipeline compile state; mirrors the explicit line ahead of
+    # the render. namespace in RtIpcSecurity.cpp.
+    if method == "render.rt_pipeline_status":
+        return "Read"
     if method.startswith("render."):
         # These two write an image file; the C++ says Render|FilesWrite and a
         # token without FilesWrite is refused at call time, so reporting plain

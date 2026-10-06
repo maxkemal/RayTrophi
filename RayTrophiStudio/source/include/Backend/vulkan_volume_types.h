@@ -102,7 +102,10 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     float ramp_colors_b[8];       // stop B components
     float pivot_offset[3];        // Pivot correction identical to OptiX
     int   source_type;            // 0=NanoVDB, 4=surface SDF, 5=live dense gas
-    float _retired_cloud[8];   // retired Faz 3b: sky clouds are no longer a volume (ATMOSPHERE_CLOUDS.md)
+    float random_walk_enabled;    // 1 = path-traced multiple scattering (volume_closesthit)
+    float random_walk_max_events; // 8..512 scattering events per walk
+    float random_walk_exact_events; // 1..512 true-phase events before the similarity switch
+    float _retired_cloud[5];   // retired Faz 3b: sky clouds are no longer a volume (ATMOSPHERE_CLOUDS.md)
     // [0..6] = isosurface/foam data for source_type 4. For other volume
     // types [6] stores authored minimum emission temperature. [7..11] =
     // bounded Material Graph density-noise program.

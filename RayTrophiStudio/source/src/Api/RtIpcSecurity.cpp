@@ -234,6 +234,11 @@ uint32_t requiredCapabilities(const std::string& method) {
         method == "project.autosave_set" ||
         method == "terrain.export_heightmap" ||
         method == "paint.export_channel" || method == "scene.export_gltf") return FilesWrite;
+    // render.rt_pipeline_status only reports whether the RT pipeline is still
+    // compiling (minutes after a shader change). Like sim.control_state it
+    // changes nothing, and a Read-only agent must be able to tell "compiling"
+    // from "broken" before it trusts samples == 0.
+    if (method == "render.rt_pipeline_status") return Read;
     if (method.rfind("render.", 0) == 0) {
         if (method == "render.start" || method == "render.start_sequence")
             return Render | FilesWrite;
@@ -249,6 +254,11 @@ uint32_t requiredCapabilities(const std::string& method) {
     // know whether its own measurement was invalidated - gating it any higher
     // would make the honest path the privileged one.
     if (method == "sim.control_state") return Read;
+    if (method == "fluid.matter_models") return Read;
+    if (method == "fluid.grain_reference") return Read;
+    if (method == "fluid.grain_settings") return Read;
+    if (method == "fluid.set_pore_exchange") return SceneWrite;
+    if (method == "fluid.set_grain_settings") return SceneWrite;
     if (method == "physics.collider.proxy_set.list" ||
         method == "physics.collider.proxy_set.get" ||
         method == "physics.collider.proxy_set.sample" ||

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          Api/RtApiFluid.cpp
@@ -8,6 +8,7 @@
  */
 
 #include "RtApiInternal.h"
+#include "Fluid/MatterEmissionBudget.h"
 #include "Fluid/FluidObject.h"
 #include "Fluid/FluidFogDensity.h"
 #include "Fluid/FluidSimulationSystem.h"
@@ -277,6 +278,12 @@ void fillFluidSurfaceMaterial(const RayTrophiSim::SimulationGridDomainDesc& d,
         RayTrophiSim::Fluid::kFluidRenderProxyMinVisualSphereBudget,
         RayTrophiSim::Fluid::kFluidRenderProxyMaxVisualSphereBudget);
     info.fog_spread_voxels = d.fluid_fog_spread_voxels;
+    info.fog_erosion_strength = d.fluid_fog_erosion_strength;
+    info.fog_erosion_size = d.fluid_fog_erosion_size;
+    info.fog_erosion_detail = d.fluid_fog_erosion_detail;
+    info.fog_erosion_seed = d.fluid_fog_erosion_seed;
+    info.fog_erosion_depth = d.fluid_fog_erosion_depth;
+    info.fog_resolution_multiplier = d.fluid_fog_resolution_multiplier;
     info.max_particles = d.fluid_max_particles;
 
     // Substance -> material bindings, with the material NAME resolved. A script
@@ -804,10 +811,38 @@ Result setFluidFog(const std::string& domain_id_or_name,
         !(std::isfinite(*patch.spread_voxels) && *patch.spread_voxels >= 0.0f &&
           *patch.spread_voxels <= RayTrophiSim::Fluid::kFogSpreadMaxVoxels))
         return Result::fail("spread_voxels must be in [0, 6]");
+    if (patch.erosion_strength &&
+        !(std::isfinite(*patch.erosion_strength) && *patch.erosion_strength >= 0.0f &&
+          *patch.erosion_strength <= 1.0f))
+        return Result::fail("erosion_strength must be in [0, 1]");
+    if (patch.erosion_size &&
+        !(std::isfinite(*patch.erosion_size) &&
+          *patch.erosion_size >= RayTrophiSim::Fluid::kFogErosionMinSize &&
+          *patch.erosion_size <= RayTrophiSim::Fluid::kFogErosionMaxSize))
+        return Result::fail("erosion_size must be in [0.001, 100] world units");
+    if (patch.erosion_detail &&
+        (*patch.erosion_detail < 1 ||
+         *patch.erosion_detail > RayTrophiSim::Fluid::kFogErosionMaxDetail))
+        return Result::fail("erosion_detail must be in [1, 6]");
+    if (patch.erosion_depth &&
+        !(std::isfinite(*patch.erosion_depth) && *patch.erosion_depth >= 0.0f &&
+          *patch.erosion_depth <= RayTrophiSim::Fluid::kFogErosionMaxDepth))
+        return Result::fail("erosion_depth must be in [0, 1] world units");
+    if (patch.resolution_multiplier &&
+        (*patch.resolution_multiplier < 1 ||
+         *patch.resolution_multiplier > RayTrophiSim::Fluid::kFogMaxResolutionMultiplier))
+        return Result::fail("resolution_multiplier must be in [1, 4]");
     Result found;
     auto* dom = findLiquidDomainDesc(domain_id_or_name, found);
     if (!dom) return found;
     if (patch.spread_voxels) dom->fluid_fog_spread_voxels = *patch.spread_voxels;
+    if (patch.erosion_strength) dom->fluid_fog_erosion_strength = *patch.erosion_strength;
+    if (patch.erosion_size) dom->fluid_fog_erosion_size = *patch.erosion_size;
+    if (patch.erosion_detail) dom->fluid_fog_erosion_detail = *patch.erosion_detail;
+    if (patch.erosion_seed) dom->fluid_fog_erosion_seed = *patch.erosion_seed;
+    if (patch.erosion_depth) dom->fluid_fog_erosion_depth = *patch.erosion_depth;
+    if (patch.resolution_multiplier)
+        dom->fluid_fog_resolution_multiplier = *patch.resolution_multiplier;
     // The bridge only re-uploads a volume when asked; on a paused timeline
     // nothing else would.
     g_ctx->scene.requestSimulationTimelineRenderResync();
@@ -975,6 +1010,9 @@ Result getGasShaderSettings(const std::string& domain_id_or_name,
     out_settings.shadow_steps = s.quality.shadow_steps;
     out_settings.shadow_stride = s.quality.shadow_stride;
     out_settings.shadow_strength = s.quality.shadow_strength;
+    out_settings.random_walk = s.scattering.random_walk;
+    out_settings.random_walk_max_events = s.scattering.random_walk_max_events;
+    out_settings.random_walk_exact_events = s.scattering.random_walk_exact_events;
     return Result::success();
 }
 
@@ -1063,6 +1101,11 @@ Result updateGasShaderSettings(const std::string& domain_id_or_name,
     s.quality.shadow_steps = std::max(0, std::min(48, settings.shadow_steps));
     s.quality.shadow_stride = std::max(1, std::min(16, settings.shadow_stride));
     s.quality.shadow_strength = std::max(0.0f, std::min(1.0f, settings.shadow_strength));
+    s.scattering.random_walk = settings.random_walk;
+    s.scattering.random_walk_max_events =
+        std::max(8, std::min(512, settings.random_walk_max_events));
+    s.scattering.random_walk_exact_events =
+        std::max(1, std::min(512, settings.random_walk_exact_events));
     republishGasLookAndRepaint();
     return Result::success();
 }
@@ -1129,6 +1172,9 @@ void readFogShader(const VolumeShader& s, FluidFogShaderSettings& out) {
     out.scattering_coefficient = s.scattering.coefficient;
     out.scattering_color = s.scattering.color;
     out.anisotropy = s.scattering.anisotropy;
+    out.anisotropy_back = s.scattering.anisotropy_back;
+    out.lobe_mix = s.scattering.lobe_mix;
+    out.multi_scatter = s.scattering.multi_scatter;
     out.absorption_coefficient = s.absorption.coefficient;
     out.absorption_color = s.absorption.color;
     out.voxel_step_multiplier = s.quality.voxel_step_multiplier;
@@ -1136,6 +1182,9 @@ void readFogShader(const VolumeShader& s, FluidFogShaderSettings& out) {
     out.shadow_steps = s.quality.shadow_steps;
     out.shadow_stride = s.quality.shadow_stride;
     out.shadow_strength = s.quality.shadow_strength;
+    out.random_walk = s.scattering.random_walk;
+    out.random_walk_max_events = s.scattering.random_walk_max_events;
+    out.random_walk_exact_events = s.scattering.random_walk_exact_events;
 }
 Vec3 clampColor(const Vec3& c) {
     return Vec3(std::max(0.0f, std::min(1.0f, c.x)),
@@ -1177,6 +1226,10 @@ Result updateFluidFogShaderSettings(const std::string& domain_id_or_name,
     s.scattering.coefficient = std::max(0.0f, settings.scattering_coefficient);
     s.scattering.color = clampColor(settings.scattering_color);
     s.scattering.anisotropy = std::max(-0.99f, std::min(0.99f, settings.anisotropy));
+    // Same ranges as the volume shader panel (scene_ui.cpp).
+    s.scattering.anisotropy_back = std::max(-0.99f, std::min(0.0f, settings.anisotropy_back));
+    s.scattering.lobe_mix = std::max(0.0f, std::min(1.0f, settings.lobe_mix));
+    s.scattering.multi_scatter = std::max(0.0f, std::min(1.0f, settings.multi_scatter));
     s.absorption.coefficient = std::max(0.0f, settings.absorption_coefficient);
     s.absorption.color = clampColor(settings.absorption_color);
     // Same clamps as updateGasShaderSettings / the panel.
@@ -1186,6 +1239,11 @@ Result updateFluidFogShaderSettings(const std::string& domain_id_or_name,
     s.quality.shadow_steps = std::max(0, std::min(48, settings.shadow_steps));
     s.quality.shadow_stride = std::max(1, std::min(16, settings.shadow_stride));
     s.quality.shadow_strength = std::max(0.0f, std::min(1.0f, settings.shadow_strength));
+    s.scattering.random_walk = settings.random_walk;
+    s.scattering.random_walk_max_events =
+        std::max(8, std::min(512, settings.random_walk_max_events));
+    s.scattering.random_walk_exact_events =
+        std::max(1, std::min(512, settings.random_walk_exact_events));
     republishGasLookAndRepaint();
     return Result::success();
 }
@@ -3078,6 +3136,9 @@ SimulationFlowSourceInfo flowInfoFromDesc(
     out.fuel = source.fuel;
     out.falloff = source.falloff;
     out.fluid_particles_per_second = source.fluid_particles_per_second;
+    out.particle_pool_weight = source.particle_pool_weight;
+    out.pool_requested_particles = source.pool_requested_particles;
+    out.pool_granted_particles = source.pool_granted_particles;
     out.fluid_velocity_spread = source.fluid_velocity_spread;
     out.fluid_emit_along_normal = source.fluid_emit_along_normal;
     out.fluid_substance = source.fluid_substance;
@@ -3135,6 +3196,10 @@ Result flowDescFromInfo(const SimulationFlowSourceInfo& info,
     out.fuel = std::max(0.0f, info.fuel);
     out.falloff = std::max(0.0f, info.falloff);
     out.fluid_particles_per_second = std::max(0.0f, info.fluid_particles_per_second);
+    if (const char* error = RayTrophiSim::Fluid::validateMatterPoolWeight(info.particle_pool_weight)) {
+        return Result::fail(error);
+    }
+    out.particle_pool_weight = info.particle_pool_weight;
     out.fluid_velocity_spread = std::max(0.0f, info.fluid_velocity_spread);
     out.fluid_emit_along_normal = info.fluid_emit_along_normal;
     if (!RayTrophiSim::Fluid::parseMatterConstitutiveModel(

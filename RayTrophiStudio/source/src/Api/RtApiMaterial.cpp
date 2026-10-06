@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "MaterialManager.h"
+#include "Fluid/MatterMaterialPreset.h"
 #include "PrincipledBSDF.h"
 #include "Volumetric.h"
 #include "Perlin.h"
@@ -156,8 +157,15 @@ Result createMaterial(const std::string& type, const std::string& requested_name
         material = std::make_shared<Volumetric>(Vec3(0.8f), 1.0f, 0.1f, 0.5f, Vec3(0.0f),
                                                 std::make_shared<Perlin>());
         if (base_name.empty()) base_name = "Volume";
+    } else if (type.rfind("substance:", 0) == 0) {
+        const std::string substance = type.substr(10);
+        std::string error;
+        material = RayTrophiSim::Fluid::createMatterMaterialPreset(substance, error);
+        if (!material) return Result::fail(error);
+        if (base_name.empty()) base_name = substance + " Material";
     } else {
-        return Result::fail("unknown material type (principled|volumetric): " + type);
+        return Result::fail(
+            "unknown material type (principled|volumetric|substance:<name>): " + type);
     }
 
     // addUniqueMaterial keeps materialName and the registry key identical, so the

@@ -9220,6 +9220,22 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
             if (ImGui::SliderFloat("Lobe Mix", &shader->scattering.lobe_mix, 0.0f, 1.0f)) changed = true;
             if (ImGui::SliderFloat("Multi-Scatter Isotropization", &shader->scattering.multi_scatter, 0.0f, 1.0f)) changed = true;
             UIWidgets::HelpMarker("Energy-conserving approximation: blends the normalized dual-HG phase toward an isotropic lobe. It is most visible when Forward/Back G are non-zero; with an already isotropic phase it intentionally has little effect.");
+            // Same fields and ranges as fluid.set_fog_shader / gas.set_shader random_walk*.
+            if (ImGui::Checkbox("Path-Traced Multiple Scattering", &shader->scattering.random_walk)) changed = true;
+            UIWidgets::HelpMarker("Vulkan RT: a random walk of real scattering events replaces the single-scatter march; Multi-Scatter Isotropization is ignored while on. Needed for bright high-albedo media (snow, cloud, foam). Slower and noisier per sample. Emissive volumes and Volume Graph materials keep the march.");
+            ImGui::BeginDisabled(!shader->scattering.random_walk);
+            if (ImGui::SliderInt("Max Scatter Events", &shader->scattering.random_walk_max_events, 8, 512)) {
+                shader->scattering.random_walk_max_events =
+                    std::clamp(shader->scattering.random_walk_max_events, 8, 512);
+                changed = true;
+            }
+            if (ImGui::SliderInt("Exact Events", &shader->scattering.random_walk_exact_events, 1, 512)) {
+                shader->scattering.random_walk_exact_events =
+                    std::clamp(shader->scattering.random_walk_exact_events, 1, 512);
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Events walked with the true phase before the walk switches to the equivalent isotropic medium (scattering x (1 - G)). Forward-peaked media such as snow need ~1/(1-G) times fewer events after the switch, with the same diffuse look. Raise it if the near-surface forward glow looks wrong; set it to Max Scatter Events to keep the walk exact.");
+            ImGui::EndDisabled();
             ImGui::TreePop();
         }
         ImGui::Unindent();

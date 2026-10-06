@@ -74,9 +74,15 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     // Batched: one submission instead of four (Vulkan submit+fence per copy).
     const auto mg_upload_begin = SimulationClock::now();
     compute->beginTransferBatch();
-    bool ok = compute->uploadBuffer(gpu_buffers.vel_x,      grid.vel_x.data(),      grid.vel_x.size() * sizeof(float)) &&
-              compute->uploadBuffer(gpu_buffers.vel_y,      grid.vel_y.data(),      grid.vel_y.size() * sizeof(float)) &&
-              compute->uploadBuffer(gpu_buffers.vel_z,      grid.vel_z.data(),      grid.vel_z.size() * sizeof(float)) &&
+    bool ok = (gpu_buffers.matter_model.enabled ||
+             compute->uploadBuffer(gpu_buffers.vel_x, grid.vel_x.data(),
+                                     grid.vel_x.size() * sizeof(float))) &&
+              (gpu_buffers.matter_model.enabled ||
+             compute->uploadBuffer(gpu_buffers.vel_y, grid.vel_y.data(),
+                                     grid.vel_y.size() * sizeof(float))) &&
+              (gpu_buffers.matter_model.enabled ||
+             compute->uploadBuffer(gpu_buffers.vel_z, grid.vel_z.data(),
+                                     grid.vel_z.size() * sizeof(float))) &&
               // cell_count, NOT fluid_mask_cpu.size(): the caller's scratch vector is
               // function-static and grow-only (buildFluidMaskFromParticles keeps the
               // high-water mark to avoid reallocating every step). Run a 4.6M-cell
@@ -107,7 +113,8 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
                         (grid.fluid_phi.size() == cell_count) &&
                         gpu_buffers.var_fluid_phi.valid();
 
-    if (is_variational) {
+    if (is_variational && (!gpu_buffers.matter_model.enabled ||
+        !gpu_buffers.matter_model.pressure_statics_uploaded)) {
         // Convert and upload weights
         std::vector<float> uw_float(grid.u_weight.size());
         std::vector<float> vw_float(grid.v_weight.size());
@@ -140,6 +147,9 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
         ok = ok && compute->uploadBuffer(gpu_buffers.var_fluid_phi, grid.fluid_phi.data(), grid.fluid_phi.size() * sizeof(float));
     }
     if (!ok) return bail("variational weight / solid-velocity upload");
+    if (gpu_buffers.matter_model.enabled) {
+        gpu_buffers.matter_model.pressure_statics_uploaded = true;
+    }
 
     GridProjectionGpuConstants c;
     c.nx         = grid.nx;
@@ -164,7 +174,8 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     c.gfm_active         = is_gfm ? 1 : 0;
 
     auto pressure_window = Fluid::ActiveWindow::full(grid.nx, grid.ny, grid.nz);
-    if (compute->backendType() == ComputeBackendType::VulkanCompute &&
+    if (!gpu_buffers.matter_model.enabled &&
+        compute->backendType() == ComputeBackendType::VulkanCompute &&
         fluid_params.boundary != Fluid::APICSolverParams::BoundaryMode::Periodic) {
         pressure_window = gpu_buffers.fluid_mask_device_valid
             ? Fluid::ActiveWindow::plan(
@@ -693,9 +704,15 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
         // downloads in one submit (see the P2G tail note).
         compute->beginTransferBatch();
         ok = ok &&
-             compute->downloadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
-             compute->downloadBuffer(gpu_buffers.vel_y, grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
-             compute->downloadBuffer(gpu_buffers.vel_z, grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
+             (gpu_buffers.matter_model.enabled ||
+             compute->downloadBuffer(gpu_buffers.vel_x, grid.vel_x.data(),
+                                     grid.vel_x.size() * sizeof(float))) &&
+             (gpu_buffers.matter_model.enabled ||
+             compute->downloadBuffer(gpu_buffers.vel_y, grid.vel_y.data(),
+                                     grid.vel_y.size() * sizeof(float))) &&
+             (gpu_buffers.matter_model.enabled ||
+             compute->downloadBuffer(gpu_buffers.vel_z, grid.vel_z.data(),
+                                     grid.vel_z.size() * sizeof(float)));
         ok = compute->endTransferBatch() && ok;
 
         // Phase breakdown, averaged and logged every ~240 substeps (see the
@@ -813,9 +830,15 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     // No synchronize(): the batch flushes in one submit (see the P2G note).
     compute->beginTransferBatch();
     ok = ok &&
-         compute->downloadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
-         compute->downloadBuffer(gpu_buffers.vel_y, grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
-         compute->downloadBuffer(gpu_buffers.vel_z, grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
+         (gpu_buffers.matter_model.enabled ||
+             compute->downloadBuffer(gpu_buffers.vel_x, grid.vel_x.data(),
+                                     grid.vel_x.size() * sizeof(float))) &&
+         (gpu_buffers.matter_model.enabled ||
+             compute->downloadBuffer(gpu_buffers.vel_y, grid.vel_y.data(),
+                                     grid.vel_y.size() * sizeof(float))) &&
+         (gpu_buffers.matter_model.enabled ||
+             compute->downloadBuffer(gpu_buffers.vel_z, grid.vel_z.data(),
+                                     grid.vel_z.size() * sizeof(float)));
     ok = compute->endTransferBatch() && ok;
 
     // Phase breakdown for the generic/CUDA path — mirrors the Vulkan

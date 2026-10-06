@@ -1,13 +1,13 @@
 // Included inside ParticleSimulation.cpp's private namespace. These stages use
 // its existing push-constant types; keep transfer policy out of the large driver.
 
-bool downloadGpuGranularParticleState(SimulationGridDomainState& state,
-                                     SimulationComputeContext* compute,
-                                     SimulationGridDomainComputeBuffers& buffers) {
+bool downloadGpuGranularParticles(Fluid::FluidParticles& particles,
+                                 SimulationComputeContext* compute,
+                                 SimulationGridDomainComputeBuffers& buffers,
+                                 bool download_transport = true) {
     if (!compute) {
         return false;
     }
-    auto& particles = state.particles;
     const std::size_t count = particles.size();
     bool ok = true;
     compute->beginTransferBatch();
@@ -19,9 +19,11 @@ bool downloadGpuGranularParticleState(SimulationGridDomainState& state,
         using Value = typename std::decay_t<decltype(values)>::value_type;
         ok = compute->downloadBuffer(handle, values.data(), count * sizeof(Value)) && ok;
     };
-    download(buffers.fluid_positions, particles.position);
-    download(buffers.fluid_velocities, particles.velocity);
-    download(buffers.fluid_affine, particles.affine);
+    if (download_transport) {
+        download(buffers.fluid_positions, particles.position);
+        download(buffers.fluid_velocities, particles.velocity);
+        download(buffers.fluid_affine, particles.affine);
+    }
     download(buffers.granular.stress_diag, particles.granular_stress_diag);
     download(buffers.granular.stress_shear, particles.granular_stress_shear);
     download(buffers.granular.plastic_volume, particles.granular_plastic_volume);
@@ -35,6 +37,11 @@ bool downloadGpuGranularParticleState(SimulationGridDomainState& state,
     download(buffers.granular.deformation_col1, particles.granular_deformation_col1);
     download(buffers.granular.deformation_col2, particles.granular_deformation_col2);
     return compute->endTransferBatch() && ok;
+}
+
+bool downloadGpuGranularParticleState(SimulationGridDomainState& state,
+    SimulationComputeContext* compute, SimulationGridDomainComputeBuffers& buffers) {
+    return downloadGpuGranularParticles(state.particles, compute, buffers);
 }
 
 class GranularParticleResidency {
@@ -319,7 +326,7 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
     cmd.constants_size = sizeof(c);
     cmd.groups.groups_x =
         (static_cast<uint32_t>(c.particle_count) + threads - 1u) / threads;
-    ok = compute->dispatch(cmd);
+    ok = Fluid::dispatchMatterGpuModel(*compute, cmd, gpu_buffers.matter_model);
 
     if (ok && fluid_params.granular_enabled) {
         Fluid::Granular::Parameters gp;
@@ -498,12 +505,15 @@ bool runGpuFluidAdvectTail(SimulationGridDomainState& state,
     cmd.constants = &c;
     cmd.constants_size = sizeof(c);
     cmd.groups.groups_x = (static_cast<uint32_t>(c.particle_count) + 255u) / 256u;
-    const bool dispatched = compute->dispatch(cmd);
+    const bool dispatched = Fluid::dispatchMatterGpuModel(*compute, cmd, buffers.matter_model);
     if (dispatched_tail) {
         *dispatched_tail = dispatched;
     }
     if (dispatched && executed_substeps) {
         *executed_substeps = c.substeps;
+    }
+    if (dispatched && buffers.matter_model.enabled) {
+        return true; // Mixed coordinator publishes both disjoint lanes together.
     }
     if (dispatched && retain_positions && retain_granular_velocity && !download_affine &&
         params.granular_enabled &&

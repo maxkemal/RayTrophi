@@ -1,0 +1,135 @@
+#version 450
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Offsets { uint offsets[]; };
+layout(set = 0, binding = 1) readonly buffer Indices { uint indices[]; };
+layout(set = 0, binding = 2) readonly buffer Models { uint models[]; };
+layout(set = 0, binding = 3) readonly buffer Tags { uint tags[]; };
+layout(set = 0, binding = 4) readonly buffer Rest { float rest[]; };
+layout(set = 0, binding = 5) buffer Fractions { float fraction[]; };
+layout(set = 0, binding = 6) buffer PoreMass { float pore[]; };
+layout(set = 0, binding = 7) readonly buffer Capacities { float capacity[]; };
+layout(set = 0, binding = 8) buffer PoreEnergy { float energy[]; };
+layout(set = 0, binding = 9) buffer Velocities { float velocity[]; };
+layout(set = 0, binding = 10) readonly buffer Temperatures { float temperature[]; };
+layout(set = 0, binding = 11) readonly buffer BirthSlots { uint birth_slot[]; };
+layout(set = 0, binding = 12) buffer Records { float record[]; };
+
+layout(push_constant) uniform PC {
+    uint cells;
+    uint water_tag;
+    float dt;
+    float permeability;
+    float viscosity;
+    float gravity;
+    float drainage_scale;
+    float voxel;
+    float water_density;
+    float water_cp;
+} pc;
+
+vec3 readVelocity(uint i) {
+    return vec3(velocity[3u * i], velocity[3u * i + 1u], velocity[3u * i + 2u]);
+}
+
+void writeVelocity(uint i, vec3 value) {
+    velocity[3u * i] = value.x;
+    velocity[3u * i + 1u] = value.y;
+    velocity[3u * i + 2u] = value.z;
+}
+
+void main() {
+    uint cell = gl_GlobalInvocationID.x;
+    if (cell >= pc.cells) {
+        return;
+    }
+    // Each cell exclusively owns its particle list. No cross-cell writes/atomics.
+    float water = 0.0;
+    vec3 water_momentum = vec3(0.0);
+    float water_energy = 0.0;
+    float room = 0.0;
+    float pore_total = 0.0;
+    float cap_total = 0.0;
+    for (uint k = offsets[cell]; k < offsets[cell + 1u]; ++k) {
+        uint i = indices[k];
+        if (models[i] == 1u && tags[i] == pc.water_tag) {
+            float mass = rest[i] * fraction[i];
+            water += mass;
+            water_momentum += mass * readVelocity(i);
+            water_energy += mass * pc.water_cp * temperature[i];
+        } else if (models[i] == 2u && capacity[i] > 0.0) {
+            room += max(capacity[i] - pore[i], 0.0);
+            pore_total += pore[i];
+            cap_total += capacity[i];
+        }
+    }
+    vec3 incoming_velocity = water > 0.0 ? water_momentum / water : vec3(0.0);
+    float incoming_energy = water > 0.0 ? water_energy / water : 0.0;
+    // Darcy conductance, driven by the free-water versus pore hydraulic head.
+    // First-order cell exchange, not a C6 pore-pressure projection.
+    float free_head = water / max(pc.water_density * pc.voxel * pc.voxel, 1e-20);
+    float saturation = cap_total > 0.0 ? pore_total / cap_total : 0.0;
+    float head_difference = max(free_head - saturation * pc.voxel, 0.0);
+    float rate = pc.permeability * pc.water_density * pc.gravity /
+        max(pc.viscosity * pc.voxel * pc.voxel, 1e-20);
+    float absorption = min(water, room *
+        (1.0 - exp(-rate * head_difference * pc.dt)));
+    float debit = water > 0.0 ? clamp(absorption / water, 0.0, 1.0) : 0.0;
+    // Bound the aggregate output to one nominal parcel (eight parcels/cell).
+    // A marked Water receiver contributes its post-absorption mass to the cap.
+    float output_room = pc.water_density * pc.voxel * pc.voxel * pc.voxel / 8.0;
+    float requested_release = 0.0;
+    for (uint k = offsets[cell]; k < offsets[cell + 1u]; ++k) {
+        uint i = indices[k];
+        if (birth_slot[i] == 2u) {
+            output_room = max(output_room - rest[i] * fraction[i] * (1.0 - debit), 0.0);
+        } else if (birth_slot[i] == 1u && capacity[i] > 0.0) {
+            float receive = room > 0.0
+                ? absorption * max(capacity[i] - pore[i], 0.0) / room : 0.0;
+            float wet_mass = pore[i] + receive;
+            float pore_head = wet_mass / capacity[i] * pc.voxel;
+            requested_release += wet_mass * (1.0 - exp(-rate * (pc.voxel + pore_head) *
+                pc.drainage_scale * pc.dt));
+        }
+    }
+    float release_scale = requested_release > 0.0
+        ? min(output_room / requested_release, 1.0) : 0.0;
+    for (uint k = offsets[cell]; k < offsets[cell + 1u]; ++k) {
+        uint i = indices[k];
+        if (models[i] == 1u && tags[i] == pc.water_tag) {
+            fraction[i] *= 1.0 - debit;
+        } else if (models[i] == 2u && capacity[i] > 0.0) {
+            float receive = room > 0.0
+                ? absorption * max(capacity[i] - pore[i], 0.0) / room : 0.0;
+            float old_mass = rest[i] * fraction[i] + pore[i];
+            vec3 old_velocity = readVelocity(i);
+            float new_mass = old_mass + receive;
+            vec3 v = new_mass > 0.0
+                ? (old_mass * old_velocity + receive * incoming_velocity) / new_mass
+                : old_velocity;
+            writeVelocity(i, v);
+            pore[i] += receive;
+            energy[i] += receive * incoming_energy;
+            uint r = i * 10u;
+            record[r] = receive;
+            record[r + 1u] = receive * incoming_energy;
+            record[r + 2u] = receive * incoming_velocity.x;
+            record[r + 3u] = receive * incoming_velocity.y;
+            record[r + 4u] = receive * incoming_velocity.z;
+            // Drainage records are batched/refilled per cell at frame publication.
+            // No slot -> retain water, without losing or silently clamping mass.
+            float pore_head = pore[i] / capacity[i] * pc.voxel;
+            float release = birth_slot[i] == 1u ? release_scale * pore[i] *
+                (1.0 - exp(-rate * (pc.voxel + pore_head) *
+                    pc.drainage_scale * pc.dt)) : 0.0;
+            float released_energy = pore[i] > 0.0 ? (release / pore[i]) * energy[i] : 0.0;
+            pore[i] -= release;
+            energy[i] -= released_energy;
+            record[r + 5u] = release;
+            record[r + 6u] = released_energy;
+            record[r + 7u] = release * v.x;
+            record[r + 8u] = release * v.y;
+            record[r + 9u] = release * v.z;
+        }
+    }
+}

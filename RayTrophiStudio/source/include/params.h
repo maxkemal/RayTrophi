@@ -271,6 +271,12 @@ struct GpuVDBVolume {
     // took the struct from 576 to 608 and one enum does not justify moving it
     // again across five declarations.
     int   surface_coord_space = 0;
+    // Path-traced multiple scattering (VolumeShader::ScatteringSettings::
+    // random_walk). Vulkan RT only; rides VkVolumeInstance::random_walk_*,
+    // carved from the retired cloud block, so no ABI growth. OptiX ignores it.
+    int   random_walk = 0;
+    int   random_walk_max_events = 32;
+    int   random_walk_exact_events = 4;
     // Material coordinate (UVW) RESIDUAL field for the SDF isosurface — HOST
     // pointer to dense interleaved xyz triples at sim-grid resolution holding
     // (uvw - cell centre), plus its cell counts. The backend uploads it and

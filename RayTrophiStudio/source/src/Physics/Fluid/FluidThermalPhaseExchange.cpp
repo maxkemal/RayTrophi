@@ -51,7 +51,7 @@ FluidThermalPhaseExchangeStats updateThermalFreezeAndRecord(
 
     ensureFluidParticleRestMasses(
         particles, params.chemistry_preset, liquidGrid(state).voxel_size,
-        params.particles_per_cell);
+        params.particles_per_cell, params.granular_enabled);
 
     std::vector<uint8_t> was_frozen(count, 0u);
     std::vector<Vec3> previous_velocity(count, Vec3(0.0f));

@@ -86,7 +86,8 @@ FluidCombustionExchangeStats transferFluidCombustionToGas(
     const float liquid_voxel = liquidGrid(fluid_state).voxel_size;
     ensureFluidParticleRestMasses(
         particles, fluid_domain.fluid_params.chemistry_preset,
-        liquid_voxel, fluid_domain.fluid_params.particles_per_cell);
+        liquid_voxel, fluid_domain.fluid_params.particles_per_cell,
+        fluid_domain.fluid_params.granular_enabled);
 
     FluidSim::FluidGrid& gas = gasGrid(gas_state);
     const FluidSim::FluidGrid& liquid = liquidGrid(fluid_state);

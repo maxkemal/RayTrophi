@@ -78,7 +78,10 @@ constexpr uint32_t kMagic   = 0x43465452u; // 'RTFC'
 // 8: gas domains preserve the physical kg/J phase sidecars introduced by the
 //    liquid-to-gas exchange. Dimensionless render tracers cannot reconstruct
 //    this inventory on resume.
-constexpr uint32_t kVersion = 9u;
+// 9: particle constitutive model survives playback.
+// 10: domain-local particle identities and their allocator survive playback.
+// 11: C5 pore mass, capacity, porosity and stored water energy survive playback.
+constexpr uint32_t kVersion = 11u;
 
 // Absolute path of the per-system, per-frame binary file inside cache_dir.
 std::string frameFilePath(const std::string& cache_dir, uint32_t system_id, int frame);

@@ -1,0 +1,3056 @@
+{
+  "arms": [
+    {
+      "name": "reference",
+      "voxel_m": 0.1,
+      "dt_s": 0.016666666666666666,
+      "load_multiplier": 1,
+      "expected_count": 360,
+      "samples": [
+        {
+          "seconds": 1.0,
+          "granular": {
+            "bounds_max": [
+              0.46083319187164307,
+              0.20252114534378052,
+              0.4828896224498749
+            ],
+            "bounds_min": [
+              -0.4875544607639313,
+              0.014419266022741795,
+              -0.41456806659698486
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.005175967113528814,
+              0.09148995178079027,
+              -0.013699859349031207
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.30416571761573047,
+            "kinetic_energy_j": 0.17340737161206454,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2971.7177734375,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.8364593386650085,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 29717.177734375
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 8.224999999999998,
+            "density_ms": 0.21140000224113464,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 5.7786,
+            "dispatch_calls": 1810,
+            "download_bytes": 508108,
+            "download_call_ms": 0.12560000000000004,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.1798,
+            "total_ms": 23.333099365234375,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 2.8664,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 2.0,
+          "granular": {
+            "bounds_max": [
+              0.5243865251541138,
+              0.18859849870204926,
+              0.5566385388374329
+            ],
+            "bounds_min": [
+              -0.567687451839447,
+              0.015828413888812065,
+              -0.47165101766586304
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.005477595156925318,
+              0.07872678107168118,
+              -0.013169100975048625
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.33789091411342936,
+            "kinetic_energy_j": 0.013542974260573302,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2711.22314453125,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.4578227698802948,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 27112.23046875
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 8.1022,
+            "density_ms": 0.15839999914169312,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 6.826499999999995,
+            "dispatch_calls": 1810,
+            "download_bytes": 508108,
+            "download_call_ms": 0.13639999999999997,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.08460000000000001,
+            "total_ms": 24.78809928894043,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 3.3406000000000002,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 3.0,
+          "granular": {
+            "bounds_max": [
+              0.5660597681999207,
+              0.19300255179405212,
+              0.5978137850761414
+            ],
+            "bounds_min": [
+              -0.6181946992874146,
+              0.01733635552227497,
+              -0.5031726360321045
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.006339029830673504,
+              0.07661666260618301,
+              -0.01281395752125213
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.3560744720840803,
+            "kinetic_energy_j": 0.013815445878211341,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2756.37939453125,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.46774357557296753,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 27563.79296875
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 7.777799999999999,
+            "density_ms": 0.1421000063419342,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 5.9550000000000045,
+            "dispatch_calls": 1810,
+            "download_bytes": 508108,
+            "download_call_ms": 0.11919999999999999,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.09190000000000001,
+            "total_ms": 21.999000549316406,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 2.5631999999999997,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 4.0,
+          "granular": {
+            "bounds_max": [
+              0.6067677736282349,
+              0.19877958297729492,
+              0.640129804611206
+            ],
+            "bounds_min": [
+              -0.6658438444137573,
+              0.017571497708559036,
+              -0.5361277461051941
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.006825561915886486,
+              0.07574784281767077,
+              -0.012603999839888677
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.37288190164421625,
+            "kinetic_energy_j": 0.014948659887957813,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2842.755615234375,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.45875483751296997,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 28427.556640625
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 7.442199999999999,
+            "density_ms": 0.1404000073671341,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 6.110099999999987,
+            "dispatch_calls": 1810,
+            "download_bytes": 508108,
+            "download_call_ms": 0.14200000000000007,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.08860000000000001,
+            "total_ms": 22.251300811767578,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 2.706799999999999,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 5.0,
+          "granular": {
+            "bounds_max": [
+              0.645494818687439,
+              0.20243073999881744,
+              0.6858746409416199
+            ],
+            "bounds_min": [
+              -0.7084780931472778,
+              0.017885258421301842,
+              -0.5672690868377686
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.007357926878224436,
+              0.07539809782885842,
+              -0.012253732584132296
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.3889884373140819,
+            "kinetic_energy_j": 0.015890100273030342,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2895.93359375,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.45229583978652954,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 28959.3359375
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 8.3419,
+            "density_ms": 0.17720000445842743,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 7.081299999999995,
+            "dispatch_calls": 1810,
+            "download_bytes": 508108,
+            "download_call_ms": 0.1721,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.1023,
+            "total_ms": 25.472200393676758,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 3.2083000000000004,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 6.0,
+          "granular": {
+            "bounds_max": [
+              0.6809452772140503,
+              0.20572738349437714,
+              0.7181861996650696
+            ],
+            "bounds_min": [
+              -0.745732843875885,
+              0.017549239099025726,
+              -0.5964719653129578
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.007807958358252007,
+              0.07527931887242537,
+              -0.012228110257678459
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.4038547446477277,
+            "kinetic_energy_j": 0.01639682737814484,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2952.70703125,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.4364801347255707,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 29527.0703125
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 7.4387,
+            "density_ms": 0.15330000221729279,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 5.72210000000002,
+            "dispatch_calls": 1810,
+            "download_bytes": 508108,
+            "download_call_ms": 0.11900000000000005,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.08220000000000001,
+            "total_ms": 21.7539005279541,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 2.5477000000000003,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 7.0,
+          "granular": {
+            "bounds_max": [
+              0.7134841084480286,
+              0.20761124789714813,
+              0.7459326386451721
+            ],
+            "bounds_min": [
+              -0.7785901427268982,
+              0.017383567988872528,
+              -0.6240243911743164
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.008111527364235371,
+              0.07502808671755107,
+              -0.012400096083052228
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.4179805134537258,
+            "kinetic_energy_j": 0.01629993710115675,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2985.573974609375,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.41681623458862305,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 29855.740234375
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 8.482399999999998,
+            "density_ms": 0.15330000221729279,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 6.338700000000008,
+            "dispatch_calls": 1810,
+            "download_bytes": 508108,
+            "download_call_ms": 0.14090000000000003,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.09540000000000001,
+            "total_ms": 24.324499130249023,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 3.3351,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 8.0,
+          "granular": {
+            "bounds_max": [
+              0.7282038927078247,
+              0.20950451493263245,
+              0.7760642170906067
+            ],
+            "bounds_min": [
+              -0.7832057476043701,
+              0.017346443608403206,
+              -0.6510781049728394
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.008546054122659066,
+              0.07495024118882909,
+              -0.01237710357818287
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.4303514434792748,
+            "kinetic_energy_j": 0.01578121134063009,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 3015.3291015625,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.39272984862327576,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 30153.291015625
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 8.296600000000002,
+            "density_ms": 0.17399999499320984,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 6.757999999999984,
+            "dispatch_calls": 1810,
+            "download_bytes": 508108,
+            "download_call_ms": 0.14270000000000005,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.1038,
+            "total_ms": 25.221099853515625,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 3.0088000000000004,
+            "upload_calls": 61
+          }
+        }
+      ],
+      "settling": {
+        "com_y_range_m": 0.0003290776835962739,
+        "rms_relative_range": 0.06156990811353731,
+        "max_specific_energy_j_kg": 0.0002277337101918483,
+        "passed": false
+      }
+    },
+    {
+      "name": "dt_half",
+      "voxel_m": 0.1,
+      "dt_s": 0.008333333333333333,
+      "load_multiplier": 1,
+      "expected_count": 360,
+      "samples": [
+        {
+          "seconds": 1.0,
+          "granular": {
+            "bounds_max": [
+              0.4579451084136963,
+              0.1998414397239685,
+              0.47802087664604187
+            ],
+            "bounds_min": [
+              -0.4836682677268982,
+              0.01573955826461315,
+              -0.4144711196422577
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.004750002466284465,
+              0.09068863452929585,
+              -0.014019922155896185
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.301849685557492,
+            "kinetic_energy_j": 0.13838252035842113,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2895.249267578125,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 1.0727277994155884,
+            "strain_substeps": 1,
+            "wave_substeps": 9,
+            "young_modulus_for_load_pa": 28952.4921875
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 38,
+            "batch_end_ms": 5.0262,
+            "density_ms": 0.19480000436306,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 3.701399999999983,
+            "dispatch_calls": 962,
+            "download_bytes": 507660,
+            "download_call_ms": 0.13670000000000002,
+            "download_calls": 40,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.2138,
+            "total_ms": 19.50429916381836,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 3.5436,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 2.0,
+          "granular": {
+            "bounds_max": [
+              0.4734053611755371,
+              0.18239720165729523,
+              0.49501004815101624
+            ],
+            "bounds_min": [
+              -0.499233603477478,
+              0.01573955826461315,
+              -0.42943957448005676
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.005025437650490657,
+              0.08220300887607865,
+              -0.01396801539619143
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.3077717376422001,
+            "kinetic_energy_j": 0.004645383504680571,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2617.933349609375,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.18009421229362488,
+            "strain_substeps": 1,
+            "wave_substeps": 9,
+            "young_modulus_for_load_pa": 26179.333984375
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 38,
+            "batch_end_ms": 15.6529,
+            "density_ms": 0.4869999885559082,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 3.766799999999993,
+            "dispatch_calls": 962,
+            "download_bytes": 507660,
+            "download_call_ms": 0.1630000000000001,
+            "download_calls": 40,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.7568,
+            "total_ms": 30.946199417114258,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 3.7903000000000002,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 3.0,
+          "granular": {
+            "bounds_max": [
+              0.4774439036846161,
+              0.1689102202653885,
+              0.49886542558670044
+            ],
+            "bounds_min": [
+              -0.5046918988227844,
+              0.01573955826461315,
+              -0.4348568618297577
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.005041851090370782,
+              0.07723269369453191,
+              -0.014064904449898883
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.3094550185500591,
+            "kinetic_energy_j": 0.004888564820197432,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2405.142822265625,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.17723049223423004,
+            "strain_substeps": 1,
+            "wave_substeps": 9,
+            "young_modulus_for_load_pa": 24051.427734375
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 38,
+            "batch_end_ms": 16.4717,
+            "density_ms": 0.20409999787807465,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 3.600799999999994,
+            "dispatch_calls": 962,
+            "download_bytes": 507660,
+            "download_call_ms": 0.20460000000000014,
+            "download_calls": 40,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.7986,
+            "total_ms": 31.575300216674805,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 4.0124,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 4.0,
+          "granular": {
+            "bounds_max": [
+              0.47995176911354065,
+              0.16028952598571777,
+              0.5024552941322327
+            ],
+            "bounds_min": [
+              -0.5094168186187744,
+              0.01573955826461315,
+              -0.4395742118358612
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.0050410552611639195,
+              0.07309388630609549,
+              -0.014173729239781895
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.3109378656404108,
+            "kinetic_energy_j": 0.004780837434947123,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2269.8388671875,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.18451637029647827,
+            "strain_substeps": 1,
+            "wave_substeps": 9,
+            "young_modulus_for_load_pa": 22698.388671875
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 38,
+            "batch_end_ms": 13.976499999999994,
+            "density_ms": 0.18490000069141388,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 2.7581999999999973,
+            "dispatch_calls": 962,
+            "download_bytes": 507660,
+            "download_call_ms": 0.13870000000000007,
+            "download_calls": 40,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.8025,
+            "total_ms": 26.804500579833984,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 3.4274,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 5.0,
+          "granular": {
+            "bounds_max": [
+              0.4819315969944,
+              0.15418723225593567,
+              0.505620002746582
+            ],
+            "bounds_min": [
+              -0.513832151889801,
+              0.01573955826461315,
+              -0.4435647428035736
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.005040081967632026,
+              0.06955880951136355,
+              -0.014278521535258432
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.31225133316899367,
+            "kinetic_energy_j": 0.004822214923610873,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2173.6083984375,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.18858052790164948,
+            "strain_substeps": 1,
+            "wave_substeps": 9,
+            "young_modulus_for_load_pa": 21736.083984375
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 38,
+            "batch_end_ms": 13.2304,
+            "density_ms": 0.2070000022649765,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 2.744299999999994,
+            "dispatch_calls": 962,
+            "download_bytes": 507660,
+            "download_call_ms": 0.12130000000000003,
+            "download_calls": 40,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.7027,
+            "total_ms": 26.363399505615234,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 3.3926999999999996,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 6.0,
+          "granular": {
+            "bounds_max": [
+              0.4847008287906647,
+              0.1498827338218689,
+              0.5084408521652222
+            ],
+            "bounds_min": [
+              -0.516801655292511,
+              0.01573955826461315,
+              -0.4466761648654938
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.005042372356143055,
+              0.06647890051826835,
+              -0.014367150204634528
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.31347095238486833,
+            "kinetic_energy_j": 0.004256973177284977,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2106.0986328125,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.18638736009597778,
+            "strain_substeps": 1,
+            "wave_substeps": 9,
+            "young_modulus_for_load_pa": 21060.986328125
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 38,
+            "batch_end_ms": 12.851399999999996,
+            "density_ms": 0.17339999973773956,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 2.7130999999999927,
+            "dispatch_calls": 962,
+            "download_bytes": 507660,
+            "download_call_ms": 0.11820000000000008,
+            "download_calls": 40,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.7317,
+            "total_ms": 24.896799087524414,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 3.2396999999999996,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 7.0,
+          "granular": {
+            "bounds_max": [
+              0.48727181553840637,
+              0.14533713459968567,
+              0.5109471082687378
+            ],
+            "bounds_min": [
+              -0.5194777846336365,
+              0.01573955826461315,
+              -0.4493926167488098
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.005045871530091972,
+              0.06374024900400801,
+              -0.014448375021957978
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.31456955770889505,
+            "kinetic_energy_j": 0.0037662129663941827,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2034.77001953125,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.19545859098434448,
+            "strain_substeps": 1,
+            "wave_substeps": 9,
+            "young_modulus_for_load_pa": 20347.69921875
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 38,
+            "batch_end_ms": 12.980999999999996,
+            "density_ms": 0.17980000376701355,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 2.835899999999999,
+            "dispatch_calls": 962,
+            "download_bytes": 507660,
+            "download_call_ms": 0.13690000000000008,
+            "download_calls": 40,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.7013,
+            "total_ms": 25.63559913635254,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 3.3178000000000005,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 8.0,
+          "granular": {
+            "bounds_max": [
+              0.48938921093940735,
+              0.14124658703804016,
+              0.5132736563682556
+            ],
+            "bounds_min": [
+              -0.5223307609558105,
+              0.01573955826461315,
+              -0.4518198072910309
+            ],
+            "capacity_kg": 24.15807992219925,
+            "dry_center_of_mass": [
+              0.0050347927750812645,
+              0.061190556491621674,
+              -0.01450918476839433
+            ],
+            "dry_mass_kg": 72.0000010728836,
+            "horizontal_rms_radius_m": 0.3155629957825077,
+            "kinetic_energy_j": 0.0033324969280872827,
+            "mean_saturation": 0.0,
+            "particles": 360,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 1970.2938232421875,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.19268162548542023,
+            "strain_substeps": 1,
+            "wave_substeps": 9,
+            "young_modulus_for_load_pa": 19702.9375
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 38,
+            "batch_end_ms": 38.827099999999994,
+            "density_ms": 0.8687999844551086,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 2.293400000000003,
+            "dispatch_calls": 962,
+            "download_bytes": 507660,
+            "download_call_ms": 0.1447,
+            "download_calls": 40,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 360,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.7283999999999999,
+            "total_ms": 55.8046989440918,
+            "upload_bytes": 1461016,
+            "upload_call_ms": 8.2478,
+            "upload_calls": 61
+          }
+        }
+      ],
+      "settling": {
+        "com_y_range_m": 0.005288344026646678,
+        "rms_relative_range": 0.006629558679564672,
+        "max_specific_energy_j_kg": 5.912462658126576e-05,
+        "passed": false
+      }
+    },
+    {
+      "name": "grid_finer",
+      "voxel_m": 0.08,
+      "dt_s": 0.016666666666666666,
+      "load_multiplier": 1,
+      "expected_count": 703,
+      "samples": [
+        {
+          "seconds": 1.0,
+          "granular": {
+            "bounds_max": [
+              0.4851371645927429,
+              0.2218778431415558,
+              0.49015772342681885
+            ],
+            "bounds_min": [
+              -0.5033556222915649,
+              0.010522594675421715,
+              -0.44407761096954346
+            ],
+            "capacity_kg": 24.153782952576876,
+            "dry_center_of_mass": [
+              0.003239492747390671,
+              0.08652224750052691,
+              -0.006094134418005048
+            ],
+            "dry_mass_kg": 71.98719818145037,
+            "horizontal_rms_radius_m": 0.3076218890178369,
+            "kinetic_energy_j": 0.1684004068940662,
+            "mean_saturation": 0.0,
+            "particles": 703,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 3339.6640625,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 1.029664397239685,
+            "strain_substeps": 1,
+            "wave_substeps": 22,
+            "young_modulus_for_load_pa": 33396.640625
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 77,
+            "batch_end_ms": 15.730599999999992,
+            "density_ms": 0.21050000190734863,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 7.945499999999994,
+            "dispatch_calls": 2340,
+            "download_bytes": 1013636,
+            "download_call_ms": 0.15890000000000007,
+            "download_calls": 53,
+            "full_grid_cells": 49600,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 703,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              40,
+              31,
+              40
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.24889999999999998,
+            "total_ms": 34.635501861572266,
+            "upload_bytes": 2932984,
+            "upload_call_ms": 2.9596999999999998,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 2.0,
+          "granular": {
+            "bounds_max": [
+              0.5553270578384399,
+              0.19617056846618652,
+              0.5605606436729431
+            ],
+            "bounds_min": [
+              -0.5783786773681641,
+              0.010937298648059368,
+              -0.5149722695350647
+            ],
+            "capacity_kg": 24.153782952576876,
+            "dry_center_of_mass": [
+              0.003675180018827223,
+              0.07519955357740686,
+              -0.005844947224738592
+            ],
+            "dry_mass_kg": 71.98719818145037,
+            "horizontal_rms_radius_m": 0.3448848195278752,
+            "kinetic_energy_j": 0.017336268361614986,
+            "mean_saturation": 0.0,
+            "particles": 703,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2908.47900390625,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.5178374648094177,
+            "strain_substeps": 1,
+            "wave_substeps": 22,
+            "young_modulus_for_load_pa": 29084.7890625
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 77,
+            "batch_end_ms": 15.877799999999997,
+            "density_ms": 0.19850000739097595,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 7.39710000000002,
+            "dispatch_calls": 2340,
+            "download_bytes": 1013636,
+            "download_call_ms": 0.12900000000000003,
+            "download_calls": 53,
+            "full_grid_cells": 49600,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 703,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              40,
+              31,
+              40
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.0912,
+            "total_ms": 34.20280075073242,
+            "upload_bytes": 2932984,
+            "upload_call_ms": 3.7579999999999996,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 3.0,
+          "granular": {
+            "bounds_max": [
+              0.5970175862312317,
+              0.1993761509656906,
+              0.5947449207305908
+            ],
+            "bounds_min": [
+              -0.6187170743942261,
+              0.012213055975735188,
+              -0.554929256439209
+            ],
+            "capacity_kg": 24.153782952576876,
+            "dry_center_of_mass": [
+              0.004856230169980142,
+              0.07460111750165266,
+              -0.006750527218217359
+            ],
+            "dry_mass_kg": 71.98719818145037,
+            "horizontal_rms_radius_m": 0.36335274884701674,
+            "kinetic_energy_j": 0.016850730580914484,
+            "mean_saturation": 0.0,
+            "particles": 703,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2936.627685546875,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.4984157681465149,
+            "strain_substeps": 1,
+            "wave_substeps": 22,
+            "young_modulus_for_load_pa": 29366.27734375
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 77,
+            "batch_end_ms": 18.744499999999995,
+            "density_ms": 0.17829999327659607,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 6.6290000000000795,
+            "dispatch_calls": 2340,
+            "download_bytes": 1013636,
+            "download_call_ms": 0.1509,
+            "download_calls": 53,
+            "full_grid_cells": 49600,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 703,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              40,
+              31,
+              40
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.10450000000000001,
+            "total_ms": 35.59629821777344,
+            "upload_bytes": 2932984,
+            "upload_call_ms": 3.1879000000000004,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 4.0,
+          "granular": {
+            "bounds_max": [
+              0.6470744609832764,
+              0.20477798581123352,
+              0.6362781524658203
+            ],
+            "bounds_min": [
+              -0.650423526763916,
+              0.012587086297571659,
+              -0.5883636474609375
+            ],
+            "capacity_kg": 24.153782952576876,
+            "dry_center_of_mass": [
+              0.005888247728655122,
+              0.07432210754078543,
+              -0.00753555289329895
+            ],
+            "dry_mass_kg": 71.98719818145037,
+            "horizontal_rms_radius_m": 0.3799003404040767,
+            "kinetic_energy_j": 0.01591822515019073,
+            "mean_saturation": 0.0,
+            "particles": 703,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 3014.94140625,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.4572688043117523,
+            "strain_substeps": 1,
+            "wave_substeps": 22,
+            "young_modulus_for_load_pa": 30149.4140625
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 77,
+            "batch_end_ms": 18.595499999999994,
+            "density_ms": 0.2168000042438507,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 8.758599999999973,
+            "dispatch_calls": 2340,
+            "download_bytes": 1013636,
+            "download_call_ms": 0.16720000000000002,
+            "download_calls": 53,
+            "full_grid_cells": 49600,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 703,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              40,
+              31,
+              40
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 2.8793000000000006,
+            "total_ms": 42.01810073852539,
+            "upload_bytes": 2932984,
+            "upload_call_ms": 3.679099999999999,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 5.0,
+          "granular": {
+            "bounds_max": [
+              0.6808103322982788,
+              0.2112065553665161,
+              0.6808851957321167
+            ],
+            "bounds_min": [
+              -0.6807808876037598,
+              0.012054236605763435,
+              -0.6174456477165222
+            ],
+            "capacity_kg": 24.153782952576876,
+            "dry_center_of_mass": [
+              0.006333258055490977,
+              0.0735302518014591,
+              -0.0077944751609284775
+            ],
+            "dry_mass_kg": 71.98719818145037,
+            "horizontal_rms_radius_m": 0.39526806825160227,
+            "kinetic_energy_j": 0.01540761041761485,
+            "mean_saturation": 0.0,
+            "particles": 703,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 3124.032958984375,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.42972972989082336,
+            "strain_substeps": 1,
+            "wave_substeps": 22,
+            "young_modulus_for_load_pa": 31240.330078125
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 77,
+            "batch_end_ms": 17.65449999999999,
+            "density_ms": 0.17800000309944153,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 7.102900000000134,
+            "dispatch_calls": 2340,
+            "download_bytes": 1013636,
+            "download_call_ms": 0.15100000000000008,
+            "download_calls": 53,
+            "full_grid_cells": 49600,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 703,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              40,
+              31,
+              40
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.1062,
+            "total_ms": 34.554500579833984,
+            "upload_bytes": 2932984,
+            "upload_call_ms": 3.3494,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 6.0,
+          "granular": {
+            "bounds_max": [
+              0.727766752243042,
+              0.2181723415851593,
+              0.716434895992279
+            ],
+            "bounds_min": [
+              -0.710466742515564,
+              0.011626391671597958,
+              -0.6427655816078186
+            ],
+            "capacity_kg": 24.153782952576876,
+            "dry_center_of_mass": [
+              0.007060207662193818,
+              0.07246164081732112,
+              -0.008012384433758998
+            ],
+            "dry_mass_kg": 71.98719818145037,
+            "horizontal_rms_radius_m": 0.4096022713588477,
+            "kinetic_energy_j": 0.013706715014036593,
+            "mean_saturation": 0.0,
+            "particles": 703,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 3239.44921875,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.36202362179756165,
+            "strain_substeps": 1,
+            "wave_substeps": 22,
+            "young_modulus_for_load_pa": 32394.4921875
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 77,
+            "batch_end_ms": 17.963599999999996,
+            "density_ms": 0.1770000010728836,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 6.800400000000035,
+            "dispatch_calls": 2340,
+            "download_bytes": 1013636,
+            "download_call_ms": 0.1254,
+            "download_calls": 53,
+            "full_grid_cells": 49600,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 703,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              40,
+              31,
+              40
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.09010000000000001,
+            "total_ms": 33.992401123046875,
+            "upload_bytes": 2932984,
+            "upload_call_ms": 2.975399999999999,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 7.0,
+          "granular": {
+            "bounds_max": [
+              0.7545322775840759,
+              0.22442758083343506,
+              0.7423689365386963
+            ],
+            "bounds_min": [
+              -0.7272064089775085,
+              0.011257462203502655,
+              -0.6709864139556885
+            ],
+            "capacity_kg": 24.153782952576876,
+            "dry_center_of_mass": [
+              0.006478257681093091,
+              0.07179597373998818,
+              -0.008445260640575557
+            ],
+            "dry_mass_kg": 71.98719818145037,
+            "horizontal_rms_radius_m": 0.420170158424112,
+            "kinetic_energy_j": 0.012918722796221374,
+            "mean_saturation": 0.0,
+            "particles": 703,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 3344.5380859375,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.3728453516960144,
+            "strain_substeps": 1,
+            "wave_substeps": 22,
+            "young_modulus_for_load_pa": 33445.3828125
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 77,
+            "batch_end_ms": 18.791099999999997,
+            "density_ms": 0.17970000207424164,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 6.95980000000004,
+            "dispatch_calls": 2340,
+            "download_bytes": 1013636,
+            "download_call_ms": 0.13460000000000005,
+            "download_calls": 53,
+            "full_grid_cells": 49600,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 703,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              40,
+              31,
+              40
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.2437,
+            "total_ms": 35.44670104980469,
+            "upload_bytes": 2932984,
+            "upload_call_ms": 3.066800000000001,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 8.0,
+          "granular": {
+            "bounds_max": [
+              0.777633011341095,
+              0.22785121202468872,
+              0.7530940175056458
+            ],
+            "bounds_min": [
+              -0.7350108623504639,
+              0.010997257195413113,
+              -0.7022327184677124
+            ],
+            "capacity_kg": 24.153782952576876,
+            "dry_center_of_mass": [
+              0.005689868408078587,
+              0.07053797477048158,
+              -0.009258150893255563
+            ],
+            "dry_mass_kg": 71.98719818145037,
+            "horizontal_rms_radius_m": 0.4294563546502996,
+            "kinetic_energy_j": 0.011582165220835057,
+            "mean_saturation": 0.0,
+            "particles": 703,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 3402.783935546875,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.3537977933883667,
+            "strain_substeps": 1,
+            "wave_substeps": 22,
+            "young_modulus_for_load_pa": 34027.83984375
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 77,
+            "batch_end_ms": 17.801700000000004,
+            "density_ms": 0.17790000140666962,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 6.589400000000116,
+            "dispatch_calls": 2340,
+            "download_bytes": 1013636,
+            "download_call_ms": 0.13210000000000005,
+            "download_calls": 53,
+            "full_grid_cells": 49600,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 703,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              40,
+              31,
+              40
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.10020000000000001,
+            "total_ms": 33.29690170288086,
+            "upload_bytes": 2932984,
+            "upload_call_ms": 2.807400000000001,
+            "upload_calls": 61
+          }
+        }
+      ],
+      "settling": {
+        "com_y_range_m": 0.0019236660468395367,
+        "rms_relative_range": 0.04623073585118747,
+        "max_specific_energy_j_kg": 0.00019040489643016185,
+        "passed": false
+      }
+    },
+    {
+      "name": "load_double",
+      "voxel_m": 0.1,
+      "dt_s": 0.016666666666666666,
+      "load_multiplier": 2,
+      "expected_count": 720,
+      "samples": [
+        {
+          "seconds": 1.0,
+          "granular": {
+            "bounds_max": [
+              0.4767643213272095,
+              0.22571322321891785,
+              0.48273247480392456
+            ],
+            "bounds_min": [
+              -0.4942430257797241,
+              0.014605658128857613,
+              -0.4370199739933014
+            ],
+            "capacity_kg": 48.3161598443985,
+            "dry_center_of_mass": [
+              0.002833205376546429,
+              0.09453810154874304,
+              -0.007511542259049345
+            ],
+            "dry_mass_kg": 144.0000021457672,
+            "horizontal_rms_radius_m": 0.3053997698676491,
+            "kinetic_energy_j": 0.3766983084190434,
+            "mean_saturation": 0.0,
+            "particles": 720,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 3338.45947265625,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.8397918939590454,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 33384.59375
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 11.144599999999999,
+            "density_ms": 0.14350000023841858,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 6.046200000000009,
+            "dispatch_calls": 1810,
+            "download_bytes": 611788,
+            "download_call_ms": 0.15480000000000005,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 720,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.11570000000000001,
+            "total_ms": 26.36829948425293,
+            "upload_bytes": 1633816,
+            "upload_call_ms": 2.9387,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 2.0,
+          "granular": {
+            "bounds_max": [
+              0.5436475276947021,
+              0.20043663680553436,
+              0.553388237953186
+            ],
+            "bounds_min": [
+              -0.5683702826499939,
+              0.015117248520255089,
+              -0.5053892135620117
+            ],
+            "capacity_kg": 48.3161598443985,
+            "dry_center_of_mass": [
+              0.003197558555125901,
+              0.0816374698524467,
+              -0.007620840793404365
+            ],
+            "dry_mass_kg": 144.0000021457672,
+            "horizontal_rms_radius_m": 0.34256397572046277,
+            "kinetic_energy_j": 0.03718943928326135,
+            "mean_saturation": 0.0,
+            "particles": 720,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2909.634521484375,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.5281065702438354,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 29096.345703125
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 13.073800000000002,
+            "density_ms": 0.2126999944448471,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 5.991900000000003,
+            "dispatch_calls": 1810,
+            "download_bytes": 611788,
+            "download_call_ms": 0.24100000000000013,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 720,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.4074,
+            "total_ms": 31.052900314331055,
+            "upload_bytes": 1633816,
+            "upload_call_ms": 3.9286999999999996,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 3.0,
+          "granular": {
+            "bounds_max": [
+              0.585985004901886,
+              0.20100049674510956,
+              0.5912562608718872
+            ],
+            "bounds_min": [
+              -0.6092272996902466,
+              0.016276441514492035,
+              -0.5449204444885254
+            ],
+            "capacity_kg": 48.3161598443985,
+            "dry_center_of_mass": [
+              0.004295943484612507,
+              0.08028288221555864,
+              -0.00806384010247712
+            ],
+            "dry_mass_kg": 144.0000021457672,
+            "horizontal_rms_radius_m": 0.3623110074011594,
+            "kinetic_energy_j": 0.03824704425226006,
+            "mean_saturation": 0.0,
+            "particles": 720,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2898.643310546875,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.5175725817680359,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 28986.43359375
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 7.6372,
+            "density_ms": 0.11649999767541885,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 3.283199999999989,
+            "dispatch_calls": 1810,
+            "download_bytes": 611788,
+            "download_call_ms": 0.12050000000000005,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 720,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.22609999999999997,
+            "total_ms": 18.65290069580078,
+            "upload_bytes": 1633816,
+            "upload_call_ms": 2.5879000000000008,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 4.0,
+          "granular": {
+            "bounds_max": [
+              0.6247430443763733,
+              0.20576225221157074,
+              0.6274896264076233
+            ],
+            "bounds_min": [
+              -0.6488760113716125,
+              0.017676440998911858,
+              -0.582004964351654
+            ],
+            "capacity_kg": 48.3161598443985,
+            "dry_center_of_mass": [
+              0.005259400891615465,
+              0.08016606593866726,
+              -0.008684377714719933
+            ],
+            "dry_mass_kg": 144.0000021457672,
+            "horizontal_rms_radius_m": 0.3806795816429006,
+            "kinetic_energy_j": 0.04076616163143605,
+            "mean_saturation": 0.0,
+            "particles": 720,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 2951.208740234375,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.5051970481872559,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 29512.087890625
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 72.07320000000003,
+            "density_ms": 0.23229999840259552,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 4.477500000000004,
+            "dispatch_calls": 1810,
+            "download_bytes": 611788,
+            "download_call_ms": 0.17070000000000002,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 720,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 2.4685000000000006,
+            "total_ms": 92.04679870605469,
+            "upload_bytes": 1633816,
+            "upload_call_ms": 7.219200000000001,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 5.0,
+          "granular": {
+            "bounds_max": [
+              0.6618525385856628,
+              0.21116600930690765,
+              0.6726125478744507
+            ],
+            "bounds_min": [
+              -0.685242235660553,
+              0.018664419651031494,
+              -0.6147223114967346
+            ],
+            "capacity_kg": 48.3161598443985,
+            "dry_center_of_mass": [
+              0.0060055919150828335,
+              0.0804947651948573,
+              -0.009218560322753734
+            ],
+            "dry_mass_kg": 144.0000021457672,
+            "horizontal_rms_radius_m": 0.39806123254832776,
+            "kinetic_energy_j": 0.04360863167983461,
+            "mean_saturation": 0.0,
+            "particles": 720,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 3020.393310546875,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.4881405830383301,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 30203.93359375
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 7.785799999999998,
+            "density_ms": 0.13259999454021454,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 5.523700000000027,
+            "dispatch_calls": 1810,
+            "download_bytes": 611788,
+            "download_call_ms": 0.12930000000000003,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 720,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.09290000000000001,
+            "total_ms": 22.23819923400879,
+            "upload_bytes": 1633816,
+            "upload_call_ms": 3.010800000000001,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 6.0,
+          "granular": {
+            "bounds_max": [
+              0.7071017026901245,
+              0.21653464436531067,
+              0.7203807234764099
+            ],
+            "bounds_min": [
+              -0.7196260094642639,
+              0.018828539177775383,
+              -0.6475250720977783
+            ],
+            "capacity_kg": 48.3161598443985,
+            "dry_center_of_mass": [
+              0.006882390306176007,
+              0.08067146274261176,
+              -0.009573682839012089
+            ],
+            "dry_mass_kg": 144.0000021457672,
+            "horizontal_rms_radius_m": 0.4151062410814295,
+            "kinetic_energy_j": 0.04399867647028131,
+            "mean_saturation": 0.0,
+            "particles": 720,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 3101.98681640625,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.460014671087265,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 31019.8671875
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 9.226799999999997,
+            "density_ms": 0.15150000154972076,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 4.941000000000034,
+            "dispatch_calls": 1810,
+            "download_bytes": 611788,
+            "download_call_ms": 0.12160000000000007,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 720,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.0926,
+            "total_ms": 22.283599853515625,
+            "upload_bytes": 1633816,
+            "upload_call_ms": 2.6487000000000007,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 7.0,
+          "granular": {
+            "bounds_max": [
+              0.7401850819587708,
+              0.22266122698783875,
+              0.7660667300224304
+            ],
+            "bounds_min": [
+              -0.7511166334152222,
+              0.018776120617985725,
+              -0.6794447898864746
+            ],
+            "capacity_kg": 48.3161598443985,
+            "dry_center_of_mass": [
+              0.0070400167125626405,
+              0.08094656397071139,
+              -0.009721434769906204
+            ],
+            "dry_mass_kg": 144.0000021457672,
+            "horizontal_rms_radius_m": 0.4306244332444594,
+            "kinetic_energy_j": 0.04404735818647378,
+            "mean_saturation": 0.0,
+            "particles": 720,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 3198.322021484375,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.419423907995224,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 31983.220703125
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 7.597599999999998,
+            "density_ms": 0.1598999947309494,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 5.5932000000000315,
+            "dispatch_calls": 1810,
+            "download_bytes": 611788,
+            "download_call_ms": 0.15139999999999998,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 720,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.0893,
+            "total_ms": 22.613500595092773,
+            "upload_bytes": 1633816,
+            "upload_call_ms": 2.7710000000000004,
+            "upload_calls": 61
+          }
+        },
+        {
+          "seconds": 8.0,
+          "granular": {
+            "bounds_max": [
+              0.7716935873031616,
+              0.2299407720565796,
+              0.8057528734207153
+            ],
+            "bounds_min": [
+              -0.7797420620918274,
+              0.018418705090880394,
+              -0.7101385593414307
+            ],
+            "capacity_kg": 48.3161598443985,
+            "dry_center_of_mass": [
+              0.0063388904118457726,
+              0.08117768173364717,
+              -0.01047808559200753
+            ],
+            "dry_mass_kg": 144.0000021457672,
+            "horizontal_rms_radius_m": 0.4438735304545017,
+            "kinetic_energy_j": 0.04387059433139706,
+            "mean_saturation": 0.0,
+            "particles": 720,
+            "pore_water_kg": 0.0
+          },
+          "mechanics": {
+            "contact_pressure_measured": false,
+            "load_proxy": "granular_extent_rho_g_h",
+            "measured": true,
+            "overburden_estimate_pa": 3317.6494140625,
+            "stiffness_below_estimated_load": false,
+            "strain_rate_per_s": 0.4167062044143677,
+            "strain_substeps": 1,
+            "wave_substeps": 17,
+            "young_modulus_for_load_pa": 33176.4921875
+          },
+          "step_stats": {
+            "advect_ms": 0.0,
+            "batch_end_calls": 62,
+            "batch_end_ms": 7.433599999999998,
+            "density_ms": 0.1362999975681305,
+            "density_on_gpu": true,
+            "dispatch_call_ms": 5.87740000000001,
+            "dispatch_calls": 1810,
+            "download_bytes": 611788,
+            "download_call_ms": 0.12200000000000001,
+            "download_calls": 48,
+            "full_grid_cells": 24576,
+            "g2p_ms": 0.0,
+            "g2p_on_gpu": true,
+            "gpu_status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+            "measured": true,
+            "normalize_window_cells": 0,
+            "normalize_window_used": false,
+            "occupancy_on_gpu": false,
+            "ok": true,
+            "p2g_ms": 0.0,
+            "p2g_on_gpu": true,
+            "particle_count": 720,
+            "pressure_ms": 0.0,
+            "pressure_on_gpu": true,
+            "pressure_window_cells": 0,
+            "pressure_window_used": false,
+            "resolution": [
+              32,
+              24,
+              32
+            ],
+            "synchronize_calls": 3,
+            "synchronize_ms": 0.07790000000000001,
+            "total_ms": 21.392200469970703,
+            "upload_bytes": 1633816,
+            "upload_call_ms": 2.402,
+            "upload_calls": 61
+          }
+        }
+      ],
+      "settling": {
+        "com_y_range_m": 0.0005062189910354092,
+        "rms_relative_range": 0.0648096527486468,
+        "max_specific_energy_j_kg": 0.0003058844272924792,
+        "passed": false
+      }
+    }
+  ],
+  "settling_thresholds": {
+    "last_two_seconds_com_y_delta_m": 0.001,
+    "last_two_seconds_rms_relative_delta": 0.01,
+    "maximum_sampled_specific_kinetic_energy_j_kg": 0.001
+  },
+  "convergence_thresholds": {
+    "com_y_relative_delta": 0.05,
+    "rms_relative_delta": 0.05,
+    "dry_mass_relative_delta": 0.001
+  },
+  "original": {
+    "control": {
+      "driver": "none",
+      "dropped_seeds": [],
+      "epoch": 0,
+      "frame": 250,
+      "playing": false,
+      "script_driving": false,
+      "script_sim_seconds": 0.0
+    },
+    "domains": [
+      {
+        "active_density_cells": 0,
+        "anisotropy_enabled": false,
+        "anisotropy_max_stretch": 4.0,
+        "anisotropy_neighbor_min": 6,
+        "anisotropy_radius_voxels": 2.5,
+        "backend": "vulkan",
+        "boundary": "closed",
+        "coord_space": "material",
+        "domain_max": [
+          2.5,
+          2.5,
+          2.5
+        ],
+        "domain_min": [
+          -2.5,
+          -2.5,
+          -2.5
+        ],
+        "elastic_model_particles": 0,
+        "enabled": true,
+        "fluid_model_particles": 0,
+        "fog_spread_voxels": 1.5,
+        "gas_phase_active_cells": 0,
+        "gas_phase_energy_j": 0.0,
+        "gas_phase_mass_centroid": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "gas_phase_mass_kg": 0.0,
+        "grain_size_variation": 0.75,
+        "granular_cohesion": 0.0,
+        "granular_compaction_capped": 0,
+        "granular_damage_over_10": 0,
+        "granular_damage_over_50": 0,
+        "granular_damage_over_90": 0,
+        "granular_damage_rate": 8.0,
+        "granular_damaged": 0,
+        "granular_detached": 0,
+        "granular_dilatancy": 5.0,
+        "granular_effective_young_modulus": 200000.0,
+        "granular_enabled": true,
+        "granular_fracture_strain": 0.019999999552965164,
+        "granular_friction_angle": 35.0,
+        "granular_hardening": 0.0,
+        "granular_healing_rate": 0.0,
+        "granular_invalid": 0,
+        "granular_max_accumulated_plastic": 0.0,
+        "granular_max_damage": 0.0,
+        "granular_max_fracture_history": 0.0,
+        "granular_max_plastic": 0.0,
+        "granular_max_solver_substeps": 32,
+        "granular_max_yield": 0.0,
+        "granular_mean_accumulated_plastic": 0.0,
+        "granular_mean_damage": 0.0,
+        "granular_mean_fracture_history": 0.0,
+        "granular_min_softening": 1.0,
+        "granular_model_particles": 10323,
+        "granular_overburden_pressure": 78097.875,
+        "granular_physical_carriers": false,
+        "granular_poisson_ratio": 0.25,
+        "granular_rebonding": false,
+        "granular_requested_young_modulus": 200000.0,
+        "granular_required_substeps": 14,
+        "granular_residual_strength": 0.05000000074505806,
+        "granular_sleeping": 0,
+        "granular_softened": 0,
+        "granular_softening_range": 40.0,
+        "granular_softening_temperature": 0.0,
+        "granular_solver_substeps": 14,
+        "granular_stiffness_below_load": true,
+        "granular_stiffness_capped": false,
+        "granular_strain_limited": 0,
+        "granular_strain_rate": 10.124336242675781,
+        "granular_strain_substeps": 3,
+        "granular_tack_peak": 1.0,
+        "granular_tensile_cutoff": 0.0,
+        "granular_thermal_conductivity": 0.0,
+        "granular_wave_substeps": 14,
+        "granular_yielded": 0,
+        "granular_young_modulus": 200000.0,
+        "granular_young_modulus_for_load": 780978.75,
+        "hidden_particles": 0,
+        "id": 0,
+        "interior_fluid_cells": 0,
+        "kernel_radius_voxels": 2.0,
+        "kinematic_viscosity": 0.0,
+        "label_routes": {
+          "body": "follow",
+          "bubble": "splat",
+          "foam": "splat",
+          "frozen": "follow",
+          "mist": "fog",
+          "spray": "follow",
+          "unknown": "follow"
+        },
+        "live_state": true,
+        "max_density": 0.0,
+        "max_particles": 100000,
+        "name": "Physics Domain 1",
+        "narrow_band_voxels": 3.0,
+        "particle_count": 10323,
+        "particle_kelvin_measured": true,
+        "particle_labels": {
+          "available": true,
+          "classifier": "mass+neighborhood_v2",
+          "detach_max_neighbors": 2,
+          "last_step": {
+            "bin_milliseconds": 0.0,
+            "center_resolved": 2765,
+            "changed": 58,
+            "classify_milliseconds": 0.3064,
+            "milliseconds": 0.3064,
+            "occupied_bins": 2679,
+            "on_gpu": true,
+            "particles": 10323
+          },
+          "mist_generation": true,
+          "mist_mass_fraction_max": 0.15000000596046448,
+          "primary": {
+            "body": 10078,
+            "bubble": 0,
+            "foam": 0,
+            "frozen": 0,
+            "mist": 0,
+            "spray": 245,
+            "unknown": 0
+          },
+          "primary_complete": true,
+          "primary_particles": 10323,
+          "radius_voxels": 1.5,
+          "rejoin_min_neighbors": 6,
+          "render_routing": "substance+label",
+          "secondary": {
+            "body": 0,
+            "bubble": 0,
+            "foam": 0,
+            "frozen": 0,
+            "mist": 0,
+            "spray": 0,
+            "unknown": 0
+          },
+          "secondary_affects_mass": false,
+          "secondary_particles": 0
+        },
+        "particle_max_kelvin": 293.0,
+        "particle_min_kelvin": 293.0,
+        "particle_radius_voxels": 0.550000011920929,
+        "phases": [
+          "gas",
+          "granular"
+        ],
+        "pore_amount": 0.0,
+        "pore_detail": 0.5,
+        "pore_scale": 0.05000000074505806,
+        "position_smoothing": 0.8999999761581421,
+        "preset": "sand",
+        "primary_visual_children": 5,
+        "render_mode": "particles",
+        "reseed_added_particles": 0,
+        "reseed_removed_particles": 0,
+        "sealed_pocket_cells": 0,
+        "sealed_pockets": 0,
+        "sealed_pockets_measured": false,
+        "smoothing_iterations": 2,
+        "solid_phase": true,
+        "solid_phase_cells": 0,
+        "solid_phase_fill": 0.25,
+        "solid_phase_particles": 0,
+        "splat_geometry": "icosphere",
+        "splat_geometry_source": "",
+        "splat_material": "Sand Material",
+        "splat_radius_factor": 0.1899999976158142,
+        "splat_size_multiplier": 1.1100000143051147,
+        "splat_subdivisions": 0,
+        "splat_triangles": 0,
+        "substance_materials": [
+          {
+            "constitutive_model": "auto",
+            "effective_representation": "splat",
+            "kinematic_viscosity": -1.0,
+            "material": "Sand Material",
+            "material_id": 4,
+            "miscibility": 1.0,
+            "phase": "liquid",
+            "representation": "splat",
+            "substance": "Sand"
+          },
+          {
+            "constitutive_model": "auto",
+            "effective_representation": "splat",
+            "kinematic_viscosity": -1.0,
+            "material": "Water Material",
+            "material_id": 5,
+            "miscibility": 1.0,
+            "phase": "liquid",
+            "representation": "splat",
+            "substance": "Water"
+          },
+          {
+            "constitutive_model": "auto",
+            "effective_representation": "splat",
+            "kinematic_viscosity": -1.0,
+            "material": "Sand Material",
+            "material_id": 4,
+            "miscibility": 1.0,
+            "phase": "liquid",
+            "representation": "splat",
+            "substance": "Gravel"
+          }
+        ],
+        "substances": [
+          {
+            "name": "Sand",
+            "particles": 10323,
+            "tag": 1044434307
+          }
+        ],
+        "surface_active_cells": 0,
+        "surface_build_ms": 0.0,
+        "surface_grid_dim": [
+          0,
+          0,
+          0
+        ],
+        "surface_material": "",
+        "surface_measured": false,
+        "surface_offset_voxels": 0.6499999761581421,
+        "surface_resolution_multiplier": 1,
+        "surface_voxel": 0.0,
+        "thermal_air_cooled_particles": 0,
+        "thermal_air_cooling_rate": 0.15000000596046448,
+        "thermal_ambient_kelvin": 293.0,
+        "thermal_cold_unsupported": 0,
+        "thermal_cold_viscosity": 0.05000000074505806,
+        "thermal_contact_cooled_particles": 0,
+        "thermal_contact_cooling_rate": 2.0,
+        "thermal_freeze_kelvin": 330.0,
+        "thermal_froze_this_frame": 0,
+        "thermal_frozen_particles": 0,
+        "thermal_liquid_enabled": false,
+        "thermal_max_kelvin": 0.0,
+        "thermal_max_viscosity": 0.0,
+        "thermal_mean_kelvin": 0.0,
+        "thermal_measured": false,
+        "thermal_melted_this_frame": 0,
+        "thermal_min_kelvin": 0.0,
+        "thermal_min_viscosity": 0.0,
+        "thermal_viscosity_field": false,
+        "thermal_viscosity_range": 25.0,
+        "type": "matter",
+        "unresolved_model_particles": 0,
+        "uvw_available": true,
+        "uvw_dim": [
+          50,
+          50,
+          50
+        ],
+        "uvw_drift": 2.247713565826416,
+        "uvw_origin": [
+          -2.5,
+          -2.5,
+          -2.5
+        ],
+        "uvw_particles": 10323,
+        "uvw_refresh_period": 240,
+        "uvw_voxel": 0.10000000149011612,
+        "views": [
+          {
+            "labels": [
+              "body",
+              "spray"
+            ],
+            "live": true,
+            "particles": 10323,
+            "substances": [
+              "Sand",
+              "Water",
+              "Gravel"
+            ],
+            "untagged": true,
+            "vdb_id": -1,
+            "view": "splat",
+            "whitewater": 0
+          },
+          {
+            "labels": [],
+            "live": false,
+            "particles": 0,
+            "substances": [],
+            "untagged": false,
+            "vdb_id": -1,
+            "view": "fog",
+            "whitewater": 0
+          }
+        ],
+        "views_measured": true,
+        "virtual_grain_budget": 20000000,
+        "virtual_grain_count": 51615,
+        "virtual_grain_rt_estimated_bytes": 5780880,
+        "virtual_grains_effective": 5,
+        "virtual_grains_requested": 5,
+        "viscosity_sweeps": 1,
+        "viscosity_wall_slip": 0.0,
+        "visible": true,
+        "voxel_size": 0.10000000149011612,
+        "whitewater_visual_children": 1
+      }
+    ],
+    "sources": [
+      {
+        "density": 1.0,
+        "domain": "Physics Domain 1",
+        "enabled": false,
+        "end_time": 5.0,
+        "falloff": 1.0,
+        "fluid_emit_along_normal": false,
+        "fluid_particles_per_second": 1000.0,
+        "fluid_substance": "Water",
+        "fluid_temperature_kelvin": 353.0,
+        "fluid_temperature_override": false,
+        "fluid_velocity_spread": 0.15000000596046448,
+        "fuel": 0.0,
+        "inherit_velocity": 1.0,
+        "initial_constitutive_model": "auto",
+        "max_emitted_particles": 100000,
+        "name": "Point Flow Source",
+        "parent_object": "",
+        "particle_pool_weight": 1.0,
+        "phase": "liquid",
+        "pool_granted_particles": 0,
+        "pool_requested_particles": 0,
+        "position": [
+          0.0,
+          1.7999999523162842,
+          -1.25
+        ],
+        "radius": 0.3499999940395355,
+        "source_mode": "point",
+        "source_object": "",
+        "start_time": 0.0,
+        "temperature": 0.0,
+        "use_particle_limit": false,
+        "use_time_limit": false,
+        "velocity": [
+          0.0,
+          -1.850000023841858,
+          1.5499999523162842
+        ],
+        "velocity_coupling": 8.0,
+        "velocity_space": "local"
+      },
+      {
+        "density": 1.0,
+        "domain": "Physics Domain 1",
+        "enabled": true,
+        "end_time": 5.0,
+        "falloff": 1.0,
+        "fluid_emit_along_normal": false,
+        "fluid_particles_per_second": 1000.0,
+        "fluid_substance": "Sand",
+        "fluid_temperature_kelvin": 353.0,
+        "fluid_temperature_override": false,
+        "fluid_velocity_spread": 0.15000000596046448,
+        "fuel": 0.0,
+        "inherit_velocity": 1.0,
+        "initial_constitutive_model": "granular",
+        "max_emitted_particles": 100000,
+        "name": "Point Flow Source 2",
+        "parent_object": "",
+        "particle_pool_weight": 1.0,
+        "phase": "liquid",
+        "pool_granted_particles": 41,
+        "pool_requested_particles": 41,
+        "position": [
+          0.0,
+          2.200000047683716,
+          0.0
+        ],
+        "radius": 0.3499999940395355,
+        "source_mode": "point",
+        "source_object": "",
+        "start_time": 0.0,
+        "temperature": 0.0,
+        "use_particle_limit": false,
+        "use_time_limit": false,
+        "velocity": [
+          0.0,
+          -1.850000023841858,
+          0.0
+        ],
+        "velocity_coupling": 8.0,
+        "velocity_space": "local"
+      }
+    ],
+    "colliders": [
+      {
+        "bounds_max": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "bounds_min": [
+          -1.0,
+          -1.0,
+          -1.0
+        ],
+        "capsule_end": [
+          0.0,
+          2.0,
+          0.0
+        ],
+        "capsule_radius": 0.5,
+        "capsule_start": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "enabled": true,
+        "fluid_collision_enabled": true,
+        "friction": 0.15000000596046448,
+        "gas_density_rate": 0.0,
+        "gas_flame_rate": 0.0,
+        "gas_fuel_rate": 0.0,
+        "gas_ignite_on_contact": false,
+        "gas_interaction_enabled": false,
+        "gas_temperature_rate": 0.0,
+        "msf_auto_transfer": false,
+        "msf_burn_rate_scale": 1.0,
+        "msf_fuel_capacity_scale": 1.0,
+        "msf_generate_char_mask": true,
+        "msf_ignition_kelvin": 573.0,
+        "msf_mask_resolution": 128,
+        "msf_melt_flow_enabled": true,
+        "msf_melt_height_loss": 0.8500000238418579,
+        "msf_melt_sdf_change_threshold": 0.02500000037252903,
+        "msf_melt_sdf_refresh": false,
+        "msf_melt_sdf_revision_interval": 4,
+        "msf_melt_spread": 1.5,
+        "msf_override_ignition": false,
+        "msf_substance": "Wood (Oak)",
+        "msf_transfer_domain": "",
+        "msf_transfer_max_batch_particles": 256,
+        "msf_transfer_min_mass_kg": 0.009999999776482582,
+        "msf_transfer_particles_per_kg": 2048.0,
+        "msf_transfer_rate_kg_s": 0.10000000149011612,
+        "msf_transfer_velocity": [
+          0.0,
+          -0.10000000149011612,
+          0.0
+        ],
+        "name": "Default_Cube Collider",
+        "plane_y": 0.0,
+        "restitution": 0.25,
+        "sdf_ready": false,
+        "sdf_resolution": 0,
+        "sdf_resolution_mode": 1,
+        "source_mode": "obb",
+        "source_object": "Default_Cube",
+        "sphere_center": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "sphere_radius": 1.0,
+        "thickness": 0.019999999552965164
+      }
+    ]
+  },
+  "comparisons": [
+    {
+      "name": "dt_half",
+      "relative_differences": {
+        "dry_mass_kg": 0.0,
+        "horizontal_rms_radius_m": 0.266731875624103,
+        "com_y": 0.18358426175762887
+      },
+      "within_shape_threshold": false,
+      "settled_on_both_sides": false
+    },
+    {
+      "name": "grid_finer",
+      "relative_differences": {
+        "dry_mass_kg": 0.00017781793392306996,
+        "horizontal_rms_radius_m": 0.0020799020022766964,
+        "com_y": 0.058869275780331055
+      },
+      "within_shape_threshold": false,
+      "settled_on_both_sides": false
+    }
+  ],
+  "measurement_completed": true,
+  "g2_complete": false,
+  "restored_authoring": true,
+  "final_control": {
+    "driver": "none",
+    "dropped_seeds": [],
+    "epoch": 0,
+    "frame": 0,
+    "playing": false,
+    "script_driving": false,
+    "script_sim_seconds": 0.0
+  },
+  "binary_phase": "substep_product_fix_built; time_scaled_granular_damping_not_built",
+  "source_fix_verified_live": false,
+  "original_scene_note": "Water disabled, zero Fluid particles; Sand preset E200 kPa, friction35deg. Matrix independently uses E2 MPa, no dilatancy; original controls restored."
+}

@@ -172,3 +172,112 @@ Ana açık Matter domaini sıfır liquid parçacığı bildirdi; ana sahnede sı
 taşıma/splat görsel kabulü yapılmış sayılmaz. Taşıma kozmetiği ertelenmiştir.
 Liquid Display panel sırası kullanıcı tarafından bildirildi; bu kontrolde
 mevcut bloğun taşındığı bir diff görülmedi, eski panel yapısı yönü korunacak.
+
+## Checkpoint sonrası manuel taşıma bulgusu — 2026-10-04
+
+Kullanıcı `da93cec` checkpoint sonrasında Matter/su domainini manuel taşıdı.
+Taşınan içerik eski domain sınırının dışına çıktığında tamamen çizilmez oluyor;
+yeni konumda simülasyon oynatılınca yeniden doğru konumda çiziliyor. Bu bulgu,
+önceki yalnız splat materyalinin geride kalması belirtisinden daha geniştir.
+Geri alımın render yayınlama/geçersizleştirme tarafını gereğinden fazla geriye
+götürmüş olabileceği kullanıcı tarafından bildirildi; kök neden doğrulanmadı.
+
+Son taşıma/kozmetik turunda simülasyon duraklatılmışken eski domain sınırını
+aşan öteleme, SDF/splat/fog görünürlüğü, render bounds ve cache scrub birlikte
+kontrol edilmeli. Kabul: yeni konumda simülasyon adımı gerektirmeden içeriğin
+görünmesi; cache tekrarlarında konumun sürüklenmemesi. Şimdilik yalnız kayıt
+eklendi, davranış değiştirilmedi.
+
+## Matter gaz görünümü / RT regresyon adayı — 2026-10-04
+
+Kullanıcı karma yakıt presetinde RayFusion/Solid görünümünün doğru, RT gaz
+görünümünün eksik olduğunu bildirdi. Açık sahnede IPC domain adı
+`Ignited Fuel Jet Matter #1` idi. Gaz kütlesi 2.48 kg, gaz-faz aktif hücreleri
+58036; plume sorgusunda sıcaklık ve dolu gaz hücreleri mevcut. Dolayısıyla
+gaz üretiminin hiç çalışmaması bu bulguyu açıklamıyor.
+
+Kaynak incelemesinde Matter gazı ayrı `syncDomainFogVolume` yolunda host
+`grid.density/temperature` üzerinden NanoVDB'ye yayınlanıyor ve dense GPU
+bağlaması temizleniyor. Eski Gas ana slotu ise GPU field view ve gerektiğinde
+host mirror kullanıyor. Bu iki yolun Vulkan GPU residency ve RT hacim
+yayınlaması açısından eşdeğerliği doğrulanmalı. Kesin kök neden ve görsel
+düzeltme henüz doğrulanmadı; plan tamamlanınca kendiliğinden düzelecek kabul
+edilmemeli. RT gas slot/bounds/mask ve density/temperature aktarımı için
+ayrı regresyon kabulü gerekir. Sahne sıfırlanmadı, kaynak kod değiştirilmedi.
+
+### Karşı örnekler ve daraltılmış kapsam
+
+Kullanıcı tekil Nuclear Detonation presetinde RT gaz renderinin doğru olduğunu
+doğruladı. Ardından tek Matter domainine gaz ve sıvı emitter ekleyerek RT'de
+önce alevin göründüğünü, üzerine su dökülünce söndüğünü bildirdi. Bu başarılı
+karşı örnek, genel Matter RT gaz yolunun bozuk olduğu yorumunu desteklemiyor.
+Önceki yakıt-preset bulgusu preset kurulumu, hacim yaşam döngüsü veya anlık
+render güncellemesi açısından araştırılmalı; kök neden hâlâ doğrulanmadı.
+
+Son açık sahnenin salt okunur IPC kaydı: `Physics Domain 1`, Matter,
+87552 liquid parçacığı, mevcut anda gas faz kütlesi ve aktif hücreleri sıfır,
+SDF/splat canlı, fog slot id 225 mevcut. Bu kayıt sönme sonrası anlık durumdur;
+alevin önceki görünümü ve suyla sönme kullanıcı tarafından doğrulanmıştır.
+Sahne ilerletilmedi veya sıfırlanmadı; render koduna düzeltme uygulanmadı.
+
+### İlk kare / RT slot probu ve dar düzeltme
+
+Kullanıcının onayıyla timeline 0, 1, 3, 6, 10, 15, 25, 40 kareleri gezildi;
+sonunda önceki 15. kareye dönüldü. 1–40 karelerinde viewport tarafında gas
+NanoVDB ve liquid SDF slotları mevcutken RT render tarafında yalnız SDF
+slotu bulundu. Kayıt: `matter_rt_slots_2026-10-04.json`. Bu, gaz simülasyonu
+eksikliğinden ziyade RT hacim slotu yaşam döngüsü sorununu doğruluyor.
+Mevcut açık emitter listesi önceki kullanıcı alev/su testini birebir yeniden
+tanımlamadığından bu prob sönme fiziğinin tekrar kabulü sayılmaz.
+
+Kaynakta gizli hacim yeniden görünür olduğunda yalnız gas SSBO dirty bayrağı
+ayarlanıyordu; RT TLAS oluşturma yolu görünmez hacimleri tamamen atlıyor.
+`syncDomainFogVolume` görünürlük dönüşüne geometry, Vulkan/OptiX ve CPU BVH
+rebuild istekleri eklendi. Bu dar düzeltme yalnız kaynakta mevcut; derlenmiş
+uygulamada sonucu henüz doğrulanmadı. Kabul: gazın boş→dolu geçişi, timeline
+0→ilk dolu kare ve RT yenilemesi sonrasında render.volume_slots içinde Matter
+Gas slotunun bulunması; RayFusion görünümüyle tutarlı kalması.
+
+### Son derleme: RT SDF+gas kabulü ve 20. kare renk farkı
+
+Kullanıcı son derlemede RT'nin gas ve SDF'yi birlikte çizdiğini doğruladı.
+Önceki suyla ateş söndürme gözlemini geri çekti; bu fiziksel davranış kabul
+edilmiş sayılmamalıdır.
+
+20. kare üç tekrar ziyarette koyu mavi; 18/19/21/22 açık-beyaz göründü.
+Surface materyal adı değişmedi, 87552 parçacık ve aynı 50³ SDF boyutu korundu.
+20'de yalnız SDF hacmi var; komşu karelerde ek gas NanoVDB slotu mevcut.
+Plume yoğunluk sorgusu 19'da 123, 20'de 0, 21'de 1 aktif hücre bildirdi;
+sıcaklık bu örneklerde sıfır. Bu nedenle fark tek seferlik görüntü yenilemesi
+değil, kareye bağlı gas/fog verisi ve katman farkıdır. Hangi fiziksel görünümün
+doğru olduğu henüz kesinleşmedi; koyu mavi kare SDF'nin fog olmadan görünümünü
+gösteriyor. Komşu karelerdeki fog etkisinin yoğunluk/bounds/cache ve gas-SDF
+birlikte render açısından incelenmesi gerekir. Eski 20. kareye dönüldü.
+
+### Kullanıcı izolasyonu: gas + SDF Liquid Body parametreleri
+
+Son kullanıcı testleri önceki fog/20. kare yorumunu daralttı: sorun yalnız
+20. kareye özgü değil, gas eklenmiş sahnelerde farklı karelerde de oluşuyor.
+Fog çıkışı kapatıldığında veya splat görünümüne geçildiğinde de bildirilen
+fark sürdü. Liquid Body UI değerleri bazı karelerde SDF görünümünü etkilerken
+diğer karelerde etkisiz kalıyor. Dolayısıyla fog slotunun kaybolması tek başına
+kök neden veya doğru görünüm ölçütü olarak kabul edilmemeli.
+
+Hipotez: gas ve liquid SDF birlikte render edilirken SDF materyal bağlaması,
+yüzey derinliği, scattering veya absorption değerleri başka/default sabitlere
+düşüyor. Bu hipotez henüz kaynak veya canlı parametre ölçümüyle doğrulanmadı.
+Kullanıcı isteğiyle düzeltme son kalite testlerine ertelendi.
+
+Son kalite kabulü: aynı Liquid Body ayarlarıyla gas yok/var, gas dolu/boş,
+fog açık/kapalı, SDF/splat geçişi ve cache scrub karşılaştırılmalı. SDF için
+bağlanan materyal ve gerçek RT depth/scattering/absorption parametreleri
+izlenmeli; UI değişiklikleri gas bulunmasından ve kareden bağımsız etkili
+olmalı. Hangi mevcut karenin fiziksel olarak doğru olduğu kesinleşmedi.
+
+
+### İki emitter kimya ve splat materyali — 2026-10-04
+Kullanıcı aynı Matter alanında bir granular ve bir fluid emitter kurabiliyor;
+ancak domain ana davranışındaki kimya ikisine de uygulanıyor ve iki splat kaynak
+ayrı materyallerle sürülemiyor. Son kalite turunda iki farklı substance tag ile
+kimya çözümlemesi, domain fallback koşulları ve splat materyal bağlaması birlikte
+doğrulanacak. Emitter model ayrımı bu iki özelliğin tamamlandığı anlamına gelmez.

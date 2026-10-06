@@ -1,0 +1,497 @@
+[
+  {
+    "frame": 36,
+    "inventory": {
+      "deposited_mass_kg": 0.0,
+      "deposited_momentum_kg_m_s": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "domain": "C4_Mixed_GPU",
+      "identity_scope": "domain",
+      "measured": true,
+      "mixed_execution": {
+        "common_substeps": 26,
+        "contact_pairs": 4163,
+        "g2p_on_gpu": true,
+        "p2g_on_gpu": true,
+        "pressure_on_gpu": true,
+        "status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+        "step_held": false,
+        "working_set_bytes": 62066704
+      },
+      "mixed_transport_available": true,
+      "mixed_transport_ready": true,
+      "models": [
+        {
+          "mass_kg": 273.26719977774286,
+          "model": "fluid",
+          "momentum_kg_m_s": [
+            -139.67432040812596,
+            -511.3133891750338,
+            4.363948728456063
+          ],
+          "particles": 2193
+        },
+        {
+          "mass_kg": 300.03543578759127,
+          "model": "granular",
+          "momentum_kg_m_s": [
+            54.007756906202175,
+            -268.3429195812013,
+            2.143340907092769
+          ],
+          "particles": 2400
+        },
+        {
+          "mass_kg": 0.0,
+          "model": "elastic",
+          "momentum_kg_m_s": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "particles": 0
+        },
+        {
+          "mass_kg": 0.0,
+          "model": "unresolved",
+          "momentum_kg_m_s": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "particles": 0
+        }
+      ],
+      "next_particle_id": "4594",
+      "outside_mass_kg": 0.0,
+      "outside_particles": 0,
+      "overlapping_cells": 0,
+      "particle_id_bytes": 36744,
+      "particle_id_hash": "b7fa7fc8d1c2c4a0",
+      "pore_exchange": {
+        "absorbed_kg": 0.008257217719801702,
+        "capacity_kg": 111.07162535190582,
+        "drainage_births": 0,
+        "drainage_budget_blocked_carriers": 0,
+        "drained_kg": 0.0,
+        "held": false,
+        "mass_error_kg": -7.668859325349331e-09,
+        "maximum_saturation": 0.13405339419841766,
+        "measured": true,
+        "momentum_error_kg_m_s": 4.8021464823274235e-08,
+        "pore_water_kg": 0.03543578759126831,
+        "settings": {
+          "drainage_scale": 0.0,
+          "enabled": true,
+          "gravity_m_s2": 9.8100004196167,
+          "permeability_m2": 9.99999993922529e-09,
+          "porosity": 0.3499999940395355,
+          "viscosity_pa_s": 0.0010000000474974513
+        },
+        "status": "Vulkan C5 cell exchange",
+        "thermal_energy_error_j": -0.009418249130249023
+      },
+      "transfer_cells": 0,
+      "transfer_requested": false
+    }
+  },
+  {
+    "frame": 48,
+    "inventory": {
+      "deposited_mass_kg": 0.0,
+      "deposited_momentum_kg_m_s": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "domain": "C4_Mixed_GPU",
+      "identity_scope": "domain",
+      "measured": true,
+      "mixed_execution": {
+        "common_substeps": 26,
+        "contact_pairs": 5643,
+        "g2p_on_gpu": true,
+        "p2g_on_gpu": true,
+        "pressure_on_gpu": true,
+        "status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+        "step_held": false,
+        "working_set_bytes": 69206032
+      },
+      "mixed_transport_available": true,
+      "mixed_transport_ready": true,
+      "models": [
+        {
+          "mass_kg": 378.0656155547682,
+          "model": "fluid",
+          "momentum_kg_m_s": [
+            -158.34485939727796,
+            -558.6852382690817,
+            54.532200511528615
+          ],
+          "particles": 3036
+        },
+        {
+          "mass_kg": 412.79589898155245,
+          "model": "granular",
+          "momentum_kg_m_s": [
+            31.86899790976718,
+            -106.47506052134246,
+            -26.68222740892105
+          ],
+          "particles": 3300
+        },
+        {
+          "mass_kg": 0.0,
+          "model": "elastic",
+          "momentum_kg_m_s": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "particles": 0
+        },
+        {
+          "mass_kg": 0.0,
+          "model": "unresolved",
+          "momentum_kg_m_s": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "particles": 0
+        }
+      ],
+      "next_particle_id": "6337",
+      "outside_mass_kg": 0.0,
+      "outside_particles": 0,
+      "overlapping_cells": 0,
+      "particle_id_bytes": 50688,
+      "particle_id_hash": "c92d59ed5444665d",
+      "pore_exchange": {
+        "absorbed_kg": 0.043977352914225776,
+        "capacity_kg": 152.7234848588705,
+        "drainage_births": 0,
+        "drainage_budget_blocked_carriers": 0,
+        "drained_kg": 0.0,
+        "held": false,
+        "mass_error_kg": -1.6161357052624226e-07,
+        "maximum_saturation": 0.17187270522117615,
+        "measured": true,
+        "momentum_error_kg_m_s": 2.662774221339067e-07,
+        "pore_water_kg": 0.29589898155245464,
+        "settings": {
+          "drainage_scale": 0.0,
+          "enabled": true,
+          "gravity_m_s2": 9.8100004196167,
+          "permeability_m2": 9.99999993922529e-09,
+          "porosity": 0.3499999940395355,
+          "viscosity_pa_s": 0.0010000000474974513
+        },
+        "status": "Vulkan C5 cell exchange",
+        "thermal_energy_error_j": -0.19697439670562744
+      },
+      "transfer_cells": 0,
+      "transfer_requested": false
+    }
+  },
+  {
+    "frame": 60,
+    "inventory": {
+      "deposited_mass_kg": 0.0,
+      "deposited_momentum_kg_m_s": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "domain": "C4_Mixed_GPU",
+      "identity_scope": "domain",
+      "measured": true,
+      "mixed_execution": {
+        "common_substeps": 26,
+        "contact_pairs": 12905,
+        "g2p_on_gpu": true,
+        "p2g_on_gpu": true,
+        "pressure_on_gpu": true,
+        "status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+        "step_held": false,
+        "working_set_bytes": 76275728
+      },
+      "mixed_transport_available": true,
+      "mixed_transport_ready": true,
+      "models": [
+        {
+          "mass_kg": 477.99497900619406,
+          "model": "fluid",
+          "momentum_kg_m_s": [
+            -73.64989004948163,
+            -579.3066167925357,
+            111.03227320695805
+          ],
+          "particles": 3862
+        },
+        {
+          "mass_kg": 528.3067893474217,
+          "model": "granular",
+          "momentum_kg_m_s": [
+            7.997746772803209,
+            -358.3990739252962,
+            -14.360221136891631
+          ],
+          "particles": 4200
+        },
+        {
+          "mass_kg": 0.0,
+          "model": "elastic",
+          "momentum_kg_m_s": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "particles": 0
+        },
+        {
+          "mass_kg": 0.0,
+          "model": "unresolved",
+          "momentum_kg_m_s": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "particles": 0
+        }
+      ],
+      "next_particle_id": "8063",
+      "outside_mass_kg": 0.0,
+      "outside_particles": 0,
+      "overlapping_cells": 0,
+      "particle_id_bytes": 64496,
+      "particle_id_hash": "a5db02c7a4a46d7f",
+      "pore_exchange": {
+        "absorbed_kg": 0.42366157881315303,
+        "capacity_kg": 194.3753443658352,
+        "drainage_births": 0,
+        "drainage_budget_blocked_carriers": 0,
+        "drained_kg": 0.0,
+        "held": false,
+        "mass_error_kg": -7.215567165985703e-08,
+        "maximum_saturation": 0.32037487626075745,
+        "measured": true,
+        "momentum_error_kg_m_s": 4.630360708396018e-07,
+        "pore_water_kg": 3.306789347421727,
+        "settings": {
+          "drainage_scale": 0.0,
+          "enabled": true,
+          "gravity_m_s2": 9.8100004196167,
+          "permeability_m2": 9.99999993922529e-09,
+          "porosity": 0.3499999940395355,
+          "viscosity_pa_s": 0.0010000000474974513
+        },
+        "status": "Vulkan C5 cell exchange",
+        "thermal_energy_error_j": -0.07634711265563965
+      },
+      "transfer_cells": 0,
+      "transfer_requested": false
+    }
+  },
+  {
+    "frame": 64,
+    "inventory": {
+      "deposited_mass_kg": 0.0,
+      "deposited_momentum_kg_m_s": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "domain": "C4_Mixed_GPU",
+      "identity_scope": "domain",
+      "measured": true,
+      "mixed_execution": {
+        "common_substeps": 26,
+        "contact_pairs": 200,
+        "g2p_on_gpu": true,
+        "p2g_on_gpu": true,
+        "pressure_on_gpu": true,
+        "status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+        "step_held": false,
+        "working_set_bytes": 48009232
+      },
+      "mixed_transport_available": true,
+      "mixed_transport_ready": true,
+      "models": [
+        {
+          "mass_kg": 69.91462770849466,
+          "model": "fluid",
+          "momentum_kg_m_s": [
+            -66.82665625869234,
+            -412.929454755524,
+            9.407790011676163
+          ],
+          "particles": 561
+        },
+        {
+          "mass_kg": 75.0,
+          "model": "granular",
+          "momentum_kg_m_s": [
+            39.29669303447008,
+            -93.02397011220455,
+            -0.017232595203211076
+          ],
+          "particles": 600
+        },
+        {
+          "mass_kg": 0.0,
+          "model": "elastic",
+          "momentum_kg_m_s": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "particles": 0
+        },
+        {
+          "mass_kg": 0.0,
+          "model": "unresolved",
+          "momentum_kg_m_s": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "particles": 0
+        }
+      ],
+      "next_particle_id": "1162",
+      "outside_mass_kg": 0.0,
+      "outside_particles": 0,
+      "overlapping_cells": 0,
+      "particle_id_bytes": 9288,
+      "particle_id_hash": "85e568d189444fd4",
+      "pore_exchange": {
+        "absorbed_kg": 0.0,
+        "capacity_kg": 27.767906337976456,
+        "drainage_births": 0,
+        "drainage_budget_blocked_carriers": 0,
+        "drained_kg": 0.0,
+        "held": false,
+        "mass_error_kg": 0.0,
+        "maximum_saturation": 0.0,
+        "measured": true,
+        "momentum_error_kg_m_s": 0.0,
+        "pore_water_kg": 0.0,
+        "settings": {
+          "drainage_scale": 1.0,
+          "enabled": true,
+          "gravity_m_s2": 9.8100004196167,
+          "permeability_m2": 9.99999993922529e-09,
+          "porosity": 0.3499999940395355,
+          "viscosity_pa_s": 0.0010000000474974513
+        },
+        "status": "Vulkan C5 cell exchange",
+        "thermal_energy_error_j": 0.0
+      },
+      "transfer_cells": 0,
+      "transfer_requested": false
+    }
+  },
+  {
+    "frame": 68,
+    "inventory": {
+      "deposited_mass_kg": 0.0,
+      "deposited_momentum_kg_m_s": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "domain": "C4_Mixed_GPU",
+      "identity_scope": "domain",
+      "measured": true,
+      "mixed_execution": {
+        "common_substeps": 26,
+        "contact_pairs": 1768,
+        "g2p_on_gpu": true,
+        "p2g_on_gpu": true,
+        "pressure_on_gpu": true,
+        "status": "Mixed Vulkan: indexed transfer/contact/common substeps",
+        "step_held": false,
+        "working_set_bytes": 57966608
+      },
+      "mixed_transport_available": true,
+      "mixed_transport_ready": true,
+      "models": [
+        {
+          "mass_kg": 203.50113365894475,
+          "model": "fluid",
+          "momentum_kg_m_s": [
+            -143.97589524858998,
+            -506.55061003603663,
+            2.285171555827241
+          ],
+          "particles": 1858
+        },
+        {
+          "mass_kg": 225.01149922460064,
+          "model": "granular",
+          "momentum_kg_m_s": [
+            63.351075421849785,
+            -443.04574440467184,
+            -0.9316213354180256
+          ],
+          "particles": 1800
+        },
+        {
+          "mass_kg": 0.0,
+          "model": "elastic",
+          "momentum_kg_m_s": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "particles": 0
+        },
+        {
+          "mass_kg": 0.0,
+          "model": "unresolved",
+          "momentum_kg_m_s": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "particles": 0
+        }
+      ],
+      "next_particle_id": "3659",
+      "outside_mass_kg": 0.0,
+      "outside_particles": 0,
+      "overlapping_cells": 0,
+      "particle_id_bytes": 29264,
+      "particle_id_hash": "c132e710dbe61368",
+      "pore_exchange": {
+        "absorbed_kg": 0.001171810659890582,
+        "capacity_kg": 83.30371901392937,
+        "drainage_births": 66,
+        "drainage_budget_blocked_carriers": 0,
+        "drained_kg": 0.0004985608498565552,
+        "held": false,
+        "mass_error_kg": -8.09365019449615e-09,
+        "maximum_saturation": 0.08203661441802979,
+        "measured": true,
+        "momentum_error_kg_m_s": 2.837931621724424e-07,
+        "pore_water_kg": 0.011499224600658664,
+        "settings": {
+          "drainage_scale": 1.0,
+          "enabled": true,
+          "gravity_m_s2": 9.8100004196167,
+          "permeability_m2": 9.99999993922529e-09,
+          "porosity": 0.3499999940395355,
+          "viscosity_pa_s": 0.0010000000474974513
+        },
+        "status": "Vulkan C5 cell exchange",
+        "thermal_energy_error_j": -0.00957036018371582
+      },
+      "transfer_cells": 0,
+      "transfer_requested": false
+    }
+  }
+]

@@ -2066,7 +2066,41 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
                 ImGui::Dummy(ImGui::CalcTextSize(text.c_str()));
             };
 
-            drawHudLine(status_text, text_col);
+            // ★ RT pipeline compile: minutes on the first Rendered use after a
+            // shader update, on a worker thread. Without this line Rendered just
+            // shows a raster mode and "0/N Samples" with no reason given.
+            std::string rt_pipeline_line;
+            ImU32 rt_pipeline_col = IM_COL32(245, 170, 70, 230); // Soft Orange
+            if (ctx.backend_ptr) {
+                const Backend::RTPipelineStatus rt = ctx.backend_ptr->getRTPipelineStatus();
+                const int secs = static_cast<int>(rt.compileSeconds);
+                char line[256];
+                if (rt.available && rt.state == Backend::RTPipelineStatus::State::Compiling) {
+                    if (rt.awaitingInstall) {
+                        snprintf(line, sizeof(line),
+                                 "Ray tracing shaders compiled (%d:%02d), switching to Rendered...",
+                                 secs / 60, secs % 60);
+                    } else {
+                        snprintf(line, sizeof(line),
+                                 "Compiling ray tracing shaders (first use after a shader update)... %d:%02d",
+                                 secs / 60, secs % 60);
+                    }
+                    rt_pipeline_line = line;
+                    if (in_rendered_mode) rt_pipeline_line += "  \xc2\xb7  showing raster meanwhile";
+                } else if (rt.available && rt.state == Backend::RTPipelineStatus::State::Failed &&
+                           in_rendered_mode) {
+                    rt_pipeline_line = "Ray tracing pipeline failed: " + rt.error;
+                    rt_pipeline_col = IM_COL32(240, 90, 80, 230);
+                }
+            }
+            // In Rendered the sample counter is meaningless until RT runs, so the
+            // compile line replaces it; in raster modes it is an extra line.
+            if (!rt_pipeline_line.empty() && in_rendered_mode) {
+                drawHudLine(rt_pipeline_line, rt_pipeline_col);
+            } else {
+                drawHudLine(status_text, text_col);
+                if (!rt_pipeline_line.empty()) drawHudLine(rt_pipeline_line, rt_pipeline_col);
+            }
 
             if (ctx.render_settings.show_scene_stats_hud) {
                 refreshSceneGeometryStats(ctx.scene);

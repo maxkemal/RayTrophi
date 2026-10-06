@@ -1,5 +1,8 @@
+#include "Fluid/MatterPoreAuthoring.h"
 #include "scene_ui_forcefield.hpp"
 #include "Fluid/MatterPhaseConfig.h"
+#include "Fluid/MatterModelService.h"
+#include "Fluid/MatterGrain.h"
 #include "scene_ui_fluid_thermal.hpp"
 #include "scene_ui_fluid_labels.h"
 #include "ui_modern.h"
@@ -341,6 +344,14 @@ void drawSimulationDomainControls(
                 if (RayTrophiSim::Fluid::drawPhaseGridControls(domain)) {
                     resetSimulationNow();
                 }
+                const auto& model_states = particles->gridDomainStates();
+                RayTrophiSim::Fluid::drawMatterModelSummary(domain,
+                    static_cast<std::size_t>(selected_domain_index) < model_states.size()
+                        ? &model_states[static_cast<std::size_t>(selected_domain_index)] : nullptr);
+                RayTrophiSim::Fluid::drawMatterGrainControls(domain);
+                RayTrophiSim::Fluid::drawMatterPoolControls(domain,
+                    static_cast<std::size_t>(selected_domain_index) < model_states.size()
+                        ? &model_states[static_cast<std::size_t>(selected_domain_index)] : nullptr);
 
                 // Group 1: Compute & Backend
                 if (UIWidgets::CollapsingHeader("Compute Device & Backend", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1748,6 +1759,9 @@ void drawSimulationDomainControls(
             }
 
             if (ImGui::BeginTabItem("Matter")) {
+                if (domain.type == RayTrophiSim::SimulationDomainType::Matter) {
+                    RayTrophiSim::Fluid::drawMatterPoreControls(domain.name);
+                }
                 ImGui::Spacing();
                 if (is_gas_domain) {
                     // Combustion / fire
@@ -2908,23 +2922,6 @@ void drawSimulationDomainControls(
 
             if (ImGui::BeginTabItem("Output")) {
                 ImGui::Spacing();
-                if (is_gas_domain) {
-                    // Volume shader
-                    auto& gas_shader = domain.type == RayTrophiSim::SimulationDomainType::Matter
-                        ? domain.fluid_fog_shader
-                        : domain.shader;
-                    if (!gas_shader) {
-                        gas_shader = VolumeShader::createSmokePreset();
-                    }
-                    if (UIWidgets::CollapsingHeader("Unified Volume Shader Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        ImGui::Spacing();
-                    
-                    if (SceneUI::drawVolumeShaderUI(ui_ctx, gas_shader, nullptr, nullptr)) {
-                        g_gas_volumes_dirty = true;
-                        ui_ctx.start_render = true;
-                    }
-                    }
-                }
                 if (is_fluid_domain) {
                     // Fluid Render settings group
                     if (UIWidgets::CollapsingHeader("Liquid Display", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -3103,9 +3100,12 @@ void drawSimulationDomainControls(
                         ImGui::SetTooltip("Draws raw simulation particle coordinates as lightweight blue viewport overlays.");
                     }
 
+                    RayTrophiSim::Fluid::drawMatterOutputControls(domain);
+
                         // Per-substance LOOK. The physics half of each binding (phase,
                         // viscosity, miscibility) is edited in the Matter tab.
-                        if (!domain.fluid_substance_materials.empty() &&
+                        if (domain.type != RayTrophiSim::SimulationDomainType::Matter &&
+                            !domain.fluid_substance_materials.empty() &&
                             UIWidgets::CollapsingHeader("Substance Look", ImGuiTreeNodeFlags_DefaultOpen)) {
                             auto& smgr = MaterialManager::getInstance();
                             for (std::size_t bi = 0; bi < domain.fluid_substance_materials.size(); ++bi) {
@@ -3918,7 +3918,7 @@ void drawSimulationDomainControls(
                                         ? std::string(default_label)
                                         : mm.getMaterialName(static_cast<uint16_t>(mat_id_ref));
                                     if (cur_label.empty()) cur_label = default_label;
-                                    
+
                                     bool changed = false;
                                     if (ImGui::BeginCombo(label, cur_label.c_str())) {
                                         if (ImGui::Selectable(default_label, mat_id_ref < 0)) {
@@ -4086,6 +4086,80 @@ void drawSimulationDomainControls(
                                 "Gaussian spread of the particle density before it is drawn.\n"
                                 "0 = raw splat (spray shows as dots); 1.5-3 = continuous cloud.\n"
                                 "Render only: does not change the simulation.");
+                        // Same field and range as fluid.set_fog resolution_multiplier.
+                        if (ImGui::SliderInt("Fog Resolution##LiquidFog",
+                                             &domain.fluid_fog_resolution_multiplier, 1,
+                                             RayTrophiSim::Fluid::kFogMaxResolutionMultiplier,
+                                             "%dx")) {
+                            domain.fluid_fog_resolution_multiplier = std::clamp(
+                                domain.fluid_fog_resolution_multiplier, 1,
+                                RayTrophiSim::Fluid::kFogMaxResolutionMultiplier);
+                            scene.requestSimulationTimelineRenderResync();
+                            ui_ctx.renderer.resetCPUAccumulation();
+                            if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
+                            ui_ctx.start_render = true;
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip(
+                                "Splat the fog on a grid this many times finer than the simulation.\n"
+                                "Sharper edges and smaller clumps; memory and upload grow with the\n"
+                                "cube (4x = 64x cells). Render only.");
+                        // Same fields and ranges as fluid.set_fog erosion_*.
+                        {
+                            bool eroded = false;
+                            eroded |= ImGui::SliderFloat("Fog Erosion##LiquidFog",
+                                                         &domain.fluid_fog_erosion_strength,
+                                                         0.0f, 1.0f, "%.2f");
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip(
+                                    "Cuts the thin parts of the fog into clumps with world-space noise\n"
+                                    "(snow / cotton look). Cells at full rest packing are kept, so the\n"
+                                    "body does not get holes. 0 = off. Render only.");
+                            ImGui::BeginDisabled(!(domain.fluid_fog_erosion_strength > 0.0f));
+                            eroded |= ImGui::DragFloat("Clump Size##LiquidFogErosion",
+                                                       &domain.fluid_fog_erosion_size, 0.005f,
+                                                       RayTrophiSim::Fluid::kFogErosionMinSize,
+                                                       RayTrophiSim::Fluid::kFogErosionMaxSize,
+                                                       "%.3f", ImGuiSliderFlags_Logarithmic);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip(
+                                    "Largest noise feature in world units. Independent of voxel size;\n"
+                                    "features smaller than a voxel cannot show.");
+                            eroded |= ImGui::SliderInt("Clump Detail##LiquidFogErosion",
+                                                       &domain.fluid_fog_erosion_detail, 1,
+                                                       RayTrophiSim::Fluid::kFogErosionMaxDetail);
+                            eroded |= ImGui::InputInt("Clump Seed##LiquidFogErosion",
+                                                      &domain.fluid_fog_erosion_seed);
+                            eroded |= ImGui::SliderFloat("Surface Band##LiquidFogErosion",
+                                                         &domain.fluid_fog_erosion_depth, 0.0f,
+                                                         RayTrophiSim::Fluid::kFogErosionMaxDepth,
+                                                         "%.3f", ImGuiSliderFlags_Logarithmic);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip(
+                                    "0 = cut only thin fog (spray, soft edges).\n"
+                                    "> 0 = break the SURFACE of a dense body into clumps within\n"
+                                    "this depth (world units) - e.g. a settled snow layer. Sparse\n"
+                                    "spray is mostly removed in this mode.");
+                            ImGui::EndDisabled();
+                            if (eroded) {
+                                domain.fluid_fog_erosion_strength = std::clamp(
+                                    domain.fluid_fog_erosion_strength, 0.0f, 1.0f);
+                                domain.fluid_fog_erosion_size = std::clamp(
+                                    domain.fluid_fog_erosion_size,
+                                    RayTrophiSim::Fluid::kFogErosionMinSize,
+                                    RayTrophiSim::Fluid::kFogErosionMaxSize);
+                                domain.fluid_fog_erosion_detail = std::clamp(
+                                    domain.fluid_fog_erosion_detail, 1,
+                                    RayTrophiSim::Fluid::kFogErosionMaxDetail);
+                                domain.fluid_fog_erosion_depth = std::clamp(
+                                    domain.fluid_fog_erosion_depth, 0.0f,
+                                    RayTrophiSim::Fluid::kFogErosionMaxDepth);
+                                scene.requestSimulationTimelineRenderResync();
+                                ui_ctx.renderer.resetCPUAccumulation();
+                                if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
+                                ui_ctx.start_render = true;
+                            }
+                        }
                         ImGui::BeginDisabled(!fog_volume);
                         if (ImGui::Button("Edit Fog Medium...##LiquidFogEdit")) {
                             ui_ctx.selection.selectVDBVolume(fog_volume, -1, fog_volume->name);
@@ -4157,6 +4231,24 @@ void drawSimulationDomainControls(
                                 ui_ctx.start_render = true;
                             }
                         }
+                    }
+                }
+
+                if (is_gas_domain) {
+                    // Volume shader
+                    auto& gas_shader = domain.type == RayTrophiSim::SimulationDomainType::Matter
+                        ? domain.fluid_fog_shader
+                        : domain.shader;
+                    if (!gas_shader) {
+                        gas_shader = VolumeShader::createSmokePreset();
+                    }
+                    if (UIWidgets::CollapsingHeader("Unified Volume Shader Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        ImGui::Spacing();
+
+                    if (SceneUI::drawVolumeShaderUI(ui_ctx, gas_shader, nullptr, nullptr)) {
+                        g_gas_volumes_dirty = true;
+                        ui_ctx.start_render = true;
+                    }
                     }
                 }
 

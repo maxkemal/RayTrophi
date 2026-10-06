@@ -40,6 +40,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -531,7 +532,8 @@ public:
 
         vkResetCommandBuffer(m_cmdBuf, 0);
         vkResetDescriptorPool(m_device, m_descPool, 0);
-        m_recordedDescriptorSets = 0;
+        m_descriptorCache.clear();
+        m_recordedDispatches = 0;
         m_recording = false;
 
         // Recorded transfers are now complete: flush deferred download
@@ -605,46 +607,57 @@ public:
         }
 
         // Resident subcycles can queue more than one pool's worth of dispatches.
-        // Drain at its actual capacity before allocating another set. This also
-        // keeps each submission below the 1024 timestamp-pair limit.
-        if (m_recordedDescriptorSets >= MAX_DESC_SETS) {
+        // Drain at the pool's capacity, counted in DISPATCHES (not unique sets),
+        // so one submission stays as long as before descriptor reuse existed
+        // and below the 1024 timestamp-pair limit.
+        if (m_recordedDispatches >= MAX_DESC_SETS) {
             synchronize();
         }
         // Ensure command buffer is recording.
         if (!ensureRecording()) return false;
 
-        // Allocate and write descriptor set.
         VkDescriptorSetLayout layout = m_descLayouts[cmd.buffer_count];
         if (layout == VK_NULL_HANDLE) return false;
 
-        VkDescriptorSetAllocateInfo dsai{};
-        dsai.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        dsai.descriptorPool     = m_descPool;
-        dsai.descriptorSetCount = 1;
-        dsai.pSetLayouts        = &layout;
-
+        // A substep loop binds the same buffers hundreds of times. Within one
+        // recording a set with identical bindings is reused: sets are never
+        // updated after recording, the pool reset in synchronize() drops the
+        // cache, and destroy/resize synchronize before a handle can change.
+        std::vector<uint64_t> set_key(cmd.buffer_count);
+        for (uint32_t b = 0; b < cmd.buffer_count; ++b) set_key[b] = cmd.buffers[b].id;
         VkDescriptorSet ds = VK_NULL_HANDLE;
-        if (vkAllocateDescriptorSets(m_device, &dsai, &ds) != VK_SUCCESS) return false;
-        ++m_recordedDescriptorSets;
+        if (const auto cached = m_descriptorCache.find(set_key); cached != m_descriptorCache.end()) {
+            ds = cached->second;
+        } else {
+            std::array<VkDescriptorBufferInfo, MAX_BINDINGS> bufInfos{};
+            std::array<VkWriteDescriptorSet,   MAX_BINDINGS> writes{};
+            for (uint32_t b = 0; b < cmd.buffer_count; ++b) {
+                auto bit = m_buffers.find(cmd.buffers[b].id);
+                if (bit == m_buffers.end() || !bit->second.buffer) return false;
+                bufInfos[b].buffer = bit->second.buffer;
+                bufInfos[b].offset = 0;
+                bufInfos[b].range  = VK_WHOLE_SIZE;
+            }
 
-        std::array<VkDescriptorBufferInfo, MAX_BINDINGS> bufInfos{};
-        std::array<VkWriteDescriptorSet,   MAX_BINDINGS> writes{};
+            VkDescriptorSetAllocateInfo dsai{};
+            dsai.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            dsai.descriptorPool     = m_descPool;
+            dsai.descriptorSetCount = 1;
+            dsai.pSetLayouts        = &layout;
+            if (vkAllocateDescriptorSets(m_device, &dsai, &ds) != VK_SUCCESS) return false;
 
-        for (uint32_t b = 0; b < cmd.buffer_count; ++b) {
-            auto bit = m_buffers.find(cmd.buffers[b].id);
-            if (bit == m_buffers.end() || !bit->second.buffer) return false;
-            bufInfos[b].buffer = bit->second.buffer;
-            bufInfos[b].offset = 0;
-            bufInfos[b].range  = VK_WHOLE_SIZE;
-
-            writes[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[b].dstSet          = ds;
-            writes[b].dstBinding      = b;
-            writes[b].descriptorCount = 1;
-            writes[b].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[b].pBufferInfo     = &bufInfos[b];
+            for (uint32_t b = 0; b < cmd.buffer_count; ++b) {
+                writes[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[b].dstSet          = ds;
+                writes[b].dstBinding      = b;
+                writes[b].descriptorCount = 1;
+                writes[b].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                writes[b].pBufferInfo     = &bufInfos[b];
+            }
+            vkUpdateDescriptorSets(m_device, cmd.buffer_count, writes.data(), 0, nullptr);
+            m_descriptorCache.emplace(std::move(set_key), ds);
         }
-        vkUpdateDescriptorSets(m_device, cmd.buffer_count, writes.data(), 0, nullptr);
+        ++m_recordedDispatches;
 
         // ── Opening timestamp ────────────────────────────────────────────
         // Every dispatch is followed by a full compute->compute barrier below,
@@ -693,7 +706,7 @@ private:
     // Snow uses 14 bindings (base, climate, ping-pong mass/ice/water and trace
     // fields); Vulkan RT-class devices targeted by the renderer expose well
     // above the core-minimum storage-buffer count.
-    static constexpr uint32_t MAX_BINDINGS      = 16;
+    static constexpr uint32_t MAX_BINDINGS      = 24;
     static constexpr uint32_t MAX_DESC_SETS     = 512;
     static constexpr uint32_t MAX_PUSH_CONSTANT = 128;
 
@@ -721,7 +734,9 @@ private:
     VkCommandBuffer  m_cmdBuf   = VK_NULL_HANDLE;
     VkFence          m_fence    = VK_NULL_HANDLE;
     VkDescriptorPool m_descPool = VK_NULL_HANDLE;
-    uint32_t         m_recordedDescriptorSets = 0;
+    uint32_t         m_recordedDispatches = 0;
+    // Descriptor sets written in the current recording, keyed by buffer ids.
+    std::map<std::vector<uint64_t>, VkDescriptorSet> m_descriptorCache;
 
     // One desc layout per buffer count (index = count, 0 unused).
     std::array<VkDescriptorSetLayout, MAX_BINDINGS + 1> m_descLayouts{};
@@ -863,7 +878,12 @@ private:
 
     bool initDescLayouts() {
         m_descLayouts[0] = VK_NULL_HANDLE;
-        for (uint32_t n = 1; n <= MAX_BINDINGS; ++n) {
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &properties);
+        const auto binding_limit = std::min(MAX_BINDINGS,
+            std::min(properties.limits.maxPerStageDescriptorStorageBuffers,
+                     properties.limits.maxDescriptorSetStorageBuffers));
+        for (uint32_t n = 1; n <= binding_limit; ++n) {
             std::vector<VkDescriptorSetLayoutBinding> bindings(n);
             for (uint32_t b = 0; b < n; ++b) {
                 bindings[b].binding         = b;
@@ -892,7 +912,8 @@ private:
                         uint32_t pushConstantSize) {
         auto spv = loadSPV(spvPath);
         if (spv.empty()) return false;
-        if (bufferCount == 0 || bufferCount > MAX_BINDINGS) return false;
+        if (bufferCount == 0 || bufferCount > MAX_BINDINGS ||
+            m_descLayouts[bufferCount] == VK_NULL_HANDLE) return false;
 
         VkShaderModuleCreateInfo smci{};
         smci.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -1003,6 +1024,22 @@ private:
             // this descriptor contract in lockstep with GranularGpuDispatch;
             // the old nine-binding layout leaves damage active while the new
             // fracture-history telemetry remains permanently zero.
+            { "sim_matter_p2g", "sim_matter_p2g.spv", 10, 40 },
+            { "sim_matter_g2p", "sim_matter_g2p.spv", 12, 72 },
+            { "sim_matter_stress_update", "sim_matter_stress_update.spv", 18, 68 },
+            { "sim_matter_stress_p2g", "sim_matter_stress_p2g.spv", 9, 52 },
+            { "sim_matter_settle", "sim_matter_settle.spv", 5, 36 },
+            { "sim_matter_advect", "sim_matter_advect.spv", 11, 84 },
+            { "sim_matter_occupancy", "sim_matter_occupancy.spv", 6, 40 },
+            { "sim_matter_contact", "sim_matter_contact.spv", 19, 16 },
+            { "sim_matter_copy", "sim_matter_copy.spv", 2, 4 },
+            { "sim_matter_clear", "sim_matter_clear.spv", 1, 4 },
+            { "sim_matter_pores", "sim_matter_pores.spv", 13, 40 },
+            { "sim_matter_zero_faces", "sim_matter_zero_faces.spv", 4, 36 },
+            { "sim_matter_partition", "sim_matter_partition.spv", 4, 8 },
+            { "sim_matter_grain_clear", "sim_matter_grain_clear.spv", 14, 96 },
+            { "sim_matter_grain_hash", "sim_matter_grain_hash.spv", 14, 96 },
+            { "sim_matter_grain_step", "sim_matter_grain_step.spv", 14, 96 },
             { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 15, 64 },
             { "sim_fluid_granular_stress_p2g",      "sim_fluid_granular_stress_p2g.spv",    4, 48 },
             { "sim_fluid_granular_settle",          "sim_fluid_granular_settle.spv",        3, 32 },

@@ -282,8 +282,21 @@
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <None Include="source\src\Physics\Fluid\APICFluidStep.inl" />
     <ClInclude Include="source\include\Fluid\MatterPhaseSettings.h" />
+    <ClInclude Include="source\include\Fluid\MatterParticleIdentity.h" />
+    <ClInclude Include="source\include\Fluid\MatterSolverStages.h" />
+    <ClInclude Include="source\include\Fluid\MatterModelBatch.h" />
+    <ClInclude Include="source\include\Fluid\MatterGpuPartition.h" />
+    <ClInclude Include="source\include\Fluid\MatterGpuRuntime.h" />
+    <ClInclude Include="source\include\Fluid\MatterGpuParticleLease.h" />
+    <ClInclude Include="source\include\Fluid\MatterGpuModelView.h" />
+    <ClInclude Include="source\include\Fluid\MatterMixedStep.h" />
+    <ClInclude Include="source\include\Fluid\MatterMacContact.h" />
+    <ClInclude Include="source\include\Fluid\MatterTransfer.h" />
+    <ClInclude Include="source\include\Fluid\MatterModelService.h" />
     <ClInclude Include="source\include\Fluid\MatterPhaseConfig.h" />
+    <ClInclude Include="source\src\Api\RtMatterModels.h" />
     <ClInclude Include="source\src\Api\RtPhaseGrid.h" />
     <ClInclude Include="source\src\Physics\Fluid\MatterDomainSynchronization.inl" />
     <ClInclude Include="source\src\Physics\Fluid\MatterDomainRestore.inl" />
@@ -384,6 +397,18 @@
     <ClCompile Include="source\src\Api\RtApiPhaseGrid.cpp" />
     <ClCompile Include="source\src\Api\RtIpcPhaseGrid.cpp" />
     <ClCompile Include="source\src\Api\RtPythonPhaseGrid.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterSolverStages.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterModelBatch.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGpuPartition.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGpuModelView.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterMixedStep.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterMacContact.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterTransfer.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterModelService.cpp" />
+    <ClCompile Include="source\src\UI\MatterModelControls.cpp" />
+    <ClCompile Include="source\src\Api\RtApiMatterModels.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcMatterModels.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonMatterModels.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterPhaseConfig.cpp" />
     <ClCompile Include="source\src\UI\MatterPhaseGridControls.cpp" />
     <ClCompile Include="source\src\PostProcess\PostSurface.cpp" />
@@ -568,6 +593,7 @@
     <ClInclude Include="source\include\Fluid\FluidGpuParticleUpload.h" />
     <ClInclude Include="source\include\Fluid\FluidGpuFlipSnapshot.h" />
     <ClInclude Include="source\src\Physics\Fluid\FluidGpuOccupancy.inl" />
+    <None Include="source\shaders\sim_matter_partition.comp" />
     <None Include="source\shaders\sim_fluid_occupancy.comp" />
     <ClInclude Include="source\include\Fluid\APICFluidSolver.h" />
     <ClInclude Include="source\include\Fluid\FluidParticleSeedPattern.h" />
@@ -1498,6 +1524,7 @@
     <ClCompile Include="source\src\Backend\OptixBackend.cpp" />
     <ClCompile Include="source\src\Backend\SceneTextureManager.cpp" />
     <ClCompile Include="source\src\Backend\VulkanDevicePipelines.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanRTPipelineBuild.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend_Raster.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend_Spheres.cpp" />
@@ -2117,5 +2144,91 @@
     <ClInclude Include="source\include\Animation\RigSplineIK.h" />
     <ClCompile Include="source\src\Animation\RigSplineIK.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
     <ClCompile Include="source\src\UI\RigSplineIKUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="source\src\Physics\Fluid\FluidGpuP2G.inl" />
+    <None Include="source\src\Physics\Fluid\FluidGpuViscosity.inl" />
+    <None Include="source\src\Physics\Fluid\FluidDomainStep.inl" />
+    <None Include="source\src\Physics\Fluid\MatterGpuStep.inl" />
+    <None Include="source\src\Physics\Fluid\MatterGpuRelease.inl" />
+    <None Include="source\shaders\sim_matter_p2g.comp" />
+    <None Include="source\shaders\sim_matter_g2p.comp" />
+    <None Include="source\shaders\sim_matter_stress_update.comp" />
+    <None Include="source\shaders\sim_matter_stress_p2g.comp" />
+    <None Include="source\shaders\sim_matter_settle.comp" />
+    <None Include="source\shaders\sim_matter_advect.comp" />
+    <None Include="source\shaders\sim_matter_occupancy.comp" />
+    <None Include="source\shaders\sim_matter_contact.comp" />
+    <None Include="source\shaders\sim_matter_copy.comp" />
+    <None Include="source\shaders\sim_matter_clear.comp" />
+    <None Include="source\shaders\sim_matter_zero_faces.comp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="source\shaders\sim_fluid_advect_tail.glsl" />
+    <None Include="source\shaders\sim_fluid_g2p.glsl" />
+    <None Include="source\shaders\sim_fluid_granular_settle.glsl" />
+    <None Include="source\shaders\sim_fluid_granular_stress_p2g.glsl" />
+    <None Include="source\shaders\sim_fluid_granular_stress_update.glsl" />
+    <None Include="source\shaders\sim_fluid_occupancy.glsl" />
+    <None Include="source\shaders\sim_fluid_p2g_scatter.glsl" />
+    <None Include="source\shaders\sim_fluid_zero_solid_faces.glsl" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterMaterialPreset.h" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterMaterialPreset.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterEmissionBudget.h" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterEmissionBudget.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterPoreExchange.h" />
+    <ClInclude Include="source\include\Fluid\MatterPoreAuthoring.h" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterPoreExchange.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterPoreAuthoring.cpp" />
+    <ClCompile Include="source\src\Api\RtApiMatterPores.cpp" />
+    <ClCompile Include="source\src\UI\MatterPoreControls.cpp" />
+    <None Include="source\shaders\sim_matter_pores.comp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterWetResponse.h" />
+    <ClInclude Include="source\include\Fluid\MatterAcceptanceMetrics.h" />
+    <ClInclude Include="source\include\Fluid\MatterGranularLoad.h" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGranularLoad.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\GranularContact.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\GranularReference.cpp" />
+    <ClCompile Include="source\src\Api\RtApiGrainReference.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterAcceptanceMetrics.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Physics\Fluid\MatterWetResponse.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterWetAppearance.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Physics\Fluid\MatterWetAppearance.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterGrain.h" />
+    <ClInclude Include="source\include\Fluid\MatterGrainBirth.h" />
+    <ClInclude Include="source\include\Fluid\MatterGrainGeometry.h" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainParams.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainBirth.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainDiagnostics.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainGpu.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainGeometry.cpp" />
+    <ClCompile Include="source\src\Api\RtApiMatterGrain.cpp" />
+    <ClCompile Include="source\src\UI\MatterGrainControls.cpp" />
+    <None Include="source\shaders\sim_matter_grain.glsl" />
+    <None Include="source\shaders\sim_matter_grain_clear.comp" />
+    <None Include="source\shaders\sim_matter_grain_hash.comp" />
+    <None Include="source\shaders\sim_matter_grain_step.comp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterGrainColliderBvh.h" />
+    <ClInclude Include="source\include\Fluid\MatterGrainStages.h" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainColliderBvh.cpp" />
   </ItemGroup>
 </Project>

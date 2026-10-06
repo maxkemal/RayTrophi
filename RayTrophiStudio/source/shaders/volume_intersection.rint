@@ -61,7 +61,10 @@ struct VkVolumeInstance {
     float ramp_colors_b[8];
     float pivot_offset[3];
     int   source_type;
-    float _retired_cloud[8];   // retired Faz 3b: sky clouds are no longer a volume (ATMOSPHERE_CLOUDS.md)
+    float random_walk_enabled;    // 1 = path-traced multiple scattering (volume_closesthit)
+    float random_walk_max_events; // 8..512 scattering events per walk
+    float random_walk_exact_events; // 1..512 true-phase events before the similarity switch
+    float _retired_cloud[5];   // retired Faz 3b: sky clouds are no longer a volume (ATMOSPHERE_CLOUDS.md)
     float _ext_reserved[12];
     // Appended acceleration block — MUST match VkVolumeInstance in
     // include/Backend/vulkan_volume_types.h (576 bytes). Every shader that

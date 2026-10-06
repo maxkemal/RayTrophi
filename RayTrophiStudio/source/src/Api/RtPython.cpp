@@ -1,5 +1,6 @@
 #include "RtPostBindings.h"
 #include "RtPhaseGrid.h"
+#include "RtMatterModels.h"
 #include "RtFluidLabelBindings.h"
 #include "RtViewportCutoutBindings.h"
 #include "RtRasterDiagnosticsBindings.h"
@@ -1458,6 +1459,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     // ── Fluid & Gas Simulation Engine (Faz 5.3b) ────────────────────────
     py::module_ fluid = module.def_submodule("fluid", "APIC liquid & fluid domain simulation");
     rtpy::registerPhaseGridBindings(fluid);
+    rtpy::registerMatterModelBindings(fluid);
     auto py_create_domain = [](const std::string& name, const py::tuple& domain_min, const py::tuple& domain_max, float voxel_size, const std::string& type) -> py::dict {
         Vec3 dmin = vec3FromPython(domain_min);
         Vec3 dmax = vec3FromPython(domain_max);
@@ -1594,6 +1596,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             info.virtual_grain_rt_estimated_bytes;
         d["grain_size_variation"] = info.grain_size_variation;
         d["fog_spread_voxels"] = info.fog_spread_voxels;
+        d["fog_erosion_strength"] = info.fog_erosion_strength;
+        d["fog_erosion_size"] = info.fog_erosion_size;
+        d["fog_erosion_detail"] = info.fog_erosion_detail;
+        d["fog_erosion_seed"] = info.fog_erosion_seed;
+        d["fog_erosion_depth"] = info.fog_erosion_depth;
+        d["fog_resolution_multiplier"] = info.fog_resolution_multiplier;
         d["particle_kelvin_measured"] = info.particle_kelvin_measured;
         d["particle_min_kelvin"] = info.particle_min_kelvin;
         d["particle_max_kelvin"] = info.particle_max_kelvin;
@@ -1834,6 +1842,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                 info.virtual_grain_rt_estimated_bytes;
             d["grain_size_variation"] = info.grain_size_variation;
             d["fog_spread_voxels"] = info.fog_spread_voxels;
+            d["fog_erosion_strength"] = info.fog_erosion_strength;
+            d["fog_erosion_size"] = info.fog_erosion_size;
+            d["fog_erosion_detail"] = info.fog_erosion_detail;
+            d["fog_erosion_seed"] = info.fog_erosion_seed;
+            d["fog_erosion_depth"] = info.fog_erosion_depth;
+            d["fog_resolution_multiplier"] = info.fog_resolution_multiplier;
             d["particle_kelvin_measured"] = info.particle_kelvin_measured;
             d["particle_min_kelvin"] = info.particle_min_kelvin;
             d["particle_max_kelvin"] = info.particle_max_kelvin;
@@ -2056,6 +2070,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             info.virtual_grain_rt_estimated_bytes;
         d["grain_size_variation"] = info.grain_size_variation;
         d["fog_spread_voxels"] = info.fog_spread_voxels;
+        d["fog_erosion_strength"] = info.fog_erosion_strength;
+        d["fog_erosion_size"] = info.fog_erosion_size;
+        d["fog_erosion_detail"] = info.fog_erosion_detail;
+        d["fog_erosion_seed"] = info.fog_erosion_seed;
+        d["fog_erosion_depth"] = info.fog_erosion_depth;
+        d["fog_resolution_multiplier"] = info.fog_resolution_multiplier;
         d["particle_kelvin_measured"] = info.particle_kelvin_measured;
         d["particle_min_kelvin"] = info.particle_min_kelvin;
         d["particle_max_kelvin"] = info.particle_max_kelvin;
@@ -2247,14 +2267,34 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 
     // VolumeFog shaping of a liquid domain. None = leave that field alone.
     fluid.def("set_fog",
-              [](const std::string& domain, const py::object& spread_voxels) {
+              [](const std::string& domain, const py::object& spread_voxels,
+                 const py::object& erosion_strength, const py::object& erosion_size,
+                 const py::object& erosion_detail, const py::object& erosion_seed,
+                 const py::object& erosion_depth, const py::object& resolution_multiplier) {
         rtapi::FluidFogPatch patch;
         if (!spread_voxels.is_none()) patch.spread_voxels = py::cast<float>(spread_voxels);
+        if (!erosion_strength.is_none()) patch.erosion_strength = py::cast<float>(erosion_strength);
+        if (!erosion_size.is_none()) patch.erosion_size = py::cast<float>(erosion_size);
+        if (!erosion_detail.is_none()) patch.erosion_detail = py::cast<int>(erosion_detail);
+        if (!erosion_seed.is_none()) patch.erosion_seed = py::cast<int>(erosion_seed);
+        if (!erosion_depth.is_none()) patch.erosion_depth = py::cast<float>(erosion_depth);
+        if (!resolution_multiplier.is_none())
+            patch.resolution_multiplier = py::cast<int>(resolution_multiplier);
         requireResult(rtapi::setFluidFog(domain, patch));
     }, py::arg("domain"), py::arg("spread_voxels") = py::none(),
+       py::arg("erosion_strength") = py::none(), py::arg("erosion_size") = py::none(),
+       py::arg("erosion_detail") = py::none(), py::arg("erosion_seed") = py::none(),
+       py::arg("erosion_depth") = py::none(), py::arg("resolution_multiplier") = py::none(),
        "Volumetric Fog: spread_voxels 0..6 is the Gaussian sigma (simulation "
        "voxels) applied to the splatted density before it is raymarched; 0 "
-       "draws the raw splat. Render-side only. Out-of-range values are rejected.");
+       "draws the raw splat. erosion_strength 0..1 (0 = off) cuts the thin "
+       "parts of the spread density into clumps with world-space fBm; cells at "
+       "full rest packing (1.0) are kept. erosion_size 0.001..100 is the largest "
+       "clump in world units, erosion_detail 1..6 octaves, erosion_seed any int. "
+       "erosion_depth 0..1 world units > 0 erodes a band under the surface of "
+       "dense bodies instead (0 = thin-fog remap). resolution_multiplier 1..4 "
+       "splats the fog on a grid that many times finer than the solver grid. "
+       "Render-side only. Out-of-range values are rejected.");
 
     fluid.def("set_substance_material",
               [](const std::string& domain, const std::string& substance,
@@ -2672,6 +2712,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["shadow_steps"] = s.shadow_steps;
         d["shadow_stride"] = s.shadow_stride;
         d["shadow_strength"] = s.shadow_strength;
+        d["random_walk"] = s.random_walk;
+        d["random_walk_max_events"] = s.random_walk_max_events;
+        d["random_walk_exact_events"] = s.random_walk_exact_events;
         return d;
     };
     gas.def("step_stats", [](const std::string& domain) {
@@ -2753,6 +2796,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_GASSHADER_KW(shadow_steps, int);
         RT_GASSHADER_KW(shadow_stride, int);
         RT_GASSHADER_KW(shadow_strength, float);
+        RT_GASSHADER_KW(random_walk, bool);
+        RT_GASSHADER_KW(random_walk_max_events, int);
+        RT_GASSHADER_KW(random_walk_exact_events, int);
 #undef RT_GASSHADER_KW
         requireResult(rtapi::updateGasShaderSettings(domain, s));
     }, py::arg("domain"));
@@ -2941,6 +2987,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["scattering_coefficient"] = s.scattering_coefficient;
         d["scattering_color"] = v3(s.scattering_color);
         d["anisotropy"] = s.anisotropy;
+        d["anisotropy_back"] = s.anisotropy_back;
+        d["lobe_mix"] = s.lobe_mix;
+        d["multi_scatter"] = s.multi_scatter;
         d["absorption_coefficient"] = s.absorption_coefficient;
         d["absorption_color"] = v3(s.absorption_color);
         d["voxel_step_multiplier"] = s.voxel_step_multiplier;
@@ -2948,6 +2997,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["shadow_steps"] = s.shadow_steps;
         d["shadow_stride"] = s.shadow_stride;
         d["shadow_strength"] = s.shadow_strength;
+        d["random_walk"] = s.random_walk;
+        d["random_walk_max_events"] = s.random_walk_max_events;
+        d["random_walk_exact_events"] = s.random_walk_exact_events;
         return d;
     }, py::arg("domain"),
        "Fog-view medium of a liquid domain. created=False: no fog has drawn yet "
@@ -2966,12 +3018,18 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_FOGSHADER_KW(density_cutoff, float);
         RT_FOGSHADER_KW(scattering_coefficient, float);
         RT_FOGSHADER_KW(anisotropy, float);
+        RT_FOGSHADER_KW(anisotropy_back, float);
+        RT_FOGSHADER_KW(lobe_mix, float);
+        RT_FOGSHADER_KW(multi_scatter, float);
         RT_FOGSHADER_KW(absorption_coefficient, float);
         RT_FOGSHADER_KW(voxel_step_multiplier, float);
         RT_FOGSHADER_KW(max_steps, int);
         RT_FOGSHADER_KW(shadow_steps, int);
         RT_FOGSHADER_KW(shadow_stride, int);
         RT_FOGSHADER_KW(shadow_strength, float);
+        RT_FOGSHADER_KW(random_walk, bool);
+        RT_FOGSHADER_KW(random_walk_max_events, int);
+        RT_FOGSHADER_KW(random_walk_exact_events, int);
 #undef RT_FOGSHADER_KW
         color("scattering_color", s.scattering_color);
         color("absorption_color", s.absorption_color);
@@ -3027,6 +3085,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["density"] = s.density; d["temperature"] = s.temperature;
         d["fuel"] = s.fuel; d["falloff"] = s.falloff;
         d["fluid_particles_per_second"] = s.fluid_particles_per_second;
+        d["particle_pool_weight"] = s.particle_pool_weight;
+        d["pool_requested_particles"] = s.pool_requested_particles;
+        d["pool_granted_particles"] = s.pool_granted_particles;
         d["fluid_velocity_spread"] = s.fluid_velocity_spread;
         d["fluid_emit_along_normal"] = s.fluid_emit_along_normal;
         d["fluid_substance"] = s.fluid_substance;
@@ -3051,6 +3112,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_FLOW_KW(velocity_coupling, float); RT_FLOW_KW(density, float);
         RT_FLOW_KW(temperature, float); RT_FLOW_KW(fuel, float);
         RT_FLOW_KW(falloff, float); RT_FLOW_KW(fluid_particles_per_second, float);
+        RT_FLOW_KW(particle_pool_weight, float);
         RT_FLOW_KW(fluid_velocity_spread, float);
         RT_FLOW_KW(fluid_emit_along_normal, bool);
         RT_FLOW_KW(fluid_substance, std::string);
@@ -5155,6 +5217,27 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["debug_view_name"] = b.debug_view_name;
         return d;
     }, "Path tracer bounce budget and the active Debug Visualizer view.");
+    render.def("rt_pipeline_status", [] {
+        const rtapi::RtPipelineStatusInfo s = rtapi::rtPipelineStatus();
+        py::dict d;
+        d["available"] = s.available;
+        d["backend"] = s.backend;
+        d["rt_pipeline_state"] = s.state;
+        d["awaiting_install"] = s.awaiting_install;
+        d["compile_seconds"] = s.compile_seconds;
+        d["cache_hit"] = s.cache_hit_known ? py::object(py::bool_(s.cache_hit)) : py::object(py::none());
+        d["cache_loaded"] = s.cache_loaded;
+        d["cache_loaded_bytes"] = s.cache_loaded_bytes;
+        d["cache_path"] = s.cache_path;
+        d["cache_reject_reason"] = s.cache_reject_reason;
+        d["deferred_threads"] = s.deferred_threads;
+        d["build_count"] = s.build_count;
+        d["error"] = s.error;
+        return d;
+    }, "Ray tracing pipeline build state: rt_pipeline_state is none|compiling|ready|failed. "
+       "The first Rendered use after a shader change compiles for minutes on a worker "
+       "while the viewport shows a raster mode; samples stay 0 until 'ready'. "
+       "cache_hit is None when the driver gave no creation feedback.");
     render.def("set_settings", [](const py::object& max_bounces, const py::object& diffuse_bounces,
                                   const py::object& transmission_bounces, const py::object& debug_view) {
         auto opt = [](const py::object& o) -> std::optional<int> {
@@ -5210,6 +5293,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["medium_passes"] = s.medium_passes;
         d["arbiter_started_inside"] = s.arbiter_started_inside;
         d["arbiter_inside_found"] = s.arbiter_inside_found;
+        d["walk_paths"] = s.walk_paths;
+        d["walk_events"] = s.walk_events;
+        d["walk_probe_traces"] = s.walk_probe_traces;
+        d["walk_shadow_traces"] = s.walk_shadow_traces;
+        d["walk_shadow_skipped"] = s.walk_shadow_skipped;
+        d["walk_event_capped"] = s.walk_event_capped;
         py::list devices;
         for (const auto& row : s.devices) {
             py::dict r;
