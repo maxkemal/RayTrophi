@@ -1,6 +1,6 @@
 # H1 dry grain GPU runtime candidate — 2026-10-05
 
-> **Durum:** AKTİF — H1 dry grain GPU adayı; 2026-10-06 fused substep/statik sürtünme/tane kütlesi CANLI PASS (G2 dahil); kova komşuluğu + yığılma açısı (B2) ve parçacık başına sahiplik + su–tane bağlama (B3) build bekliyor (en alttaki iki bölüm). Parti sırası: [MATTER_H1_GRAIN_ROADMAP.md](MATTER_H1_GRAIN_ROADMAP.md).
+> **Durum:** AKTİF — H1 dry grain GPU adayı; 2026-10-06 fused substep/statik sürtünme/tane kütlesi CANLI PASS (G2 dahil); B2–B8 + B9a build bekliyor (en alttaki bölümler). Parti sırası: [MATTER_H1_GRAIN_ROADMAP.md](MATTER_H1_GRAIN_ROADMAP.md).
 
 2026-10-06 birth-fix kullanıcı build sonrası tam dış IPC PASS:
 g60/120=9.80958/9.80961 m/s², floor min y .02133 m, spin1.504 rad/s.
@@ -247,3 +247,22 @@ akışkan taşıyıcıyı görünce bütün adımı reddediyordu). Artık taşı
 - Bulutta koşturulan: `matter_grain_coupling_test.cpp` (g++, kütle yoğunluğu stub'lı) PASS —
   kaldırma 3.6788 m/s² = analitik, sıvı/tane momentum artığı 0. Statik sözleşme PASS.
 - Bilerek dışarıda: hacim dışlama, −V∇p, dönme sürüklenmesi, ıslanma (yol haritası B5/B6).
+
+## B4–B9a — 2026-10-06, 2. bulut turu (kaynak, build bekliyor)
+
+| Parti | Çekirdek değişiklik | Dosyalar |
+|---|---|---|
+| B9a | Cihaz geçmişi yalnız yayımlandığı durum için geçerli; CPU referansı EPSD2 | MatterGrainGpu.cpp, GranularContact.cpp, GranularReference.cpp |
+| B5 | Gözenek ağırlıkları + tane hızı → `sim_fluid_divergence_porous`; basınç kuvveti −Vρ∇p | MatterGrainCoupling.cpp, FluidGpuPressure.inl, MatterGrainStep.inl |
+| B6 | Tane suyu (emilim/kuruma/doğum), Willett köprüsü, Bond ölçeği | MatterGrainCoupling.cpp, sim_matter_grain.glsl, MatterDomainSources.inl |
+| B7 | `solver_kind = xpbd` küçük adımlı aday | sim_matter_grain.glsl, MatterGrainGpu.cpp |
+| B8 | Morton hücre sırası; geçmiş kimlikle GPU'da taşınır | sim_matter_grain_permute{,_copy}.comp, MatterGrainCoupling.cpp |
+| B4 | Yerleşik bank 0 yeniden kullanımı; transfer sayaçları | MatterGrainGpu.cpp |
+
+ABI: shader revision 10, push constant 112 bayt (`wet`: hücre boyu, kılcal ön çarpan, kopma
+sınırı, çözücü türü), 15 buffer; bağlama satırı 2'nin w bileşeni köprü suyu hacmi.
+Yeni ayarlar: `volume_exclusion`, `wet_grains`, `water_capacity_fraction`,
+`absorption_rate_per_s`, `drying_rate_per_s`, `surface_tension_n_m`, `contact_angle_deg`,
+`represented_grain_radius_m`, `birth_saturation`, `solver_kind`, `xpbd_substeps` — panel,
+IPC, Python, kayıt, descriptor. Yeni test kolları: `--history-only`, `--porous-only`,
+`--wet-only`, `--xpbd-compare`. Kabul sırası NEXT_BUILD_CHECKS en üst.

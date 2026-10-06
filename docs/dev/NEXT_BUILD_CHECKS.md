@@ -1,60 +1,77 @@
-# Sıradaki kullanıcı build (C++ + SHADER): dry grain B2 + B3 — kova komşuluğu, yığılma açısı, su + tane aynı domain'de
+# Sıradaki kullanıcı build (C++ + SHADER): H1 tane B2–B8 + B9a — tek uzun test geçişi
 
-İki parti tek build'de (ikisi de bulutta yazıldı, hiçbiri derlenmedi). Sıra ve gerekçe:
-[MATTER_H1_GRAIN_ROADMAP.md](MATTER_H1_GRAIN_ROADMAP.md).
+Bulutta yazılan sekiz parti tek build'de: B2 kova komşuluğu + yığılma açısı, B3 su + tane
+aynı domain'de (sürüklenme/kaldırma), B5 hacim dışlama + basınç kuvveti, B6 ıslak tane
+(emilim/kuruma, sıvı köprüsü), B7 XPBD adayı, B8 hücre sırası + kimlikle taşınan temas
+geçmişi, B4 yerleşik durum + transfer sayaçları, B9a geçmiş geçersiz kılma + CPU referansı
+EPSD2. Ayrıntı ve gerekçe: [MATTER_H1_GRAIN_ROADMAP.md](MATTER_H1_GRAIN_ROADMAP.md).
 
-- **B2:** komşuluk bağlı liste yerine üç dönen sabit kapasiteli kova tablosu (kova başına 16);
-  `grain_diagnostics.pile` yığılma açısı; `--repose-only`.
-- **B3:** taşıyıcı başına taşıma sahibi. Granüler taşıyıcı → DEM tane, sıvı taşıyıcı → karma
-  Vulkan sıvı şeridi, aynı domain'de. Kare başına bağlama: Di Felice sürüklenmesi (örtük, tane
-  başına sıvı topağıyla) + Arşimet kaldırması, zıt impuls sıvıya. Tane çözücüsü artık kendi GPU
-  tamponlarında (domain grid tamponuna bağımlılık kalktı). Yeni ayarlar `fluid_coupling`,
-  `drag_viscosity_pa_s`; tanı `grain_diagnostics.liquid`; `--coexist-only`.
-- Shader revision **7**, grain kernel'leri **15 buffer**. Yeni dosya
-  `MatterGrainCoupling.cpp/.h` (vcxproj + filters'a eklendi). `compile_sim_shaders.bat` gerekli.
+Bulutta yapılabilenler yapıldı: tüm grain shader'ları + `sim_fluid_divergence_porous` +
+`sim_matter_grain_permute{,_copy}` glslangValidator + spirv-val ile derlendi; değişen
+C++ dosyaları (ParticleSimulation.cpp ve .inl'leri dahil) Linux g++ sözdizimi geçişinden
+geçti (Windows/CUDA/SDL başlıkları taklit edilerek — MSVC'ye özgü hatalar burada görünmez);
+`matter_grain_coupling_test.cpp`, `matter_grain_reference_slope_test.cpp`,
+`matter_granular_contact_test.cpp` g++ ile derlenip PASS koştu. Canlı hiçbir şey koşmadı.
 
-0. **Statik sözleşme** (build gerekmez): `python scripts/test/check_matter_grain_contracts.py`
-   → PASS (bulutta PASS). İstersen `scripts/test/matter_grain_coupling_test.cpp` (bulutta g++ ile
-   PASS: kaldırma 3.6788 m/s² = analitik, momentum artığı 0).
-1. **Açılış + revizyon.** Herhangi bir tane koşusunda `shader revision mismatch` YOK. Varsa
-   shader derlenmedi. `descriptor/binding` hatası = SPIR-V 14 buffer'lı eski sürüm.
-2. **Temel regresyon** `python scripts/test/rt_h1_grain_runtime_ipc.py` → önceki değerler
-   (g ±%5, pile dt farkı ≤ %10). Yalnız-tane domain'i artık kendi tamponlarıyla koşuyor: burada
-   bozulan her şey B3'ün tane yolu (tampon/yükleme/indirme), B2 değil. Bozuksa:
-   `bucket overflow` = 16 kapasite yetmedi (ölç, gevşetme); `grain buffers exceed` mesajı artık
-   MB söylüyor → domain resource budget.
-3. **Su + tane (B3)** `python scripts/test/rt_h1_grain_runtime_ipc.py --coexist-only` (~2–3 dk):
-   (a) suya gömülü doğan tane: bağlama AÇIK ilk ivme ≈ **6.13 m/s²** (±%15), KAPALI ≈ 9.81 (±%5);
-   (b) 256 tanelik yığına su dökme: hiçbir adım tutulmaz, su düşer, su/tane kütlesi sabit,
-   `momentum_residual_n_s` ≤ 1e-3 × alışveriş, `unmatched_impulse_n_s` = 0, en az bir tane
-   suyla bağlı. Bozuksa: (a) açık kol 9.81 → bağlama hiç uygulanmıyor (coupled_grains 0? su
-   bin'lenmedi); 3.7 civarı ya da yukarı → işaret hatası; kapalı kol 6 → `fluid_coupling`
-   yayılmıyor. (b) `step_held` → status mesajı nedeni söyler (sıvı şeridi bütçesi/tamponu).
-4. **Maliyet (B2)** `python scripts/test/rt_h1_grain_kernel_profile_ipc.py --counts 1024 4096 --stiffness 200000`
-   → `sim_matter_grain_step` µs/çağrı 243/289'dan düşmeli. Ardından
-   `python scripts/test/rt_h1_dense_grain_scene_ipc.py` → medyan 25.5/24.4/41.1 ms ile kıyas
-   (B3 kare başına tane durumunu kendi tamponuna bir kez yüklüyor: eskisiyle aynı bayt).
-   Düşmediyse darboğaz zincir değil (history taraması/BVH/register) — B8'in ilk işi.
-5. **Statik + yakınsama + extended + settle** (`--static-only`, `--convergence-only`,
-   `--extended-only`, `--settle-only --settle-normal-damping 8`) → önceki değerler; fizik
-   değişmedi. Settle enerjisi ~1e-12 J/tane, statik kayma 0.
-6. **Yığılma açısı (B2)** `--repose-only` (uzun: 4 kol, ~1500–4400 tane): μr .05 vs .3 farkı
-   ≥ 3°; μr .1 açısı 15–45°; r .025 vs .0175 farkı ≤ 4°; yığın duvara değmiyor, son 1 s açı
-   aralığı ≤ 1.5°, KE/tane ≤ 1e-5 J.
-7. **Karma MPM/su regresyonu** `python scripts/test/rt_g2_dry_wet_compare_ipc.py --expect-empty-fluid-skipped`
-   → PASS (tane kapalı domain'ler B3'ten etkilenmemeli; doğum filtresi yalnız tane doğumunda).
-8. **Senin sahnen (görsel).** Aynı domain'de Water + dry grain emitter, Play: su akar, taneler
-   suya girince yavaşlar ve dibe çöker; su küçük parsel yarıçapıyla, taneler fizik yarıçapıyla
-   çizilir. Domain çözünürlüğünü artırıp tek kuru tane: emitter'da kalmamalı. Kalırsa
-   `Invoke-RtIpc fluid.matter_models @{ domain = '<ad>' }` → `mixed_execution.status` nedeni yazar;
-   o metni getir.
+**Build:** C++ + shader. Yeni dosyalar vcxproj/filters'ta: `MatterGrainCoupling.cpp/.h`,
+`sim_fluid_divergence_porous.comp`, `sim_matter_grain_permute.comp`,
+`sim_matter_grain_permute_copy.comp`. `compile_shaders.bat` (hepsini derler) ya da
+`compile_sim_shaders.bat` (yenileri listeye eklendi). Grain shader revision **10**, push
+constant **112 bayt**, 15 buffer.
 
-★ En sinsi başarısızlık: **3(a) açık kolun "makul" bir değer vermesi ama kapalı kolla aynı
-olması.** Bu yüzden A/B kolu var: iki kol arasındaki fark (~3.7 m/s²) ölçü aletinin kanıtıdır;
-tek kolun makul görünmesi değil.
-★ İkinci: su yığının **içinden** geçer ve yalnız yavaşlar — B3'te beklenen (sıvı taneyi hacim
-olarak görmüyor, B5). Hata diye raporlama; ama su yığına hiç girmeden üstünde duruyorsa o hata.
-★ Üçüncü: 6. maddede açı makul ama μr'ye duyarsız → ölçüm yığını değil emitter kolonunu ölçüyor.
+0. **Statik sözleşme** `python scripts/test/check_matter_grain_contracts.py` → PASS.
+1. **Açılış/revizyon.** Herhangi bir tane koşusunda `shader revision mismatch` yok. Varsa
+   shader'lar derlenmedi (ya da yalnız eski bat çalıştı).
+2. **Temel regresyon** `python scripts/test/rt_h1_grain_runtime_ipc.py` → g ±%5, pile dt
+   ≤ %10. Yalnız-tane domain'i artık kendi tamponlarında, hücre sırasında ve kimlik eşlemeli;
+   burada kırılan her şey B3/B8 tane yolu. `bucket overflow` = 16 kapasite yetmedi.
+3. **Temas geçmişi** `--history-only` (B8/B9a): reset sonrası ilk adım
+   `history_reset_this_step=true`, sonraki adımlarda reset yok, en az bir adımda
+   `history_remapped=true` (hücre sırası değişti, geçmiş GPU'da taşındı). Bozuksa: her adım
+   reset → host bir aşama tane konumunu değiştiriyor (imza) ya da permute kernel'i yanlış;
+   hiç remap yok → sıralama devrede değil.
+4. **Statik + yakınsama + extended + settle** (`--static-only`, `--convergence-only`,
+   `--extended-only`, `--settle-only --settle-normal-damping 8`) → önceki değerler.
+   `--settle-only` artık B4 kapısı da içerir: yerleşmiş yığında `state_resident` en az bir
+   örnekte true (yoksa bir host aşaması her kare taneye dokunuyor).
+   ★ Statik kol 3. maddeden sonra: geçmiş taşınmıyorsa tutunma burada da kaybolur.
+5. **Maliyet (B2 + B8)** `python scripts/test/rt_h1_grain_kernel_profile_ipc.py --counts 1024 4096 --stiffness 200000`
+   → `sim_matter_grain_step` µs/çağrı 243/289'dan düşmeli; `python scripts/test/rt_h1_dense_grain_scene_ipc.py`
+   → medyan 25.5/24.4/41.1 ms ile kıyas. `runtime.upload_bytes/download_bytes/transfer_batches`
+   kaydedilir (B4 ölçümü: sonraki yerleşiklik adımı bunlara göre seçilecek).
+6. **Su + tane (B3, B5 varsayılan açık)** `--coexist-only`: gömülü tane ilk ivmesi açıkken
+   ≈ **6.13 m/s²** (±%15; artık hidrostatik değil çözücünün basınç gradyanı), kapalıyken 9.81;
+   yığına su dökme: adım tutulmaz, su düşer, kütleler sabit, momentum artığı ≤ 1e-3 × alışveriş.
+7. **Hacim dışlama (B5)** `--porous-only`: 1000 tane havuza dökülünce su yüzeyi (p95)
+   açıkken N·V/A ≈ **0.102 m**'nin %50–150'si yükselir, kapalıyken ≤ %25. Bozuksa: açık kolda
+   yükselme yok → ağırlıklar/porous kernel devrede değil (`liquid.porous_cells` 0 mı?);
+   kapalı kolda yükselme → tane sıvıyı başka bir yoldan itiyor.
+8. **Islak tane (B6)** `--wet-only`: kohezyon A/B (512 tane kolon çöküşü, doğumda yarı
+   doygun, temsil edilen tane .5 mm): ıslak yatay RMS ≤ 0.8 × kuru, köprü sayısı > 0 (kuru 0),
+   tutulan su sabit; havuzda emilim: tane suyu > 0, sıvı + tane suyu sabit (≤ 1e-4 göreli),
+   `water_balance_error_kg` ≤ 1e-5.
+9. **DEM vs XPBD (B7, H1-G0)** `--xpbd-compare`: iki çözücü de serbest düşüş ±%5 ve 20°
+   eğimde tutunma; XPBD yığını 20→80 alt adımda COM ≤ %5, taban ≤ .2 r değişir (iterasyonla
+   sertleşmiyor). Çıktı tablosu (COM/RMS/alt adım/ms) karar girdisi — kazanan ilan etme,
+   bana getir.
+10. **Yığılma açısı (B2)** `--repose-only` (uzun): μr .05 vs .3 ≥ 3°, μr .1 15–45°,
+    r .025 vs .0175 ≤ 4°.
+11. **Diğer çözücüler** `python scripts/test/rt_g2_dry_wet_compare_ipc.py --expect-empty-fluid-skipped`
+    → PASS (porous kernel yalnız tane domain'inde; variational yol değişmedi). Bir sıvı
+    sahnesi (variational açık collider'lı) hızlı göz kontrolü.
+12. **Senin sahnen (görsel).** Su + kuru tane aynı domain: su akar, taneler suya girince
+    yavaşlar, dibe çöker, su seviyesi yükselir; sıvı parsel yarıçapıyla, taneler fizik
+    yarıçapıyla çizilir. Yüksek çözünürlükte tek tane emitter'da kalmamalı; kalırsa
+    `fluid.matter_models` → `mixed_execution.status` metnini getir. İstersen
+    `wet_grains` + `wet_appearance_enabled` ile ıslanan taneleri gör.
+
+★ En sinsi: **3. madde geçip 4. madde (statik tutunma) çoklu tanede kayması.** Tek tane
+remap'e girmez; geçmiş taşıma hatası yalnız çok taneli yığında yavaş sürünme olarak görünür
+ve "biraz yumuşak kum" gibi okunur. `--settle-only` COM aralığı bunu yakalar.
+★ İkinci: 6. maddede açık kolun 6.13 değil ~2.45 vermesi → basınç kuvveti ve hidrostatik
+kaldırma birlikte uygulanıyor (çift sayım: 9.81 − 2 × 3.68).
+★ Üçüncü: 7. maddede yükselme var ama su kütlesi düşüyor → yükselme dışlamadan değil
+kayıptan.
 
 
 # Sıradaki kullanıcı build (C++ + SHADER): dry grain — birleşik alt adım, statik sürtünme, tane kütlesi
