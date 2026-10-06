@@ -419,34 +419,46 @@ void restoreMatterGrainPorosity(FluidSim::FluidGrid& grid, MatterGrainPorosityBa
     backup.active = false;
 }
 
-void applyMatterGrainPressureForce(const std::vector<float>& pressure,
-    const std::vector<float>& mask, const FluidParticles& grains, float grain_radius,
-    float dt, MatterGrainCouplingFrame& frame, MatterGrainStepReport& report) {
+bool applyMatterGrainLiquidAccelerationForce(const FluidParticles& liquid,
+    const std::vector<Vec3>& start_velocity, const std::vector<uint64_t>& start_id,
+    const FluidParticles& grains, float grain_radius, const Vec3& gravity, float dt,
+    MatterGrainCouplingFrame& frame, MatterGrainStepReport& report, std::string& error) {
     const auto& f = frame.field;
-    const std::size_t cells = static_cast<std::size_t>(f.nx) * f.ny * f.nz;
+    const std::size_t cells = f.mass.size();
     report.pressure_impulse = Vec3(0.0f, 0.0f, 0.0f);
     report.pressure_force = false;
-    if (pressure.size() < cells || mask.size() < cells || frame.inputs.size() != grains.size()) {
-        return;
+    if (start_velocity.size() != liquid.size() || start_id.size() != liquid.size() ||
+        liquid.particle_id.size() != liquid.size() || f.parcel_cell.size() != liquid.size() ||
+        frame.inputs.size() != grains.size() || !(dt > 0.0f)) {
+        error = "grain pressure force: liquid subset changed size during its step";
+        return false;
+    }
+    if (!std::equal(start_id.begin(), start_id.end(), liquid.particle_id.begin())) {
+        error = "grain pressure force: liquid parcel identities changed during its step";
+        return false;
+    }
+    // Per cell: liquid mass and mass-weighted velocity change of its parcels.
+    std::vector<double> mass(cells, 0.0), change[3];
+    for (auto& axis : change) {
+        axis.assign(cells, 0.0);
+    }
+    for (std::size_t p = 0; p < liquid.size(); ++p) {
+        const int c = f.parcel_cell[p];
+        if (c < 0) {
+            continue;
+        }
+        const double m = double(liquid.rest_mass_kg[p]) * liquid.mass_fraction[p];
+        const Vec3 dv = liquid.velocity[p] - start_velocity[p];
+        if (!(m > 0.0) || !finite(dv)) {
+            continue;
+        }
+        mass[c] += m;
+        change[0][c] += m * dv.x;
+        change[1][c] += m * dv.y;
+        change[2][c] += m * dv.z;
     }
     report.pressure_force = true;
     report.buoyancy_impulse = Vec3(0.0f, 0.0f, 0.0f);
-    // Kinematic pressure with the solver's boundary semantics: liquid -> p,
-    // air -> 0 (free surface), solid and closed walls -> the asking cell's p.
-    const auto at = [&](int i, int j, int k, double own) -> double {
-        if (i < 0 || j < 0 || k < 0 || i >= f.nx || j >= f.ny || k >= f.nz) {
-            return own;
-        }
-        const std::size_t c = cellIndex(f, i, j, k);
-        return mask[c] > .5f ? pressure[c] : mask[c] < -.5f ? own : 0.0;
-    };
-    const auto gradient = [&](int i, int j, int k) {
-        const std::size_t c = cellIndex(f, i, j, k);
-        const double own = mask[c] > .5f ? pressure[c] : 0.0;
-        return Vec3(static_cast<float>((at(i + 1, j, k, own) - at(i - 1, j, k, own)) / (2.0 * f.h)),
-            static_cast<float>((at(i, j + 1, k, own) - at(i, j - 1, k, own)) / (2.0 * f.h)),
-            static_cast<float>((at(i, j, k + 1, own) - at(i, j, k - 1, own)) / (2.0 * f.h)));
-    };
     const double sphere = 4.0 / 3.0 * kPi * double(grain_radius) * grain_radius * grain_radius;
     for (std::size_t g = 0; g < grains.size(); ++g) {
         auto& in = frame.inputs[g];
@@ -458,27 +470,30 @@ void applyMatterGrainPressureForce(const std::vector<float>& pressure,
         int c[8];
         double w[8];
         neighbours(f, grains.position[g], c, w);
-        Vec3 grad(0.0f, 0.0f, 0.0f);
-        double weight = 0.0;
+        double weight = 0.0, a[3] = {};
         for (int n = 0; n < 8; ++n) {
-            if (c[n] < 0) {
+            if (c[n] < 0 || mass[c[n]] <= 0.0) {
                 continue;
             }
-            const int i = c[n] % f.nx, j = (c[n] / f.nx) % f.ny, k = c[n] / (f.nx * f.ny);
-            grad = grad + gradient(i, j, k) * static_cast<float>(w[n]);
+            for (int axis = 0; axis < 3; ++axis) {
+                a[axis] += w[n] * change[axis][c[n]] / (mass[c[n]] * dt);
+            }
             weight += w[n];
         }
         if (weight <= 0.0) {
             continue;
         }
-        grad = grad * static_cast<float>(1.0 / weight);
-        const double mass = grainMass(grains, g);
-        const Vec3 force = grad * static_cast<float>(-sphere * frame.density[g]);
-        in.buoyancy_acceleration = force * static_cast<float>(1.0 / mass);
+        const Vec3 acceleration(static_cast<float>(a[0] / weight),
+            static_cast<float>(a[1] / weight), static_cast<float>(a[2] / weight));
+        const double displaced = double(frame.submerged[g]) * frame.density[g] * sphere;
+        const Vec3 force = (acceleration - gravity) * static_cast<float>(displaced);
+        in.buoyancy_acceleration = force * static_cast<float>(1.0 / grainMass(grains, g));
         frame.buoyancy_impulse[g] = force * dt;
         report.pressure_impulse = report.pressure_impulse + frame.buoyancy_impulse[g];
     }
     report.buoyancy_impulse = report.pressure_impulse;
+    error.clear();
+    return true;
 }
 
 void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,

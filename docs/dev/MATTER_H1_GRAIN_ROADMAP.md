@@ -132,8 +132,15 @@ CPU + 2 yükleme/indirme). B4 bunu GPU'ya taşır.
 
 > **Yazılan:** tanelerin hacim kesri sıvı şeridinin variational yüz ağırlıklarına (ε, en az
 > .3) bir adım için yazılır, katı hızı olarak tanelerin ortalama hızı; yeni
-> `sim_fluid_divergence_porous` ∇·(ε u_s + (1−ε) u_t) = 0'ı uygular. Taneler çözücünün
-> basınç gradyanını (−V ρ ∇p) alır, sıvı geri alır (model A). Eklenik kütle yazılmadı.
+> `sim_fluid_divergence_porous` ∇·(ε u_s + (1−ε) u_t) = 0'ı uygular. Taneler sıvının
+> basınç kuvvetini alır, sıvı geri alır (model A). Eklenik kütle yazılmadı.
+> ★ **2026-10-06 canlı düzeltme:** kuvvet önce çözücünün basınç tamponundan (−V ρ ∇p)
+> okunuyordu; canlıda Arşimet'in ≈ %10'u, işareti kare kare dönen gürültü çıktı. Sıvı
+> şeridi yerçekimini kare başında bir kez uygulayıp alt adımlarda projekte ettiği için tek
+> bir basınç alanı karenin yükünü taşımıyor (alt adım ortalaması da yetmedi: 9.43 → 9.08).
+> Artık kuvvet sıvının **ölçülen** ivmesinden: F = batma · ρV (Du/Dt − g), Du/Dt tanenin 8
+> hücresindeki sıvı parsellerinin kare boyu kütle ağırlıklı hız değişimi (kimlikle,
+> Lagrange). Durgun suda tam Arşimet; GPU basınç okuması yok.
 > Kabul: `--porous-only` (yer değiştirme A/B); Richardson–Zaki/Ergun kıyasları sonraki tur.
 
 - **Kod:** sıvı süreklilik denklemi gözeneklilikle (ε = 1 − φ_s): P2G'de katı hacim kesri,

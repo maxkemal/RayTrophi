@@ -297,23 +297,6 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
             }
         }
     }
-    runtime.frame_pressure_valid = false;
-    const bool frame_pressure = runtime.frame_pressure_requested && has_fluid;
-    if (frame_pressure) {
-        const uint32_t values = static_cast<uint32_t>(cells);
-        ComputeDispatch clear;
-        clear.kernel = "sim_matter_clear";
-        clear.buffers = &runtime.frame_pressure;
-        clear.buffer_count = 1;
-        clear.constants = &values;
-        clear.constants_size = sizeof(values);
-        clear.groups.groups_x = (values + 255u) / 256u;
-        if (!allocation(runtime.frame_pressure, cells * sizeof(float), "matter_frame_pressure") ||
-            !compute->dispatch(clear)) {
-            error = "mixed GPU frame pressure clear failed";
-            return false;
-        }
-    }
     for (int substep = 0; substep < substeps; ++substep) {
         if ((has_fluid && !liquid_occupancy.build()) || !granular_occupancy.build()) {
             error = "mixed GPU model occupancy failed";
@@ -370,24 +353,6 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
                                                   unused_host_mask, &stats)) {
             error = "mixed GPU liquid MGPCG projection failed";
             return false;
-        }
-        if (frame_pressure) {
-            struct { uint32_t count; float scale; } accumulate_constants{
-                static_cast<uint32_t>(cells), 1.0f / static_cast<float>(substeps)};
-            static_assert(sizeof(accumulate_constants) == 8);
-            const ComputeBufferHandle accumulate_buffers[] = {primary.pressure,
-                runtime.frame_pressure};
-            ComputeDispatch accumulate;
-            accumulate.kernel = "sim_matter_accumulate";
-            accumulate.buffers = accumulate_buffers;
-            accumulate.buffer_count = 2;
-            accumulate.constants = &accumulate_constants;
-            accumulate.constants_size = sizeof(accumulate_constants);
-            accumulate.groups.groups_x = static_cast<uint32_t>((cells + 255u) / 256u);
-            if (!compute->dispatch(accumulate)) {
-                error = "mixed GPU frame pressure accumulation failed";
-                return false;
-            }
         }
         const ComputeBufferHandle contact_buffers[] = {
             primary.vel_x, primary.vel_y, primary.vel_z,
@@ -515,7 +480,6 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
     grid.vel_x = std::move(result_velocity[0]);
     grid.vel_y = std::move(result_velocity[1]);
     grid.vel_z = std::move(result_velocity[2]);
-    runtime.frame_pressure_valid = frame_pressure;
     stats.grid_cell_count = cells;
     stats.granular_solver_substeps = substeps;
     stats.granular_required_substeps = elastic.required_substeps;
