@@ -1,0 +1,2034 @@
+[
+ {
+  "label": "Domain Enabled",
+  "kind": "Checkbox",
+  "target": "domain.enabled",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 266,
+  "tab": ""
+ },
+ {
+  "label": "Contents",
+  "kind": "Combo",
+  "target": "phase_idx",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 299,
+  "tab": "Domain"
+ },
+ {
+  "label": "##DomainBackend",
+  "kind": "Combo",
+  "target": "current_backend",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 389,
+  "tab": "Domain"
+ },
+ {
+  "label": "Quality Profile",
+  "kind": "Combo",
+  "target": "quality_profile",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 439,
+  "tab": "Domain"
+ },
+ {
+  "label": "Grid Resolution (X, Y, Z)",
+  "kind": "DragInt3",
+  "target": "res",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 522,
+  "tab": "Domain"
+ },
+ {
+  "label": "Preserve Voxel Size",
+  "kind": "Checkbox",
+  "target": "domain.preserve_voxel_size_on_resize",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 586,
+  "tab": "Domain"
+ },
+ {
+  "label": "Sparse Grid System (Sparse Tiles)",
+  "kind": "Checkbox",
+  "target": "domain.use_sparse_tiles",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 593,
+  "tab": "Domain"
+ },
+ {
+  "label": "NanoVDB Volumetric Render (Ray Tracing)",
+  "kind": "Checkbox",
+  "target": "domain.render_to_nanovdb",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 601,
+  "tab": "Domain"
+ },
+ {
+  "label": "Max Auto Resolution",
+  "kind": "DragInt",
+  "target": "domain.max_auto_resolution",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 617,
+  "tab": "Domain"
+ },
+ {
+  "label": "Boundary Padding",
+  "kind": "DragFloat",
+  "target": "domain.padding",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 655,
+  "tab": "Domain"
+ },
+ {
+  "label": "Domain Source Mode",
+  "kind": "Combo",
+  "target": "current_source_mode",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 685,
+  "tab": "Domain"
+ },
+ {
+  "label": "Lock Ground Level (Y Min)",
+  "kind": "Checkbox",
+  "target": "domain.adaptive_lock_floor",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 712,
+  "tab": "Domain"
+ },
+ {
+  "label": "Ground Level Y Height",
+  "kind": "DragFloat",
+  "target": "domain.adaptive_floor_y",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 719,
+  "tab": "Domain"
+ },
+ {
+  "label": "Domain Minimum Bounds",
+  "kind": "DragFloat3",
+  "target": "domain.bounds_min.x",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 744,
+  "tab": "Domain"
+ },
+ {
+  "label": "Domain Maximum Bounds",
+  "kind": "DragFloat3",
+  "target": "domain.bounds_max.x",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 750,
+  "tab": "Domain"
+ },
+ {
+  "label": "Boundary Collision Mode",
+  "kind": "Combo",
+  "target": "boundary_mode",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 785,
+  "tab": "Domain"
+ },
+ {
+  "label": "Auto Reseed on Edit",
+  "kind": "Checkbox",
+  "target": "s_fluid_auto_reseed",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 804,
+  "tab": "Domain"
+ },
+ {
+  "label": "Seed Mode",
+  "kind": "Combo",
+  "target": "seed_mode_idx",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 818,
+  "tab": "Domain"
+ },
+ {
+  "label": "Fill Level (target)",
+  "kind": "SliderFloat",
+  "target": "domain.fluid_fill_level",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 831,
+  "tab": "Domain"
+ },
+ {
+  "label": "Wall Margin",
+  "kind": "DragFloat",
+  "target": "domain.fluid_fill_wall_margin",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 841,
+  "tab": "Domain"
+ },
+ {
+  "label": "Fluid Seed Box Min",
+  "kind": "DragFloat3",
+  "target": "domain.fluid_seed_min.x",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 888,
+  "tab": "Domain"
+ },
+ {
+  "label": "Fluid Seed Box Max",
+  "kind": "DragFloat3",
+  "target": "domain.fluid_seed_max.x",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 893,
+  "tab": "Domain"
+ },
+ {
+  "label": "Seed Particles Per Voxel",
+  "kind": "SliderInt",
+  "target": "domain.fluid_seed_particles_per_cell",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 901,
+  "tab": "Domain"
+ },
+ {
+  "label": "Max Particles Limit",
+  "kind": "DragInt",
+  "target": "max_particles_ui",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 918,
+  "tab": "Domain"
+ },
+ {
+  "label": "Clear Existing on Seed",
+  "kind": "Checkbox",
+  "target": "domain.fluid_replace_on_seed",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 926,
+  "tab": "Domain"
+ },
+ {
+  "label": "Recreate Seed on Reset",
+  "kind": "Checkbox",
+  "target": "domain.fluid_reseed_on_reset",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 931,
+  "tab": "Domain"
+ },
+ {
+  "label": "Keyframe Edit Mode",
+  "kind": "Checkbox",
+  "target": "key_authoring",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1081,
+  "tab": "Domain"
+ },
+ {
+  "label": "Flow Source Enabled",
+  "kind": "Checkbox",
+  "target": "source.enabled",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1252,
+  "tab": "Domain"
+ },
+ {
+  "label": "Emission Phase",
+  "kind": "Combo",
+  "target": "source_phase",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1266,
+  "tab": "Domain"
+ },
+ {
+  "label": "Emitter Geometry Type",
+  "kind": "Combo",
+  "target": "mode_idx",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1279,
+  "tab": "Domain"
+ },
+ {
+  "label": "Source Radius",
+  "kind": "DragFloat",
+  "target": "source.radius",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1291,
+  "tab": "Domain"
+ },
+ {
+  "label": "Injected Particles / Sec",
+  "kind": "DragFloat",
+  "target": "source.fluid_particles_per_second",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1322,
+  "tab": "Domain"
+ },
+ {
+  "label": "Soot Density Rate",
+  "kind": "DragFloat",
+  "target": "source.density",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1340,
+  "tab": "Domain"
+ },
+ {
+  "label": "Thermal Temperature Rate",
+  "kind": "DragFloat",
+  "target": "source.temperature",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1353,
+  "tab": "Domain"
+ },
+ {
+  "label": "Combustion Fuel Rate",
+  "kind": "DragFloat",
+  "target": "source.fuel",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1366,
+  "tab": "Domain"
+ },
+ {
+  "label": "Radial Falloff Blend",
+  "kind": "DragFloat",
+  "target": "source.falloff",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1379,
+  "tab": "Domain"
+ },
+ {
+  "label": "Emission Velocity",
+  "kind": "DragFloat3",
+  "target": "source.velocity.x",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1396,
+  "tab": "Domain"
+ },
+ {
+  "label": "Velocity Coupling / Sec",
+  "kind": "DragFloat",
+  "target": "source.velocity_coupling",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1413,
+  "tab": "Domain"
+ },
+ {
+  "label": "Velocity Spread",
+  "kind": "DragFloat",
+  "target": "source.fluid_velocity_spread",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1430,
+  "tab": "Domain"
+ },
+ {
+  "label": "Emit Along Surface Normal",
+  "kind": "Checkbox",
+  "target": "source.fluid_emit_along_normal",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1440,
+  "tab": "Domain"
+ },
+ {
+  "label": "Custom Substance ID",
+  "kind": "InputText",
+  "target": "subs_buf",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1482,
+  "tab": "Domain"
+ },
+ {
+  "label": "Initial Model",
+  "kind": "Combo",
+  "target": "model",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1510,
+  "tab": "Domain"
+ },
+ {
+  "label": "Velocity Space",
+  "kind": "Combo",
+  "target": "space_idx",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1660,
+  "tab": "Domain"
+ },
+ {
+  "label": "Inherit Parent Velocity",
+  "kind": "DragFloat",
+  "target": "source.inherit_velocity",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1672,
+  "tab": "Domain"
+ },
+ {
+  "label": "Use Time Range Limit",
+  "kind": "Checkbox",
+  "target": "source.use_time_limit",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1691,
+  "tab": "Domain"
+ },
+ {
+  "label": "Start Time (s)",
+  "kind": "DragFloat",
+  "target": "source.start_time",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1696,
+  "tab": "Domain"
+ },
+ {
+  "label": "End Time (s)",
+  "kind": "DragFloat",
+  "target": "source.end_time",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1700,
+  "tab": "Domain"
+ },
+ {
+  "label": "Use Particle Budget Limit",
+  "kind": "Checkbox",
+  "target": "source.use_particle_limit",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1710,
+  "tab": "Domain"
+ },
+ {
+  "label": "Max Particle Budget",
+  "kind": "DragInt",
+  "target": "source.max_emitted_particles",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1715,
+  "tab": "Domain"
+ },
+ {
+  "label": "Enable Combustion Physics (Fire & Flames)",
+  "kind": "Checkbox",
+  "target": "domain.fire_enabled",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1771,
+  "tab": "Matter"
+ },
+ {
+  "label": "Ignition Temperature",
+  "kind": "DragFloat",
+  "target": "domain.ignition_temperature",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1780,
+  "tab": "Matter"
+ },
+ {
+  "label": "Fuel Burn Rate",
+  "kind": "DragFloat",
+  "target": "domain.burn_rate",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1784,
+  "tab": "Matter"
+ },
+ {
+  "label": "Heat Release Rate",
+  "kind": "DragFloat",
+  "target": "domain.heat_release",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1788,
+  "tab": "Matter"
+ },
+ {
+  "label": "Smoke Generation Rate",
+  "kind": "DragFloat",
+  "target": "domain.smoke_generation",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1792,
+  "tab": "Matter"
+ },
+ {
+  "label": "Flame Dissipation Rate",
+  "kind": "DragFloat",
+  "target": "domain.flame_dissipation",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1796,
+  "tab": "Matter"
+ },
+ {
+  "label": "Maximum Temperature Limit",
+  "kind": "DragFloat",
+  "target": "domain.fire_max_temperature",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1800,
+  "tab": "Matter"
+ },
+ {
+  "label": "Thermal Expansion (Blast)",
+  "kind": "DragFloat",
+  "target": "domain.fire_expansion",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1804,
+  "tab": "Matter"
+ },
+ {
+  "label": "Blast Damages Structures",
+  "kind": "Checkbox",
+  "target": "domain.structural_coupling_enabled",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1815,
+  "tab": "Matter"
+ },
+ {
+  "label": "Blast Pressure Scale",
+  "kind": "DragFloat",
+  "target": "domain.structural_pressure_scale",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1824,
+  "tab": "Matter"
+ },
+ {
+  "label": "Minimum Blast Intensity",
+  "kind": "DragFloat",
+  "target": "domain.structural_min_intensity",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1833,
+  "tab": "Matter"
+ },
+ {
+  "label": "Blast Interval",
+  "kind": "DragFloat",
+  "target": "domain.structural_event_interval",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1840,
+  "tab": "Matter"
+ },
+ {
+  "label": "Kinematic Viscosity (m^2/s)",
+  "kind": "DragFloat",
+  "target": "fp.kinematic_viscosity",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1882,
+  "tab": "Matter"
+ },
+ {
+  "label": "Viscosity Sweeps",
+  "kind": "DragInt",
+  "target": "fp.viscosity_sweeps",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1919,
+  "tab": "Matter"
+ },
+ {
+  "label": "Wall Slip",
+  "kind": "SliderFloat",
+  "target": "fp.viscosity_wall_slip",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1928,
+  "tab": "Matter"
+ },
+ {
+  "label": "Enable Granular MPM",
+  "kind": "Checkbox",
+  "target": "fp.granular_enabled",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1965,
+  "tab": "Matter"
+ },
+ {
+  "label": "Friction Angle (deg)",
+  "kind": "SliderFloat",
+  "target": "fp.granular_friction_angle_degrees",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1972,
+  "tab": "Matter"
+ },
+ {
+  "label": "Cohesion (Pa)",
+  "kind": "DragFloat",
+  "target": "fp.granular_cohesion",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1977,
+  "tab": "Matter"
+ },
+ {
+  "label": "Dilatancy (deg)",
+  "kind": "SliderFloat",
+  "target": "fp.granular_dilatancy_degrees",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1982,
+  "tab": "Matter"
+ },
+ {
+  "label": "Young Modulus (Pa)",
+  "kind": "DragFloat",
+  "target": "fp.granular_young_modulus",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1987,
+  "tab": "Matter"
+ },
+ {
+  "label": "Poisson Ratio",
+  "kind": "SliderFloat",
+  "target": "fp.granular_poisson_ratio",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1993,
+  "tab": "Matter"
+ },
+ {
+  "label": "Tensile Cutoff (Pa)",
+  "kind": "DragFloat",
+  "target": "fp.granular_tensile_cutoff",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 1998,
+  "tab": "Matter"
+ },
+ {
+  "label": "Hardening",
+  "kind": "DragFloat",
+  "target": "fp.granular_hardening",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2003,
+  "tab": "Matter"
+ },
+ {
+  "label": "Fracture Strain",
+  "kind": "DragFloat",
+  "target": "fp.granular_fracture_strain",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2009,
+  "tab": "Matter"
+ },
+ {
+  "label": "Damage Rate",
+  "kind": "DragFloat",
+  "target": "fp.granular_damage_rate",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2016,
+  "tab": "Matter"
+ },
+ {
+  "label": "Allow Rebonding",
+  "kind": "Checkbox",
+  "target": "fp.granular_rebonding",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2021,
+  "tab": "Matter"
+ },
+ {
+  "label": "Healing Rate",
+  "kind": "DragFloat",
+  "target": "fp.granular_healing_rate",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2026,
+  "tab": "Matter"
+ },
+ {
+  "label": "Softening Temperature (K)",
+  "kind": "DragFloat",
+  "target": "fp.granular_softening_temperature",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2028,
+  "tab": "Matter"
+ },
+ {
+  "label": "Softening Range (K)",
+  "kind": "DragFloat",
+  "target": "fp.granular_softening_range",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2038,
+  "tab": "Matter"
+ },
+ {
+  "label": "Residual Strength",
+  "kind": "SliderFloat",
+  "target": "fp.granular_residual_strength",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2041,
+  "tab": "Matter"
+ },
+ {
+  "label": "Chemistry Preset",
+  "kind": "Combo",
+  "target": "chemistry_index",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2077,
+  "tab": "Matter"
+ },
+ {
+  "label": "Enable Flammable Surface",
+  "kind": "Checkbox",
+  "target": "domain.fluid_flammable",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2101,
+  "tab": "Matter"
+ },
+ {
+  "label": "Auto Ignite",
+  "kind": "Checkbox",
+  "target": "domain.fluid_auto_ignite",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2117,
+  "tab": "Matter"
+ },
+ {
+  "label": "Ignition Temperature",
+  "kind": "DragFloat",
+  "target": "domain.fluid_ignition_temperature",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2123,
+  "tab": "Matter"
+ },
+ {
+  "label": "Evaporation / Burn Rate",
+  "kind": "DragFloat",
+  "target": "domain.fluid_evaporation_rate",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2130,
+  "tab": "Matter"
+ },
+ {
+  "label": "Surface Fuel Capacity",
+  "kind": "DragFloat",
+  "target": "domain.fluid_surface_fuel_capacity",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2137,
+  "tab": "Matter"
+ },
+ {
+  "label": "Heat Release",
+  "kind": "DragFloat",
+  "target": "domain.fluid_combustion_heat_release",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2144,
+  "tab": "Matter"
+ },
+ {
+  "label": "Smoke Yield",
+  "kind": "DragFloat",
+  "target": "domain.fluid_combustion_smoke_yield",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2150,
+  "tab": "Matter"
+ },
+ {
+  "label": "Surface Cooling",
+  "kind": "DragFloat",
+  "target": "domain.fluid_surface_cooling",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2156,
+  "tab": "Matter"
+ },
+ {
+  "label": "Solid Phase Blocks Flow",
+  "kind": "Checkbox",
+  "target": "solid_on",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2206,
+  "tab": "Matter"
+ },
+ {
+  "label": "Solid Cell Fill",
+  "kind": "SliderFloat",
+  "target": "fill",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2223,
+  "tab": "Matter"
+ },
+ {
+  "label": "Phase",
+  "kind": "Combo",
+  "target": "phase_idx",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2294,
+  "tab": "Matter"
+ },
+ {
+  "label": "Constitutive Model",
+  "kind": "Combo",
+  "target": "model_idx",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2326,
+  "tab": "Matter"
+ },
+ {
+  "label": "Inherit Domain Viscosity",
+  "kind": "Checkbox",
+  "target": "inherit_visc",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2350,
+  "tab": "Matter"
+ },
+ {
+  "label": "Kinematic Viscosity (m^2/s)",
+  "kind": "DragFloat",
+  "target": "visc",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2359,
+  "tab": "Matter"
+ },
+ {
+  "label": "Miscibility",
+  "kind": "SliderFloat",
+  "target": "misc",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2380,
+  "tab": "Matter"
+ },
+ {
+  "label": "Gravity Force Vector",
+  "kind": "DragFloat3",
+  "target": "fp.gravity.x",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2483,
+  "tab": "Environment"
+ },
+ {
+  "label": "Density Grid (Smoke Visualization)",
+  "kind": "Checkbox",
+  "target": "channel_density",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2509,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Temperature Grid (Buoyant Heat Rise)",
+  "kind": "Checkbox",
+  "target": "channel_temperature",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2513,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Velocity Grid (Vector Flow Field)",
+  "kind": "Checkbox",
+  "target": "channel_velocity",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2517,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Fuel Grid (Combustion/Fire)",
+  "kind": "Checkbox",
+  "target": "channel_fuel",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2521,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Pressure Grid (Volume Incompressibility)",
+  "kind": "Checkbox",
+  "target": "channel_pressure",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2525,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Heat Lift",
+  "kind": "DragFloat",
+  "target": "domain.gas_buoyancy_heat",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2543,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Smoke Lift",
+  "kind": "DragFloat",
+  "target": "domain.gas_buoyancy_density",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2549,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Pressure Sweeps",
+  "kind": "DragInt",
+  "target": "domain.gas_pressure_iterations",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2554,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Stratification from atmosphere",
+  "kind": "Checkbox",
+  "target": "domain.gas_inherit_atmosphere",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2567,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Stratification",
+  "kind": "DragFloat",
+  "target": "domain.gas_ambient_stratification",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2580,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Solved Vorticity",
+  "kind": "DragFloat",
+  "target": "domain.gas_vorticity",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2598,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Surface Dust",
+  "kind": "Checkbox",
+  "target": "domain.gas_surface_dust_enabled",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2604,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Lift Threshold m/s",
+  "kind": "DragFloat",
+  "target": "domain.gas_surface_dust_threshold",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2618,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Dust Heat",
+  "kind": "DragFloat",
+  "target": "domain.gas_surface_dust_temperature",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2627,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Dust Yield",
+  "kind": "DragFloat",
+  "target": "domain.gas_surface_dust_emission",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2636,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Ground Reserve",
+  "kind": "DragFloat",
+  "target": "domain.gas_surface_dust_supply",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2641,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Dust Ceiling",
+  "kind": "DragFloat",
+  "target": "domain.gas_surface_dust_max_density",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2652,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Override Field Loss",
+  "kind": "Checkbox",
+  "target": "domain.gas_dissipation_override",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2663,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Smoke Loss /s",
+  "kind": "DragFloat",
+  "target": "domain.gas_density_dissipation",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2678,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Heat Loss /s",
+  "kind": "DragFloat",
+  "target": "domain.gas_temperature_dissipation",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2691,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Fuel Loss /s",
+  "kind": "DragFloat",
+  "target": "domain.gas_fuel_dissipation",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2703,
+  "tab": "Solvers"
+ },
+ {
+  "label": "MacCormack Advection",
+  "kind": "Checkbox",
+  "target": "domain.gas_maccormack_advection",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2714,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Turbulence Strength",
+  "kind": "DragFloat",
+  "target": "domain.turbulence_strength",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2725,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Noise Scale",
+  "kind": "DragFloat",
+  "target": "domain.turbulence_scale",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2731,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Octaves",
+  "kind": "DragInt",
+  "target": "domain.turbulence_octaves",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2733,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Lacunarity",
+  "kind": "DragFloat",
+  "target": "domain.turbulence_lacunarity",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2735,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Persistence",
+  "kind": "DragFloat",
+  "target": "domain.turbulence_persistence",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2737,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Evolution Speed",
+  "kind": "DragFloat",
+  "target": "domain.turbulence_speed",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2739,
+  "tab": "Solvers"
+ },
+ {
+  "label": "APIC Momentum Blend",
+  "kind": "SliderFloat",
+  "target": "fp.apic_blend",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2751,
+  "tab": "Solvers"
+ },
+ {
+  "label": "FLIP Particle Blend",
+  "kind": "SliderFloat",
+  "target": "fp.flip_blend",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2757,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Velocity Damping",
+  "kind": "DragFloat",
+  "target": "fp.velocity_damping",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2771,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Internal Viscous Friction",
+  "kind": "DragFloat",
+  "target": "fp.internal_friction",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2775,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Air Drag Resistance",
+  "kind": "DragFloat",
+  "target": "fp.air_drag",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2785,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Wall Friction Damping",
+  "kind": "DragFloat",
+  "target": "fp.wall_damping",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2795,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Atmosphere wind",
+  "kind": "Checkbox",
+  "target": "fp.inherit_atmosphere",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2802,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Domain Motion Coupling",
+  "kind": "SliderFloat",
+  "target": "fp.domain_motion_coupling",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2813,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Density Correction Strength",
+  "kind": "DragFloat",
+  "target": "fp.density_correction",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2818,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Free Surface Pressure Boundary",
+  "kind": "Checkbox",
+  "target": "fp.free_surface",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2823,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Ghost Fluid Method (GFM) Surface",
+  "kind": "Checkbox",
+  "target": "fp.ghost_fluid_surface",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2828,
+  "tab": "Solvers"
+ },
+ {
+  "label": "CFL Stability Factor",
+  "kind": "DragFloat",
+  "target": "fp.cfl",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2833,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Max Advection Substeps",
+  "kind": "DragInt",
+  "target": "fp.max_substeps",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2860,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Poisson Pressure Iterations",
+  "kind": "DragInt",
+  "target": "fp.pressure_iterations",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2872,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Pressure Residual Target",
+  "kind": "DragFloat",
+  "target": "fp.pressure_relative_residual",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2876,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Pressure Layer B V-cycle",
+  "kind": "Checkbox",
+  "target": "fp.pressure_multigrid_preconditioner",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2881,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Enable Dynamic Reseeding",
+  "kind": "Checkbox",
+  "target": "fp.reseed_enabled",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2896,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Target Particles Per Cell",
+  "kind": "DragInt",
+  "target": "fp.reseed_target_per_cell",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2907,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Minimum Threshold Per Cell",
+  "kind": "DragInt",
+  "target": "fp.reseed_min_per_cell",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2908,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Maximum Threshold Per Cell",
+  "kind": "DragInt",
+  "target": "fp.reseed_max_per_cell",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2909,
+  "tab": "Solvers"
+ },
+ {
+  "label": "Visualization Mode",
+  "kind": "Combo",
+  "target": "current_mode_idx",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 2949,
+  "tab": "Output"
+ },
+ {
+  "label": "Debug Particle Points Overlay",
+  "kind": "Checkbox",
+  "target": "domain.fluid_debug_overlay",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3096,
+  "tab": "Output"
+ },
+ {
+  "label": "Drawn as",
+  "kind": "Combo",
+  "target": "rep",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3125,
+  "tab": "Output"
+ },
+ {
+  "label": "Geometry Source",
+  "kind": "Combo",
+  "target": "geometry_mode",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3232,
+  "tab": "Output"
+ },
+ {
+  "label": "Voxel Radius Factor",
+  "kind": "DragFloat",
+  "target": "domain.fluid_particle_radius_factor",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3330,
+  "tab": "Output"
+ },
+ {
+  "label": "Visual Size Multiplier",
+  "kind": "DragFloat",
+  "target": "domain.fluid_particle_size_multiplier",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3331,
+  "tab": "Output"
+ },
+ {
+  "label": "Physical Granular Carriers",
+  "kind": "Checkbox",
+  "target": "physical_granular_carriers",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3337,
+  "tab": "Output"
+ },
+ {
+  "label": "Virtual Children per Particle",
+  "kind": "SliderInt",
+  "target": "virtual_grains",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3358,
+  "tab": "Output"
+ },
+ {
+  "label": "Child Size Variation",
+  "kind": "SliderFloat",
+  "target": "size_variation",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3363,
+  "tab": "Output"
+ },
+ {
+  "label": "Virtual Sphere Budget (millions)",
+  "kind": "SliderInt",
+  "target": "budget_millions",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3369,
+  "tab": "Output"
+ },
+ {
+  "label": "Sphere Subdivision Detail",
+  "kind": "SliderInt",
+  "target": "domain.fluid_particle_subdivisions",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3470,
+  "tab": "Output"
+ },
+ {
+  "label": "Level Set Kernel Radius",
+  "kind": "DragFloat",
+  "target": "domain.fluid_level_set_params.kernel_radius_voxels",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3503,
+  "tab": "Output"
+ },
+ {
+  "label": "Particle Voxel Radius (vx)",
+  "kind": "DragFloat",
+  "target": "domain.fluid_level_set_params.particle_radius_voxels",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3507,
+  "tab": "Output"
+ },
+ {
+  "label": "Surface Fullness (vx)",
+  "kind": "DragFloat",
+  "target": "domain.fluid_level_set_params.surface_offset_voxels",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3508,
+  "tab": "Output"
+ },
+ {
+  "label": "SDF Narrow Band Width",
+  "kind": "DragFloat",
+  "target": "domain.fluid_level_set_params.narrow_band_voxels",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3517,
+  "tab": "Output"
+ },
+ {
+  "label": "SDF Surface Band Width",
+  "kind": "DragFloat",
+  "target": "domain.fluid_surface_band_voxels",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3518,
+  "tab": "Output"
+ },
+ {
+  "label": "Laplacian Surface Smoothing",
+  "kind": "SliderInt",
+  "target": "domain.fluid_level_set_params.smoothing_iterations",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3519,
+  "tab": "Output"
+ },
+ {
+  "label": "Coordinate Space",
+  "kind": "Combo",
+  "target": "space",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3540,
+  "tab": "Output"
+ },
+ {
+  "label": "Coord Refresh Period",
+  "kind": "DragInt",
+  "target": "period",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3566,
+  "tab": "Output"
+ },
+ {
+  "label": "Pore Amount",
+  "kind": "SliderFloat",
+  "target": "domain.fluid_surface_pore_amount",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3595,
+  "tab": "Output"
+ },
+ {
+  "label": "Bubble Size (m)",
+  "kind": "DragFloat",
+  "target": "domain.fluid_surface_pore_scale",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3607,
+  "tab": "Output"
+ },
+ {
+  "label": "Size Variation",
+  "kind": "SliderFloat",
+  "target": "domain.fluid_surface_pore_detail",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3614,
+  "tab": "Output"
+ },
+ {
+  "label": "Surface Detail (x sim grid)",
+  "kind": "SliderInt",
+  "target": "domain.fluid_level_set_params.surface_resolution_multiplier",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3650,
+  "tab": "Output"
+ },
+ {
+  "label": "Anisotropic Kernel (clean merge)",
+  "kind": "Checkbox",
+  "target": "domain.fluid_level_set_params.anisotropy_enabled",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3670,
+  "tab": "Output"
+ },
+ {
+  "label": "Neighbour Radius (vx)",
+  "kind": "DragFloat",
+  "target": "domain.fluid_level_set_params.anisotropy_radius_voxels",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3679,
+  "tab": "Output"
+ },
+ {
+  "label": "Max Stretch",
+  "kind": "DragFloat",
+  "target": "domain.fluid_level_set_params.anisotropy_max_stretch",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3681,
+  "tab": "Output"
+ },
+ {
+  "label": "Position Smoothing",
+  "kind": "DragFloat",
+  "target": "domain.fluid_level_set_params.position_smoothing",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3683,
+  "tab": "Output"
+ },
+ {
+  "label": "Isolated Min Neighbours",
+  "kind": "SliderInt",
+  "target": "domain.fluid_level_set_params.anisotropy_neighbor_min",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3685,
+  "tab": "Output"
+ },
+ {
+  "label": "Index of Refraction (IOR)",
+  "kind": "DragFloat",
+  "target": "domain.fluid_surface_ior",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3760,
+  "tab": "Output"
+ },
+ {
+  "label": "Surface Roughness",
+  "kind": "DragFloat",
+  "target": "domain.fluid_surface_roughness",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3768,
+  "tab": "Output"
+ },
+ {
+  "label": "Splash Foam Intensity",
+  "kind": "DragFloat",
+  "target": "domain.fluid_surface_foam",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3775,
+  "tab": "Output"
+ },
+ {
+  "label": "Enable Whitewater",
+  "kind": "Checkbox",
+  "target": "fo.enabled",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3803,
+  "tab": "Output"
+ },
+ {
+  "label": "Trapped-Air Rate",
+  "kind": "DragFloat",
+  "target": "fo.trapped_air_rate",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3812,
+  "tab": "Output"
+ },
+ {
+  "label": "Wave-Crest Rate",
+  "kind": "DragFloat",
+  "target": "fo.wave_crest_rate",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3814,
+  "tab": "Output"
+ },
+ {
+  "label": "Neighbour Radius (vx)",
+  "kind": "DragFloat",
+  "target": "fo.neighbor_radius_voxels",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3816,
+  "tab": "Output"
+ },
+ {
+  "label": "Lifetime (s)",
+  "kind": "DragFloat",
+  "target": "fo.lifetime",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3819,
+  "tab": "Output"
+ },
+ {
+  "label": "Bubble Buoyancy",
+  "kind": "DragFloat",
+  "target": "fo.buoyancy",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3820,
+  "tab": "Output"
+ },
+ {
+  "label": "Fluid Coupling",
+  "kind": "DragFloat",
+  "target": "fo.fluid_drag",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3822,
+  "tab": "Output"
+ },
+ {
+  "label": "Spray Air Drag",
+  "kind": "DragFloat",
+  "target": "fo.spray_drag",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3824,
+  "tab": "Output"
+ },
+ {
+  "label": "Spray when <= N",
+  "kind": "SliderInt",
+  "target": "fo.spray_max_neighbors",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3827,
+  "tab": "Output"
+ },
+ {
+  "label": "Bubble when >= N",
+  "kind": "SliderInt",
+  "target": "fo.bubble_min_neighbors",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3828,
+  "tab": "Output"
+ },
+ {
+  "label": "Foam Color",
+  "kind": "ColorEdit3",
+  "target": "fo.volume_color.x",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3870,
+  "tab": "Output"
+ },
+ {
+  "label": "Foam Density",
+  "kind": "DragFloat",
+  "target": "fo.volume_density",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3876,
+  "tab": "Output"
+ },
+ {
+  "label": "Foam Opacity",
+  "kind": "DragFloat",
+  "target": "fo.volume_opacity",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3880,
+  "tab": "Output"
+ },
+ {
+  "label": "Bubble Froth",
+  "kind": "DragFloat",
+  "target": "fo.volume_bubble_strength",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3886,
+  "tab": "Output"
+ },
+ {
+  "label": "Spray in Volume",
+  "kind": "DragFloat",
+  "target": "fo.volume_spray_strength",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3889,
+  "tab": "Output"
+ },
+ {
+  "label": "Custom Material Overrides",
+  "kind": "Checkbox",
+  "target": "show_material_overrides",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3911,
+  "tab": "Output"
+ },
+ {
+  "label": "Foam Sphere Radius (vx)",
+  "kind": "DragFloat",
+  "target": "fo.render_radius_voxels",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3987,
+  "tab": "Output"
+ },
+ {
+  "label": "Foam Subdivisions",
+  "kind": "SliderInt",
+  "target": "fo.foam_sphere_subdivisions",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3990,
+  "tab": "Output"
+ },
+ {
+  "label": "Max Foam Particles",
+  "kind": "DragInt",
+  "target": "maxf",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 3995,
+  "tab": "Output"
+ },
+ {
+  "label": "Fog Spread (voxels)",
+  "kind": "SliderFloat",
+  "target": "domain.fluid_fog_spread_voxels",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 4073,
+  "tab": "Output"
+ },
+ {
+  "label": "Fog Resolution",
+  "kind": "SliderInt",
+  "target": "domain.fluid_fog_resolution_multiplier",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 4090,
+  "tab": "Output"
+ },
+ {
+  "label": "Fog Erosion",
+  "kind": "SliderFloat",
+  "target": "domain.fluid_fog_erosion_strength",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 4110,
+  "tab": "Output"
+ },
+ {
+  "label": "Clump Size",
+  "kind": "DragFloat",
+  "target": "domain.fluid_fog_erosion_size",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 4119,
+  "tab": "Output"
+ },
+ {
+  "label": "Clump Detail",
+  "kind": "SliderInt",
+  "target": "domain.fluid_fog_erosion_detail",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 4128,
+  "tab": "Output"
+ },
+ {
+  "label": "Clump Seed",
+  "kind": "InputInt",
+  "target": "domain.fluid_fog_erosion_seed",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 4131,
+  "tab": "Output"
+ },
+ {
+  "label": "Surface Band",
+  "kind": "SliderFloat",
+  "target": "domain.fluid_fog_erosion_depth",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 4133,
+  "tab": "Output"
+ },
+ {
+  "label": "Absorption Color",
+  "kind": "ColorEdit3",
+  "target": "body.absorption.color.x",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 4201,
+  "tab": "Output"
+ },
+ {
+  "label": "Absorption",
+  "kind": "DragFloat",
+  "target": "body.absorption.coefficient",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 4209,
+  "tab": "Output"
+ },
+ {
+  "label": "Refraction Tint",
+  "kind": "ColorEdit3",
+  "target": "body.scattering.color.x",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 4218,
+  "tab": "Output"
+ },
+ {
+  "label": "##FluidDomainVDBDir",
+  "kind": "InputText",
+  "target": "vdb_dir",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 4700,
+  "tab": "Measure"
+ },
+ {
+  "label": "Base Name",
+  "kind": "InputText",
+  "target": "vdb_base",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 4710,
+  "tab": "Measure"
+ },
+ {
+  "label": "Start Frame",
+  "kind": "DragInt",
+  "target": "vdb_start",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 4717,
+  "tab": "Measure"
+ },
+ {
+  "label": "End Frame",
+  "kind": "DragInt",
+  "target": "vdb_end",
+  "file": "scene_ui_simulation_domains.cpp",
+  "line": 4718,
+  "tab": "Measure"
+ },
+ {
+  "label": "Enable discrete grains",
+  "kind": "Checkbox",
+  "target": "p.enabled",
+  "file": "MatterGrainControls.cpp",
+  "line": 15,
+  "tab": ""
+ },
+ {
+  "label": "Physical radius (m)",
+  "kind": "DragFloat",
+  "target": "p.radius_m",
+  "file": "MatterGrainControls.cpp",
+  "line": 16,
+  "tab": ""
+ },
+ {
+  "label": "Contact stiffness (N/m)",
+  "kind": "DragFloat",
+  "target": "p.stiffness_n_m",
+  "file": "MatterGrainControls.cpp",
+  "line": 17,
+  "tab": ""
+ },
+ {
+  "label": "Normal damping (Ns/m)",
+  "kind": "DragFloat",
+  "target": "p.normal_damping_n_s_m",
+  "file": "MatterGrainControls.cpp",
+  "line": 19,
+  "tab": ""
+ },
+ {
+  "label": "Sliding damping (Ns/m)",
+  "kind": "DragFloat",
+  "target": "p.sliding_damping_n_s_m",
+  "file": "MatterGrainControls.cpp",
+  "line": 21,
+  "tab": ""
+ },
+ {
+  "label": "Sliding friction",
+  "kind": "SliderFloat",
+  "target": "p.friction",
+  "file": "MatterGrainControls.cpp",
+  "line": 23,
+  "tab": ""
+ },
+ {
+  "label": "Rolling friction",
+  "kind": "SliderFloat",
+  "target": "p.rolling_friction",
+  "file": "MatterGrainControls.cpp",
+  "line": 24,
+  "tab": ""
+ },
+ {
+  "label": "Twisting friction",
+  "kind": "SliderFloat",
+  "target": "p.twisting_friction",
+  "file": "MatterGrainControls.cpp",
+  "line": 25,
+  "tab": ""
+ },
+ {
+  "label": "Static friction stiffness (x normal)",
+  "kind": "SliderFloat",
+  "target": "p.tangential_stiffness_ratio",
+  "file": "MatterGrainControls.cpp",
+  "line": 26,
+  "tab": ""
+ },
+ {
+  "label": "Packing fraction",
+  "kind": "SliderFloat",
+  "target": "p.packing_fraction",
+  "file": "MatterGrainControls.cpp",
+  "line": 28,
+  "tab": ""
+ },
+ {
+  "label": "Substeps per collision",
+  "kind": "DragInt",
+  "target": "p.contact_resolution",
+  "file": "MatterGrainControls.cpp",
+  "line": 29,
+  "tab": ""
+ },
+ {
+  "label": "Contact substep limit",
+  "kind": "DragInt",
+  "target": "p.max_substeps",
+  "file": "MatterGrainControls.cpp",
+  "line": 30,
+  "tab": ""
+ },
+ {
+  "label": "Solver (comparison)",
+  "kind": "Combo",
+  "target": "solver",
+  "file": "MatterGrainControls.cpp",
+  "line": 32,
+  "tab": ""
+ },
+ {
+  "label": "XPBD substeps per frame",
+  "kind": "DragInt",
+  "target": "p.xpbd_substeps",
+  "file": "MatterGrainControls.cpp",
+  "line": 37,
+  "tab": ""
+ },
+ {
+  "label": "Liquid drag + buoyancy coupling",
+  "kind": "Checkbox",
+  "target": "p.fluid_coupling",
+  "file": "MatterGrainControls.cpp",
+  "line": 39,
+  "tab": ""
+ },
+ {
+  "label": "Liquid viscosity for drag (Pa s)",
+  "kind": "DragFloat",
+  "target": "p.drag_viscosity_pa_s",
+  "file": "MatterGrainControls.cpp",
+  "line": 40,
+  "tab": ""
+ },
+ {
+  "label": "Liquid sees grain volume (pressure force)",
+  "kind": "Checkbox",
+  "target": "p.volume_exclusion",
+  "file": "MatterGrainControls.cpp",
+  "line": 43,
+  "tab": ""
+ },
+ {
+  "label": "Wet grains (absorb water, liquid bridges)",
+  "kind": "Checkbox",
+  "target": "p.wet_grains",
+  "file": "MatterGrainControls.cpp",
+  "line": 45,
+  "tab": ""
+ },
+ {
+  "label": "Water capacity (x grain volume)",
+  "kind": "SliderFloat",
+  "target": "p.water_capacity_fraction",
+  "file": "MatterGrainControls.cpp",
+  "line": 47,
+  "tab": ""
+ },
+ {
+  "label": "Absorption rate (1/s)",
+  "kind": "DragFloat",
+  "target": "p.absorption_rate_per_s",
+  "file": "MatterGrainControls.cpp",
+  "line": 49,
+  "tab": ""
+ },
+ {
+  "label": "Drying rate (1/s)",
+  "kind": "DragFloat",
+  "target": "p.drying_rate_per_s",
+  "file": "MatterGrainControls.cpp",
+  "line": 50,
+  "tab": ""
+ },
+ {
+  "label": "Surface tension (N/m)",
+  "kind": "SliderFloat",
+  "target": "p.surface_tension_n_m",
+  "file": "MatterGrainControls.cpp",
+  "line": 51,
+  "tab": ""
+ },
+ {
+  "label": "Contact angle (deg)",
+  "kind": "SliderFloat",
+  "target": "p.contact_angle_deg",
+  "file": "MatterGrainControls.cpp",
+  "line": 52,
+  "tab": ""
+ },
+ {
+  "label": "Represented grain radius (m, 0 = same)",
+  "kind": "DragFloat",
+  "target": "p.represented_grain_radius_m",
+  "file": "MatterGrainControls.cpp",
+  "line": 53,
+  "tab": ""
+ },
+ {
+  "label": "Birth saturation",
+  "kind": "SliderFloat",
+  "target": "p.birth_saturation",
+  "file": "MatterGrainControls.cpp",
+  "line": 55,
+  "tab": ""
+ },
+ {
+  "label": "Pool weight",
+  "kind": "DragFloat",
+  "target": "source.particle_pool_weight",
+  "file": "MatterModelControls.cpp",
+  "line": 41,
+  "tab": ""
+ },
+ {
+  "label": "Output",
+  "kind": "Combo",
+  "target": "selected",
+  "file": "MatterModelControls.cpp",
+  "line": 111,
+  "tab": ""
+ },
+ {
+  "label": "Inherit domain grid",
+  "kind": "Checkbox",
+  "target": "draft.inherit",
+  "file": "MatterPhaseGridControls.cpp",
+  "line": 55,
+  "tab": ""
+ },
+ {
+  "label": "Bounds min",
+  "kind": "InputFloat3",
+  "target": "draft.lo.x",
+  "file": "MatterPhaseGridControls.cpp",
+  "line": 57,
+  "tab": ""
+ },
+ {
+  "label": "Bounds max",
+  "kind": "InputFloat3",
+  "target": "draft.hi.x",
+  "file": "MatterPhaseGridControls.cpp",
+  "line": 58,
+  "tab": ""
+ },
+ {
+  "label": "Voxel (m)",
+  "kind": "InputFloat",
+  "target": "draft.voxel",
+  "file": "MatterPhaseGridControls.cpp",
+  "line": 59,
+  "tab": ""
+ },
+ {
+  "label": "Enable water absorption / drainage",
+  "kind": "Checkbox",
+  "target": "enabled",
+  "file": "MatterPoreControls.cpp",
+  "line": 20,
+  "tab": ""
+ },
+ {
+  "label": "Saturation affects granular strength",
+  "kind": "Checkbox",
+  "target": "wet_physics",
+  "file": "MatterPoreControls.cpp",
+  "line": 39,
+  "tab": ""
+ },
+ {
+  "label": "Saturation darkens Principled granular splats",
+  "kind": "Checkbox",
+  "target": "wet_appearance",
+  "file": "MatterPoreControls.cpp",
+  "line": 43,
+  "tab": ""
+ },
+ {
+  "label": "Override World Thermal Environment",
+  "kind": "Checkbox",
+  "target": "domain.thermal_override_enabled",
+  "file": "scene_ui_fluid_thermal.cpp",
+  "line": 123,
+  "tab": ""
+ },
+ {
+  "label": "Ambient Temperature (K)",
+  "kind": "DragFloat",
+  "target": "domain.thermal_ambient_kelvin",
+  "file": "scene_ui_fluid_thermal.cpp",
+  "line": 135,
+  "tab": ""
+ },
+ {
+  "label": "Oxygen",
+  "kind": "DragFloat",
+  "target": "domain.thermal_oxygen",
+  "file": "scene_ui_fluid_thermal.cpp",
+  "line": 147,
+  "tab": ""
+ },
+ {
+  "label": "Enable Cooling & Freezing",
+  "kind": "Checkbox",
+  "target": "params.thermal_liquid_enabled",
+  "file": "scene_ui_fluid_thermal.cpp",
+  "line": 184,
+  "tab": ""
+ },
+ {
+  "label": "Freeze Temperature (K)",
+  "kind": "DragFloat",
+  "target": "params.thermal_freeze_kelvin",
+  "file": "scene_ui_fluid_thermal.cpp",
+  "line": 196,
+  "tab": ""
+ },
+ {
+  "label": "Thickening Range (K)",
+  "kind": "DragFloat",
+  "target": "params.thermal_viscosity_range",
+  "file": "scene_ui_fluid_thermal.cpp",
+  "line": 207,
+  "tab": ""
+ },
+ {
+  "label": "Cold Viscosity (m^2/s)",
+  "kind": "DragFloat",
+  "target": "params.thermal_cold_viscosity",
+  "file": "scene_ui_fluid_thermal.cpp",
+  "line": 219,
+  "tab": ""
+ },
+ {
+  "label": "Air Cooling (1/s)",
+  "kind": "DragFloat",
+  "target": "params.thermal_air_cooling_rate",
+  "file": "scene_ui_fluid_thermal.cpp",
+  "line": 232,
+  "tab": ""
+ },
+ {
+  "label": "Contact Cooling (1/s)",
+  "kind": "DragFloat",
+  "target": "params.thermal_contact_cooling_rate",
+  "file": "scene_ui_fluid_thermal.cpp",
+  "line": 247,
+  "tab": ""
+ },
+ {
+  "label": "Heat Conduction (1/s)",
+  "kind": "DragFloat",
+  "target": "params.granular_thermal_conductivity",
+  "file": "scene_ui_fluid_thermal.cpp",
+  "line": 263,
+  "tab": ""
+ },
+ {
+  "label": "Initial Temperature",
+  "kind": "Combo",
+  "target": "temperature_mode",
+  "file": "scene_ui_fluid_thermal.cpp",
+  "line": 364,
+  "tab": ""
+ },
+ {
+  "label": "Custom Temperature (K)",
+  "kind": "DragFloat",
+  "target": "source.fluid_temperature_kelvin",
+  "file": "scene_ui_fluid_thermal.cpp",
+  "line": 378,
+  "tab": ""
+ }
+]
