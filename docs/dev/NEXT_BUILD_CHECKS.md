@@ -16,7 +16,7 @@ geçti (Windows/CUDA/SDL başlıkları taklit edilerek — MSVC'ye özgü hatala
 **Build:** C++ + shader. Yeni dosyalar vcxproj/filters'ta: `MatterGrainCoupling.cpp/.h`,
 `sim_fluid_divergence_porous.comp`, `sim_matter_grain_permute.comp`,
 `sim_matter_grain_permute_copy.comp`. `compile_shaders.bat` (hepsini derler) ya da
-`compile_sim_shaders.bat` (yenileri listeye eklendi). Grain shader revision **10**, push
+`compile_sim_shaders.bat` (yenileri listeye eklendi). Grain shader revision **11**, push
 constant **112 bayt**, 15 buffer.
 
 **★ Ara düzeltme (2026-10-06, canlı turlardan sonra):** `--coexist-only` gömülü tane
@@ -41,6 +41,12 @@ kayması +.041 m iki kolda ortak). **Build:** C++ + shader.
 **Üçüncü tur: 6 ve 7 PASS.** Gömülü tane 5.74 (beklenen 6.13, −%6), batma .97–1.0, itki
 Arşimet'in ~%8 üstünde (dışlamanın dinamik basıncı; makul). Kapalı kol 9.81, pour PASS.
 Porous fark .132 m (beklenen .102, +%29). Sıradaki: 8 (`--wet-only`), 9 (`--xpbd-compare`).
+**Dördüncü tur:** `--wet-only` kuru kolda 512 tane 1/30 s'de .25 m küreye sığmadı (doğum
+filtresi çakışmayı reddeder, ~380 sığar) → test doğumu 1 s'ye yaydı, sayı emisyondan sonra
+kontrol ediliyor. `--xpbd-compare`: XPBD eğimde 3.3 mm/s kaydı (DEM 2e-8) — statik sürtünme
+düzeltmesinin 2.5/3.5'i dönmeye gidiyor, yuvarlanma sınırı dönmeyi öldürüp merkezin kaymasını
+bırakıyordu. Artık tanθ ≤ min(μ, μr) iken temas tamamen ötelemeyle tutuluyor. Grain shader
+revision **11** (`shader revision mismatch` görürsen shader derlenmedi). **Build:** C++ + shader.
 
 0. **Statik sözleşme** `python scripts/test/check_matter_grain_contracts.py` → PASS.
 1. **Açılış/revizyon.** Herhangi bir tane koşusunda `shader revision mismatch` yok. Varsa
