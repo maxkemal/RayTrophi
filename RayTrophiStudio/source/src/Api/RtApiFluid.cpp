@@ -8,6 +8,7 @@
  */
 
 #include "RtApiInternal.h"
+#include "Fluid/MatterGrain.h"
 #include "Fluid/MatterEmissionBudget.h"
 #include "Fluid/FluidObject.h"
 #include "Fluid/FluidFogDensity.h"
@@ -879,6 +880,9 @@ Result setFluidThermal(const std::string& domain_id_or_name,
     auto* dom = findLiquidDomainDesc(domain_id_or_name, found);
     if (!dom) return found;
     auto& p = dom->fluid_params;
+    if (patch.enabled && *patch.enabled && p.grain.enabled) {
+        return Result::fail("grains are enabled: Thermal liquid cannot run with grains yet.");
+    }
     if (patch.enabled) p.thermal_liquid_enabled = *patch.enabled;
     if (patch.air_cooling_rate) p.thermal_air_cooling_rate = *patch.air_cooling_rate;
     if (patch.contact_cooling_rate) p.thermal_contact_cooling_rate = *patch.contact_cooling_rate;
@@ -2093,6 +2097,30 @@ Result clearFluidParticles(const std::string& domain_id_or_name,
     return Result::success();
 }
 
+namespace {
+RayTrophiSim::SimulationGridDomainBoundaryMode parseGridBoundary(std::string b) {
+    std::transform(b.begin(), b.end(), b.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+    return b == "open"
+        ? RayTrophiSim::SimulationGridDomainBoundaryMode::Open
+        : (b == "periodic" ? RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic
+                            : RayTrophiSim::SimulationGridDomainBoundaryMode::Closed);
+}
+
+RayTrophiSim::SimulationDomainBackend parseDomainBackend(std::string dev) {
+    std::transform(dev.begin(), dev.end(), dev.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+    if (dev == "gpu" || dev == "gpu_compute" || dev == "cuda" || dev == "compute") {
+        return RayTrophiSim::SimulationDomainBackend::GPU_Compute;
+    }
+    if (dev == "vulkan" || dev == "gpu_vulkan") {
+        return RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
+    }
+    if (dev == "cpu_sparse" || dev == "sparse" || dev == "vdb") {
+        return RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB;
+    }
+    return RayTrophiSim::SimulationDomainBackend::CPU_Dense;
+}
+} // namespace
+
 Result updateFluidDomain(const std::string& domain_id_or_name,
                          const Vec3* domain_min, const Vec3* domain_max,
                          const float* voxel_size, const std::string* render_mode,
@@ -2153,6 +2181,18 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         if (d.name == info.name) { grid_dom = &d; break; }
     }
     if (!obj && !grid_dom) return Result::fail("fluid domain not found");
+    // A grain domain cannot be moved off what the grain solver needs; checked
+    // before any field is written so a rejected call changes nothing.
+    if (grid_dom && grid_dom->fluid_params.grain.enabled && (backend || boundary || solid_phase)) {
+        auto candidate = *grid_dom;
+        if (backend) candidate.backend = parseDomainBackend(*backend);
+        if (boundary) candidate.boundary_mode = parseGridBoundary(*boundary);
+        if (solid_phase) candidate.fluid_solid_phase_enabled = *solid_phase;
+        std::string error;
+        if (!RayTrophiSim::Fluid::validateMatterGrainDomain(candidate, candidate.fluid_params.grain, error)) {
+            return Result::fail("grains are enabled: " + error);
+        }
+    }
 
     if (obj) {
         if (domain_min) { obj->domain_min = *domain_min; obj->grid_dirty = true; }
@@ -2267,11 +2307,7 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
     if (boundary) {
         std::string b = *boundary;
         std::transform(b.begin(), b.end(), b.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-        const auto grid_boundary = b == "open"
-            ? RayTrophiSim::SimulationGridDomainBoundaryMode::Open
-            : (b == "periodic" ? RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic
-                                : RayTrophiSim::SimulationGridDomainBoundaryMode::Closed);
-        if (grid_dom) grid_dom->boundary_mode = grid_boundary;
+        if (grid_dom) grid_dom->boundary_mode = parseGridBoundary(b);
         if (obj) {
             if (b == "open") obj->params.boundary = RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Open;
             else if (b == "periodic") obj->params.boundary = RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Periodic;
@@ -2341,18 +2377,7 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
     }
 
     if (backend) {
-        std::string dev = *backend;
-        std::transform(dev.begin(), dev.end(), dev.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-        RayTrophiSim::SimulationDomainBackend be = RayTrophiSim::SimulationDomainBackend::CPU_Dense;
-        if (dev == "gpu" || dev == "gpu_compute" || dev == "cuda" || dev == "compute") {
-            be = RayTrophiSim::SimulationDomainBackend::GPU_Compute;
-        } else if (dev == "vulkan" || dev == "gpu_vulkan") {
-            be = RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
-        } else if (dev == "cpu_sparse" || dev == "sparse" || dev == "vdb") {
-            be = RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB;
-        }
-
-        if (grid_dom) grid_dom->backend = be;
+        if (grid_dom) grid_dom->backend = parseDomainBackend(*backend);
     }
 
     if (surface_material && grid_dom) {

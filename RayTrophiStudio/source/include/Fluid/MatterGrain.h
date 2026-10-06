@@ -84,6 +84,16 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& para
                            std::string& error);
 nlohmann::json matterGrainParamsToJson(const MatterGrainParams& params);
 MatterGrainParams matterGrainParamsFromJson(const nlohmann::json& json);
+// Why the grain solver cannot run on this domain as configured; empty = ready.
+// The single rule: validation, the domain panel's locks and
+// fluid.matter_models grain_readiness all read it. `code` is stable
+// (not_matter, backend, boundary, pore_exchange, wet_response,
+// thermal_liquid, solid_phase); `message` names the fix.
+struct MatterGrainBlocker {
+    std::string code;
+    std::string message;
+};
+std::vector<MatterGrainBlocker> matterGrainBlockers(const SimulationGridDomainDesc& domain);
 bool validateMatterGrainDomain(const SimulationGridDomainDesc& domain,
                               const MatterGrainParams& params, std::string& error);
 // Birth mass of one physical grain; the emitter is the only writer.
