@@ -19,6 +19,8 @@ nlohmann::json matterGrainParamsToJson(const MatterGrainParams& p) {
         {"tangential_stiffness_ratio", p.tangential_stiffness_ratio},
         {"contact_resolution", p.contact_resolution},
         {"packing_fraction", p.packing_fraction},
+        {"fluid_coupling", p.fluid_coupling},
+        {"drag_viscosity_pa_s", p.drag_viscosity_pa_s},
         {"max_substeps", p.max_substeps}};
 }
 
@@ -36,9 +38,10 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
             return false;
         }
         const bool integer = it.key() == "max_substeps" || it.key() == "contact_resolution";
-        if ((it.key() == "enabled" && !it.value().is_boolean()) ||
+        const bool boolean = it.key() == "enabled" || it.key() == "fluid_coupling";
+        if ((boolean && !it.value().is_boolean()) ||
             (integer && !it.value().is_number_integer()) ||
-            (it.key() != "enabled" && !integer &&
+            (!boolean && !integer &&
              (!it.value().is_number() || !std::isfinite(it.value().get<double>())))) {
             error = "invalid grain setting type: " + it.key();
             return false;
@@ -56,6 +59,8 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
         candidate.tangential_stiffness_ratio =
             patch.value("tangential_stiffness_ratio", p.tangential_stiffness_ratio);
         candidate.packing_fraction = patch.value("packing_fraction", p.packing_fraction);
+        candidate.fluid_coupling = patch.value("fluid_coupling", p.fluid_coupling);
+        candidate.drag_viscosity_pa_s = patch.value("drag_viscosity_pa_s", p.drag_viscosity_pa_s);
         const auto steps = patch.value("max_substeps", double(p.max_substeps));
         if (steps < 1 || steps > 4096) {
             throw std::runtime_error("max_substeps must be 1..4096");
@@ -77,7 +82,8 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
             candidate.twisting_friction < 0.0f || candidate.twisting_friction > 1.0f ||
             candidate.tangential_stiffness_ratio < 0.0f ||
             candidate.tangential_stiffness_ratio > 1.0f ||
-            candidate.packing_fraction < .3f || candidate.packing_fraction > .74f) {
+            candidate.packing_fraction < .3f || candidate.packing_fraction > .74f ||
+            candidate.drag_viscosity_pa_s < 1e-6f || candidate.drag_viscosity_pa_s > 1e3f) {
             throw std::runtime_error("grain settings outside physical/runtime limits");
         }
     } catch (const std::exception& exception) {

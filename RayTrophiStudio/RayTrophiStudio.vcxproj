@@ -2213,11 +2213,13 @@
   <ItemGroup>
     <ClInclude Include="source\include\Fluid\MatterGrain.h" />
     <ClInclude Include="source\include\Fluid\MatterGrainBirth.h" />
+    <ClInclude Include="source\include\Fluid\MatterGrainCoupling.h" />
     <ClInclude Include="source\include\Fluid\MatterGrainGeometry.h" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainParams.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainBirth.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainDiagnostics.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainGpu.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainCoupling.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainGeometry.cpp" />
     <ClCompile Include="source\src\Api\RtApiMatterGrain.cpp" />
     <ClCompile Include="source\src\UI\MatterGrainControls.cpp" />

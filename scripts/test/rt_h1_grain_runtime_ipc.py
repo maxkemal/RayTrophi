@@ -29,6 +29,8 @@ def main():
                         help="pile at contact_resolution 24 vs 48 (real substep-dt halving)")
     parser.add_argument("--repose-only", action="store_true",
                         help="poured free-standing pile: repose angle, mu_r sensitivity, grain-size convergence")
+    parser.add_argument("--coexist-only", action="store_true",
+                        help="water + grains in one domain: buoyancy/drag A/B and a water pour onto a pile")
     args = parser.parse_args()
     args.extended_only = args.extended_only or args.corner_only
     client = RtIpc()
@@ -58,7 +60,7 @@ def main():
                 'colliders': call('collider.list')['colliders']}
     assert not original['control']['playing'], 'Pause application first'
     data['original'] = original
-    domain_ready = source_ready = repose_ready = False
+    domain_ready = source_ready = repose_ready = coexist_ready = False
     ramp_collider = None
     extra_colliders = []
     try:
@@ -128,6 +130,166 @@ def main():
             extra_colliders.append(collider)
             return obj, collider
 
+        if args.coexist_only:
+            # One Matter domain, two transport owners: Sand grains (DEM) and
+            # Water parcels (liquid lane). Before this batch any liquid
+            # carrier held the whole grain step: parcels stayed at the emitter.
+            COEXIST = 'H1_Grain_Coexist'
+            WATER = 'H1_Grain_Coexist_Water'
+            if COEXIST not in {d['name'] for d in call('fluid.list_domains')['domains']}:
+                call('fluid.create_domain', name=COEXIST, type='matter', domain_min=[-.4, 0, -.4],
+                     domain_max=[.4, .8, .4], voxel_size=.05)
+            call('fluid.set_param', domain=DOMAIN, enabled=False, visible=False)
+            call('fluid.set_param', domain=COEXIST, enabled=True, visible=False, backend='vulkan',
+                 boundary='closed', preset='sand', granular_enabled=True, solid_phase=False,
+                 thermal_liquid_enabled=False, max_particles=40000)
+            call('fluid.set_pore_exchange', domain=COEXIST, enabled=False,
+                 wet_response_enabled=False, wet_appearance_enabled=False)
+            names = {x['name'] for x in call('flow_source.list')}
+            call('flow_source.update' if WATER in names else 'flow_source.create', name=WATER,
+                 domain=COEXIST, enabled=False, phase='liquid', source_mode='point',
+                 fluid_substance='Water', initial_constitutive_model='fluid', position=[0, .2, 0],
+                 radius=.2, velocity=[0, 0, 0], fluid_velocity_spread=0.,
+                 fluid_particles_per_second=24000., fluid_temperature_override=True,
+                 fluid_temperature_kelvin=293.15, use_time_limit=True, start_time=0., end_time=.5,
+                 use_particle_limit=True, max_emitted_particles=12000)
+            coexist_ready = True
+            call('flow_source.update', name=SOURCE, domain=COEXIST, enabled=False)
+            data['coexist'] = {}
+
+            def model_totals(inventory):
+                return {m['model']: m for m in inventory['models']}
+
+            def liquid_of(inventory):
+                return inventory['grain_diagnostics']['liquid']
+
+            # 1. Immersed release, coupling on vs off. A grain born at rest in
+            # still water starts with the buoyancy-reduced acceleration
+            # g' = g (1 - rho_w V / m) (drag ~0 at rest); without coupling, g.
+            # This is the analytic gate for the liquid sample, the submerged
+            # fraction and the force path; the A/B arm proves the instrument.
+            water_density = 1000.
+            volume = 4/3*math.pi*.025**3
+            expected = {True: 9.81*(1-water_density*volume/expected_grain_mass), False: 9.81}
+            for coupled in (True, False):
+                call('timeline.set_frame', frame=0)
+                call('fluid.reset')
+                call('fluid.set_grain_settings', domain=COEXIST, enabled=True, radius_m=.025,
+                     stiffness_n_m=20000., normal_damping_n_s_m=4., sliding_damping_n_s_m=4.,
+                     friction=.5, rolling_friction=.02, twisting_friction=0., max_substeps=1024,
+                     tangential_stiffness_ratio=2/7, contact_resolution=24, packing_fraction=.6,
+                     fluid_coupling=coupled, drag_viscosity_pa_s=1e-3)
+                call('flow_source.update', name=WATER, enabled=True)
+                call('flow_source.update', name=SOURCE, domain=COEXIST, position=[0, .15, 0],
+                     radius=.0001, velocity=[0, 0, 0], max_emitted_particles=1,
+                     use_time_limit=True, start_time=1.5, end_time=1.55, enabled=True)
+                control = call('sim.control_state')
+                arm = {'coupled': coupled, 'samples': []}
+                data['coexist'][f'immersed_{coupled}'] = arm
+                for step in range(1, 241):
+                    call('fluid.step', dt=1/120)
+                    if step < 170 and step % 30:
+                        continue
+                    assert call('sim.control_state') == control
+                    inventory = call('fluid.matter_models', domain=COEXIST)
+                    assert not inventory['mixed_execution']['step_held'], inventory['mixed_execution']
+                    g = inventory['acceptance_metrics']['granular']
+                    totals = model_totals(inventory)
+                    arm['samples'].append({'step': step, 'time': step/120, 'granular': g,
+                        'fluid': totals['fluid'], 'liquid': liquid_of(inventory),
+                        'status': inventory['mixed_execution']['status']})
+                    if g['particles'] == 1 and len([x for x in arm['samples']
+                                                    if x['granular']['particles'] == 1]) >= 10:
+                        break
+                save()
+                born = [x for x in arm['samples'] if x['granular']['particles'] == 1]
+                assert len(born) >= 6, ('grain was not born under water', arm['samples'][-1])
+                assert born[0]['fluid']['particles'] >= 6000, ('water pool missing', born[0]['fluid'])
+                # Quadratic fit y = y0 + v0 t - a t^2 / 2 over the first 6 samples.
+                pts = [(x['time']-born[0]['time'], x['granular']['dry_center_of_mass'][1])
+                       for x in born[:6]]
+                n = len(pts)
+                sums = [[sum(t**(i+j) for t, _ in pts) for j in range(3)] for i in range(3)]
+                rhs = [sum(y*t**i for t, y in pts) for i in range(3)]
+                a00, a01, a02 = sums[0]; a10, a11, a12 = sums[1]; a20, a21, a22 = sums[2]
+                det = (a00*(a11*a22-a12*a21)-a01*(a10*a22-a12*a20)+a02*(a10*a21-a11*a20))
+                c2 = (a00*(a11*rhs[2]-rhs[1]*a21)-a01*(a10*rhs[2]-rhs[1]*a20)+
+                      rhs[0]*(a10*a21-a11*a20))/det
+                acceleration = -2*c2
+                arm['acceleration'] = acceleration
+                arm['expected'] = expected[coupled]
+                save()
+                print('coexist immersed coupled' if coupled else 'coexist immersed uncoupled',
+                      'a', acceleration, 'expected', expected[coupled], flush=True)
+                tolerance = .15 if coupled else .05
+                assert abs(acceleration-expected[coupled]) <= tolerance*expected[coupled], \
+                    ('immersed grain acceleration', coupled, acceleration, expected[coupled])
+                if coupled:
+                    liquid = born[2]['liquid']
+                    assert liquid['coupled_grains'] == 1 and liquid['max_submerged_fraction'] >= .8, liquid
+                    assert 'Grain + liquid' in born[2]['status'], born[2]['status']
+            call('flow_source.update', name=WATER, enabled=False)
+            call('flow_source.update', name=SOURCE, enabled=False)
+
+            # 2. The reported case: water poured onto a resting grain pile in
+            # the same domain. The step must not hold, the water must fall,
+            # both owners keep their mass, and every exchanged impulse lands.
+            call('timeline.set_frame', frame=0)
+            call('fluid.reset')
+            call('fluid.set_grain_settings', domain=COEXIST, stiffness_n_m=100000.,
+                 normal_damping_n_s_m=8., twisting_friction=.1, fluid_coupling=True)
+            call('flow_source.update', name=SOURCE, domain=COEXIST, position=[0, .35, 0],
+                 radius=.28, velocity=[0, 0, 0], max_emitted_particles=256,
+                 fluid_particles_per_second=256*1.01*60, use_time_limit=True,
+                 start_time=0., end_time=1/30, enabled=True)
+            call('flow_source.update', name=WATER, position=[0, .6, 0], radius=.12,
+                 fluid_particles_per_second=12000., start_time=1., end_time=1.5,
+                 max_emitted_particles=6000, enabled=True)
+            control = call('sim.control_state')
+            pour = []
+            data['coexist']['pour'] = pour
+            for step in range(1, 181):
+                call('fluid.step', dt=1/60)
+                if step % 10:
+                    continue
+                assert call('sim.control_state') == control
+                inventory = call('fluid.matter_models', domain=COEXIST)
+                assert not inventory['mixed_execution']['step_held'], inventory['mixed_execution']
+                g = inventory['acceptance_metrics']['granular']
+                totals = model_totals(inventory)
+                liquid = liquid_of(inventory)
+                pour.append({'step': step, 'granular': g, 'fluid': totals['fluid'],
+                             'liquid': liquid, 'runtime': runtime_of(inventory),
+                             'status': inventory['mixed_execution']['status']})
+                save()
+                assert g['particles'] == 256, g['particles']
+                assert g['bounds_min'][1] >= .025*.7, ('pile floor penetration under water', step)
+                exchanged = sum(abs(v) for v in liquid['drag_impulse_n_s']) + \
+                    sum(abs(v) for v in liquid['buoyancy_impulse_n_s'])
+                assert liquid['momentum_residual_n_s'] <= 1e-3*exchanged + 1e-6, liquid
+                assert liquid['unmatched_impulse_n_s'] <= 1e-9, liquid
+            after = [x for x in pour if x['step'] >= 100]
+            fluid_mass = [x['fluid']['mass_kg'] for x in after]
+            grain_mass = [x['granular']['dry_mass_kg'] for x in pour]
+            data['coexist']['pour_gates'] = {
+                'water_particles': after[-1]['fluid']['particles'],
+                'water_mass_drift_kg': max(fluid_mass)-min(fluid_mass),
+                'grain_mass_drift_kg': max(grain_mass)-min(grain_mass),
+                'max_coupled_grains': max(x['liquid']['coupled_grains'] for x in pour),
+                'water_fell': min(x['fluid']['momentum_kg_m_s'][1] for x in pour
+                                  if x['fluid']['particles'] > 0)}
+            save()
+            print('coexist pour', json.dumps(data['coexist']['pour_gates']), flush=True)
+            gates = data['coexist']['pour_gates']
+            assert gates['water_particles'] >= 3000, gates
+            assert gates['water_mass_drift_kg'] <= 1e-6*max(fluid_mass), gates
+            assert gates['grain_mass_drift_kg'] <= 1e-6, gates
+            assert gates['water_fell'] < -.01, ('water did not move: parcels stuck at the emitter', gates)
+            assert gates['max_coupled_grains'] > 0, ('water never reached the pile', gates)
+            call('flow_source.update', name=WATER, enabled=False)
+            call('flow_source.update', name=SOURCE, domain=DOMAIN, enabled=False)
+            data['completed'] = True
+            return
         if args.static_only:
             # A single grain on a 20 degree flat mesh slope; mu=.5 and mu_r=1
             # both exceed tan(20)=.364, so a static contact must hold it.
@@ -550,6 +712,9 @@ def main():
             call('flow_source.update', name=SOURCE, domain=DOMAIN, enabled=False)
         if repose_ready:
             call('fluid.set_param', domain='H1_Grain_Repose', enabled=False, visible=False)
+        if coexist_ready:
+            call('flow_source.update', name='H1_Grain_Coexist_Water', enabled=False)
+            call('fluid.set_param', domain='H1_Grain_Coexist', enabled=False, visible=False)
         if domain_ready:
             call('fluid.set_param', domain=DOMAIN, enabled=False, visible=False)
         for c in original['colliders']:

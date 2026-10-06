@@ -17,6 +17,7 @@
 | Sonraki iş | C6 dry/damp/saturated ve spatial/cache/dt/resolution kabulü, ardından C7. Sağ başlangıç kuru kontrolüne uzun koşuda su ulaşır. Tam pressure PDE/drag/buoyancy açık. |
 | Kanonik not | [MATTER_C5_HANDOFF.md](MATTER_C5_HANDOFF.md), model: [MATTER_WET_RESPONSE.md](MATTER_WET_RESPONSE.md). |
 | Kapanış ve sonrası | [Kalan fizik kabulü ve profile/emitter/domain/UI veri sahipliği](MATTER_ACCEPTANCE_AND_AUTHORING.md). Yeni spatial kabul ölçümleri kaynakta hazır; kullanıcı derlemesi bekler. |
+| H1 parti sırası | [MATTER_H1_GRAIN_ROADMAP.md](MATTER_H1_GRAIN_ROADMAP.md) (2026-10-06): B2 kova/repose + B3 taşıyıcı başına sahiplik ve su–tane sürükleme/kaldırma kaynakta, tek build bekliyor; sonra B4 GPU yerleşikliği (H1-C7), B5 hacim dışlama, B6 ıslak tane, B7 DEM–XPBD kararı. |
 | Granül önceliği | G2 MPM yerleşme/dt açık. H1 CPU tane referansı 21/21 canlı PASS; production emitter/collider/GPU bağlantısı yok. Öncelik domain içi GPU granül çözümü; DEM ile PBD/XPBD seçimi ölçümle, otomatik hibrit geçiş sonraki kapı. Aşağıdaki H1 üretim güncellemesi kanonik yön; [referans ve sınırlar](MATTER_H1_GRAIN_CONTACT.md). |
 | Tarihsel devir | [Önceki kayıt](archive/MATTER_ROADMAP_HANDOFF_2026-10-05_HISTORY.md). Ayrıntılı tasarım ve geçmiş ölçümler aşağıda korunur. |
 

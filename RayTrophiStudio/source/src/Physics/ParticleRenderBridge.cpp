@@ -1599,6 +1599,11 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 structural_change = true;
             }
             const float diam = radius * 2.0f;  // unit-diameter primitives -> scale = diameter
+            // A grain domain may also hold liquid parcels (one transport owner
+            // per carrier): only granular carriers are drawn as physical grains.
+            const bool grain_domain = dconfig.fluid_params.grain.enabled;
+            const float liquid_diam = 2.0f * std::max(1e-4f,
+                voxel * visual_radius.effective_voxels);
 
             uint64_t content = hashCombine(1469598103934665603ull, state.version);
             std::size_t drawn = 0;
@@ -1622,12 +1627,18 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                         continue;
                     }
                     tr.position = p;
-                    tr.scale = Vec3(diam, diam, diam);
+                    const bool grain = !grain_domain ||
+                        (pi < state.particles.constitutive_model.size() &&
+                         state.particles.constitutive_model[pi] == static_cast<uint8_t>(
+                             RayTrophiSim::Fluid::MatterConstitutiveModel::Granular));
+                    const float d = grain ? diam : liquid_diam;
+                    tr.scale = Vec3(d, d, d);
                     ++drawn;
                 }
                 slot_base += source_cap;
             }
             content = hashCombine(content, quantize(diam));
+            content = hashCombine(content, grain_domain ? quantize(liquid_diam) : 0ull);
             content = hashCombine(content, static_cast<uint64_t>(drawn));
 
             if (structural_change) {
@@ -1893,6 +1904,7 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
             content = hashCombine(content, state.version);
             content = hashCombine(content, static_cast<uint64_t>(draw_count));
             content = hashCombine(content, quantize(diam));
+            content = hashCombine(content, grain_domain ? quantize(liquid_diam) : 0ull);
             for (const bool routed : splat_types) content = hashCombine(content, routed ? 1u : 0u);
 
             const std::vector<float>& sdf_buf = system.domain_sdf_buffers[d];

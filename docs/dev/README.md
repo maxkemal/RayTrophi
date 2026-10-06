@@ -83,6 +83,7 @@ being paid for twice.
 | [GRANULAR_GPU_FIRST_PLAN.md](GRANULAR_GPU_FIRST_PLAN.md) | GPU-first execution plan for the granular solver |
 | [GRANULAR_GPU_TEST_PROTOCOL.md](GRANULAR_GPU_TEST_PROTOCOL.md) | Vulkan granular acceptance test |
 | [GRANULAR_COHESIVE_DAMAGE_TEST.md](GRANULAR_COHESIVE_DAMAGE_TEST.md) | Bonded/cohesive granular damage acceptance test |
+| [MATTER_H1_GRAIN_ROADMAP.md](MATTER_H1_GRAIN_ROADMAP.md) | **ACTIVE 2026-10-06.** H1 grain batch order B2..B10 with acceptance gates: bucket neighbours/repose, per-carrier owner + water–grain drag/buoyancy coupling, GPU residency, volume exclusion, wet grains, DEM vs XPBD decision, scale, production. |
 | [MATTER_GRAIN_GPU_RUNTIME.md](MATTER_GRAIN_GPU_RUNTIME.md) | **ACTIVE 2026-10-06.** Dry grain (DEM) GPU candidate inside the one Matter domain: fused one-dispatch substeps, 24-contact CFL, Cundall-Strack + EPSD2 rolling history, grain mass from radius. Handoff: [MATTER_C5_HANDOFF.md](MATTER_C5_HANDOFF.md). |
 | [material_transformation_fracture_roadmap.md](material_transformation_fracture_roadmap.md) | Burning, melting, mass transfer, fracture |
 | [NODE_SIMULATION_ARCHITECTURE_PLAN.md](NODE_SIMULATION_ARCHITECTURE_PLAN.md) | Node-based simulation and thermochemistry layer |

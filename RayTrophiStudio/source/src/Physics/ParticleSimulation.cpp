@@ -2,6 +2,7 @@
 #include "Fluid/MatterPhaseConfig.h"
 #include "Fluid/MatterGpuRuntime.h"
 #include "Fluid/MatterGrainBirth.h"
+#include "Fluid/MatterGrainCoupling.h"
 #include "Fluid/MatterGpuParticleLease.h"
 #include "Fluid/MatterWetResponse.h"
 #include "Fluid/MatterGranularLoad.h"

@@ -23,7 +23,16 @@ MatterGrainBirthFilter::MatterGrainBirthFilter(const FluidParticles& particles,
     if (radius_ <= 0.0f) {
         return;
     }
-    for (const auto& p : particles.position) {
+    // Grains space against grains only. Liquid parcels are not rigid: a grain
+    // born inside water is a valid state, and parcels are far denser than
+    // grains, so counting them would starve a source poured into a pool.
+    for (std::size_t i = 0; i < particles.position.size(); ++i) {
+        if (i >= particles.constitutive_model.size() ||
+            particles.constitutive_model[i] !=
+                static_cast<uint8_t>(MatterConstitutiveModel::Granular)) {
+            continue;
+        }
+        const Vec3& p = particles.position[i];
         if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z) &&
             p.x >= low_.x - spacing_ && p.x <= high_.x + spacing_ &&
             p.y >= low_.y - spacing_ && p.y <= high_.y + spacing_ &&

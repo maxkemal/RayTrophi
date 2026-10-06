@@ -16,7 +16,7 @@ def main():
     gpu = read('src/Physics/Fluid/MatterGrainGpu.cpp')
     shader = read('shaders/sim_matter_grain.glsl')
     header = read('include/Fluid/MatterGrain.h')
-    assert sorted(map(int, re.findall(r'binding\s*=\s*(\d+)', shader))) == list(range(14))
+    assert sorted(map(int, re.findall(r'binding\s*=\s*(\d+)', shader))) == list(range(15))
     push = re.search(r'uniform Constants\s*\{(.*?)\}\s*pc;', shader, re.S).group(1)
     assert len(re.findall(r'\b(?:uvec4|vec4)\s+\w+;', push)) == 6
     assert 'static_assert(sizeof(Constants) == 96)' in gpu
@@ -58,7 +58,7 @@ def main():
     assert '2.8125 * mu_r * mu_r * k' in gpu
     assert 'nodes[stack[--size]]' in shader and 'patch_count == 8u' in shader
     assert 'manifold_count == 4u' in shader
-    assert 'previous->collider_fingerprint != fingerprint' in gpu
+    assert 'runtime.collider_fingerprint != fingerprint' in gpu
     assert 'all(equal(cell(pj),wanted))' in shader
     diagnostics = read('src/Physics/Fluid/MatterGrainDiagnostics.cpp')
     assert '{"pile", matterGrainPileProfile(centres, params.radius_m)}' in diagnostics
@@ -96,7 +96,7 @@ def main():
     registry = read('src/Device/SimulationComputeVulkan.cpp')
     for stage in ('clear', 'hash', 'step'):
         kernel = 'sim_matter_grain_' + stage
-        assert f'"{kernel}.spv", 14, 96' in registry
+        assert f'"{kernel}.spv", 15, 96' in registry
         assert kernel in read('shaders/compile_sim_shaders.bat')
         assert f'GRAIN_{stage.upper()}' in read(f'shaders/{kernel}.comp')
     for dead in ('contact', 'integrate', 'integrate_hash'):
@@ -105,8 +105,42 @@ def main():
     assert 'm_descriptorCache.clear();' in registry and 'm_recordedDispatches >= MAX_DESC_SETS' in registry
     for project in ('RayTrophiStudio.vcxproj', 'RayTrophiStudio.vcxproj.filters'):
         ET.parse(ROOT / 'RayTrophiStudio' / project)
-    ast.parse((ROOT / 'scripts/test/rt_h1_grain_runtime_ipc.py').read_text(encoding='utf-8'))
-    print('PASS dry grain source: fused ping-pong ABI/order, bucket rotation, contact budget, history, grain mass, pile, UI/API/save wiring')
+    runtime_test = (ROOT / 'scripts/test/rt_h1_grain_runtime_ipc.py').read_text(encoding='utf-8')
+    ast.parse(runtime_test)
+    # Per-carrier transport owner: grains have their own bank-0 buffers, the
+    # liquid lane steps the liquid subset, coupling returns every impulse.
+    assert 'buffers.fluid_positions' not in gpu, 'grain step must not alias the liquid particle buffers'
+    assert 'static_assert(sizeof(handles) / sizeof(handles[0]) == 15);' in gpu
+    assert 'runtime.coupling};' in gpu
+    assert 'layout(std430, binding = 14) buffer Coupling { vec4 coupling[]; };' in shader
+    assert 'vec3 relative = (drag.xyz-v)/(1.0+dt*drag.w*(im+1.0/M));' in shader
+    assert 'vec3 settled = (m*v+M*(drag.xyz-relative))/(m+M);' in shader
+    assert shader.index('vec4 lift = coupling[3u*i+1u];') < shader.index('p += dt*v;')
+    coordinator = read('src/Physics/Fluid/MatterGrainStep.inl')
+    order = ['partitionMatterGrainOwners(', 'runGpuFluidParticleIntegrateForces(',
+             'runMatterGpuStep(', 'buildMatterGrainLiquidField(', 'prepareMatterGrainCoupling(',
+             'stepMatterGrainGpu(', 'applyMatterGrainLiquidReaction(', 'mergeMatterGrainOwners(']
+    positions = [coordinator.index(token) for token in order]
+    assert positions == sorted(positions), 'coexistence stage order'
+    assert 'std::swap(state.particles, liquid);' in coordinator and '~SwapBack()' in coordinator
+    coupling = read('src/Physics/Fluid/MatterGrainCoupling.cpp')
+    assert 'std::stable_sort(grains.begin(), grains.end()' in coupling
+    assert 'impulse[0][c] -= s * gain.x;' in coupling
+    assert 'w[n] * sphere / grains_in_cell * f.mass[c[n]]' in coupling
+    assert 'std::max(f.solid[c[n]], sphere)' in coupling
+    for project in ('RayTrophiStudio.vcxproj', 'RayTrophiStudio.vcxproj.filters'):
+        text = (ROOT / 'RayTrophiStudio' / project).read_text(encoding='utf-8')
+        assert 'MatterGrainCoupling.cpp' in text and 'MatterGrainCoupling.h' in text
+    assert 'MatterConstitutiveModel::Granular' in birth_filter, 'liquid parcels must not block grain births'
+    assert 'emit_model == RayTrophiSim::Fluid::MatterConstitutiveModel::Granular;' in births
+    params_src = read('src/Physics/Fluid/MatterGrainParams.cpp')
+    assert '"fluid_coupling"' in params_src and '"drag_viscosity_pa_s"' in params_src
+    ui = read('src/UI/MatterGrainControls.cpp')
+    assert 'p.fluid_coupling' in ui and 'p.drag_viscosity_pa_s' in ui
+    bridge = read('src/Physics/ParticleRenderBridge.cpp')
+    assert 'const float d = grain ? diam : liquid_diam;' in bridge
+    assert '--coexist-only' in runtime_test
+    print('PASS dry grain source: fused ping-pong ABI/order, bucket rotation, contact budget, history, grain mass, pile, per-carrier owner + liquid coupling, UI/API/save wiring')
 
 
 if __name__ == '__main__':
