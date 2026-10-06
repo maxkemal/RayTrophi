@@ -102,6 +102,21 @@ def missing_tooltips():
     return missing
 
 
+# A standard-width field takes 55% of the row, so two on one line overflow the
+# panel (Max Auto Resolution + Boundary Padding did, 2026-10-06).
+SAMELINE_WIDE = re.compile(r'ImGui::SameLine\([^)]*\);\s*ImGui::SetNextItemWidth\(\s*DomainUi::itemWidth\(\)')
+
+
+def wide_on_same_line():
+    hits = []
+    for pattern in FILES:
+        for path in sorted(UI.glob(pattern)):
+            text = path.read_text(encoding='utf-8', errors='replace')
+            for m in SAMELINE_WIDE.finditer(text):
+                hits.append(f"{path.name}:{text.count(chr(10), 0, m.start())+1}")
+    return hits
+
+
 def key(widget):
     return widget['label']
 
@@ -145,9 +160,12 @@ def main():
     untipped = missing_tooltips()
     for where in untipped:
         print(f'NO TIP {where}')
-    if lost or stale or untipped:
+    wide = wide_on_same_line()
+    for where in wide:
+        print(f'WIDE   {where}: standard-width field after SameLine overflows the row')
+    if lost or stale or untipped or wide:
         print(f'FAIL domain panel fields: {len(lost)} lost, {len(stale)} stale change entries, '
-              f'{len(untipped)} widgets without tooltip')
+              f'{len(untipped)} widgets without tooltip, {len(wide)} wide fields on one line')
         return 1
     print(f'PASS domain panel fields: {len(baseline)} baseline widgets kept or changed on purpose '
           f'({len(moved)} moved, {len(current)} now)')
