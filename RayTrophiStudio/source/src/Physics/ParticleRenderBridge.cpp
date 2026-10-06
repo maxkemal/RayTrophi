@@ -1354,7 +1354,9 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 group->point_sphere_visual_children = visual_children;
                 structural_change = true;
             }
-            const float visual_size_variation = procedural_splats
+            // A grain's size is its physical radius, never a visual jitter.
+            const float visual_size_variation = procedural_splats &&
+                    !dconfig.fluid_params.grain.enabled
                 ? std::clamp(
                       dconfig.fluid_particle_visual_size_variation,
                       0.0f,
