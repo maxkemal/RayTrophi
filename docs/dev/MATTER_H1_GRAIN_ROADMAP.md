@@ -26,7 +26,7 @@ koşturulur; uygulama derlemesi ve canlı IPC testleri kullanıcının makinesin
 | **B3** parçacık başına sahiplik + su–tane bağlama + `--coexist-only` | Kaynak, build yok; bağlama matematiği bulutta C++ ile koşturuldu (PASS) | `scripts/test/matter_grain_coupling_test.cpp` |
 | **B5** hacim dışlama (porous projeksiyon) + basınç kuvveti + `--porous-only` | Kaynak; gözenek ağırlığı ve hidrostatik basınç = Arşimet C++ ile PASS | aynı test |
 | **B6** ıslak tane (emilim/kuruma, Willett köprüsü, doğum ıslaklığı) + `--wet-only` | Kaynak; su bilançosu 7e-9 kg, momentum birebir (C++ PASS) | aynı test |
-| **B7** XPBD adayı + `--xpbd-compare` | Canlı tablo: **DEM kazandı**, XPBD sökülecek | — |
+| **B7** XPBD adayı + `--xpbd-compare` | İlk canlı tablo alındı; maliyet sütunu eklendi, karar açık | — |
 | **B8** hücre sırası + kimlikle taşınan temas geçmişi (rev 10) | Kaynak; shader doğrulandı | — |
 | **B4** yerleşik durum yeniden kullanımı + transfer sayaçları | Kaynak (ilk adım) | — |
 | **B9a** geçmiş geçersiz kılma + CPU referansı EPSD2 | Kaynak; eğim parity testi C++ PASS (μr=1 kayma 0, μr=0 3.588 m = analitik) | `matter_grain_reference_slope_test.cpp` |
@@ -182,7 +182,8 @@ CPU + 2 yükleme/indirme). B4 bunu GPU'ya taşır.
 > olmayan normal, kol üzerinden konumsal Coulomb, yuvarlanma sınırı. `--xpbd-compare`
 > doğruluk kapıları + karşılaştırma tablosu.
 >
-> ★ **Karar (2026-10-06, canlı tablo): DEM kazandı, XPBD sökülecek.** 256 tanelik yığın:
+> ★ **İlk canlı tablo (2026-10-06) — karar AÇIK.** 256 tanelik dökülme (yığın değil, zeminde
+> yayılan tek kat: COM ≈ r):
 >
 > | çözücü | alt adım | COM y | yatay rms | taban |
 > |---|---|---|---|---|
@@ -191,12 +192,12 @@ CPU + 2 yükleme/indirme). B4 bunu GPU'ya taşır.
 > | XPBD 40 | 42 | .02681 | .386 | .02490 |
 > | XPBD 80 | 82 | .02544 | .435 | .02493 |
 >
-> XPBD'nin yığını alt adım sayısıyla değişiyor (rms 20→80'de +%20, COM −%5.4; kapı %5) ve
-> DEM'e doğru yakınsıyor: 20 alt adımdaki "malzeme" iterasyon sayısının raporu, fizik değil
-> (yukarıdaki sinsi risk tam olarak gerçekleşti). DEM'e yakın sonuç için ~80 alt adım
-> gerekiyor; o noktada alt adım avantajı ~2.5× kalıyor ve malzeme yine ayarlara bağlı. Serbest
-> düşüş ve eğim tutunması (statik sürtünme düzeltmesinden sonra) iki çözücüde de doğru.
-> Önizleme hızı gerekirse yolu DEM'de: alt adım ∝ √k, düşük sertlikli önizleme profili.
+> XPBD'nin yayılması alt adımla değişiyor (20→80: rms +%20, COM −%5.4) ve DEM'e yaklaşıyor.
+> Serbest düşüş ve eğim tutunması (sürtünme düzeltmesinden sonra) ikisinde de doğru.
+> **Eksik olan maliyet:** tabloda ms yoktu; test artık adım süresi ve tane GPU süresini
+> yazıyor ve alt adım duyarlılığını durdurmadan kaydediyor. Karar artı/eksi tartışmasıyla
+> ve maliyet sütunuyla verilecek; aday senaryolar: DEM tek çözücü / XPBD önizleme modu
+> (malzeme ayara bağlı olduğu açıkça yazılarak) / büyük sahnede XPBD, yakın planda DEM.
 
 - **Kod:** aynı runtime içinde (aynı kova hash, aynı collider BVH, aynı sahiplik) XPBD temas
   adayı: pozisyon kısıtı + sürtünme kısıtı + açısal güncelleme (spin için ayrıca tasarlanır;
