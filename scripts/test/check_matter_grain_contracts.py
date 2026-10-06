@@ -167,7 +167,15 @@ def main():
     assert 'vulkan_variational && gpu_buffers.porous_solid_velocity' in pressure_src
     assert 'sim_fluid_divergence_porous' in read('shaders/compile_sim_shaders.bat')
     assert coordinator.index('applyMatterGrainPorosity(') < coordinator.index('runMatterGpuStep(')
-    assert coordinator.index('runMatterGpuStep(') < coordinator.index('downloadBuffer(buffers.pressure')
+    assert coordinator.index('runMatterGpuStep(') < coordinator.index('downloadBuffer(liquid_runtime.frame_pressure')
+    # The last substep's pressure carries almost no gravity load: the grains
+    # must read the substep-averaged one the mixed lane accumulates.
+    assert 'downloadBuffer(buffers.pressure' not in coordinator
+    assert 'frame_pressure_requested = exclude' in coordinator
+    mixed = read('src/Physics/Fluid/MatterGpuStep.inl')
+    assert mixed.index('runGpuFluidMGPCGPressure') < mixed.index('"sim_matter_accumulate"')
+    assert '1.0f / static_cast<float>(substeps)' in mixed
+    assert 'has_granular ? static_cast<double>(elastic.required_substeps)' in mixed
     assert coordinator.index('prepareMatterGrainCoupling(') < coordinator.index('applyMatterGrainPressureForce(')
     assert '~RestorePorosity()' in coordinator and 'restoreMatterGrainPorosity(grid, backup);' in coordinator
     assert '"volume_exclusion"' in params_src and 'p.volume_exclusion' in ui
