@@ -43,6 +43,11 @@ struct MatterGrainParams {
     // and liquid pass through each other (A/B and diagnosis only).
     bool fluid_coupling = true;
     float drag_viscosity_pa_s = 1.0e-3f;
+    // B5: the liquid's projection sees the grains' volume (pore-fraction face
+    // weights, grain velocity on the closed part) and grains take the
+    // solver's pressure gradient instead of hydrostatic buoyancy. Needs
+    // fluid_coupling. Off = B3 behaviour (pile is drag-only to the liquid).
+    bool volume_exclusion = true;
     int max_substeps = 512;
 };
 
@@ -93,6 +98,12 @@ struct MatterGrainStepReport {
     double unmatched_impulse = 0.0;  // reaction with no liquid mass to take it
     float max_drag_coefficient = 0.0f;
     float max_submerged_fraction = 0.0f;
+    // B5 volume exclusion
+    bool volume_exclusion = false;
+    bool pressure_force = false;      // false: hydrostatic buoyancy was used
+    std::size_t porous_cells = 0;
+    float max_solid_fraction = 0.0f;
+    Vec3 pressure_impulse;            // sum over grains, N*s
 };
 
 // Per-grain liquid coupling, one frame. Inputs are frozen for the frame

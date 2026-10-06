@@ -64,6 +64,27 @@ nlohmann::json matterGrainPileProfile(const std::vector<Vec3>& centres, float ra
 
 nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrainParams& params,
                                      const MatterGrainStepReport* report) {
+    // Liquid parcels of the domain: count, centre height and the 95th
+    // percentile height (the free surface, robust to a few splash parcels).
+    std::vector<float> liquid_heights;
+    double liquid_mass = 0.0, liquid_moment = 0.0;
+    for (std::size_t i = 0; i < p.size() && i < p.constitutive_model.size(); ++i) {
+        if (p.constitutive_model[i] != static_cast<uint8_t>(MatterConstitutiveModel::Fluid) ||
+            i >= p.rest_mass_kg.size() || i >= p.mass_fraction.size()) {
+            continue;
+        }
+        const double mass = double(p.rest_mass_kg[i]) * p.mass_fraction[i];
+        liquid_heights.push_back(p.position[i].y);
+        liquid_mass += mass;
+        liquid_moment += mass * p.position[i].y;
+    }
+    nlohmann::json liquid_shape = {{"parcels", liquid_heights.size()}};
+    if (!liquid_heights.empty()) {
+        const auto rank = static_cast<std::size_t>(.95 * double(liquid_heights.size() - 1));
+        std::nth_element(liquid_heights.begin(), liquid_heights.begin() + rank, liquid_heights.end());
+        liquid_shape["surface_p95_m"] = liquid_heights[rank];
+        liquid_shape["center_y_m"] = liquid_mass > 0.0 ? liquid_moment / liquid_mass : 0.0;
+    }
     double spin_energy = 0.0, maximum_spin = 0.0;
     double angular[3] = {};
     std::vector<Vec3> centres;
@@ -114,8 +135,15 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
             {"unmatched_impulse_n_s", report->unmatched_impulse},
             {"max_drag_coefficient_kg_s", report->max_drag_coefficient},
             {"max_submerged_fraction", report->max_submerged_fraction},
-            {"model", "di_felice_implicit_pair_drag+hydrostatic_buoyancy"},
-            {"volume_exclusion", false}};
+            {"model", report->volume_exclusion
+                ? "di_felice_implicit_pair_drag+porous_projection_pressure_force"
+                : "di_felice_implicit_pair_drag+hydrostatic_buoyancy"},
+            {"volume_exclusion", report->volume_exclusion},
+            {"pressure_force", report->pressure_force},
+            {"pressure_impulse_n_s", vec(report->pressure_impulse)},
+            {"porous_cells", report->porous_cells},
+            {"max_solid_fraction", report->max_solid_fraction},
+            {"shape", liquid_shape}};
     }
     return {{"transport_owner", params.enabled ? "grain" : "mpm"},
         {"solver", history ? "force_dem_cundall_strack_candidate"

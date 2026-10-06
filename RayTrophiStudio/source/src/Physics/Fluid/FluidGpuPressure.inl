@@ -285,8 +285,10 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     }
     const int div_buf_count = is_variational ? 11 : 5;
 
+    const bool porous = vulkan_variational && gpu_buffers.porous_solid_velocity;
     ok = dispatch1(use_cuda_fluid_projection
-                       ? varKernel("sim_fluid_divergence", "sim_fluid_divergence_var")
+                       ? (porous ? "sim_fluid_divergence_porous"
+                                 : varKernel("sim_fluid_divergence", "sim_fluid_divergence_var"))
                        : "sim_grid_divergence",
                    use_cuda_fluid_projection ? fluid_divergence_bufs : proj_bufs,
                    use_cuda_fluid_projection ? div_buf_count : 5,

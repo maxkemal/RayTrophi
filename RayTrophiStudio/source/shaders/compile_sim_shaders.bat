@@ -14,7 +14,7 @@ set SHADER_DIR=%~dp0
 echo Compiling simulation compute shaders...
 
 glslc "%SHADER_DIR%sim_matter_partition.comp" -o "%SHADER_DIR%sim_matter_partition.spv" --target-env=vulkan1.2
-for %%k in (sim_matter_grain_clear sim_matter_grain_hash sim_matter_grain_step) do (
+for %%k in (sim_matter_grain_clear sim_matter_grain_hash sim_matter_grain_step sim_fluid_divergence_porous) do (
     glslc "%SHADER_DIR%%%k.comp" -o "%SHADER_DIR%%%k.spv" --target-env=vulkan1.2
     if errorlevel 1 exit /b 1
 )

@@ -151,6 +151,7 @@ void prepareMatterGrainCoupling(const FluidParticles& grains, const MatterGrainP
     frame.cells.assign(count * 8, -1);
     frame.shares.assign(count * 8, 0.0f);
     frame.buoyancy_impulse.assign(count, Vec3(0.0f, 0.0f, 0.0f));
+    frame.density.assign(count, 0.0f);
     report.coupled_grains = 0;
     report.max_drag_coefficient = 0.0f;
     report.max_submerged_fraction = 0.0f;
@@ -210,6 +211,7 @@ void prepareMatterGrainCoupling(const FluidParticles& grains, const MatterGrainP
         // Archimedes, hydrostatic: the displaced liquid's weight, upward.
         const double buoyancy = submerged * density * sphere / grain_mass;
         auto& in = frame.inputs[g];
+        frame.density[g] = static_cast<float>(density);
         in.lump_velocity = lump_velocity;
         in.drag_coefficient = static_cast<float>(beta);
         in.lump_mass_kg = static_cast<float>(lump);
@@ -281,6 +283,194 @@ void applyMatterGrainLiquidReaction(FluidParticles& liquid, const MatterGrainCou
         (grain_gain[1] + liquid_gain[1]) * (grain_gain[1] + liquid_gain[1]) +
         (grain_gain[2] + liquid_gain[2]) * (grain_gain[2] + liquid_gain[2]));
     report.unmatched_impulse = unmatched;
+}
+
+void applyMatterGrainPorosity(FluidSim::FluidGrid& grid, const FluidParticles& grains,
+    float grain_radius, bool keep_collider_weights, float minimum_voidage,
+    MatterGrainPorosityBackup& backup, MatterGrainStepReport& report) {
+    const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
+    const float h = grid.voxel_size;
+    report.porous_cells = 0;
+    report.max_solid_fraction = 0.0f;
+    if (nx <= 0 || ny <= 0 || nz <= 0 || !(h > 0.0f)) {
+        return;
+    }
+    const std::size_t cells = static_cast<std::size_t>(nx) * ny * nz;
+    const std::size_t faces[3] = {static_cast<std::size_t>(nx + 1) * ny * nz,
+        static_cast<std::size_t>(nx) * (ny + 1) * nz, static_cast<std::size_t>(nx) * ny * (nz + 1)};
+    backup.active = true;
+    backup.u_weight = grid.u_weight;
+    backup.v_weight = grid.v_weight;
+    backup.w_weight = grid.w_weight;
+    backup.solid_vel = grid.solid_vel;
+    backup.weights_init = grid.collider_weights_init;
+    backup.weights_sig = grid.collider_weights_sig;
+
+    MatterGrainLiquidField f;
+    f.nx = nx;
+    f.ny = ny;
+    f.nz = nz;
+    f.origin = grid.origin;
+    f.h = h;
+    std::vector<double> solid(cells, 0.0), momentum[3];
+    for (auto& axis : momentum) {
+        axis.assign(cells, 0.0);
+    }
+    const double sphere = 4.0 / 3.0 * kPi * double(grain_radius) * grain_radius * grain_radius;
+    for (std::size_t g = 0; g < grains.size(); ++g) {
+        int c[8];
+        double w[8];
+        neighbours(f, grains.position[g], c, w);
+        for (int n = 0; n < 8; ++n) {
+            if (c[n] < 0) {
+                continue;
+            }
+            const double v = w[n] * sphere;
+            solid[c[n]] += v;
+            momentum[0][c[n]] += v * grains.velocity[g].x;
+            momentum[1][c[n]] += v * grains.velocity[g].y;
+            momentum[2][c[n]] += v * grains.velocity[g].z;
+        }
+    }
+    const double cell_volume = double(h) * h * h;
+    const double cap = 1.0 - std::clamp(double(minimum_voidage), 0.05, 1.0);
+    std::vector<float> fraction(cells, 0.0f);
+    if (grid.solid_vel.size() != cells) {
+        grid.solid_vel.assign(cells, Vec3(0.0f, 0.0f, 0.0f));
+    }
+    for (std::size_t c = 0; c < cells; ++c) {
+        if (solid[c] <= 0.0) {
+            continue;
+        }
+        fraction[c] = static_cast<float>(std::min(solid[c] / cell_volume, cap));
+        report.max_solid_fraction = std::max(report.max_solid_fraction, fraction[c]);
+        ++report.porous_cells;
+        // Collider cells keep their wall velocity; the grains' mean velocity
+        // is only read by the porous divergence at non-solid cells.
+        if (c < grid.solid.size() && grid.solid[c]) {
+            continue;
+        }
+        grid.solid_vel[c] = Vec3(static_cast<float>(momentum[0][c] / solid[c]),
+            static_cast<float>(momentum[1][c] / solid[c]),
+            static_cast<float>(momentum[2][c] / solid[c]));
+    }
+    std::vector<uint8_t>* weights[3] = {&grid.u_weight, &grid.v_weight, &grid.w_weight};
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!keep_collider_weights || weights[axis]->size() != faces[axis]) {
+            weights[axis]->assign(faces[axis], 255u);
+        }
+    }
+    const auto cellFraction = [&](int i, int j, int k) -> float {
+        if (i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz) {
+            return -1.0f;  // outside: the face takes the in-grid side only
+        }
+        return fraction[(static_cast<std::size_t>(k) * ny + j) * nx + i];
+    };
+    const auto closeFace = [&](uint8_t& weight, float lo, float hi) {
+        const float phi = lo < 0.0f ? hi : hi < 0.0f ? lo : .5f * (lo + hi);
+        if (phi > 0.0f) {
+            weight = static_cast<uint8_t>(std::lround(weight * (1.0f - phi)));
+        }
+    };
+    for (int k = 0; k < nz; ++k) {
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 0; i <= nx; ++i) {
+                closeFace(grid.u_weight[grid.velXIndex(i, j, k)],
+                    cellFraction(i - 1, j, k), cellFraction(i, j, k));
+            }
+        }
+    }
+    for (int k = 0; k < nz; ++k) {
+        for (int j = 0; j <= ny; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                closeFace(grid.v_weight[grid.velYIndex(i, j, k)],
+                    cellFraction(i, j - 1, k), cellFraction(i, j, k));
+            }
+        }
+    }
+    for (int k = 0; k <= nz; ++k) {
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                closeFace(grid.w_weight[grid.velZIndex(i, j, k)],
+                    cellFraction(i, j, k - 1), cellFraction(i, j, k));
+            }
+        }
+    }
+}
+
+void restoreMatterGrainPorosity(FluidSim::FluidGrid& grid, MatterGrainPorosityBackup& backup) {
+    if (!backup.active) {
+        return;
+    }
+    grid.u_weight = std::move(backup.u_weight);
+    grid.v_weight = std::move(backup.v_weight);
+    grid.w_weight = std::move(backup.w_weight);
+    grid.solid_vel = std::move(backup.solid_vel);
+    grid.collider_weights_init = backup.weights_init;
+    grid.collider_weights_sig = backup.weights_sig;
+    backup.active = false;
+}
+
+void applyMatterGrainPressureForce(const std::vector<float>& pressure,
+    const std::vector<float>& mask, const FluidParticles& grains, float grain_radius,
+    float dt, MatterGrainCouplingFrame& frame, MatterGrainStepReport& report) {
+    const auto& f = frame.field;
+    const std::size_t cells = static_cast<std::size_t>(f.nx) * f.ny * f.nz;
+    report.pressure_impulse = Vec3(0.0f, 0.0f, 0.0f);
+    report.pressure_force = false;
+    if (pressure.size() < cells || mask.size() < cells || frame.inputs.size() != grains.size()) {
+        return;
+    }
+    report.pressure_force = true;
+    report.buoyancy_impulse = Vec3(0.0f, 0.0f, 0.0f);
+    // Kinematic pressure with the solver's boundary semantics: liquid -> p,
+    // air -> 0 (free surface), solid and closed walls -> the asking cell's p.
+    const auto at = [&](int i, int j, int k, double own) -> double {
+        if (i < 0 || j < 0 || k < 0 || i >= f.nx || j >= f.ny || k >= f.nz) {
+            return own;
+        }
+        const std::size_t c = cellIndex(f, i, j, k);
+        return mask[c] > .5f ? pressure[c] : mask[c] < -.5f ? own : 0.0;
+    };
+    const auto gradient = [&](int i, int j, int k) {
+        const std::size_t c = cellIndex(f, i, j, k);
+        const double own = mask[c] > .5f ? pressure[c] : 0.0;
+        return Vec3(static_cast<float>((at(i + 1, j, k, own) - at(i - 1, j, k, own)) / (2.0 * f.h)),
+            static_cast<float>((at(i, j + 1, k, own) - at(i, j - 1, k, own)) / (2.0 * f.h)),
+            static_cast<float>((at(i, j, k + 1, own) - at(i, j, k - 1, own)) / (2.0 * f.h)));
+    };
+    const double sphere = 4.0 / 3.0 * kPi * double(grain_radius) * grain_radius * grain_radius;
+    for (std::size_t g = 0; g < grains.size(); ++g) {
+        auto& in = frame.inputs[g];
+        frame.buoyancy_impulse[g] = Vec3(0.0f, 0.0f, 0.0f);
+        in.buoyancy_acceleration = Vec3(0.0f, 0.0f, 0.0f);
+        if (in.lump_mass_kg <= 0.0f || frame.density[g] <= 0.0f) {
+            continue;
+        }
+        int c[8];
+        double w[8];
+        neighbours(f, grains.position[g], c, w);
+        Vec3 grad(0.0f, 0.0f, 0.0f);
+        double weight = 0.0;
+        for (int n = 0; n < 8; ++n) {
+            if (c[n] < 0) {
+                continue;
+            }
+            const int i = c[n] % f.nx, j = (c[n] / f.nx) % f.ny, k = c[n] / (f.nx * f.ny);
+            grad = grad + gradient(i, j, k) * static_cast<float>(w[n]);
+            weight += w[n];
+        }
+        if (weight <= 0.0) {
+            continue;
+        }
+        grad = grad * static_cast<float>(1.0 / weight);
+        const double mass = double(grains.rest_mass_kg[g]) * grains.mass_fraction[g];
+        const Vec3 force = grad * static_cast<float>(-sphere * frame.density[g]);
+        in.buoyancy_acceleration = force * static_cast<float>(1.0 / mass);
+        frame.buoyancy_impulse[g] = force * dt;
+        report.pressure_impulse = report.pressure_impulse + frame.buoyancy_impulse[g];
+    }
+    report.buoyancy_impulse = report.pressure_impulse;
 }
 
 bool partitionMatterGrainOwners(const FluidParticles& p, bool legacy_granular,

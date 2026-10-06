@@ -31,6 +31,8 @@ def main():
                         help="poured free-standing pile: repose angle, mu_r sensitivity, grain-size convergence")
     parser.add_argument("--history-only", action="store_true",
                         help="device contact history: carried while the state is unchanged, reset after fluid.reset")
+    parser.add_argument("--porous-only", action="store_true",
+                        help="B5 volume exclusion A/B: grains poured into a pool raise the water by N V / A")
     parser.add_argument("--coexist-only", action="store_true",
                         help="water + grains in one domain: buoyancy/drag A/B and a water pour onto a pile")
     args = parser.parse_args()
@@ -163,7 +165,7 @@ def main():
                 assert not carried, ('history reset while the state was unchanged', carried[:2])
             data['completed'] = True
             return
-        if args.coexist_only:
+        if args.coexist_only or args.porous_only:
             # One Matter domain, two transport owners: Sand grains (DEM) and
             # Water parcels (liquid lane). Before this batch any liquid
             # carrier held the whole grain step: parcels stayed at the emitter.
@@ -195,6 +197,68 @@ def main():
 
             def liquid_of(inventory):
                 return inventory['grain_diagnostics']['liquid']
+
+            if args.porous_only:
+                # Archimedes by displacement: N grains sunk in a closed pool of
+                # floor area A raise the free surface by N V / A only if the
+                # liquid's projection sees their volume. Without it the pile is
+                # a ghost to continuity and the surface stays put.
+                count, area = 1000, .8*.8
+                rise = count*4/3*math.pi*.025**3/area
+                data['coexist']['porous'] = {'expected_rise_m': rise}
+                for exclude in (True, False):
+                    call('timeline.set_frame', frame=0)
+                    call('fluid.reset')
+                    call('fluid.set_grain_settings', domain=COEXIST, enabled=True, radius_m=.025,
+                         stiffness_n_m=100000., normal_damping_n_s_m=8., sliding_damping_n_s_m=4.,
+                         friction=.5, rolling_friction=.1, twisting_friction=.1, max_substeps=2048,
+                         tangential_stiffness_ratio=2/7, contact_resolution=24, packing_fraction=.6,
+                         fluid_coupling=True, volume_exclusion=exclude)
+                    call('flow_source.update', name=WATER, position=[0, .2, 0], radius=.2,
+                         fluid_particles_per_second=24000., start_time=0., end_time=.5,
+                         max_emitted_particles=12000, enabled=True)
+                    call('flow_source.update', name=SOURCE, domain=COEXIST, position=[0, .6, 0],
+                         radius=.25, velocity=[0, 0, 0], max_emitted_particles=count,
+                         use_particle_limit=True, use_time_limit=True,
+                         fluid_particles_per_second=count/.5, start_time=1.5, end_time=2.5,
+                         enabled=True)
+                    control = call('sim.control_state')
+                    arm = {'volume_exclusion': exclude, 'samples': []}
+                    data['coexist']['porous'][str(exclude)] = arm
+                    for step in range(1, 301):
+                        call('fluid.step', dt=1/60)
+                        if step % 10:
+                            continue
+                        assert call('sim.control_state') == control
+                        inventory = call('fluid.matter_models', domain=COEXIST)
+                        assert not inventory['mixed_execution']['step_held'], inventory['mixed_execution']
+                        liquid = inventory['grain_diagnostics']['liquid']
+                        g = inventory['acceptance_metrics']['granular']
+                        arm['samples'].append({'step': step, 'liquid': liquid, 'granular': g,
+                            'fluid': model_totals(inventory)['fluid'],
+                            'status': inventory['mixed_execution']['status']})
+                        save()
+                    before = [x for x in arm['samples'] if x['step'] == 80][0]
+                    after = arm['samples'][-1]
+                    assert after['granular']['particles'] == count, after['granular']
+                    surface = (after['liquid']['shape']['surface_p95_m'] -
+                               before['liquid']['shape']['surface_p95_m'])
+                    arm['surface_rise_m'] = surface
+                    arm['grain_floor_m'] = after['granular']['bounds_min'][1]
+                    save()
+                    print('porous', exclude, 'surface rise', surface, 'expected', rise, flush=True)
+                    assert after['granular']['bounds_min'][1] >= .025*.7, 'pile floor penetration'
+                    assert after['liquid']['volume_exclusion'] == exclude, after['liquid']
+                    if exclude:
+                        assert after['liquid']['pressure_force'], after['liquid']
+                        assert after['liquid']['porous_cells'] > 0, after['liquid']
+                        assert .5*rise <= surface <= 1.5*rise, ('displacement not seen', surface, rise)
+                    else:
+                        assert surface <= .25*rise, ('surface rose without volume exclusion', surface)
+                call('flow_source.update', name=WATER, enabled=False)
+                call('flow_source.update', name=SOURCE, domain=DOMAIN, enabled=False)
+                data['completed'] = True
+                return
 
             # 1. Immersed release, coupling on vs off. A grain born at rest in
             # still water starts with the buoyancy-reduced acceleration

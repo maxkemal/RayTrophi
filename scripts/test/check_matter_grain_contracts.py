@@ -147,7 +147,20 @@ def main():
     assert '--history-only' in runtime_test
     contact = read('src/Physics/Fluid/GranularContact.cpp')
     assert '2.25f * params.rolling_friction * params.rolling_friction' in contact
-    assert 'stop_torque' not in contact, 'CPU reference still has the kinetic-only rolling torque' 
+    assert 'stop_torque' not in contact, 'CPU reference still has the kinetic-only rolling torque'
+    # B5: porous projection + pressure force.
+    assert '"sim_fluid_divergence_porous.spv",    11, 52' in registry
+    porous = read('shaders/sim_fluid_divergence_porous.comp')
+    assert 'return porous(' in porous
+    pressure_src = read('src/Physics/Fluid/FluidGpuPressure.inl')
+    assert 'vulkan_variational && gpu_buffers.porous_solid_velocity' in pressure_src
+    assert 'sim_fluid_divergence_porous' in read('shaders/compile_sim_shaders.bat')
+    assert coordinator.index('applyMatterGrainPorosity(') < coordinator.index('runMatterGpuStep(')
+    assert coordinator.index('runMatterGpuStep(') < coordinator.index('downloadBuffer(buffers.pressure')
+    assert coordinator.index('prepareMatterGrainCoupling(') < coordinator.index('applyMatterGrainPressureForce(')
+    assert '~RestorePorosity()' in coordinator and 'restoreMatterGrainPorosity(grid, backup);' in coordinator
+    assert '"volume_exclusion"' in params_src and 'p.volume_exclusion' in ui
+    assert '--porous-only' in runtime_test
     print('PASS dry grain source: fused ping-pong ABI/order, bucket rotation, contact budget, history, grain mass, pile, per-carrier owner + liquid coupling, UI/API/save wiring')
 
 

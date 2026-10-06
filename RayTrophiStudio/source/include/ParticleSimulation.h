@@ -1491,6 +1491,11 @@ struct SimulationGridDomainComputeBuffers {
     uint64_t fluid_normalize_window_cells = 0;
     bool fluid_normalize_window_used = false;
     bool fluid_mask_device_valid = false;
+    // H1 B5: the variational weights carry the grains' pore fraction and the
+    // solid velocity of non-solid cells is the grains' mean velocity; the
+    // projection then uses sim_fluid_divergence_porous. Set only for the
+    // duration of one grain-domain liquid step.
+    bool porous_solid_velocity = false;
     int resolution_x = 0;
     int resolution_y = 0;
     int resolution_z = 0;
