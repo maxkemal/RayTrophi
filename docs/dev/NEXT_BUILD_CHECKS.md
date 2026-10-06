@@ -17,6 +17,10 @@ kontrat + panel alan envanteri + IPC denetimi PASS. Canlı hiçbir şey koşmad�
 `scene_ui_simulation_domains.inl`, `scene_ui_fluid_billboards.hpp` (build "bulunamadı" derse
 bir yerde unutulmuş include var — hata metnini getir).
 
+**Ara düzeltme (gözle kontrol sonrası):** Max Auto Resolution + Boundary Padding aynı satırdaydı,
+ikisi de standart genişlikte → panel taşıyordu. Padding kendi satırında; alan envanteri artık
+`SameLine` sonrası standart genişlikte alanı FAIL eder. **Build:** yalnız C++.
+
 0. **Statik (uygulama gerekmez):** `python scripts/test/check_matter_grain_contracts.py`,
    `python scripts/test/check_domain_panel_fields.py` (254 kontrol: hiçbiri kaybolmadı, yeni
    yardımcı dosyalarda tooltip'siz kontrol yok), `python scripts/test/xpbd_grain_friction_reference.py`.
