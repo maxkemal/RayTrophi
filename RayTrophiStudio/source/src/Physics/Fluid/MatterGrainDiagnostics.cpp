@@ -143,7 +143,16 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
             {"pressure_impulse_n_s", vec(report->pressure_impulse)},
             {"porous_cells", report->porous_cells},
             {"max_solid_fraction", report->max_solid_fraction},
-            {"shape", liquid_shape}};
+            {"shape", liquid_shape},
+            {"wet", {{"enabled", report->wet_grains},
+                {"wet_grains", report->wet_grain_count},
+                {"liquid_bridges_last_substep", report->liquid_bridges},
+                {"grain_water_kg", report->grain_water_kg},
+                {"absorbed_kg", report->absorbed_kg},
+                {"evaporated_kg", report->evaporated_kg},
+                {"water_balance_error_kg", report->water_balance_error_kg},
+                {"max_saturation", report->max_grain_saturation},
+                {"bridge_model", "willett_2000_pendular"}}}};
     }
     return {{"transport_owner", params.enabled ? "grain" : "mpm"},
         {"solver", history ? "force_dem_cundall_strack_candidate"
@@ -157,7 +166,7 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
         {"radius_m", params.radius_m}, {"spin_energy_j", spin_energy},
         {"max_spin_rad_s", maximum_spin},
         {"angular_momentum_kg_m2_s", {angular[0], angular[1], angular[2]}},
-        {"history_static_friction", history}, {"wet_coupling", false},
+        {"history_static_friction", history}, {"wet_coupling", params.wet_grains},
         {"liquid", liquid}, {"fluid_coupling_setting", params.fluid_coupling},
         {"dissipation_heat_coupled", false}, {"frame_end_host_publication", true}};
 }

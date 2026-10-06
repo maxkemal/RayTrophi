@@ -355,6 +355,10 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                 state.particles.emit(
                     spawn_pos, emit_vel, emit_kelvin, 0.0f, emit_substance,
                     nullptr, nullptr, grain_rest_mass, emit_model);
+                if (grain_birth) {
+                    Fluid::initMatterGrainBirthWater(state.particles,
+                        state.particles.size() - 1, fluid_domain.fluid_params.grain);
+                }
             }
             source.total_emitted_particles +=
                 static_cast<int>(state.particles.size() - before_emission);

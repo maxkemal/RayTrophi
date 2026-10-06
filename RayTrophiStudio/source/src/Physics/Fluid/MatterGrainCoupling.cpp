@@ -46,6 +46,12 @@ void neighbours(const MatterGrainLiquidField& f, const Vec3& p, int cells[8], do
     }
 }
 
+// Transport mass of a grain: dry carrier plus the water it holds (0 when dry).
+double grainMass(const FluidParticles& p, std::size_t g) {
+    const double water = g < p.pore_water_mass_kg.size() ? p.pore_water_mass_kg[g] : 0.0;
+    return double(p.rest_mass_kg[g]) * p.mass_fraction[g] + water;
+}
+
 bool isGranular(const FluidParticles& p, std::size_t i, bool legacy_granular) {
     const auto model = i < p.constitutive_model.size()
         ? static_cast<MatterConstitutiveModel>(p.constitutive_model[i])
@@ -152,6 +158,7 @@ void prepareMatterGrainCoupling(const FluidParticles& grains, const MatterGrainP
     frame.shares.assign(count * 8, 0.0f);
     frame.buoyancy_impulse.assign(count, Vec3(0.0f, 0.0f, 0.0f));
     frame.density.assign(count, 0.0f);
+    frame.submerged.assign(count, 0.0f);
     report.coupled_grains = 0;
     report.max_drag_coefficient = 0.0f;
     report.max_submerged_fraction = 0.0f;
@@ -199,7 +206,7 @@ void prepareMatterGrainCoupling(const FluidParticles& grains, const MatterGrainP
             kMinimumVoidage, 1.0);
         const double submerged = std::clamp(alpha / voidage, 0.0, 1.0);
         const double density = liquid_mass / liquid_volume;
-        const double grain_mass = double(grains.rest_mass_kg[g]) * grains.mass_fraction[g];
+        const double grain_mass = grainMass(grains, g);
         if (!(grain_mass > 0.0) || submerged <= 0.0) {
             continue;
         }
@@ -212,6 +219,7 @@ void prepareMatterGrainCoupling(const FluidParticles& grains, const MatterGrainP
         const double buoyancy = submerged * density * sphere / grain_mass;
         auto& in = frame.inputs[g];
         frame.density[g] = static_cast<float>(density);
+        frame.submerged[g] = static_cast<float>(submerged);
         in.lump_velocity = lump_velocity;
         in.drag_coefficient = static_cast<float>(beta);
         in.lump_mass_kg = static_cast<float>(lump);
@@ -464,7 +472,7 @@ void applyMatterGrainPressureForce(const std::vector<float>& pressure,
             continue;
         }
         grad = grad * static_cast<float>(1.0 / weight);
-        const double mass = double(grains.rest_mass_kg[g]) * grains.mass_fraction[g];
+        const double mass = grainMass(grains, g);
         const Vec3 force = grad * static_cast<float>(-sphere * frame.density[g]);
         in.buoyancy_acceleration = force * static_cast<float>(1.0 / mass);
         frame.buoyancy_impulse[g] = force * dt;
@@ -473,8 +481,135 @@ void applyMatterGrainPressureForce(const std::vector<float>& pressure,
     report.buoyancy_impulse = report.pressure_impulse;
 }
 
+void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
+    const MatterGrainCouplingFrame& frame, const MatterGrainParams& params, float dt,
+    MatterGrainStepReport& report) {
+    report.wet_grains = params.wet_grains;
+    report.absorbed_kg = 0.0;
+    report.evaporated_kg = 0.0;
+    if (!params.wet_grains) {
+        return;
+    }
+    const auto& f = frame.field;
+    const std::size_t cells = f.mass.size();
+    const std::size_t count = grains.size();
+    constexpr double kWaterHeat = 4186.0;
+    const double capacity = matterGrainWaterCapacityKg(params);
+    // Current liquid per cell (the drag reaction already changed velocities).
+    std::vector<double> mass(cells, 0.0), momentum[3];
+    for (auto& axis : momentum) {
+        axis.assign(cells, 0.0);
+    }
+    double liquid_before = 0.0, grain_before = 0.0;
+    for (std::size_t p = 0; p < liquid.size(); ++p) {
+        const double m = double(liquid.rest_mass_kg[p]) * liquid.mass_fraction[p];
+        liquid_before += m;
+        const int c = p < f.parcel_cell.size() ? f.parcel_cell[p] : -1;
+        if (c < 0 || m <= 0.0) {
+            continue;
+        }
+        mass[c] += m;
+        momentum[0][c] += m * liquid.velocity[p].x;
+        momentum[1][c] += m * liquid.velocity[p].y;
+        momentum[2][c] += m * liquid.velocity[p].z;
+    }
+    for (std::size_t g = 0; g < count; ++g) {
+        grain_before += grains.pore_water_mass_kg[g];
+    }
+    // Requests along each grain's lump shares, then one scale per cell so no
+    // cell gives more than half its liquid in a frame.
+    const bool absorbing = params.absorption_rate_per_s > 0.0f && frame.cells.size() == count * 8;
+    const double uptake = 1.0 - std::exp(-double(params.absorption_rate_per_s) * dt);
+    std::vector<double> want(count, 0.0), demand(cells, 0.0);
+    if (absorbing) {
+        for (std::size_t g = 0; g < count; ++g) {
+            const double free = capacity - grains.pore_water_mass_kg[g];
+            const double s = g < frame.submerged.size() ? frame.submerged[g] : 0.0;
+            if (free <= 0.0 || s <= 0.0) {
+                continue;
+            }
+            want[g] = free * uptake * s;
+            for (int n = 0; n < 8; ++n) {
+                const int c = frame.cells[g * 8 + n];
+                if (c >= 0) {
+                    demand[c] += want[g] * frame.shares[g * 8 + n];
+                }
+            }
+        }
+    }
+    std::vector<double> scale(cells, 0.0), taken(cells, 0.0);
+    for (std::size_t c = 0; c < cells; ++c) {
+        if (demand[c] > 0.0 && mass[c] > 0.0) {
+            scale[c] = std::min(1.0, .5 * mass[c] / demand[c]);
+        }
+    }
+    report.wet_grain_count = 0;
+    report.max_grain_saturation = 0.0f;
+    report.grain_water_kg = 0.0;
+    for (std::size_t g = 0; g < count; ++g) {
+        double grant = 0.0, gained[3] = {};
+        if (want[g] > 0.0) {
+            for (int n = 0; n < 8; ++n) {
+                const int c = frame.cells[g * 8 + n];
+                if (c < 0 || scale[c] <= 0.0) {
+                    continue;
+                }
+                const double piece = want[g] * frame.shares[g * 8 + n] * scale[c];
+                taken[c] += piece;
+                grant += piece;
+                for (int axis = 0; axis < 3; ++axis) {
+                    gained[axis] += piece * momentum[axis][c] / mass[c];
+                }
+            }
+        }
+        double water = grains.pore_water_mass_kg[g];
+        if (grant > 0.0) {
+            const double before = grainMass(grains, g);
+            const Vec3& v = grains.velocity[g];
+            grains.velocity[g] = Vec3(static_cast<float>((before * v.x + gained[0]) / (before + grant)),
+                static_cast<float>((before * v.y + gained[1]) / (before + grant)),
+                static_cast<float>((before * v.z + gained[2]) / (before + grant)));
+            water += grant;
+            report.absorbed_kg += grant;
+        }
+        if (params.drying_rate_per_s > 0.0f && water > 0.0) {
+            const double lost = water * (1.0 - std::exp(-double(params.drying_rate_per_s) * dt));
+            water -= lost;
+            report.evaporated_kg += lost;
+        }
+        grains.pore_water_mass_kg[g] = static_cast<float>(std::max(water, 0.0));
+        grains.pore_capacity_kg[g] = static_cast<float>(capacity);
+        // Held water stores its sensible heat at the grain's temperature so
+        // energy and mass vanish together (the ledger's ownership rule).
+        const double kelvin = g < grains.temperature.size()
+            ? std::max(1.0, double(grains.temperature[g])) : 293.15;
+        grains.pore_water_energy_j[g] = static_cast<float>(grains.pore_water_mass_kg[g] *
+            kWaterHeat * kelvin);
+        if (grains.pore_water_mass_kg[g] > 0.0f) {
+            ++report.wet_grain_count;
+        }
+        report.grain_water_kg += grains.pore_water_mass_kg[g];
+        report.max_grain_saturation = std::max(report.max_grain_saturation,
+            static_cast<float>(capacity > 0.0 ? grains.pore_water_mass_kg[g] / capacity : 0.0));
+    }
+    // Every parcel of a cell gives the same fraction, so the cell's momentum
+    // leaves with its mean velocity -- what the grains received.
+    double liquid_after = 0.0;
+    for (std::size_t p = 0; p < liquid.size(); ++p) {
+        const int c = p < f.parcel_cell.size() ? f.parcel_cell[p] : -1;
+        if (c >= 0 && taken[c] > 0.0 && mass[c] > 0.0) {
+            liquid.mass_fraction[p] = static_cast<float>(
+                double(liquid.mass_fraction[p]) * (1.0 - taken[c] / mass[c]));
+        }
+        liquid_after += double(liquid.rest_mass_kg[p]) * liquid.mass_fraction[p];
+    }
+    report.water_balance_error_kg = (liquid_after + report.grain_water_kg + report.evaporated_kg) -
+        (liquid_before + grain_before);
+}
+
 bool partitionMatterGrainOwners(const FluidParticles& p, bool legacy_granular,
-    std::vector<std::size_t>& liquid, std::vector<std::size_t>& grains, std::string& error) {
+    bool wet_grains, std::vector<std::size_t>& liquid, std::vector<std::size_t>& grains,
+    std::string& error) {
     liquid.clear();
     grains.clear();
     const std::size_t count = p.size();
@@ -495,8 +630,8 @@ bool partitionMatterGrainOwners(const FluidParticles& p, bool legacy_granular,
                     "explicit owner; emit Granular or Fluid";
                 return false;
             }
-            if (p.pore_water_mass_kg[i] != 0.0f) {
-                error = "grain domain: wet grains need the H1-G2 wet response (not yet built)";
+            if (p.pore_water_mass_kg[i] != 0.0f && !wet_grains) {
+                error = "grain domain: a grain holds water but wet_grains is off";
                 return false;
             }
             grains.push_back(i);

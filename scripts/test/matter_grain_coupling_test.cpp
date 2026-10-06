@@ -119,7 +119,7 @@ int main() {
     mixed.removeSwap(0);  // grain id 3 now precedes nothing; order: [grain3, fluid2]
     emit(mixed, Vec3(3.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 0.0f), 1.0f, MatterConstitutiveModel::Fluid);
     std::vector<std::size_t> lo, go;
-    ok = partitionMatterGrainOwners(mixed, true, lo, go, error);
+    ok = partitionMatterGrainOwners(mixed, true, false, lo, go, error);
     assert(ok && lo.size() == 2 && go.size() == 1);
     auto l = selectMatterParticles(mixed, lo);
     auto g = selectMatterParticles(mixed, go);
@@ -182,6 +182,48 @@ int main() {
         assert(tank_report.pressure_force);
         assert(std::abs(tank.inputs[0].buoyancy_acceleration.y - archimedes) < .02f * archimedes);
         assert(tank.inputs[1].buoyancy_acceleration.length() == 0.0f);  // dry grain
+    }
+    // B6 absorption: a submerged grain takes water from its cells; total
+    // water and momentum are unchanged, the grain picks up the liquid velocity.
+    {
+        FluidParticles pool = liquid, wet = grains;
+        for (auto& v : pool.velocity) v = Vec3(1.0f, 0.0f, 0.0f);
+        for (auto& v : wet.velocity) v = Vec3(0.0f, 0.0f, 0.0f);
+        MatterGrainCouplingFrame frame2;
+        assert(buildMatterGrainLiquidField(pool, wet, r, static_cast<FluidChemistryPreset>(0),
+            Vec3(0.0f, 0.0f, 0.0f), n, 2 * n, n, h, frame2.field, error));
+        MatterGrainParams wet_params = params;
+        wet_params.wet_grains = true;
+        MatterGrainStepReport wet_report;
+        prepareMatterGrainCoupling(wet, wet_params, Vec3(0.0f, -9.81f, 0.0f), dt, frame2, wet_report);
+        auto momentum = [](const FluidParticles& p) {
+            double m = 0.0;
+            for (std::size_t i = 0; i < p.size(); ++i) {
+                m += (double(p.rest_mass_kg[i]) * p.mass_fraction[i] + p.pore_water_mass_kg[i]) *
+                    p.velocity[i].x;
+            }
+            return m;
+        };
+        const double before = momentum(pool) + momentum(wet);
+        exchangeMatterGrainWater(pool, wet, frame2, wet_params, dt, wet_report);
+        const double after = momentum(pool) + momentum(wet);
+        std::printf("absorbed %.6f kg, water balance error %.3e, momentum %.6e -> %.6e, grain vx %.4f\n",
+            wet_report.absorbed_kg, wet_report.water_balance_error_kg, before, after,
+            wet.velocity[0].x);
+        assert(wet_report.absorbed_kg > 0.0 && wet.pore_water_mass_kg[0] > 0.0f);
+        assert(wet.pore_water_mass_kg[1] == 0.0f);  // the dry grain above the pool
+        assert(std::abs(wet_report.water_balance_error_kg) < 1e-6);
+        assert(std::abs(after - before) < 1e-6);
+        assert(wet.velocity[0].x > 0.0f && wet.velocity[0].x < 1.0f);
+        assert(wet.pore_water_energy_j[0] > 0.0f && wet.pore_capacity_kg[0] > 0.0f);
+        // Drying alone (no liquid frame): mass leaves and is reported.
+        wet_params.drying_rate_per_s = 1.0f;
+        MatterGrainCouplingFrame none;
+        FluidParticles empty;
+        const float held = wet.pore_water_mass_kg[0];
+        exchangeMatterGrainWater(empty, wet, none, wet_params, 1.0f, wet_report);
+        assert(wet.pore_water_mass_kg[0] < held && wet_report.evaporated_kg > 0.0);
+        assert(std::abs(wet_report.water_balance_error_kg) < 1e-6);
     }
     std::printf("PASS grain liquid coupling contract\n");
     return 0;

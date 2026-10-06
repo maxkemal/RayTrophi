@@ -33,6 +33,8 @@ def main():
                         help="device contact history: carried while the state is unchanged, reset after fluid.reset")
     parser.add_argument("--porous-only", action="store_true",
                         help="B5 volume exclusion A/B: grains poured into a pool raise the water by N V / A")
+    parser.add_argument("--wet-only", action="store_true",
+                        help="B6 wet grains: cohesion A/B (column collapse) and water absorption from a pool")
     parser.add_argument("--coexist-only", action="store_true",
                         help="water + grains in one domain: buoyancy/drag A/B and a water pour onto a pile")
     args = parser.parse_args()
@@ -165,7 +167,7 @@ def main():
                 assert not carried, ('history reset while the state was unchanged', carried[:2])
             data['completed'] = True
             return
-        if args.coexist_only or args.porous_only:
+        if args.coexist_only or args.porous_only or args.wet_only:
             # One Matter domain, two transport owners: Sand grains (DEM) and
             # Water parcels (liquid lane). Before this batch any liquid
             # carrier held the whole grain step: parcels stayed at the emitter.
@@ -198,6 +200,97 @@ def main():
             def liquid_of(inventory):
                 return inventory['grain_diagnostics']['liquid']
 
+            if args.wet_only:
+                # (1) Cohesion A/B without liquid: grains born half saturated,
+                # standing for .5 mm sand (Bond-number scale 2500): bridges
+                # must hold the collapsed column together; dry it spreads.
+                arms = {}
+                for wet in (False, True):
+                    call('timeline.set_frame', frame=0)
+                    call('fluid.reset')
+                    call('fluid.set_grain_settings', domain=COEXIST, enabled=True, radius_m=.025,
+                         stiffness_n_m=100000., normal_damping_n_s_m=8., sliding_damping_n_s_m=4.,
+                         friction=.5, rolling_friction=.1, twisting_friction=.1, max_substeps=2048,
+                         tangential_stiffness_ratio=2/7, contact_resolution=24, packing_fraction=.6,
+                         fluid_coupling=True, volume_exclusion=True, wet_grains=wet,
+                         water_capacity_fraction=.05, absorption_rate_per_s=4., drying_rate_per_s=0.,
+                         represented_grain_radius_m=.0005 if wet else 0., birth_saturation=.5 if wet else 0.)
+                    call('flow_source.update', name=WATER, enabled=False)
+                    call('flow_source.update', name=SOURCE, domain=COEXIST, position=[0, .45, 0],
+                         radius=.25, velocity=[0, 0, 0], max_emitted_particles=512,
+                         use_particle_limit=True, use_time_limit=True,
+                         fluid_particles_per_second=512*1.01*60, start_time=0., end_time=1/30,
+                         enabled=True)
+                    control = call('sim.control_state')
+                    arm = {'wet': wet, 'samples': []}
+                    arms[str(wet)] = arm
+                    for step in range(1, 181):
+                        call('fluid.step', dt=1/60)
+                        if step % 15:
+                            continue
+                        assert call('sim.control_state') == control
+                        inventory = call('fluid.matter_models', domain=COEXIST)
+                        assert not inventory['mixed_execution']['step_held'], inventory['mixed_execution']
+                        g = inventory['acceptance_metrics']['granular']
+                        arm['samples'].append({'step': step, 'granular': g,
+                            'wet': liquid_of(inventory)['wet'], 'runtime': runtime_of(inventory)})
+                        assert g['particles'] == 512 and g['bounds_min'][1] >= .025*.7
+                    data['coexist']['cohesion'] = arms
+                    save()
+                    last = arm['samples'][-1]
+                    print('cohesion wet' if wet else 'cohesion dry', 'rms', last['granular']['horizontal_rms_radius_m'],
+                          'bridges', last['wet']['liquid_bridges_last_substep'], flush=True)
+                    water = [x['granular']['pore_water_kg'] for x in arm['samples']]
+                    assert max(water)-min(water) <= 1e-6, ('held water changed without liquid/drying', water)
+                    if wet:
+                        assert last['wet']['liquid_bridges_last_substep'] > 0, last['wet']
+                        assert water[-1] > 0
+                    else:
+                        assert last['wet']['liquid_bridges_last_substep'] == 0, last['wet']
+                rms = {k: v['samples'][-1]['granular']['horizontal_rms_radius_m'] for k, v in arms.items()}
+                data['coexist']['cohesion_rms'] = rms
+                save()
+                assert rms['True'] <= .8*rms['False'], ('liquid bridges did not hold the column', rms)
+                # (2) Absorption: grains poured into a pool take water; liquid
+                # mass + grain water stays constant (no drying).
+                call('timeline.set_frame', frame=0)
+                call('fluid.reset')
+                call('fluid.set_grain_settings', domain=COEXIST, represented_grain_radius_m=0.,
+                     birth_saturation=0., wet_grains=True)
+                call('flow_source.update', name=WATER, position=[0, .2, 0], radius=.2,
+                     fluid_particles_per_second=24000., start_time=0., end_time=.5,
+                     max_emitted_particles=12000, enabled=True)
+                call('flow_source.update', name=SOURCE, domain=COEXIST, position=[0, .6, 0], radius=.2,
+                     max_emitted_particles=256, fluid_particles_per_second=512., start_time=1.,
+                     end_time=1.6, enabled=True)
+                control = call('sim.control_state')
+                absorb = []
+                data['coexist']['absorption'] = absorb
+                for step in range(1, 241):
+                    call('fluid.step', dt=1/60)
+                    if step % 20:
+                        continue
+                    assert call('sim.control_state') == control
+                    inventory = call('fluid.matter_models', domain=COEXIST)
+                    assert not inventory['mixed_execution']['step_held'], inventory['mixed_execution']
+                    g = inventory['acceptance_metrics']['granular']
+                    absorb.append({'step': step, 'grain_water_kg': g['pore_water_kg'],
+                        'liquid_kg': model_totals(inventory)['fluid']['mass_kg'],
+                        'wet': liquid_of(inventory)['wet']})
+                    save()
+                    assert abs(absorb[-1]['wet']['water_balance_error_kg']) <= 1e-5, absorb[-1]['wet']
+                after = [x for x in absorb if x['step'] >= 40]  # water emission ended at .5 s
+                totals = [x['liquid_kg'] + x['grain_water_kg'] for x in after]
+                data['coexist']['absorption_gates'] = {'grain_water_kg': after[-1]['grain_water_kg'],
+                    'total_water_drift_kg': max(totals)-min(totals)}
+                save()
+                print('absorption', json.dumps(data['coexist']['absorption_gates']), flush=True)
+                assert after[-1]['grain_water_kg'] > 0, 'submerged grains did not absorb water'
+                assert max(totals)-min(totals) <= 1e-4*max(totals), ('water not conserved', totals)
+                call('flow_source.update', name=WATER, enabled=False)
+                call('flow_source.update', name=SOURCE, domain=DOMAIN, enabled=False)
+                data['completed'] = True
+                return
             if args.porous_only:
                 # Archimedes by displacement: N grains sunk in a closed pool of
                 # floor area A raise the free surface by N V / A only if the

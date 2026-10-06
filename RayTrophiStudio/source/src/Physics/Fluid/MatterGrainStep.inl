@@ -67,7 +67,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
 
     std::vector<std::size_t> liquid_order, grain_order;
     if (!Fluid::partitionMatterGrainOwners(state.particles, legacy_granular,
-            liquid_order, grain_order, error)) {
+            params.grain.wet_grains, liquid_order, grain_order, error)) {
         return false;
     }
     auto liquid = Fluid::selectMatterParticles(state.particles, liquid_order);
@@ -185,6 +185,9 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         if (coupled) {
             Fluid::applyMatterGrainLiquidReaction(liquid, frame, drag, report);
         }
+        // B6: after the reaction, so the reaction used the masses it was
+        // computed with. Without liquid (or coupling) only drying runs.
+        Fluid::exchangeMatterGrainWater(liquid, grains, frame, params.grain, dt, report);
     }
 
     if (!Fluid::mergeMatterGrainOwners(state.particles, liquid, grains, error)) {
