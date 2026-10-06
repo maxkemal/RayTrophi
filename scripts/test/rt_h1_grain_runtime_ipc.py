@@ -33,6 +33,8 @@ def main():
                         help="device contact history: carried while the state is unchanged, reset after fluid.reset")
     parser.add_argument("--porous-only", action="store_true",
                         help="B5 volume exclusion A/B: grains poured into a pool raise the water by N V / A")
+    parser.add_argument("--xpbd-compare", action="store_true",
+                        help="H1-G0: DEM vs XPBD on the same scenes (free fall, slope hold, pile, substep sensitivity, cost)")
     parser.add_argument("--wet-only", action="store_true",
                         help="B6 wet grains: cohesion A/B (column collapse) and water absorption from a pool")
     parser.add_argument("--coexist-only", action="store_true",
@@ -136,6 +138,104 @@ def main():
             extra_colliders.append(collider)
             return obj, collider
 
+        if args.xpbd_compare:
+            # Same domain, hash, colliders and owners; only the contact law
+            # differs. Gates are correctness per solver; the comparison table
+            # (pile shape, substeps, ms) is the input of the H1-G0 decision.
+            data['xpbd'] = {}
+
+            def pile_run(kind, substeps, count=256):
+                call('timeline.set_frame', frame=0)
+                call('fluid.reset')
+                call('fluid.set_grain_settings', domain=DOMAIN, solver_kind=kind, xpbd_substeps=substeps,
+                     stiffness_n_m=100000., normal_damping_n_s_m=8., twisting_friction=.1,
+                     rolling_friction=.1, friction=.5, max_substeps=4096)
+                call('flow_source.update', name=SOURCE, position=[0, .65, 0], radius=.43,
+                     max_emitted_particles=count, fluid_particles_per_second=count*1.01*60,
+                     start_time=0., end_time=1/30, velocity=[0, 0, 0], enabled=True)
+                control = call('sim.control_state')
+                samples = []
+                for step in range(1, 181):
+                    call('fluid.step', dt=1/60)
+                    if step % 30:
+                        continue
+                    assert call('sim.control_state') == control
+                    inventory = call('fluid.matter_models', domain=DOMAIN)
+                    assert not inventory['mixed_execution']['step_held'], inventory['mixed_execution']
+                    g = inventory['acceptance_metrics']['granular']
+                    assert g['particles'] == count
+                    samples.append({'step': step, 'granular': g, 'runtime': runtime_of(inventory),
+                                    'stats': call('fluid.step_stats', domain=DOMAIN)})
+                last = samples[-1]
+                return {'kind': kind, 'substeps_setting': substeps,
+                        'com_y': last['granular']['dry_center_of_mass'][1],
+                        'rms': last['granular']['horizontal_rms_radius_m'],
+                        'bottom_y': last['granular']['bounds_min'][1],
+                        'kinetic_energy_j': last['granular']['kinetic_energy_j'],
+                        'runtime': last['runtime'], 'samples': samples}
+
+            # 1. Free fall and slope hold per solver.
+            angle = math.radians(20)
+            _, slope = make_ramp('H1_Grain_XPBD_Ramp', [0, 0, 20])
+            call('collider.update', name=slope, enabled=False)
+            for kind in ('dem', 'xpbd'):
+                call('timeline.set_frame', frame=0)
+                call('fluid.reset')
+                call('fluid.set_grain_settings', domain=DOMAIN, solver_kind=kind, xpbd_substeps=20,
+                     stiffness_n_m=20000., normal_damping_n_s_m=4., rolling_friction=1., friction=.5,
+                     twisting_friction=0., max_substeps=1024)
+                call('flow_source.update', name=SOURCE, position=[0, 1.5, 0], radius=.0001,
+                     velocity=[0, 0, 0], max_emitted_particles=1, end_time=.05, enabled=True)
+                fall = []
+                for step in range(1, 25):
+                    call('fluid.step', dt=1/120)
+                    inventory = call('fluid.matter_models', domain=DOMAIN)
+                    assert not inventory['mixed_execution']['step_held'], inventory['mixed_execution']
+                    fall.append((step/120, inventory['acceptance_metrics']['granular']['dry_center_of_mass'][1]))
+                (t0, y0), (tm, ym), (tf, yf) = fall[0], fall[len(fall)//2-1], fall[-1]
+                acceleration = -2*((yf-y0)/(tf-t0)-(ym-y0)/(tm-t0))/(tf-tm)
+                assert inventory['grain_diagnostics']['solver_kind'] == kind
+                # Slope: born resting, 2 s.
+                call('collider.update', name=slope, enabled=True)
+                call('timeline.set_frame', frame=0)
+                call('fluid.reset')
+                rest = .025-5e-5
+                call('flow_source.update', name=SOURCE,
+                     position=[-math.sin(angle)*rest, 1.+math.cos(angle)*rest, 0], radius=.0001,
+                     velocity=[0, 0, 0], max_emitted_particles=1, end_time=.05, enabled=True)
+                along = []
+                for step in range(1, 241):
+                    call('fluid.step', dt=1/120)
+                    g = call('fluid.matter_models', domain=DOMAIN)['acceptance_metrics']['granular']
+                    x, y, _ = g['dry_center_of_mass']
+                    along.append(math.cos(angle)*x+math.sin(angle)*(y-1.))
+                call('collider.update', name=slope, enabled=False)
+                creep = abs(along[-1]-along[119])
+                data['xpbd'][kind] = {'free_fall_g': acceleration, 'slope_creep_last_1s_m': creep}
+                save()
+                print(kind, 'free fall', acceleration, 'slope creep', creep, flush=True)
+                assert abs(acceleration-9.81) < .05*9.81, (kind, acceleration)
+                assert creep <= 5e-4, (kind, 'slope hold failed', creep)
+            # 2. Pile: DEM vs XPBD, and XPBD at 2x/4x substeps. A positional
+            # solver whose pile gets harder with more substeps is reporting
+            # its iteration count, not a material (CLAUDE.md lesson).
+            piles = [pile_run('dem', 20), pile_run('xpbd', 20), pile_run('xpbd', 40), pile_run('xpbd', 80)]
+            data['xpbd']['piles'] = [{k: v for k, v in pile.items() if k != 'samples'} for pile in piles]
+            save()
+            for pile in data['xpbd']['piles']:
+                print('pile', pile['kind'], pile['substeps_setting'], 'com', pile['com_y'], 'rms', pile['rms'],
+                      'bottom', pile['bottom_y'], 'substeps', pile['runtime']['substeps'], flush=True)
+                assert pile['bottom_y'] >= .025*.7, ('pile floor penetration', pile)
+            x20, x40, x80 = piles[1], piles[2], piles[3]
+            drift = abs(x80['com_y']-x20['com_y'])/max(x20['com_y'], .025)
+            data['xpbd']['substep_com_drift'] = drift
+            data['xpbd']['substep_bottom_drift_m'] = abs(x80['bottom_y']-x20['bottom_y'])
+            save()
+            assert drift <= .05, ('XPBD pile COM changes >5% from 20 to 80 substeps', drift)
+            assert data['xpbd']['substep_bottom_drift_m'] <= .2*.025, \
+                ('XPBD contact stiffens with substeps: not a material property', data['xpbd'])
+            data['completed'] = True
+            return
         if args.history_only:
             # Contact springs live on the device and are valid only for the
             # state they were published with. Before B9a a fluid.reset (ids

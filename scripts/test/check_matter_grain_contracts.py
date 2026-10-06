@@ -26,7 +26,7 @@ def main():
     revision = int(re.search(r'kMatterGrainShaderRevision = (\d+);', header).group(1))
     assert f'const uint REVISION = {revision}u;' in shader
     assert 'diagnostics[1] != kMatterGrainShaderRevision' in gpu
-    assert 'if (g_contacts > SLOTS) atomicOr(diagnostics[0],1u);' in shader
+    assert 'g_contacts > SLOTS) atomicOr(diagnostics[0],1u);' in shader
     assert '48.0' not in shader, 'old 48-contact bound left in shader'
     assert gpu.index(' CFL exceeds max_substeps') < gpu.index('ensureParticles(compute, runtime')
     assert 'substeps += substeps & 1u;' in gpu
@@ -165,12 +165,18 @@ def main():
     assert 'return ivec3(floor((p-pc.low_radius.xyz)/pc.wet.x));' in shader
     assert 'void bridge(uint i, uint j, float d, vec3 n, float r, inout vec3 force)' in shader
     assert 'if (d < 2.0*r+pc.wet.z && d > 1e-9) bridge(i,j,d,separation/d,r,f);' in shader
-    assert 'constants.wet[0] = 2.0f * params.radius_m + rupture_cap;' in gpu
+    assert 'constants.wet[0] = 2.0f * params.radius_m + skin;' in gpu
     assert 'coupling_rows[12 * i + 11] = p.pore_water_mass_kg[i] / 1000.0f;' in gpu
     assert coordinator.index('applyMatterGrainLiquidReaction(') < coordinator.index('exchangeMatterGrainWater(')
     assert coordinator.index('exchangeMatterGrainWater(') < coordinator.index('mergeMatterGrainOwners(state.particles')
     assert 'initMatterGrainBirthWater(' in births and '"birth_saturation"' in params_src
     assert 'p.wet_grains' in ui and '--wet-only' in runtime_test
+    # B7: XPBD candidate in the same runtime.
+    assert 'bool xpbd = pc.wet.w > .5;' in shader and 'void xpbdConstraint(' in shader
+    assert 'g_alpha = 1.0/(pc.high_stiffness.w*h*h);' in shader
+    assert 'if (!xpbd && g_contacts > SLOTS) atomicOr(diagnostics[0],1u);' in shader
+    assert 'constants.wet[3] = xpbd ? 1.0f : 0.0f;' in gpu
+    assert '"solver_kind"' in params_src and 'p.solver_kind' in ui and '--xpbd-compare' in runtime_test
     print('PASS dry grain source: fused ping-pong ABI/order, bucket rotation, contact budget, history, grain mass, pile, per-carrier owner + liquid coupling, UI/API/save wiring')
 
 
