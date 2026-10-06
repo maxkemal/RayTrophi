@@ -151,6 +151,10 @@ def main():
     for kernel in ('sim_matter_grain_permute', 'sim_matter_grain_permute_copy'):
         assert f'"{kernel}.spv", 15, 112' in registry and kernel in read('shaders/compile_sim_shaders.bat')
     assert 'orderMatterGrainsByCell(' in coordinator
+    # B4: residency + transfer accounting.
+    assert gpu.index('const bool resident =') < gpu.index('if (!resident) {')
+    assert 'runtime.published_masses = std::move(masses);' in gpu
+    assert "resident_tail_samples" in runtime_test
     assert '--history-only' in runtime_test
     contact = read('src/Physics/Fluid/GranularContact.cpp')
     assert '2.25f * params.rolling_friction * params.rolling_friction' in contact

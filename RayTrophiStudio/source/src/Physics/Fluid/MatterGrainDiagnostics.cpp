@@ -121,6 +121,10 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
             {"history_reset_this_step", report->history_reset},
             {"history_reset_reason", report->history_reset_reason},
             {"history_remapped", report->history_remapped},
+            {"state_resident", report->state_resident},
+            {"upload_bytes", report->upload_bytes},
+            {"download_bytes", report->download_bytes},
+            {"transfer_batches", report->transfer_batches},
             {"working_set_bytes", report->working_set_bytes}};
     }
     nlohmann::json liquid = nullptr;
