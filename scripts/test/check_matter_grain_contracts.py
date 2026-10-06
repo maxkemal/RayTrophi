@@ -140,6 +140,14 @@ def main():
     bridge = read('src/Physics/ParticleRenderBridge.cpp')
     assert 'const float d = grain ? diam : liquid_diam;' in bridge
     assert '--coexist-only' in runtime_test
+    # B9a: device history is valid only for the state it was published with.
+    assert 'grainStateSignature(p, runtime.published_count) != runtime.published_signature' in gpu
+    assert gpu.index('reset_reason = "host_state_changed";') < gpu.index('const bool history_reset = runtime.history_fresh;')
+    assert gpu.index('p = std::move(result);') < gpu.index('runtime.published_signature = grainStateSignature(p, count);')
+    assert '--history-only' in runtime_test
+    contact = read('src/Physics/Fluid/GranularContact.cpp')
+    assert '2.25f * params.rolling_friction * params.rolling_friction' in contact
+    assert 'stop_torque' not in contact, 'CPU reference still has the kinetic-only rolling torque' 
     print('PASS dry grain source: fused ping-pong ABI/order, bucket rotation, contact budget, history, grain mass, pile, per-carrier owner + liquid coupling, UI/API/save wiring')
 
 

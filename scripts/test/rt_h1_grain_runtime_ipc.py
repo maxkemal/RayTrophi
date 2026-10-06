@@ -29,6 +29,8 @@ def main():
                         help="pile at contact_resolution 24 vs 48 (real substep-dt halving)")
     parser.add_argument("--repose-only", action="store_true",
                         help="poured free-standing pile: repose angle, mu_r sensitivity, grain-size convergence")
+    parser.add_argument("--history-only", action="store_true",
+                        help="device contact history: carried while the state is unchanged, reset after fluid.reset")
     parser.add_argument("--coexist-only", action="store_true",
                         help="water + grains in one domain: buoyancy/drag A/B and a water pour onto a pile")
     args = parser.parse_args()
@@ -130,6 +132,37 @@ def main():
             extra_colliders.append(collider)
             return obj, collider
 
+        if args.history_only:
+            # Contact springs live on the device and are valid only for the
+            # state they were published with. Before B9a a fluid.reset (ids
+            # restart at 1) let new grains inherit the old grains' springs.
+            data['history'] = []
+            for attempt in range(2):
+                call('timeline.set_frame', frame=0)
+                call('fluid.reset')
+                call('flow_source.update', name=SOURCE, position=[0, .25, 0], radius=.16,
+                     velocity=[0, -.2, 0], max_emitted_particles=64,
+                     fluid_particles_per_second=64*1.01*60, enabled=True, end_time=2/60)
+                control = call('sim.control_state')
+                runs = []
+                data['history'].append(runs)
+                for step in range(1, 31):
+                    call('fluid.step', dt=1/60)
+                    assert call('sim.control_state') == control
+                    inventory = call('fluid.matter_models', domain=DOMAIN)
+                    assert not inventory['mixed_execution']['step_held'], inventory['mixed_execution']
+                    runs.append({'step': step, 'runtime': runtime_of(inventory)})
+                save()
+                first = runs[0]['runtime']
+                assert first['history_reset_this_step'], ('fresh run reused old springs', attempt, first)
+                print('history attempt', attempt, 'first step reason', first['history_reset_reason'],
+                      flush=True)
+                if attempt == 1:
+                    assert first['history_reset_reason'] in ('host_state_changed', 'allocation'), first
+                carried = [r for r in runs[3:] if r['runtime']['history_reset_this_step']]
+                assert not carried, ('history reset while the state was unchanged', carried[:2])
+            data['completed'] = True
+            return
         if args.coexist_only:
             # One Matter domain, two transport owners: Sand grains (DEM) and
             # Water parcels (liquid lane). Before this batch any liquid

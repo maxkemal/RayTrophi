@@ -59,14 +59,28 @@ bool contactLaw(const ContactBody& a, uint64_t other_id, float other_saturation,
                 (tangent + slip * params.tangential_damping_n_s_m) /
                 (-params.tangential_stiffness_n_m);
         }
+        // EPSD2 (Ai et al. 2011): a rolling spring holds a grain on a slope
+        // below tan(theta) = mu_r; a kinetic-only torque vanished at zero spin.
         const Vec3 rolling = relative_omega - normal * dot(relative_omega, normal);
-        const float rolling_speed = rolling.length();
         Vec3 rolling_torque(0.0f);
-        if (rolling_speed > 0.0f) {
-            const float torque_limit = params.rolling_friction * normal_force * effective_radius;
-            const float stop_torque = rolling_speed /
-                (inverse_inertia_sum * dt_s);
-            rolling_torque = rolling * (-std::min(torque_limit, stop_torque) / rolling_speed);
+        if (params.rolling_friction > 0.0f) {
+            const float kr = 2.25f * params.rolling_friction * params.rolling_friction *
+                params.normal_stiffness_n_m * effective_radius * effective_radius;
+            const float cr = 0.6f * std::sqrt(kr / inverse_inertia_sum);
+            Vec3 angle = fresh ? Vec3(0.0f) : history.rolling_displacement;
+            const Vec3 projected = angle - normal * dot(angle, normal);
+            const float before = angle.length(), after = projected.length();
+            angle = after > 1e-12f ? projected * (before / after) : Vec3(0.0f);
+            angle += rolling * dt_s;
+            const Vec3 damping = rolling * (-cr);
+            rolling_torque = damping - angle * kr;
+            const float limit = params.rolling_friction * normal_force * effective_radius;
+            const float magnitude = rolling_torque.length();
+            if (magnitude > limit) {
+                rolling_torque = magnitude > 1e-12f ? rolling_torque * (limit / magnitude) : Vec3(0.0f);
+                angle = kr > 0.0f && limit > 0.0f ? (rolling_torque - damping) / (-kr) : Vec3(0.0f);
+            }
+            next.rolling_displacement = angle;
         }
         candidate.force_on_a = tangent - normal * normal_force;
         candidate.force_on_b = -candidate.force_on_a;
@@ -74,7 +88,8 @@ bool contactLaw(const ContactBody& a, uint64_t other_id, float other_saturation,
         candidate.torque_on_b = arm_b.cross(-tangent) - rolling_torque;
     }
     if (!finite(candidate.force_on_a) || !finite(candidate.torque_on_a) ||
-        !finite(candidate.torque_on_b) || !finite(next.tangential_displacement)) {
+        !finite(candidate.torque_on_b) || !finite(next.tangential_displacement) ||
+        !finite(next.rolling_displacement)) {
         error = "DEM contact arithmetic overflow";
         return false;
     }
@@ -94,7 +109,7 @@ bool evaluateSphereContact(const ContactBody& a, const ContactBody& b,
         params.tangential_stiffness_n_m, params.tangential_damping_n_s_m,
         params.dry_friction, params.saturated_friction, params.rolling_friction};
     if (!validBody(a) || !validBody(b) || a.id >= b.id || !std::isfinite(dt_s) ||
-        dt_s <= 0.0f || !finite(history.tangential_displacement) ||
+        dt_s <= 0.0f || !finite(history.tangential_displacement) || !finite(history.rolling_displacement) ||
         !std::all_of(std::begin(coefficients), std::end(coefficients), [](float value) {
             return std::isfinite(value) && value >= 0.0f;
         }) || params.normal_stiffness_n_m <= 0.0f ||
@@ -136,7 +151,7 @@ bool evaluatePlaneContact(const ContactBody& body, const Vec3& outward_normal,
     const bool fresh = history.a_id == 0 && history.b_id == 0;
     if (!validBody(body) || !finite(outward_normal) || !std::isfinite(offset_m) ||
         std::abs(outward_normal.length_squared() - 1.0f) > 1e-4f ||
-        !std::isfinite(dt_s) || dt_s <= 0.0f || !finite(history.tangential_displacement) ||
+        !std::isfinite(dt_s) || dt_s <= 0.0f || !finite(history.tangential_displacement) || !finite(history.rolling_displacement) ||
         (!fresh && (history.a_id != body.id || history.b_id != 0)) ||
         !std::all_of(std::begin(coefficients), std::end(coefficients), [](float value) {
             return std::isfinite(value) && value >= 0.0f;

@@ -171,6 +171,29 @@ bool ensureCollider(SimulationComputeContext& compute, MatterGrainGpuRuntime& ru
     return true;
 }
 
+// Identity + kinematics of the first `count` grains, word-wise multiply-xor.
+uint64_t grainStateSignature(const FluidParticles& p, std::size_t count) {
+    uint64_t h = 0x9e3779b97f4a7c15ull ^ count;
+    auto mix = [&h](const void* data, std::size_t bytes) {
+        const auto* bytes_in = static_cast<const unsigned char*>(data);
+        std::size_t i = 0;
+        for (; i + 8 <= bytes; i += 8) {
+            uint64_t word;
+            std::memcpy(&word, bytes_in + i, 8);
+            h = (h ^ word) * 0x100000001b3ull;
+            h ^= h >> 29;
+        }
+        for (; i < bytes; ++i) {
+            h = (h ^ bytes_in[i]) * 0x100000001b3ull;
+        }
+    };
+    mix(p.particle_id.data(), count * sizeof(uint64_t));
+    mix(p.position.data(), count * sizeof(Vec3));
+    mix(p.velocity.data(), count * sizeof(Vec3));
+    mix(p.affine.data(), count * sizeof(AffineC));
+    return h;
+}
+
 } // namespace
 
 void releaseMatterGrainGpu(SimulationComputeContext& compute, MatterGrainGpuRuntime& r) {
@@ -400,6 +423,15 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     constants.rolling[1] = gravity.x;
     constants.rolling[2] = gravity.y;
     constants.rolling[3] = gravity.z;
+    // Births append grains with larger identities at the end, so the grains
+    // this runtime published must still be the unchanged prefix.
+    std::string reset_reason = runtime.history_fresh
+        ? (runtime.published_count ? "allocation" : "first_step") : "";
+    if (!runtime.history_fresh && (runtime.published_count > count ||
+            grainStateSignature(p, runtime.published_count) != runtime.published_signature)) {
+        runtime.history_fresh = true;
+        reset_reason = "host_state_changed";
+    }
     constants.reset_history = runtime.history_fresh ? 1u : 0u;
     constants.last_substep = substeps - 1;
     const bool history_reset = runtime.history_fresh;
@@ -483,6 +515,8 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     result.advanceMaterialCoordinates();
     p = std::move(result);
     runtime.history_fresh = false;
+    runtime.published_count = count;
+    runtime.published_signature = grainStateSignature(p, count);
     report.substeps = static_cast<int>(substeps);
     report.dispatches = static_cast<int>(substeps + 2);
     report.substep_dt = dt / substeps;
@@ -491,6 +525,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     report.sticking_contacts = diagnostics[3];
     report.contacts = diagnostics[4];
     report.history_reset = history_reset;
+    report.history_reset_reason = reset_reason;
     report.grains = count;
     report.working_set_bytes = working;
     return true;

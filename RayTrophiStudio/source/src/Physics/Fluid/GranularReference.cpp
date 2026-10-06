@@ -95,8 +95,11 @@ bool runGrainReference(const ReferenceConfig& config, ReferenceReport& report,
         }
     }
     // Conservative contact wave/damping bound, including tangential rotation.
+    // The EPSD2 rolling spring on a sphere against a wall: 5.625 mu_r^2 k / m.
     const double stiffness = config.contact.normal_stiffness_n_m +
-        5.0 * config.contact.tangential_stiffness_n_m;
+        5.0 * config.contact.tangential_stiffness_n_m +
+        5.625 * double(config.contact.rolling_friction) * config.contact.rolling_friction *
+            config.contact.normal_stiffness_n_m;
     const double damping = config.contact.normal_damping_n_s_m +
         5.0 * config.contact.tangential_damping_n_s_m;
     const double elastic_dt = 0.1 * std::sqrt(min_mass / (2.0 * stiffness));
