@@ -1,6 +1,6 @@
 # H1 tane yol haritası — tek Matter domain'inde kuru/ıslak granül çözücü
 
-> **Durum:** AKTİF — 2026-10-06. B2–B8 + B9a canlı turlarda geçti (coexist/porous/wet/eğim; XPBD tablosu alındı). Yeni parti B9b (fiziksel parametreler, kilitler, domain paneli) kaynakta, tek build bekliyor (NEXT_BUILD_CHECKS en üst). H1-G0 kapandı: XPBD söküldü, DEM tek çözücü. B9b canlıda; açık: madde başına tane malzemesi, DEM maliyeti (sönüm sınırı).
+> **Durum:** AKTİF — 2026-10-06. B2–B8 + B9a canlı turlarda geçti (coexist/porous/wet/eğim; XPBD tablosu alındı). Yeni parti B9b (fiziksel parametreler, kilitler, domain paneli) kaynakta, tek build bekliyor (NEXT_BUILD_CHECKS en üst). B9b canlıda PASS. H1-G0 kapandı: XPBD söküldü, DEM tek çözücü (söküm build bekliyor); açık: madde başına tane malzemesi, DEM maliyeti (sönüm sınırı).
 
 Bu belge H1'in (granül çözücü) **parti sırasıdır**: her partinin ne yazdığı, neyi
 ölçerek kapandığı ve kapanmazsa neyi ifade ettiği. Tasarım gerekçesi ve kapı tablosu
@@ -30,7 +30,7 @@ koşturulur; uygulama derlemesi ve canlı IPC testleri kullanıcının makinesin
 | **B8** hücre sırası + kimlikle taşınan temas geçmişi (rev 10) | Kaynak; shader doğrulandı | — |
 | **B4** yerleşik durum yeniden kullanımı + transfer sayaçları | Kaynak (ilk adım) | — |
 | **B9a** geçmiş geçersiz kılma + CPU referansı EPSD2 | Kaynak; eğim parity testi C++ PASS (μr=1 kayma 0, μr=0 3.588 m = analitik) | `matter_grain_reference_slope_test.cpp` |
-| **B9b** restitution (temas başına etkin kütle), sürüklenme viskozitesi sıvı maddeden, tek "tane hazır mı" kuralı + API reddi, domain paneli (6 sekme kararı, kilitler, tooltip standardı, alan envanteri), tane küre yarıçapı | Kaynak, build yok; coupling C++ PASS, panel envanteri 254/254 | NEXT_BUILD_CHECKS |
+| **B9b** restitution (temas başına etkin kütle), sürüklenme viskozitesi sıvı maddeden, tek "tane hazır mı" kuralı + API reddi, domain paneli (6 sekme kararı, kilitler, tooltip standardı, alan envanteri), tane küre yarıçapı | **CANLI PASS** (2026-10-06, tüm kollar hatasız; panel gözle temiz) | NEXT_BUILD_CHECKS |
 | Emitter tohumu oturumdan bağımsız | Ayrı yerel görev (kullanıcı başlattı) | — |
 | H1-R CPU referansı | EPSD2'ye güncellendi (B9a); küçük sahne GPU parity canlıda koşulmadı | B9 |
 

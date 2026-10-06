@@ -20,6 +20,11 @@ bilinçli kaldırma) + IPC denetimi PASS.
 
 **Build:** C++ + `compile_shaders.bat`. Grain shader revision **14**.
 
+**Tek komut (yeni):** `python scripts/test/rt_h1_grain_suite.py` aşağıdaki 0–9'un hepsini
+sırayla koşturur (`--quick` yavaşları atlar, `--only settle dense` seçer), tam çıktıyı ve her
+kolun JSON'unu `docs/dev/grain_suite/`'e yazar, sonda kısa özet basar. **Yalnız
+"==== H1 grain suite summary" sonrasını getir.** Panel (madde 8) gözle kalır.
+
 0. **Statik:** `python scripts/test/check_matter_grain_contracts.py`,
    `python scripts/test/check_domain_panel_fields.py` → PASS (252 now).
 1. **Revizyon:** tane koşusunda `shader revision mismatch` yok (varsa shader derlenmedi).
@@ -43,8 +48,9 @@ bilinçli kaldırma) + IPC denetimi PASS.
    (comparison)" yok; Measure → Grain Step "DEM: N substeps … limited by …".
 9. **Uzun:** `--repose-only`; `rt_g2_dry_wet_compare_ipc.py --expect-empty-fluid-skipped`.
 
-Önceki partiden canlı alınanlar: panel gözle (hata yok; taşan Max Auto Resolution /
-Boundary Padding satırı düzeltildi), settle PASS, `--xpbd-compare` (eğim 0, tablo), 16k tablo.
+Önceki parti (B9b) canlıda: **tüm kollar hatasız geçti** (kullanıcı hepsini koştu); panel gözle
+temiz (taşan Max Auto Resolution / Boundary Padding satırı düzeltildi); `--xpbd-compare` ve 16k
+tablo → XPBD kararı.
 
 ---
 
