@@ -16,7 +16,7 @@ geçti (Windows/CUDA/SDL başlıkları taklit edilerek — MSVC'ye özgü hatala
 **Build:** C++ + shader. Yeni dosyalar vcxproj/filters'ta: `MatterGrainCoupling.cpp/.h`,
 `sim_fluid_divergence_porous.comp`, `sim_matter_grain_permute.comp`,
 `sim_matter_grain_permute_copy.comp`. `compile_shaders.bat` (hepsini derler) ya da
-`compile_sim_shaders.bat` (yenileri listeye eklendi). Grain shader revision **11**, push
+`compile_sim_shaders.bat` (yenileri listeye eklendi). Grain shader revision **12**, push
 constant **112 bayt**, 15 buffer.
 
 **★ Ara düzeltme (2026-10-06, canlı turlardan sonra):** `--coexist-only` gömülü tane
@@ -47,6 +47,15 @@ kontrol ediliyor. `--xpbd-compare`: XPBD eğimde 3.3 mm/s kaydı (DEM 2e-8) — 
 düzeltmesinin 2.5/3.5'i dönmeye gidiyor, yuvarlanma sınırı dönmeyi öldürüp merkezin kaymasını
 bırakıyordu. Artık tanθ ≤ min(μ, μr) iken temas tamamen ötelemeyle tutuluyor. Grain shader
 revision **11** (`shader revision mismatch` görürsen shader derlenmedi). **Build:** C++ + shader.
+**Beşinci tur:** `--wet-only` PASS (kuru rms .324, ıslak .197, 2736 köprü; su sapması 1e-6 kg).
+XPBD kayması aynı kaldı (3.25 mm) — ilk düzeltme yalnız hareketsiz başlangıçta tutuyordu.
+CPU kopyası (`scripts/test/xpbd_grain_friction_reference.py`) kök nedeni gösterdi: hız bir kez
+oluşunca 3.5/m yolu her alt adımda temas noktasını durdurup dönmeyi silmeye devam ediyor,
+merkez 2.5·h·g·sinθ'da sabit kayıyor. Kural: öteleme düzeltmesi F = min(tam durdurma, μλ);
+F ≤ μr·λ ise yalnız öteleme (tutunma ya da dönmeden kayma), değilse yuvarlanma yolu. CPU
+kopyasında eğim tutunması 20/40/80 alt adımda 1e-17, yuvarlanma ivmesi 1.739 (analitik 1.738),
+kayma ivmesi .657 (analitik .657). Revision **12**. Rampa collider gizmosu döndürülmüş
+plane'de yanıltıcı görünüyor; tane geometrisi doğru (DEM rampa testi analitik düzleme göre).
 
 0. **Statik sözleşme** `python scripts/test/check_matter_grain_contracts.py` → PASS.
 1. **Açılış/revizyon.** Herhangi bir tane koşusunda `shader revision mismatch` yok. Varsa
