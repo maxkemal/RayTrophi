@@ -9,6 +9,7 @@ import argparse
 import json
 from pathlib import Path
 from rt_ipc import RtIpc
+from grain_units import restitution_of
 
 DOMAIN = 'H1_Grain_Runtime'
 SOURCE = 'H1_Grain_Runtime_Source'
@@ -49,7 +50,7 @@ def main():
             call('timeline.set_frame', frame=0)
             call('fluid.reset')
             call('fluid.set_grain_settings', domain=DOMAIN, enabled=True, radius_m=.025,
-                 stiffness_n_m=args.stiffness, normal_damping_n_s_m=4., sliding_damping_n_s_m=4.,
+                 stiffness_n_m=args.stiffness, restitution=restitution_of(4., args.stiffness), sliding_damping_n_s_m=4.,
                  friction=.5, rolling_friction=args.rolling, twisting_friction=0.,
                  tangential_stiffness_ratio=args.tangential, contact_resolution=24,
                  max_substeps=4096)

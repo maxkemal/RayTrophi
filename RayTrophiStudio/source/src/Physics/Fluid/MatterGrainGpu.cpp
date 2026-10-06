@@ -274,7 +274,9 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     //  accuracy:  `contact_resolution` substeps per binary collision,
     //             t_c = pi * sqrt(m_pair / k), m_pair = m/2.
     //  damping:   aggregate explicit damping rate Z*(2cn + 7cs)/m below 0.5
-    //             per substep (7 = tangential 1/m + r^2/I for both grains).
+    //             per substep (7 = tangential 1/m + r^2/I for both grains);
+    //             cn = 2 zeta sqrt(k m), the largest per-contact normal
+    //             damping (a wall contact, effective mass m).
     //  travel:    no grain moves more than 10% of its radius per substep
     //             (the liquid lump speed counts: drag can carry a grain there).
     // Liquid drag is integrated implicitly and adds no bound.
@@ -302,8 +304,10 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     const double stability_dt = 1.0 / std::sqrt(2.0 * budget * k_effective / m);
     const double accuracy_dt = 3.14159265358979 * std::sqrt(.5 * m / k) /
         params.contact_resolution;
+    const double zeta = matterGrainDampingRatio(params.restitution);
+    const double normal_damping = 2.0 * zeta * std::sqrt(k * m);
     const double damping_rate = budget *
-        (2.0 * params.normal_damping_n_s_m + 7.0 * params.sliding_damping_n_s_m) / m;
+        (2.0 * normal_damping + 7.0 * params.sliding_damping_n_s_m) / m;
     const double damping_dt = damping_rate > 0.0 ? .5 / damping_rate
         : std::numeric_limits<double>::infinity();
     const double travel_dt = .1 * params.radius_m /
@@ -410,7 +414,8 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     constants.low[3] = params.radius_m;
     constants.high[3] = params.stiffness_n_m;
     constants.contact[0] = dt / substeps;
-    constants.contact[1] = params.normal_damping_n_s_m;
+    // Damping ratio; the shader scales it per contact by sqrt(k m_eff).
+    constants.contact[1] = matterGrainDampingRatio(params.restitution);
     constants.contact[2] = params.sliding_damping_n_s_m;
     constants.contact[3] = params.friction;
     constants.rolling[0] = params.rolling_friction;

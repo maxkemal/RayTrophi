@@ -18,7 +18,10 @@
                  fluid_params.pore_exchange.wet_response_enabled ||
                  Fluid::hasMixedMatterModels(state.particles, fluid_params.granular_enabled) ||
                  Fluid::needsMatterPoreTransport(state.particles, fluid_params.pore_exchange));
-            const bool mixed_legacy_granular = fluid_params.granular_enabled;
+            // The grain solver owns every granular carrier; the legacy MPM
+            // granular switch must not change Auto ownership, mass or radius.
+            const bool mixed_legacy_granular = fluid_params.granular_enabled &&
+                !fluid_params.grain.enabled;
             if (matter_domain && !mixed_models) {
                 const auto model = Fluid::resolveSingleMatterModel(
                     state.particles, mixed_legacy_granular);

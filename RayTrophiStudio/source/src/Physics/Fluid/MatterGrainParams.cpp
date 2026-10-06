@@ -12,7 +12,7 @@ namespace RayTrophiSim::Fluid {
 nlohmann::json matterGrainParamsToJson(const MatterGrainParams& p) {
     return {{"enabled", p.enabled}, {"radius_m", p.radius_m},
         {"stiffness_n_m", p.stiffness_n_m},
-        {"normal_damping_n_s_m", p.normal_damping_n_s_m},
+        {"restitution", p.restitution},
         {"sliding_damping_n_s_m", p.sliding_damping_n_s_m},
         {"friction", p.friction}, {"rolling_friction", p.rolling_friction},
         {"twisting_friction", p.twisting_friction},
@@ -20,7 +20,6 @@ nlohmann::json matterGrainParamsToJson(const MatterGrainParams& p) {
         {"contact_resolution", p.contact_resolution},
         {"packing_fraction", p.packing_fraction},
         {"fluid_coupling", p.fluid_coupling},
-        {"drag_viscosity_pa_s", p.drag_viscosity_pa_s},
         {"volume_exclusion", p.volume_exclusion},
         {"wet_grains", p.wet_grains},
         {"water_capacity_fraction", p.water_capacity_fraction},
@@ -44,6 +43,14 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
         return false;
     }
     for (auto it = patch.begin(); it != patch.end(); ++it) {
+        if (it.key() == "normal_damping_n_s_m") {
+            error = "normal_damping_n_s_m was replaced by restitution (0.01..1)";
+            return false;
+        }
+        if (it.key() == "drag_viscosity_pa_s") {
+            error = "drag_viscosity_pa_s was removed: drag uses the liquid substance viscosity";
+            return false;
+        }
         if (!fields.contains(it.key())) {
             error = "unknown grain setting: " + it.key();
             return false;
@@ -72,7 +79,7 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
         candidate.enabled = patch.value("enabled", p.enabled);
         candidate.radius_m = patch.value("radius_m", p.radius_m);
         candidate.stiffness_n_m = patch.value("stiffness_n_m", p.stiffness_n_m);
-        candidate.normal_damping_n_s_m = patch.value("normal_damping_n_s_m", p.normal_damping_n_s_m);
+        candidate.restitution = patch.value("restitution", p.restitution);
         candidate.sliding_damping_n_s_m = patch.value("sliding_damping_n_s_m", p.sliding_damping_n_s_m);
         candidate.friction = patch.value("friction", p.friction);
         candidate.rolling_friction = patch.value("rolling_friction", p.rolling_friction);
@@ -81,7 +88,6 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
             patch.value("tangential_stiffness_ratio", p.tangential_stiffness_ratio);
         candidate.packing_fraction = patch.value("packing_fraction", p.packing_fraction);
         candidate.fluid_coupling = patch.value("fluid_coupling", p.fluid_coupling);
-        candidate.drag_viscosity_pa_s = patch.value("drag_viscosity_pa_s", p.drag_viscosity_pa_s);
         candidate.volume_exclusion = patch.value("volume_exclusion", p.volume_exclusion);
         candidate.wet_grains = patch.value("wet_grains", p.wet_grains);
         candidate.water_capacity_fraction =
@@ -111,8 +117,7 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
         candidate.contact_resolution = static_cast<int>(resolution);
         if (candidate.radius_m < .001f || candidate.radius_m > 1.0f ||
             candidate.stiffness_n_m < 1.0f || candidate.stiffness_n_m > 1e8f ||
-            candidate.normal_damping_n_s_m < 0.0f ||
-            candidate.normal_damping_n_s_m > 1e5f ||
+            !(candidate.restitution >= .01f && candidate.restitution <= 1.0f) ||
             candidate.sliding_damping_n_s_m < 0.0f ||
             candidate.sliding_damping_n_s_m > 1e5f ||
             candidate.friction < 0.0f || candidate.friction > 2.0f ||
@@ -121,7 +126,6 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
             candidate.tangential_stiffness_ratio < 0.0f ||
             candidate.tangential_stiffness_ratio > 1.0f ||
             candidate.packing_fraction < .3f || candidate.packing_fraction > .74f ||
-            candidate.drag_viscosity_pa_s < 1e-6f || candidate.drag_viscosity_pa_s > 1e3f ||
             candidate.water_capacity_fraction < 0.0f || candidate.water_capacity_fraction > .5f ||
             candidate.absorption_rate_per_s < 0.0f || candidate.absorption_rate_per_s > 1000.0f ||
             candidate.drying_rate_per_s < 0.0f || candidate.drying_rate_per_s > 100.0f ||
@@ -142,7 +146,36 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
     return true;
 }
 
-MatterGrainParams matterGrainParamsFromJson(const nlohmann::json& json) {
+float matterGrainDampingRatio(float restitution) {
+    const double e = std::clamp(double(restitution), .01, 1.0);
+    const double log_e = std::log(e);
+    return static_cast<float>(-log_e / std::sqrt(9.869604401089358 + log_e * log_e));
+}
+
+MatterGrainParams matterGrainParamsFromJson(const nlohmann::json& stored) {
+    // Saved scenes from before restitution: the per-domain normal damping c
+    // (N s/m) is converted at the grain-grain effective mass m/2 of a
+    // quartz-like grain (2667 kg/m^3: sand bulk 1600 / packing .6), the
+    // reference every grain test used: e = exp(-pi zeta / sqrt(1 - zeta^2)),
+    // zeta = c / (2 sqrt(k m/2)). The stored drag viscosity is dropped; drag
+    // reads the liquid substance now.
+    auto json = stored;
+    if (json.is_object() && json.contains("normal_damping_n_s_m")) {
+        const double c = json["normal_damping_n_s_m"].get<double>();
+        if (!json.contains("restitution")) {
+            const double radius = json.value("radius_m", 0.025);
+            const double k = json.value("stiffness_n_m", 20000.0);
+            const double mass = 2667.0 * 4.18879020478639 * radius * radius * radius;
+            const double zeta = c / (2.0 * std::sqrt(std::max(k * .5 * mass, 1e-12)));
+            json["restitution"] = zeta >= 1.0 ? .01
+                : std::clamp(std::exp(-3.141592653589793 * zeta / std::sqrt(1.0 - zeta * zeta)),
+                    .01, 1.0);
+        }
+        json.erase("normal_damping_n_s_m");
+    }
+    if (json.is_object()) {
+        json.erase("drag_viscosity_pa_s");
+    }
     MatterGrainParams p;
     std::string error;
     if (!patchMatterGrainParams(json, p, error)) {

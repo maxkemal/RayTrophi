@@ -16,8 +16,7 @@ void drawMatterGrainControls(const SimulationGridDomainDesc& domain) {
     changed |= ImGui::DragFloat("Physical radius (m)", &p.radius_m, .001f, .001f, 1.0f);
     changed |= ImGui::DragFloat("Contact stiffness (N/m)", &p.stiffness_n_m,
         100.0f, 1.0f, 1e8f, "%.0f");
-    changed |= ImGui::DragFloat("Normal damping (Ns/m)", &p.normal_damping_n_s_m,
-        .1f, 0.0f, 1e5f);
+    changed |= ImGui::SliderFloat("Restitution", &p.restitution, .01f, 1.0f, "%.2f");
     changed |= ImGui::DragFloat("Sliding damping (Ns/m)", &p.sliding_damping_n_s_m,
         .1f, 0.0f, 1e5f);
     changed |= ImGui::SliderFloat("Sliding friction", &p.friction, 0.0f, 2.0f);
@@ -37,8 +36,6 @@ void drawMatterGrainControls(const SimulationGridDomainDesc& domain) {
         changed |= ImGui::DragInt("XPBD substeps per frame", &p.xpbd_substeps, 1.0f, 4, 512);
     }
     changed |= ImGui::Checkbox("Liquid drag + buoyancy coupling", &p.fluid_coupling);
-    changed |= ImGui::DragFloat("Liquid viscosity for drag (Pa s)", &p.drag_viscosity_pa_s,
-        1e-4f, 1e-6f, 1e3f, "%.5f", ImGuiSliderFlags_Logarithmic);
     ImGui::BeginDisabled(!p.fluid_coupling);
     changed |= ImGui::Checkbox("Liquid sees grain volume (pressure force)", &p.volume_exclusion);
     ImGui::EndDisabled();

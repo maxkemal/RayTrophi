@@ -10,6 +10,7 @@ import time
 import json
 from pathlib import Path
 from rt_ipc import RtIpc
+from grain_units import restitution_of
 
 DOMAIN = 'H1_Grain_Runtime'
 SOURCE = 'H1_Grain_Runtime_Source'
@@ -22,6 +23,7 @@ def main():
     parser.add_argument("--extended-only", action="store_true")
     parser.add_argument("--corner-only", action="store_true")
     parser.add_argument("--settle-only", action="store_true")
+    # Old normal damping (N s/m) at k = 1e5, converted to restitution.
     parser.add_argument("--settle-normal-damping", type=float, default=4.)
     parser.add_argument("--static-only", action="store_true",
                         help="slope hold: static friction + rolling spring vs kinetic-only")
@@ -92,7 +94,7 @@ def main():
              wet_response_enabled=False, wet_appearance_enabled=False)
         call('fluid.reset')
         call('fluid.set_grain_settings', domain=DOMAIN, enabled=True, radius_m=.025,
-             stiffness_n_m=20000., normal_damping_n_s_m=4., sliding_damping_n_s_m=4.,
+             stiffness_n_m=20000., restitution=restitution_of(4., 20000.), sliding_damping_n_s_m=4.,
              friction=.5, rolling_friction=.02, twisting_friction=0., max_substeps=1024,
              tangential_stiffness_ratio=2/7, contact_resolution=24, packing_fraction=.6)
         settings = call('fluid.grain_settings', domain=DOMAIN)
@@ -151,7 +153,7 @@ def main():
                 call('timeline.set_frame', frame=0)
                 call('fluid.reset')
                 call('fluid.set_grain_settings', domain=DOMAIN, solver_kind=kind, xpbd_substeps=substeps,
-                     stiffness_n_m=100000., normal_damping_n_s_m=8., twisting_friction=.1,
+                     stiffness_n_m=100000., restitution=restitution_of(8., 100000.), twisting_friction=.1,
                      rolling_friction=.1, friction=.5, max_substeps=4096)
                 call('flow_source.update', name=SOURCE, position=[0, .65, 0], radius=.43,
                      max_emitted_particles=count, fluid_particles_per_second=count*1.01*60,
@@ -195,7 +197,7 @@ def main():
                 call('timeline.set_frame', frame=0)
                 call('fluid.reset')
                 call('fluid.set_grain_settings', domain=DOMAIN, solver_kind=kind, xpbd_substeps=20,
-                     stiffness_n_m=20000., normal_damping_n_s_m=4., rolling_friction=1., friction=.5,
+                     stiffness_n_m=20000., restitution=restitution_of(4., 20000.), rolling_friction=1., friction=.5,
                      twisting_friction=0., max_substeps=1024)
                 call('flow_source.update', name=SOURCE, position=[0, 1.5, 0], radius=.0001,
                      velocity=[0, 0, 0], max_emitted_particles=1, end_time=.05, enabled=True)
@@ -334,7 +336,7 @@ def main():
                     call('timeline.set_frame', frame=0)
                     call('fluid.reset')
                     call('fluid.set_grain_settings', domain=COEXIST, enabled=True, radius_m=.025,
-                         stiffness_n_m=100000., normal_damping_n_s_m=8., sliding_damping_n_s_m=4.,
+                         stiffness_n_m=100000., restitution=restitution_of(8., 100000.), sliding_damping_n_s_m=4.,
                          friction=.5, rolling_friction=.1, twisting_friction=.1, max_substeps=2048,
                          tangential_stiffness_ratio=2/7, contact_resolution=24, packing_fraction=.6,
                          fluid_coupling=True, volume_exclusion=True, wet_grains=wet,
@@ -436,7 +438,7 @@ def main():
                     call('timeline.set_frame', frame=0)
                     call('fluid.reset')
                     call('fluid.set_grain_settings', domain=COEXIST, enabled=True, radius_m=.025,
-                         stiffness_n_m=100000., normal_damping_n_s_m=8., sliding_damping_n_s_m=4.,
+                         stiffness_n_m=100000., restitution=restitution_of(8., 100000.), sliding_damping_n_s_m=4.,
                          friction=.5, rolling_friction=.1, twisting_friction=.1, max_substeps=2048,
                          tangential_stiffness_ratio=2/7, contact_resolution=24, packing_fraction=.6,
                          fluid_coupling=True, volume_exclusion=exclude)
@@ -504,10 +506,10 @@ def main():
                 call('timeline.set_frame', frame=0)
                 call('fluid.reset')
                 call('fluid.set_grain_settings', domain=COEXIST, enabled=True, radius_m=.025,
-                     stiffness_n_m=20000., normal_damping_n_s_m=4., sliding_damping_n_s_m=4.,
+                     stiffness_n_m=20000., restitution=restitution_of(4., 20000.), sliding_damping_n_s_m=4.,
                      friction=.5, rolling_friction=.02, twisting_friction=0., max_substeps=1024,
                      tangential_stiffness_ratio=2/7, contact_resolution=24, packing_fraction=.6,
-                     fluid_coupling=coupled, drag_viscosity_pa_s=1e-3,
+                     fluid_coupling=coupled,
                      volume_exclusion=not args.coexist_hydrostatic)
                 call('flow_source.update', name=WATER, enabled=True)
                 call('flow_source.update', name=SOURCE, domain=COEXIST, position=[0, .15, 0],
@@ -579,7 +581,7 @@ def main():
             call('timeline.set_frame', frame=0)
             call('fluid.reset')
             call('fluid.set_grain_settings', domain=COEXIST, stiffness_n_m=100000.,
-                 normal_damping_n_s_m=8., twisting_friction=.1, fluid_coupling=True)
+                 restitution=restitution_of(8., 100000.), twisting_friction=.1, fluid_coupling=True)
             call('flow_source.update', name=SOURCE, domain=COEXIST, position=[0, .35, 0],
                  radius=.28, velocity=[0, 0, 0], max_emitted_particles=256,
                  fluid_particles_per_second=256*1.01*60, use_time_limit=True,
@@ -710,7 +712,7 @@ def main():
                 call('timeline.set_frame', frame=0)
                 call('fluid.reset')
                 call('fluid.set_grain_settings', domain=REPOSE, enabled=True, radius_m=radius,
-                     stiffness_n_m=100000.*scale, normal_damping_n_s_m=8.*scale**2,
+                     stiffness_n_m=100000.*scale, restitution=restitution_of(8.*scale**2, 100000.*scale, radius),
                      sliding_damping_n_s_m=4.*scale**2, friction=.5, rolling_friction=mu_r,
                      twisting_friction=.1, tangential_stiffness_ratio=2/7, contact_resolution=24,
                      packing_fraction=.6, max_substeps=4096)
@@ -784,7 +786,7 @@ def main():
                 # default profile damping binds and both arms run identical
                 # substeps: a 0.0 difference that measures nothing.
                 call('fluid.set_grain_settings', domain=DOMAIN, contact_resolution=resolution,
-                     max_substeps=4096, normal_damping_n_s_m=1., sliding_damping_n_s_m=1.)
+                     max_substeps=4096, restitution=restitution_of(1., 20000.), sliding_damping_n_s_m=1.)
                 call('flow_source.update', name=SOURCE, position=[0, .25, 0], radius=.16,
                      velocity=[0, -.2, 0], max_emitted_particles=64,
                      fluid_particles_per_second=64*1.01*60, enabled=True, end_time=2/60)
@@ -821,7 +823,8 @@ def main():
         if args.settle_only:
             call('fluid.reset')
             call('fluid.set_grain_settings', domain=DOMAIN, stiffness_n_m=100000.,
-                 twisting_friction=.1, normal_damping_n_s_m=args.settle_normal_damping)
+                 twisting_friction=.1,
+                 restitution=restitution_of(args.settle_normal_damping, 100000.))
             call('flow_source.update', name=SOURCE, position=[0, .65, 0], radius=.43,
                  max_emitted_particles=256, fluid_particles_per_second=256*1.01*60,
                  start_time=0., end_time=1/30, enabled=True)

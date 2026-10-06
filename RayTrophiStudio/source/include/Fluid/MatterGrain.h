@@ -24,7 +24,13 @@ struct MatterGrainParams {
     bool enabled = false;
     float radius_m = 0.025f;
     float stiffness_n_m = 20000.0f;
-    float normal_damping_n_s_m = 4.0f;
+    // Coefficient of restitution of a normal impact, 0.01..1 (a measurable
+    // material property; sand ~.5, glass beads ~.9). The step derives the
+    // damping ratio zeta = -ln e / sqrt(pi^2 + ln^2 e) and gives every
+    // contact c = 2 zeta sqrt(k m_eff) with its own effective mass, so a
+    // grain-grain and a grain-wall impact rebound alike. Replaces the old
+    // per-domain normal damping in N s/m (loaded scenes are converted).
+    float restitution = 0.5f;
     float sliding_damping_n_s_m = 4.0f;
     float friction = 0.5f;
     float rolling_friction = 0.02f;
@@ -43,7 +49,8 @@ struct MatterGrainParams {
     // equal and opposite impulse returned to the liquid parcels. Off = grains
     // and liquid pass through each other (A/B and diagnosis only).
     bool fluid_coupling = true;
-    float drag_viscosity_pa_s = 1.0e-3f;
+    // Drag viscosity is the liquid's own: substance liquid_kinematic_viscosity
+    // x liquid_density of the parcels around each grain (no second field).
     // B5: the liquid's projection sees the grains' volume (pore-fraction face
     // weights, grain velocity on the closed part) and grains take the
     // solver's pressure gradient instead of hydrostatic buoyancy. Needs
@@ -75,7 +82,7 @@ struct MatterGrainParams {
 
 // Host CFL and GLSL history slots share this budget (sim_matter_grain.glsl).
 inline constexpr int kMatterGrainContactBudget = 24;
-inline constexpr uint32_t kMatterGrainShaderRevision = 12;
+inline constexpr uint32_t kMatterGrainShaderRevision = 13;
 // Neighbour hash: three rotating tables of fixed-capacity buckets.
 inline constexpr uint32_t kMatterGrainBucketCapacity = 16;
 inline constexpr uint32_t kMatterGrainBucketTables = 3;
@@ -89,6 +96,9 @@ MatterGrainParams matterGrainParamsFromJson(const nlohmann::json& json);
 // fluid.matter_models grain_readiness all read it. `code` is stable
 // (not_matter, backend, boundary, pore_exchange, wet_response,
 // thermal_liquid, solid_phase); `message` names the fix.
+// Damping ratio of a restitution coefficient (spring-dashpot contact).
+float matterGrainDampingRatio(float restitution);
+
 struct MatterGrainBlocker {
     std::string code;
     std::string message;

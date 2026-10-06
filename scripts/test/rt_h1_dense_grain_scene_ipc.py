@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from rt_ipc import RtIpc
+from grain_units import restitution_of
 
 DOMAIN = 'H1_Dense_Grain_Lab'
 SOURCE = 'H1_Dense_Sand_Stream'
@@ -85,7 +86,7 @@ def main():
              wet_response_enabled=False, wet_appearance_enabled=False)
         call('fluid.reset')
         call('fluid.set_grain_settings', domain=DOMAIN, enabled=True, radius_m=.025,
-             stiffness_n_m=200000., normal_damping_n_s_m=8., sliding_damping_n_s_m=4.,
+             stiffness_n_m=200000., restitution=restitution_of(8., 200000.), sliding_damping_n_s_m=4.,
              friction=.5, rolling_friction=.02, twisting_friction=.1, max_substeps=4096)
         data['profile'] = call('fluid.grain_settings', domain=DOMAIN)
         exists = SOURCE in {s['name'] for s in call('flow_source.list')}
