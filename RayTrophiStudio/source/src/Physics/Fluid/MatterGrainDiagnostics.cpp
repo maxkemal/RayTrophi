@@ -160,10 +160,8 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
                 {"bridge_model", "willett_2000_pendular"}}}};
     }
     return {{"transport_owner", params.enabled ? "grain" : "mpm"},
-        {"solver_kind", params.solver_kind},
-        {"solver", params.solver_kind == "xpbd" ? "xpbd_small_steps_candidate"
-                   : history ? "force_dem_cundall_strack_candidate"
-                             : "force_dem_viscous_sliding_candidate"},
+        {"solver", history ? "force_dem_cundall_strack_candidate"
+                           : "force_dem_viscous_sliding_candidate"},
         {"collider_structure", "flat_bvh"}, {"max_support_contacts", 4},
         {"max_surface_patches", 8}, {"contact_shader_revision", kMatterGrainShaderRevision},
         {"contact_budget", kMatterGrainContactBudget}, {"runtime", runtime},

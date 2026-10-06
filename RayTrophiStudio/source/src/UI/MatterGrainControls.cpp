@@ -191,20 +191,6 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
                 0.0f, 1e5f, "%.2f",
                 "Viscous part of the sliding force inside the Coulomb cone (0..1e5 Ns/m).\n"
                 "Script: fluid.set_grain_settings(sliding_damping_n_s_m=...)");
-            int solver = p.solver_kind == "xpbd" ? 1 : 0;
-            if (DomainUi::Choice("Solver (comparison)", &solver,
-                    "DEM (force, history)\0XPBD (experimental)\0",
-                    "DEM is the production solver. XPBD is an experimental comparison\n"
-                    "candidate: its material changes with the substep count (H1-G0).\n"
-                    "Script: fluid.set_grain_settings(solver_kind='dem'|'xpbd')")) {
-                p.solver_kind = solver == 1 ? "xpbd" : "dem";
-                changed = true;
-            }
-            if (solver == 1) {
-                changed |= DomainUi::Int("XPBD substeps per frame", &p.xpbd_substeps, 1.0f, 4, 512,
-                    "XPBD substep floor per frame (4..512); travel may add more.\n"
-                    "Script: fluid.set_grain_settings(xpbd_substeps=...)");
-            }
             ImGui::TreePop();
         }
         ImGui::SeparatorText("Liquid coupling");
@@ -240,8 +226,8 @@ void drawMatterGrainReport(const SimulationGridDomainDesc& domain,
         return;
     }
     const auto& r = state->fluid_stats.grain_report;
-    ImGui::Text("Solver %s: %d substeps (%.2e s), limited by %s", r.solver_kind.c_str(),
-        r.substeps, r.substep_dt, r.limit.c_str());
+    ImGui::Text("DEM: %d substeps (%.2e s), limited by %s", r.substeps, r.substep_dt,
+        r.limit.c_str());
     ImGui::Text("Grains %zu, liquid parcels %zu", r.grains, r.liquid_parcels);
     ImGui::Text("Contacts %u (sticking %u), max per grain %u", r.contacts, r.sticking_contacts,
         r.max_contacts);

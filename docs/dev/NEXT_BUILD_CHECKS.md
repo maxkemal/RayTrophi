@@ -1,3 +1,53 @@
+# Sıradaki kullanıcı build (C++ + SHADER): XPBD söküldü (H1-G0 kapandı) + settle kapısı
+
+Bu partide (2026-10-06): 16k tablosu anlaşılan ölçütü geçemedi (hiçbir XPBD ayarı DEM'e %5
+içinde değil; en yakını .949 @ 80 alt adım, maliyet .53) → **XPBD söküldü**, DEM tek tane
+çözücüsü. Shader'dan XPBD dalları, CFL'den XPBD sınırı, ayarlardan `solver_kind` /
+`xpbd_substeps` (script'ten gelirse sebebiyle reddedilir, eski sahnede yüklenirken atılır),
+panelden "Solver (comparison)" ve "XPBD substeps", testten `--xpbd-compare` ve CPU kopyası
+çıktı. Gerekçe + tablo: [MATTER_H1_GRAIN_ROADMAP.md](MATTER_H1_GRAIN_ROADMAP.md) B7.
+
+Settle teşhisi: geçen koşuda ötelenme enerjisi 1e-10'a indi ama dönme enerjisi 4 s boyunca
+yavaşça söndü (kapı %12 payla geçti). √E zamanla doğrusal düşüyor = sabit tork = tek bir
+tanenin temas normali etrafında dönmesi, burulma sürtünmesiyle (μt·Fn·√(Rδ), ≈2.5 rad/s²)
+yavaşlaması. Fizik doğru (masadaki topaç); kapı yanlış ölçüyordu. Kapı artık: ötelenme KE/tane
+≤ 1e-5 ve dönme enerjisi kuyrukta **hiç artmıyor** (enerji kaynağı yok). Geçince kapı değerleri
+basılır.
+
+Bulutta: grain shader'ları glslangValidator + spirv-val PASS; değişen C++ g++ sözdizimi PASS
+(bilinen `sprintf_s` düzenek yan etkisi hariç); kontrat + panel envanteri (254 → 252, iki
+bilinçli kaldırma) + IPC denetimi PASS.
+
+**Build:** C++ + `compile_shaders.bat`. Grain shader revision **14**.
+
+0. **Statik:** `python scripts/test/check_matter_grain_contracts.py`,
+   `python scripts/test/check_domain_panel_fields.py` → PASS (252 now).
+1. **Revizyon:** tane koşusunda `shader revision mismatch` yok (varsa shader derlenmedi).
+2. **Kilitler:** `rt_h1_grain_runtime_ipc.py --readiness-only` → `PASS grain readiness`;
+   artık `solver_kind='xpbd'` de "was removed" ile `rejected` basılmalı.
+3. **Temel regresyon:** `rt_h1_grain_runtime_ipc.py`, `--history-only`, `--static-only`,
+   `--convergence-only`, `--extended-only`. DEM yolu değişmedi (yalnız XPBD dalları çıktı);
+   değerler önceki turla aynı olmalı. Fark = söküm DEM'e dokunmuş, hemen getir.
+4. **Yerleşme:** `--settle-only --settle-normal-damping 8` → `PASS settle {...}`;
+   `spin_grows: False`, `tail_energy_per_grain_j` ≈ 4e-13 (geçen tur 1.06e-10/256).
+   ★ Sinsi: `spin_grows: True` = bir temas tanelere enerji pompalıyor; kapı doğru tutar ama
+   sayıları getir.
+5. **Su + tane:** `--coexist-only`, `--coexist-only --coexist-hydrostatic`, `--porous-only`
+   (önceki tur: 5.74, hidrostatik 9.81, porous fark .132).
+6. **Islak:** `--wet-only`.
+7. **Maliyet (DEM tek):** `python scripts/test/rt_h1_dense_grain_scene_ipc.py --counts 4096 16384 --steps 120`
+   → sonda `count median_ms p95_ms substeps limit contacts max/grain` tablosu. Beklenen geçen
+   turun DEM satırları (19.9 / 60.4 ms, 234 alt adım, `damping`). Bu tablo sıradaki maliyet
+   işinin (sönüm CFL sınırı) taban çizgisi; getir.
+8. **Panel (gözle, 1 dk):** Solvers → Granular Solver → Advanced solver'da "Solver
+   (comparison)" yok; Measure → Grain Step "DEM: N substeps … limited by …".
+9. **Uzun:** `--repose-only`; `rt_g2_dry_wet_compare_ipc.py --expect-empty-fluid-skipped`.
+
+Önceki partiden canlı alınanlar: panel gözle (hata yok; taşan Max Auto Resolution /
+Boundary Padding satırı düzeltildi), settle PASS, `--xpbd-compare` (eğim 0, tablo), 16k tablo.
+
+---
+
 # Sıradaki kullanıcı build (C++ + SHADER): tane fiziksel parametreleri + domain paneli + kilitler
 
 Bu partide (2026-10-06, tek build): tane küre yarıçapı düzeltmesi; çekirdekte tek "tane hazır

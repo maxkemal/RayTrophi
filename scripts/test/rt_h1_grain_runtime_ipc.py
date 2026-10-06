@@ -35,8 +35,6 @@ def main():
                         help="device contact history: carried while the state is unchanged, reset after fluid.reset")
     parser.add_argument("--porous-only", action="store_true",
                         help="B5 volume exclusion A/B: grains poured into a pool raise the water by N V / A")
-    parser.add_argument("--xpbd-compare", action="store_true",
-                        help="H1-G0: DEM vs XPBD on the same scenes (free fall, slope hold, pile, substep sensitivity, cost)")
     parser.add_argument("--wet-only", action="store_true",
                         help="B6 wet grains: cohesion A/B (column collapse) and water absorption from a pool")
     parser.add_argument("--coexist-only", action="store_true",
@@ -146,121 +144,6 @@ def main():
             extra_colliders.append(collider)
             return obj, collider
 
-        if args.xpbd_compare:
-            # Same domain, hash, colliders and owners; only the contact law
-            # differs. Gates are correctness per solver; the comparison table
-            # (pile shape, substeps, ms) is the input of the H1-G0 decision.
-            data['xpbd'] = {}
-
-            def pile_run(kind, substeps, count=256):
-                call('timeline.set_frame', frame=0)
-                call('fluid.reset')
-                call('fluid.set_grain_settings', domain=DOMAIN, solver_kind=kind, xpbd_substeps=substeps,
-                     stiffness_n_m=100000., restitution=restitution_of(8., 100000.), twisting_friction=.1,
-                     rolling_friction=.1, friction=.5, max_substeps=4096)
-                call('flow_source.update', name=SOURCE, position=[0, .65, 0], radius=.43,
-                     max_emitted_particles=count, fluid_particles_per_second=count*1.01*60,
-                     start_time=0., end_time=1/30, velocity=[0, 0, 0], enabled=True)
-                control = call('sim.control_state')
-                samples = []
-                step_ms = []
-                call('perf.set_gpu_kernel_timing', enabled=True)
-                call('perf.gpu_kernel_timings', reset=True)
-                for step in range(1, 181):
-                    call('fluid.step', dt=1/60)
-                    step_ms.append(call('fluid.step_stats', domain=DOMAIN)['total_ms'])
-                    if step % 30:
-                        continue
-                    assert call('sim.control_state') == control
-                    inventory = call('fluid.matter_models', domain=DOMAIN)
-                    assert not inventory['mixed_execution']['step_held'], inventory['mixed_execution']
-                    g = inventory['acceptance_metrics']['granular']
-                    assert g['particles'] == count
-                    samples.append({'step': step, 'granular': g, 'runtime': runtime_of(inventory),
-                                    'stats': call('fluid.step_stats', domain=DOMAIN)})
-                timings = call('perf.gpu_kernel_timings', reset=True)
-                call('perf.set_gpu_kernel_timing', enabled=False)
-                gpu_ms = sum(k['ms'] for k in timings['kernels'] if 'grain' in k['kernel'])
-                settled = sorted(step_ms[60:])
-                last = samples[-1]
-                return {'kind': kind, 'substeps_setting': substeps,
-                        'median_step_ms': settled[len(settled)//2],
-                        'grain_gpu_ms_per_frame': gpu_ms/len(step_ms),
-                        'com_y': last['granular']['dry_center_of_mass'][1],
-                        'rms': last['granular']['horizontal_rms_radius_m'],
-                        'bottom_y': last['granular']['bounds_min'][1],
-                        'kinetic_energy_j': last['granular']['kinetic_energy_j'],
-                        'runtime': last['runtime'], 'samples': samples}
-
-            # 1. Free fall and slope hold per solver.
-            angle = math.radians(20)
-            _, slope = make_ramp('H1_Grain_XPBD_Ramp', [0, 0, 20])
-            call('collider.update', name=slope, enabled=False)
-            for kind in ('dem', 'xpbd'):
-                call('timeline.set_frame', frame=0)
-                call('fluid.reset')
-                call('fluid.set_grain_settings', domain=DOMAIN, solver_kind=kind, xpbd_substeps=20,
-                     stiffness_n_m=20000., restitution=restitution_of(4., 20000.), rolling_friction=1., friction=.5,
-                     twisting_friction=0., max_substeps=1024)
-                call('flow_source.update', name=SOURCE, position=[0, 1.5, 0], radius=.0001,
-                     velocity=[0, 0, 0], max_emitted_particles=1, end_time=.05, enabled=True)
-                fall = []
-                for step in range(1, 25):
-                    call('fluid.step', dt=1/120)
-                    inventory = call('fluid.matter_models', domain=DOMAIN)
-                    assert not inventory['mixed_execution']['step_held'], inventory['mixed_execution']
-                    fall.append((step/120, inventory['acceptance_metrics']['granular']['dry_center_of_mass'][1]))
-                (t0, y0), (tm, ym), (tf, yf) = fall[0], fall[len(fall)//2-1], fall[-1]
-                acceleration = -2*((yf-y0)/(tf-t0)-(ym-y0)/(tm-t0))/(tf-tm)
-                assert inventory['grain_diagnostics']['solver_kind'] == kind
-                # Slope: born resting, 2 s.
-                call('collider.update', name=slope, enabled=True)
-                call('timeline.set_frame', frame=0)
-                call('fluid.reset')
-                rest = .025-5e-5
-                call('flow_source.update', name=SOURCE,
-                     position=[-math.sin(angle)*rest, 1.+math.cos(angle)*rest, 0], radius=.0001,
-                     velocity=[0, 0, 0], max_emitted_particles=1, end_time=.05, enabled=True)
-                along = []
-                for step in range(1, 241):
-                    call('fluid.step', dt=1/120)
-                    g = call('fluid.matter_models', domain=DOMAIN)['acceptance_metrics']['granular']
-                    x, y, _ = g['dry_center_of_mass']
-                    along.append(math.cos(angle)*x+math.sin(angle)*(y-1.))
-                call('collider.update', name=slope, enabled=False)
-                creep = abs(along[-1]-along[119])
-                data['xpbd'][kind] = {'free_fall_g': acceleration, 'slope_creep_last_1s_m': creep}
-                save()
-                print(kind, 'free fall', acceleration, 'slope creep', creep, flush=True)
-                assert abs(acceleration-9.81) < .05*9.81, (kind, acceleration)
-                assert creep <= 5e-4, (kind, 'slope hold failed', creep)
-            # 2. Pile: DEM vs XPBD, and XPBD at 2x/4x substeps. A positional
-            # solver whose pile gets harder with more substeps is reporting
-            # its iteration count, not a material (CLAUDE.md lesson).
-            piles = [pile_run('dem', 20), pile_run('xpbd', 20), pile_run('xpbd', 40), pile_run('xpbd', 80)]
-            data['xpbd']['piles'] = [{k: v for k, v in pile.items() if k != 'samples'} for pile in piles]
-            save()
-            print('solver   setting  substeps  com_y    rms     bottom   step_ms  grain_gpu_ms', flush=True)
-            for pile in data['xpbd']['piles']:
-                print(f"{pile['kind']:<8} {pile['substeps_setting']:>7}  {pile['runtime']['substeps']:>8}  "
-                      f"{pile['com_y']:.5f}  {pile['rms']:.4f}  {pile['bottom_y']:.5f}  "
-                      f"{pile['median_step_ms']:>7.2f}  {pile['grain_gpu_ms_per_frame']:>12.3f}", flush=True)
-                assert pile['bottom_y'] >= .025*.7, ('pile floor penetration', pile)
-            # Substep sensitivity is a finding for the H1-G0 decision, not a
-            # correctness failure: recorded and printed, the table must finish.
-            dem, x20, x40, x80 = piles
-            data['xpbd']['substep_com_drift'] = abs(x80['com_y']-x20['com_y'])/max(x20['com_y'], .025)
-            data['xpbd']['substep_rms_drift'] = abs(x80['rms']-x20['rms'])/max(x20['rms'], 1e-6)
-            data['xpbd']['rms_vs_dem'] = {str(p['substeps_setting']): p['rms']/dem['rms'] for p in (x20, x40, x80)}
-            data['xpbd']['cost_vs_dem'] = {str(p['substeps_setting']): p['median_step_ms']/dem['median_step_ms']
-                                           for p in (x20, x40, x80)}
-            save()
-            print('xpbd substep drift: com', data['xpbd']['substep_com_drift'],
-                  'rms', data['xpbd']['substep_rms_drift'], flush=True)
-            print('xpbd rms / dem', data['xpbd']['rms_vs_dem'], 'step ms / dem', data['xpbd']['cost_vs_dem'],
-                  flush=True)
-            data['completed'] = True
-            return
         if args.readiness_only:
             # One rule (matterGrainBlockers) behind validation, the panel locks and
             # matter_models: a grain domain cannot be moved off what the solver needs.
@@ -273,7 +156,8 @@ def main():
                                    ('fluid.set_param', dict(domain=DOMAIN, boundary='open')),
                                    ('fluid.set_pore_exchange', dict(domain=DOMAIN, enabled=True)),
                                    ('fluid.set_grain_settings', dict(domain=DOMAIN, normal_damping_n_s_m=4.)),
-                                   ('fluid.set_grain_settings', dict(domain=DOMAIN, drag_viscosity_pa_s=1e-3))]:
+                                   ('fluid.set_grain_settings', dict(domain=DOMAIN, drag_viscosity_pa_s=1e-3)),
+                                   ('fluid.set_grain_settings', dict(domain=DOMAIN, solver_kind='xpbd'))]:
                 try:
                     call(method, **params)
                     rejected[f'{method} {sorted(params)}'] = None
@@ -885,11 +769,17 @@ def main():
             tail = [s for s in samples if s['step'] >= 360]
             com = [s['inventory']['acceptance_metrics']['granular']['dry_center_of_mass'][1] for s in tail]
             rms = [s['inventory']['acceptance_metrics']['granular']['horizontal_rms_radius_m'] for s in tail]
-            energy = [s['inventory']['acceptance_metrics']['granular']['kinetic_energy_j'] +
-                      s['inventory']['grain_diagnostics']['spin_energy_j'] for s in tail]
+            # Settled = the centres rest. A grain left spinning about its contact
+            # normal decays only through the twisting torque mu_t Fn a on a patch
+            # of a = sqrt(R overlap) ~ .65 mm (2.5 rad/s^2 for this grain): a top
+            # on a table spins for seconds, which is physics, not an unsettled
+            # pile. So spin is gated as dissipative (never grows), not as zero.
+            energy = [s['inventory']['acceptance_metrics']['granular']['kinetic_energy_j'] for s in tail]
+            spin = [s['inventory']['grain_diagnostics']['spin_energy_j'] for s in tail]
             data['settle_gates'] = {'mass_drift_kg': max(masses)-min(masses),
                 'tail_com_range_m': max(com)-min(com), 'tail_rms_range_m': max(rms)-min(rms),
-                'tail_energy_per_grain_j': max(energy)/256}
+                'tail_energy_per_grain_j': max(energy)/256, 'tail_spin_j': spin,
+                'spin_grows': any(b > a*(1+1e-3)+1e-12 for a, b in zip(spin, spin[1:]))}
             # B4: a settled pile with no births and no liquid is exactly what
             # the runtime published, so bank 0 must be reused (no state upload).
             # Never resident = some host stage touches grains every frame.
@@ -900,11 +790,14 @@ def main():
                 s['inventory']['grain_diagnostics']['runtime'].get('upload_bytes') for s in tail]
             data['completed'] = (max(masses)-min(masses) <= 1e-5 and
                                  max(com)-min(com) <= .001 and max(rms)-min(rms) <= .001 and
-                                 max(energy)/256 <= 1e-5)
+                                 max(energy)/256 <= 1e-5 and
+                                 not data['settle_gates']['spin_grows'])
             save()
             assert data['completed'], data['settle_gates']
             assert data['settle_gates']['resident_tail_samples'] > 0, \
                 ('grain state re-uploaded every frame of a settled pile', data['settle_gates'])
+            print('PASS settle', {k: v for k, v in data['settle_gates'].items()
+                                  if k not in ('tail_upload_bytes', 'tail_spin_j')}, flush=True)
             return
         if args.extended_only:
             # A real transformed flat TriangleMesh, not an analytic test plane.

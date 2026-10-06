@@ -73,16 +73,11 @@ struct MatterGrainParams {
     // (an emitter of wet sand). Needs wet_grains.
     float birth_saturation = 0.0f;
     int max_substeps = 512;
-    // H1-G0 candidate comparison: "dem" (force spring-dashpot, contact
-    // history) or "xpbd" (small-steps positional contact, inelastic normal,
-    // positional Coulomb friction). Same hash, colliders, coupling, owners.
-    std::string solver_kind = "dem";
-    int xpbd_substeps = 20;  // per frame minimum; travel bound may add more
 };
 
 // Host CFL and GLSL history slots share this budget (sim_matter_grain.glsl).
 inline constexpr int kMatterGrainContactBudget = 24;
-inline constexpr uint32_t kMatterGrainShaderRevision = 13;
+inline constexpr uint32_t kMatterGrainShaderRevision = 14;
 // Neighbour hash: three rotating tables of fixed-capacity buckets.
 inline constexpr uint32_t kMatterGrainBucketCapacity = 16;
 inline constexpr uint32_t kMatterGrainBucketTables = 3;
@@ -125,8 +120,7 @@ struct MatterGrainStepReport {
     int substeps = 0;
     int dispatches = 0;
     float substep_dt = 0.0f;
-    std::string limit; // accuracy | stability | damping | travel | xpbd_substeps
-    std::string solver_kind = "dem";
+    std::string limit; // accuracy | stability | damping | travel
     uint32_t max_contacts = 0;
     uint32_t sticking_contacts = 0;
     uint32_t contacts = 0;
