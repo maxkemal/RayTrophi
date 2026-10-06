@@ -37,12 +37,18 @@ struct MatterGrainParams {
     // Grain mass = substance bulk density / packing_fraction * sphere volume,
     // so a packed bed of grains reproduces the substance's bulk density.
     float packing_fraction = 0.6f;
+    // Two-way liquid coupling when fluid carriers share the domain: implicit
+    // pairwise drag (Di Felice voidage law) + Archimedes buoyancy, with the
+    // equal and opposite impulse returned to the liquid parcels. Off = grains
+    // and liquid pass through each other (A/B and diagnosis only).
+    bool fluid_coupling = true;
+    float drag_viscosity_pa_s = 1.0e-3f;
     int max_substeps = 512;
 };
 
 // Host CFL and GLSL history slots share this budget (sim_matter_grain.glsl).
 inline constexpr int kMatterGrainContactBudget = 24;
-inline constexpr uint32_t kMatterGrainShaderRevision = 6;
+inline constexpr uint32_t kMatterGrainShaderRevision = 7;
 // Neighbour hash: three rotating tables of fixed-capacity buckets.
 inline constexpr uint32_t kMatterGrainBucketCapacity = 16;
 inline constexpr uint32_t kMatterGrainBucketTables = 3;
@@ -72,9 +78,40 @@ struct MatterGrainStepReport {
     uint32_t sticking_contacts = 0;
     uint32_t contacts = 0;
     bool history_reset = false;
+    std::size_t working_set_bytes = 0;
+    // Same-domain liquid (transport owner mpm) beside the grains.
+    std::size_t grains = 0;
+    std::size_t liquid_parcels = 0;
+    bool coupling_enabled = false;
+    std::size_t coupled_grains = 0;
+    Vec3 drag_impulse;        // sum over grains of the liquid's drag, N*s
+    Vec3 buoyancy_impulse;    // sum over grains, N*s
+    Vec3 liquid_reaction;     // impulse returned to the liquid parcels, N*s
+    double momentum_residual = 0.0;  // |grain gain + liquid gain|, N*s
+    double unmatched_impulse = 0.0;  // reaction with no liquid mass to take it
+    float max_drag_coefficient = 0.0f;
+    float max_submerged_fraction = 0.0f;
+};
+
+// Per-grain liquid coupling, one frame. Inputs are frozen for the frame
+// (staggered with the liquid step); the shader integrates a private liquid
+// lump of mass `lump_mass_kg` with each grain so the drag pair is implicit
+// and momentum-exact. Outputs come back with the grain publication.
+struct MatterGrainCouplingInput {
+    Vec3 lump_velocity;          // liquid velocity at the grain, m/s
+    float drag_coefficient = 0;  // beta, kg/s (0 = uncoupled)
+    Vec3 buoyancy_acceleration;  // m/s^2, opposite to gravity
+    float lump_mass_kg = 0;      // liquid mass that answers this grain's drag
+};
+struct MatterGrainCouplingOutput {
+    Vec3 drag_impulse;           // impulse the liquid gave this grain, N*s
 };
 
 struct MatterGrainGpuRuntime {
+    ComputeBufferHandle positions;
+    ComputeBufferHandle velocities;
+    ComputeBufferHandle affines;
+    ComputeBufferHandle coupling;
     ComputeBufferHandle bucket_counts;
     ComputeBufferHandle bucket_slots;
     ComputeBufferHandle mass;
@@ -108,12 +145,22 @@ void drawMatterGrainControls(const SimulationGridDomainDesc& domain);
 
 void releaseMatterGrainGpu(SimulationComputeContext& compute, MatterGrainGpuRuntime& runtime);
 
-// All canonical transport remains on device between contact microsteps.
-// The existing host publication/cache/render bridge is still used at frame end.
-bool stepMatterGrainGpu(SimulationGridDomainState& state, const MatterGrainParams& params,
-    float dt, const Vec3& gravity, std::size_t budget_bytes,
-    SimulationComputeContext& compute, SimulationGridDomainComputeBuffers& buffers,
-    const std::vector<SurfaceMeshTriangle>& triangles, std::string& error);
+// Steps `grains` -- the grain-owned carriers of one domain, in a stable
+// (identity-sorted) order -- inside the closed box [low, high]. The grain
+// runtime owns its own device copy of the grain state; liquid parcels of the
+// same domain never enter these buffers. Contact history is keyed by index
+// and stable identity, so a stable order keeps static friction across frames.
+// `coupling` (optional, one entry per grain) adds the liquid drag/buoyancy;
+// `drag_out` then receives the impulse each grain took from the liquid.
+// All transport remains on device between contact substeps; the grain state
+// is published to the host once at frame end.
+bool stepMatterGrainGpu(FluidParticles& grains, const Vec3& low, const Vec3& high,
+    const MatterGrainParams& params, float dt, const Vec3& gravity,
+    std::size_t budget_bytes, SimulationComputeContext& compute,
+    MatterGrainGpuRuntime& runtime, const std::vector<SurfaceMeshTriangle>& triangles,
+    const std::vector<MatterGrainCouplingInput>* coupling,
+    std::vector<MatterGrainCouplingOutput>* drag_out,
+    MatterGrainStepReport& report, std::string& error);
 
 } // namespace Fluid
 } // namespace RayTrophiSim

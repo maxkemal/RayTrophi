@@ -28,6 +28,9 @@ void drawMatterGrainControls(const SimulationGridDomainDesc& domain) {
     changed |= ImGui::SliderFloat("Packing fraction", &p.packing_fraction, .3f, .74f, "%.2f");
     changed |= ImGui::DragInt("Substeps per collision", &p.contact_resolution, 1.0f, 8, 200);
     changed |= ImGui::DragInt("Contact substep limit", &p.max_substeps, 1.0f, 1, 4096);
+    changed |= ImGui::Checkbox("Liquid drag + buoyancy coupling", &p.fluid_coupling);
+    changed |= ImGui::DragFloat("Liquid viscosity for drag (Pa s)", &p.drag_viscosity_pa_s,
+        1e-4f, 1e-6f, 1e3f, "%.5f", ImGuiSliderFlags_Logarithmic);
     static std::string error;
     if (changed) {
         try {
@@ -37,12 +40,16 @@ void drawMatterGrainControls(const SimulationGridDomainDesc& domain) {
             error = e.what();
         }
     }
-    ImGui::TextWrapped("Dry granular emitters, Closed Vulkan and static PlaneY/flat mesh "
+    ImGui::TextWrapped("Granular emitters become grains; liquid emitters in the same domain "
+        "stay liquid parcels (one transport owner each). Closed Vulkan, static PlaneY/flat mesh "
         "colliders. Reset particles before editing. Disable Pore Water and thermal physics.");
+    ImGui::TextWrapped("Liquid coupling: Di Felice drag against the liquid in the grain's cells "
+        "plus hydrostatic buoyancy; the liquid gets the opposite impulse. The liquid does not "
+        "yet treat grains as volume (a pile is a porous medium to it).");
     ImGui::TextWrapped("Each carrier is one physical sphere; its mass is the substance bulk "
         "density / packing fraction x sphere volume. Static friction stiffness 0.286 (2/7) "
-        "holds piles with a Cundall-Strack spring; 0 is kinetic-only sliding. Wet coupling "
-        "is pending.");
+        "holds piles with a Cundall-Strack spring; 0 is kinetic-only sliding. Grains stay "
+        "dry: wetting/cohesion is pending.");
     if (!error.empty()) {
         ImGui::TextWrapped("%s", error.c_str());
     }

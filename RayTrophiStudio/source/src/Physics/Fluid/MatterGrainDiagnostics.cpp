@@ -69,7 +69,10 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
     std::vector<Vec3> centres;
     centres.reserve(p.size());
     for (std::size_t i = 0; i < p.size(); ++i) {
-        if (i >= p.rest_mass_kg.size() || i >= p.mass_fraction.size() || i >= p.affine.size()) {
+        // Liquid parcels of the same domain are not grains: no spin, no pile.
+        if (i >= p.rest_mass_kg.size() || i >= p.mass_fraction.size() || i >= p.affine.size() ||
+            i >= p.constitutive_model.size() || p.constitutive_model[i] !=
+                static_cast<uint8_t>(MatterConstitutiveModel::Granular)) {
             continue;
         }
         centres.push_back(p.position[i]);
@@ -94,7 +97,24 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
             {"max_contacts_per_grain", report->max_contacts},
             {"contacts_last_substep", report->contacts},
             {"sticking_contacts_last_substep", report->sticking_contacts},
-            {"history_reset_this_step", report->history_reset}};
+            {"history_reset_this_step", report->history_reset},
+            {"working_set_bytes", report->working_set_bytes}};
+    }
+    nlohmann::json liquid = nullptr;
+    if (report) {
+        const auto vec = [](const Vec3& v) { return nlohmann::json{v.x, v.y, v.z}; };
+        liquid = {{"grains", report->grains}, {"liquid_parcels", report->liquid_parcels},
+            {"coupling_enabled", report->coupling_enabled},
+            {"coupled_grains", report->coupled_grains},
+            {"drag_impulse_n_s", vec(report->drag_impulse)},
+            {"buoyancy_impulse_n_s", vec(report->buoyancy_impulse)},
+            {"liquid_reaction_n_s", vec(report->liquid_reaction)},
+            {"momentum_residual_n_s", report->momentum_residual},
+            {"unmatched_impulse_n_s", report->unmatched_impulse},
+            {"max_drag_coefficient_kg_s", report->max_drag_coefficient},
+            {"max_submerged_fraction", report->max_submerged_fraction},
+            {"model", "di_felice_implicit_pair_drag+hydrostatic_buoyancy"},
+            {"volume_exclusion", false}};
     }
     return {{"transport_owner", params.enabled ? "grain" : "mpm"},
         {"solver", history ? "force_dem_cundall_strack_candidate"
@@ -109,6 +129,7 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
         {"max_spin_rad_s", maximum_spin},
         {"angular_momentum_kg_m2_s", {angular[0], angular[1], angular[2]}},
         {"history_static_friction", history}, {"wet_coupling", false},
+        {"liquid", liquid}, {"fluid_coupling_setting", params.fluid_coupling},
         {"dissipation_heat_coupled", false}, {"frame_end_host_publication", true}};
 }
 

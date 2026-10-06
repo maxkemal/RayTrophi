@@ -1,6 +1,6 @@
 # H1 dry grain GPU runtime candidate — 2026-10-05
 
-> **Durum:** AKTİF — H1 dry grain GPU adayı; 2026-10-06 fused substep/statik sürtünme/tane kütlesi CANLI PASS (G2 dahil); kova komşuluğu + yığılma açısı partisi build bekliyor (en alttaki bölüm).
+> **Durum:** AKTİF — H1 dry grain GPU adayı; 2026-10-06 fused substep/statik sürtünme/tane kütlesi CANLI PASS (G2 dahil); kova komşuluğu + yığılma açısı (B2) ve parçacık başına sahiplik + su–tane bağlama (B3) build bekliyor (en alttaki iki bölüm). Parti sırası: [MATTER_H1_GRAIN_ROADMAP.md](MATTER_H1_GRAIN_ROADMAP.md).
 
 2026-10-06 birth-fix kullanıcı build sonrası tam dış IPC PASS:
 g60/120=9.80958/9.80961 m/s², floor min y .02133 m, spin1.504 rad/s.
@@ -220,3 +220,30 @@ halka yüzeyi = en yüksek tane tepesi − en alçak tane tabanı; zirvenin %20�
 halkalara en küçük kareler eğimi → `repose_angle_deg`. Sentetik 20/30/38° koni ile Python
 aynası 19.5/29.1/37.7° okudu (ayrık istifleme ~0.5° düşük okur). Duvara dayalı/çoklu yığın
 ölçüm değildir. Kabul: `--repose-only` (sıra NEXT_BUILD_CHECKS en üst).
+
+## Parçacık başına sahiplik + su–tane bağlama (B3) — 2026-10-06, 3. parti (kaynak, build bekliyor)
+
+Arıza: aynı domain'de su + dry grain → parçacıklar emitter'da doğup kalıyordu (tane adımı
+akışkan taşıyıcıyı görünce bütün adımı reddediyordu). Artık taşıma sahibi taşıyıcı başına.
+
+- `runMatterGrainStep` (MatterGrainStep.inl) koordinatör: `partitionMatterGrainOwners` →
+  sıvı alt kümesi `state.particles` ile takas edilip `runGpuFluidParticleIntegrateForces` +
+  `runMatterGpuStep` (karma Vulkan sıvı şeridi) → `buildMatterGrainLiquidField` +
+  `prepareMatterGrainCoupling` → `stepMatterGrainGpu` → `applyMatterGrainLiquidReaction` →
+  `mergeMatterGrainOwners`. Kanonik dizi ancak hepsi başarılıysa yazılır: `[sıvı…, tane…]`.
+- Tane çözücüsü artık **kendi** bank-0 tamponlarına sahip (`grain_positions/velocities/
+  affines`); domain grid tamponlarına ve `fluid_uploaded_particle_count`'a bağımlılık yok.
+  Tane alt kümesi kimliğe göre sıralı: geçmiş yuvaları başka taşıyıcı silinince kaymaz.
+- Shader revision 7, 15 buffer (binding 14 `Coupling`: tane başına 3 vec4). Bağlama yoksa
+  satırlar sıfır → shader'da kesin no-op. Örtük çift: göreli hız 1/(1+dt β(1/m+1/M)) ile
+  söner, `m v + M u` korunur; birikmiş sürüklenme impulsu geri okunur.
+- Sürükleme: Di Felice (1994) gözeneklilikli; kaldırma: hidrostatik Arşimet, batma oranı
+  s = clamp(α_sıvı/ε). Topak: hücre sıvısının tanenin hacim ağırlığı kadar payı (hücrede bir
+  tane hacminden fazla tane varsa paylar hücre kütlesine eşitlenir, aşamaz).
+- Doğum: tane doğum filtresi yalnız granüler taşıyıcılara karşı aralık tutar; sıvı kaynak
+  tane domain'inde voxel/PPC parsel doğumunu korur.
+- Render: tane domain'inde sıvı parsel kendi yarıçapıyla çizilir.
+- Ayarlar `fluid_coupling`, `drag_viscosity_pa_s`; tanı `grain_diagnostics.liquid`.
+- Bulutta koşturulan: `matter_grain_coupling_test.cpp` (g++, kütle yoğunluğu stub'lı) PASS —
+  kaldırma 3.6788 m/s² = analitik, sıvı/tane momentum artığı 0. Statik sözleşme PASS.
+- Bilerek dışarıda: hacim dışlama, −V∇p, dönme sürüklenmesi, ıslanma (yol haritası B5/B6).

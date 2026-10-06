@@ -1,4 +1,6 @@
 // Shared dry DEM stages. Packed xyz and 3-column affine match canonical SoA.
+// Bank 0 is the grain runtime's own device copy of the grain-owned carriers
+// (identity order); liquid parcels of the same domain never enter it.
 //
 // One dispatch per contact substep. State ping-pongs between bank 0 (the
 // canonical position/velocity/affine buffers) and bank 1 (grain scratch), so a
@@ -25,6 +27,10 @@ layout(std430, binding = 11) readonly buffer Triangles { float triangles[]; };
 struct ColliderNode { vec3 low; uint first; vec3 high; uint second; };
 layout(std430, binding = 12) readonly buffer ColliderNodes { ColliderNode nodes[]; };
 layout(std430, binding = 13) readonly buffer SurfacePatches { uint patches[]; };
+// Liquid coupling, three vec4 per grain, touched only by the grain's own
+// invocation: {lump velocity, drag coefficient beta}, {buoyancy acceleration,
+// lump mass}, {accumulated drag impulse, -}. beta == 0: uncoupled.
+layout(std430, binding = 14) buffer Coupling { vec4 coupling[]; };
 layout(push_constant) uniform Constants {
     uvec4 meta; // count, buckets per table, twisting-friction float bits, BVH nodes
     vec4 low_radius;
@@ -43,7 +49,7 @@ const uint BUCKET = 16u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 6u;
+const uint REVISION = 7u;
 
 uint readBank() { return pc.substep.x & 1u; }
 uint writeBank() { return readBank() ^ 1u; }
@@ -371,7 +377,20 @@ void main() {
     }
     // Symplectic Euler from the complete previous-substep state.
     float dt = pc.step_contact.x;
-    v += dt*(f*im+pc.rolling.yzw);
+    vec4 drag = coupling[3u*i];
+    vec4 lift = coupling[3u*i+1u];
+    v += dt*(f*im+pc.rolling.yzw+lift.xyz);
+    if (drag.w > 0.0 && lift.w > 0.0) {
+        // Implicit drag pair: grain (m) and its private liquid lump (M).
+        // The relative velocity decays by 1/(1 + dt beta (1/m + 1/M)) and
+        // m v + M u is unchanged, so no stiffness bound and no overshoot.
+        float m = 1.0/im, M = lift.w;
+        vec3 relative = (drag.xyz-v)/(1.0+dt*drag.w*(im+1.0/M));
+        vec3 settled = (m*v+M*(drag.xyz-relative))/(m+M);
+        coupling[3u*i] = vec4(settled+relative, drag.w);
+        coupling[3u*i+2u].xyz += m*(settled-v);
+        v = settled;
+    }
     p += dt*v;
     w += dt*t*ii;
     store(i,dst,p,v,w);

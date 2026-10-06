@@ -1,7 +1,6 @@
 #include "Fluid/MatterGrain.h"
 #include "Fluid/MatterGrainColliderBvh.h"
 #include "Fluid/MatterGrainStages.h"
-#include "Fluid/MatterGpuRuntime.h"
 #include "Fluid/FluidPhysicalMass.h"
 #include "Fluid/FluidThermalLiquid.h"
 #include "ParticleSimulation.h"
@@ -45,7 +44,9 @@ std::size_t bucketBytes(uint32_t buckets) {
 std::size_t particleBytes(std::size_t capacity) {
     return bucketBytes(bucketsFor(capacity)) +
         2 * capacity * sizeof(float) +             // mass, ids
+        18 * capacity * sizeof(float) +            // bank 0 (pos/vel/affine)
         9 * capacity * sizeof(float) +             // scratch bank
+        12 * capacity * sizeof(float) +            // liquid coupling
         capacity * kHistoryBytesPerGrain +
         2 * capacity * sizeof(uint32_t) +          // history owners
         kDiagnosticWords * sizeof(uint32_t);
@@ -77,7 +78,8 @@ void destroy(SimulationComputeContext& compute, std::initializer_list<ComputeBuf
 }
 
 bool particleBuffersValid(const MatterGrainGpuRuntime& r) {
-    return r.bucket_counts.valid() && r.bucket_slots.valid() && r.mass.valid() && r.ids.valid() &&
+    return r.positions.valid() && r.velocities.valid() && r.affines.valid() &&
+        r.coupling.valid() && r.bucket_counts.valid() && r.bucket_slots.valid() && r.mass.valid() && r.ids.valid() &&
         r.scratch.valid() && r.history.valid() && r.history_owner.valid() &&
         r.diagnostics.valid();
 }
@@ -96,6 +98,11 @@ bool ensureParticles(SimulationComputeContext& compute, MatterGrainGpuRuntime& r
                      std::size_t capacity, std::string& error) {
     MatterGrainGpuRuntime candidate;
     candidate.buckets = bucketsFor(capacity);
+    candidate.positions = makeBuffer(compute, "grain_positions", capacity * sizeof(Vec3));
+    candidate.velocities = makeBuffer(compute, "grain_velocities", capacity * sizeof(Vec3));
+    candidate.affines = makeBuffer(compute, "grain_affines", capacity * sizeof(AffineC));
+    candidate.coupling = makeBuffer(compute, "grain_liquid_coupling",
+        capacity * 12 * sizeof(float));
     candidate.bucket_counts = makeBuffer(compute, "grain_bucket_counts",
         std::size_t{kMatterGrainBucketTables} * candidate.buckets * sizeof(uint32_t));
     candidate.bucket_slots = makeBuffer(compute, "grain_bucket_slots",
@@ -111,14 +118,21 @@ bool ensureParticles(SimulationComputeContext& compute, MatterGrainGpuRuntime& r
     candidate.diagnostics = makeBuffer(compute, "grain_diagnostics",
         kDiagnosticWords * sizeof(uint32_t));
     if (!particleBuffersValid(candidate)) {
-        destroy(compute, {&candidate.bucket_counts, &candidate.bucket_slots, &candidate.mass, &candidate.ids,
+        destroy(compute, {&candidate.positions, &candidate.velocities, &candidate.affines,
+            &candidate.coupling, &candidate.bucket_counts, &candidate.bucket_slots, &candidate.mass, &candidate.ids,
             &candidate.scratch, &candidate.history, &candidate.history_owner,
             &candidate.diagnostics});
         error = "grain GPU allocation failed";
         return false;
     }
-    destroy(compute, {&runtime.bucket_counts, &runtime.bucket_slots, &runtime.mass, &runtime.ids,
-        &runtime.scratch, &runtime.history, &runtime.history_owner, &runtime.diagnostics});
+    destroy(compute, {&runtime.positions, &runtime.velocities, &runtime.affines,
+        &runtime.coupling, &runtime.bucket_counts, &runtime.bucket_slots, &runtime.mass,
+        &runtime.ids, &runtime.scratch, &runtime.history, &runtime.history_owner,
+        &runtime.diagnostics});
+    runtime.positions = candidate.positions;
+    runtime.velocities = candidate.velocities;
+    runtime.affines = candidate.affines;
+    runtime.coupling = candidate.coupling;
     runtime.bucket_counts = candidate.bucket_counts;
     runtime.bucket_slots = candidate.bucket_slots;
     runtime.mass = candidate.mass;
@@ -160,33 +174,35 @@ bool ensureCollider(SimulationComputeContext& compute, MatterGrainGpuRuntime& ru
 } // namespace
 
 void releaseMatterGrainGpu(SimulationComputeContext& compute, MatterGrainGpuRuntime& r) {
-    destroy(compute, {&r.bucket_counts, &r.bucket_slots, &r.mass, &r.ids, &r.scratch, &r.history,
+    destroy(compute, {&r.positions, &r.velocities, &r.affines, &r.coupling,
+        &r.bucket_counts, &r.bucket_slots, &r.mass, &r.ids, &r.scratch, &r.history,
         &r.history_owner, &r.diagnostics, &r.triangles, &r.collider_nodes,
         &r.collider_patches});
     r = {};
 }
 
-bool stepMatterGrainGpu(SimulationGridDomainState& state, const MatterGrainParams& params,
-    float dt, const Vec3& gravity, std::size_t budget_bytes,
-    SimulationComputeContext& compute, SimulationGridDomainComputeBuffers& buffers,
-    const std::vector<SurfaceMeshTriangle>& triangles, std::string& error) {
+bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
+    const MatterGrainParams& params, float dt, const Vec3& gravity,
+    std::size_t budget_bytes, SimulationComputeContext& compute,
+    MatterGrainGpuRuntime& runtime, const std::vector<SurfaceMeshTriangle>& triangles,
+    const std::vector<MatterGrainCouplingInput>* coupling,
+    std::vector<MatterGrainCouplingOutput>* drag_out,
+    MatterGrainStepReport& report, std::string& error) {
     error.clear();
-    auto& p = state.particles;
     const auto count = p.size();
     auto checked = params;
     if (!patchMatterGrainParams(matterGrainParamsToJson(params), checked, error)) {
         return false;
     }
     if (!count || count > 100000 || triangles.size() > 4096 ||
-        !std::isfinite(dt) || dt <= 0.0f || !finite(gravity) ||
+        !std::isfinite(dt) || dt <= 0.0f || !finite(gravity) || !finite(low) || !finite(high) ||
         compute.backendType() != ComputeBackendType::VulkanCompute ||
-        !compute.supportsDispatch() || buffers.fluid_particle_capacity < count ||
-        buffers.fluid_uploaded_particle_count != count ||
+        !compute.supportsDispatch() ||
         p.rest_mass_kg.size() != count || p.mass_fraction.size() != count ||
         p.pore_water_mass_kg.size() != count || p.affine.size() != count ||
         p.velocity.size() != count || p.constitutive_model.size() != count ||
-        p.particle_id.size() != count) {
-        error = "dry grain requires ready Vulkan canonical state, 1..100000 grains, <=4096 faces";
+        p.particle_id.size() != count || (coupling && coupling->size() != count)) {
+        error = "dry grain requires Vulkan compute, 1..100000 grains, <=4096 faces";
         return false;
     }
     std::vector<float> masses(count);
@@ -209,6 +225,30 @@ bool stepMatterGrainGpu(SimulationGridDomainState& state, const MatterGrainParam
         minimum_mass = std::min(minimum_mass, masses[i]);
         maximum_speed = std::max(maximum_speed, p.velocity[i].length());
     }
+    // Liquid coupling rows: {lump velocity, beta}, {buoyancy accel, lump mass},
+    // {drag impulse accumulator}. Zero rows are an exact no-op in the shader.
+    std::vector<float> coupling_rows(count * 12, 0.0f);
+    if (coupling) {
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto& in = (*coupling)[i];
+            if (!finite(in.lump_velocity) || !finite(in.buoyancy_acceleration) ||
+                !std::isfinite(in.drag_coefficient) || in.drag_coefficient < 0.0f ||
+                !std::isfinite(in.lump_mass_kg) || in.lump_mass_kg < 0.0f) {
+                error = "grain liquid coupling input is not finite";
+                return false;
+            }
+            float* row = &coupling_rows[12 * i];
+            row[0] = in.lump_velocity.x;
+            row[1] = in.lump_velocity.y;
+            row[2] = in.lump_velocity.z;
+            row[3] = in.lump_mass_kg > 0.0f ? in.drag_coefficient : 0.0f;
+            row[4] = in.buoyancy_acceleration.x;
+            row[5] = in.buoyancy_acceleration.y;
+            row[6] = in.buoyancy_acceleration.z;
+            row[7] = in.lump_mass_kg;
+            maximum_speed = std::max(maximum_speed, in.lump_velocity.length());
+        }
+    }
     // Substep size. Every grain owns at most kMatterGrainContactBudget contact
     // springs (grain, wall and mesh patch); exceeding it refuses publication,
     // so the bounds below hold for any state that is published.
@@ -219,7 +259,9 @@ bool stepMatterGrainGpu(SimulationGridDomainState& state, const MatterGrainParam
     //             t_c = pi * sqrt(m_pair / k), m_pair = m/2.
     //  damping:   aggregate explicit damping rate Z*(2cn + 7cs)/m below 0.5
     //             per substep (7 = tangential 1/m + r^2/I for both grains).
-    //  travel:    no grain moves more than 10% of its radius per substep.
+    //  travel:    no grain moves more than 10% of its radius per substep
+    //             (the liquid lump speed counts: drag can carry a grain there).
+    // Liquid drag is integrated implicitly and adds no bound.
     // The tangential spring acts through 1/m + r^2/I = 3.5/m, hence 3.5 kt.
     // The rolling spring 2.25 mu_r^2 k R^2 on I = 0.4 m r^2 is stiffest
     // against a wall (R = r): 5.625 mu_r^2 k / m, hence 2.81 mu_r^2 k.
@@ -249,7 +291,7 @@ bool stepMatterGrainGpu(SimulationGridDomainState& state, const MatterGrainParam
             " CFL exceeds max_substeps; reduce dt or stiffness";
         return false;
     }
-    // Even: the ping-pong must end in the canonical (bank 0) buffers.
+    // Even: the ping-pong must end in the bank 0 buffers.
     auto substeps = static_cast<uint32_t>(std::max(2.0, requested));
     substeps += substeps & 1u;
     if (substeps > static_cast<uint32_t>(params.max_substeps)) {
@@ -257,53 +299,61 @@ bool stepMatterGrainGpu(SimulationGridDomainState& state, const MatterGrainParam
         return false;
     }
 
-    auto& runtime_owner = buffers.matter_runtime;
-    const auto* previous = runtime_owner ? &runtime_owner->grain : nullptr;
-    const bool grow_particles = !previous || !particleBuffersValid(*previous) ||
-        previous->capacity < count;
-    const bool grow_collider = !previous || !colliderBuffersValid(*previous) ||
-        previous->triangle_capacity < std::max(triangles.size(), std::size_t{1});
+    const bool grow_particles = !particleBuffersValid(runtime) || runtime.capacity < count;
+    const bool grow_collider = !colliderBuffersValid(runtime) ||
+        runtime.triangle_capacity < std::max(triangles.size(), std::size_t{1});
     const std::size_t capacity = grow_particles
-        ? grownCapacity(previous ? previous->capacity : 0, count) : previous->capacity;
+        ? grownCapacity(runtime.capacity, count) : runtime.capacity;
     const std::size_t triangle_capacity = grow_collider
-        ? std::max(triangles.size(), std::size_t{1}) : previous->triangle_capacity;
+        ? std::max(triangles.size(), std::size_t{1}) : runtime.triangle_capacity;
     std::size_t working = particleBytes(capacity) + colliderBytes(triangle_capacity);
-    if (previous && (grow_particles || grow_collider)) {
+    if (grow_particles || grow_collider) {
         // Existing scratch remains allocated during transactional replacement.
-        working += (grow_particles ? particleBytes(previous->capacity) : 0) +
-            (grow_collider ? colliderBytes(previous->triangle_capacity) : 0);
+        working += (grow_particles && runtime.capacity ? particleBytes(runtime.capacity) : 0) +
+            (grow_collider && runtime.triangle_capacity
+                ? colliderBytes(runtime.triangle_capacity) : 0);
     }
     const auto largest_buffer = std::max({capacity * kHistoryBytesPerGrain,
         std::size_t{kMatterGrainBucketTables} * bucketsFor(capacity) *
             kMatterGrainBucketCapacity * sizeof(uint32_t),
         triangle_capacity * 2 * sizeof(MatterGrainBvhNode),
         triangle_capacity * 3 * sizeof(Vec3)});
-    if ((budget_bytes && working > budget_bytes) || state.voxel_size <= 0.0f ||
+    if ((budget_bytes && working > budget_bytes) ||
         (compute.caps().max_storage_buffer_bytes &&
          largest_buffer > compute.caps().max_storage_buffer_bytes)) {
-        error = "grain buffers exceed device limits";
+        error = "grain buffers exceed the domain resource budget or device limits (" +
+            std::to_string(working / (1024 * 1024)) + " MB requested)";
         return false;
     }
     const auto fingerprint = matterGrainColliderFingerprint(triangles);
-    const bool refresh_collider = grow_collider || !previous->collider_uploaded ||
-        previous->collider_fingerprint != fingerprint;
+    const bool refresh_collider = grow_collider || !runtime.collider_uploaded ||
+        runtime.collider_fingerprint != fingerprint;
     MatterGrainColliderBvh collider;
     if (refresh_collider && !buildMatterGrainColliderBvh(triangles, collider, error)) {
         return false;
     }
-    if (!runtime_owner) {
-        runtime_owner = std::make_shared<MatterGpuRuntime>();
-    }
-    auto& runtime = runtime_owner->grain;
     if ((grow_particles && !ensureParticles(compute, runtime, capacity, error)) ||
         (grow_collider && !ensureCollider(compute, runtime, triangle_capacity, error))) {
         return false;
     }
     std::array<uint32_t, kDiagnosticWords> diagnostics{};
-    if (!compute.uploadBuffer(runtime.diagnostics, diagnostics.data(), sizeof(diagnostics)) ||
-        !compute.uploadBuffer(runtime.mass, masses.data(), masses.size() * sizeof(float)) ||
-        !compute.uploadBuffer(runtime.ids, ids.data(), ids.size() * sizeof(uint32_t))) {
-        error = "grain mass/identity/diagnostic upload failed";
+    compute.beginTransferBatch();
+    bool uploaded = compute.uploadBuffer(runtime.diagnostics, diagnostics.data(), sizeof(diagnostics));
+    uploaded = compute.uploadBuffer(runtime.mass, masses.data(), masses.size() * sizeof(float)) &&
+        uploaded;
+    uploaded = compute.uploadBuffer(runtime.ids, ids.data(), ids.size() * sizeof(uint32_t)) &&
+        uploaded;
+    uploaded = compute.uploadBuffer(runtime.positions, p.position.data(), count * sizeof(Vec3)) &&
+        uploaded;
+    uploaded = compute.uploadBuffer(runtime.velocities, p.velocity.data(), count * sizeof(Vec3)) &&
+        uploaded;
+    uploaded = compute.uploadBuffer(runtime.affines, p.affine.data(), count * sizeof(AffineC)) &&
+        uploaded;
+    uploaded = compute.uploadBuffer(runtime.coupling, coupling_rows.data(),
+        coupling_rows.size() * sizeof(float)) && uploaded;
+    uploaded = compute.endTransferBatch() && uploaded;
+    if (!uploaded) {
+        error = "grain state/mass/identity/coupling upload failed";
         return false;
     }
     if (refresh_collider) {
@@ -336,8 +386,6 @@ bool stepMatterGrainGpu(SimulationGridDomainState& state, const MatterGrainParam
     std::memcpy(&constants.twisting_friction_bits, &params.twisting_friction, sizeof(float));
     const float tangential_stiffness = static_cast<float>(kt);
     std::memcpy(&constants.tangential_stiffness_bits, &tangential_stiffness, sizeof(float));
-    Vec3 low, high;
-    state.grid.getWorldBounds(low, high);
     for (int axis = 0; axis < 3; ++axis) {
         constants.low[axis] = axis == 0 ? low.x : axis == 1 ? low.y : low.z;
         constants.high[axis] = axis == 0 ? high.x : axis == 1 ? high.y : high.z;
@@ -357,16 +405,16 @@ bool stepMatterGrainGpu(SimulationGridDomainState& state, const MatterGrainParam
     const bool history_reset = runtime.history_fresh;
     // Until this frame publishes, the device history may not match the host.
     runtime.history_fresh = true;
-    const ComputeBufferHandle handles[] = {buffers.fluid_positions, buffers.fluid_velocities,
-        buffers.fluid_affine, runtime.mass, runtime.ids, runtime.bucket_counts, runtime.bucket_slots,
+    const ComputeBufferHandle handles[] = {runtime.positions, runtime.velocities,
+        runtime.affines, runtime.mass, runtime.ids, runtime.bucket_counts, runtime.bucket_slots,
         runtime.scratch, runtime.history, runtime.history_owner, runtime.diagnostics,
-        runtime.triangles, runtime.collider_nodes, runtime.collider_patches};
-    static_assert(sizeof(handles) / sizeof(handles[0]) == 14);
+        runtime.triangles, runtime.collider_nodes, runtime.collider_patches, runtime.coupling};
+    static_assert(sizeof(handles) / sizeof(handles[0]) == 15);
     if (!dispatchMatterGrainStages(substeps, [&](const char* kernel, uint32_t substep) {
             ComputeDispatch command;
             command.kernel = kernel;
             command.buffers = handles;
-            command.buffer_count = 14;
+            command.buffer_count = 15;
             constants.substep = substep;
             command.constants = &constants;
             command.constants_size = sizeof(constants);
@@ -381,7 +429,6 @@ bool stepMatterGrainGpu(SimulationGridDomainState& state, const MatterGrainParam
             }
             command.groups.groups_x = (threads + 255u) / 256u;
             if (!compute.dispatch(command)) {
-                buffers.fluid_uploaded_particle_count = 0;
                 error = std::string("grain stage failed: ") + kernel;
                 return false;
             }
@@ -391,20 +438,23 @@ bool stepMatterGrainGpu(SimulationGridDomainState& state, const MatterGrainParam
     }
     auto result = p;
     compute.beginTransferBatch();
-    bool ok = compute.downloadBuffer(buffers.fluid_positions, result.position.data(),
+    bool ok = compute.downloadBuffer(runtime.positions, result.position.data(),
         count * sizeof(Vec3));
-    ok = compute.downloadBuffer(buffers.fluid_velocities, result.velocity.data(),
+    ok = compute.downloadBuffer(runtime.velocities, result.velocity.data(),
         count * sizeof(Vec3)) && ok;
-    ok = compute.downloadBuffer(buffers.fluid_affine, result.affine.data(),
+    ok = compute.downloadBuffer(runtime.affines, result.affine.data(),
         count * sizeof(AffineC)) && ok;
     ok = compute.downloadBuffer(runtime.diagnostics, diagnostics.data(), sizeof(diagnostics)) && ok;
+    if (coupling && drag_out) {
+        ok = compute.downloadBuffer(runtime.coupling, coupling_rows.data(),
+            coupling_rows.size() * sizeof(float)) && ok;
+    }
     ok = compute.endTransferBatch() && ok;
     for (std::size_t i = 0; i < count && ok; ++i) {
         ok = finite(result.position[i]) && finite(result.velocity[i]) &&
             finite(result.affine[i].col0) && finite(result.affine[i].col1) &&
             finite(result.affine[i].col2);
     }
-    buffers.fluid_uploaded_particle_count = 0;
     if (ok && diagnostics[1] != kMatterGrainShaderRevision) {
         error = "grain step shader revision mismatch; rebuild simulation shaders";
         return false;
@@ -419,12 +469,20 @@ bool stepMatterGrainGpu(SimulationGridDomainState& state, const MatterGrainParam
             "grain publication rejected nonfinite/readback state";
         return false;
     }
+    if (coupling && drag_out) {
+        drag_out->assign(count, {});
+        for (std::size_t i = 0; i < count; ++i) {
+            const float* row = &coupling_rows[12 * i + 8];
+            (*drag_out)[i].drag_impulse = Vec3(row[0], row[1], row[2]);
+            if (!finite((*drag_out)[i].drag_impulse)) {
+                error = "grain liquid drag impulse is not finite";
+                return false;
+            }
+        }
+    }
     result.advanceMaterialCoordinates();
     p = std::move(result);
     runtime.history_fresh = false;
-    auto& stats = state.fluid_stats;
-    auto& report = stats.grain_report;
-    report = {};
     report.substeps = static_cast<int>(substeps);
     report.dispatches = static_cast<int>(substeps + 2);
     report.substep_dt = dt / substeps;
@@ -433,15 +491,8 @@ bool stepMatterGrainGpu(SimulationGridDomainState& state, const MatterGrainParam
     report.sticking_contacts = diagnostics[3];
     report.contacts = diagnostics[4];
     report.history_reset = history_reset;
-    stats.mixed_model_step = true;
-    stats.mixed_step_held = false;
-    stats.mixed_common_substeps = static_cast<int>(substeps);
-    stats.mixed_contact_pairs = diagnostics[4];
-    stats.mixed_working_set_bytes = working;
-    stats.pressure_on_gpu = false;
-    stats.g2p_on_gpu = false;
-    stats.p2g_on_gpu = false;
-    stats.gpu_status = "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin";
+    report.grains = count;
+    report.working_set_bytes = working;
     return true;
 }
 

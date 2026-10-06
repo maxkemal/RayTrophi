@@ -250,7 +250,10 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             // looked like a one-shot SeedBox event.
             const uint32_t emission_serial_base =
                 static_cast<uint32_t>(source.fluid_emit_sample_serial);
-            const bool grain_birth = fluid_domain.fluid_params.grain.enabled;
+            // Only granular carriers become grains; a liquid source in the same
+            // grain-enabled domain keeps the voxel/PPC parcel birth.
+            const bool grain_birth = fluid_domain.fluid_params.grain.enabled &&
+                emit_model == RayTrophiSim::Fluid::MatterConstitutiveModel::Granular;
             // A physical grain is born with its own sphere mass (bulk density /
             // packing fraction), not the voxel/particles-per-cell parcel mass,
             // so grain size and grid resolution stay independent.

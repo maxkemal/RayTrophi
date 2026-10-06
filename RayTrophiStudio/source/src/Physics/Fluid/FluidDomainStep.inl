@@ -120,8 +120,9 @@
                 auto& gpu_buffers = grid_domain_compute_buffers_[i];
                 if (ensureGridDomainComputeBuffers(*context.compute, gpu_buffers, state.grid)) {
                     if (fluid_params.grain.enabled) {
-                        gpu_integrated_forces = ensureGpuFluidParticleBuffers(
-                            state, context.compute, gpu_buffers);
+                        // The grain coordinator owns its forces: gravity inside
+                        // the DEM substeps, and the liquid owner's forces on the
+                        // liquid subset only (runMatterGrainStep).
                     } else if (!force_fields_require_cpu) {
                         // Gravity, container motion and shared body-force fields
                         // are evaluated in one GPU particle pass.
@@ -616,8 +617,13 @@
                     std::string mixed_error;
                     bool ok = false;
                     if (step_params.grain.enabled && i < grid_domain_compute_buffers_.size()) {
-                        ok = runMatterGrainStep(state, step_params, granular_frame_dt,
-                            context.compute, grid_domain_compute_buffers_[i], colliders_,
+                        ok = runMatterGrainStep(state, step_params, mixed_legacy_granular,
+                            granular_frame_dt, context.time_seconds, context.compute,
+                            grid_domain_compute_buffers_[i],
+                            [&](SimulationGridDomainComputeBuffers& buffers) {
+                                return context.compute && ensureGridDomainComputeBuffers(
+                                    *context.compute, buffers, state.grid);
+                            }, matter_exchange_ledger_, colliders_,
                             grain_collider_mesh_resolver_, has_kinematic_solids || motion_mag > 1e-7f ||
                                 (context.force_snapshot && !context.force_snapshot->empty()) ||
                                 std::any_of(collider_velocities_.begin(), collider_velocities_.end(),
