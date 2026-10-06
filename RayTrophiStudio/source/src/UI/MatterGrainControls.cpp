@@ -28,6 +28,14 @@ void drawMatterGrainControls(const SimulationGridDomainDesc& domain) {
     changed |= ImGui::SliderFloat("Packing fraction", &p.packing_fraction, .3f, .74f, "%.2f");
     changed |= ImGui::DragInt("Substeps per collision", &p.contact_resolution, 1.0f, 8, 200);
     changed |= ImGui::DragInt("Contact substep limit", &p.max_substeps, 1.0f, 1, 4096);
+    int solver = p.solver_kind == "xpbd" ? 1 : 0;
+    if (ImGui::Combo("Solver (comparison)", &solver, "DEM (force, history)\0XPBD (positional)\0")) {
+        p.solver_kind = solver == 1 ? "xpbd" : "dem";
+        changed = true;
+    }
+    if (solver == 1) {
+        changed |= ImGui::DragInt("XPBD substeps per frame", &p.xpbd_substeps, 1.0f, 4, 512);
+    }
     changed |= ImGui::Checkbox("Liquid drag + buoyancy coupling", &p.fluid_coupling);
     changed |= ImGui::DragFloat("Liquid viscosity for drag (Pa s)", &p.drag_viscosity_pa_s,
         1e-4f, 1e-6f, 1e3f, "%.5f", ImGuiSliderFlags_Logarithmic);

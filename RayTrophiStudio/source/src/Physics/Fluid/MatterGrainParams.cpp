@@ -30,6 +30,8 @@ nlohmann::json matterGrainParamsToJson(const MatterGrainParams& p) {
         {"contact_angle_deg", p.contact_angle_deg},
         {"represented_grain_radius_m", p.represented_grain_radius_m},
         {"birth_saturation", p.birth_saturation},
+        {"solver_kind", p.solver_kind},
+        {"xpbd_substeps", p.xpbd_substeps},
         {"max_substeps", p.max_substeps}};
 }
 
@@ -46,7 +48,16 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
             error = "unknown grain setting: " + it.key();
             return false;
         }
-        const bool integer = it.key() == "max_substeps" || it.key() == "contact_resolution";
+        const bool integer = it.key() == "max_substeps" || it.key() == "contact_resolution" ||
+            it.key() == "xpbd_substeps";
+        if (it.key() == "solver_kind") {
+            if (!it.value().is_string() ||
+                (it.value() != "dem" && it.value() != "xpbd")) {
+                error = "grain solver_kind must be \"dem\" or \"xpbd\"";
+                return false;
+            }
+            continue;
+        }
         const bool boolean = it.key() == "enabled" || it.key() == "fluid_coupling" ||
             it.key() == "volume_exclusion" || it.key() == "wet_grains";
         if ((boolean && !it.value().is_boolean()) ||
@@ -82,6 +93,12 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
         candidate.represented_grain_radius_m =
             patch.value("represented_grain_radius_m", p.represented_grain_radius_m);
         candidate.birth_saturation = patch.value("birth_saturation", p.birth_saturation);
+        candidate.solver_kind = patch.value("solver_kind", p.solver_kind);
+        const auto xpbd = patch.value("xpbd_substeps", double(p.xpbd_substeps));
+        if (xpbd < 4 || xpbd > 512) {
+            throw std::runtime_error("xpbd_substeps must be 4..512");
+        }
+        candidate.xpbd_substeps = static_cast<int>(xpbd);
         const auto steps = patch.value("max_substeps", double(p.max_substeps));
         if (steps < 1 || steps > 4096) {
             throw std::runtime_error("max_substeps must be 1..4096");
