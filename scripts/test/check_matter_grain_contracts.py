@@ -211,6 +211,24 @@ def main():
     assert 'if (!xpbd && g_contacts > SLOTS) atomicOr(diagnostics[0],1u);' in shader
     assert 'constants.wet[3] = xpbd ? 1.0f : 0.0f;' in gpu
     assert '"solver_kind"' in params_src and 'p.solver_kind' in ui and '--xpbd-compare' in runtime_test
+    # Domain panel (2026-09-27 six-tab decision): grain material in Matter,
+    # solver + coupling + readiness in Solvers, report in Measure; the legacy
+    # MPM granular block is not offered while grains own the granular phase;
+    # every blocker is a lock with its reason, from the core rule.
+    panel = read('src/UI/scene_ui_simulation_domains.cpp')
+    tab = lambda name: panel.index(f'BeginTabItem("{name}")')
+    assert tab('Matter') < panel.index('drawMatterGrainMaterial(domain)') < tab('Environment')
+    assert tab('Solvers') < panel.index('drawMatterGrainSolver(domain') < tab('Output')
+    assert tab('Measure') < panel.index('drawMatterGrainReport(domain')
+    assert 'drawMatterGrainControls' not in panel
+    assert 'if (fp.grain.enabled) {\n                        ImGui::TextDisabled("Legacy MPM granular' in panel
+    for reason in ('Grains need the Vulkan backend.', 'Grains need a Closed boundary.',
+                   'Solid phase cannot run with grains yet.'):
+        assert reason in panel, reason
+    assert 'const bool reseed_locked = fp.granular_enabled || fp.grain.enabled;' in panel
+    assert 'matterGrainBlockers(domain)' in ui and 'ImGui::DragFloat' not in ui and 'ImGui::SliderFloat' not in ui
+    assert 'grain_locked' in read('src/UI/scene_ui_fluid_thermal.cpp')
+    assert 'desc.fluid_params.grain.enabled' in read('src/UI/ParticleBillboardBuilder.cpp')
     print('PASS dry grain source: fused ping-pong ABI/order, bucket rotation, contact budget, history, grain mass, pile, per-carrier owner + liquid coupling, UI/API/save wiring')
 
 

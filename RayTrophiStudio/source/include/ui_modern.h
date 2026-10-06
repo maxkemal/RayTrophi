@@ -154,6 +154,11 @@ namespace UIWidgets {
         const ImVec4& titleColor,
         bool defaultOpen = true);
 
+    // Closes every CollapsingHeader drawn after this call in the current frame
+    // ("collapse all" for a tab). A one-frame action, not stored state: the
+    // headers' open flags stay in ImGui's own ini as usual.
+    void RequestCollapseAll();
+
     // CollapsingHeader wrapper (Flat monochrome / tema kontrollü)
     bool CollapsingHeader(const char* label,
         ImGuiTreeNodeFlags flags = 0,

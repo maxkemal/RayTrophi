@@ -230,7 +230,13 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& particles,
 // rings whose surface lies between 20% and 80% of the peak (cap and toe
 // excluded). Wall-confined or multi-pile layouts are not a repose measurement.
 nlohmann::json matterGrainPileProfile(const std::vector<Vec3>& centres, float radius);
-void drawMatterGrainControls(const SimulationGridDomainDesc& domain);
+// Domain panel: grain material (Matter tab), solver and coupling (Solvers
+// tab, with the readiness line) and the last step's report (Measure tab).
+void drawMatterGrainMaterial(const SimulationGridDomainDesc& domain);
+void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
+                           const SimulationGridDomainState* state);
+void drawMatterGrainReport(const SimulationGridDomainDesc& domain,
+                           const SimulationGridDomainState* state);
 
 void releaseMatterGrainGpu(SimulationComputeContext& compute, MatterGrainGpuRuntime& runtime);
 

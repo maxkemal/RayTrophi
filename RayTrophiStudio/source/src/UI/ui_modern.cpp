@@ -485,7 +485,16 @@ bool BeginColoredSection(const char* title, const ImVec4& titleColor, bool defau
     );
 }
 
+static int s_collapse_all_frame = -1;
+
+void RequestCollapseAll() {
+    s_collapse_all_frame = ImGui::GetFrameCount();
+}
+
 bool CollapsingHeader(const char* label, ImGuiTreeNodeFlags flags, const ImVec4& accentColor) {
+    if (s_collapse_all_frame == ImGui::GetFrameCount()) {
+        ImGui::SetNextItemOpen(false);
+    }
     const auto& theme = ThemeManager::instance().current();
     return SectionStyleManager::instance().beginCollapsingHeader(
         label, flags, accentColor,

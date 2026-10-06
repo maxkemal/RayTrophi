@@ -1,17 +1,21 @@
 #include "Fluid/MatterPoreAuthoring.h"
 #include "../Api/RtMatterModels.h"
+#include "ui_modern.h"
 #include "imgui.h"
+#include "DomainPanelWidgets.h"
 
 #include <exception>
+#include <map>
 
 namespace RayTrophiSim::Fluid {
 
 void drawMatterPoreControls(const std::string& domain_name) {
-    if (!ImGui::CollapsingHeader("Pore Water")) {
+    if (!UIWidgets::CollapsingHeader("Pore Water")) {
         return;
     }
     ImGui::PushID(domain_name.c_str());
-    static std::string error;
+    static std::map<std::string, std::string> errors;
+    auto& error = errors[domain_name];
     try {
         const auto state = rtapi::getMatterModels(domain_name, false).at("pore_exchange");
         const auto settings = state.at("settings");
@@ -20,37 +24,66 @@ void drawMatterPoreControls(const std::string& domain_name) {
         if (ImGui::Checkbox("Enable water absorption / drainage", &enabled)) {
             patch["enabled"] = enabled;
         }
+        DomainUi::tooltip("MPM granular carriers absorb water from liquid parcels into their pores\n"
+            "and drain it back; water is held once (pore_water_mass_kg).\n"
+            "Needs Closed Vulkan Matter; not with the grain solver.\n"
+            "Script: fluid.set_pore_exchange(enabled=...)");
         auto slider = [&](const char* label, const char* key, float low, float high,
-                          const char* format) {
+                          const char* format, const char* tip) {
             float value = settings.at(key).get<float>();
-            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::SetNextItemWidth(DomainUi::itemWidth());
             if (ImGui::SliderFloat(label, &value, low, high, format,
                                   ImGuiSliderFlags_Logarithmic)) {
                 patch[key] = value;
             }
+            DomainUi::tooltip(tip);
         };
-        slider("Porosity", "porosity", 0.01f, 0.8f, "%.3f");
-        slider("Permeability (m2)", "permeability_m2", 0.0f, 1e-6f, "%.3e");
-        slider("Water viscosity (Pa.s)", "viscosity_pa_s", 1e-5f, 10.0f, "%.4g");
-        slider("Gravity drive (m/s2)", "gravity_m_s2", 0.0f, 100.0f, "%.3f");
-        slider("Drainage scale", "drainage_scale", 0.0f, 100.0f, "%.3f");
+        slider("Porosity", "porosity", 0.01f, 0.8f, "%.3f",
+            "Pore volume fraction of a granular carrier (0.01..0.8; sand ~0.35-0.4).\n"
+            "Sets how much water a carrier can hold.\nScript: fluid.set_pore_exchange(porosity=...)");
+        slider("Permeability (m2)", "permeability_m2", 0.0f, 1e-6f, "%.3e",
+            "Intrinsic permeability (Darcy), m^2: sand ~1e-11..1e-10.\n"
+            "Higher drains faster.\nScript: fluid.set_pore_exchange(permeability_m2=...)");
+        slider("Water viscosity (Pa.s)", "viscosity_pa_s", 1e-5f, 10.0f, "%.4g",
+            "Dynamic viscosity of the pore water (water 1e-3 Pa s) in the Darcy flux.\n"
+            "Script: fluid.set_pore_exchange(viscosity_pa_s=...)");
+        slider("Gravity drive (m/s2)", "gravity_m_s2", 0.0f, 100.0f, "%.3f",
+            "Gravity that drives drainage through the pores (9.81 m/s^2).\n"
+            "Script: fluid.set_pore_exchange(gravity_m_s2=...)");
+        slider("Drainage scale", "drainage_scale", 0.0f, 100.0f, "%.3f",
+            "Multiplier on the Darcy drainage rate (1 = physical; 0 holds water).\n"
+            "Script: fluid.set_pore_exchange(drainage_scale=...)");
         ImGui::Separator();
         bool wet_physics = settings.at("wet_response_enabled").get<bool>();
         if (ImGui::Checkbox("Saturation affects granular strength", &wet_physics)) {
             patch["wet_response_enabled"] = wet_physics;
         }
+        DomainUi::tooltip("Saturation changes the MPM friction, dilatancy and capillary cohesion\n"
+            "(multipliers below). Physics, not look.\n"
+            "Script: fluid.set_pore_exchange(wet_response_enabled=...)");
         bool wet_appearance = settings.at("wet_appearance_enabled").get<bool>();
         if (ImGui::Checkbox("Saturation darkens Principled granular splats", &wet_appearance)) {
             patch["wet_appearance_enabled"] = wet_appearance;
         }
-        slider("Saturated friction multiplier", "wet_friction_scale", 0.0f, 1.0f, "%.3f");
-        slider("Saturated dilatancy multiplier", "wet_dilatancy_scale", 0.0f, 1.0f, "%.3f");
-        slider("Peak capillary cohesion (Pa)", "capillary_cohesion_pa", 0.0f, 100000.0f, "%.2f");
-        slider("Local pore pressure multiplier", "pore_pressure_scale", 0.0f, 10.0f, "%.3f");
-        slider("Saturated color multiplier", "wet_color_scale", 0.05f, 1.0f, "%.3f");
-        slider("Saturated roughness multiplier", "wet_roughness_scale", 0.05f, 1.0f, "%.3f");
+        DomainUi::tooltip("Look only: wet carriers render darker and smoother (eight bands).\n"
+            "Physics and saturation are unchanged.\n"
+            "Script: fluid.set_pore_exchange(wet_appearance_enabled=...)");
+        slider("Saturated friction multiplier", "wet_friction_scale", 0.0f, 1.0f, "%.3f",
+            "Friction multiplier at full saturation (0..1).\nScript: fluid.set_pore_exchange(wet_friction_scale=...)");
+        slider("Saturated dilatancy multiplier", "wet_dilatancy_scale", 0.0f, 1.0f, "%.3f",
+            "Dilatancy multiplier at full saturation (0..1).\nScript: fluid.set_pore_exchange(wet_dilatancy_scale=...)");
+        slider("Peak capillary cohesion (Pa)", "capillary_cohesion_pa", 0.0f, 100000.0f, "%.2f",
+            "Peak capillary cohesion at intermediate saturation, Pa (damp sand ~1e3).\nScript: fluid.set_pore_exchange(capillary_cohesion_pa=...)");
+        slider("Local pore pressure multiplier", "pore_pressure_scale", 0.0f, 10.0f, "%.3f",
+            "Multiplier on the empirical cell-height pore pressure head (0..10).\nScript: fluid.set_pore_exchange(pore_pressure_scale=...)");
+        slider("Saturated color multiplier", "wet_color_scale", 0.05f, 1.0f, "%.3f",
+            "Look: base color multiplier at full wetness (0.05..1).\nScript: fluid.set_pore_exchange(wet_color_scale=...)");
+        slider("Saturated roughness multiplier", "wet_roughness_scale", 0.05f, 1.0f, "%.3f",
+            "Look: roughness multiplier at full wetness (0.05..1).\nScript: fluid.set_pore_exchange(wet_roughness_scale=...)");
         slider("Full wet look at pore saturation", "wet_appearance_full_saturation",
-            0.001f, 1.0f, "%.3f");
+            0.001f, 1.0f, "%.3f",
+            "Look: pore saturation at which the wet look is complete (0.001..1).\n"
+            "Script: fluid.set_pore_exchange(wet_appearance_full_saturation=...)");
         ImGui::TextWrapped("Full wet look at %.1f%% pore filling. Lower values make "
             "early wetting more visible; physical saturation and strength stay unchanged.",
             settings.at("wet_appearance_full_saturation").get<float>() * 100.0f);
