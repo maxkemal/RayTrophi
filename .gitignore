@@ -106,3 +106,4 @@ RayTrophiAgent/agent_scripts/
 
 # Measurement output from measure_horizon.py
 RayTrophiAgent/horizon_result.json
+docs/dev/grain_suite/
