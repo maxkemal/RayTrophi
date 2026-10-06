@@ -48,12 +48,28 @@ struct MatterGrainParams {
     // solver's pressure gradient instead of hydrostatic buoyancy. Needs
     // fluid_coupling. Off = B3 behaviour (pile is drag-only to the liquid).
     bool volume_exclusion = true;
+    // B6 wet grains. Water a grain holds lives in the canonical
+    // pore_water_mass_kg sidecar (one owner, the ledger counts it once) and
+    // is absorbed from liquid parcels in the grain's cells, momentum-exact.
+    // Wet grains pull on each other through pendular liquid bridges.
+    bool wet_grains = false;
+    float water_capacity_fraction = 0.05f;  // of the sphere volume
+    float absorption_rate_per_s = 4.0f;     // of the free capacity, when submerged
+    float drying_rate_per_s = 0.0f;         // of the held water; leaves the domain
+    float surface_tension_n_m = 0.072f;
+    float contact_angle_deg = 20.0f;
+    // Real grain radius one simulated grain stands for (0 = radius_m). A
+    // coarse grain keeps the real Bond number: bridge force x (radius_m / it)^2.
+    float represented_grain_radius_m = 0.0f;
+    // Water a newly emitted grain already holds, as a fraction of capacity
+    // (an emitter of wet sand). Needs wet_grains.
+    float birth_saturation = 0.0f;
     int max_substeps = 512;
 };
 
 // Host CFL and GLSL history slots share this budget (sim_matter_grain.glsl).
 inline constexpr int kMatterGrainContactBudget = 24;
-inline constexpr uint32_t kMatterGrainShaderRevision = 7;
+inline constexpr uint32_t kMatterGrainShaderRevision = 8;
 // Neighbour hash: three rotating tables of fixed-capacity buckets.
 inline constexpr uint32_t kMatterGrainBucketCapacity = 16;
 inline constexpr uint32_t kMatterGrainBucketTables = 3;
@@ -68,6 +84,11 @@ bool validateMatterGrainDomain(const SimulationGridDomainDesc& domain,
 float matterGrainRestMassKg(const MatterGrainParams& params, uint32_t substance_tag,
                             FluidChemistryPreset chemistry_preset,
                             MatterConstitutiveModel model, bool legacy_granular);
+// Water one grain can hold, kg: water_capacity_fraction of its sphere volume.
+float matterGrainWaterCapacityKg(const MatterGrainParams& params);
+// Gives a just-emitted grain its birth water, capacity and water energy.
+void initMatterGrainBirthWater(FluidParticles& particles, std::size_t index,
+                               const MatterGrainParams& params);
 // Fills missing (<= 0) rest masses of granular carriers with the grain mass.
 std::size_t ensureMatterGrainRestMasses(FluidParticles& particles,
                                         const MatterGrainParams& params,
@@ -104,6 +125,15 @@ struct MatterGrainStepReport {
     std::size_t porous_cells = 0;
     float max_solid_fraction = 0.0f;
     Vec3 pressure_impulse;            // sum over grains, N*s
+    // B6 wet grains
+    bool wet_grains = false;
+    std::size_t wet_grain_count = 0;
+    uint32_t liquid_bridges = 0;      // active bridges, last substep
+    double grain_water_kg = 0.0;      // after this step
+    double absorbed_kg = 0.0;         // liquid -> grains this step
+    double evaporated_kg = 0.0;       // grains -> outside this step
+    double water_balance_error_kg = 0.0;  // (liquid + grain water) change - (-evaporated)
+    float max_grain_saturation = 0.0f;
 };
 
 // Per-grain liquid coupling, one frame. Inputs are frozen for the frame

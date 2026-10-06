@@ -34,6 +34,18 @@ void drawMatterGrainControls(const SimulationGridDomainDesc& domain) {
     ImGui::BeginDisabled(!p.fluid_coupling);
     changed |= ImGui::Checkbox("Liquid sees grain volume (pressure force)", &p.volume_exclusion);
     ImGui::EndDisabled();
+    changed |= ImGui::Checkbox("Wet grains (absorb water, liquid bridges)", &p.wet_grains);
+    ImGui::BeginDisabled(!p.wet_grains);
+    changed |= ImGui::SliderFloat("Water capacity (x grain volume)", &p.water_capacity_fraction,
+        0.0f, .5f, "%.3f");
+    changed |= ImGui::DragFloat("Absorption rate (1/s)", &p.absorption_rate_per_s, .1f, 0.0f, 1000.0f);
+    changed |= ImGui::DragFloat("Drying rate (1/s)", &p.drying_rate_per_s, .01f, 0.0f, 100.0f);
+    changed |= ImGui::SliderFloat("Surface tension (N/m)", &p.surface_tension_n_m, 0.0f, 1.0f, "%.4f");
+    changed |= ImGui::SliderFloat("Contact angle (deg)", &p.contact_angle_deg, 0.0f, 89.0f);
+    changed |= ImGui::DragFloat("Represented grain radius (m, 0 = same)",
+        &p.represented_grain_radius_m, 1e-5f, 0.0f, p.radius_m, "%.5f");
+    changed |= ImGui::SliderFloat("Birth saturation", &p.birth_saturation, 0.0f, 1.0f);
+    ImGui::EndDisabled();
     static std::string error;
     if (changed) {
         try {
@@ -52,8 +64,10 @@ void drawMatterGrainControls(const SimulationGridDomainDesc& domain) {
         "hydrostatic buoyancy, and a pile is drag-only to the liquid).");
     ImGui::TextWrapped("Each carrier is one physical sphere; its mass is the substance bulk "
         "density / packing fraction x sphere volume. Static friction stiffness 0.286 (2/7) "
-        "holds piles with a Cundall-Strack spring; 0 is kinetic-only sliding. Grains stay "
-        "dry: wetting/cohesion is pending.");
+        "holds piles with a Cundall-Strack spring; 0 is kinetic-only sliding. Wet grains hold "
+        "water from the liquid (or from birth) and pull on each other through pendular liquid "
+        "bridges; a coarse grain standing for small real grains keeps their Bond number via "
+        "the represented radius.");
     if (!error.empty()) {
         ImGui::TextWrapped("%s", error.c_str());
     }

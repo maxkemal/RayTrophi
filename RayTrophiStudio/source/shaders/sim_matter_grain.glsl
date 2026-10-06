@@ -29,7 +29,8 @@ layout(std430, binding = 12) readonly buffer ColliderNodes { ColliderNode nodes[
 layout(std430, binding = 13) readonly buffer SurfacePatches { uint patches[]; };
 // Liquid coupling, three vec4 per grain, touched only by the grain's own
 // invocation: {lump velocity, drag coefficient beta}, {buoyancy acceleration,
-// lump mass}, {accumulated drag impulse, -}. beta == 0: uncoupled.
+// lump mass}, {accumulated drag impulse, bridge water volume m^3}.
+// beta == 0: uncoupled; water 0: dry (no liquid bridge).
 layout(std430, binding = 14) buffer Coupling { vec4 coupling[]; };
 layout(push_constant) uniform Constants {
     uvec4 meta; // count, buckets per table, twisting-friction float bits, BVH nodes
@@ -38,6 +39,9 @@ layout(push_constant) uniform Constants {
     vec4 step_contact; // dt, normal damping, sliding damping, friction
     vec4 rolling; // rolling coefficient, gravity xyz
     uvec4 substep; // index, reset history, tangential stiffness bits, last index
+    // Wet grains: hash cell size (2r dry, 2r + rupture cap wet), capillary
+    // prefactor 2 pi gamma cos(theta) x cohesion scale, rupture cap (m), -.
+    vec4 wet;
 } pc;
 
 // Contact budget shared with the host CFL (kMatterGrainContactBudget). Every
@@ -49,7 +53,7 @@ const uint BUCKET = 16u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 7u;
+const uint REVISION = 8u;
 
 uint readBank() { return pc.substep.x & 1u; }
 uint writeBank() { return readBank() ^ 1u; }
@@ -92,7 +96,7 @@ void store(uint i, uint bank, vec3 x, vec3 v, vec3 w) {
 }
 
 ivec3 cell(vec3 p) {
-    return ivec3(floor((p-pc.low_radius.xyz)/(2.0*pc.low_radius.w)));
+    return ivec3(floor((p-pc.low_radius.xyz)/pc.wet.x));
 }
 uint bucket(ivec3 c) {
     uvec3 u = uvec3(c);
@@ -165,6 +169,22 @@ vec3 carry(vec3 previous, vec3 n) {
     vec3 projected = previous-dot(previous,n)*n;
     float after = length(projected);
     return after > 1e-12 ? projected*(length(previous)/after) : vec3(0.0);
+}
+
+// Pendular liquid bridge between two wet grains, Willett et al. (2000) for
+// equal spheres: F = 2 pi R gamma cos(theta) / (1 + 2.1 s + 10 s^2),
+// s = S sqrt(R / V), rupture at S = V^(1/3) (capped by the hash skin).
+// Each grain shares its water among ~6 bridges (random packing coordination).
+// Central force only, equal and opposite by symmetry of the pair.
+uint g_bridges = 0u;
+void bridge(uint i, uint j, float d, vec3 n, float r, inout vec3 force) {
+    float volume = (coupling[3u*i+2u].w+coupling[3u*j+2u].w)/12.0;
+    if (volume <= 0.0 || pc.wet.y <= 0.0) return;
+    float gap = max(d-2.0*r,0.0);
+    if (gap >= min(pow(volume,1.0/3.0),pc.wet.z)) return;
+    float s = gap*sqrt(r/volume);
+    force -= n*(pc.wet.y*r/(1.0+2.1*s+10.0*s*s));
+    ++g_bridges;
 }
 
 void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
@@ -269,6 +289,7 @@ void main() {
             if (j != i && all(equal(cell(pj),wanted))) {
                 vec3 separation = p-pj;
                 float d = length(separation);
+                if (d < 2.0*r+pc.wet.z && d > 1e-9) bridge(i,j,d,separation/d,r,f);
                 if (d < 2.0*r) {
                     vec3 n = d > 1e-9 ? separation/d : vec3(i<j ? -1.0 : 1.0,0,0);
                     vec3 arm = -n*(.5*d);
@@ -374,6 +395,7 @@ void main() {
     if (pc.substep.x == pc.substep.w) {
         atomicAdd(diagnostics[3],g_sticking);
         atomicAdd(diagnostics[4],g_contacts);
+        atomicAdd(diagnostics[5],g_bridges);
     }
     // Symplectic Euler from the complete previous-substep state.
     float dt = pc.step_contact.x;

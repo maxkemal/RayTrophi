@@ -18,8 +18,8 @@ def main():
     header = read('include/Fluid/MatterGrain.h')
     assert sorted(map(int, re.findall(r'binding\s*=\s*(\d+)', shader))) == list(range(15))
     push = re.search(r'uniform Constants\s*\{(.*?)\}\s*pc;', shader, re.S).group(1)
-    assert len(re.findall(r'\b(?:uvec4|vec4)\s+\w+;', push)) == 6
-    assert 'static_assert(sizeof(Constants) == 96)' in gpu
+    assert len(re.findall(r'\b(?:uvec4|vec4)\s+\w+;', push)) == 7
+    assert 'static_assert(sizeof(Constants) == 112)' in gpu
     # Host CFL, history slots and the overflow gate share one contact budget.
     budget = int(re.search(r'kMatterGrainContactBudget = (\d+);', header).group(1))
     assert f'const uint SLOTS = {budget}u;' in shader and f'const float BUDGET = {budget}.0;' in shader
@@ -66,7 +66,7 @@ def main():
     assert 'affines[b+1]=w.z' in shader
     assert 'BUDGET*dt*inverse_pair_inertia' in shader
     assert 'twist_limit' in shader and 'twist_torque*n' in shader
-    assert 'pore_water_mass_kg[i] != 0.0f' in gpu
+    assert '(!params.wet_grains && water != 0.0f)' in gpu
     assert gpu.index('if (!ok || overflow)') < gpu.index('p = std::move(result)')
     geometry = read('src/Physics/Fluid/MatterGrainGeometry.cpp')
     assert 'TriangleMesh*' in geometry and 'get_attribute_data<Vec3>' in geometry
@@ -96,7 +96,7 @@ def main():
     registry = read('src/Device/SimulationComputeVulkan.cpp')
     for stage in ('clear', 'hash', 'step'):
         kernel = 'sim_matter_grain_' + stage
-        assert f'"{kernel}.spv", 15, 96' in registry
+        assert f'"{kernel}.spv", 15, 112' in registry
         assert kernel in read('shaders/compile_sim_shaders.bat')
         assert f'GRAIN_{stage.upper()}' in read(f'shaders/{kernel}.comp')
     for dead in ('contact', 'integrate', 'integrate_hash'):
@@ -161,6 +161,16 @@ def main():
     assert '~RestorePorosity()' in coordinator and 'restoreMatterGrainPorosity(grid, backup);' in coordinator
     assert '"volume_exclusion"' in params_src and 'p.volume_exclusion' in ui
     assert '--porous-only' in runtime_test
+    # B6: wet grains.
+    assert 'return ivec3(floor((p-pc.low_radius.xyz)/pc.wet.x));' in shader
+    assert 'void bridge(uint i, uint j, float d, vec3 n, float r, inout vec3 force)' in shader
+    assert 'if (d < 2.0*r+pc.wet.z && d > 1e-9) bridge(i,j,d,separation/d,r,f);' in shader
+    assert 'constants.wet[0] = 2.0f * params.radius_m + rupture_cap;' in gpu
+    assert 'coupling_rows[12 * i + 11] = p.pore_water_mass_kg[i] / 1000.0f;' in gpu
+    assert coordinator.index('applyMatterGrainLiquidReaction(') < coordinator.index('exchangeMatterGrainWater(')
+    assert coordinator.index('exchangeMatterGrainWater(') < coordinator.index('mergeMatterGrainOwners(state.particles')
+    assert 'initMatterGrainBirthWater(' in births and '"birth_saturation"' in params_src
+    assert 'p.wet_grains' in ui and '--wet-only' in runtime_test
     print('PASS dry grain source: fused ping-pong ABI/order, bucket rotation, contact budget, history, grain mass, pile, per-carrier owner + liquid coupling, UI/API/save wiring')
 
 

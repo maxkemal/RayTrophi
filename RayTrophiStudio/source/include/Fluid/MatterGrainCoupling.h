@@ -54,6 +54,7 @@ struct MatterGrainCouplingFrame {
     MatterGrainLiquidField field;
     std::vector<MatterGrainCouplingInput> inputs;   // one per grain
     std::vector<float> density;       // liquid density sampled per grain, kg/m^3
+    std::vector<float> submerged;     // submerged fraction per grain, 0..1
     // Per grain: the eight neighbour cells and their share of this grain's
     // liquid lump (sums to 1 over cells with liquid; empty when uncoupled).
     std::vector<int> cells;           // 8 per grain, -1 unused
@@ -111,11 +112,24 @@ void applyMatterGrainPressureForce(const std::vector<float>& pressure,
     const std::vector<float>& mask, const FluidParticles& grains, float grain_radius,
     float dt, MatterGrainCouplingFrame& frame, MatterGrainStepReport& report);
 
+// B6 wet grains, after the drag reaction (so the reaction's cell masses are
+// the ones it was computed with). Absorption moves water from the liquid
+// parcels of a grain's cells (the same shares as its lump) into the grain's
+// pore_water_mass_kg, at most half a cell's liquid per frame; the moved
+// water carries the liquid's cell velocity, so momentum is exact. Drying
+// removes held water from the domain (reported, not hidden). Capacity is
+// water_capacity_fraction of the sphere volume (pore_capacity_kg).
+void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
+    const MatterGrainCouplingFrame& frame, const MatterGrainParams& params, float dt,
+    MatterGrainStepReport& report);
+
 // Order of the grain-owned carriers: granular model, sorted by stable
 // identity. Liquid parcels keep their order. Fails on carriers that neither
-// owner accepts (elastic, frozen, wet) or on Auto in a legacy-granular domain.
+// owner accepts (elastic, frozen; wet grains unless wet_grains) or on Auto in
+// a legacy-granular domain.
 bool partitionMatterGrainOwners(const FluidParticles& particles, bool legacy_granular,
-    std::vector<std::size_t>& liquid, std::vector<std::size_t>& grains, std::string& error);
+    bool wet_grains, std::vector<std::size_t>& liquid, std::vector<std::size_t>& grains,
+    std::string& error);
 
 // Exact snapshot copies of `order` (identity, every sidecar).
 FluidParticles selectMatterParticles(const FluidParticles& particles,

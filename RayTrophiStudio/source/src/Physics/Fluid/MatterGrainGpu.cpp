@@ -171,7 +171,10 @@ bool ensureCollider(SimulationComputeContext& compute, MatterGrainGpuRuntime& ru
     return true;
 }
 
-// Identity + kinematics of the first `count` grains, word-wise multiply-xor.
+// Identity + position of the first `count` grains, word-wise multiply-xor.
+// Velocities are left out on purpose: the host legitimately continues them
+// between steps (liquid drag reaction, wet-grain absorption momentum), and
+// springs belong to the contact geometry, which positions fix.
 uint64_t grainStateSignature(const FluidParticles& p, std::size_t count) {
     uint64_t h = 0x9e3779b97f4a7c15ull ^ count;
     auto mix = [&h](const void* data, std::size_t bytes) {
@@ -189,8 +192,6 @@ uint64_t grainStateSignature(const FluidParticles& p, std::size_t count) {
     };
     mix(p.particle_id.data(), count * sizeof(uint64_t));
     mix(p.position.data(), count * sizeof(Vec3));
-    mix(p.velocity.data(), count * sizeof(Vec3));
-    mix(p.affine.data(), count * sizeof(AffineC));
     return h;
 }
 
@@ -232,10 +233,17 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     std::vector<uint32_t> ids(count);
     float minimum_mass = std::numeric_limits<float>::max();
     float maximum_speed = 0.0f;
+    // Wet grains carry their held water (B6): it moves with the grain.
+    double minimum_bridge_volume = std::numeric_limits<double>::infinity();
     for (std::size_t i = 0; i < count; ++i) {
-        masses[i] = p.rest_mass_kg[i] * p.mass_fraction[i];
+        const float water = p.pore_water_mass_kg[i];
+        masses[i] = p.rest_mass_kg[i] * p.mass_fraction[i] + (params.wet_grains ? water : 0.0f);
+        if (water > 0.0f) {
+            minimum_bridge_volume = std::min(minimum_bridge_volume, double(water) / 1000.0 / 6.0);
+        }
         if (p.constitutive_model[i] != static_cast<uint8_t>(MatterConstitutiveModel::Granular) ||
-            isFrozenParticle(p, i) || p.pore_water_mass_kg[i] != 0.0f ||
+            isFrozenParticle(p, i) || !std::isfinite(water) || water < 0.0f ||
+            (!params.wet_grains && water != 0.0f) ||
             !std::isfinite(masses[i]) || masses[i] < 1e-6f ||
             !finite(p.position[i]) || !finite(p.velocity[i]) ||
             !finite(p.affine[i].col0) || !finite(p.affine[i].col1) ||
@@ -251,6 +259,12 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     // Liquid coupling rows: {lump velocity, beta}, {buoyancy accel, lump mass},
     // {drag impulse accumulator}. Zero rows are an exact no-op in the shader.
     std::vector<float> coupling_rows(count * 12, 0.0f);
+    if (params.wet_grains) {
+        // Bridge water volume rides in the free fourth component of row 2.
+        for (std::size_t i = 0; i < count; ++i) {
+            coupling_rows[12 * i + 11] = p.pore_water_mass_kg[i] / 1000.0f;
+        }
+    }
     if (coupling) {
         for (std::size_t i = 0; i < count; ++i) {
             const auto& in = (*coupling)[i];
@@ -293,7 +307,19 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     const double k = params.stiffness_n_m;
     const double kt = params.tangential_stiffness_ratio * k;
     const double mu_r = params.rolling_friction;
-    const double k_effective = std::max({k, 3.5 * kt, 2.8125 * mu_r * mu_r * k});
+    // Wet: liquid bridge stiffness at contact, |dF/dS| = F0 * 2.1 sqrt(R/V),
+    // F0 = 2 pi gamma cos(theta) R x scale (stiffest for the smallest bridge).
+    const float cohesion_scale = params.represented_grain_radius_m > 0.0f
+        ? (params.radius_m / params.represented_grain_radius_m) *
+          (params.radius_m / params.represented_grain_radius_m) : 1.0f;
+    const double capillary = params.wet_grains ? 2.0 * 3.14159265358979 *
+        params.surface_tension_n_m * std::cos(params.contact_angle_deg * 0.017453292519943295) *
+        cohesion_scale : 0.0;
+    const double bridge_stiffness = std::isfinite(minimum_bridge_volume)
+        ? capillary * params.radius_m * 2.1 * std::sqrt(params.radius_m / minimum_bridge_volume)
+        : 0.0;
+    const double k_effective = std::max({k, 3.5 * kt, 2.8125 * mu_r * mu_r * k,
+        bridge_stiffness});
     const double stability_dt = 1.0 / std::sqrt(2.0 * budget * k_effective / m);
     const double accuracy_dt = 3.14159265358979 * std::sqrt(.5 * m / k) /
         params.contact_resolution;
@@ -401,8 +427,9 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         float contact[4];
         float rolling[4];
         uint32_t substep, reset_history, tangential_stiffness_bits, last_substep;
+        float wet[4];  // hash cell size, capillary prefactor, rupture cap, -
     } constants{};
-    static_assert(sizeof(Constants) == 96);
+    static_assert(sizeof(Constants) == 112);
     constants.count = static_cast<uint32_t>(count);
     constants.buckets = runtime.buckets;
     constants.collider_nodes = runtime.collider_node_count;
@@ -432,6 +459,12 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         runtime.history_fresh = true;
         reset_reason = "host_state_changed";
     }
+    // Bridges reach past contact up to the rupture distance; the hash cell
+    // grows by that skin so the 27-cell search still finds every bridge.
+    const float rupture_cap = params.wet_grains ? .5f * params.radius_m : 0.0f;
+    constants.wet[0] = 2.0f * params.radius_m + rupture_cap;
+    constants.wet[1] = static_cast<float>(capillary);
+    constants.wet[2] = rupture_cap;
     constants.reset_history = runtime.history_fresh ? 1u : 0u;
     constants.last_substep = substeps - 1;
     const bool history_reset = runtime.history_fresh;
@@ -524,6 +557,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     report.max_contacts = diagnostics[2];
     report.sticking_contacts = diagnostics[3];
     report.contacts = diagnostics[4];
+    report.liquid_bridges = diagnostics[5];
     report.history_reset = history_reset;
     report.history_reset_reason = reset_reason;
     report.grains = count;

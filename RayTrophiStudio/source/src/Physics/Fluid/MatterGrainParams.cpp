@@ -22,6 +22,14 @@ nlohmann::json matterGrainParamsToJson(const MatterGrainParams& p) {
         {"fluid_coupling", p.fluid_coupling},
         {"drag_viscosity_pa_s", p.drag_viscosity_pa_s},
         {"volume_exclusion", p.volume_exclusion},
+        {"wet_grains", p.wet_grains},
+        {"water_capacity_fraction", p.water_capacity_fraction},
+        {"absorption_rate_per_s", p.absorption_rate_per_s},
+        {"drying_rate_per_s", p.drying_rate_per_s},
+        {"surface_tension_n_m", p.surface_tension_n_m},
+        {"contact_angle_deg", p.contact_angle_deg},
+        {"represented_grain_radius_m", p.represented_grain_radius_m},
+        {"birth_saturation", p.birth_saturation},
         {"max_substeps", p.max_substeps}};
 }
 
@@ -40,7 +48,7 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
         }
         const bool integer = it.key() == "max_substeps" || it.key() == "contact_resolution";
         const bool boolean = it.key() == "enabled" || it.key() == "fluid_coupling" ||
-            it.key() == "volume_exclusion";
+            it.key() == "volume_exclusion" || it.key() == "wet_grains";
         if ((boolean && !it.value().is_boolean()) ||
             (integer && !it.value().is_number_integer()) ||
             (!boolean && !integer &&
@@ -64,6 +72,16 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
         candidate.fluid_coupling = patch.value("fluid_coupling", p.fluid_coupling);
         candidate.drag_viscosity_pa_s = patch.value("drag_viscosity_pa_s", p.drag_viscosity_pa_s);
         candidate.volume_exclusion = patch.value("volume_exclusion", p.volume_exclusion);
+        candidate.wet_grains = patch.value("wet_grains", p.wet_grains);
+        candidate.water_capacity_fraction =
+            patch.value("water_capacity_fraction", p.water_capacity_fraction);
+        candidate.absorption_rate_per_s = patch.value("absorption_rate_per_s", p.absorption_rate_per_s);
+        candidate.drying_rate_per_s = patch.value("drying_rate_per_s", p.drying_rate_per_s);
+        candidate.surface_tension_n_m = patch.value("surface_tension_n_m", p.surface_tension_n_m);
+        candidate.contact_angle_deg = patch.value("contact_angle_deg", p.contact_angle_deg);
+        candidate.represented_grain_radius_m =
+            patch.value("represented_grain_radius_m", p.represented_grain_radius_m);
+        candidate.birth_saturation = patch.value("birth_saturation", p.birth_saturation);
         const auto steps = patch.value("max_substeps", double(p.max_substeps));
         if (steps < 1 || steps > 4096) {
             throw std::runtime_error("max_substeps must be 1..4096");
@@ -86,7 +104,16 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
             candidate.tangential_stiffness_ratio < 0.0f ||
             candidate.tangential_stiffness_ratio > 1.0f ||
             candidate.packing_fraction < .3f || candidate.packing_fraction > .74f ||
-            candidate.drag_viscosity_pa_s < 1e-6f || candidate.drag_viscosity_pa_s > 1e3f) {
+            candidate.drag_viscosity_pa_s < 1e-6f || candidate.drag_viscosity_pa_s > 1e3f ||
+            candidate.water_capacity_fraction < 0.0f || candidate.water_capacity_fraction > .5f ||
+            candidate.absorption_rate_per_s < 0.0f || candidate.absorption_rate_per_s > 1000.0f ||
+            candidate.drying_rate_per_s < 0.0f || candidate.drying_rate_per_s > 100.0f ||
+            candidate.surface_tension_n_m < 0.0f || candidate.surface_tension_n_m > 1.0f ||
+            candidate.contact_angle_deg < 0.0f || candidate.contact_angle_deg > 89.0f ||
+            candidate.birth_saturation < 0.0f || candidate.birth_saturation > 1.0f ||
+            (candidate.represented_grain_radius_m != 0.0f &&
+             (candidate.represented_grain_radius_m < 1e-6f ||
+              candidate.represented_grain_radius_m > candidate.radius_m))) {
             throw std::runtime_error("grain settings outside physical/runtime limits");
         }
     } catch (const std::exception& exception) {
@@ -116,6 +143,24 @@ float matterGrainRestMassKg(const MatterGrainParams& params, uint32_t substance_
     const float bulk_volume = sphere / std::clamp(params.packing_fraction, .3f, .74f);
     return fluidParticleRestMassKg(substance_tag, chemistry_preset, std::cbrt(bulk_volume), 1,
         model, legacy_granular);
+}
+
+float matterGrainWaterCapacityKg(const MatterGrainParams& params) {
+    return params.water_capacity_fraction * 4.18879020f * params.radius_m * params.radius_m *
+        params.radius_m * 1000.0f;
+}
+
+void initMatterGrainBirthWater(FluidParticles& particles, std::size_t index,
+                               const MatterGrainParams& params) {
+    if (!params.wet_grains || index >= particles.size()) {
+        return;
+    }
+    const float capacity = matterGrainWaterCapacityKg(params);
+    const float water = capacity * params.birth_saturation;
+    particles.pore_capacity_kg[index] = capacity;
+    particles.pore_water_mass_kg[index] = water;
+    particles.pore_water_energy_j[index] = water * 4186.0f *
+        std::max(1.0f, particles.temperature[index]);
 }
 
 std::size_t ensureMatterGrainRestMasses(FluidParticles& particles,
