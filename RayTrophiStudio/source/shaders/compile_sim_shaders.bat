@@ -21,7 +21,7 @@ for %%k in (sim_matter_grain_clear sim_matter_grain_hash sim_matter_grain_step s
 if errorlevel 1 exit /b 1
 
 for %%k in (
-    sim_matter_p2g sim_matter_g2p sim_matter_stress_update sim_matter_stress_p2g sim_matter_settle sim_matter_advect sim_matter_occupancy sim_matter_contact sim_matter_copy sim_matter_accumulate sim_matter_clear sim_matter_zero_faces sim_matter_pores
+    sim_matter_p2g sim_matter_g2p sim_matter_stress_update sim_matter_stress_p2g sim_matter_settle sim_matter_advect sim_matter_occupancy sim_matter_contact sim_matter_copy sim_matter_clear sim_matter_zero_faces sim_matter_pores
 ) do (
     glslc "%SHADER_DIR%%%k.comp" -o "%SHADER_DIR%%%k.spv" --target-env=vulkan1.2
     if errorlevel 1 exit /b 1

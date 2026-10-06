@@ -80,9 +80,13 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     const auto budget = params.mixed_working_set_budget_bytes;
     const bool coupled = !liquid.empty() && !grains.empty() && params.grain.fluid_coupling;
     // B5: the liquid projection sees the grains' volume; the grains then take
-    // the projection's pressure gradient instead of hydrostatic buoyancy.
+    // the force the liquid's own acceleration implies, rho V (Du/Dt - g),
+    // instead of hydrostatic buoyancy.
     const bool exclude = coupled && params.grain.volume_exclusion;
-    std::vector<float> liquid_pressure, liquid_mask;
+    // Each parcel's velocity before the liquid step (after last frame's grain
+    // reaction): Du/Dt is measured per parcel, Lagrangian, by identity.
+    const auto liquid_start_velocity = exclude ? liquid.velocity : std::vector<Vec3>{};
+    const auto liquid_start_id = exclude ? liquid.particle_id : std::vector<uint64_t>{};
 
     // 1. Liquid owner. The mixed driver steps state.particles, so the liquid
     // subset is swapped in for the call and swapped back on every path.
@@ -128,42 +132,12 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             return false;
         }
         liquid_params.external_forces_preintegrated = true;
-        if (!buffers.matter_runtime) {
-            buffers.matter_runtime = std::make_shared<Fluid::MatterGpuRuntime>();
-        }
-        auto& liquid_runtime = *buffers.matter_runtime;
-        liquid_runtime.frame_pressure_requested = exclude;
-        struct ClearRequest {
-            Fluid::MatterGpuRuntime& runtime;
-            ~ClearRequest() { runtime.frame_pressure_requested = false; }
-        } clear_request{liquid_runtime};
         if (!runMatterGpuStep(state, liquid_params, legacy_granular, dt, compute, buffers,
                 ensure, ledger, error)) {
             error = "grain domain liquid lane: " + error;
             return false;
         }
         stats = state.fluid_stats;
-        if (exclude) {
-            const std::size_t cells = state.grid.getCellCount();
-            liquid_pressure.resize(cells);
-            liquid_mask.resize(cells);
-            // The substep-averaged pressure, not buffers.pressure: that is
-            // only the last substep's, which sees almost no gravity load.
-            if (!liquid_runtime.frame_pressure_valid) {
-                error = "grain domain: liquid lane did not publish its frame pressure";
-                return false;
-            }
-            compute->beginTransferBatch();
-            bool read = compute->downloadBuffer(liquid_runtime.frame_pressure,
-                liquid_pressure.data(), cells * sizeof(float));
-            read = compute->downloadBuffer(buffers.fluid_mask, liquid_mask.data(),
-                cells * sizeof(float)) && read;
-            read = compute->endTransferBatch() && read;
-            if (!read) {
-                error = "grain domain: liquid pressure readback failed";
-                return false;
-            }
-        }
     }
 
     // 2-4. Grain owner with the liquid coupling.
@@ -180,9 +154,10 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             }
             Fluid::prepareMatterGrainCoupling(grains, params.grain, params.gravity, dt,
                 frame, report);
-            if (exclude) {
-                Fluid::applyMatterGrainPressureForce(liquid_pressure, liquid_mask, grains,
-                    params.grain.radius_m, dt, frame, report);
+            if (exclude && !Fluid::applyMatterGrainLiquidAccelerationForce(liquid,
+                    liquid_start_velocity, liquid_start_id, grains, params.grain.radius_m,
+                    params.gravity, dt, frame, report, error)) {
+                return false;
             }
             report.volume_exclusion = exclude;
         }

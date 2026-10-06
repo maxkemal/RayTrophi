@@ -32,10 +32,11 @@ enum class FluidChemistryPreset : int;
 // B5 (volume_exclusion): the liquid's projection sees the grains' volume.
 // The variational face weights carry the pore fraction eps and the closed
 // part of a face moves with the grains, so the projection enforces
-// div(eps u_l + (1 - eps) u_g) = 0; the grains then take the solver's real
-// pressure gradient, -V rho grad(p), instead of hydrostatic buoyancy, and the
-// liquid gets it back (unresolved CFD-DEM "model A": the liquid ends up with
-// -eps grad p). Without it the liquid sees the pile only as drag.
+// div(eps u_l + (1 - eps) u_g) = 0; the grains then take the pressure force
+// of the liquid around them, rho V (Du/Dt - g) (= -V grad p + viscous), from
+// the liquid's measured acceleration instead of hydrostatic buoyancy, and the
+// liquid gets it back (unresolved CFD-DEM "model A"). Without it the liquid
+// sees the pile only as drag.
 //
 // Not modelled (stated, not hidden): rotational drag, added mass, and
 // wetting -- that is H1-G2 wet response (B6).
@@ -103,14 +104,21 @@ void applyMatterGrainPorosity(FluidSim::FluidGrid& grid, const FluidParticles& g
 // Restores exactly what applyMatterGrainPorosity replaced.
 void restoreMatterGrainPorosity(FluidSim::FluidGrid& grid, MatterGrainPorosityBackup& backup);
 
-// Replaces hydrostatic buoyancy by the projection's pressure gradient:
-// F = -V rho grad(p_kin), p_kin the solver's kinematic pressure (p / rho, the
-// value sim_fluid_subtract_gradient uses), mask the device fluid mask
-// (> .5 liquid, < -.5 solid -> Neumann, else air p = 0); closed domain walls
-// are Neumann. Grains with no liquid share keep zero force.
-void applyMatterGrainPressureForce(const std::vector<float>& pressure,
-    const std::vector<float>& mask, const FluidParticles& grains, float grain_radius,
-    float dt, MatterGrainCouplingFrame& frame, MatterGrainStepReport& report);
+// Replaces hydrostatic buoyancy by the force the liquid's own motion implies
+// (pressure gradient + viscous stress of model A): F = submerged rho V
+// (Du/Dt - g), Du/Dt the mass-weighted mean acceleration of the liquid
+// parcels in the grain's eight cells over this frame's liquid step, taken per
+// parcel by identity (Lagrangian, so advection is included). Liquid at rest
+// gives exactly Archimedes; a liquid the porous projection pushes aside gives
+// the grain the matching push. Measured from what the liquid did, not read
+// back from a pressure buffer: the liquid lane integrates gravity once per
+// frame and projects in substeps, so no single pressure field carries the
+// frame's load. `start_*` are the liquid subset before its step; fails when
+// the identities no longer match (no birth or removal is allowed between).
+bool applyMatterGrainLiquidAccelerationForce(const FluidParticles& liquid,
+    const std::vector<Vec3>& start_velocity, const std::vector<uint64_t>& start_id,
+    const FluidParticles& grains, float grain_radius, const Vec3& gravity, float dt,
+    MatterGrainCouplingFrame& frame, MatterGrainStepReport& report, std::string& error);
 
 // B6 wet grains, after the drag reaction (so the reaction's cell masses are
 // the ones it was computed with). Absorption moves water from the liquid

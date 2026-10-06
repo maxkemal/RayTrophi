@@ -141,7 +141,7 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
             {"max_drag_coefficient_kg_s", report->max_drag_coefficient},
             {"max_submerged_fraction", report->max_submerged_fraction},
             {"model", report->volume_exclusion
-                ? "di_felice_implicit_pair_drag+porous_projection_pressure_force"
+                ? "di_felice_implicit_pair_drag+porous_projection_liquid_acceleration_force"
                 : "di_felice_implicit_pair_drag+hydrostatic_buoyancy"},
             {"volume_exclusion", report->volume_exclusion},
             {"pressure_force", report->pressure_force},

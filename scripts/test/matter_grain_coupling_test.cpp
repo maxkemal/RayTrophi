@@ -156,32 +156,41 @@ int main() {
         restoreMatterGrainPorosity(grid, backup);
         assert(grid.u_weight.empty() || grid.u_weight[grid.velXIndex(2, 1, 1)] == 255);
     }
-    // B5 pressure force: hydrostatic kinematic pressure p = g (H - y) in a
-    // full tank gives exactly Archimedes, -rho V g.
+    // B5 pressure force from the liquid's own acceleration: liquid at rest
+    // (no velocity change over the step) gives exactly Archimedes, -rho V g;
+    // liquid accelerating upward at g pushes twice as hard; a changed
+    // population is rejected instead of guessed.
     {
         MatterGrainCouplingFrame tank;
         assert(buildMatterGrainLiquidField(liquid, grains, r, static_cast<FluidChemistryPreset>(0),
             Vec3(0.0f, 0.0f, 0.0f), n, 2 * n, n, h, tank.field, error));
         MatterGrainStepReport tank_report;
-        prepareMatterGrainCoupling(grains, params, Vec3(0.0f, -9.81f, 0.0f), dt, tank, tank_report);
-        const std::size_t cells = static_cast<std::size_t>(n) * 2 * n * n;
-        std::vector<float> pressure(cells, 0.0f), mask(cells, 0.0f);
-        for (int k = 0; k < n; ++k)
-            for (int j = 0; j < 2 * n; ++j)
-                for (int i = 0; i < n; ++i) {
-                    const std::size_t c = (static_cast<std::size_t>(k) * 2 * n + j) * n + i;
-                    if (j < n) {  // liquid up to y = .4
-                        mask[c] = 8.0f;
-                        pressure[c] = 9.81f * (n * h - (j + .5f) * h);
-                    }
-                }
-        applyMatterGrainPressureForce(pressure, mask, grains, r, dt, tank, tank_report);
+        const Vec3 gravity(0.0f, -9.81f, 0.0f);
+        prepareMatterGrainCoupling(grains, params, gravity, dt, tank, tank_report);
         const float archimedes = 1000.0f * 4.18879f * r * r * r * 9.81f / grain_mass;
+        assert(applyMatterGrainLiquidAccelerationForce(liquid, liquid.velocity, liquid.particle_id,
+            grains, r, gravity, dt, tank, tank_report, error));
         std::printf("pressure accel %.4f archimedes %.4f\n",
             tank.inputs[0].buoyancy_acceleration.y, archimedes);
         assert(tank_report.pressure_force);
         assert(std::abs(tank.inputs[0].buoyancy_acceleration.y - archimedes) < .02f * archimedes);
+        assert(std::abs(tank.inputs[0].buoyancy_acceleration.x) < 1e-6f);
         assert(tank.inputs[1].buoyancy_acceleration.length() == 0.0f);  // dry grain
+        assert(std::abs(tank_report.pressure_impulse.y - archimedes * grain_mass * dt) <
+               .02f * archimedes * grain_mass * dt);
+        auto start = liquid.velocity;
+        for (auto& v : start) v = v - Vec3(0.0f, 9.81f * dt, 0.0f);
+        assert(applyMatterGrainLiquidAccelerationForce(liquid, start, liquid.particle_id,
+            grains, r, gravity, dt, tank, tank_report, error));
+        std::printf("accelerating liquid %.4f expected %.4f\n",
+            tank.inputs[0].buoyancy_acceleration.y, 2.0f * archimedes);
+        assert(std::abs(tank.inputs[0].buoyancy_acceleration.y - 2.0f * archimedes) <
+               .02f * archimedes);
+        auto ids = liquid.particle_id;
+        std::swap(ids[0], ids[1]);
+        assert(!applyMatterGrainLiquidAccelerationForce(liquid, liquid.velocity, ids,
+            grains, r, gravity, dt, tank, tank_report, error));
+        assert(!error.empty());
     }
     // B6 absorption: a submerged grain takes water from its cells; total
     // water and momentum are unchanged, the grain picks up the liquid velocity.
