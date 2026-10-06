@@ -198,6 +198,14 @@ CPU + 2 yükleme/indirme). B4 bunu GPU'ya taşır.
 > yazıyor ve alt adım duyarlılığını durdurmadan kaydediyor. Karar artı/eksi tartışmasıyla
 > ve maliyet sütunuyla verilecek; aday senaryolar: DEM tek çözücü / XPBD önizleme modu
 > (malzeme ayara bağlı olduğu açıkça yazılarak) / büyük sahnede XPBD, yakın planda DEM.
+>
+> İkinci tablo (maliyetli, 256 tane): DEM 202 alt adım, adım 6.94 ms, tane GPU 9.96 ms;
+> XPBD 20/40/80 → yayılma DEM'in .79/.85/.92'si, adım 7.50/4.20/4.14 ms, GPU 6.50/2.91/3.32
+> ms; alt adım kayması COM %7.5, rms %17. Okuma: malzeme alt adıma bağlı → XPBD kullanıcı
+> seçimi olamaz (üretimde hız ayarı malzemeyi değiştirmez); 256 tanede maliyet ek yük
+> baskın ve gürültülü. **Ölçüt:** 16k tanede, DEM'e %5 içinde yaklaştığı alt adımda XPBD
+> ≥3× ucuz değilse sökülür; ucuzsa yalnız "önizleme (yaklaşık malzeme)" olarak kalır. O
+> ölçüme kadar UI'de yok, yalnız IPC.
 
 - **Kod:** aynı runtime içinde (aynı kova hash, aynı collider BVH, aynı sahiplik) XPBD temas
   adayı: pozisyon kısıtı + sürtünme kısıtı + açısal güncelleme (spin için ayrıca tasarlanır;
