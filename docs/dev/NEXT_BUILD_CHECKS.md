@@ -1,3 +1,65 @@
+# Sıradaki kullanıcı build (C++ + SHADER): tane fiziksel parametreleri + domain paneli + kilitler
+
+Bu partide (2026-10-06, tek build): tane küre yarıçapı düzeltmesi; çekirdekte tek "tane hazır
+mı" kuralı (`matterGrainBlockers`) ve onu bozan API düzenlemelerinin reddi; sönüm yerine
+**restitution** (çarpışma geri sekmesi, temas başına etkin kütle), sürüklenme viskozitesi sıvı
+maddeden; domain paneli 6 sekme kararına göre (tane malzemesi Matter, çözücü Solvers, rapor
+Measure), kilitler sebep satırıyla, standart satır + zorunlu tooltip, "Collapse all";
+16k DEM/XPBD maliyet testi. Gerekçe ve kararlar: [MATTER_H1_GRAIN_ROADMAP.md](MATTER_H1_GRAIN_ROADMAP.md).
+
+Bulutta yapılan: grain shader'ları glslangValidator + spirv-val; değişen C++ dosyaları Linux g++
+sözdizimi geçişi (MSVC'ye özgü hatalar görünmez; `scene_ui_forcefield.hpp:1721 sprintf_s`
+düzeneğin bilinen yan etkisi); `matter_grain_coupling_test.cpp` PASS; CPU XPBD kopyası PASS;
+kontrat + panel alan envanteri + IPC denetimi PASS. Canlı hiçbir şey koşmadı.
+
+**Build:** C++ + `compile_shaders.bat`. Grain shader revision **13**. Yeni başlık
+`source/src/UI/DomainPanelWidgets.h` (vcxproj'ta); silinen kullanılmayan dosyalar
+`scene_ui_simulation_domains.inl`, `scene_ui_fluid_billboards.hpp` (build "bulunamadı" derse
+bir yerde unutulmuş include var — hata metnini getir).
+
+0. **Statik (uygulama gerekmez):** `python scripts/test/check_matter_grain_contracts.py`,
+   `python scripts/test/check_domain_panel_fields.py` (254 kontrol: hiçbiri kaybolmadı, yeni
+   yardımcı dosyalarda tooltip'siz kontrol yok), `python scripts/test/xpbd_grain_friction_reference.py`.
+1. **Revizyon:** herhangi bir tane koşusunda `shader revision mismatch` yok.
+2. **Kilitler (IPC):** `rt_h1_grain_runtime_ipc.py --readiness-only` → `PASS grain readiness`:
+   backend=cpu, boundary=open, pore exchange açma, eski `normal_damping_n_s_m` ve
+   `drag_viscosity_pa_s` anahtarları reddedilir, domain değişmeden kalır. Bozuksa: bir yazıcı
+   kontrolü atlıyor (hangisi `ACCEPTED` diye basılır).
+3. **Temel regresyon:** `rt_h1_grain_runtime_ipc.py` (serbest düşüş), `--history-only`,
+   `--static-only`, `--convergence-only`, `--extended-only`. Testler eski sönüm değerlerinin
+   restitution karşılığıyla koşar (`grain_units.restitution_of`); tane-tane fiziği aynı,
+   **duvar teması √2 daha sönümlü** (aynı geri sekme). Değerler önceki turlarla yakın olmalı.
+4. **Yerleşme:** `--settle-only --settle-normal-damping 8` → enerji/COM kapısı + `state_resident`.
+   ★ Sinsi: geçer ama yığın daha "ölü" görünür → duvar sönümü beklenenden fazla; sayıları getir.
+5. **Su + tane:** `--coexist-only` (≈6.13 ±%15, batma ≈1), `--coexist-only --coexist-hydrostatic`,
+   `--porous-only` (fark .051–.153 m). Sürüklenme artık Water maddesinin viskozitesinden
+   (1e-3 Pa s, önceki sabitle aynı): sonuçlar önceki turla aynı olmalı. Belirgin fark = madde
+   profilinden yanlış viskozite okunuyor.
+6. **Islak:** `--wet-only` (kuru rms > ıslak rms / .8, köprü > 0, su korunumu).
+7. **XPBD:** `--xpbd-compare` (eğim 0, tablo).
+8. **Ölçekte maliyet (H1-G0 kararı):**
+   `python scripts/test/rt_h1_dense_grain_scene_ipc.py --counts 4096 16384 --solvers dem xpbd:20 xpbd:40 xpbd:80 --steps 120`
+   → sonda tablo (median ms, COM, rms, ms/dem, rms/dem). Ölçüt: 16k'da rms/dem .95–1.05 olan
+   ilk XPBD satırı ms/dem ≤ .33 değilse XPBD sökülür. Tabloyu getir.
+9. **Panel (gözle, ~5 dk):** tane açık Matter domain'i seç.
+   - **Solvers** en üstte "Granular Solver (grains)": "Ready." ya da sebep satırları; Accuracy
+     Draft/Production/Reference; Advanced altında XPBD (deneysel); Liquid coupling.
+   - **Matter**: "Granular Material (grains)" (gerçek tane yarıçapı, μ, μr, restitution, su);
+     legacy "Granular Material" yerine tek satır; Pore Water yerine tek satır.
+   - **Domain**: backend ve sınır gri, altında sebep; **Environment/Solvers**: Domain Motion
+     Coupling ve Reseed gri.
+   - **Output**: "Grain spheres — Diameter …"; viewport'ta küreler tane boyutunda (bildirdiğin
+     hata). ★ Küreler hâlâ varsayılan boyuttaysa GPU yolu hâlâ seçiliyor.
+   - **Measure**: "Grain Step" raporu. Her sekmede "Collapse all". Gri kontrolde tooltip görünür.
+   - Kayıtlı tane sahnen varsa aç: yüklenir, restitution sönümden çevrilmiş olur.
+10. **Uzun / diğer:** `--repose-only`; `rt_g2_dry_wet_compare_ipc.py --expect-empty-fluid-skipped`.
+
+Bilinen açık iş (bu partide yok): madde başına tane malzemesi (SubstanceProfile; GPU'da tane
+başına malzeme tablosu), örtüşmeden türetilen sertlik, sıvı parselleri için tane domain'inde
+ayrı render grubu (sanal çocuklar), gaz ortam havası referansının Environment'a taşınması.
+
+---
+
 # Sıradaki kullanıcı build (C++ + SHADER): H1 tane B2–B8 + B9a — tek uzun test geçişi
 
 Bulutta yazılan sekiz parti tek build'de: B2 kova komşuluğu + yığılma açısı, B3 su + tane

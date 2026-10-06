@@ -1,6 +1,6 @@
 # H1 tane yol haritası — tek Matter domain'inde kuru/ıslak granül çözücü
 
-> **Durum:** AKTİF — 2026-10-06 bulut oturumu. B2, B3, B4 (ilk adım), B5, B6, B7, B8 ve B9a kaynakta, **hepsi tek build + tek uzun test geçişi** bekliyor (NEXT_BUILD_CHECKS en üst). Kalan kod: B9'un geri kalanı ve koşullu B10 — canlı sonuçlardan sonra.
+> **Durum:** AKTİF — 2026-10-06. B2–B8 + B9a canlı turlarda geçti (coexist/porous/wet/eğim; XPBD tablosu alındı). Yeni parti B9b (fiziksel parametreler, kilitler, domain paneli) kaynakta, tek build bekliyor (NEXT_BUILD_CHECKS en üst). Açık: madde başına tane malzemesi, H1-G0 16k kararı.
 
 Bu belge H1'in (granül çözücü) **parti sırasıdır**: her partinin ne yazdığı, neyi
 ölçerek kapandığı ve kapanmazsa neyi ifade ettiği. Tasarım gerekçesi ve kapı tablosu
@@ -30,6 +30,7 @@ koşturulur; uygulama derlemesi ve canlı IPC testleri kullanıcının makinesin
 | **B8** hücre sırası + kimlikle taşınan temas geçmişi (rev 10) | Kaynak; shader doğrulandı | — |
 | **B4** yerleşik durum yeniden kullanımı + transfer sayaçları | Kaynak (ilk adım) | — |
 | **B9a** geçmiş geçersiz kılma + CPU referansı EPSD2 | Kaynak; eğim parity testi C++ PASS (μr=1 kayma 0, μr=0 3.588 m = analitik) | `matter_grain_reference_slope_test.cpp` |
+| **B9b** restitution (temas başına etkin kütle), sürüklenme viskozitesi sıvı maddeden, tek "tane hazır mı" kuralı + API reddi, domain paneli (6 sekme kararı, kilitler, tooltip standardı, alan envanteri), tane küre yarıçapı | Kaynak, build yok; coupling C++ PASS, panel envanteri 254/254 | NEXT_BUILD_CHECKS |
 | Emitter tohumu oturumdan bağımsız | Ayrı yerel görev (kullanıcı başlattı) | — |
 | H1-R CPU referansı | EPSD2'ye güncellendi (B9a); küçük sahne GPU parity canlıda koşulmadı | B9 |
 
@@ -215,6 +216,27 @@ CPU + 2 yükleme/indirme). B4 bunu GPU'ya taşır.
 - **Karar kaydı:** kazanan varsayılan olur, kaybeden **sökülür** (CLAUDE.md §5).
 - **Sinsi risk:** XPBD'nin iterasyonla "sertleşmesi" — CLAUDE.md teşhis dersi: yakınsadıkça
   sertleşen belirti fizik değildir; iterasyon taraması zorunlu.
+
+### B9b — Kavramlar, kilitler, panel (2026-10-06)
+
+> **Yazılan:** kullanıcı maddeyi fiziksel birimlerle tanımlar, çözücü sayıları türetilir.
+> `restitution` (0.01..1) eski alan-başına normal sönümün (N s/m) yerini aldı: ζ = −ln e /
+> √(π²+ln²e), her temas c = 2ζ√(k·m_eff) (tane–tane m/2, duvar m) → iki temas da aynı geri
+> sekme. Eski sahneler yüklenirken c, 2667 kg/m³ tanenin tane–tane etkin kütlesinde e'ye
+> çevrilir; API eski anahtarı yerini söyleyerek reddeder. `drag_viscosity_pa_s` kalktı:
+> sürüklenme hücredeki sıvı parsellerinin madde viskozitesini (ν·ρ, kütle ağırlıklı) kullanır.
+> `matterGrainBlockers()` tek kural: doğrulama, panel kilitleri, `fluid.matter_models
+> grain_readiness` ve tane açıkken backend/sınır/katı faz/termal/gözenek düzenlemelerinin
+> (hiçbir şey yazılmadan) reddi. Tane açıkken legacy MPM granular bayrağı sahiplik/kütle/yarıçapı
+> değiştirmez. Panel: tane malzemesi Matter, çözücü + bağlama + hazır satırı Solvers, rapor
+> Measure, küre çapı Output; legacy granular ve gözenek suyu tek satıra iner; kilitler sebep
+> satırıyla; `DomainPanelWidgets.h` tek genişlik + zorunlu tooltip (ne/birim-aralık/etkileşim/
+> script anahtarı); `check_domain_panel_fields.py` 254 kontrolün envanteriyle kaybı ve
+> tooltip'siz yeni kontrolü FAIL eder. GPU küre yolu tane domain'lerini CPU köprüsüne bırakır
+> (tane = 2·yarıçap).
+> **Yazılmadı (bilerek):** madde başına tane malzemesi (GPU'da tane başına malzeme tablosu
+> ister; bugün tane malzemesi domain başına), örtüşmeden türetilen sertlik (yük/çarpma hızı
+> varsayımı ister), sıvı parselleri için ayrı render grubu, gaz ortam referansının taşınması.
 
 ### B8 — Ölçek
 
