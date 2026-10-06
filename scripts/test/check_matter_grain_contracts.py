@@ -175,6 +175,11 @@ def main():
     assert coordinator.index('liquid_start_velocity = exclude') < coordinator.index('runMatterGpuStep(')
     assert coordinator.index('runMatterGpuStep(') < coordinator.index('applyMatterGrainLiquidAccelerationForce(')
     mixed = read('src/Physics/Fluid/MatterGpuStep.inl')
+    porous_kernel = read('shaders/sim_fluid_divergence_porous.comp')
+    # Density correction must target the pore volume, or it refills the pores.
+    assert 'max(count - eps * ppc, 0.0) - max(count - ppc, 0.0)' in porous_kernel
+    coupling = read('src/Physics/Fluid/MatterGrainCoupling.cpp')
+    assert 'f.volume[c[n]] / (.5 * pores)' in coupling, 'submersion must be occupancy, not volume'
     assert 'has_granular ? static_cast<double>(elastic.required_substeps)' in mixed
     assert coordinator.index('prepareMatterGrainCoupling(') < coordinator.index('applyMatterGrainLiquidAccelerationForce(')
     assert '~RestorePorosity()' in coordinator and 'restoreMatterGrainPorosity(grid, backup);' in coordinator
