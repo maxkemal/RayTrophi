@@ -216,7 +216,9 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         const float water = p.pore_water_mass_kg[i];
         masses[i] = p.rest_mass_kg[i] * p.mass_fraction[i] + (params.wet_grains ? water : 0.0f);
         if (water > 0.0f) {
-            minimum_bridge_volume = std::min(minimum_bridge_volume, double(water) / 1000.0 / 6.0);
+            // Smallest bridge: this grain against a dry one, (V + 0) / 12
+            // (sim_matter_grain.glsl bridge()).
+            minimum_bridge_volume = std::min(minimum_bridge_volume, double(water) / 1000.0 / 12.0);
         }
         if (p.constitutive_model[i] != static_cast<uint8_t>(MatterConstitutiveModel::Granular) ||
             isFrozenParticle(p, i) || !std::isfinite(water) || water < 0.0f ||
