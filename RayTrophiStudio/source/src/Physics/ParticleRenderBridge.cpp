@@ -1904,7 +1904,6 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
             content = hashCombine(content, state.version);
             content = hashCombine(content, static_cast<uint64_t>(draw_count));
             content = hashCombine(content, quantize(diam));
-            content = hashCombine(content, grain_domain ? quantize(liquid_diam) : 0ull);
             for (const bool routed : splat_types) content = hashCombine(content, routed ? 1u : 0u);
 
             const std::vector<float>& sdf_buf = system.domain_sdf_buffers[d];
