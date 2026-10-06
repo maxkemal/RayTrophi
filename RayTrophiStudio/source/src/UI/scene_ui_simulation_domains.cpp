@@ -658,7 +658,6 @@ void drawSimulationDomainControls(
                     domain.use_sparse_tiles = true;
                 }
 
-                ImGui::SameLine();
                 ImGui::SetNextItemWidth(DomainUi::itemWidth());
                 ImGui::DragFloat("Boundary Padding", &domain.padding, 0.01f, 0.0f, 1000.0f, "%.3f");
                 if (ImGui::IsItemHovered()) {
