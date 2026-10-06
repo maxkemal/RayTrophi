@@ -324,15 +324,19 @@ def main():
                          water_capacity_fraction=.05, absorption_rate_per_s=4., drying_rate_per_s=0.,
                          represented_grain_radius_m=.0005 if wet else 0., birth_saturation=.5 if wet else 0.)
                     call('flow_source.update', name=WATER, enabled=False)
+                    # Births never overlap (the birth filter rejects them): a
+                    # .25 m ball holds ~380 grains at once, so 512 are born over
+                    # 1 s as the first ones fall away (live: 512 in 1/30 s never
+                    # reached the count).
                     call('flow_source.update', name=SOURCE, domain=COEXIST, position=[0, .45, 0],
                          radius=.25, velocity=[0, 0, 0], max_emitted_particles=512,
                          use_particle_limit=True, use_time_limit=True,
-                         fluid_particles_per_second=512*1.01*60, start_time=0., end_time=1/30,
+                         fluid_particles_per_second=1024., start_time=0., end_time=1.,
                          enabled=True)
                     control = call('sim.control_state')
                     arm = {'wet': wet, 'samples': []}
                     arms[str(wet)] = arm
-                    for step in range(1, 181):
+                    for step in range(1, 241):
                         call('fluid.step', dt=1/60)
                         if step % 15:
                             continue
@@ -340,9 +344,13 @@ def main():
                         inventory = call('fluid.matter_models', domain=COEXIST)
                         assert not inventory['mixed_execution']['step_held'], inventory['mixed_execution']
                         g = inventory['acceptance_metrics']['granular']
+                        if step < 75:
+                            continue  # still being born
                         arm['samples'].append({'step': step, 'granular': g,
                             'wet': liquid_of(inventory)['wet'], 'runtime': runtime_of(inventory)})
-                        assert g['particles'] == 512 and g['bounds_min'][1] >= .025*.7
+                        assert g['particles'] == 512, ('wet' if wet else 'dry', step, g['particles'])
+                        assert g['bounds_min'][1] >= .025*.7, ('floor penetration', wet, step,
+                                                                g['bounds_min'])
                     data['coexist']['cohesion'] = arms
                     save()
                     last = arm['samples'][-1]
