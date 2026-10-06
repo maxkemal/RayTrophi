@@ -35,6 +35,8 @@ struct ContactHistory {
     uint64_t a_id = 0;
     uint64_t b_id = 0;
     Vec3 tangential_displacement = Vec3(0.0f);
+    // EPSD2 rolling spring angle (rad), same law as the GPU grain step.
+    Vec3 rolling_displacement = Vec3(0.0f);
 };
 
 struct ContactResult {
@@ -47,7 +49,9 @@ struct ContactResult {
 };
 
 // Transactional: invalid input leaves history and result unchanged. Linear
-// spring/dashpot + history Coulomb sliding; bounded viscous rolling resistance.
+// spring/dashpot + history Coulomb sliding (Cundall-Strack); EPSD2 rolling
+// spring k_r = 2.25 mu_r^2 k R^2, 0.3 critical damping, torque cap mu_r Fn R --
+// the law of the GPU grain step (sim_matter_grain.glsl), so the two agree.
 // No cohesion, pore-pressure PDE, fracture, collider lookup or MPM conversion.
 bool evaluateSphereContact(const ContactBody& a, const ContactBody& b,
                            const ContactParams& params, float dt_s,

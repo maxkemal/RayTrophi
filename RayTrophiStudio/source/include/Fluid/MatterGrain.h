@@ -78,6 +78,8 @@ struct MatterGrainStepReport {
     uint32_t sticking_contacts = 0;
     uint32_t contacts = 0;
     bool history_reset = false;
+    // allocation | host_state_changed | first_step | "" (history carried over)
+    std::string history_reset_reason;
     std::size_t working_set_bytes = 0;
     // Same-domain liquid (transport owner mpm) beside the grains.
     std::size_t grains = 0;
@@ -127,6 +129,13 @@ struct MatterGrainGpuRuntime {
     uint32_t collider_node_count = 0;
     bool collider_uploaded = false;
     bool history_fresh = true;
+    // Device contact history is valid only for the exact grain state it was
+    // published with. Reset, timeline scrub, cache restore, a script edit or
+    // a reordering all present a different host state: the springs of that
+    // other state must not be applied to it (ids restart at 1 after a reset,
+    // so an identity check alone matches the wrong grains).
+    uint64_t published_signature = 0;
+    std::size_t published_count = 0;
     std::size_t capacity = 0;
     std::size_t triangle_capacity = 0;
     uint32_t buckets = 0;
