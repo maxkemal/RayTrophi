@@ -44,7 +44,8 @@ def main():
     assert f'const uint BUCKET = {capacity}u;' in shader
     assert 'uint table = pc.substep.x % 3u;' in shader
     assert 'bucket_counts[((pc.substep.x+2u)%3u)*pc.meta.y+i] = 0u;' in shader
-    assert shader.index('bucket_counts[((pc.substep.x+2u)%3u)') < shader.index('if (i >= pc.meta.x) return;')
+    step_section = shader[shader.index('#elif defined(GRAIN_STEP)'):]
+    assert step_section.index('bucket_counts[((pc.substep.x+2u)%3u)') < step_section.index('if (i >= pc.meta.x) return;')
     assert 'insert(i,p,(pc.substep.x+1u)%3u);' in shader
     assert shader.index('store(i,dst,p,v,w);') < shader.index('insert(i,p,(pc.substep.x+1u)%3u);')
     assert 'else atomicOr(diagnostics[0],4u);' in shader and '(overflow & 4u)' in gpu
@@ -141,9 +142,15 @@ def main():
     assert 'const float d = grain ? diam : liquid_diam;' in bridge
     assert '--coexist-only' in runtime_test
     # B9a: device history is valid only for the state it was published with.
-    assert 'grainStateSignature(p, runtime.published_count) != runtime.published_signature' in gpu
+    assert 'std::memcmp(&was, &p.position[i], sizeof(Vec3)) != 0' in gpu
     assert gpu.index('reset_reason = "host_state_changed";') < gpu.index('const bool history_reset = runtime.history_fresh;')
-    assert gpu.index('p = std::move(result);') < gpu.index('runtime.published_signature = grainStateSignature(p, count);')
+    assert gpu.index('p = std::move(result);') < gpu.index('runtime.published_positions = p.position;')
+    # B8: history follows identity across any order; grains sorted by cell.
+    assert gpu.index('"sim_matter_grain_permute", "sim_matter_grain_permute_copy"') < gpu.index('if (!dispatchMatterGrainStages(')
+    assert 'GRAIN_PERMUTE_COPY' in read('shaders/sim_matter_grain_permute_copy.comp')
+    for kernel in ('sim_matter_grain_permute', 'sim_matter_grain_permute_copy'):
+        assert f'"{kernel}.spv", 15, 112' in registry and kernel in read('shaders/compile_sim_shaders.bat')
+    assert 'orderMatterGrainsByCell(' in coordinator
     assert '--history-only' in runtime_test
     contact = read('src/Physics/Fluid/GranularContact.cpp')
     assert '2.25f * params.rolling_friction * params.rolling_friction' in contact

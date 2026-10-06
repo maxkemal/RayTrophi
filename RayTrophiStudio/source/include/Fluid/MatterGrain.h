@@ -74,7 +74,7 @@ struct MatterGrainParams {
 
 // Host CFL and GLSL history slots share this budget (sim_matter_grain.glsl).
 inline constexpr int kMatterGrainContactBudget = 24;
-inline constexpr uint32_t kMatterGrainShaderRevision = 9;
+inline constexpr uint32_t kMatterGrainShaderRevision = 10;
 // Neighbour hash: three rotating tables of fixed-capacity buckets.
 inline constexpr uint32_t kMatterGrainBucketCapacity = 16;
 inline constexpr uint32_t kMatterGrainBucketTables = 3;
@@ -112,6 +112,7 @@ struct MatterGrainStepReport {
     bool history_reset = false;
     // allocation | host_state_changed | first_step | "" (history carried over)
     std::string history_reset_reason;
+    bool history_remapped = false;  // order changed; history gathered on device
     std::size_t working_set_bytes = 0;
     // Same-domain liquid (transport owner mpm) beside the grains.
     std::size_t grains = 0;
@@ -176,13 +177,15 @@ struct MatterGrainGpuRuntime {
     uint32_t collider_node_count = 0;
     bool collider_uploaded = false;
     bool history_fresh = true;
-    // Device contact history is valid only for the exact grain state it was
-    // published with. Reset, timeline scrub, cache restore, a script edit or
-    // a reordering all present a different host state: the springs of that
-    // other state must not be applied to it (ids restart at 1 after a reset,
-    // so an identity check alone matches the wrong grains).
-    uint64_t published_signature = 0;
-    std::size_t published_count = 0;
+    // Device contact history is valid only for the grain state it was
+    // published with. Reset, timeline scrub, cache restore or a script edit
+    // present a different state (ids restart at 1 after a reset, so identity
+    // alone matches the wrong grains): any surviving grain whose position is
+    // not bit-identical to the published one drops all history. A new ORDER
+    // of the same grains (cell sort, births, removals) keeps it: the history
+    // is gathered to the new indices on the device (B8).
+    std::vector<uint64_t> published_ids;
+    std::vector<Vec3> published_positions;
     std::size_t capacity = 0;
     std::size_t triangle_capacity = 0;
     uint32_t buckets = 0;

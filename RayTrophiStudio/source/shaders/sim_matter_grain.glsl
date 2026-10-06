@@ -54,7 +54,7 @@ const uint BUCKET = 16u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 9u;
+const uint REVISION = 10u;
 
 uint readBank() { return pc.substep.x & 1u; }
 uint writeBank() { return readBank() ^ 1u; }
@@ -302,6 +302,27 @@ void main() {
     // when the history buffers were (re)allocated.
     if (i < 3u*pc.meta.y) bucket_counts[i] = 0u;
     if (pc.substep.y != 0u && i < 2u*pc.meta.x) history_owner[i] = EMPTY;
+#elif defined(GRAIN_PERMUTE)
+    // Frame start, before the clear, only when the grain order changed
+    // (cell sort, births, removals elsewhere in the array). bucket_slots holds
+    // new index -> previous index (EMPTY = new grain). Bank 0 holds the last
+    // frame's final history (its bank stride is irrelevant: offset 0).
+    if (i >= pc.meta.x) return;
+    uint previous = bucket_slots[i];
+    uint dst = slotBase(1u,i);
+    if (previous == EMPTY) {
+        history_owner[pc.meta.x+i] = EMPTY;
+        return;
+    }
+    uint src = slotBase(0u,previous);
+    for (uint s=0u; s<2u*SLOTS; ++s) history[dst+s] = history[src+s];
+    history_owner[pc.meta.x+i] = history_owner[previous];
+#elif defined(GRAIN_PERMUTE_COPY)
+    // Second half: the gathered bank 1 becomes bank 0 at the new indices.
+    if (i >= pc.meta.x) return;
+    uint dst = slotBase(0u,i), src = slotBase(1u,i);
+    for (uint s=0u; s<2u*SLOTS; ++s) history[dst+s] = history[src+s];
+    history_owner[i] = history_owner[pc.meta.x+i];
 #elif defined(GRAIN_HASH)
     if (i < pc.meta.x) insert(i, position(i,0u), 0u);
 #elif defined(GRAIN_STEP)

@@ -11,6 +11,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <limits>
+#include <unordered_map>
 #include <utility>
 
 namespace RayTrophiSim::Fluid {
@@ -169,30 +170,6 @@ bool ensureCollider(SimulationComputeContext& compute, MatterGrainGpuRuntime& ru
     runtime.triangle_capacity = triangles;
     runtime.collider_uploaded = false;
     return true;
-}
-
-// Identity + position of the first `count` grains, word-wise multiply-xor.
-// Velocities are left out on purpose: the host legitimately continues them
-// between steps (liquid drag reaction, wet-grain absorption momentum), and
-// springs belong to the contact geometry, which positions fix.
-uint64_t grainStateSignature(const FluidParticles& p, std::size_t count) {
-    uint64_t h = 0x9e3779b97f4a7c15ull ^ count;
-    auto mix = [&h](const void* data, std::size_t bytes) {
-        const auto* bytes_in = static_cast<const unsigned char*>(data);
-        std::size_t i = 0;
-        for (; i + 8 <= bytes; i += 8) {
-            uint64_t word;
-            std::memcpy(&word, bytes_in + i, 8);
-            h = (h ^ word) * 0x100000001b3ull;
-            h ^= h >> 29;
-        }
-        for (; i < bytes; ++i) {
-            h = (h ^ bytes_in[i]) * 0x100000001b3ull;
-        }
-    };
-    mix(p.particle_id.data(), count * sizeof(uint64_t));
-    mix(p.position.data(), count * sizeof(Vec3));
-    return h;
 }
 
 } // namespace
@@ -457,14 +434,35 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     constants.rolling[1] = gravity.x;
     constants.rolling[2] = gravity.y;
     constants.rolling[3] = gravity.z;
-    // Births append grains with larger identities at the end, so the grains
-    // this runtime published must still be the unchanged prefix.
+    // Map the incoming order onto the published one by identity. A moved
+    // survivor means a foreign state (reset/scrub/restore/edit): drop all
+    // history. Otherwise a new order is gathered on the device.
     std::string reset_reason = runtime.history_fresh
-        ? (runtime.published_count ? "allocation" : "first_step") : "";
-    if (!runtime.history_fresh && (runtime.published_count > count ||
-            grainStateSignature(p, runtime.published_count) != runtime.published_signature)) {
-        runtime.history_fresh = true;
-        reset_reason = "host_state_changed";
+        ? (runtime.published_ids.empty() ? "first_step" : "allocation") : "";
+    std::vector<uint32_t> previous_index;
+    bool remap = false;
+    if (!runtime.history_fresh) {
+        std::unordered_map<uint64_t, uint32_t> published;
+        published.reserve(runtime.published_ids.size());
+        for (std::size_t k = 0; k < runtime.published_ids.size(); ++k) {
+            published.emplace(runtime.published_ids[k], static_cast<uint32_t>(k));
+        }
+        previous_index.assign(count, 0xffffffffu);
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto found = published.find(p.particle_id[i]);
+            if (found == published.end()) {
+                continue;  // birth: starts without springs
+            }
+            const Vec3& was = runtime.published_positions[found->second];
+            if (std::memcmp(&was, &p.position[i], sizeof(Vec3)) != 0) {
+                runtime.history_fresh = true;
+                reset_reason = "host_state_changed";
+                break;
+            }
+            previous_index[i] = found->second;
+            remap = remap || found->second != i;
+        }
+        remap = remap && !runtime.history_fresh;
     }
     // Bridges reach past contact up to the rupture distance; the hash cell
     // grows by that skin so the 27-cell search still finds every bridge.
@@ -485,6 +483,29 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         runtime.scratch, runtime.history, runtime.history_owner, runtime.diagnostics,
         runtime.triangles, runtime.collider_nodes, runtime.collider_patches, runtime.coupling};
     static_assert(sizeof(handles) / sizeof(handles[0]) == 15);
+    if (remap) {
+        // bucket_slots is scratch until the clear/hash below: it carries the
+        // new -> previous index map for the two gather dispatches.
+        if (!compute.uploadBuffer(runtime.bucket_slots, previous_index.data(),
+                count * sizeof(uint32_t))) {
+            error = "grain history remap upload failed";
+            return false;
+        }
+        for (const char* kernel : {"sim_matter_grain_permute", "sim_matter_grain_permute_copy"}) {
+            ComputeDispatch command;
+            command.kernel = kernel;
+            command.buffers = handles;
+            command.buffer_count = 15;
+            constants.substep = 0;
+            command.constants = &constants;
+            command.constants_size = sizeof(constants);
+            command.groups.groups_x = (constants.count + 255u) / 256u;
+            if (!compute.dispatch(command)) {
+                error = std::string("grain stage failed: ") + kernel;
+                return false;
+            }
+        }
+    }
     if (!dispatchMatterGrainStages(substeps, [&](const char* kernel, uint32_t substep) {
             ComputeDispatch command;
             command.kernel = kernel;
@@ -558,8 +579,8 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     result.advanceMaterialCoordinates();
     p = std::move(result);
     runtime.history_fresh = false;
-    runtime.published_count = count;
-    runtime.published_signature = grainStateSignature(p, count);
+    runtime.published_ids = p.particle_id;
+    runtime.published_positions = p.position;
     report.substeps = static_cast<int>(substeps);
     report.dispatches = static_cast<int>(substeps + 2);
     report.substep_dt = dt / substeps;
@@ -571,6 +592,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     report.liquid_bridges = diagnostics[5];
     report.history_reset = history_reset;
     report.history_reset_reason = reset_reason;
+    report.history_remapped = remap;  // +2 gather dispatches, outside `dispatches`
     report.grains = count;
     report.working_set_bytes = working;
     return true;

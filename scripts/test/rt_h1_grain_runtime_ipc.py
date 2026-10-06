@@ -265,6 +265,11 @@ def main():
                     assert first['history_reset_reason'] in ('host_state_changed', 'allocation'), first
                 carried = [r for r in runs[3:] if r['runtime']['history_reset_this_step']]
                 assert not carried, ('history reset while the state was unchanged', carried[:2])
+                # B8: grains are re-ordered by cell every frame; falling grains
+                # change cells, so the device gather must have run.
+                remapped = [r for r in runs[1:] if r['runtime'].get('history_remapped')]
+                assert remapped, 'cell order never changed: remap path untested'
+                data['history_remapped_steps'] = len(remapped)
             data['completed'] = True
             return
         if args.coexist_only or args.porous_only or args.wet_only:

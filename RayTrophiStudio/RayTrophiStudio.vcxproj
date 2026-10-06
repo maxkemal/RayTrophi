@@ -595,6 +595,8 @@
     <ClInclude Include="source\src\Physics\Fluid\FluidGpuOccupancy.inl" />
     <None Include="source\shaders\sim_matter_partition.comp" />
     <None Include="source\shaders\sim_fluid_divergence_porous.comp" />
+    <None Include="source\shaders\sim_matter_grain_permute.comp" />
+    <None Include="source\shaders\sim_matter_grain_permute_copy.comp" />
     <None Include="source\shaders\sim_fluid_occupancy.comp" />
     <ClInclude Include="source\include\Fluid\APICFluidSolver.h" />
     <ClInclude Include="source\include\Fluid\FluidParticleSeedPattern.h" />
