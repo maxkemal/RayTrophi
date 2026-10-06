@@ -56,6 +56,9 @@ F ≤ μr·λ ise yalnız öteleme (tutunma ya da dönmeden kayma), değilse yuv
 kopyasında eğim tutunması 20/40/80 alt adımda 1e-17, yuvarlanma ivmesi 1.739 (analitik 1.738),
 kayma ivmesi .657 (analitik .657). Revision **12**. Rampa collider gizmosu döndürülmüş
 plane'de yanıltıcı görünüyor; tane geometrisi doğru (DEM rampa testi analitik düzleme göre).
+**Altıncı tur:** XPBD eğim tutunması 0.0 (düzeltme çalıştı). `--xpbd-compare` yığın kolu:
+XPBD malzemesi alt adımla değişiyor (rms .363/.386/.435 @20/40/80, DEM .467; COM kayması %5.4 >
+%5) → H1-G0 kararı **DEM**, XPBD sonraki partide sökülür (tablo: roadmap B7).
 
 0. **Statik sözleşme** `python scripts/test/check_matter_grain_contracts.py` → PASS.
 1. **Açılış/revizyon.** Herhangi bir tane koşusunda `shader revision mismatch` yok. Varsa
