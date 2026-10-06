@@ -41,6 +41,9 @@ def main():
                         help="B6 wet grains: cohesion A/B (column collapse) and water absorption from a pool")
     parser.add_argument("--coexist-only", action="store_true",
                         help="water + grains in one domain: buoyancy/drag A/B and a water pour onto a pile")
+    parser.add_argument("--readiness-only", action="store_true",
+                        help="grain blockers: readiness report, API edits that would break a grain domain are "
+                             "rejected unchanged, old grain keys name their replacement")
     parser.add_argument("--coexist-hydrostatic", action="store_true",
                         help="with --coexist-only: volume exclusion off, so the immersed arm uses "
                              "hydrostatic buoyancy instead of the projection's pressure gradient")
@@ -256,6 +259,36 @@ def main():
                   'rms', data['xpbd']['substep_rms_drift'], flush=True)
             print('xpbd rms / dem', data['xpbd']['rms_vs_dem'], 'step ms / dem', data['xpbd']['cost_vs_dem'],
                   flush=True)
+            data['completed'] = True
+            return
+        if args.readiness_only:
+            # One rule (matterGrainBlockers) behind validation, the panel locks and
+            # matter_models: a grain domain cannot be moved off what the solver needs.
+            call('fluid.reset')
+            readiness = call('fluid.matter_models', domain=DOMAIN)['grain_readiness']
+            data['readiness'] = {'before': readiness}
+            assert readiness['enabled'] and readiness['ready'], readiness
+            rejected = {}
+            for method, params in [('fluid.set_param', dict(domain=DOMAIN, backend='cpu')),
+                                   ('fluid.set_param', dict(domain=DOMAIN, boundary='open')),
+                                   ('fluid.set_pore_exchange', dict(domain=DOMAIN, enabled=True)),
+                                   ('fluid.set_grain_settings', dict(domain=DOMAIN, normal_damping_n_s_m=4.)),
+                                   ('fluid.set_grain_settings', dict(domain=DOMAIN, drag_viscosity_pa_s=1e-3))]:
+                try:
+                    call(method, **params)
+                    rejected[f'{method} {sorted(params)}'] = None
+                except RuntimeError as error:
+                    rejected[f'{method} {sorted(params)}'] = str(error)
+            data['readiness']['rejected'] = rejected
+            after = call('fluid.matter_models', domain=DOMAIN)['grain_readiness']
+            data['readiness']['after'] = after
+            save()
+            for name, message in rejected.items():
+                print('rejected' if message else 'ACCEPTED', name, (message or '')[:120], flush=True)
+            assert all(rejected.values()), ('an edit that breaks the grain domain was accepted', rejected)
+            assert after['ready'] and not after['blockers'], ('a rejected edit still changed the domain', after)
+            assert 'restitution' in rejected[next(k for k in rejected if 'normal_damping' in k)]
+            print('PASS grain readiness', flush=True)
             data['completed'] = True
             return
         if args.history_only:

@@ -24,7 +24,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--counts', nargs='+', type=int, default=[1024, 4096, 16384])
     parser.add_argument('--visual-only', action='store_true')
+    # H1-G0 cost at scale: e.g. --counts 16384 --solvers dem xpbd:20 xpbd:40 xpbd:80
+    # --steps 120. Each variant runs every count; the table compares median ms
+    # and the end-state shape (COM y, horizontal rms) against the DEM arm.
+    parser.add_argument('--solvers', nargs='+', default=['dem'])
+    parser.add_argument('--steps', type=int, default=30)
     args = parser.parse_args()
+    assert args.steps >= 10
+    variants = []
+    for solver in args.solvers:
+        kind, _, substeps = solver.partition(':')
+        assert kind in ('dem', 'xpbd'), solver
+        variants.append((kind, int(substeps or 20)))
     assert all(1 <= n <= 40000 for n in args.counts)
     client = RtIpc()
     data = {'arms': [], 'dt_s': 1/60, 'duration_s': .5, 'warmup_steps': 5,
@@ -99,16 +110,23 @@ def main():
              fluid_temperature_override=True, fluid_temperature_kelvin=293.15)
         source_ready = True
         if not args.visual_only:
+          for kind, xpbd_substeps in variants:
+            # Grain settings change only on an empty domain.
+            call('timeline.set_frame', frame=0)
+            call('fluid.reset')
+            call('fluid.set_grain_settings', domain=DOMAIN, solver_kind=kind,
+                 xpbd_substeps=xpbd_substeps)
             for count in args.counts:
                 call('timeline.set_frame', frame=0)
                 call('fluid.reset')
                 call('flow_source.update', name=SOURCE, enabled=True,
                      max_emitted_particles=count, fluid_particles_per_second=count*1.01*60)
                 control = call('sim.control_state')
-                arm = {'requested': count, 'samples': []}
+                arm = {'requested': count, 'solver': kind, 'xpbd_substeps': xpbd_substeps,
+                       'samples': []}
                 data['arms'].append(arm)
-                print('START dense', count, flush=True)
-                for step in range(1, 31):
+                print('START dense', kind, xpbd_substeps if kind == 'xpbd' else '', count, flush=True)
+                for step in range(1, args.steps + 1):
                     call('fluid.step', dt=1/60)
                     assert call('sim.control_state') == control
                     inventory = call('fluid.matter_models', domain=DOMAIN)
@@ -131,12 +149,28 @@ def main():
                     'median_download_bytes': statistics.median(s['stats']['download_bytes'] for s in samples),
                     'dry_mass_drift_kg': max(s['granular']['dry_mass_kg'] for s in arm['samples'])-
                         min(s['granular']['dry_mass_kg'] for s in arm['samples']),
-                    'last_runtime': arm['samples'][-1]['runtime']}
+                    'last_runtime': arm['samples'][-1]['runtime'],
+                    'com_y': arm['samples'][-1]['granular']['dry_center_of_mass'][1],
+                    'rms': arm['samples'][-1]['granular']['horizontal_rms_radius_m']}
                 assert arm['summary']['dry_mass_drift_kg'] <= 1e-5
                 print('RESULT', json.dumps(arm['summary']), flush=True)
                 save()
+        if len(variants) > 1:
+            print('solver   substeps  count   median_ms  p95_ms  com_y    rms     ms/dem  rms/dem', flush=True)
+            for arm in data['arms']:
+                dem = next((a for a in data['arms'] if a['solver'] == 'dem' and
+                            a['requested'] == arm['requested']), None)
+                sm = arm['summary']
+                ratio_ms = sm['median_sim_ms']/dem['summary']['median_sim_ms'] if dem else float('nan')
+                ratio_rms = sm['rms']/dem['summary']['rms'] if dem else float('nan')
+                arm['vs_dem'] = {'ms': ratio_ms, 'rms': ratio_rms}
+                print(f"{arm['solver']:<8} {sm['last_runtime'].get('substeps', 0):>8}  {arm['requested']:>5}  "
+                      f"{sm['median_sim_ms']:>9.2f}  {sm['p95_sim_ms']:>6.2f}  {sm['com_y']:.4f}  "
+                      f"{sm['rms']:.4f}  {ratio_ms:>6.2f}  {ratio_rms:>7.3f}", flush=True)
+            save()
         call('timeline.set_frame', frame=0)
         call('fluid.reset')
+        call('fluid.set_grain_settings', domain=DOMAIN, solver_kind='dem')
         sand = call('material.create', type='substance:Sand', name='H1_Dense_Dry_Sand')
         floor_mat = call('material.create', type='principled', name='H1_Dense_Floor')
         ramp_mat = call('material.create', type='principled', name='H1_Dense_Ramp')
