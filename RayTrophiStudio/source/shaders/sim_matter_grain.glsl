@@ -54,7 +54,7 @@ const uint BUCKET = 16u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 11u;
+const uint REVISION = 12u;
 
 uint readBank() { return pc.substep.x & 1u; }
 uint writeBank() { return readBank() ^ 1u; }
@@ -217,22 +217,25 @@ void xpbdConstraint(vec3 n, float penetration, vec3 motion, float wi, float wj,
     vec3 slip = motion-dot(motion,n)*n;
     float s = length(slip);
     if (s <= 1e-12) return;
-    // Static hold: when the tangential load fits inside both the sliding
-    // cone (mu) and the rolling resistance (mu_r; a sphere rolls unless
-    // tan(theta) <= mu_r), the contact holds the grain as a whole, so the
-    // correction is pure translation. Routing it through the 3.5/m rolling
-    // inverse mass would stop only the contact point, leave 2.5/3.5 of the
-    // slip in the centre, and the spin cap below would then kill the spin
-    // but not that motion: a grain sliding down a slope without rotating.
+    // Friction as translation while the rolling resistance can carry its
+    // torque: the full-stop translational correction, capped by the sliding
+    // cone, is F; if F <= mu_r * lambda the contact neither rolls (torque
+    // F r fits inside mu_r lambda r) nor needs rotation, so the grain sticks
+    // (F below the cone) or slides without spinning. Routing it through the
+    // 3.5/m rolling inverse mass instead stopped only the contact point; the
+    // spin cap then removed the spin but not the centre's motion, and a grain
+    // held on a slope crept at 2.5 h g sin(theta) forever (live: 3.3 mm/s).
     float translate = wi+wj;
-    if (s/translate <= min(pc.step_contact.w, pc.rolling.x)*lambda) {
-        ++g_sticking;
-        g_dx -= wi*slip/translate;
+    float cone = pc.step_contact.w*lambda;
+    float force = min(s/translate, cone);
+    if (force <= pc.rolling.x*lambda) {
+        if (s/translate <= cone) ++g_sticking;
+        g_dx -= wi*slip*(force/s);
         return;
     }
-    // Tangential generalized inverse mass of a sphere: 1/m + r^2/I = 3.5/m.
+    // Rolls: tangential generalized inverse mass of a sphere 1/m + r^2/I.
     float wt = 3.5*(wi+wj);
-    float limit = pc.step_contact.w*lambda;
+    float limit = cone;
     vec3 correction = s/wt <= limit ? slip/wt : slip*(limit/s);
     if (s/wt <= limit) ++g_sticking;
     g_dx -= wi*correction;
