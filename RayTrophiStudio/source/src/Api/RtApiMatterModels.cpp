@@ -152,6 +152,17 @@ nlohmann::json getMatterModels(const std::string& domain, bool include_transfer)
             {"models", models}, {"identity_scope", "domain"},
             {"grain_settings", RayTrophiSim::Fluid::matterGrainParamsToJson(
                 domains[index].fluid_params.grain)},
+            {"grain_readiness", [&] {
+                // Same rule the panel locks and set_grain_settings use.
+                nlohmann::json blockers = nlohmann::json::array();
+                for (const auto& b : RayTrophiSim::Fluid::matterGrainBlockers(domains[index])) {
+                    blockers.push_back({{"code", b.code}, {"message", b.message}});
+                }
+                return nlohmann::json{{"enabled", domains[index].fluid_params.grain.enabled},
+                    {"ready", blockers.empty()}, {"blockers", blockers},
+                    {"step_held", state && state->fluid_stats.mixed_step_held},
+                    {"status", state ? state->fluid_stats.gpu_status : std::string()}};
+            }()},
             {"grain_diagnostics", state && domains[index].fluid_params.grain.enabled
                 ? RayTrophiSim::Fluid::matterGrainDiagnostics(
                     state->particles, domains[index].fluid_params.grain,

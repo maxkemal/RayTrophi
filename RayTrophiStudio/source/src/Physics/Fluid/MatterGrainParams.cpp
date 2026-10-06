@@ -206,19 +206,45 @@ std::size_t ensureMatterGrainRestMasses(FluidParticles& particles,
     return initialized;
 }
 
+std::vector<MatterGrainBlocker> matterGrainBlockers(const SimulationGridDomainDesc& d) {
+    std::vector<MatterGrainBlocker> blockers;
+    const auto add = [&](const char* code, const char* message) {
+        blockers.push_back({code, message});
+    };
+    if (d.type != SimulationDomainType::Matter) {
+        add("not_matter", "Grains run in a Matter domain only.");
+    }
+    if (d.backend != SimulationDomainBackend::GPU_Vulkan) {
+        add("backend", "Grains need the Vulkan backend.");
+    }
+    if (d.boundary_mode != SimulationGridDomainBoundaryMode::Closed) {
+        add("boundary", "Grains need a Closed boundary.");
+    }
+    if (d.fluid_params.pore_exchange.enabled) {
+        add("pore_exchange", "Pore water exchange cannot run with grains; use wet grains.");
+    }
+    if (d.fluid_params.pore_exchange.wet_response_enabled) {
+        add("wet_response", "Pore wet response cannot run with grains; use wet grains.");
+    }
+    if (d.fluid_params.thermal_liquid_enabled) {
+        add("thermal_liquid", "Thermal liquid cannot run with grains yet.");
+    }
+    if (d.fluid_solid_phase_enabled) {
+        add("solid_phase", "Solid phase cannot run with grains yet.");
+    }
+    return blockers;
+}
+
 bool validateMatterGrainDomain(const SimulationGridDomainDesc& d,
                               const MatterGrainParams& p, std::string& error) {
-    if (p.enabled && (d.type != SimulationDomainType::Matter ||
-        d.backend != SimulationDomainBackend::GPU_Vulkan ||
-        d.boundary_mode != SimulationGridDomainBoundaryMode::Closed ||
-        d.fluid_params.pore_exchange.enabled ||
-        d.fluid_params.pore_exchange.wet_response_enabled ||
-        d.fluid_params.thermal_liquid_enabled || d.fluid_solid_phase_enabled)) {
-        error = "dry grain requires Closed Vulkan Matter; disable pore/wet/thermal/solid";
-        return false;
-    }
     error.clear();
-    return true;
+    if (!p.enabled) {
+        return true;
+    }
+    for (const auto& blocker : matterGrainBlockers(d)) {
+        error += (error.empty() ? "" : " ") + blocker.message;
+    }
+    return error.empty();
 }
 
 } // namespace RayTrophiSim::Fluid
