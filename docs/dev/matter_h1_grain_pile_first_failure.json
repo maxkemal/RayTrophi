@@ -1,0 +1,443 @@
+{
+  "arms": [],
+  "completed": false,
+  "original": {
+    "control": {
+      "driver": "none",
+      "dropped_seeds": [],
+      "epoch": 0,
+      "frame": 0,
+      "playing": false,
+      "script_driving": false,
+      "script_sim_seconds": 0.0
+    },
+    "domains": [
+      {
+        "active_density_cells": 0,
+        "anisotropy_enabled": false,
+        "anisotropy_max_stretch": 4.0,
+        "anisotropy_neighbor_min": 6,
+        "anisotropy_radius_voxels": 2.5,
+        "backend": "vulkan",
+        "boundary": "closed",
+        "coord_space": "material",
+        "domain_max": [
+          0.6000000238418579,
+          3.0,
+          0.6000000238418579
+        ],
+        "domain_min": [
+          -0.6000000238418579,
+          0.0,
+          -0.6000000238418579
+        ],
+        "elastic_model_particles": 0,
+        "enabled": false,
+        "fluid_model_particles": 0,
+        "fog_erosion_depth": 0.0,
+        "fog_erosion_detail": 3,
+        "fog_erosion_seed": 0,
+        "fog_erosion_size": 0.20000000298023224,
+        "fog_erosion_strength": 0.0,
+        "fog_resolution_multiplier": 1,
+        "fog_spread_voxels": 1.5,
+        "gas_phase_active_cells": 0,
+        "gas_phase_energy_j": 0.0,
+        "gas_phase_mass_centroid": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "gas_phase_mass_kg": 0.0,
+        "grain_size_variation": 0.2199999988079071,
+        "granular_cohesion": 0.0,
+        "granular_compaction_capped": 0,
+        "granular_damage_over_10": 0,
+        "granular_damage_over_50": 0,
+        "granular_damage_over_90": 0,
+        "granular_damage_rate": 8.0,
+        "granular_damaged": 0,
+        "granular_detached": 0,
+        "granular_dilatancy": 5.0,
+        "granular_effective_young_modulus": 0.0,
+        "granular_enabled": true,
+        "granular_fracture_strain": 0.019999999552965164,
+        "granular_friction_angle": 35.0,
+        "granular_hardening": 0.0,
+        "granular_healing_rate": 0.0,
+        "granular_invalid": 0,
+        "granular_max_accumulated_plastic": 0.0,
+        "granular_max_damage": 0.0,
+        "granular_max_fracture_history": 0.0,
+        "granular_max_plastic": 0.0,
+        "granular_max_solver_substeps": 32,
+        "granular_max_yield": 0.0,
+        "granular_mean_accumulated_plastic": 0.0,
+        "granular_mean_damage": 0.0,
+        "granular_mean_fracture_history": 0.0,
+        "granular_min_softening": 1.0,
+        "granular_model_particles": 0,
+        "granular_overburden_pressure": 0.0,
+        "granular_physical_carriers": true,
+        "granular_poisson_ratio": 0.25,
+        "granular_rebonding": false,
+        "granular_requested_young_modulus": 0.0,
+        "granular_required_substeps": 1,
+        "granular_residual_strength": 0.05000000074505806,
+        "granular_sleeping": 0,
+        "granular_softened": 0,
+        "granular_softening_range": 40.0,
+        "granular_softening_temperature": 0.0,
+        "granular_solver_substeps": 1,
+        "granular_stiffness_below_load": false,
+        "granular_stiffness_capped": false,
+        "granular_strain_limited": 0,
+        "granular_strain_rate": 0.0,
+        "granular_strain_substeps": 1,
+        "granular_tack_peak": 1.0,
+        "granular_tensile_cutoff": 0.0,
+        "granular_thermal_conductivity": 0.0,
+        "granular_wave_substeps": 1,
+        "granular_yielded": 0,
+        "granular_young_modulus": 200000.0,
+        "granular_young_modulus_for_load": 0.0,
+        "hidden_particles": 0,
+        "id": 1,
+        "interior_fluid_cells": 0,
+        "kernel_radius_voxels": 2.0,
+        "kinematic_viscosity": 0.0,
+        "label_routes": {
+          "body": "follow",
+          "bubble": "splat",
+          "foam": "splat",
+          "frozen": "follow",
+          "mist": "fog",
+          "spray": "splat",
+          "unknown": "follow"
+        },
+        "live_state": false,
+        "max_density": 0.0,
+        "max_particles": 100000,
+        "name": "H1_Grain_Runtime",
+        "narrow_band_voxels": 3.0,
+        "particle_count": 0,
+        "particle_kelvin_measured": false,
+        "particle_labels": {
+          "available": false,
+          "classifier": "mass+neighborhood_v2",
+          "detach_max_neighbors": 2,
+          "last_step": {
+            "bin_milliseconds": 0.0,
+            "center_resolved": 0,
+            "changed": 0,
+            "classify_milliseconds": 0.0,
+            "milliseconds": 0.0,
+            "occupied_bins": 0,
+            "on_gpu": false,
+            "particles": 0
+          },
+          "mist_generation": true,
+          "mist_mass_fraction_max": 0.15000000596046448,
+          "primary": {
+            "body": 0,
+            "bubble": 0,
+            "foam": 0,
+            "frozen": 0,
+            "mist": 0,
+            "spray": 0,
+            "unknown": 0
+          },
+          "primary_complete": false,
+          "primary_particles": 0,
+          "radius_voxels": 1.5,
+          "rejoin_min_neighbors": 6,
+          "render_routing": "substance+label",
+          "secondary": {
+            "body": 0,
+            "bubble": 0,
+            "foam": 0,
+            "frozen": 0,
+            "mist": 0,
+            "spray": 0,
+            "unknown": 0
+          },
+          "secondary_affects_mass": false,
+          "secondary_particles": 0
+        },
+        "particle_max_kelvin": 0.0,
+        "particle_min_kelvin": 0.0,
+        "particle_radius_voxels": 0.550000011920929,
+        "phases": [
+          "gas",
+          "granular"
+        ],
+        "pore_amount": 0.0,
+        "pore_detail": 0.5,
+        "pore_scale": 0.05000000074505806,
+        "position_smoothing": 0.8999999761581421,
+        "preset": "custom",
+        "primary_visual_children": 1,
+        "render_mode": "surface",
+        "reseed_added_particles": 0,
+        "reseed_removed_particles": 0,
+        "sealed_pocket_cells": 0,
+        "sealed_pockets": 0,
+        "sealed_pockets_measured": false,
+        "smoothing_iterations": 2,
+        "solid_phase": false,
+        "solid_phase_cells": 0,
+        "solid_phase_fill": 0.25,
+        "solid_phase_particles": 0,
+        "splat_geometry": "icosphere",
+        "splat_geometry_source": "",
+        "splat_material": "",
+        "splat_radius_factor": 0.44999998807907104,
+        "splat_size_multiplier": 1.0,
+        "splat_subdivisions": 0,
+        "splat_triangles": 0,
+        "substance_materials": [],
+        "substances": [],
+        "surface_active_cells": 0,
+        "surface_build_ms": 0.17010000348091125,
+        "surface_grid_dim": [
+          12,
+          30,
+          12
+        ],
+        "surface_material": "",
+        "surface_measured": true,
+        "surface_offset_voxels": 0.6499999761581421,
+        "surface_resolution_multiplier": 1,
+        "surface_voxel": 0.10000000149011612,
+        "thermal_air_cooled_particles": 0,
+        "thermal_air_cooling_rate": 0.15000000596046448,
+        "thermal_ambient_kelvin": 293.0,
+        "thermal_cold_unsupported": 0,
+        "thermal_cold_viscosity": 0.05000000074505806,
+        "thermal_contact_cooled_particles": 0,
+        "thermal_contact_cooling_rate": 2.0,
+        "thermal_freeze_kelvin": 330.0,
+        "thermal_froze_this_frame": 0,
+        "thermal_frozen_particles": 0,
+        "thermal_liquid_enabled": false,
+        "thermal_max_kelvin": 0.0,
+        "thermal_max_viscosity": 0.0,
+        "thermal_mean_kelvin": 0.0,
+        "thermal_measured": false,
+        "thermal_melted_this_frame": 0,
+        "thermal_min_kelvin": 0.0,
+        "thermal_min_viscosity": 0.0,
+        "thermal_viscosity_field": false,
+        "thermal_viscosity_range": 25.0,
+        "type": "matter",
+        "unresolved_model_particles": 0,
+        "uvw_available": false,
+        "uvw_dim": [
+          0,
+          0,
+          0
+        ],
+        "uvw_drift": 0.0,
+        "uvw_origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "uvw_particles": 0,
+        "uvw_refresh_period": 240,
+        "uvw_voxel": 0.0,
+        "views": [
+          {
+            "labels": [],
+            "live": false,
+            "particles": 0,
+            "substances": [],
+            "untagged": true,
+            "vdb_id": -1,
+            "view": "sdf",
+            "whitewater": 0
+          },
+          {
+            "labels": [],
+            "live": false,
+            "particles": 0,
+            "substances": [],
+            "untagged": false,
+            "vdb_id": -1,
+            "view": "splat",
+            "whitewater": 0
+          },
+          {
+            "labels": [],
+            "live": false,
+            "particles": 0,
+            "substances": [],
+            "untagged": false,
+            "vdb_id": -1,
+            "view": "fog",
+            "whitewater": 0
+          }
+        ],
+        "views_measured": false,
+        "virtual_grain_budget": 8000000,
+        "virtual_grain_count": 0,
+        "virtual_grain_rt_estimated_bytes": 0,
+        "virtual_grains_effective": 8,
+        "virtual_grains_requested": 8,
+        "viscosity_sweeps": 1,
+        "viscosity_wall_slip": 0.0,
+        "visible": false,
+        "voxel_size": 0.10000000149011612,
+        "whitewater_visual_children": 1
+      }
+    ],
+    "sources": [
+      {
+        "density": 1.0,
+        "domain": "H1_Grain_Runtime",
+        "enabled": false,
+        "end_time": 0.03333333507180214,
+        "falloff": 1.0,
+        "fluid_emit_along_normal": false,
+        "fluid_particles_per_second": 3878.39990234375,
+        "fluid_substance": "Sand",
+        "fluid_temperature_kelvin": 293.1499938964844,
+        "fluid_temperature_override": true,
+        "fluid_velocity_spread": 0.0,
+        "fuel": 0.0,
+        "inherit_velocity": 1.0,
+        "initial_constitutive_model": "granular",
+        "max_emitted_particles": 64,
+        "name": "H1_Grain_Runtime_Source",
+        "parent_object": "",
+        "particle_pool_weight": 1.0,
+        "phase": "liquid",
+        "pool_granted_particles": 0,
+        "pool_requested_particles": 0,
+        "position": [
+          0.0,
+          0.25,
+          0.0
+        ],
+        "radius": 0.1599999964237213,
+        "source_mode": "point",
+        "source_object": "",
+        "start_time": 0.0,
+        "temperature": 0.0,
+        "use_particle_limit": true,
+        "use_time_limit": true,
+        "velocity": [
+          0.0,
+          -0.20000000298023224,
+          0.0
+        ],
+        "velocity_coupling": 8.0,
+        "velocity_space": "local"
+      }
+    ],
+    "colliders": []
+  },
+  "pile": [
+    {
+      "dt": 0.016666666666666666,
+      "samples": [
+        {
+          "step": 1,
+          "granular": {
+            "bounds_max": [
+              0.22077703475952148,
+              0.49424099922180176,
+              0.1616584211587906
+            ],
+            "bounds_min": [
+              -0.19822700321674347,
+              0.030104300007224083,
+              -0.17959412932395935
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.012739338852043149,
+              0.2523808307305444,
+              -0.004062330306624063
+            ],
+            "dry_mass_kg": 12.800000190734863,
+            "horizontal_rms_radius_m": 0.12349203885455344,
+            "kinetic_energy_j": 108.38090955941163,
+            "mean_saturation": 0.0,
+            "particles": 64,
+            "pore_water_kg": 0.0
+          },
+          "grain": {
+            "angular_momentum_kg_m2_s": [
+              -0.018898588510444875,
+              -2.0348429971041304e-06,
+              -0.05927055287563
+            ],
+            "dissipation_heat_coupled": false,
+            "frame_end_host_publication": true,
+            "history_static_friction": false,
+            "max_spin_rad_s": 71.1239684369383,
+            "radius_m": 0.02500000037252903,
+            "solver": "force_dem_viscous_sliding_candidate",
+            "spin_energy_j": 1.018254219297018,
+            "transport_owner": "grain",
+            "wet_coupling": false
+          }
+        },
+        {
+          "step": 2,
+          "granular": {
+            "bounds_max": [
+              0.34267961978912354,
+              0.6391258835792542,
+              0.23742711544036865
+            ],
+            "bounds_min": [
+              -0.28764015436172485,
+              0.013124815188348293,
+              -0.3091088831424713
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0126546390238218,
+              0.24754125867912088,
+              -0.004155263282882514
+            ],
+            "dry_mass_kg": 12.800000190734863,
+            "horizontal_rms_radius_m": 0.1672548422854066,
+            "kinetic_energy_j": 101.41576532006353,
+            "mean_saturation": 0.0,
+            "particles": 64,
+            "pore_water_kg": 0.0
+          },
+          "grain": {
+            "angular_momentum_kg_m2_s": [
+              -0.12213535145757619,
+              -0.005982988926534056,
+              -0.23563098823020642
+            ],
+            "dissipation_heat_coupled": false,
+            "frame_end_host_publication": true,
+            "history_static_friction": false,
+            "max_spin_rad_s": 86.22989130460718,
+            "radius_m": 0.02500000037252903,
+            "solver": "force_dem_viscous_sliding_candidate",
+            "spin_energy_j": 1.450599264756729,
+            "transport_owner": "grain",
+            "wet_coupling": false
+          }
+        }
+      ]
+    }
+  ],
+  "final_control": {
+    "driver": "none",
+    "dropped_seeds": [],
+    "epoch": 0,
+    "frame": 0,
+    "playing": false,
+    "script_driving": false,
+    "script_sim_seconds": 0.0
+  },
+  "restored_authoring": true
+}

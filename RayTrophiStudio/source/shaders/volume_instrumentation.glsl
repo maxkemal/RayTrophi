@@ -116,6 +116,21 @@ layout(set = 0, binding = 29, scalar) buffer VolumeInstrumentationBuffer {
     uint mediumPasses;
     uint arbiterStartedInside;
     uint arbiterInsideFound;
+    // Random walk (volume_closesthit volumeRandomWalk). Separates the walk's
+    // per-event cost: samples (densitySamples / shadowDensitySamples) versus
+    // the two traceRayEXT calls an event can make.
+    //   walkPaths          - walks that scattered at least once
+    //   walkEvents         - scattering events
+    //   walkProbeTraces    - solid probes after a flight (one per event)
+    //   walkShadowTraces   - geometry shadow rays toward the light (NEE)
+    //   walkShadowSkipped  - NEE whose in-volume transmittance was ~0: no trace
+    //   walkEventCapped    - walks cut by random_walk_max_events
+    uint walkPaths;
+    uint walkEvents;
+    uint walkProbeTraces;
+    uint walkShadowTraces;
+    uint walkShadowSkipped;
+    uint walkEventCapped;
 } volumeInstrumentation;
 
 const uint VOLUME_MARCH_COMPLETED = 0u;
@@ -147,6 +162,16 @@ void volumeRecordPass(uint kind) {
     else if (kind == 2u) atomicAdd(volumeInstrumentation.chargedTransmission, 1u);
     else if (kind == 3u) atomicAdd(volumeInstrumentation.chargedOther, 1u);
     else                 atomicAdd(volumeInstrumentation.freePasses, 1u);
+}
+void volumeRecordWalk(uint events, uint probeTraces, uint shadowTraces, uint shadowSkipped,
+                      bool capped) {
+    if (!volumeInstrumentationEnabled()) return;
+    atomicAdd(volumeInstrumentation.walkPaths, 1u);
+    atomicAdd(volumeInstrumentation.walkEvents, events);
+    atomicAdd(volumeInstrumentation.walkProbeTraces, probeTraces);
+    atomicAdd(volumeInstrumentation.walkShadowTraces, shadowTraces);
+    atomicAdd(volumeInstrumentation.walkShadowSkipped, shadowSkipped);
+    if (capped) atomicAdd(volumeInstrumentation.walkEventCapped, 1u);
 }
 void volumeRecordMediumPass() { if (volumeInstrumentationEnabled()) atomicAdd(volumeInstrumentation.mediumPasses, 1u); }
 void volumeRecordArbiterStartedInside(bool found) {

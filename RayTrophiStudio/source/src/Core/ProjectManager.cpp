@@ -1,5 +1,7 @@
+#include "Fluid/MatterPoreAuthoring.h"
 #include "Animation/RigBindingScope.h"
 #include "Fluid/MatterPhaseConfig.h"
+#include "Fluid/FluidFogDensity.h"
 #include "PostProcess/PostService.h"
 #include "ProjectManager.h"
 #include "globals.h"
@@ -5717,6 +5719,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         f["fluid_velocity_spread"] = source.fluid_velocity_spread;
         f["fluid_emit_along_normal"] = source.fluid_emit_along_normal;
         f["fluid_substance"] = source.fluid_substance;
+        f["particle_pool_weight"] = source.particle_pool_weight;
         f["initial_constitutive_model"] =
             RayTrophiSim::Fluid::matterConstitutiveModelName(
                 source.initial_constitutive_model);
@@ -5894,6 +5897,12 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
 
         d["fluid_render_mode"] = static_cast<int>(domain.fluid_render_mode);
         d["fluid_fog_spread_voxels"] = domain.fluid_fog_spread_voxels;
+        d["fluid_fog_erosion_strength"] = domain.fluid_fog_erosion_strength;
+        d["fluid_fog_erosion_size"] = domain.fluid_fog_erosion_size;
+        d["fluid_fog_erosion_detail"] = domain.fluid_fog_erosion_detail;
+        d["fluid_fog_erosion_seed"] = domain.fluid_fog_erosion_seed;
+        d["fluid_fog_erosion_depth"] = domain.fluid_fog_erosion_depth;
+        d["fluid_fog_resolution_multiplier"] = domain.fluid_fog_resolution_multiplier;
         {
             json routes = json::object();
             for (const auto& kv : RayTrophiSim::Fluid::labelRoutesToNames(domain.fluid_label_routes))
@@ -5970,6 +5979,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
                                       ? "solid" : "liquid"}});
             }
             d["fluid_substance_materials"] = binds;
+            d["matter_pore_exchange"] = RayTrophiSim::Fluid::matterPoreParamsToJson(domain.fluid_params.pore_exchange);
             d["fluid_solid_phase_enabled"] = domain.fluid_solid_phase_enabled;
             d["fluid_solid_phase_fill"] = domain.fluid_solid_phase_fill;
         }
@@ -6291,6 +6301,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         // Absent in older files -> empty -> untagged -> the domain material, i.e.
         // exactly how the scene rendered before substances existed.
         source.fluid_substance = item.value("fluid_substance", source.fluid_substance);
+        source.particle_pool_weight = item.value("particle_pool_weight", 1.0f);
         {
             const std::string model = item.value(
                 "initial_constitutive_model", std::string("auto"));
@@ -6547,6 +6558,21 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
 
         if (item.contains("fluid_render_mode")) domain.fluid_render_mode = RayTrophiSim::Fluid::fluidRenderModeFromStored(item["fluid_render_mode"].get<int>());
         domain.fluid_fog_spread_voxels = item.value("fluid_fog_spread_voxels", domain.fluid_fog_spread_voxels);
+        domain.fluid_fog_erosion_strength = std::clamp(
+            item.value("fluid_fog_erosion_strength", domain.fluid_fog_erosion_strength), 0.0f, 1.0f);
+        domain.fluid_fog_erosion_size = std::clamp(
+            item.value("fluid_fog_erosion_size", domain.fluid_fog_erosion_size),
+            RayTrophiSim::Fluid::kFogErosionMinSize, RayTrophiSim::Fluid::kFogErosionMaxSize);
+        domain.fluid_fog_erosion_detail = std::clamp(
+            item.value("fluid_fog_erosion_detail", domain.fluid_fog_erosion_detail),
+            1, RayTrophiSim::Fluid::kFogErosionMaxDetail);
+        domain.fluid_fog_erosion_seed = item.value("fluid_fog_erosion_seed", domain.fluid_fog_erosion_seed);
+        domain.fluid_fog_erosion_depth = std::clamp(
+            item.value("fluid_fog_erosion_depth", domain.fluid_fog_erosion_depth),
+            0.0f, RayTrophiSim::Fluid::kFogErosionMaxDepth);
+        domain.fluid_fog_resolution_multiplier = std::clamp(
+            item.value("fluid_fog_resolution_multiplier", domain.fluid_fog_resolution_multiplier),
+            1, RayTrophiSim::Fluid::kFogMaxResolutionMultiplier);
         if (item.contains("fluid_label_routes") && item["fluid_label_routes"].is_object()) {
             for (auto it = item["fluid_label_routes"].begin(); it != item["fluid_label_routes"].end(); ++it) {
                 if (it.value().is_string())
@@ -6618,6 +6644,9 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         // not a dominant material. Sharpness is now per-substance `miscibility`
         // below. An old project has neither key: the flag is ignored and
         // miscibility defaults to 1.0, which is what the flag's default meant.
+        if (item.contains("matter_pore_exchange")) {
+            domain.fluid_params.pore_exchange = RayTrophiSim::Fluid::matterPoreParamsFromJson(item.at("matter_pore_exchange"));
+        }
         domain.fluid_substance_materials.clear();
         if (item.contains("fluid_substance_materials") &&
             item["fluid_substance_materials"].is_array()) {

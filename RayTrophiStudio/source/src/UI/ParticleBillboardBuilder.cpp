@@ -174,7 +174,10 @@ void appendFluidSphereProxies(const SceneData& scene,
             // A single packed position stream can be pulled only when every
             // live parcel uses the splat representation. Mixed substance/label
             // routes retain the exact CPU-filtered bridge.
-            if (!plan.allLiveIn(RayTrophiSim::Fluid::FluidView::Splat)) continue;
+            if (!plan.allLiveIn(RayTrophiSim::Fluid::FluidView::Splat) ||
+                desc.fluid_params.pore_exchange.wet_appearance_enabled) {
+                continue;
+            }
 
             RayTrophiSim::FluidResidentPositionBuffer resident;
             if (!system.runtime->fluidResidentPositionBuffer(d, compute, resident) ||

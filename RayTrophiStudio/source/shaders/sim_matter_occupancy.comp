@@ -1,0 +1,4 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define MATTER_INDEXED
+#include "sim_fluid_occupancy.glsl"

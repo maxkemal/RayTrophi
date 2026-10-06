@@ -16,7 +16,9 @@ enum class MatterExchangeKind : uint8_t {
     Combustion,
     Pyrolysis,
     MistToGas,
-    Condensation
+    Condensation,
+    Absorption,
+    Drainage
 };
 
 const char* matterExchangeKindName(MatterExchangeKind kind);

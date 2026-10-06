@@ -45,7 +45,7 @@ public:
         cmd.constants = &constants;
         cmd.constants_size = sizeof(constants);
         cmd.groups.groups_x = (static_cast<uint32_t>(cells) + 255u) / 256u;
-        bool ok = compute_->dispatch(cmd);
+        bool ok = Fluid::dispatchMatterGpuModel(*compute_, cmd, buffers_->matter_model);
 
         const ComputeBufferHandle bindings[] = {
             buffers_->fluid_positions, buffers_->fluid_mass_fraction,
@@ -58,12 +58,12 @@ public:
             constants.component = 0;
             constants.particle_count = static_cast<int>(solid_count_);
             cmd.groups.groups_x = (solid_count_ + 255u) / 256u;
-            ok = ok && compute_->dispatch(cmd);
+            ok = ok && Fluid::dispatchMatterGpuModel(*compute_, cmd, buffers_->matter_model);
         }
         constants.component = 1;
         constants.particle_count = static_cast<int>(state_.particles.size());
         cmd.groups.groups_x = (static_cast<uint32_t>(constants.particle_count) + 255u) / 256u;
-        ok = ok && compute_->dispatch(cmd);
+        ok = ok && Fluid::dispatchMatterGpuModel(*compute_, cmd, buffers_->matter_model);
         failed_ = !ok;
         return ok;
     }

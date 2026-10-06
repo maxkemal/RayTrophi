@@ -99,6 +99,29 @@ void SceneData::syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
     }
     const RayTrophiSim::Fluid::FluidViewSelection fog_selection{&plan, FluidView::Fog};
     const bool whole_domain = parcels_live && plan.allLiveIn(FluidView::Fog);
+
+    // ── Fog grid: the solver grid, or a finer render-only copy of it ─────────
+    // A liquid fog may be splatted at res_mul x the simulation resolution, so
+    // its edges and erosion clumps are not limited to the solver's cell size
+    // (Houdini's VDB-from-particles has its own voxel size for the same
+    // reason). Same origin and world extent; only the cell size shrinks. The
+    // solver grid is never touched. Matter gas always draws its own grid.
+    const int res_mul = matter_gas ? 1
+        : std::clamp(desc.fluid_fog_resolution_multiplier, 1,
+                     RayTrophiSim::Fluid::kFogMaxResolutionMultiplier);
+    const int fog_nx = grid.nx * res_mul;
+    const int fog_ny = grid.ny * res_mul;
+    const int fog_nz = grid.nz * res_mul;
+    const float fog_voxel = grid.voxel_size / static_cast<float>(res_mul);
+    const std::size_t fog_cells = static_cast<std::size_t>(fog_nx) *
+                                  static_cast<std::size_t>(fog_ny) *
+                                  static_cast<std::size_t>(fog_nz);
+    // Density stays "1 = a cell at rest packing" on every grid: a parcel holds
+    // 1/ppc of a SOLVER cell, which is res_mul^3 fog cells.
+    const float res_volume = static_cast<float>(res_mul * res_mul * res_mul);
+    const float parcel_density = res_volume /
+        static_cast<float>(std::max(1, desc.fluid_params.particles_per_cell));
+
     std::vector<float> subset;
     const float* raw = nullptr;
     if (matter_gas) {
@@ -107,10 +130,9 @@ void SceneData::syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
         }
         if (parcels_live) {
             std::vector<float> fluid_fog;
-            if (RayTrophiSim::Fluid::splatFogDensityForSelection(
+            if (RayTrophiSim::Fluid::splatFogDensityWeighted(
                     state.particles, grid.nx, grid.ny, grid.nz, grid.origin,
-                    grid.voxel_size, desc.fluid_params.particles_per_cell,
-                    fog_selection, fluid_fog)) {
+                    grid.voxel_size, parcel_density, &fog_selection, fluid_fog)) {
                 if (raw) subset.assign(raw, raw + cells);
                 else subset.assign(cells, 0.0f);
                 for (std::size_t c = 0; c < cells; ++c) {
@@ -121,14 +143,13 @@ void SceneData::syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
         }
     } else if (!parcels_live) {
         // whitewater only; filled below
-    } else if (whole_domain) {
+    } else if (whole_domain && res_mul == 1) {
         if (state.active_density_cells > 0 && grid.density.size() == cells) {
             raw = grid.density.data();
         }
-    } else if (RayTrophiSim::Fluid::splatFogDensityForSelection(
-                   state.particles, grid.nx, grid.ny, grid.nz, grid.origin,
-                   grid.voxel_size, desc.fluid_params.particles_per_cell,
-                   fog_selection, subset)) {
+    } else if (RayTrophiSim::Fluid::splatFogDensityWeighted(
+                   state.particles, fog_nx, fog_ny, fog_nz, grid.origin, fog_voxel,
+                   parcel_density, whole_domain ? nullptr : &fog_selection, subset)) {
         raw = subset.data();
     }
     if (ww_fog_routed) {
@@ -136,17 +157,17 @@ void SceneData::syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
         float weights[3];
         RayTrophiSim::Fluid::whitewaterTypeWeights(desc.fluid_foam_params, routed, weights);
         const float per_particle = std::max(0.0f, desc.fluid_foam_params.volume_density) /
-            static_cast<float>(std::max(1, desc.fluid_params.particles_per_cell));
+            static_cast<float>(std::max(1, desc.fluid_params.particles_per_cell)) * res_volume;
         std::vector<float> ww;
         if (RayTrophiSim::Fluid::splatFoamDensity(
-                state.foam, grid.nx, grid.ny, grid.nz, grid.voxel_size, grid.origin,
+                state.foam, fog_nx, fog_ny, fog_nz, fog_voxel, grid.origin,
                 ww, per_particle, weights) > 0) {
             if (!raw || raw != subset.data()) {
                 // grid.density (whole domain) or nothing: own a copy to add into.
-                if (raw) subset.assign(raw, raw + cells);
-                else subset.assign(cells, 0.0f);
+                if (raw) subset.assign(raw, raw + fog_cells);
+                else subset.assign(fog_cells, 0.0f);
             }
-            for (std::size_t c = 0; c < cells && c < ww.size(); ++c) subset[c] += ww[c];
+            for (std::size_t c = 0; c < fog_cells && c < ww.size(); ++c) subset[c] += ww[c];
             raw = subset.data();
         }
     }
@@ -178,12 +199,29 @@ void SceneData::syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
     if (do_update) {
         // A Gaussian-spread copy: the raw trilinear splat reaches 8 cells per
         // particle and shows spray as isolated dots.
+        // spread_voxels is authored in SOLVER voxels (a world distance), so on
+        // a finer fog grid the same blur is res_mul times as many fog voxels.
+        const float fog_sigma = desc.fluid_fog_spread_voxels * static_cast<float>(res_mul);
         std::vector<float> spread;
         const float* density = raw;
         if (!matter_gas && desc.fluid_fog_spread_voxels > 0.0f) {
-            RayTrophiSim::Fluid::spreadFogDensity(raw, grid.nx, grid.ny, grid.nz,
-                                                  desc.fluid_fog_spread_voxels, spread);
+            RayTrophiSim::Fluid::spreadFogDensity(raw, fog_nx, fog_ny, fog_nz, fog_sigma,
+                                                  spread);
             density = spread.data();
+        }
+        // Erosion runs on the grid, not in a shader, so Vulkan RT, RayFusion
+        // and the CPU path all draw the same clumps. It edits in place, so a
+        // field still pointing at the solver's grid.density is copied first.
+        if (!matter_gas && desc.fluid_fog_erosion_strength > 0.0f) {
+            if (density != spread.data()) {
+                spread.assign(density, density + fog_cells);
+                density = spread.data();
+            }
+            RayTrophiSim::Fluid::erodeFogDensity(
+                spread.data(), fog_nx, fog_ny, fog_nz, grid.origin, fog_voxel,
+                desc.fluid_fog_erosion_strength, desc.fluid_fog_erosion_size,
+                desc.fluid_fog_erosion_detail, desc.fluid_fog_erosion_seed,
+                desc.fluid_fog_erosion_depth);
         }
         // Blackbody / channel emission reads the parcels' Kelvin on the same
         // grid and spread, so a hot parcel glows where it is drawn.
@@ -201,13 +239,13 @@ void SceneData::syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
             temperature = kelvin.data();
         } else if (wants_temperature &&
             RayTrophiSim::Fluid::splatFogTemperatureKelvin(
-                state.particles, grid.nx, grid.ny, grid.nz, grid.origin,
-                grid.voxel_size, desc.fluid_fog_spread_voxels, kelvin,
+                state.particles, fog_nx, fog_ny, fog_nz, grid.origin,
+                fog_voxel, fog_sigma, kelvin,
                 whole_domain ? nullptr : &fog_selection)) {
             temperature = kelvin.data();
         }
         const int new_id = mgr.registerOrUpdateLiveVolume(
-            prev_id, volume_name, grid.nx, grid.ny, grid.nz, grid.voxel_size,
+            prev_id, volume_name, fog_nx, fog_ny, fog_nz, fog_voxel,
             density, temperature, nullptr);
         // -1 means the conversion threw; keep the last good binding rather
         // than orphaning it (same rule as the surface slot).
@@ -238,6 +276,12 @@ void SceneData::syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
     auto& vol = system.domain_fog_volumes[d];
     if (!vol->visible) {
         vol->visible = true;
+        // Hidden volumes are omitted from the RT TLAS. An SSBO refresh can
+        // update existing slots, but cannot restore a slot omitted at rebuild.
+        g_geometry_dirty = true;
+        g_vulkan_rebuild_pending = true;
+        g_optix_rebuild_pending = true;
+        g_bvh_rebuild_pending = true;
         g_gas_volumes_dirty = true;
     }
     vol->name = volume_name;
@@ -253,7 +297,7 @@ void SceneData::syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
     }
     vol->render_as_isosurface = false;
     vol->setShader(shader);  // live shader edits reach the volume
-    vol->bindLiveVolume(id, grid.voxel_size, world_min, world_max);
+    vol->bindLiveVolume(id, fog_voxel, world_min, world_max);
 
     if (created) {
         // New hittable: GPU TLAS + CPU BVH must see it (same as the surface slot).

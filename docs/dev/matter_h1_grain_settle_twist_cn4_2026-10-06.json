@@ -1,0 +1,6014 @@
+{
+  "arms": [],
+  "completed": false,
+  "original": {
+    "control": {
+      "driver": "none",
+      "dropped_seeds": [],
+      "epoch": 0,
+      "frame": 0,
+      "playing": false,
+      "script_driving": false,
+      "script_sim_seconds": 0.0
+    },
+    "domains": [],
+    "sources": [],
+    "colliders": []
+  },
+  "settle_profile": {
+    "enabled": true,
+    "friction": 0.5,
+    "max_substeps": 1024,
+    "normal_damping_n_s_m": 4.0,
+    "radius_m": 0.02500000037252903,
+    "rolling_friction": 0.019999999552965164,
+    "sliding_damping_n_s_m": 4.0,
+    "stiffness_n_m": 100000.0,
+    "twisting_friction": 0.10000000149011612
+  },
+  "settle": [
+    {
+      "step": 1,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.36995595693588257,
+              1.0434266328811646,
+              0.3989250659942627
+            ],
+            "bounds_min": [
+              -0.4080366790294647,
+              0.2575186789035797,
+              -0.36149129271507263
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.008384131796219661,
+              0.6536294959951188,
+              0.009124024098127844
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.27047263571352637,
+            "kinetic_energy_j": 0.6843468246725878,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.36995595693588257,
+                1.0434266328811646,
+                0.3989250659942627
+              ],
+              "bounds_min": [
+                -0.4080366790294647,
+                0.2575186789035797,
+                -0.36149129271507263
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                0.008384131796219661,
+                0.6536294959951188,
+                0.009124024098127844
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.27047263571352637,
+              "kinetic_energy_j": 0.6843468246725878,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            0.07637909791537381,
+            0.0,
+            -0.07018530605229537
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 0.0,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 0.0,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              0.0,
+              -8.371207552719184,
+              0.0
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 11,
+        "batch_end_ms": 34.67600000000001,
+        "density_ms": 0.10400000214576721,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 206.949999999997,
+        "dispatch_calls": 2608,
+        "download_bytes": 151616,
+        "download_call_ms": 0.5197999999999999,
+        "download_calls": 17,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 2,
+        "synchronize_ms": 0.0002,
+        "total_ms": 268.60260009765625,
+        "upload_bytes": 173832,
+        "upload_call_ms": 2.3299,
+        "upload_calls": 18
+      }
+    },
+    {
+      "step": 30,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.5791248679161072,
+              0.47643041610717773,
+              0.5549778938293457
+            ],
+            "bounds_min": [
+              -0.5578696727752686,
+              0.020869703963398933,
+              -0.5744603872299194
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.01133395514989388,
+              0.14306940844835486,
+              0.012084704282642642
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.4239714736207185,
+            "kinetic_energy_j": 126.76504307580997,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.5791248679161072,
+                0.47643041610717773,
+                0.5549778938293457
+              ],
+              "bounds_min": [
+                -0.5578696727752686,
+                0.020869703963398933,
+                -0.5744603872299194
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                0.01133395514989388,
+                0.14306940844835486,
+                0.012084704282642642
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.4239714736207185,
+              "kinetic_energy_j": 126.76504307580997,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            -0.38758227947675516,
+            0.2497944972365627,
+            -0.09172474554130715
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 43.01392361471005,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 1.8448203314914615,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              -1.105352875483824,
+              29.77237941786467,
+              1.5421732353277249
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 3.3202,
+        "density_ms": 0.11169999837875366,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 23.91260000000027,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.0071,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0001,
+        "total_ms": 27.86669921875,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.041999999999999996,
+        "upload_calls": 12
+      }
+    },
+    {
+      "step": 60,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.5765027403831482,
+              0.7624365091323853,
+              0.5725706219673157
+            ],
+            "bounds_min": [
+              -0.5757710933685303,
+              0.022591525688767433,
+              -0.5750710368156433
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.006466161497883149,
+              0.12486302420438729,
+              0.012272252625280096
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.46678409496856377,
+            "kinetic_energy_j": 67.85634500939302,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.5765027403831482,
+                0.7624365091323853,
+                0.5725706219673157
+              ],
+              "bounds_min": [
+                -0.5757710933685303,
+                0.022591525688767433,
+                -0.5750710368156433
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                0.006466161497883149,
+                0.12486302420438729,
+                0.012272252625280096
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.46678409496856377,
+              "kinetic_energy_j": 67.85634500939302,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            2.7260957681417204,
+            -0.05154752678010748,
+            -1.0240859814197738
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 32.77653259717607,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 1.172965221105358,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              2.5352656544784553,
+              -4.4227107295076085,
+              1.1418047201529844
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 4.1077,
+        "density_ms": 0.15060000121593475,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 71.85629999999958,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.009999999999999998,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0001,
+        "total_ms": 80.40579986572266,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.08610000000000001,
+        "upload_calls": 12
+      }
+    },
+    {
+      "step": 90,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.575150728225708,
+              0.6630923748016357,
+              0.5742160677909851
+            ],
+            "bounds_min": [
+              -0.5747165679931641,
+              0.02353188581764698,
+              -0.5747184157371521
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.006814744838266047,
+              0.08523844485171138,
+              0.015206060652417364
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.47215800055121754,
+            "kinetic_energy_j": 36.01917584661332,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.575150728225708,
+                0.6630923748016357,
+                0.5742160677909851
+              ],
+              "bounds_min": [
+                -0.5747165679931641,
+                0.02353188581764698,
+                -0.5747184157371521
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                0.006814744838266047,
+                0.08523844485171138,
+                0.015206060652417364
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.47215800055121754,
+              "kinetic_energy_j": 36.01917584661332,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            -1.0613699497864226,
+            -0.7352994739431759,
+            0.6598103584596632
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 30.121611032138404,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 0.6688392769704156,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              0.24749988406896373,
+              -1.5283167312983468,
+              2.5673475191661232
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 3.9135,
+        "density_ms": 0.11460000276565552,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 26.955700000000814,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.006199999999999999,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0,
+        "total_ms": 31.38159942626953,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.0276,
+        "upload_calls": 12
+      }
+    },
+    {
+      "step": 120,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.5748834013938904,
+              0.4303995370864868,
+              0.5649126172065735
+            ],
+            "bounds_min": [
+              -0.5746629238128662,
+              0.023532312363386154,
+              -0.5753176212310791
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              -0.0009213651942445707,
+              0.0589388198495726,
+              0.027775651373758592
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.4668765230101193,
+            "kinetic_energy_j": 18.232124376436328,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.5748834013938904,
+                0.4303995370864868,
+                0.5649126172065735
+              ],
+              "bounds_min": [
+                -0.5746629238128662,
+                0.023532312363386154,
+                -0.5753176212310791
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                -0.0009213651942445707,
+                0.0589388198495726,
+                0.027775651373758592
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.4668765230101193,
+              "kinetic_energy_j": 18.232124376436328,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            0.2594824925604804,
+            -0.08058241795100805,
+            -1.0380726330624268
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 20.178011535945007,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 0.3540129685721591,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              -0.5672482415809965,
+              -2.6409414589917874,
+              1.3136516791939983
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 3.2768,
+        "density_ms": 0.12540000677108765,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 24.16909999999982,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.006899999999999999,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0001,
+        "total_ms": 28.07550048828125,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.04609999999999999,
+        "upload_calls": 12
+      }
+    },
+    {
+      "step": 150,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.5749624967575073,
+              0.18556666374206543,
+              0.5747907757759094
+            ],
+            "bounds_min": [
+              -0.5755318403244019,
+              0.024045418947935104,
+              -0.5716397166252136
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              -0.017121692466389508,
+              0.042488901170145234,
+              0.03652809224331577
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.4752818334411285,
+            "kinetic_energy_j": 8.652604071223351,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.5749624967575073,
+                0.18556666374206543,
+                0.5747907757759094
+              ],
+              "bounds_min": [
+                -0.5755318403244019,
+                0.024045418947935104,
+                -0.5716397166252136
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                -0.017121692466389508,
+                0.042488901170145234,
+                0.03652809224331577
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.4752818334411285,
+              "kinetic_energy_j": 8.652604071223351,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            -0.16159589839435928,
+            -0.8847982854014345,
+            -0.18385696639853283
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 33.0176681884521,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 0.1896380908167196,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              0.5317825118159129,
+              0.03365951165422054,
+              0.504600502968401
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 3.6519999999999997,
+        "density_ms": 0.14499999582767487,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 24.295399999999635,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.0084,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0001,
+        "total_ms": 28.581300735473633,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.037599999999999995,
+        "upload_calls": 12
+      }
+    },
+    {
+      "step": 180,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.57209312915802,
+              0.07922165840864182,
+              0.5744619965553284
+            ],
+            "bounds_min": [
+              -0.5729070901870728,
+              0.024280842393636703,
+              -0.5729785561561584
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              -0.014462736607129049,
+              0.03171823849697833,
+              0.044679324542357776
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.475355750487929,
+            "kinetic_energy_j": 3.777904839538599,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.57209312915802,
+                0.07922165840864182,
+                0.5744619965553284
+              ],
+              "bounds_min": [
+                -0.5729070901870728,
+                0.024280842393636703,
+                -0.5729785561561584
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                -0.014462736607129049,
+                0.03171823849697833,
+                0.044679324542357776
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.475355750487929,
+              "kinetic_energy_j": 3.777904839538599,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            0.1556085848850494,
+            -0.6214344639552434,
+            -0.2044345868007445
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 12.58002991050486,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 0.09326001901738512,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              0.18962711080353134,
+              -1.545009623067597,
+              0.5057703495594443
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 2.9665,
+        "density_ms": 0.12559999525547028,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 23.484299999999518,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.0081,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0,
+        "total_ms": 27.122400283813477,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.0411,
+        "upload_calls": 12
+      }
+    },
+    {
+      "step": 210,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.5741266012191772,
+              0.06875255703926086,
+              0.5751376152038574
+            ],
+            "bounds_min": [
+              -0.5748080611228943,
+              0.024077093228697777,
+              -0.5736066102981567
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              -0.020851505283644666,
+              0.028293167619267482,
+              0.047577144235219755
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.47620903470929055,
+            "kinetic_energy_j": 1.1465362649862338,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.5741266012191772,
+                0.06875255703926086,
+                0.5751376152038574
+              ],
+              "bounds_min": [
+                -0.5748080611228943,
+                0.024077093228697777,
+                -0.5736066102981567
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                -0.020851505283644666,
+                0.028293167619267482,
+                0.047577144235219755
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.47620903470929055,
+              "kinetic_energy_j": 1.1465362649862338,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            0.1507526891706607,
+            -0.2481482179184663,
+            -0.09028267327856979
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 11.8542657411106,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 0.0414422107281261,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              -0.6604649236704584,
+              -0.05314961206350126,
+              0.09964002592432933
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 3.2533000000000003,
+        "density_ms": 0.13109999895095825,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 24.281599999999685,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.009399999999999999,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0,
+        "total_ms": 28.201000213623047,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.048100000000000004,
+        "upload_calls": 12
+      }
+    },
+    {
+      "step": 240,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.570815920829773,
+              0.04144362360239029,
+              0.5744011402130127
+            ],
+            "bounds_min": [
+              -0.5748988389968872,
+              0.024635907262563705,
+              -0.5728281736373901
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              -0.02624184871228864,
+              0.026248294474498814,
+              0.04924032258554688
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.47518203126875996,
+            "kinetic_energy_j": 0.5733636379303678,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.570815920829773,
+                0.04144362360239029,
+                0.5744011402130127
+              ],
+              "bounds_min": [
+                -0.5748988389968872,
+                0.024635907262563705,
+                -0.5728281736373901
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                -0.02624184871228864,
+                0.026248294474498814,
+                0.04924032258554688
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.47518203126875996,
+              "kinetic_energy_j": 0.5733636379303678,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            -0.14693130987189348,
+            -0.10668115737490103,
+            -0.2956572364100829
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 5.312866881096195,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 0.00850562032340801,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              -0.40176178802791285,
+              -0.7093091184343578,
+              0.08637431430900826
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 3.7467999999999995,
+        "density_ms": 0.17949999868869781,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 27.115499999999454,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.0097,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0,
+        "total_ms": 31.586299896240234,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.038099999999999995,
+        "upload_calls": 12
+      }
+    },
+    {
+      "step": 270,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.5737238526344299,
+              0.036143042147159576,
+              0.5744011402130127
+            ],
+            "bounds_min": [
+              -0.5747681856155396,
+              0.024738844484090805,
+              -0.5747287273406982
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              -0.028212497561980843,
+              0.025583734590327364,
+              0.049798195444054734
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.47493092440559037,
+            "kinetic_energy_j": 0.1879930360068667,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.5737238526344299,
+                0.036143042147159576,
+                0.5744011402130127
+              ],
+              "bounds_min": [
+                -0.5747681856155396,
+                0.024738844484090805,
+                -0.5747287273406982
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                -0.028212497561980843,
+                0.025583734590327364,
+                0.049798195444054734
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.47493092440559037,
+              "kinetic_energy_j": 0.1879930360068667,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            0.15494604821358773,
+            -0.02400940275086052,
+            -0.20680939121030667
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 3.4523803398481996,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 0.0012898018856785758,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              -0.0899283078631718,
+              0.1976902301869647,
+              0.019866048750877777
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 2.8268999999999997,
+        "density_ms": 0.11029999703168869,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 22.026999999999425,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.005299999999999999,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0,
+        "total_ms": 25.4601993560791,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.029100000000000004,
+        "upload_calls": 12
+      }
+    },
+    {
+      "step": 300,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.5702725052833557,
+              0.030102765187621117,
+              0.5744011402130127
+            ],
+            "bounds_min": [
+              -0.5747681856155396,
+              0.024614430963993073,
+              -0.5747287273406982
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              -0.028932538736171413,
+              0.025201768301485575,
+              0.04986482298954797
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.4744497184502462,
+            "kinetic_energy_j": 0.061647035160634925,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.5702725052833557,
+                0.030102765187621117,
+                0.5744011402130127
+              ],
+              "bounds_min": [
+                -0.5747681856155396,
+                0.024614430963993073,
+                -0.5747287273406982
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                -0.028932538736171413,
+                0.025201768301485575,
+                0.04986482298954797
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.4744497184502462,
+              "kinetic_energy_j": 0.061647035160634925,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            -0.011537368248395316,
+            0.006104389895633082,
+            -0.004229046203949146
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 0.6544333891840851,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 1.8949401749436884e-05,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              -0.025070766928115808,
+              -0.3101203610213584,
+              -0.0002656694044555147
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 2.9968999999999997,
+        "density_ms": 0.10890000313520432,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 22.289700000000327,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.0059,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0001,
+        "total_ms": 25.848899841308594,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.03270000000000001,
+        "upload_calls": 12
+      }
+    },
+    {
+      "step": 330,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.5702725052833557,
+              0.02824590913951397,
+              0.5744011402130127
+            ],
+            "bounds_min": [
+              -0.5747681856155396,
+              0.024873437359929085,
+              -0.5747287273406982
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              -0.029026672162103744,
+              0.025040906628419173,
+              0.04987358277412571
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.47441105356598584,
+            "kinetic_energy_j": 0.018619583283060237,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.5702725052833557,
+                0.02824590913951397,
+                0.5744011402130127
+              ],
+              "bounds_min": [
+                -0.5747681856155396,
+                0.024873437359929085,
+                -0.5747287273406982
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                -0.029026672162103744,
+                0.025040906628419173,
+                0.04987358277412571
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.47441105356598584,
+              "kinetic_energy_j": 0.018619583283060237,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            0.037753932542172325,
+            -0.00021887048319068096,
+            -0.03098204310151031
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 0.03150542753572091,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 1.0122732739123989e-07,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              0.001213980276313587,
+              0.11681921147627776,
+              0.0013391906335559263
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 2.78,
+        "density_ms": 0.1467999964952469,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 22.1832999999996,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.0092,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0001,
+        "total_ms": 25.653400421142578,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.0491,
+        "upload_calls": 12
+      }
+    },
+    {
+      "step": 360,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.5702725052833557,
+              0.025716587901115417,
+              0.5744011402130127
+            ],
+            "bounds_min": [
+              -0.5747681856155396,
+              0.024938898161053658,
+              -0.5747287273406982
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              -0.029005401518247705,
+              0.024993186671053987,
+              0.049883618366038725
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.47444668352183655,
+            "kinetic_energy_j": 0.003360877953594621,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.5702725052833557,
+                0.025716587901115417,
+                0.5744011402130127
+              ],
+              "bounds_min": [
+                -0.5747681856155396,
+                0.024938898161053658,
+                -0.5747287273406982
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                -0.029005401518247705,
+                0.024993186671053987,
+                0.049883618366038725
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.47444668352183655,
+              "kinetic_energy_j": 0.003360877953594621,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            -0.016556703859620842,
+            -0.0001503894102294929,
+            0.007106670622369996
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 0.007960847986089259,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 6.0514106132416744e-09,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              0.0012927333729344588,
+              -0.035954854054247615,
+              0.00047626265324324674
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 2.7171,
+        "density_ms": 0.11940000206232071,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 20.752100000000166,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.0065,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0,
+        "total_ms": 24.043399810791016,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.030200000000000005,
+        "upload_calls": 12
+      }
+    },
+    {
+      "step": 390,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.5702725052833557,
+              0.025018930435180664,
+              0.5744011402130127
+            ],
+            "bounds_min": [
+              -0.5747681856155396,
+              0.024921216070652008,
+              -0.5747287273406982
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              -0.028999466839763954,
+              0.02498032343282829,
+              0.04988334027893871
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.47445460714466653,
+            "kinetic_energy_j": 0.00010878807647517433,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.5702725052833557,
+                0.025018930435180664,
+                0.5744011402130127
+              ],
+              "bounds_min": [
+                -0.5747681856155396,
+                0.024921216070652008,
+                -0.5747287273406982
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                -0.028999466839763954,
+                0.02498032343282829,
+                0.04988334027893871
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.47445460714466653,
+              "kinetic_energy_j": 0.00010878807647517433,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            -0.0009682428100505858,
+            1.769785856063119e-05,
+            0.0003674322001740983
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 0.0005824349172521111,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 1.9582530585721336e-11,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              3.6916877161229736e-05,
+              0.003873747167431221,
+              -6.082436527973177e-05
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 7.916,
+        "density_ms": 0.2069000005722046,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 46.25290000000077,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.019299999999999998,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0001,
+        "total_ms": 54.84389877319336,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.0781,
+        "upload_calls": 12
+      }
+    },
+    {
+      "step": 420,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.5702725052833557,
+              0.024980589747428894,
+              0.5744011402130127
+            ],
+            "bounds_min": [
+              -0.5747681856155396,
+              0.024980178102850914,
+              -0.5747287273406982
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              -0.028999466839763954,
+              0.024980380090710234,
+              0.049883266122378714
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.4744546311109083,
+            "kinetic_energy_j": 4.152010182596421e-08,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.5702725052833557,
+                0.024980589747428894,
+                0.5744011402130127
+              ],
+              "bounds_min": [
+                -0.5747681856155396,
+                0.024980178102850914,
+                -0.5747287273406982
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                -0.028999466839763954,
+                0.024980380090710234,
+                0.049883266122378714
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.4744546311109083,
+              "kinetic_energy_j": 4.152010182596421e-08,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            -1.0249502871999865e-05,
+            2.088206787240129e-09,
+            -5.937071598354962e-05
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 1.694725036402541e-07,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 8.509941754403923e-19,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              -1.1413243748771255e-08,
+              -6.382541391368755e-05,
+              -1.5566645669778732e-08
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 9.507899999999998,
+        "density_ms": 0.21580000221729279,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 51.72630000000065,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.0049,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0,
+        "total_ms": 61.700199127197266,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.05480000000000001,
+        "upload_calls": 12
+      }
+    },
+    {
+      "step": 450,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.5702725052833557,
+              0.02498038113117218,
+              0.5744011402130127
+            ],
+            "bounds_min": [
+              -0.5747681856155396,
+              0.02498037926852703,
+              -0.5747287273406982
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              -0.028999466839763954,
+              0.02498038034536875,
+              0.049883266122378714
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.4744546311109083,
+            "kinetic_energy_j": 1.3588156055877088e-08,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.5702725052833557,
+                0.02498038113117218,
+                0.5744011402130127
+              ],
+              "bounds_min": [
+                -0.5747681856155396,
+                0.02498037926852703,
+                -0.5747287273406982
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                -0.028999466839763954,
+                0.02498038034536875,
+                0.049883266122378714
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.4744546311109083,
+              "kinetic_energy_j": 1.3588156055877088e-08,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            -2.097076524843937e-05,
+            -3.2263541763814977e-09,
+            -1.381468655754266e-06
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 9.995593214312804e-10,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 6.276485578079066e-21,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              -1.063238446544817e-08,
+              3.172951011934518e-05,
+              1.3287994418154445e-09
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 10.5271,
+        "density_ms": 0.1784999966621399,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 66.96270000000109,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.0064,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0001,
+        "total_ms": 77.9319076538086,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.054700000000000006,
+        "upload_calls": 12
+      }
+    },
+    {
+      "step": 480,
+      "inventory": {
+        "acceptance_metrics": {
+          "appearance_full_saturation": 0.05000000074505806,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "exactly_dry_particles": 256,
+          "granular": {
+            "bounds_max": [
+              0.5702725052833557,
+              0.02498038113117218,
+              0.5744011402130127
+            ],
+            "bounds_min": [
+              -0.5747681856155396,
+              0.02498037926852703,
+              -0.5747287273406982
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              -0.028999466839763954,
+              0.02498038034536875,
+              0.049883266122378714
+            ],
+            "dry_mass_kg": 51.20000076293945,
+            "horizontal_rms_radius_m": 0.4744546311109083,
+            "kinetic_energy_j": 1.3550160159806823e-08,
+            "mean_saturation": 0.0,
+            "particles": 256,
+            "pore_water_kg": 0.0
+          },
+          "measured": true,
+          "saturation_bands": [
+            {
+              "band": 0,
+              "bounds_max": [
+                0.5702725052833557,
+                0.02498038113117218,
+                0.5744011402130127
+              ],
+              "bounds_min": [
+                -0.5747681856155396,
+                0.02498037926852703,
+                -0.5747287273406982
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                -0.028999466839763954,
+                0.02498038034536875,
+                0.049883266122378714
+              ],
+              "dry_mass_kg": 51.20000076293945,
+              "horizontal_rms_radius_m": 0.4744546311109083,
+              "kinetic_energy_j": 1.3550160159806823e-08,
+              "mean_saturation": 0.0,
+              "particles": 256,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 1,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 2,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 3,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 4,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 5,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 6,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            },
+            {
+              "band": 7,
+              "bounds_max": null,
+              "bounds_min": null,
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": null,
+              "dry_mass_kg": 0.0,
+              "horizontal_rms_radius_m": null,
+              "kinetic_energy_j": 0.0,
+              "mean_saturation": 0.0,
+              "particles": 0,
+              "pore_water_kg": 0.0
+            }
+          ],
+          "shape_semantics": "material_point_bounds_and_dry_mass_moments"
+        },
+        "deposited_mass_kg": 0.0,
+        "deposited_momentum_kg_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "domain": "H1_Grain_Runtime",
+        "grain_diagnostics": {
+          "angular_momentum_kg_m2_s": [
+            -2.084076334143902e-05,
+            -3.2263541763814977e-09,
+            -7.064124004811243e-07
+          ],
+          "collider_structure": "flat_bvh",
+          "contact_shader_revision": 3,
+          "dissipation_heat_coupled": false,
+          "frame_end_host_publication": true,
+          "history_static_friction": false,
+          "max_spin_rad_s": 9.995593214312804e-10,
+          "max_support_contacts": 4,
+          "max_surface_patches": 8,
+          "radius_m": 0.02500000037252903,
+          "solver": "force_dem_viscous_sliding_candidate",
+          "spin_energy_j": 6.276485578079066e-21,
+          "transport_owner": "grain",
+          "wet_coupling": false
+        },
+        "grain_settings": {
+          "enabled": true,
+          "friction": 0.5,
+          "max_substeps": 1024,
+          "normal_damping_n_s_m": 4.0,
+          "radius_m": 0.02500000037252903,
+          "rolling_friction": 0.019999999552965164,
+          "sliding_damping_n_s_m": 4.0,
+          "stiffness_n_m": 100000.0,
+          "twisting_friction": 0.10000000149011612
+        },
+        "granular_mechanics": {
+          "contact_pressure_measured": false,
+          "load_proxy": "granular_extent_rho_g_h",
+          "measured": false,
+          "overburden_estimate_pa": 0.0,
+          "stiffness_below_estimated_load": false,
+          "strain_rate_per_s": 0.0,
+          "strain_substeps": 1,
+          "wave_substeps": 1,
+          "young_modulus_for_load_pa": 0.0
+        },
+        "identity_scope": "domain",
+        "measured": true,
+        "mixed_execution": {
+          "common_substeps": 817,
+          "contact_pairs": 0,
+          "g2p_on_gpu": false,
+          "p2g_on_gpu": false,
+          "pressure_on_gpu": false,
+          "status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+          "step_held": false,
+          "working_set_bytes": 12368
+        },
+        "mixed_transport_available": true,
+        "mixed_transport_ready": true,
+        "models": [
+          {
+            "mass_kg": 0.0,
+            "model": "fluid",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 51.20000076293945,
+            "model": "granular",
+            "momentum_kg_m_s": [
+              -1.063238446544817e-08,
+              3.384350980422101e-05,
+              1.3287994418154445e-09
+            ],
+            "particles": 256
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "elastic",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          },
+          {
+            "mass_kg": 0.0,
+            "model": "unresolved",
+            "momentum_kg_m_s": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "particles": 0
+          }
+        ],
+        "next_particle_id": "257",
+        "outside_mass_kg": 0.0,
+        "outside_particles": 0,
+        "overlapping_cells": 0,
+        "particle_id_bytes": 2048,
+        "particle_id_hash": "deb85e528274984a",
+        "pore_exchange": {
+          "absorbed_kg": 0.0,
+          "capacity_kg": 0.0,
+          "drainage_births": 0,
+          "drainage_budget_blocked_carriers": 0,
+          "drainage_refills": 0,
+          "drained_kg": 0.0,
+          "held": false,
+          "mass_error_kg": 0.0,
+          "maximum_saturation": 0.0,
+          "measured": false,
+          "momentum_error_kg_m_s": 0.0,
+          "pore_water_kg": 0.0,
+          "settings": {
+            "capillary_cohesion_pa": 250.0,
+            "drainage_scale": 1.0,
+            "enabled": false,
+            "gravity_m_s2": 9.8100004196167,
+            "permeability_m2": 1.000000013351432e-10,
+            "pore_pressure_scale": 1.0,
+            "porosity": 0.3499999940395355,
+            "viscosity_pa_s": 0.0010000000474974513,
+            "wet_appearance_enabled": false,
+            "wet_appearance_full_saturation": 0.05000000074505806,
+            "wet_color_scale": 0.550000011920929,
+            "wet_dilatancy_scale": 0.25,
+            "wet_friction_scale": 0.6000000238418579,
+            "wet_response_enabled": false,
+            "wet_roughness_scale": 0.6499999761581421
+          },
+          "status": "Disabled",
+          "thermal_energy_error_j": 0.0
+        },
+        "transfer_cells": 0,
+        "transfer_requested": false,
+        "wet_response": {
+          "appearance": "granular_splat_8_bands",
+          "appearance_enabled": false,
+          "appearance_quantization": "normalized_saturation_upper_edge_v2",
+          "enabled": false,
+          "field_sampled": true,
+          "gpu_step_measured": true,
+          "maximum_capillary_cohesion_pa": 0.0,
+          "maximum_pore_pressure_pa": 0.0,
+          "model": "empirical_cell_head",
+          "wet_particles": 0
+        }
+      },
+      "stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 13.516200000000001,
+        "density_ms": 0.2425999939441681,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 94.3788999999986,
+        "dispatch_calls": 2457,
+        "download_bytes": 33688,
+        "download_call_ms": 0.0072,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 256,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0001,
+        "total_ms": 108.4551010131836,
+        "upload_bytes": 37896,
+        "upload_call_ms": 0.0656,
+        "upload_calls": 12
+      }
+    }
+  ],
+  "settle_gates": {
+    "mass_drift_kg": 0.0,
+    "tail_com_range_m": 1.286323822569796e-05,
+    "tail_rms_range_m": 7.947589071743977e-06,
+    "tail_energy_per_grain_j": 1.3128453144551696e-05
+  },
+  "final_control": {
+    "driver": "none",
+    "dropped_seeds": [],
+    "epoch": 0,
+    "frame": 0,
+    "playing": false,
+    "script_driving": false,
+    "script_sim_seconds": 0.0
+  },
+  "restored_authoring": true
+}

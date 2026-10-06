@@ -1,38 +1,110 @@
 # Birleşik madde domain'i — gaz/sıvı ayrımı olmayan simülasyon ve render
 
-> **Durum:** AŞAMALI UYGULAMA — 2026-09-28. Faz 0 ve ilk görünüm/UI adımları
-> mevcut; simülasyon etiketleri, dönüşüm defteri ve gerçek mist→gaz faz
-> aktarımı canlı çalışıyor. Faz 4 domain birleşmesi canlı kabulden geçti.
-> İleri aşamaların
-> tasarımı değişebilir. Hedef: tek
-> domain bir fizik-kimya sistemi gibi davranır — madde (granül, sıvı, gaz,
-> yanan katı) kendi özelliklerine göre erir, donar, buharlaşır, yanar, kütle
-> kaybeder; çözücüler bu dönüşümlerde birbirini besler. İlk somut senaryo
-> şelale (gövde SDF + kopan sprey splat + yükselen sis fog).
+> **Durum: 2026-10-05.** C5 kontrollü su bilançosu canlıda korundu. C6 ilk
+> kaynak partisi kullanıcı derlemesiyle canlı probları geçti; tam C6/C7 kabulü açık.
+> Hedef tek Matter domaininde madde durumundan türeyen gaz/sıvı/granül çözümü
+> ve fiziksel alanlarla tutarlı görünüm. Ampirik local-head modeli tam basınç
+> çözümü olarak sunulmaz.
 
 ---
 
-## ★ DEVİR NOTU — her oturum sonunda güncellenir
+## Güncel kısa devir — 2026-10-05
 
-> Bu mimari tek oturumda bitmeyecek. Bu blok, işi devralan ajanın OKUDUĞU
-> İLK şeydir; her iş partisinin sonunda güncellenir. Bayatsa önce onu düzelt.
-
-| | |
+| Konu | Durum |
 |---|---|
-| **2026-10-02 splat kabul 2 (kod)** | Kullanıcı ikinci derlemede iki kusuru ayırdı: ilk RT geçişinde sim başlayana kadar icosphere fallback görünüyordu ve prosedürel küre sahne ışıklarından doğrudan ışık almıyordu. Kök neden lazy RT pipeline kurulmadan önce `hasSphereShaders=false` olmasıydı. Point-sphere üçgen fallback'i pipeline çözülene kadar ertelendi; pipeline hazır olunca mevcut sahne BLAS'ları korunarak tek sphere BLAS/TLAS kaydı ilk trace öncesinde ekleniyor. Sphere closest-hit artık nokta/yönlü/alan/spot ışıkları için tek örnekli doğrudan GGX+diffuse katkı ve gölge ışını taşıyor. Statik denetim geçti; C++ ve shader derlemesi ile canlı kabul bekliyor. |
-| **2026-10-03 G2 görsel A/B** | Yeni prefix-balanced seed derlendi ve 200.000 parçacıklı sahne yeniden seed edildi. Kafes slab'ı kırıldı; kalan strafor/boncuk görünümü render çapından çıktı. Kaydedilmiş sahne 8 PPC, voxel 0,0768657 m, `radius_factor=0,09`, `size_multiplier=2,61` taşıyor; etkin yarıçap 0,01806 m = 0,235 voxel. Bir malzeme noktasının temsil ettiği `voxel³/PPC` hacmin eşdeğer küre yarıçapı 0,310 voxel. Yalnız görünümde `size_multiplier=3,5` A/B'si yarıçapı 0,315 voxel'e taşıdı ve büyük iç boşlukları kapattı. Fizik aynı anda Young 840.500 Pa / yük tabanı 800.841 Pa ve `stiffness_below_load=false` raporladı. Prosedürel granüler sphere yolu artık PPC'den bu eşdeğer hacim alt sınırını türetiyor; daha büyük sanatçı ayarını koruyor ve UI etkin yarıçapı gösteriyor. Sahne mesh'i ile özelleştirilmiş taneler bu tabana zorlanmıyor. |
-| **2026-10-04 kullanıcı kabulü** | Kullanıcı önceki değişiklikleri derlediğini ve sorunsuz çalıştığını bildirdi. Önceki derleme bekliyor notları tarihsel kayıttır; bu değişiklikler için yeniden derleme engeli yoktur. Bu bildirim sayısal performans, korunum, kolon/repose veya cache-resume matrisinin ölçüldüğü anlamına gelmez. |
-| **Son güncelleme (önceki ayrıntılı ölçüm)** | 2026-10-03 — C0, C1 ve G1 canlı PASS. G2'de prefix-balanced, hücre başına yönlendirilmiş seed kullanıcı derlemesinde kafes slab'ını kırdı. Granüler prosedürel küre yarıçapı `cbrt(1 / ((4π/3) × PPC))` voxel tabanının altına düşmüyor; mevcut daha büyük radius/size sonucu korunuyor. G3'te fizik taşıyıcısı başına render tanesi 1..32 arasında author ediliyor; varsayılan 8. İlk canlı Vulkan RT sonucu aynı eksen hizalı küp tekrarından blok görünüyordu. Yeni yerleşim taşıyıcı/çift kimliğinden kararlı rastgele 3B yön üretir. 0..0,75 boyut varyasyonu karşılıklı çiftleri farklı çapta çizerken çift hacmini normalize eder. UI, Python ve IPC aynı splat-geometry setter'ını kullanır; get/list istenen-etkin çocuk ve toplam görsel tane istatistiğini verir. Raster canlı telemetrisindeki 100.000 upload / 100.000 draw CPU fallback'i gösterdi; `.vert` mevcut `.spv`den yeni olduğu için shader yeniden derlenerek varsayılan ayarda 100.000 taşıyıcıda yaklaşık 800.000 draw doğrulanmalı. Açık `granul_test1.rtp` dosyası ayrıca Sand değil, `Custom` etiketi altında Cohesive Soil imzası taşıyor; fizik kabulü temiz Sand tabanı + istenen friction/Young override ile yapılmalı. |
-| **2026-10-02 splat/RT** | Değişiklik öncesi canlı sahnede 1.000.000 Splat, Solid modda `render.fluid.splat_instances` için 22,577 ms son / 38,706 ms tepe CPU maliyeti üretti. Kök neden: 20 üçgenli icosphere + parçacık başına TLAS instance yolu ve dururken de yinelenen konum hash'i. Hazır Vulkan analitik küre shader/BLAS altyapısı artık built-in Splat ve whitewater için bağlandı: tüm point-sphere grupları tek kompakt AABB BLAS + tek kimlik TLAS kaydı kullanır; hareket BLAS'ı taze BUILD eder, tüm TLAS'ı yeniden kurmaz. Solid impostor korunur; RayFusion geçici point-sphere havuzlarını üçgen AS'ye katmaz. Değişmeyen `state.version` köprü taramasını erken keser. Kod statik denetimden geçti; kullanıcı derlemesi ve canlı kabul bekliyor. |
-| **2026-10-02 splat canlı kabul 1** | 1.000.000 parçacıkta prosedürel Vulkan küre görünümü doğru, Solid→Rendered TDR'siz ve 128 sample yaklaşık 4 saniyede tamamlandı; aktif viewport ölçümü ortalama ~2,9 ms/sample. Bu aralıkta Vulkan geometri rebuild/refit sayısı sıfır, RayFusion AS `ready=false`, BLAS/instance sayısı sıfırdı. Kalan CPU maliyeti `splat_instances=1,76–1,79 ms` + `foam_instances=1,75–1,97 ms`: iki yol aynı milyon etiketi ayrı ayrı tarıyordu. `cachedDistinctViewKeys(particles,state.version)` render, whitewater, hacim, UI ve API için ortak sürüm önbelleği olarak eklendi; ikinci kullanıcı derlemesi/canlı ölçüm bekliyor. IPC terminali öndeyken görülen ~500 ms kare, SDL arka-plan beklemesidir ve RT maliyeti değildir. |
-| **Kodda ne var** | `SimulationDomainType::Matter`, tek descriptor/kimlik altında ayrı gaz alanı (`state.grid`) + APIC alanı (`matter_liquid_grid`) taşıyor; iki çözücü sıralı çalışıyor. Mist/yanma aktarımı, hareketli sıvı sınırı ve ayrı SDF/gaz render slotları bağlı. Burning Fuel Spill'de gaz görünümü, SDF sürekliliği ve yüzeyden kademeli yanma canlı doğrulandı. Boş gaz fazı uyuyor. Matter faz başına ayrı kalıcı GPU buffer takımı taşıyor. Burning Fuel Spill 12 karede 65.664 sıvı parçacığı + 9.693 aktif gaz hücresiyle geçti; sıvı kare başına ~17 MB yükleyip ~11 MB indirirken gaz toplamı 98,45 ms idi. Bu toplamın görünmeyen ortak maliyetlerinden biri bulundu: fiziksel gaz kütle/enerji sidecar'ları tüm gaz domainlerinde boşken bile tam grid üzerinde CPU'da iki kez taşınıyordu. Sidecar artık ilk gerçek faz aktarımına kadar ayrılmıyor; dolu alan yalnız pozitif destek AABB'si ve güvenlik bandında advect ediliyor. `gas.step_stats.inventory_advection_ms` ve `fluid.step_stats.total_ms` eklendi. Splat havuzu iki spray için 256 slot açtı ve RT geçişi TDR'siz geçti. Son optimizasyonlar henüz derlenmedi; shader değişmedi; commit edilmedi. |
-| **Faz 0 durumu** | 1. tur (koddan) + 2. tur (canlı) BİTTİ — §8b. Kısıt: `density`/sıcaklık/hız faza göre farklı ANLAM taşıyor → ortak grid ≠ ortak alan. Canlı: Vulkan matrisi 9/9 çiziyor (fog Material ≈ siyah); gaz+SDF katmanı 3 yolda tutuyor; sim VRAM'i izlenmiyor (519 MB). IPC render_mode resync düzeltmesi ✔ derlendi ve doğrulandı (exe 22:21) |
-| **Sıradaki iş (2026-10-04)** | C2 aktif sıvı penceresinin mevcut koddan kapsam denetimi ve uygulaması; ardından C3 faz gridleri, C4 ortak transfer/contact ve H1 hibrit yüzey taneleri. G2 kolon/repose ölçümleri ayrı kabul kaydı olarak açık kalır; kullanıcı derlemesi ve çalıştırması başarılıdır. Ayrıntı: aşağıdaki 2026-10-04 sözleşmesi. |
-| **Önceki sıra (tarihsel)** | G2 granüler tane temsili ve yük davranışı ana iştir: PPC-hacim yarıçap tabanını temiz Sand sahnesinde canlı kabul et; ardından iki yükseklikte kolon çökmesi/yığılma ve angle-of-repose yakınsamasını ölç. Preset kökenini `Custom`a düşerken kaybetmeyen authoring modeli ayrıca kapatılmalı; aksi halde Sand override ile Cohesive Soil override ayırt edilemiyor. Sphere tane görünümü korunur; granüler otomatik SDF'ye çevrilmez. G2 kapanınca C2 aktif sıvı penceresi, C3 faz grid, C4 ortak çok malzemeli P2G/contact, C5 emilim-drenaj, C6 doygunluk fiziği ve C7 kabul sırası sürer. |
-| **Karar verilmiş** | UI: ayrı DCC ekranı yok, mevcut Domain paneli altı sekme (§8b); panel materyal bağlar, düzenlemez; ad "Physics Domain" (✔ doğrulandı); tüm UI metni İngilizce, genel tema. §3 ilkeleri; kimlik+depolama birleşir, çözücü değerlendirmesi birleşmez. Emitter çözücü seçmez: `substance + başlangıç durumu + kütle/enerji/bileşim` yatırır; domain anlık durumdan constitutive model/çözücü seçer. Granular bir termodinamik faz adı değil, constitutive rejimdir. Kimya emitter özelliği değil, substance bileşimi ile domain reaksiyon kurallarının sonucudur. |
-| **Açık karar** | Su+kumun aynı Matter adımında doğru etkileşmesi artık kapanış şartıdır. Temel sözleşme §8d'de sabit: serbest su kütlesi ile granül gözenek suyu ayrı ve korunumludur; domain-geneli `granular_enabled` fizik otoritesi olmaktan çıkar; görünüm fiziksel doygunluğu okur. Gaz-sıvı ortak basınç, materyal editörü, OptiX ve RT/SDF kusurları ayrı kalır. |
-| **Kullanıcıyla konuşulan** | Hedef TAM akışkan fiziği: gaz, sıvı, granül (2026-09-28). Whitewater kütlesiz alt-ızgara yer tutucusu, fizik gibi sunulmaz; etiketle yalnız GÖRÜNÜMDE birleşir (§8c). Fizik-kimya sistemi (§4.5); şelale ilk senaryo; UI modelden türemeli, kod öncesi mock. |
-| **Dikkat** | `GAZ_DERSLERI_VE_FLUID_DEVRI.md` koddan geride; bir AKTİF planın "sıradaki"sine güvenmeden koda bak. Eski sahnelerde whitewater artık küre çizilir (varsayılan tablo splat; eski "Volume" = foam/bubble → Isosurface; göç yok). Canlı test pahalı: sayıyla doğrula, en fazla bir görüntü. Testler: scripts/test/rt_test_whitewater_label_routes_ipc.py, rt_probe_whitewater_determinism_ipc.py, rt_test_fluid_label_views_ipc.py, rt_test_fluid_labels_cache_ipc.py. |
+| C5 canlı ölçüm | Sonlu Water/Sand sahnesi; emisyon sonrası su farkı -0.71 mg / 180 adım, kuru Sand sabit. Drenaj/contact/kimlik probları PASS; tüm yakınsama matrisi kapanmadı. |
+| Yeni kaynak partisi | C6 wet/drainage/mixed GPU probları PASS; emisyon sonrası 180 adımda su +0.32 mg, kuru Sand sabit. 8-band wet materyaller üretildi; tam fiziksel kabul açık. |
+| Sonraki iş | C6 dry/damp/saturated ve spatial/cache/dt/resolution kabulü, ardından C7. Sağ başlangıç kuru kontrolüne uzun koşuda su ulaşır. Tam pressure PDE/drag/buoyancy açık. |
+| Kanonik not | [MATTER_C5_HANDOFF.md](MATTER_C5_HANDOFF.md), model: [MATTER_WET_RESPONSE.md](MATTER_WET_RESPONSE.md). |
+| Kapanış ve sonrası | [Kalan fizik kabulü ve profile/emitter/domain/UI veri sahipliği](MATTER_ACCEPTANCE_AND_AUTHORING.md). Yeni spatial kabul ölçümleri kaynakta hazır; kullanıcı derlemesi bekler. |
+| Granül önceliği | G2 MPM yerleşme/dt açık. H1 CPU tane referansı 21/21 canlı PASS; production emitter/collider/GPU bağlantısı yok. Öncelik domain içi GPU granül çözümü; DEM ile PBD/XPBD seçimi ölçümle, otomatik hibrit geçiş sonraki kapı. Aşağıdaki H1 üretim güncellemesi kanonik yön; [referans ve sınırlar](MATTER_H1_GRAIN_CONTACT.md). |
+| Tarihsel devir | [Önceki kayıt](archive/MATTER_ROADMAP_HANDOFF_2026-10-05_HISTORY.md). Ayrıntılı tasarım ve geçmiş ölçümler aşağıda korunur. |
+
+---
+
+## H1 üretim hedefi — ortak GPU madde, tek domain (2026-10-05)
+
+**Bu bölüm, aşağıdaki 2026-10-04 H1 tasarımının uygulama önceliğini günceller.**
+Ana hedef değişmez: tek Matter domaininde birbirini etkileyen gaz, sıvı, granül
+ve deformasyon; yerel ıslanma/kuruma, yanma ve erime. Domain sınır/zaman/collider/
+bütçe/cache yöneticisidir; tek domain, tek fizik algoritması anlamına gelmez.
+Mevcut particle altyapısı yeniden çoğaltılmaz. Emitter aynı fiziksel maddeyi ve
+başlangıç durumunu üretir; granül çözücü bu ortak taşıyıcıları ilerletir.
+
+### Veri ve GPU sahipliği
+
+- Kanonik GPU SoA/phase grid durumu üretim çözümünün ana durumudur. Kararlı
+  kimlik, substance/model/sahiplik, konum-hız-kütle, sıcaklık/enerji ve pore
+  water/capacity yerel olarak korunur. Granül temas geçmişi, bağ/hasar,
+  radius/inertia/angular state ilgili modelin gerekli sidecar'larıdır.
+- Ortak veri, bütün fazları tek hız/density alanında ortalamak değildir. Model
+  başına gerekli grid/scratch ve farklı faz temsilleri korunur; aynı kütlenin
+  veya enerjinin ikinci otoriter kopyası oluşturulmaz. Buffer yaşam döngüsü,
+  revision ve okuyucu/yazıcı aşamaları tek scheduler tarafından yönetilir.
+- Solver → solver ve solver → render normal üretim yolu GPU buffer/aktif listeleri
+  üzerinden ilerler. CPU'ya bütün konum/hız/state indirip sonraki çözücü için
+  yeniden upload etmek normal taşıma yolu olmaz. Barriers ve dispatch sırası
+  açık sözleşmedir; mümkün olan occupancy/hash/stencil/aktif metadata paylaşılır.
+- CPU readback yalnız açık sorgu, küçük/asenkron kabul sayaçları, gereken cache/
+  save kaydı veya debug referansı içindir. Cache kayıt maliyeti ayrı ölçülür;
+  GPU'da kalmak tek başına hız garantisi sayılmaz.
+- Aynı domain/grupta her taşıyıcının su, sıcaklık, hasar ve bağ durumu farklı
+  olabilir. Akışkanlarda da heterojen durum mümkündür. Domain ortalaması yerel
+  kuvvet/bağ/kopma hesabının yerine geçmez. Saturation su/capacity'den türetilir.
+- Islanma/kuruma mevcut modelin sürtünme/bağ/dayanımını değiştirebilir; sırf
+  saturation değişti diye otomatik model geçişi gerekmez. Yanma/erime/evaporation
+  ve faz transferleri dry/free/pore/gas mass, enerji ve momentum ledger'ıyla
+  kapanır; tüketilen kaynak iki modele birden yazılmaz.
+
+### Granül çözücü kararı ve sınır
+
+CPU kuvvet-tork tabanlı DEM çekirdeği doğrulama referansıdır; ayrı bir ürün
+particle sistemi veya kalıcı CPU sahne solver'ı değildir. Yüksek yoğunluklu
+üretim taneleri için force-based DEM ve PBD/XPBD contact adayları; paketleme,
+yerleşme, dt/iteration hassasiyeti, runout, temas/rolling ve GPU maliyetiyle
+karşılaştırılır. PBD/XPBD üretim için henüz seçilmiş/uygulanmış değildir; görsel
+benzerlik fiziksel eşdeğerlik veya açısal momentum kabulü yerine geçmez.
+PBD nokta temasının kendiliğinden fiziksel spin/rolling sağladığı varsayılmaz;
+gerekli açısal state ve torque/constraint karşılığı ayrıca tasarlanıp ölçülür.
+Sürtünme sönümü enerji yok etmek diye saklanmaz; disipasyon/ısı aktarım politikası
+ve ölçülen sayısal enerji farkı termal bilanço ile ayrı raporlanır.
+
+Önce ortak Matter runtime içinde açık bir granül taşıma yolu kurulur. Her
+parçacığın bir alt adımda tek transport owner'ı vardır; model/solver seçimi
+render materyalinden veya virtual sphere sayısından türemez. MPM kuru kumu da
+çözebilir; G2 dt/yerleşme RED kapanmadan MPM yanlış yöntem ilan edilmez.
+Render çözünürlüğü ile fizik tane/taşıyıcı çözünürlüğü açıkça ayrılır.
+
+2026-10-04 tasarımındaki yüzey tanesi seçimi ve MPM↔DEM otomatik geçişi ikinci
+bir hibrit kapıdır, ilk yüksek yoğunluklu granül paketinin ön şartı değildir.
+Eski `transport_owner=mpm|dem` sözleşmesi üretimde `mpm|grain` sahipliğine ve
+ayrı `grain_solver_kind` seçimine genellenir; bunlar hedef şema, henüz kodda
+uygulanmış alanlar değildir. Sonradan geçiş uygulanırsa aşağıdaki tek kimlik,
+çift impuls, orbital/spin momentum, hysteresis ve cache koşulları aynen geçerlidir.
+
+### Uygulama ve kabul sırası
+
+2026-10-05 kaynak: [dry grain GPU runtime adayı](MATTER_GRAIN_GPU_RUNTIME.md)
+yazıldı; tek kullanıcı C++/shader build bekliyor. Hash/contact/spin, gerçek emitter
+ve flat collider bağlantısı var; GPU sayısal kabul, yoğunluk kıyası ve üretim solver
+kararı henüz açık. Statik friction history/wet/thermal coupling ve frame sonu
+host render köprüsünün kaldırılması bu ilk adayda tamamlanmadı.
+
+| Kapı | Teslim | Kabul / kapanış |
+|---|---|---|
+| H1-R | Mevcut bounded CPU sphere/contact/integratör referansı | 21/21 canlı PASS; kısa .4 s / 27 tane dt farkı .285 mm. Grid karşı-impuls, production collider ve GPU parity henüz yok; eski H1a bütünü tamamlanmadı. |
+| H1-G0 | Ortak GPU taşıyıcı/aktif liste/komşuluk/lifecycle sahipliği; DEM–PBD/XPBD aday kararı | Kimlik/mass/local state korunur, çift sahipliği deterministik; yoğunluk ve bütçe artınca görünüm fizik kimliğini değiştirmez. |
+| H1-G1 | Matter emitter → GPU granül step → mevcut flat TriangleMesh collider → GPU render; ortak scheduler | Kuru dökülme, rampaya çarpma/sekme/kayma, yüksek yoğunluklu yığın, iki yük yüksekliği; dt ve tane çözünürlüğü yakınsaması, repose/runout. Sahne gerçek runtime'da çalışır; IPC snapshot replay bu kapıyı kapatmaz. |
+| H1-G2 | Aynı state üzerinde yerel wet/thermal/bond/damage ve sıvı–tane karşılıklı contact | Aynı grupta dry/damp/saturated alanlar ayrılır; kapalı kütle/enerji/momentum, kuruma/yanma/erime mevcut ledger ile bağlanır. Her dönüşüm kendi kabul matrisiyle kapanır. |
+| H1-P | Production servis/authoring, cache/serializer ve UI/Python/IPC parity | Yeni operations aynı core; strict validation/transactional error, save/load/bake/scrub/resume aynı kimlik ve sidecar durumunu kurar. Authoring capability ilgili fizik paketiyle birlikte gelir; UI-only veya binding-only yol yok. |
+| H1-H | Gerekli olduğu kanıtlanırsa MPM↔grain hibrit geçiş ve yerel kırılan bağlar | Önce/sonra mass, linear/angular momentum ve sayısal enerji; bütçe/hysteresis; kar/çığ, toprak/heyelan için yerel bağ kopması. Otomatik geçiş ilk paket için zorunlu değildir. |
+| H1-C7 | Saf su/saf kum/karma GPU resident maliyet ve regresyon | Dispatch, GPU süre/bellek, CPU sync ve upload/download byte sayıları; normal solver aşamalarında tam-state CPU roundtrip yok. Cache/query maliyetleri ayrı; hız yüzdesi ölçümsüz ilan edilmez. |
+
+H1-P, H1-G1/G2 ile birlikte teslim edilen ilgili operasyonların şartıdır; genel
+editable profile/emitter/contextual UI göçü kendi sonraki yol haritasını korur.
+Bu liste eski açık C5/C6/C7 veya G2 kabulünü tamamlandıya çevirmez. Mevcut
+27-grain görsel tekrar CPU referansın sampled pozlarını oynatır; üretim GPU
+state paylaşımı, emitter/collider bağlantısı veya timeline DEM kanıtı değildir.
 
 ---
 
@@ -1164,7 +1236,9 @@ taşır. C3a ve önceki testler kullanıcı tarafından PASS bildirildi. C3b ile
 taşıma düzeltmesi tek toplu derleme/canlı kabul bekler; bu kabul gelmeden C3
 tablosuna tamamlandı işareti konulmaz. Checklist: [MATTER_PHASE_GRID.md](MATTER_PHASE_GRID.md).
 
-Bu bölüm tasarım kararıdır; H1 henüz uygulanmış değildir. Kullanıcı önceki
+Bu bölüm 2026-10-04 hibrit aday sözleşmesidir; yukarıdaki H1 üretim güncellemesi
+uygulama sırası ve solver seçimi için önceliklidir. CPU referansı mevcut, üretim
+H1 henüz uygulanmış değildir. Kullanıcı önceki
 değişikliklerin derleme ve çalıştırmasının sorunsuz olduğunu doğruladı.
 G2'nin MPM yük/repose ölçümleri açık kalır. Gerçek tane yuvarlanması H1'de,
 C4 ortak komşuluk ve contact altyapısı üzerine uygulanır; C2/C3'ü engellemez.
@@ -1248,3 +1322,145 @@ Uygulama kapıları:
 H1 kapalıyken mevcut MPM sonucu korunur ve DEM buffer/dispatch maliyeti oluşmaz.
 İlk uygulama işi C2'nin aktif pencere kapsam denetimidir; H1 bu sözleşme
 üzerinden C4 tamamlandıktan sonra kodlanır. Derleme kullanıcı tarafından yapılır.
+
+## C4a kaynak checkpoint — kimlik ve transfer/contact temeli
+
+2026-10-04 büyük kaynak partisi: domain-local 64-bit particle_id, SoA
+remove/compact ve cache korunumu; disk sim-cache v10; ayrı fluid/granular
+kg ve momentum accumulator'ları, ortak quadratic cell support ve stable-ID
+occupant listesi; transaction-safe eşit/zıt normal+Coulomb contact referansı.
+Active Matter tablosu ve `fluid.matter_models` Python/IPC sorgusu ortak core
+servisini kullanır. Standalone C++ ve dış IPC kabul test kaynakları eklendi.
+Statik sözleşme kontrolleri geçti; C++/canlı yeni-parti kabulü henüz çalışmadı.
+
+Bu C4a altyapı/referans partisidir; contact henüz canlı solver'a bağlı değil.
+C4 tamamlandı işareti konulmadı. C4b ayrı-model canlı transfer/solve/contact
+ve GPU yolunu tamamlayacak; H1, C5/C6 ve C7 açık kalır. Ayrıntı ve kesin
+kullanıcı checklist'i [MATTER_TRANSFER_CORE.md](MATTER_TRANSFER_CORE.md).
+
+C3 checkpoint `da93cec` gönderildi. Sonraki RT fog visibility/TLAS düzeltmesi
+kullanıcı derlemesinde gas+SDF birlikte render kabulünü geçti. Liquid Body
+parametrelerinin gas varlığında bazı karelerde etkisizleşmesi ve taşıma/splat
+regresyonu son kalite turuna ertelendi; suyun ateşi söndürmesi kabulü kullanıcı
+tarafından geri çekildi. Güncel görsel kayıt [MATTER_PHASE_GRID.md](MATTER_PHASE_GRID.md).
+
+### C4a kısa canlı kabul / C4b CPU stage sınırı
+
+Kullanıcı C4a derlemesini tamamladı. Boş sahnede geçici domainle model/kimlik
+ve transfer IPC smoke PASS (216 parçacık, kimlik byte sayısı ve kütle toplamı);
+geçici sistem temizlendi. C++ contact ve disk identity roundtrip kabulü açık.
+
+C4b CPU projection→contact→G2P sınırı kaynakta hazır: APIC step odaklı inl
+modülüne çıkarıldı, model-local FLIP snapshot, çift finish ve aradaki topology/
+layout değişimi kapıları eklendi. Statik kontroller PASS. Bu ilk C4b kaynak
+adımı henüz canlı coordinator/MAC contact/GPU karma transport'u bağlamaz.
+Sonraki büyük blok bu bağlamaları tamamlayacak; ara derleme talep edilmiyor.
+Ayrıntı [MATTER_TRANSFER_CORE.md](MATTER_TRANSFER_CORE.md).
+
+2026-10-04 C4b: atomik iki-model CPU batch koordinatörü kaynakta eklendi.
+Canlı MAC temas/CFL/bellek bütçesi bağlantısı bekliyor; karma transport tamamlanmadı.
+İki emitter için domain kimyası ve ayrı splat materyali gözlemleri
+`MATTER_PHASE_GRID.md` son kalite notlarına alındı.
+
+C4b üretim hedefi kullanıcı yönlendirmesiyle açıkça GPU compute: CPU karma
+koordinatör doğrulama referansı olarak kalacak, GPU domain'i otomatik CPU'ya
+yönlendirmeyecek. GPU model partition kernel/ABI/buffer guard kaynakta eklendi;
+indexed transfer/contact ve canlı GPU coordinator tamamlanmadan tam karma
+test veya yeni derleme döngüsü istenmeyecek.
+
+
+2026-10-04 güncel C4b test noktası: `MATTER_MIXED_GPU_TEST_POINT.md`.
+Karma GPU canlı bağlantısı, ortak alt adım, fiziksel P2G kütlesi ve GPU temas
+kaynakta eklendi; önceki “bağlı değil” kayıtları tarihsel ilerleme notlarıdır.
+Derleme/shader/sahne kabulü henüz kullanıcı tarafından yapılmadı. Sonraki adım
+tek derleme ile karma GPU kabulü; C4 tamamlandı etiketi henüz verilmedi.
+
+## 2026-10-04 Output ve ortak emitter havuzu partisi
+
+Karma GPU ilk canlı probu geçti; kullanıcı su/kum rejimlerini görsel ayırdı.
+Output yeniden Liquid Display ile başlar; Matter madde bazlı SDF/Splat/Fog ve
+mevcut sahne materyallerini aynı ortak API üzerinden sunar. Katalog maddesi
+görsel preset'ten düzenlenebilir sahne materyali üretebilir. Serbest canlı
+kapasite kaynaklara `particle_pool_weight` ile paylaştırılır; kaynakların
+ömür boyu üretim limitinden ayrıdır. Bu yeni parti kullanıcı derlemesi/kabulü
+bekliyor; madde başına fog shader ve C5/C6 hâlâ açık. Ayrıntı/kabul komutu:
+`docs/dev/MATTER_MIXED_GPU_TEST_POINT.md`.
+
+
+### 2026-10-05 — C5 büyük kaynak partisi, kabul bekliyor
+GPU emilim/drenaj, kanonik pore mass/capacity/porosity/thermal energy sidecar'ları,
+ıslak taşıyıcı transport kütlesi, korunum kapılı yayın ve ledger olayları yazıldı.
+UI, Python ve IPC ortak authoring servisine bağlı; serializer ve cache v11 hazır.
+Bu bir kaynak teslimidir: C++/shader derlenmedi, canlı C5 kabulü yapılmadı.
+C5 fiziksel kabulü açık; hücre-local ilk adımın dt/çözünürlük, havuz doluluğu ve
+cache round-trip ölçümleri gerekir. C6 wet friction/cohesion/pore-pressure ve
+ıslak görünüm henüz uygulanmadı; C7 kalite kabulü açık. İlk scope Closed Vulkan
+Water + Sand/Gravel/Soil. Eski cache v10 yeniden bake edilir.
+Kesin devir, dosyalar, sınırlamalar ve sonraki kabul adımları:
+[MATTER_C5_HANDOFF.md](MATTER_C5_HANDOFF.md).
+
+
+## 2026-10-05 canlı C5 incelemesi — kullanıcı derlemesinden sonra
+Kullanıcı açık ikili emitter sahnesini ölçmeye izin verdi. Uygulama açılmadı,
+derleme yapılmadı; dış scripts/test/rt_ipc.py ile named-pipe escalation kullanıldı.
+Sahne C4_Mixed_GPU, Closed Vulkan, 32^3, 50.000 particle limit. İlk durumda
+frame 0/boş runtime, C5 disabled; C4_Sand emitter aslında Soil (Granular),
+C4_Water emitter küçük harf water (Fluid). Soil için domain custom cohesion
+1807 Pa, Young 706400 Pa; bu kuru Sand kabul sahnesi değildir.
+
+Mevcut ayarlar ile ilerletmede GPU üç stage etkin, held=false; temas sayaçları
+199,529,1562 oldu. Contact pair sayısı kuvvet transferinin tüm doğruluğunu,
+batmayı veya hidrostatik buoyancy/drag kabulünü kanıtlamaz.
+
+Test sırasında Water emitter etiketi Water'a düzeltildi; aynı Obj_1_Material /
+SDF binding Water için eklendi (eski water binding korunuyor). Soil ve kaynak
+konumları değiştirilmedi. C5 enabled, permeability=1e-8, drainage_scale=0 ile
+emilim; sonra drainage_scale=1 ile drenaj denendi. Bu ayarlar sahnede kaldı,
+dosyaya save yapılmadı. Son playhead 68, playing=false.
+
+Kaydedilmiş canlı örneklerde pore water 0.0134 -> 0.0354 -> 0.2959 -> 3.3068 kg,
+max saturation 0.3204; absorption last-step 0.4237 kg. Mass residual yaklaşık
+-7.2e-8 kg, momentum residual 4.6e-7 kg m/s. Drenaj örneği: 0.00049856 kg /
+66 yeni Water parcel, mass residual -8.1e-9 kg. Bunlar anlık solver örnekleridir,
+aynı durdurulmuş sistemin before/after bilançosu veya çözünürlük kabulü değildir.
+Timeline set_frame asenkron resync yapar; config değişimi cache/resync tetikler.
+JSON'daki frame requested playhead'dir; her örneğin solver yaşını garanti etmez.
+Örnekler: matter_c5_live_2026-10-05.json.
+
+Önemli açık sorun: sonraki ölçümde 50.000 limit doldu: 45.425 Fluid + 4.575
+Granular. 3.524 pore taşıyıcısında drainage slotu yok, drained_kg=0; su tutuldu.
+Kararlı son query öncesi/sonrası sim.control_state epoch=0, frame=68,
+playing=false idi. Önceki query ile bu query arasında çok sayıda drainage birth
+oluştu; timeline-resync/step sayımı sonraki kontrollü testte izlenmeli.
+
+Harici mixed GPU --contact probe PASS (78.098 contacts). C5 --expect drainage
+probe son karede FAIL: havuz dolu olduğundan drained_kg=0, bu aşamada beklenen
+budget koşulu; önceki kayıtlı örnekte drenaj doğumu görüldü. C5 genel finite /
+saturation / GPU publication probe ayrıca çalıştırıldı. C5 tam kabul açık.
+
+## Öncelikli sonraki düzeltmeler
+1. FluidPhysicalMass.cpp densityForParticle yalnız liquid_density kullanıyor.
+   Sand/Gravel/Soil bu alanı override etmiyor (default 1000); dry density alanı
+   Sand 1600, Gravel 1750, Soil 1450. Gözlenen Soil 0.125 kg/parcel, Water
+   ~0.124625 kg/parcel. Rejim-aware mass initialization yapılmalı: Granular dry
+   density, Fluid liquid density; exact phase-transfer masses korunmalı. CPU/
+   GPU ortak helper, legacy Auto fallback ve yeni-emission yolları denetlenmeli.
+   Bu turda fizik kaynak kodu değiştirilmedi; mevcut exe bu kusuru taşıyor.
+2. C5 tiny drainage parcel her taşıyıcı/her step üretimi havuzu hızlı dolduruyor.
+   GPU hücre/model bazlı birleştirme veya kontrollü birth batching/reuse tasarla;
+   mass/momentum/thermal energy/ID/cache/ledger korunumu birlikte sürmeli.
+3. Fluid-only pressure ile unilateral Coulomb grid-contact tam hidrodinamik
+   drag/buoyancy doğrulaması değildir. C4 roadmap iki yönlü contact/drag kabulünü
+   (ayrı referans, yoğunluk kontrastı, submerged bed, pressure/drag transfer)
+   açık tut. C6 wet effective stress/cohesion uygulanmadan batma kabulü verme.
+4. Yukarıdakilerden sonra gerçek canonical Water+Sand (zero cohesion) paused
+   isolated test; emitters stop, epoch/time checked balances ve dt/resolution.
+
+
+### 2026-10-05 C6 ilk kaynak partisi (temel canlı problar geçti)
+Canonical pore saturation -> wet strength/local head ve 8-band granular splat
+appearance; shared UI/Python/IPC authoring, serializer/cache hash ve test kaynakları
+bağlı. C6 fiziksel kabul kapanmadı; local head pressure PDE değildir. Toplu shader
+ABI: stress_update 18/68, stress_p2g 9/52. Güncel kısa durum/test listesi:
+[MATTER_C5_HANDOFF.md](MATTER_C5_HANDOFF.md); model sınırları:
+[MATTER_WET_RESPONSE.md](MATTER_WET_RESPONSE.md).

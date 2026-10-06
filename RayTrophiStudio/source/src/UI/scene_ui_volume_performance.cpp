@@ -132,6 +132,8 @@ std::string buildMetricsReport(const VulkanRT::VolumePerformanceStats& stats) {
         "medium_passes: %u\n"
         "arbiter_started_inside: %u\n"
         "arbiter_inside_found: %u\n"
+        "walk_paths: %u  walk_events: %u  walk_event_capped: %u\n"
+        "walk_probe_traces: %u  walk_shadow_traces: %u  walk_shadow_skipped: %u\n"
         "bounce_capped_percent: %.3f\n"
         "region: %.3f %.3f %.3f %.3f\n",
         stats.pathsTraced,
@@ -145,6 +147,8 @@ std::string buildMetricsReport(const VulkanRT::VolumePerformanceStats& stats) {
         stats.mediumPasses,
         stats.arbiterStartedInside,
         stats.arbiterInsideFound,
+        stats.walkPaths, stats.walkEvents, stats.walkEventCapped,
+        stats.walkProbeTraces, stats.walkShadowTraces, stats.walkShadowSkipped,
         100.0f * safeRatio(stats.pathsBounceCapped, stats.pathsTraced),
         stats.regionMinX, stats.regionMinY, stats.regionMaxX, stats.regionMaxY);
     return std::string(report) + budget;

@@ -1,0 +1,83 @@
+{
+  "args": {
+    "counts": [
+      1024,
+      4096
+    ],
+    "steps": 36,
+    "stiffness": 200000.0,
+    "tangential": 0.2857142857142857,
+    "rolling": 0.02,
+    "tag": ""
+  },
+  "arms": [
+    {
+      "count": 1024,
+      "kernels": [
+        {
+          "calls": 6984,
+          "kernel": "sim_matter_grain_step",
+          "ms": 1696.160768000004,
+          "ms_per_call": 0.24286379839633507
+        },
+        {
+          "calls": 36,
+          "kernel": "sim_matter_grain_clear",
+          "ms": 0.5751360000000001,
+          "ms_per_call": 0.015976000000000004
+        },
+        {
+          "calls": 36,
+          "kernel": "sim_matter_grain_hash",
+          "ms": 0.4321280000000001,
+          "ms_per_call": 0.012003555555555559
+        }
+      ],
+      "runtime": {
+        "contacts_last_substep": 172,
+        "dispatches": 196,
+        "history_reset_this_step": false,
+        "max_contacts_per_grain": 3,
+        "sticking_contacts_last_substep": 93,
+        "substep_dt_s": 8.591065852669999e-05,
+        "substep_limit": "accuracy",
+        "substeps": 194
+      },
+      "median_total_ms": 51.81740188598633
+    },
+    {
+      "count": 4096,
+      "kernels": [
+        {
+          "calls": 6984,
+          "kernel": "sim_matter_grain_step",
+          "ms": 2016.0040960000042,
+          "ms_per_call": 0.2886603802978242
+        },
+        {
+          "calls": 36,
+          "kernel": "sim_matter_grain_clear",
+          "ms": 0.619424,
+          "ms_per_call": 0.01720622222222222
+        },
+        {
+          "calls": 36,
+          "kernel": "sim_matter_grain_hash",
+          "ms": 0.533504,
+          "ms_per_call": 0.014819555555555555
+        }
+      ],
+      "runtime": {
+        "contacts_last_substep": 917,
+        "dispatches": 196,
+        "history_reset_this_step": false,
+        "max_contacts_per_grain": 5,
+        "sticking_contacts_last_substep": 475,
+        "substep_dt_s": 8.591065852669999e-05,
+        "substep_limit": "accuracy",
+        "substeps": 194
+      },
+      "median_total_ms": 66.2394027709961
+    }
+  ]
+}

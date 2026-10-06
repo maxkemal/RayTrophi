@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -1430,6 +1430,15 @@ struct VolumeInstrumentationInfo {
     // and whether it found that exit.
     uint32_t arbiter_started_inside = 0;
     uint32_t arbiter_inside_found = 0;
+    // Random walk cost split: events, and the traces an event makes (solid
+    // probe after each flight; geometry shadow ray per NEE unless the
+    // in-volume transmittance was ~0, counted as skipped).
+    uint32_t walk_paths = 0;
+    uint32_t walk_events = 0;
+    uint32_t walk_probe_traces = 0;
+    uint32_t walk_shadow_traces = 0;
+    uint32_t walk_shadow_skipped = 0;
+    uint32_t walk_event_capped = 0;
     // Per-device breakdown behind the summed numbers above. Diagnostic for the
     // instrument itself: a region that is written before a render and reads
     // back as 0,0,1,1 after it is visible here as WHICH device lost it.
@@ -1607,6 +1616,31 @@ struct ViewportStatusInfo {
     std::string shading;            // "solid" | "material" | "rendered" | "matcap"
 };
 ViewportStatusInfo viewportStatus();
+
+// ---------------------------------------------------------------------------
+// Ray tracing pipeline build state (render.rt_pipeline_status).
+//
+// ★★ The first Rendered use after a shader change compiles the RT pipeline for
+// minutes on a worker thread; Rendered shows a raster mode meanwhile. An agent
+// reading samples == 0 in that window cannot tell "compiling" from "broken"
+// without this value -- and a render.start issued then just waits.
+struct RtPipelineStatusInfo {
+    bool available = false;        // false = the active backend builds no RT pipeline
+    std::string backend;           // "vulkan", "optix", "cpu"
+    std::string state;             // "none" | "compiling" | "ready" | "failed"
+    bool awaiting_install = false; // compiled; installs on the next Rendered frame
+    double compile_seconds = 0.0;  // running while compiling, last build's duration otherwise
+    bool cache_hit_known = false;  // driver returned pipeline creation feedback
+    bool cache_hit = false;        // last build served from the on-disk pipeline cache
+    bool cache_loaded = false;     // a valid cache file was loaded at device creation
+    uint64_t cache_loaded_bytes = 0;
+    std::string cache_path;
+    std::string cache_reject_reason;
+    uint32_t deferred_threads = 0; // threads that joined the last build; 0 = synchronous
+    uint32_t build_count = 0;
+    std::string error;
+};
+RtPipelineStatusInfo rtPipelineStatus();
 
 // ---------------------------------------------------------------------------
 // Viewport shading mode.
@@ -4202,6 +4236,13 @@ struct FluidDomainInfo {
     float grain_size_variation = 0.0f;
     // VolumeFog Gaussian spread (sigma, simulation voxels); 0 = raw splat.
     float fog_spread_voxels = 0.0f;
+    // VolumeFog world-space erosion (fluid.set_fog); strength 0 = off.
+    float fog_erosion_strength = 0.0f;
+    float fog_erosion_size = 0.2f;
+    int   fog_erosion_detail = 3;
+    int   fog_erosion_seed = 0;
+    float fog_erosion_depth = 0.0f;           // 0 = thin-fog remap; > 0 = surface band, world units
+    int   fog_resolution_multiplier = 1;      // fog grid / solver grid, 1..4
     // Particle temperature range, Kelvin, over parcels that carry one (> 0).
     // Measured on every read, whether or not the thermal chain is on: this is
     // what the fog's blackbody emission is fed. particle_kelvin_measured is
@@ -4483,6 +4524,12 @@ struct FluidSplatGeometryPatch {
 // Volumetric Fog shaping of a liquid domain. Empty fields keep their value.
 struct FluidFogPatch {
     std::optional<float> spread_voxels;  // 0..6, Gaussian sigma; 0 = raw splat
+    std::optional<float> erosion_strength;  // 0..1; 0 = off
+    std::optional<float> erosion_size;      // 0.001..100 world units, largest feature
+    std::optional<int>   erosion_detail;    // 1..6 fBm octaves
+    std::optional<int>   erosion_seed;
+    std::optional<float> erosion_depth;          // 0..1 world units; 0 = thin-fog remap
+    std::optional<int>   resolution_multiplier;  // 1..4
 };
 
 // Overlay patches: fields left empty keep their value.
@@ -4638,6 +4685,9 @@ struct SimulationFlowSourceInfo {
     float fuel = 0.0f;
     float falloff = 1.0f;
     float fluid_particles_per_second = 1000.0f;
+    float particle_pool_weight = 1.0f;
+    int pool_requested_particles = 0;
+    int pool_granted_particles = 0;
     float fluid_velocity_spread = 0.15f;
     bool fluid_emit_along_normal = false;
     // Substance this source pours; empty = untagged (domain material).
@@ -4733,6 +4783,11 @@ struct GasShaderSettings {
     int   shadow_steps = 8;
     int   shadow_stride = 4;
     float shadow_strength = 0.8f;
+    // Path-traced multiple scattering (Vulkan RT random walk); see
+    // VolumeShader::ScatteringSettings::random_walk. Off = the march.
+    bool  random_walk = false;
+    int   random_walk_max_events = 32;   // 8..512
+    int   random_walk_exact_events = 4;   // 1..512, then similarity (sigma_s(1-g), isotropic)
 };
 
 Result getGasShaderSettings(const std::string& domain_id_or_name,
@@ -4753,6 +4808,9 @@ struct FluidFogShaderSettings {
     float scattering_coefficient = 1.0f;
     Vec3  scattering_color = Vec3(0.55f, 0.74f, 0.92f);
     float anisotropy = 0.0f;
+    float anisotropy_back = -0.3f;   // backward HG lobe, -0.99..0
+    float lobe_mix = 0.7f;           // 1 = all forward lobe
+    float multi_scatter = 0.3f;      // multi-scatter approximation (0..1), see the volume panel
     float absorption_coefficient = 2.0f;
     Vec3  absorption_color = Vec3(0.15f, 0.42f, 0.78f);
     float voxel_step_multiplier = 1.0f;
@@ -4760,6 +4818,11 @@ struct FluidFogShaderSettings {
     int   shadow_steps = 8;
     int   shadow_stride = 1;
     float shadow_strength = 1.0f;
+    // Path-traced multiple scattering (Vulkan RT random walk); see
+    // VolumeShader::ScatteringSettings::random_walk. Off = the march.
+    bool  random_walk = false;
+    int   random_walk_max_events = 32;   // 8..512
+    int   random_walk_exact_events = 4;   // 1..512, then similarity (sigma_s(1-g), isotropic)
 };
 // A domain's thermal environment (gas OR liquid): the world ambient/oxygen, or
 // the domain's own override inside its bounds. The panel's Environment tab

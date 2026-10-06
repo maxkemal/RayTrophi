@@ -1002,6 +1002,11 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst.scatter_anisotropy_back = src.scatter_anisotropy_back;
         dst.scatter_lobe_mix = src.scatter_lobe_mix;
         dst.scatter_multi = src.scatter_multi;
+        dst.random_walk_enabled = src.random_walk ? 1.0f : 0.0f;
+        dst.random_walk_max_events = static_cast<float>(
+            (std::max)(8, (std::min)(512, src.random_walk_max_events)));
+        dst.random_walk_exact_events = static_cast<float>(
+            (std::max)(1, (std::min)(512, src.random_walk_exact_events)));
 
         // Absorption
         dst.absorption_color[0] = src.absorption_color.x;

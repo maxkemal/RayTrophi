@@ -29,6 +29,7 @@
 
 #include "scene_data.h"
 #include "Fluid/MatterPhaseGrid.h"
+#include "Fluid/MatterWetAppearance.h"
 #include "InstanceManager.h"
 #include "InstanceGroup.h"
 #include "Triangle.h"
@@ -1319,7 +1320,8 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 group->rendered_rt_excluded = !has_explicit_splats;
                 structural_change = true;
             }
-            group->raster_sphere_candidate = dconfig.fluid_particle_geometry_mode != 1;
+            group->raster_sphere_candidate = dconfig.fluid_particle_geometry_mode != 1 &&
+                !dconfig.fluid_params.pore_exchange.wet_appearance_enabled;
             const bool procedural_splats =
                 dconfig.fluid_particle_geometry_mode == 0 && has_explicit_splats;
             if (group->point_sphere_mode != procedural_splats) {
@@ -1327,8 +1329,9 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 structural_change = true;
             }
             const uint32_t requested_visual_children =
-                dconfig.fluid_params.granular_enabled &&
-                    dconfig.fluid_granular_physical_carriers
+                dconfig.fluid_params.grain.enabled ||
+                    (dconfig.fluid_params.granular_enabled &&
+                     dconfig.fluid_granular_physical_carriers)
                 ? 1u
                 : static_cast<uint32_t>(std::clamp(
                       dconfig.fluid_particle_visual_children,
@@ -1369,6 +1372,8 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             sig = hashCombine(sig, quantize(dconfig.fluid_particle_color.y));
             sig = hashCombine(sig, quantize(dconfig.fluid_particle_color.z));
             sig = hashCombine(sig, quantize(dconfig.fluid_particle_radius_factor));
+            sig = hashCombine(sig, quantize(dconfig.fluid_params.grain.radius_m));
+            sig = hashCombine(sig, dconfig.fluid_params.grain.enabled ? 1ull : 0ull);
             sig = hashCombine(sig, quantize(dconfig.fluid_particle_size_multiplier));
             sig = hashCombine(sig, static_cast<uint64_t>(
                 std::max(dconfig.fluid_particle_visual_children, 1)));
@@ -1409,6 +1414,15 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 sig = hashCombine(sig, static_cast<uint64_t>(route));
             }
 
+            const auto wet_palette = RayTrophiSim::Fluid::prepareMatterWetPalette(
+                dconfig, state.particles);
+            for (const auto& entry : wet_palette.entries) {
+                for (const auto material : entry.materials) {
+                    sig = hashCombine(sig, static_cast<uint64_t>(material));
+                }
+            }
+            sig = hashCombine(sig,
+                RayTrophiSim::Fluid::matterPoreSettingsHash(dconfig.fluid_params.pore_exchange));
             FluidSourceState& st = g_fluid_source_state[group_id];
             if (!group->sources.empty() && st.signature == sig &&
                 st.state_version == state.version && st.content_hash != 0u) {
@@ -1447,6 +1461,7 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                         splat_material_keys.push_back(material_key);
                     }
                 }
+                wet_palette.appendMaterialKeys(splat_material_keys);
                 const int subdiv = std::max(0, std::min(dconfig.fluid_particle_subdivisions, 3));
                 for (std::size_t si = 0; si < splat_material_keys.size(); ++si) {
                     const int material_key = splat_material_keys[si];
@@ -1518,6 +1533,8 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                     }
                     break;
                 }
+                source_index = wet_palette.sourceIndex(
+                    state.particles, pi, st.source_material_keys, source_index);
                 // Proxy spheres stand in for a SURFACE only; fog parcels are
                 // drawn by the fog volume and get no sphere.
                 const bool sampled_proxy =
@@ -1569,8 +1586,9 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                     dconfig.fluid_particle_size_multiplier);
             const float radius = std::max(
                 1e-4f,
-                voxel * visual_radius.effective_voxels);
-            const float visual_spread_radius = procedural_splats
+                dconfig.fluid_params.grain.enabled ? dconfig.fluid_params.grain.radius_m :
+                    voxel * visual_radius.effective_voxels);
+            const float visual_spread_radius = procedural_splats && !dconfig.fluid_params.grain.enabled
                 ? std::max(
                       0.0f,
                       voxel * RayTrophiSim::Fluid::kFluidRenderProxyFillSupportVoxels -

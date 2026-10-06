@@ -1337,6 +1337,7 @@ static const MethodParam params_flow_source_create[] = {
     {"initial_constitutive_model", "string", false, "Optional birth-state override; auto resolves through the Substance", nullptr, "auto|fluid|granular|elastic"},
     {"fluid_particles_per_second", "float", false, "Liquid particle emission rate", nullptr, nullptr},
     {"enabled", "bool", false, "Emitter active", nullptr, nullptr},
+    {"particle_pool_weight", "float", false, "Relative share of free live particle capacity, finite in [0.001, 1000], default 1. Unused shares return to the common pool. Not a live-particle reservation or lifetime emission limit.", nullptr, nullptr},
     {"end_time", "any", false, "", nullptr, nullptr},
     {"falloff", "any", false, "", nullptr, nullptr},
     {"fluid_emit_along_normal", "any", false, "", nullptr, nullptr},
@@ -1353,12 +1354,12 @@ static const MethodParam params_flow_source_create[] = {
 static const MethodDescriptor desc_flow_source_create = {
     "flow_source.create", "flow_source",
     "Create an emitter that feeds a fluid or gas domain with mass, heat, fuel or particles",
-    "An emitter belongs to a domain by name. phase selects gas or liquid emission inside a unified matter domain; legacy single-phase domains ignore it. With a parent_object it follows that object, and velocity_space decides whether its velocity is read in world or parent-local space.",
+    "An emitter belongs to a domain by name. phase selects gas or liquid emission inside a unified matter domain; legacy single-phase domains ignore it. With a parent_object it follows that object, and velocity_space decides whether its velocity is read in world or parent-local space. particle_pool_weight shares remaining live capacity between simultaneously emitting liquid sources. pool_requested_particles and pool_granted_particles are read-only last-injection diagnostics returned by get/list; denied slots are not accumulated as an emission backlog. Equal fractional ties rotate with frame.",
     "write", "SceneWrite", false, "FlowSourceInfo",
     "flow_source|flow|source|create|simulation|emitter|inject|pour|jet|flame|inflow",
     "flow_source.update|flow_source.list|fluid.create_domain|gas.set_settings",
     nullptr, nullptr, nullptr, nullptr,
-    params_flow_source_create, 29,
+    params_flow_source_create, 30,
     true
 };
 static const MethodRegistration reg_flow_source_create(desc_flow_source_create);
@@ -1369,7 +1370,7 @@ static const MethodParam params_flow_source_get[] = {
 static const MethodDescriptor desc_flow_source_get = {
     "flow_source.get", "flow_source",
     "Return one emitter's full settings",
-    nullptr,
+    " particle_pool_weight is the authored share of free slots. pool_requested_particles/pool_granted_particles report requested and allocated slots of the last injection, not per-source live ownership; rewind clears these diagnostics.",
     "read", "Read", false, "FlowSourceInfo",
     "flow_source|flow|source|get|simulation|emitter",
     nullptr,
@@ -1382,7 +1383,7 @@ static const MethodRegistration reg_flow_source_get(desc_flow_source_get);
 static const MethodDescriptor desc_flow_source_list = {
     "flow_source.list", "flow_source",
     "List every emitter with its settings",
-    nullptr,
+    " particle_pool_weight is the authored share of free slots. pool_requested_particles/pool_granted_particles report requested and allocated slots of the last injection, not per-source live ownership; rewind clears these diagnostics.",
     "read", "Read", false, "FlowSourceInfo[]",
     "flow_source|flow|source|list|simulation|emitter|inventory",
     nullptr,
@@ -1410,6 +1411,7 @@ static const MethodRegistration reg_flow_source_remove(desc_flow_source_remove);
 
 static const MethodParam params_flow_source_update[] = {
     {"name", "string", true, "", nullptr, nullptr},
+    {"particle_pool_weight", "float", false, "Relative share of free live particle capacity, finite in [0.001, 1000], default 1. Unused shares return to the common pool. Not a live-particle reservation or lifetime emission limit.", nullptr, nullptr},
     {"density", "any", false, "", nullptr, nullptr},
     {"domain", "any", false, "", nullptr, nullptr},
     {"enabled", "any", false, "", nullptr, nullptr},
@@ -1442,12 +1444,12 @@ static const MethodParam params_flow_source_update[] = {
 static const MethodDescriptor desc_flow_source_update = {
     "flow_source.update", "flow_source",
     "Update fields of an existing emitter, keeping everything you do not send",
-    "Read-modify-write on purpose: sending only one field must not reset the rest.",
+    "Read-modify-write on purpose: sending only one field must not reset the rest. particle_pool_weight shares remaining live capacity between simultaneously emitting liquid sources. pool_requested_particles and pool_granted_particles are read-only last-injection diagnostics returned by get/list; denied slots are not accumulated as an emission backlog. Equal fractional ties rotate with frame.",
     "write", "SceneWrite", false, "any",
     "flow_source|flow|source|update|simulation|emitter|configure",
     "flow_source.create|flow_source.get",
     nullptr, nullptr, nullptr, nullptr,
-    params_flow_source_update, 29,
+    params_flow_source_update, 30,
     true
 };
 static const MethodRegistration reg_flow_source_update(desc_flow_source_update);
@@ -1601,6 +1603,44 @@ static const MethodDescriptor desc_fluid_get_whitewater = {
 };
 static const MethodRegistration reg_fluid_get_whitewater(desc_fluid_get_whitewater);
 
+static const MethodParam params_fluid_grain_reference[] = {
+    {"bodies", "array", true, "Explicit id/position/radius_m/mass_kg; optional velocity/angular_velocity/saturation", nullptr, nullptr},
+    {"gravity", "vec3", false, "", "[0,-9.81,0]", nullptr},
+    {"plane", "object", false, "Unit normal and offset_m, or null for free flight", "{normal:[0,1,0],offset_m:0}", nullptr},
+    {"duration_s", "float", false, "", "1", nullptr},
+    {"maximum_dt_s", "float", false, "", ".001", nullptr},
+    {"sample_interval_s", "float", false, "", ".02", nullptr},
+    {"contact", "object", false, "", "{}", nullptr},
+};
+static const MethodDescriptor desc_fluid_grain_reference = {
+    "fluid.grain_reference", "fluid",
+    "Run a bounded transient CPU physical-grain reference experiment",
+    "Shared rt.fluid.grain_reference(**kwargs) and external IPC use one validation/core. No scene/cache/emitter mutation; production_dem_enabled=false. Analytic plane only, not a scene mesh collider. 1..64 explicit spheres, unique positive integer IDs, mass 1e-5..100 kg, radius .001..1 m, local saturation 0..1, duration (0,2] s. Requested dt is further limited by contact stiffness/damping/travel. Bounded CPU work; overflow/budget/unknown-key/type/identity errors reject transactionally. Returns sampled positions, linear/angular velocity, mass, linear/angular momentum, kinetic energy and contact counters. No MPM-DEM conversion, wet-water transport, fracture or persistent scene feature.",
+    "read", "Read", false, "GrainReferenceReport",
+    "fluid|grain|reference|granular|dem|contact|read",
+    "fluid.matter_models",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_grain_reference, 7,
+    true
+};
+static const MethodRegistration reg_fluid_grain_reference(desc_fluid_grain_reference);
+
+static const MethodParam params_fluid_grain_settings[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_grain_settings = {
+    "fluid.grain_settings", "fluid",
+    "Read dry grain candidate settings",
+    nullptr,
+    "read", "Read", false, "Physical radius, contact coefficients and substep cap",
+    "fluid|grain|settings|read",
+    "fluid.set_grain_settings|fluid.matter_models",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_grain_settings, 1,
+    true
+};
+static const MethodRegistration reg_fluid_grain_settings(desc_fluid_grain_settings);
+
 static const MethodDescriptor desc_fluid_list_domains = {
     "fluid.list_domains", "fluid",
     "List every fluid and gas domain with its full settings",
@@ -1613,6 +1653,23 @@ static const MethodDescriptor desc_fluid_list_domains = {
     true
 };
 static const MethodRegistration reg_fluid_list_domains(desc_fluid_list_domains);
+
+static const MethodParam params_fluid_matter_models[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"include_transfer", "bool", false, "", "False", nullptr},
+};
+static const MethodDescriptor desc_fluid_matter_models = {
+    "fluid.matter_models", "fluid",
+    "Inspect domain particle identities, constitutive model mass and momentum",
+    "Read-only; does not run the mixed solver or apply contact. include_transfer=true builds sparse separate physical-mass fields, shared quadratic support, overlap and out-of-grid totals; limited to 250000 particles. Elastic/unknown lanes never scatter into fluid or granular fields. IDs are domain-local and exact in cache v11; mixed_transport_available reports the CPU-reference/Vulkan mixed route; mixed_transport_ready and mixed_execution report the last measured step, common substeps, contact pairs and GPU stages. GPU errors hold the step instead of silently selecting a single-model CPU solve. Periodic and frozen/elastic mixed parcels are rejected. Momentum uses kg*m/s. Invalid finite state, duplicate IDs or negative masses reject the query. pore_exchange reports settings, live stored mass/capacity/maximum saturation, last absorption/drainage, budget-blocked drainage carriers and conservation residuals. Model mass/momentum includes carrier pore water. granular_mechanics publishes the last measured granular-only wave/strain CFL and extent-based rho*g*h load estimate; measured=false means no publication, including cached/default counters. This estimate uses the legacy 1600 kg/m3 and 9.81 m/s2 reference, includes unsupported/in-flight granular extent, and is not measured contact/support pressure or repose proof. Fluid affine, height and thermal softening do not enter the mixed granular estimate. acceptance_metrics reports canonical granular dry mass, pore mass/capacity, capacity-weighted saturation, dry center of mass, material-point bounds, horizontal RMS radius and transport kinetic energy, plus eight saturation bands with the same spatial metrics. Band selection uses A=clamp(S/wet_appearance_full_saturation,0,1), then ceil(7*A): zero stays dry and positive saturation selects at least wet band 1. Default full wet look occurs at 5 percent pore filling; physical saturation and strength still use S. appearance_quantization and appearance_full_saturation identify this policy for snapshot comparison. Empty bounds/centers are null; legacy missing or unwritten canonical mass/model/pore sidecars report measured=false with a reason without replacing the existing legacy totals. Shape statistics are not an angle-of-repose or renderer proof. Invalid cardinality/nonfinite granular state rejects the read.",
+    "read", "Read", false, "Measured status, model totals, identity storage and optional CPU transfer reference",
+    "fluid|matter|models|read",
+    "fluid.get_phase_grids|fluid.step_stats",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_matter_models, 2,
+    true
+};
+static const MethodRegistration reg_fluid_matter_models(desc_fluid_matter_models);
 
 static const MethodParam params_fluid_remove_domain[] = {
     {"domain", "string", true, "", nullptr, nullptr},
@@ -1710,17 +1767,23 @@ static const MethodRegistration reg_fluid_set_environment(desc_fluid_set_environ
 
 static const MethodParam params_fluid_set_fog[] = {
     {"domain", "string", true, "", nullptr, nullptr},
+    {"erosion_depth", "any", false, "", nullptr, nullptr},
+    {"erosion_detail", "any", false, "", nullptr, nullptr},
+    {"erosion_seed", "any", false, "", nullptr, nullptr},
+    {"erosion_size", "any", false, "", nullptr, nullptr},
+    {"erosion_strength", "any", false, "", nullptr, nullptr},
+    {"resolution_multiplier", "any", false, "", nullptr, nullptr},
     {"spread_voxels", "any", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_fluid_set_fog = {
     "fluid.set_fog", "fluid",
-    "Shape the Volumetric Fog of a liquid domain: Gaussian spread of the splatted density",
-    "Overlay semantics - keys you do not send keep their value. spread_voxels 0..6 is the Gaussian sigma in simulation voxels (default 1.5); 0 draws the raw trilinear splat, where spray shows as isolated dots. Render-side only: the solver density and fluid.get active_density_cells are unchanged. Takes effect only when render_mode is 'fog'. Out-of-range values are rejected. Read back with fluid.get fog_spread_voxels. Blackbody/ChannelDriven emission of a fog domain reads the PARTICLE temperature in Kelvin (mass-weighted, same spread), not the gas heat channel: ambient liquid barely glows (radiance ~ T^4); a Flow Source temperature override makes hot liquid, the thermal chain cools it. fluid.get particle_min_kelvin / particle_max_kelvin (particle_kelvin_measured) report what the emission is fed.",
+    "Shape the Volumetric Fog of a liquid domain: Gaussian spread and world-space clump erosion of the splatted density",
+    "Overlay semantics - keys you do not send keep their value. spread_voxels 0..6 is the Gaussian sigma in simulation voxels (default 1.5); 0 draws the raw trilinear splat, where spray shows as isolated dots. Render-side only: the solver density and fluid.get active_density_cells are unchanged. Takes effect only when render_mode is 'fog'. Out-of-range values are rejected. Read back with fluid.get fog_spread_voxels. Blackbody/ChannelDriven emission of a fog domain reads the PARTICLE temperature in Kelvin (mass-weighted, same spread), not the gas heat channel: ambient liquid barely glows (radiance ~ T^4); a Flow Source temperature override makes hot liquid, the thermal chain cools it. fluid.get particle_min_kelvin / particle_max_kelvin (particle_kelvin_measured) report what the emission is fed. erosion_strength 0..1 (default 0 = off) cuts the thin parts of the spread density into clumps (snow/cotton look) with a world-space fBm: d' = max(0, (d - e)/(1 - e)), e = strength*noise, applied only where d < 1, so cells at full rest packing are kept and the body gets no holes. erosion_size 0.001..100 is the largest clump in WORLD units (independent of voxel size and domain extent; below a voxel it cannot show); erosion_detail 1..6 octaves; erosion_seed any int. Runs on the grid before upload, so Vulkan RT, RayFusion and CPU draw the same field. World-anchored: clumps do not travel with moving material. Read back with fluid.get fog_erosion_strength/size/detail/seed. erosion_depth 0..1 world units (default 0): > 0 switches to SURFACE-BAND erosion for dense bodies (a settled snow layer is d~1 everywhere, so the remap has nothing to cut and stays a flat slab): a chamfer distance transform gives each cell its depth s (voxels) below the d=0.5 surface and the noise pushes the surface in, d*=smoothstep(-0.5,0.5,s-D*n), D=strength*depth/voxel: clumps cut at most strength*depth deep whatever the body's thickness (the earlier blur-based version erased bodies thinner than the band); deeper cells are untouched, sparse spray is mostly removed. resolution_multiplier 1..4 (default 1) splats the fog on a grid that many times finer than the solver grid (same origin/extent; density keeps 1 = a cell at rest packing; spread_voxels stays in SOLVER voxels). Sharper edges and smaller clumps, but cells, memory and upload grow with its cube, and the volume march / random walk step on the finer voxel. Read back with fluid.get fog_erosion_depth / fog_resolution_multiplier.",
     "write", "SceneWrite", false, "any",
     "fluid|set|fog",
     nullptr,
     nullptr, nullptr, "fluid.get", nullptr,
-    params_fluid_set_fog, 2,
+    params_fluid_set_fog, 8,
     true
 };
 static const MethodRegistration reg_fluid_set_fog(desc_fluid_set_fog);
@@ -1730,9 +1793,15 @@ static const MethodParam params_fluid_set_fog_shader[] = {
     {"absorption_coefficient", "float", false, "", nullptr, nullptr},
     {"absorption_color", "vec3", false, "", nullptr, nullptr},
     {"anisotropy", "float", false, "", nullptr, nullptr},
+    {"anisotropy_back", "float", false, "", nullptr, nullptr},
     {"density_cutoff", "float", false, "", nullptr, nullptr},
     {"density_multiplier", "float", false, "", nullptr, nullptr},
+    {"lobe_mix", "float", false, "", nullptr, nullptr},
     {"max_steps", "int", false, "", nullptr, nullptr},
+    {"multi_scatter", "float", false, "", nullptr, nullptr},
+    {"random_walk", "any", false, "", nullptr, nullptr},
+    {"random_walk_exact_events", "int", false, "", nullptr, nullptr},
+    {"random_walk_max_events", "int", false, "", nullptr, nullptr},
     {"scattering_coefficient", "float", false, "", nullptr, nullptr},
     {"scattering_color", "vec3", false, "", nullptr, nullptr},
     {"shadow_steps", "int", false, "", nullptr, nullptr},
@@ -1743,15 +1812,43 @@ static const MethodParam params_fluid_set_fog_shader[] = {
 static const MethodDescriptor desc_fluid_set_fog_shader = {
     "fluid.set_fog_shader", "fluid",
     "Edit the fog-view medium of a liquid domain; omitted keys are unchanged",
-    "The shader the panel's 'Edit Fog Medium...' opens. Edited in place and republished, so it repaints a paused frame without a simulation step. density_multiplier scales the splatted density (a packed cell is ~1); colors are 0..1.",
+    "The shader the panel's 'Edit Fog Medium...' opens. Edited in place and republished, so it repaints a paused frame without a simulation step. density_multiplier scales the splatted density (a packed cell is ~1); colors are 0..1. anisotropy_back -0.99..0 and lobe_mix 0..1 shape the dual-lobe HG phase; multi_scatter 0..1 is the multi-scatter approximation (phase isotropization + softened self-shadow). RayFusion's volume path does not read anisotropy_back/lobe_mix/multi_scatter yet: they change Vulkan RT only. random_walk (bool) turns on path-traced multiple scattering in Vulkan RT: a random walk of real scattering events with sun/light next-event estimation replaces the single-scatter march, and multi_scatter is ignored. Needed for bright high-albedo media (snow, cloud); slower and noisier per sample, so render with more spp. random_walk_max_events 8..512 (default 32, clamped) cuts long walks; a walk that keeps hitting it darkens the medium. In a thin, sunlit layer almost all visible light comes from the first few events (8 already looks the same); thick bright media (clouds, deep snow) need more. Falls back to the march for emissive volumes, Volume Graph materials and overlapping media. RayFusion and OptiX do not implement it. random_walk_exact_events 1..512 (default 4, clamped): events walked with the TRUE phase and sigma before the walk switches to the similarity medium (sigma_s*(1-g), isotropic phase; g = mean cosine of the dual lobe, only when g > 0.05). The camera flight is always exact, so silhouettes do not move. Cuts the event count of forward-peaked media (snow g 0.8..0.99) by ~1/(1-g); set it to random_walk_max_events to keep the walk exact. voxel_step_multiplier (step in voxels) also sets the random walk flight and shadow-chord step (min 0.25 voxel): the walk costs ~distance/step, so at fog resolution 4x raising it from 0.5 to 1-2 is the main speed knob (measured 2026-10-05: 4x walk 15.3 s vs 1x 7.6 s at the same multiplier). shadow_steps (min 2) is also the random walk's sample count per light chord at every scattering event, and a chord stops once transmittance < 0.25%; at 16 spp on the snow scene those chords were the walk's largest cost (347M shadow vs 270M scattering density samples), so it is the second speed knob after voxel_step_multiplier.",
     "write", "SceneWrite", false, "any",
     "fluid|set|fog|shader|volume|appearance|density",
     "fluid.get_fog_shader|fluid.set_fog",
     nullptr, nullptr, nullptr, nullptr,
-    params_fluid_set_fog_shader, 13,
+    params_fluid_set_fog_shader, 19,
     true
 };
 static const MethodRegistration reg_fluid_set_fog_shader(desc_fluid_set_fog_shader);
+
+static const MethodParam params_fluid_set_grain_settings[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"enabled", "bool", false, "", nullptr, nullptr},
+    {"radius_m", "float", false, "", nullptr, nullptr},
+    {"stiffness_n_m", "float", false, "", nullptr, nullptr},
+    {"normal_damping_n_s_m", "float", false, "", nullptr, nullptr},
+    {"sliding_damping_n_s_m", "float", false, "", nullptr, nullptr},
+    {"friction", "float", false, "", nullptr, nullptr},
+    {"rolling_friction", "float", false, "", nullptr, nullptr},
+    {"max_substeps", "int", false, "", nullptr, nullptr},
+    {"twisting_friction", "float", false, "0..1; finite contact patch torque opposing normal-axis relative spin. Default 0 preserves existing ideal-sphere behavior.", nullptr, nullptr},
+    {"tangential_stiffness_ratio", "float", false, "", nullptr, nullptr},
+    {"contact_resolution", "int", false, "", nullptr, nullptr},
+    {"packing_fraction", "float", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_set_grain_settings = {
+    "fluid.set_grain_settings", "fluid",
+    "Configure opt-in dry Vulkan grain DEM candidate",
+    "Requires empty Matter domain, Closed Vulkan and disabled pore/wet/thermal/solid physics. Physical radius .001..1 m, stiffness 1..1e8 N/m, damping 0..1e5 Ns/m, friction 0..2, rolling 0..1, twisting 0..1, substeps 1..4096. tangential_stiffness_ratio 0..1 (default 2/7) is the Cundall-Strack static-friction spring as a fraction of normal stiffness; 0 = kinetic-only viscous Coulomb sliding. rolling_friction mu_r drives an EPSD2 rolling spring (k_r = 2.25 mu_r^2 k R^2, 0.3 critical damping, torque cap mu_r Fn R), so a grain holds on slopes below tan(theta)=mu_r. Springs live in per-grain contact history (24-contact budget; more contacts reject publication). contact_resolution 8..200 (default 24) = substeps per binary collision; the substep is the minimum of that accuracy bound, a 24-contact Gershgorin stability bound, an explicit damping bound and 10%-radius travel, rounded up to an even count; fluid.matter_models grain_diagnostics.runtime reports substeps, dispatches (substeps+2), substep_limit and contact counts. packing_fraction 0.3..0.74 (default 0.6): a grain is born with mass = substance bulk density / packing_fraction * sphere volume, independent of voxel size and particles-per-cell; reset particles after changing radius. Runtime rejects fluid/frozen/wet carriers, moving colliders, force fields, unsupported collider shapes and exhausted budgets. Angular state is stored as canonical skew affine; contact history is device-only and resets when buffers grow or a step is rejected. fluid.matter_models grain_diagnostics.pile measures a free-standing pile: radial rings of one grain diameter around the horizontal centroid, repose_angle_deg = least-squares slope of rings between 20% and 80% of peak height (null when fewer than 3 rings fit); wall-confined or multi-pile layouts are not a repose measurement. Neighbour search uses three rotating fixed-capacity hash bucket tables (16 grains per bucket; overflow rejects publication). Wet coupling and dissipation heat pending. Unknown keys/types reject without mutation.",
+    "write", "SceneWrite", false, "Validated settings",
+    "fluid|set|grain|settings|write",
+    "fluid.grain_settings|fluid.reset|fluid.matter_models",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_set_grain_settings, 13,
+    true
+};
+static const MethodRegistration reg_fluid_set_grain_settings(desc_fluid_set_grain_settings);
 
 static const MethodParam params_fluid_set_label_views[] = {
     {"domain", "string", true, "", nullptr, nullptr},
@@ -1865,6 +1962,22 @@ static const MethodDescriptor desc_fluid_set_phase_grid = {
     true
 };
 static const MethodRegistration reg_fluid_set_phase_grid(desc_fluid_set_phase_grid);
+
+static const MethodParam params_fluid_set_pore_exchange[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_set_pore_exchange = {
+    "fluid.set_pore_exchange", "fluid",
+    "Configure conservative pore exchange and saturation-dependent granular strength/appearance",
+    "Transactional shared UI/Python/IPC service. Closed Vulkan Matter for exchange/wet physics; canonical Water + Sand/Soil/Gravel. Exact dry rest masses are retained, transport adds pore water. Wet friction/dilatancy interpolate to saturated multipliers; additive capillary cohesion is 4*S*(1-S)*peak Pa; local positive pore pressure is scale*rho_water*g*h*S^2 and reduces compressive strength. This empirical cell-head closure is not a pressure PDE or a buoyancy guarantee. Wet appearance uses the same canonical mass/capacity saturation in eight granular splat material bands, with a separate full-wet appearance threshold (default 0.05 pore filling). This appearance sensitivity does not change water mass or the constitutive response. Existing settings deserialize disabled. Invalid/unknown values reject the complete patch; wet porosity edits are refused. Drainage refills a local Water parcel or reserves one birth per cell; without capacity water stays in pores. cache v11 keeps pore sidecars; the policy fingerprint requires rebaking.",
+    "write", "SceneWrite", false, "Validated C5 settings",
+    "fluid|set|pore|exchange|matter|pores|absorption|drainage|write",
+    "fluid.matter_models|flow_source.create",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_set_pore_exchange, 1,
+    true
+};
+static const MethodRegistration reg_fluid_set_pore_exchange(desc_fluid_set_pore_exchange);
 
 static const MethodParam params_fluid_set_splat_geometry[] = {
     {"domain", "string", true, "", nullptr, nullptr},
@@ -2489,6 +2602,9 @@ static const MethodParam params_gas_set_shader[] = {
     {"density_multiplier", "float", false, "", nullptr, nullptr},
     {"max_steps", "int", false, "", nullptr, nullptr},
     {"preset", "string", false, "", nullptr, nullptr},
+    {"random_walk", "bool", false, "", nullptr, nullptr},
+    {"random_walk_exact_events", "int", false, "", nullptr, nullptr},
+    {"random_walk_max_events", "int", false, "", nullptr, nullptr},
     {"scattering_coefficient", "float", false, "", nullptr, nullptr},
     {"shadow_steps", "int", false, "", nullptr, nullptr},
     {"shadow_strength", "float", false, "", nullptr, nullptr},
@@ -2500,12 +2616,12 @@ static const MethodParam params_gas_set_shader[] = {
 static const MethodDescriptor desc_gas_set_shader = {
     "gas.set_shader", "gas",
     "Set a gas domain's volume appearance and ray-march budget: preset, density, absorption/scattering, blackbody emission and the temperature range it maps, plus sample spacing and step ceilings",
-    "temperature_min/max define the window mapped to emission colour; a flame outside that window renders black however hot it is. voxel_step_multiplier is the primary sample spacing in VOXELS (0.5 = one sample every other voxel), so it follows domain resolution rather than a world constant; max_steps is a strict per-ray ceiling and is the dial that actually bounds cost. The realtime raster viewport applies its own ceiling on top (96/256/512 by viewport quality preset), so raising max_steps past it changes RT and the final render but not the viewport.",
+    "temperature_min/max define the window mapped to emission colour; a flame outside that window renders black however hot it is. voxel_step_multiplier is the primary sample spacing in VOXELS (0.5 = one sample every other voxel), so it follows domain resolution rather than a world constant; max_steps is a strict per-ray ceiling and is the dial that actually bounds cost. The realtime raster viewport applies its own ceiling on top (96/256/512 by viewport quality preset), so raising max_steps past it changes RT and the final render but not the viewport. random_walk (bool) turns on path-traced multiple scattering in Vulkan RT: a random walk of real scattering events with sun/light next-event estimation replaces the single-scatter march, and multi_scatter is ignored. Needed for bright high-albedo media (snow, cloud); slower and noisier per sample, so render with more spp. random_walk_max_events 8..512 (default 32, clamped) cuts long walks; a walk that keeps hitting it darkens the medium. In a thin, sunlit layer almost all visible light comes from the first few events (8 already looks the same); thick bright media (clouds, deep snow) need more. Falls back to the march for emissive volumes, Volume Graph materials and overlapping media. RayFusion and OptiX do not implement it. random_walk_exact_events 1..512 (default 4, clamped): events walked with the TRUE phase and sigma before the walk switches to the similarity medium (sigma_s*(1-g), isotropic phase; g = mean cosine of the dual lobe, only when g > 0.05). The camera flight is always exact, so silhouettes do not move. Cuts the event count of forward-peaked media (snow g 0.8..0.99) by ~1/(1-g); set it to random_walk_max_events to keep the walk exact. voxel_step_multiplier (step in voxels) also sets the random walk flight and shadow-chord step (min 0.25 voxel): the walk costs ~distance/step, so at fog resolution 4x raising it from 0.5 to 1-2 is the main speed knob (measured 2026-10-05: 4x walk 15.3 s vs 1x 7.6 s at the same multiplier). shadow_steps (min 2) is also the random walk's sample count per light chord at every scattering event, and a chord stops once transmittance < 0.25%; at 16 spp on the snow scene those chords were the walk's largest cost (347M shadow vs 270M scattering density samples), so it is the second speed knob after voxel_step_multiplier.",
     "write", "SceneWrite", false, "any",
     "gas|set|shader|render|appearance|volume|fire|colour|emission|blackbody|quality|raymarch|steps",
     "gas.get_shader|gas.set_settings",
     nullptr, nullptr, nullptr, nullptr,
-    params_gas_set_shader, 14,
+    params_gas_set_shader, 17,
     true
 };
 static const MethodRegistration reg_gas_set_shader(desc_gas_set_shader);
@@ -3332,13 +3448,13 @@ static const MethodDescriptor desc_material_clear_texture = {
 static const MethodRegistration reg_material_clear_texture(desc_material_clear_texture);
 
 static const MethodParam params_material_create[] = {
-    {"type", "string", true, "Material type, e.g. 'principled'", nullptr, nullptr},
+    {"type", "string", true, "principled, volumetric, or substance:<canonical catalogue name> (e.g. substance:Sand). Substance presets create editable visual materials and do not change physics.", nullptr, nullptr},
     {"name", "string", false, "", "", nullptr},
 };
 static const MethodDescriptor desc_material_create = {
     "material.create", "material",
     "Create a material of the given type and return its name",
-    nullptr,
+    "Substance presets require an exact catalogue name (Water, Sand, Iron, Paper, etc.); unknown names fail before material allocation. They suggest colors/roughness/transmission only, without phase or chemistry changes. The returned unique name is the scene material handle.",
     "write", "SceneWrite", false, "any",
     "material|create|shading",
     nullptr,
@@ -6521,6 +6637,19 @@ static const MethodDescriptor desc_render_probe = {
 };
 static const MethodRegistration reg_render_probe(desc_render_probe);
 
+static const MethodDescriptor desc_render_rt_pipeline_status = {
+    "render.rt_pipeline_status", "render",
+    "Report whether the ray tracing pipeline is compiling, ready or failed, with compile time and pipeline-cache use",
+    "The first Rendered use after a shader change compiles the RT pipeline on a worker thread for up to minutes; meanwhile the viewport draws the previous raster mode and samples stay 0, and a render.start just waits. rt_pipeline_state none|compiling|ready|failed; compile_seconds runs while compiling. cache_hit is null when the driver gave no creation feedback (not a miss). deferred_threads = threads that joined the compile (0 = synchronous call). A failure is not retried until the shaders change.",
+    "read", "Read", false, "any",
+    "render|rt|pipeline|status|shader|compile|cache",
+    "render.status|viewport.status",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_render_rt_pipeline_status(desc_render_rt_pipeline_status);
+
 static const MethodDescriptor desc_render_sequence_status = {
     "render.sequence_status", "render",
     "Report sequence render progress and current frame",
@@ -6635,7 +6764,7 @@ static const MethodRegistration reg_render_volume_slots(desc_render_volume_slots
 static const MethodDescriptor desc_render_volume_stats = {
     "render.volume_stats", "render",
     "Return volume traversal and path-budget counters accumulated since render.volume_counters",
-    "paths_bounce_capped / paths_traced is the share of paths that were still scattering when the bounce budget ran out: a black surface with a high share is budget-starved, not unlit. paths_pass_capped counts the free-pass cap (maxBounces + 32) instead. charged_* partition every bounce spent by kind; medium_passes counts straight gas/fog continuations; they are FREE (inside free_passes) -- ~1 per box crossed is healthy, many per path is short-hop re-entry. arbiter_started_inside / arbiter_inside_found: the gas->liquid arbiter began inside a liquid and whether it found the exit.",
+    "paths_bounce_capped / paths_traced is the share of paths that were still scattering when the bounce budget ran out: a black surface with a high share is budget-starved, not unlit. paths_pass_capped counts the free-pass cap (maxBounces + 32) instead. charged_* partition every bounce spent by kind; medium_passes counts straight gas/fog continuations; they are FREE (inside free_passes) -- ~1 per box crossed is healthy, many per path is short-hop re-entry. arbiter_started_inside / arbiter_inside_found: the gas->liquid arbiter began inside a liquid and whether it found the exit. walk_* split the random walk cost (volume_closesthit volumeRandomWalk): walk_paths walks that scattered, walk_events scattering events (walk_events/walk_paths = mean walk length), walk_probe_traces solid probes after flights (one per event), walk_shadow_traces geometry shadow rays toward the light, walk_shadow_skipped NEE whose in-volume transmittance was ~0 so no ray was traced, walk_event_capped walks cut by random_walk_max_events. Compare traces vs density_samples/shadow_density_samples against render time to tell whether ray tracing or voxel sampling dominates.",
     "render", "Render", false, "any",
     "render|volume|stats|diagnostics|performance|bounce|budget",
     "render.volume_counters|render.get_settings",

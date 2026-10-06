@@ -1,0 +1,4963 @@
+{
+  "arms": [
+    {
+      "dt": 0.016666666666666666,
+      "acceleration": 9.809581583196467,
+      "samples": [
+        {
+          "time": 0.016666666666666666,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.498594880104065,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.498594880104065,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.498594880104065,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.00267323124568273,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.03333333333333333,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.4945034980773926,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.4945034980773926,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.4945034980773926,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.010692759312067706,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.05,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.487687587738037,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.487687587738037,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.487687587738037,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.02405830061326899,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.06666666666666667,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.4781464338302612,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.4781464338302612,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.4781464338302612,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.042771294524455813,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.08333333333333333,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.4658801555633545,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.4658801555633545,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.4658801555633545,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.06683117095747179,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.1,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.450888752937317,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.450888752937317,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.450888752937317,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.09623786851751558,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.11666666666666667,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.433172583580017,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.433172583580017,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.433172583580017,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.13098696669008358,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.13333333333333333,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.4127315282821655,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.4127315282821655,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.4127315282821655,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.17108096814345536,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.15,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.3895657062530518,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.3895657062530518,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.3895657062530518,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.21652036404888908,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.16666666666666666,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.3636753559112549,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.3636753559112549,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.3636753559112549,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.2673051544063848,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.18333333333333332,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.3350601196289062,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.3350601196289062,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.3350601196289062,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.3234353392159424,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.2,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.303720235824585,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.303720235824585,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.303720235824585,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.38491091847756204,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        }
+      ],
+      "step_stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 18.704,
+        "density_ms": 1.1850999593734741,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 26.31109999999948,
+        "dispatch_calls": 1469,
+        "download_bytes": 17364,
+        "download_call_ms": 0.006500000000000001,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 1,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0001,
+        "total_ms": 45.30970001220703,
+        "upload_bytes": 152,
+        "upload_call_ms": 0.0586,
+        "upload_calls": 12
+      }
+    },
+    {
+      "dt": 0.008333333333333333,
+      "acceleration": 9.809609741090314,
+      "samples": [
+        {
+          "time": 0.008333333333333333,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.4996185302734375,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.4996185302734375,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.4996185302734375,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.0006683075677864327,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.016666666666666666,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.498594880104065,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.498594880104065,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.498594880104065,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.00267323124568273,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.025,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.4968898296356201,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.4968898296356201,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.4968898296356201,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.006014771033688981,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.03333333333333333,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.4945034980773926,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.4945034980773926,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.4945034980773926,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.010692759312067706,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.041666666666666664,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.4914361238479614,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.4914361238479614,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.4914361238479614,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.01670726649194966,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.05,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.487687587738037,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.487687587738037,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.487687587738037,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.02405830061326899,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.058333333333333334,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.483257532119751,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.483257532119751,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.483257532119751,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.03274641423058325,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.06666666666666667,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.4781464338302612,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.4781464338302612,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.4781464338302612,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.042771294524455813,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.075,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.4723539352416992,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.4723539352416992,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.4723539352416992,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.05413288010008533,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.08333333333333333,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.4658801555633545,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.4658801555633545,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.4658801555633545,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.06683117095747179,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.09166666666666666,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.4587252140045166,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.4587252140045166,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.4587252140045166,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.0808661670966152,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.1,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.450888752937317,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.450888752937317,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.450888752937317,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.09623786851751558,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.10833333333333334,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.4423712491989136,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.4423712491989136,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.4423712491989136,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.11294448888292093,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.11666666666666667,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.433172583580017,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.433172583580017,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.433172583580017,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.13098696669008358,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.125,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.423292636871338,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.423292636871338,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.423292636871338,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.15036579311026171,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.13333333333333333,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.4127315282821655,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.4127315282821655,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.4127315282821655,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.17108096814345536,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.14166666666666666,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.4014891386032104,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.4014891386032104,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.4014891386032104,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.1931324917896645,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.15,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.3895657062530518,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.3895657062530518,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.3895657062530518,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.21652036404888908,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.15833333333333333,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.3769612312316895,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.3769612312316895,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.3769612312316895,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.24124458492112918,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.16666666666666666,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.3636753559112549,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.3636753559112549,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.3636753559112549,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.2673051544063848,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.175,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.3497081995010376,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.3497081995010376,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.3497081995010376,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.29470207250465585,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.18333333333333332,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.3350601196289062,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.3350601196289062,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.3350601196289062,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.3234353392159424,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.19166666666666665,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.3197307586669922,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.3197307586669922,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.3197307586669922,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.3535049545402445,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        },
+        {
+          "time": 0.2,
+          "granular": {
+            "bounds_max": [
+              0.0006316131912171841,
+              1.303720235824585,
+              -0.0005716054583899677
+            ],
+            "bounds_min": [
+              0.0006316131912171841,
+              1.303720235824585,
+              -0.0005716054583899677
+            ],
+            "capacity_kg": 0.0,
+            "dry_center_of_mass": [
+              0.0006316131912171841,
+              1.303720235824585,
+              -0.0005716054583899677
+            ],
+            "dry_mass_kg": 0.20000000298023224,
+            "horizontal_rms_radius_m": 0.0,
+            "kinetic_energy_j": 0.38491091847756204,
+            "mean_saturation": 0.0,
+            "particles": 1,
+            "pore_water_kg": 0.0
+          }
+        }
+      ],
+      "step_stats": {
+        "advect_ms": 0.0,
+        "batch_end_calls": 6,
+        "batch_end_ms": 13.0296,
+        "density_ms": 3.4719998836517334,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 17.12769999999983,
+        "dispatch_calls": 737,
+        "download_bytes": 17364,
+        "download_call_ms": 0.0062,
+        "download_calls": 7,
+        "full_grid_cells": 0,
+        "g2p_ms": 0.0,
+        "g2p_on_gpu": false,
+        "gpu_status": "Dry grain Vulkan DEM candidate: hash/contact/spin",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": false,
+        "ok": true,
+        "p2g_ms": 0.0,
+        "p2g_on_gpu": false,
+        "particle_count": 1,
+        "pressure_ms": 0.0,
+        "pressure_on_gpu": false,
+        "pressure_window_cells": 0,
+        "pressure_window_used": false,
+        "resolution": [
+          12,
+          30,
+          12
+        ],
+        "synchronize_calls": 1,
+        "synchronize_ms": 0.0,
+        "total_ms": 30.354799270629883,
+        "upload_bytes": 152,
+        "upload_call_ms": 0.0571,
+        "upload_calls": 12
+      }
+    }
+  ],
+  "completed": false,
+  "original": {
+    "control": {
+      "driver": "none",
+      "dropped_seeds": [],
+      "epoch": 0,
+      "frame": 0,
+      "playing": false,
+      "script_driving": false,
+      "script_sim_seconds": 0.0
+    },
+    "domains": [],
+    "sources": [],
+    "colliders": []
+  },
+  "floor": [
+    {
+      "step": 1,
+      "granular": {
+        "bounds_max": [
+          0.0031316066160798073,
+          0.11545196175575256,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.0031316066160798073,
+          0.11545196175575256,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.0031316066160798073,
+          0.11545196175575256,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.042843637655020354,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -6.650661915923086e-05,
+          -3.429632976068302e-05,
+          -0.00729148175256672
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.0,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 0.0,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 2,
+      "granular": {
+        "bounds_max": [
+          0.005631588865071535,
+          0.11026152223348618,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.005631588865071535,
+          0.11026152223348618,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.005631588865071535,
+          0.11026152223348618,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.05302397936990241,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -7.585269162770645e-05,
+          -3.429632976068302e-05,
+          -0.007363010307595286
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.0,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 0.0,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 3,
+      "granular": {
+        "bounds_max": [
+          0.008131582289934158,
+          0.10438980907201767,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.008131582289934158,
+          0.10438980907201767,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.008131582289934158,
+          0.10438980907201767,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.06454102636654142,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -8.519876991694821e-05,
+          -3.429632976068302e-05,
+          -0.007475414983561857
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.0,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 0.0,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 4,
+      "granular": {
+        "bounds_max": [
+          0.010631649754941463,
+          0.09783682227134705,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.010631649754941463,
+          0.09783682227134705,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.010631649754941463,
+          0.09783682227134705,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.0081862609186659e-10,
+        "kinetic_energy_j": 0.07739477864493738,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -9.45448423854238e-05,
+          -3.429632976068302e-05,
+          -0.007628709191511707
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.0,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 0.0,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 5,
+      "granular": {
+        "bounds_max": [
+          0.013131717219948769,
+          0.0906025618314743,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.013131717219948769,
+          0.0906025618314743,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.013131717219948769,
+          0.0906025618314743,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.09158523620509029,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.00010389092067466556,
+          -3.429632976068302e-05,
+          -0.007822881010515703
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.0,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 0.0,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 6,
+      "granular": {
+        "bounds_max": [
+          0.0156317837536335,
+          0.08268702775239944,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.0156317837536335,
+          0.08268702775239944,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.0156317837536335,
+          0.08268702775239944,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.10711239904700014,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.00011323698732237496,
+          -3.429632976068302e-05,
+          -0.008057931930689988
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.0,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 0.0,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 7,
+      "granular": {
+        "bounds_max": [
+          0.01813168078660965,
+          0.07409024983644485,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.01813168078660965,
+          0.07409024983644485,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.01813168078660965,
+          0.07409024983644485,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.12397420920494687,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.0001225819596660429,
+          -3.429632976068302e-05,
+          -0.008333791171517835
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.0,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 0.0,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 8,
+      "granular": {
+        "bounds_max": [
+          0.0206315778195858,
+          0.06481229513883591,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.0206315778195858,
+          0.06481229513883591,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.0206315778195858,
+          0.06481229513883591,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.14217210820230666,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.00013192679231132255,
+          -3.429632976068302e-05,
+          -0.008650514612354554
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.0,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 0.0,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 9,
+      "granular": {
+        "bounds_max": [
+          0.02313147485256195,
+          0.054853152483701706,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.02313147485256195,
+          0.054853152483701706,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.02313147485256195,
+          0.054853152483701706,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.16170635581268195,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.00014127161331506984,
+          -3.429632976068302e-05,
+          -0.00900810672354857
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.0,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 0.0,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 10,
+      "granular": {
+        "bounds_max": [
+          0.0256313718855381,
+          0.04421283304691315,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.0256313718855381,
+          0.04421283304691315,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.0256313718855381,
+          0.04421283304691315,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.18257695203607271,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.0001506164459603495,
+          -3.429632976068302e-05,
+          -0.00940656526992567
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.0,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 0.0,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 11,
+      "granular": {
+        "bounds_max": [
+          0.02813126891851425,
+          0.03289132937788963,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.02813126891851425,
+          0.03289132937788963,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.02813126891851425,
+          0.03289132937788963,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.204783896872479,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.0001599612669640968,
+          -3.429632976068302e-05,
+          -0.009845891741601998
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.0,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 0.0,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 12,
+      "granular": {
+        "bounds_max": [
+          0.030608857050538063,
+          0.021502086892724037,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.030608857050538063,
+          0.021502086892724037,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.030608857050538063,
+          0.021502086892724037,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.08752620467635072,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.00010188805324044901,
+          -3.2525350009468936e-05,
+          -0.006722983881979414
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.8696479201316833,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 1.8907188469951235e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 13,
+      "granular": {
+        "bounds_max": [
+          0.032812051475048065,
+          0.026382852345705032,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.032812051475048065,
+          0.026382852345705032,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.032812051475048065,
+          0.026382852345705032,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.1765393233442228,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          0.00014917380398770871,
+          -2.8629586876438356e-05,
+          0.007170951053940461
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 14,
+      "granular": {
+        "bounds_max": [
+          0.034898821264505386,
+          0.036914292722940445,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.034898821264505386,
+          0.036914292722940445,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.034898821264505386,
+          0.036914292722940445,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.15587503160555144,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          0.00013982897134242906,
+          -2.8629586876438356e-05,
+          0.006617521918954222
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 15,
+      "granular": {
+        "bounds_max": [
+          0.03698559105396271,
+          0.0467645488679409,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.03698559105396271,
+          0.0467645488679409,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.03698559105396271,
+          0.0467645488679409,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.13654708847989558,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          0.00013048415033868176,
+          -2.8629586876438356e-05,
+          0.006029980300196652
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 16,
+      "granular": {
+        "bounds_max": [
+          0.03907236084342003,
+          0.055933620780706406,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.03907236084342003,
+          0.055933620780706406,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.03907236084342003,
+          0.055933620780706406,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.1185554939672552,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          0.00012113931769340211,
+          -2.8629586876438356e-05,
+          0.005408326570196786
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 17,
+      "granular": {
+        "bounds_max": [
+          0.04115913063287735,
+          0.06442150473594666,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.04115913063287735,
+          0.06442150473594666,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.04115913063287735,
+          0.06442150473594666,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.10189966519524016,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          0.00011179414744368413,
+          -2.8629586876438356e-05,
+          0.004752535396980217
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 18,
+      "granular": {
+        "bounds_max": [
+          0.04324590042233467,
+          0.07222814112901688,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.04324590042233467,
+          0.07222814112901688,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.04324590042233467,
+          0.07222814112901688,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.08657886165529143,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          0.00010244808079597472,
+          -2.8629586876438356e-05,
+          0.00406256431223691
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 19,
+      "granular": {
+        "bounds_max": [
+          0.04533267021179199,
+          0.07935350388288498,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.04533267021179199,
+          0.07935350388288498,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.04533267021179199,
+          0.07935350388288498,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.07259476339709964,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          9.310200250673296e-05,
+          -2.8629586876438356e-05,
+          0.0033384751557867407
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 20,
+      "granular": {
+        "bounds_max": [
+          0.04741944000124931,
+          0.08579759299755096,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.04741944000124931,
+          0.08579759299755096,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.04741944000124931,
+          0.08579759299755096,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.059947370420664794,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          8.375593003825737e-05,
+          -2.8629586876438356e-05,
+          0.0025802694177458506
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 21,
+      "granular": {
+        "bounds_max": [
+          0.049506209790706635,
+          0.09156040847301483,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.049506209790706635,
+          0.09156040847301483,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.049506209790706635,
+          0.09156040847301483,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.04863668272598691,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          7.440985756978179e-05,
+          -2.8629586876438356e-05,
+          0.0017879459805271334
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 22,
+      "granular": {
+        "bounds_max": [
+          0.051592979580163956,
+          0.09664195030927658,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.051592979580163956,
+          0.09664195030927658,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.051592979580163956,
+          0.09664195030927658,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.03866270031306597,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          6.50637851013062e-05,
+          -2.8629586876438356e-05,
+          0.0009615052166596247
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 23,
+      "granular": {
+        "bounds_max": [
+          0.05367974936962128,
+          0.10104221850633621,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.05367974936962128,
+          0.10104221850633621,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.05367974936962128,
+          0.10104221850633621,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.03002550742714202,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          5.5717805765089466e-05,
+          -2.8629586876438356e-05,
+          0.00010095643936920945
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 24,
+      "granular": {
+        "bounds_max": [
+          0.0557665191590786,
+          0.10476124286651611,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.0557665191590786,
+          0.10476124286651611,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.0557665191590786,
+          0.10476124286651611,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.022725363893299586,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          4.6372356118594936e-05,
+          -2.8629586876438356e-05,
+          -0.0007936590006211833
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 25,
+      "granular": {
+        "bounds_max": [
+          0.05785328894853592,
+          0.10779903829097748,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.05785328894853592,
+          0.10779903829097748,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.05785328894853592,
+          0.10779903829097748,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.016761747300894525,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          3.7026906472100406e-05,
+          -2.8629586876438356e-05,
+          -0.001722389532086155
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 26,
+      "granular": {
+        "bounds_max": [
+          0.05994005873799324,
+          0.1101556047797203,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.05994005873799324,
+          0.1101556047797203,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.05994005873799324,
+          0.1101556047797203,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.012134644660650597,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          2.7681424811391896e-05,
+          -2.8629586876438356e-05,
+          -0.0026852379489934715
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 27,
+      "granular": {
+        "bounds_max": [
+          0.06202682852745056,
+          0.11183091998100281,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.06202682852745056,
+          0.11183091998100281,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.06202682852745056,
+          0.11183091998100281,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.008843998863159277,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          1.833566375390684e-05,
+          -2.8629586876438356e-05,
+          -0.003682231259698199
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 28,
+      "granular": {
+        "bounds_max": [
+          0.06411412358283997,
+          0.11282500624656677,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.06411412358283997,
+          0.11282500624656677,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.06411412358283997,
+          0.11282500624656677,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.00688996917577791,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          8.98990269642178e-06,
+          -2.8629586876438356e-05,
+          -0.004713333515148421
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 29,
+      "granular": {
+        "bounds_max": [
+          0.0662015751004219,
+          0.11313783377408981,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.0662015751004219,
+          0.11313783377408981,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.0662015751004219,
+          0.11313783377408981,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.006272555580822504,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -3.5585636017490335e-07,
+          -2.8629586876438356e-05,
+          -0.005778568370937887
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 30,
+      "granular": {
+        "bounds_max": [
+          0.06828902661800385,
+          0.11276941001415253,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.06828902661800385,
+          0.11276941001415253,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.06828902661800385,
+          0.11276941001415253,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.006991757246156084,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -9.701615780569473e-06,
+          -2.8629586876438356e-05,
+          -0.006877942160060197
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 31,
+      "granular": {
+        "bounds_max": [
+          0.07037647813558578,
+          0.11171973496675491,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.07037647813558578,
+          0.11171973496675491,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.07037647813558578,
+          0.11171973496675491,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.00904757478811179,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -1.904737611045876e-05,
+          -2.8629586876438356e-05,
+          -0.008011454137457281
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 32,
+      "granular": {
+        "bounds_max": [
+          0.07246392965316772,
+          0.10998880118131638,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.07246392965316772,
+          0.10998880118131638,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.07246392965316772,
+          0.10998880118131638,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.012440008566632972,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -2.839313862313536e-05,
+          -2.8629586876438356e-05,
+          -0.009179103930600103
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 33,
+      "granular": {
+        "bounds_max": [
+          0.07455138117074966,
+          0.1075766310095787,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.07455138117074966,
+          0.1075766310095787,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.07455138117074966,
+          0.1075766310095787,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.017168882353273445,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -3.773859700077916e-05,
+          -2.8629586876438356e-05,
+          -0.010380853541527053
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 34,
+      "granular": {
+        "bounds_max": [
+          0.0766388326883316,
+          0.1044832319021225,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.0766388326883316,
+          0.1044832319021225,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.0766388326883316,
+          0.1044832319021225,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.023234280120632295,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -4.708404664727369e-05,
+          -2.8629586876438356e-05,
+          -0.01161674022314167
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 35,
+      "granular": {
+        "bounds_max": [
+          0.07872628420591354,
+          0.10070861130952835,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.07872628420591354,
+          0.10070861130952835,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.07872628420591354,
+          0.10070861130952835,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.03063620482942852,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -5.642949338338513e-05,
+          -2.8629586876438356e-05,
+          -0.012886763230385885
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 36,
+      "granular": {
+        "bounds_max": [
+          0.08081373572349548,
+          0.09625273197889328,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.08081373572349548,
+          0.09625273197889328,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.08081373572349548,
+          0.09625273197889328,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.03937523261619373,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -6.577551928573129e-05,
+          -2.8629586876438356e-05,
+          -0.014191003774589412
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 37,
+      "granular": {
+        "bounds_max": [
+          0.08290118724107742,
+          0.09111559391021729,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.08290118724107742,
+          0.09111559391021729,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.08290118724107742,
+          0.09111559391021729,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.049451009816448156,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -7.512159175420688e-05,
+          -2.8629586876438356e-05,
+          -0.015529390330177457
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 38,
+      "granular": {
+        "bounds_max": [
+          0.08498863875865936,
+          0.08529717475175858,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.08498863875865936,
+          0.08529717475175858,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.08498863875865936,
+          0.08529717475175858,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.060863492298459526,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -8.446766422268246e-05,
+          -2.8629586876438356e-05,
+          -0.016901918426801592
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 39,
+      "granular": {
+        "bounds_max": [
+          0.0870760902762413,
+          0.07879747450351715,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.0870760902762413,
+          0.07879747450351715,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.0870760902762413,
+          0.07879747450351715,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 1.5400299517580952e-10,
+        "kinetic_energy_j": 0.07361268006222785,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -9.381373669115805e-05,
+          -2.8629586876438356e-05,
+          -0.01830858508422954
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 40,
+      "granular": {
+        "bounds_max": [
+          0.08916354179382324,
+          0.0716165155172348,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.08916354179382324,
+          0.0716165155172348,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.08916354179382324,
+          0.0716165155172348,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.08769857310775311,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.00010315980915963363,
+          -2.8629586876438356e-05,
+          -0.019749390302461294
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 41,
+      "granular": {
+        "bounds_max": [
+          0.09125099331140518,
+          0.06375427544116974,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.09125099331140518,
+          0.06375427544116974,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.09125099331140518,
+          0.06375427544116974,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.10312117143503534,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.0001125058874488754,
+          -2.8629586876438356e-05,
+          -0.02122433408149686
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 42,
+      "granular": {
+        "bounds_max": [
+          0.09333844482898712,
+          0.05521078407764435,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.09333844482898712,
+          0.05521078407764435,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.09333844482898712,
+          0.05521078407764435,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.11987859453178289,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.00012185095292480217,
+          -2.8629586876438356e-05,
+          -0.022733256978909083
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 43,
+      "granular": {
+        "bounds_max": [
+          0.09542589634656906,
+          0.0459861196577549,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.09542589634656906,
+          0.0459861196577549,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.09542589634656906,
+          0.0459861196577549,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.1379719556334678,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.00013119577392854947,
+          -2.8629586876438356e-05,
+          -0.02427627671387315
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 44,
+      "granular": {
+        "bounds_max": [
+          0.097513347864151,
+          0.036080267280340195,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.097513347864151,
+          0.036080267280340195,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.097513347864151,
+          0.036080267280340195,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.15740166534816824,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.00014054060657382912,
+          -2.8629586876438356e-05,
+          -0.025853430539292604
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 45,
+      "granular": {
+        "bounds_max": [
+          0.09960079938173294,
+          0.025493232533335686,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.09960079938173294,
+          0.025493232533335686,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.09960079938173294,
+          0.025493232533335686,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.17816772367588415,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.00014988542757757642,
+          -2.8629586876438356e-05,
+          -0.0274647169650513
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.414039134979248,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 4.998766911594439e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 46,
+      "granular": {
+        "bounds_max": [
+          0.10155891627073288,
+          0.02257964387536049,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.10155891627073288,
+          0.02257964387536049,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.10155891627073288,
+          0.02257964387536049,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.10185537190042919,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          0.00011264361841818119,
+          -2.49642358621841e-05,
+          0.018981224550135036
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.9275084733963013,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 2.1506800166977294e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 47,
+      "granular": {
+        "bounds_max": [
+          0.1033245399594307,
+          0.032182179391384125,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.1033245399594307,
+          0.032182179391384125,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.1033245399594307,
+          0.032182179391384125,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.13188296177236838,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          0.00012905075174273178,
+          -2.412674111409844e-05,
+          0.021908543965033132
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 48,
+      "granular": {
+        "bounds_max": [
+          0.1050833985209465,
+          0.041246768087148666,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.1050833985209465,
+          0.041246768087148666,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.1050833985209465,
+          0.041246768087148666,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.11409634845527586,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          0.00011970591909745212,
+          -2.412674111409844e-05,
+          0.02020509087568486
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 49,
+      "granular": {
+        "bounds_max": [
+          0.10684225708246231,
+          0.04963016137480736,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.10684225708246231,
+          0.04963016137480736,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.10684225708246231,
+          0.04963016137480736,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.09764518612957747,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          0.00011036056258321644,
+          -2.412674111409844e-05,
+          0.018472781687254712
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 50,
+      "granular": {
+        "bounds_max": [
+          0.10860111564397812,
+          0.057332295924425125,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.10860111564397812,
+          0.057332295924425125,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.10860111564397812,
+          0.057332295924425125,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.08252941842583845,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          0.00010101449593550704,
+          -2.412674111409844e-05,
+          0.01671158063695529
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 51,
+      "granular": {
+        "bounds_max": [
+          0.11035997420549393,
+          0.06435316056013107,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.11035997420549393,
+          0.06435316056013107,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.11035997420549393,
+          0.06435316056013107,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.0687503560038564,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          9.166841764626527e-05,
+          -2.412674111409844e-05,
+          0.014921615874774773
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 52,
+      "granular": {
+        "bounds_max": [
+          0.11211883276700974,
+          0.0706927478313446,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.11211883276700974,
+          0.0706927478313446,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.11211883276700974,
+          0.0706927478313446,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.05630799886363129,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          8.232234517778969e-05,
+          -2.412674111409844e-05,
+          0.013102891871061582
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 53,
+      "granular": {
+        "bounds_max": [
+          0.11387769132852554,
+          0.07635106891393661,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.11387769132852554,
+          0.07635106891393661,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.11387769132852554,
+          0.07635106891393661,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.045202347005163124,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          7.29762727093141e-05,
+          -2.412674111409844e-05,
+          0.011255407135699579
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 54,
+      "granular": {
+        "bounds_max": [
+          0.11563654989004135,
+          0.08132810890674591,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.11563654989004135,
+          0.08132810890674591,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.11563654989004135,
+          0.08132810890674591,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.03543340042845192,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          6.363020024083852e-05,
+          -2.412674111409844e-05,
+          0.00937916017857262
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 55,
+      "granular": {
+        "bounds_max": [
+          0.11739540845155716,
+          0.08562387526035309,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.11739540845155716,
+          0.08562387526035309,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.11739540845155716,
+          0.08562387526035309,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.02700132045869619,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          5.428431985764681e-05,
+          -2.412674111409844e-05,
+          0.007474194213048811
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 56,
+      "granular": {
+        "bounds_max": [
+          0.11915426701307297,
+          0.08923840522766113,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.11915426701307297,
+          0.08923840522766113,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.11915426701307297,
+          0.08923840522766113,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.019906185439822338,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          4.493886730076919e-05,
+          -2.412674111409844e-05,
+          0.005540554315141437
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 57,
+      "granular": {
+        "bounds_max": [
+          0.12091312557458878,
+          0.09217170625925064,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.12091312557458878,
+          0.09217170625925064,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.12091312557458878,
+          0.09217170625925064,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.014147577362385862,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          3.559341765427466e-05,
+          -2.412674111409844e-05,
+          0.003578156293288497
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 58,
+      "granular": {
+        "bounds_max": [
+          0.12267198413610458,
+          0.09442377835512161,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.12267198413610458,
+          0.09442377835512161,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.12267198413610458,
+          0.09442377835512161,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.009725464750598718,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          2.6247889427436725e-05,
+          -2.412674111409844e-05,
+          0.0015869822660962917
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 59,
+      "granular": {
+        "bounds_max": [
+          0.12443084269762039,
+          0.09599460661411285,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.12443084269762039,
+          0.09599460661411285,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.12443084269762039,
+          0.09599460661411285,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.0066398411284690016,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          1.6902126914760123e-05,
+          -2.412674111409844e-05,
+          -0.0004330012940483641
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 60,
+      "granular": {
+        "bounds_max": [
+          0.1261896938085556,
+          0.09688418358564377,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.1261896938085556,
+          0.09688418358564377,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.1261896938085556,
+          0.09688418358564377,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.004890833616449238,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          7.556365129679293e-06,
+          -2.412674111409844e-05,
+          -0.0024817450270482803
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 61,
+      "granular": {
+        "bounds_max": [
+          0.1279485523700714,
+          0.09709251672029495,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.1279485523700714,
+          0.09709251672029495,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.1279485523700714,
+          0.09709251672029495,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.004478442057103664,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -1.789390652736416e-06,
+          -2.412674111409844e-05,
+          -0.004559247629051834
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 62,
+      "granular": {
+        "bounds_max": [
+          0.12970741093158722,
+          0.09661959856748581,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.12970741093158722,
+          0.09661959856748581,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.12970741093158722,
+          0.09661959856748581,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.005402665906752755,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -1.1135152619716189e-05,
+          -2.412674111409844e-05,
+          -0.006665511894026789
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 63,
+      "granular": {
+        "bounds_max": [
+          0.13146626949310303,
+          0.09546542167663574,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.13146626949310303,
+          0.09546542167663574,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.13146626949310303,
+          0.09546542167663574,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.007663505605384657,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -2.0480912949605475e-05,
+          -2.412674111409844e-05,
+          -0.008800534655476346
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 64,
+      "granular": {
+        "bounds_max": [
+          0.13322512805461884,
+          0.09362999349832535,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.13322512805461884,
+          0.09362999349832535,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.13322512805461884,
+          0.09362999349832535,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.01126094289806871,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -2.9826633261727286e-05,
+          -2.412674111409844e-05,
+          -0.010964308462819795
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 65,
+      "granular": {
+        "bounds_max": [
+          0.13498398661613464,
+          0.09111333638429642,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.13498398661613464,
+          0.09111333638429642,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.13498398661613464,
+          0.09111333638429642,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.016194822238958764,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -3.9172085818604905e-05,
+          -2.412674111409844e-05,
+          -0.013156779671876041
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 66,
+      "granular": {
+        "bounds_max": [
+          0.13674284517765045,
+          0.08791545033454895,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.13674284517765045,
+          0.08791545033454895,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.13674284517765045,
+          0.08791545033454895,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.022465228521286195,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -4.8517535465099435e-05,
+          -2.412674111409844e-05,
+          -0.015378009377406889
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 67,
+      "granular": {
+        "bounds_max": [
+          0.13850170373916626,
+          0.08403632789850235,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.13850170373916626,
+          0.08403632789850235,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.13850170373916626,
+          0.08403632789850235,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.030072200964193566,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -5.786303167772339e-05,
+          -2.412674111409844e-05,
+          -0.017628007265167257
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 68,
+      "granular": {
+        "bounds_max": [
+          0.14026056230068207,
+          0.07947596162557602,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.14026056230068207,
+          0.07947596162557602,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.14026056230068207,
+          0.07947596162557602,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.039016308718900765,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -6.720910414619898e-05,
+          -2.412674111409844e-05,
+          -0.01990690744560989
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 69,
+      "granular": {
+        "bounds_max": [
+          0.14201942086219788,
+          0.07423431426286697,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.14201942086219788,
+          0.07423431426286697,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.14201942086219788,
+          0.07423431426286697,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.04929712175536491,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -7.655517661467456e-05,
+          -2.412674111409844e-05,
+          -0.022214568357701338
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 70,
+      "granular": {
+        "bounds_max": [
+          0.14377827942371368,
+          0.06831139326095581,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.14377827942371368,
+          0.06831139326095581,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.14377827942371368,
+          0.06831139326095581,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.06091464007358601,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -8.590124908315015e-05,
+          -2.412674111409844e-05,
+          -0.0245509900014416
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 71,
+      "granular": {
+        "bounds_max": [
+          0.1455371379852295,
+          0.06170720234513283,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.1455371379852295,
+          0.06170720234513283,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.1455371379852295,
+          0.06170720234513283,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.07386886367356406,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -9.524732155162573e-05,
+          -2.412674111409844e-05,
+          -0.026916172376830673
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 72,
+      "granular": {
+        "bounds_max": [
+          0.1472959965467453,
+          0.05442173406481743,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.1472959965467453,
+          0.05442173406481743,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.1472959965467453,
+          0.05442173406481743,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.08815979255529906,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.00010459339402010132,
+          -2.412674111409844e-05,
+          -0.029310118464100844
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 73,
+      "granular": {
+        "bounds_max": [
+          0.1490548551082611,
+          0.04645498842000961,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.1490548551082611,
+          0.04645498842000961,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.1490548551082611,
+          0.04645498842000961,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 2.088187159347825e-09,
+        "kinetic_energy_j": 0.103787426718791,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.00011393947230934308,
+          -2.412674111409844e-05,
+          -0.031732820812671404
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 74,
+      "granular": {
+        "bounds_max": [
+          0.15081371366977692,
+          0.03780702129006386,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.15081371366977692,
+          0.03780702129006386,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.15081371366977692,
+          0.03780702129006386,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.120749503570972,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.00012328435152075216,
+          -2.412674111409844e-05,
+          -0.034183972458617186
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 75,
+      "granular": {
+        "bounds_max": [
+          0.15257257223129272,
+          0.028477860614657402,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.15257257223129272,
+          0.028477860614657402,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.15257257223129272,
+          0.028477860614657402,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.1390478458682048,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -0.00013262917252449945,
+          -2.412674111409844e-05,
+          -0.036663868444934224
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 1.2111438512802124,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 3.6671737351701e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 76,
+      "granular": {
+        "bounds_max": [
+          0.15428176522254944,
+          0.0213550366461277,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.15428176522254944,
+          0.0213550366461277,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.15428176522254944,
+          0.0213550366461277,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.005730070490677911,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          1.6237914920604448e-05,
+          -2.2027503619846006e-05,
+          0.003515420678654462
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.8881062865257263,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 1.971832028564047e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 77,
+      "granular": {
+        "bounds_max": [
+          0.15579578280448914,
+          0.02880442701280117,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.15579578280448914,
+          0.02880442701280117,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.15579578280448914,
+          0.02880442701280117,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.11145505577414554,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          0.00011896804385212126,
+          -2.0322746725439972e-05,
+          0.03135180872756538
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.9961018562316895,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 2.4805473808596494e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 78,
+      "granular": {
+        "bounds_max": [
+          0.15727649629116058,
+          0.03713402897119522,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.15727649629116058,
+          0.03713402897119522,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.15727649629116058,
+          0.03713402897119522,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.09510925954704719,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          0.00010962259420562673,
+          -2.0322746725439972e-05,
+          0.028792453788114236
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.9961018562316895,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 2.4805473808596494e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 79,
+      "granular": {
+        "bounds_max": [
+          0.15875720977783203,
+          0.0447823703289032,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.15875720977783203,
+          0.0447823703289032,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.15875720977783203,
+          0.0447823703289032,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.08009903969883651,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          0.00010027651591638497,
+          -2.0322746725439972e-05,
+          0.02620872650905126
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.9961018562316895,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 2.4805473808596494e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 80,
+      "granular": {
+        "bounds_max": [
+          0.16023792326450348,
+          0.051749445497989655,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.16023792326450348,
+          0.051749445497989655,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.16023792326450348,
+          0.051749445497989655,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.0664255251323828,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          9.093044344790939e-05,
+          -2.0322746725439972e-05,
+          0.023600798253732735
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.9961018562316895,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 2.4805473808596494e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 81,
+      "granular": {
+        "bounds_max": [
+          0.16171863675117493,
+          0.0580352358520031,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.16171863675117493,
+          0.0580352358520031,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.16171863675117493,
+          0.0580352358520031,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 0.0,
+        "kinetic_energy_j": 0.05408871584768602,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          8.158436515866762e-05,
+          -2.0322746725439972e-05,
+          0.020968674982623225
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.9961018562316895,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 2.4805473808596494e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 82,
+      "granular": {
+        "bounds_max": [
+          0.16319935023784637,
+          0.06363976746797562,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.16319935023784637,
+          0.06363976746797562,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.16319935023784637,
+          0.06363976746797562,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.0430886118447462,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          7.223829269019204e-05,
+          -2.0322746725439972e-05,
+          0.018312349245142023
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.9961018562316895,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 2.4805473808596494e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 83,
+      "granular": {
+        "bounds_max": [
+          0.16468006372451782,
+          0.06856301426887512,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.16468006372451782,
+          0.06856301426887512,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.16468006372451782,
+          0.06856301426887512,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.033425213123563335,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          6.289222022171645e-05,
+          -2.0322746725439972e-05,
+          0.015631825511637554
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.9961018562316895,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 2.4805473808596494e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 84,
+      "granular": {
+        "bounds_max": [
+          0.16616077721118927,
+          0.07280498743057251,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.16616077721118927,
+          0.07280498743057251,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.16616077721118927,
+          0.07280498743057251,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.025098717901318596,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          5.354638640465417e-05,
+          -2.0322746725439972e-05,
+          0.012927173817568473
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.9961018562316895,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 2.4805473808596494e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 85,
+      "granular": {
+        "bounds_max": [
+          0.16764149069786072,
+          0.07636573165655136,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.16764149069786072,
+          0.07636573165655136,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.16764149069786072,
+          0.07636573165655136,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.01810911687522193,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          4.420093966854273e-05,
+          -2.0322746725439972e-05,
+          0.010198435141128672
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.9961018562316895,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 2.4805473808596494e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 86,
+      "granular": {
+        "bounds_max": [
+          0.16912220418453217,
+          0.07924523949623108,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.16912220418453217,
+          0.07924523949623108,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.16912220418453217,
+          0.07924523949623108,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.012456042790562642,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          3.485548711166511e-05,
+          -2.0322746725439972e-05,
+          0.007445498468665602
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.9961018562316895,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 2.4805473808596494e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 87,
+      "granular": {
+        "bounds_max": [
+          0.1706029176712036,
+          0.08144352585077286,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.1706029176712036,
+          0.08144352585077286,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.1706029176712036,
+          0.08144352585077286,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.008139455081189535,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          2.5509935601762462e-05,
+          -2.0322746725439972e-05,
+          0.004668331762682222
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.9961018562316895,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 2.4805473808596494e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 88,
+      "granular": {
+        "bounds_max": [
+          0.17208363115787506,
+          0.08296056091785431,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.17208363115787506,
+          0.08296056091785431,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.17208363115787506,
+          0.08296056091785431,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.0051593726267331235,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          1.616417308908586e-05,
+          -2.0322746725439972e-05,
+          0.0018669068972363575
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.9961018562316895,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 2.4805473808596494e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 89,
+      "granular": {
+        "bounds_max": [
+          0.1735643446445465,
+          0.08379634469747543,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.1735643446445465,
+          0.08379634469747543,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.1735643446445465,
+          0.08379634469747543,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.0035159062823866658,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          6.8184105764092576e-06,
+          -2.0322746725439972e-05,
+          -0.0009587168955553631
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.9961018562316895,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 2.4805473808596494e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    },
+    {
+      "step": 90,
+      "granular": {
+        "bounds_max": [
+          0.17504505813121796,
+          0.08395087718963623,
+          -0.0005716054583899677
+        ],
+        "bounds_min": [
+          0.17504505813121796,
+          0.08395087718963623,
+          -0.0005716054583899677
+        ],
+        "capacity_kg": 0.0,
+        "dry_center_of_mass": [
+          0.17504505813121796,
+          0.08395087718963623,
+          -0.0005716054583899677
+        ],
+        "dry_mass_kg": 0.20000000298023224,
+        "horizontal_rms_radius_m": 9.43969629019665e-10,
+        "kinetic_energy_j": 0.003209055825787083,
+        "mean_saturation": 0.0,
+        "particles": 1,
+        "pore_water_kg": 0.0
+      },
+      "grain": {
+        "angular_momentum_kg_m2_s": [
+          -2.5273457517032804e-06,
+          -2.0322746725439972e-05,
+          -0.003808537380518727
+        ],
+        "dissipation_heat_coupled": false,
+        "frame_end_host_publication": true,
+        "history_static_friction": false,
+        "max_spin_rad_s": 0.9961018562316895,
+        "radius_m": 0.02500000037252903,
+        "solver": "force_dem_viscous_sliding_candidate",
+        "spin_energy_j": 2.4805473808596494e-05,
+        "transport_owner": "grain",
+        "wet_coupling": false
+      }
+    }
+  ],
+  "final_control": {
+    "driver": "none",
+    "dropped_seeds": [],
+    "epoch": 0,
+    "frame": 0,
+    "playing": false,
+    "script_driving": false,
+    "script_sim_seconds": 0.0
+  },
+  "restored_authoring": true
+}

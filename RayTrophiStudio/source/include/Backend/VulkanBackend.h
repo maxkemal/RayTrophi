@@ -899,23 +899,35 @@ public:
      */
     uint32_t createPipeline(const PipelineCreateInfo& info);
     
-    /**
-     * @brief Create ray tracing pipeline from raygen/miss/closesthit SPIR-V
-     * @return true on success
-     */
-    bool createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
-                          const std::vector<std::uint32_t>& missSPV,
-                          const std::vector<std::uint32_t>& closestHitSPV,
-                          const std::vector<std::uint32_t>& anyHitSPV               = std::vector<std::uint32_t>(),
-                          const std::vector<std::uint32_t>& volumeClosestHitSPV     = std::vector<std::uint32_t>(),
-                          const std::vector<std::uint32_t>& volumeIntersectionSPV   = std::vector<std::uint32_t>(),
-                          const std::vector<std::uint32_t>& hairClosestHitSPV       = std::vector<std::uint32_t>(),
-                          const std::vector<std::uint32_t>& hairIntersectionSPV     = std::vector<std::uint32_t>(),
-                          const std::vector<std::uint32_t>& shadowMissSPV           = std::vector<std::uint32_t>(),
-                          const std::vector<std::uint32_t>& hairAnyHitSPV           = std::vector<std::uint32_t>(),
-                          const std::vector<std::uint32_t>& sphereClosestHitSPV     = std::vector<std::uint32_t>(),
-                          const std::vector<std::uint32_t>& sphereIntersectionSPV   = std::vector<std::uint32_t>(),
-                          const std::vector<std::uint32_t>& photonRaygenSPV         = std::vector<std::uint32_t>());
+    // ========================================================================
+    // Ray tracing pipeline build (VulkanRTPipelineBuild.cpp)
+    // ========================================================================
+    // ★★★ The driver compile of the RT pipeline takes MINUTES on the first use
+    // after a shader change (volume_closesthit alone is ~4800 lines). It used to
+    // run synchronously on the render thread, so switching to Rendered froze the
+    // app with no indication why (reported 2026-10-05). Now:
+    //   requestRTPipelineBuild()  render thread: starts a worker, returns at once
+    //   pollRTPipelineBuild()     render thread: installs a finished build (SBT)
+    // The worker compiles through a VkDeferredOperationKHR joined from several
+    // threads, against a VkPipelineCache persisted on disk.
+    // An empty vector means "stage not present" (all optional except the first three).
+    struct RTPipelineShaderSet {
+        std::vector<std::uint32_t> raygen, miss, closestHit, anyHit;
+        std::vector<std::uint32_t> volumeClosestHit, volumeIntersection;
+        std::vector<std::uint32_t> hairClosestHit, hairIntersection, hairAnyHit;
+        std::vector<std::uint32_t> shadowMiss;
+        std::vector<std::uint32_t> sphereClosestHit, sphereIntersection;
+        std::vector<std::uint32_t> photonRaygen;
+    };
+    // Ready     - the installed pipeline was built from these exact shaders; nothing started.
+    // Compiling - a worker is compiling them (started now or earlier).
+    // Failed    - these exact shaders already failed; not retried until they change.
+    Backend::RTPipelineStatus::State requestRTPipelineBuild(RTPipelineShaderSet shaders);
+    // Installs a finished build. block=true waits for the worker (offline renders
+    // that have no viewport to keep alive). Returns true exactly when this call
+    // installed a new pipeline.
+    bool pollRTPipelineBuild(bool block);
+    Backend::RTPipelineStatus getRTPipelineStatus() const;
 
     // ========================================================================
     // Photon caustic pass (Faz 2 / Dilim 1)
@@ -1188,6 +1200,13 @@ public:
     PFN_vkGetBufferDeviceAddressKHR fpGetBufferDeviceAddressKHR = nullptr;
     PFN_vkCmdCopyAccelerationStructureKHR fpCmdCopyAccelerationStructureKHR = nullptr;
     PFN_vkCmdWriteAccelerationStructuresPropertiesKHR fpCmdWriteAccelerationStructuresPropertiesKHR = nullptr;
+    // VK_KHR_deferred_host_operations (null when the extension was not enabled;
+    // the RT pipeline build then takes the synchronous path).
+    PFN_vkCreateDeferredOperationKHR fpCreateDeferredOperationKHR = nullptr;
+    PFN_vkDestroyDeferredOperationKHR fpDestroyDeferredOperationKHR = nullptr;
+    PFN_vkGetDeferredOperationMaxConcurrencyKHR fpGetDeferredOperationMaxConcurrencyKHR = nullptr;
+    PFN_vkGetDeferredOperationResultKHR fpGetDeferredOperationResultKHR = nullptr;
+    PFN_vkDeferredOperationJoinKHR fpDeferredOperationJoinKHR = nullptr;
     VkDevice m_device = VK_NULL_HANDLE;
     // VRAM accounting state.
     struct TrackedAllocation {
@@ -1238,6 +1257,27 @@ public:
     bool m_hasSphereShaders = false; // Whether pipeline includes foam point-sphere procedural hit group
     bool m_hasShadowMiss = false; // Whether a shadow miss shader is at miss index 1
     VkPipeline m_rtPipeline = VK_NULL_HANDLE;
+    // Build job state (VulkanRTPipelineBuild.cpp). The worker writes only into
+    // its job; m_rtPipeline stays null until pollRTPipelineBuild installs it, so
+    // every "ready = (m_rtPipeline != null)" site keeps meaning what it says.
+    struct RTPipelineBuildJob;
+    std::shared_ptr<RTPipelineBuildJob> m_rtBuildJob;      // in flight or finished-not-installed
+    std::unique_ptr<RTPipelineShaderSet> m_rtQueuedShaders; // newer request that arrived mid-compile
+    uint64_t m_rtInstalledShaderHash = 0;
+    uint64_t m_rtFailedShaderHash = 0;
+    mutable std::mutex m_rtBuildStatusMutex;
+    Backend::RTPipelineStatus m_rtBuildStatus;              // guarded by m_rtBuildStatusMutex
+    int64_t m_rtBuildStartTicks = 0;                        // steady_clock ticks; guarded by the same mutex
+    VkPipelineCache m_rtPipelineCache = VK_NULL_HANDLE;
+    bool m_deferredHostOpsEnabled = false;                  // latched in createLogicalDevice
+    bool m_rtCreationFeedbackSupported = false;             // Vulkan 1.3 pipeline creation feedback
+    bool startRTPipelineBuild(RTPipelineShaderSet shaders, uint64_t hash);
+    void runRTPipelineBuildJob(RTPipelineBuildJob& job);   // worker thread
+    bool installRTPipelineBuild(RTPipelineBuildJob& job);  // render thread
+    bool ensureRTPipelineLayouts();
+    void loadRTPipelineCache();
+    void saveRTPipelineCache();
+    void shutdownRTPipelineBuild();                        // joins the worker, frees cache
     
     // Skinning Compute Pipeline
     bool createSkinningPipeline(const std::vector<uint32_t>& computeSPV);
@@ -1792,6 +1832,7 @@ public:
     void loadShaders(const ShaderProgramData& data) override;
     BackendInfo getInfo() const override;
     GpuMemoryStats getMemoryStats() const override;
+    Backend::RTPipelineStatus getRTPipelineStatus() const override;
 
     // ========================================================================
     // IBackend - Geometry Upload
@@ -2779,6 +2820,10 @@ protected:
     };
 
     bool shouldUseInteractiveViewport() const;
+    // RT pipeline build hand-over (VulkanRTPipelineBuild.cpp compiles on a worker).
+    void onRTPipelineInstalled();
+    bool drawRasterWhileRTPipelineUnavailable(void* s, int width, int height, void* fb, void* tex);
+    void leaveRTPipelineRasterFallback();
     bool ensureInteractiveViewportResources(const std::string& shaderDir, int width, int height);
     void destroyInteractiveViewportResources(bool keepPipeline = false);
     void renderInteractiveViewport(void* outSurface, int width, int height, void* outFramebuffer, void* outTexture);
@@ -2795,6 +2840,13 @@ protected:
     int m_minSamples = 4;
     float m_currentTime = 0.0f;
     bool m_testInitialized = false;
+    // A build was requested and not yet installed; renderProgressive polls it.
+    bool m_rtPipelineInstallPending = false;
+    // Raster mode drawn in Rendered while there is no RT pipeline (the mode
+    // the user switched from), its resources live, and the recursion guard.
+    ViewportMode m_rtFallbackRasterMode = ViewportMode::Solid;
+    bool m_rtFallbackRasterUsed = false;
+    bool m_inRTPipelineRasterFallback = false;
     CameraParams m_camera;
     bool m_useAdaptiveSampling = false;
     float m_varianceThreshold = 0.05f;

@@ -23,14 +23,20 @@ const SubstanceProfile* presetProfile(FluidChemistryPreset preset) {
     }
 }
 
-float densityForParticle(uint32_t tag, const SubstanceProfile* fallback) {
+float densityForParticle(uint32_t tag, const SubstanceProfile* fallback,
+                         MatterConstitutiveModel model, bool legacy_granular) {
     const SubstanceProfile* profile = tryFindSubstanceByTag(tag);
-    if (!profile) profile = fallback;
-    if (!profile || !std::isfinite(profile->liquid_density) ||
-        profile->liquid_density <= 0.0f) {
-        return 1000.0f;
+    if (!profile) {
+        profile = fallback;
     }
-    return profile->liquid_density;
+    if (model == MatterConstitutiveModel::Auto) {
+        model = legacy_granular ? MatterConstitutiveModel::Granular
+            : MatterConstitutiveModel::Fluid;
+    }
+    const float density = profile
+        ? (model == MatterConstitutiveModel::Granular ? profile->density : profile->liquid_density)
+        : 1000.0f;
+    return std::isfinite(density) && density > 0.0f ? density : 1000.0f;
 }
 
 } // namespace
@@ -46,7 +52,7 @@ FluidPhysicalMassStats ensureFluidParticleRestMasses(
     FluidParticles& particles,
     FluidChemistryPreset chemistry_preset,
     float voxel_size,
-    int particles_per_cell) {
+    int particles_per_cell, bool legacy_granular) {
     FluidPhysicalMassStats stats;
     const std::size_t count = particles.size();
     particles.rest_mass_kg.resize(count, 0.0f);
@@ -61,7 +67,10 @@ FluidPhysicalMassStats ensureFluidParticleRestMasses(
         if (!std::isfinite(rest_mass) || rest_mass <= 0.0f) {
             const uint32_t tag = i < particles.substance_tag.size()
                 ? particles.substance_tag[i] : kSubstanceUntagged;
-            rest_mass = densityForParticle(tag, fallback) * parcel_volume;
+            const auto model = i < particles.constitutive_model.size()
+                ? static_cast<MatterConstitutiveModel>(particles.constitutive_model[i])
+                : MatterConstitutiveModel::Auto;
+            rest_mass = densityForParticle(tag, fallback, model, legacy_granular) * parcel_volume;
             ++stats.initialized_particles;
         }
         const float fraction = i < particles.mass_fraction.size() &&
@@ -71,6 +80,15 @@ FluidPhysicalMassStats ensureFluidParticleRestMasses(
         stats.current_mass_kg += static_cast<double>(rest_mass) * fraction;
     }
     return stats;
+}
+
+float fluidParticleRestMassKg(uint32_t tag, FluidChemistryPreset preset,
+                             float voxel_size, int particles_per_cell,
+                             MatterConstitutiveModel model, bool legacy_granular) {
+    const float h = std::isfinite(voxel_size) && voxel_size > 0.0f
+        ? voxel_size : 0.1f;
+    return densityForParticle(tag, presetProfile(preset), model, legacy_granular) * h * h * h /
+        static_cast<float>(std::max(1, particles_per_cell));
 }
 
 } // namespace Fluid

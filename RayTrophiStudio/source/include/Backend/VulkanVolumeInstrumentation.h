@@ -74,9 +74,16 @@ struct VolumePerformanceStats {
     uint32_t mediumPasses = 0;
     uint32_t arbiterStartedInside = 0;
     uint32_t arbiterInsideFound = 0;
+    // Random walk cost split (volume_closesthit volumeRandomWalk).
+    uint32_t walkPaths = 0;
+    uint32_t walkEvents = 0;
+    uint32_t walkProbeTraces = 0;
+    uint32_t walkShadowTraces = 0;
+    uint32_t walkShadowSkipped = 0;
+    uint32_t walkEventCapped = 0;
 };
-static_assert(sizeof(VolumePerformanceStats) == 160,
-              "Volume instrumentation ABI must remain 40 x 4-byte words "
+static_assert(sizeof(VolumePerformanceStats) == 184,
+              "Volume instrumentation ABI must remain 46 x 4-byte words "
               "and must match volume_instrumentation.glsl exactly.");
 
 // Normalized [min, max) pixel rectangle the counters are restricted to.

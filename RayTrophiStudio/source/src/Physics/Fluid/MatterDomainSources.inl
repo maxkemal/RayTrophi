@@ -10,6 +10,60 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
     const float time_scale = std::max(0.0f, dt);
     // Parent motion first, unconditionally — see advanceFlowSourceMotion().
     advanceFlowSourceMotion(dt, frame);
+    // Plan all liquid sources before any source consumes the shared free slots.
+    // This is an emission allocation, not ownership of existing material points.
+    std::vector<std::vector<Fluid::MatterEmissionRequest>> pool_requests(
+        grid_domain_states_.size(),
+        std::vector<Fluid::MatterEmissionRequest>(flow_sources_.size()));
+    for (std::size_t si = 0; si < flow_sources_.size(); ++si) {
+        auto& source = flow_sources_[si];
+        source.pool_requested_particles = 0;
+        source.pool_granted_particles = 0;
+        if (source.domain_index < 0 ||
+            source.domain_index >= static_cast<int>(grid_domain_states_.size()) ||
+            source.domain_index >= static_cast<int>(grid_domains_.size())) {
+            continue;
+        }
+        const auto& state = grid_domain_states_[source.domain_index];
+        const auto resolved = resolveFlowSourceFrame(source, frame);
+        if (!state.valid || resolved.parent_missing || !resolved.keyed.enabled ||
+            !simulationDomainHasLiquid(state.type) ||
+            (simulationDomainHasGas(state.type) &&
+             source.phase != SimulationFlowSourceDesc::Phase::Liquid) ||
+            (source.use_time_limit &&
+             (time_seconds < source.start_time || time_seconds > source.end_time))) {
+            continue;
+        }
+        const double requested = source.fluid_emit_accumulator +
+            std::max(0.0f, resolved.keyed.flow_rate) * std::max(0.0f, dt);
+        if (!std::isfinite(requested) || requested <= 0.0) {
+            continue;
+        }
+        int count = static_cast<int>(std::min(requested, 2147483647.0));
+        if (source.use_particle_limit) {
+            count = std::min(count,
+                std::max(0, source.max_emitted_particles - source.total_emitted_particles));
+        }
+        source.pool_requested_particles = count;
+        auto& request = pool_requests[source.domain_index][si];
+        request.particles = static_cast<std::size_t>(count);
+        request.weight = std::isfinite(source.particle_pool_weight)
+            ? std::clamp(source.particle_pool_weight, 0.001f, 1000.0f) : 1.0f;
+    }
+    for (std::size_t di = 0; di < pool_requests.size() && di < grid_domains_.size(); ++di) {
+        const auto maximum = grid_domains_[di].fluid_max_particles;
+        const auto current = grid_domain_states_[di].particles.size();
+        const auto dead_band = std::max<std::size_t>(1u, maximum / 100u);
+        const auto free = current < maximum && maximum - current > dead_band
+            ? maximum - current : 0u;
+        const auto grants = Fluid::allocateMatterEmissionBudget(
+            pool_requests[di], free, static_cast<uint64_t>(frame));
+        for (std::size_t si = 0; si < grants.size(); ++si) {
+            if (flow_sources_[si].domain_index == static_cast<int>(di)) {
+                flow_sources_[si].pool_granted_particles = static_cast<int>(grants[si]);
+            }
+        }
+    }
     for (auto& source : flow_sources_) {
         const SimulationFlowSourceFrame resolved = resolveFlowSourceFrame(source, frame);
         const SimulationFlowSourceDesc::Keyframe& keyed = resolved.keyed;
@@ -42,7 +96,12 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             const auto& fluid_domain = grid_domains_[static_cast<std::size_t>(source.domain_index)];
             const float rate = std::max(0.0f, keyed.flow_rate);
             source.fluid_emit_accumulator += rate * std::max(0.0f, dt);
-            int emit_count = static_cast<int>(source.fluid_emit_accumulator);
+            if (!std::isfinite(source.fluid_emit_accumulator)) {
+                source.fluid_emit_accumulator = 0.0f;
+                continue;
+            }
+            int emit_count = static_cast<int>(std::min(
+                static_cast<double>(source.fluid_emit_accumulator), 2147483647.0));
             if (emit_count <= 0) continue;
             source.fluid_emit_accumulator -= static_cast<float>(emit_count);
 
@@ -66,10 +125,12 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             // counter is kept as telemetry only — read it, do not gate on it.
             const std::size_t max_p = fluid_domain.fluid_max_particles;
             const std::size_t cur_p = state.particles.size();
-            const std::size_t dead_band = std::max<std::size_t>(1u, max_p / 100u);
+            // The dead-band applies once when the shared plan is made, not
+            // again after an earlier source used its allocated share.
             const std::size_t remaining =
-                (cur_p + dead_band < max_p) ? (max_p - cur_p) : 0u;
+                cur_p < max_p ? max_p - cur_p : 0u;
             emit_count = std::min<int>(emit_count, static_cast<int>(remaining));
+            emit_count = std::min(emit_count, source.pool_granted_particles);
             if (emit_count <= 0) continue;
 
             // Particle budget limit check
@@ -189,14 +250,35 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             // looked like a one-shot SeedBox event.
             const uint32_t emission_serial_base =
                 static_cast<uint32_t>(source.fluid_emit_sample_serial);
-            source.fluid_emit_sample_serial += static_cast<uint64_t>(emit_count);
+            const bool grain_birth = fluid_domain.fluid_params.grain.enabled;
+            // A physical grain is born with its own sphere mass (bulk density /
+            // packing fraction), not the voxel/particles-per-cell parcel mass,
+            // so grain size and grid resolution stay independent.
+            const float grain_rest_mass = grain_birth
+                ? Fluid::matterGrainRestMassKg(fluid_domain.fluid_params.grain, emit_substance,
+                      fluid_domain.fluid_params.chemistry_preset, emit_model,
+                      fluid_domain.fluid_params.granular_enabled)
+                : 0.0f;
+            if (!grain_birth) {
+                source.fluid_emit_sample_serial += static_cast<uint64_t>(emit_count);
+            }
 
             const std::size_t before_emission = state.particles.size();
             state.particles.reserve(state.particles.size() + static_cast<std::size_t>(emit_count));
-            for (int p = 0; p < emit_count; ++p) {
+            Fluid::MatterGrainBirthFilter grain_filter(state.particles, Fluid::liquidGrid(state),
+                grain_birth ? fluid_domain.fluid_params.grain.radius_m : 0.0f);
+            const uint64_t attempt_limit = grain_birth
+                ? std::min<uint64_t>(static_cast<uint64_t>(emit_count) * 64u, 262144u)
+                : static_cast<uint64_t>(emit_count);
+            uint64_t attempts = 0;
+            for (; attempts < attempt_limit; ++attempts) {
+                if (grain_birth && state.particles.size() - before_emission >=
+                    static_cast<std::size_t>(emit_count)) {
+                    break;
+                }
                 const uint32_t s =
                     source_seed_base ^
-                    ((emission_serial_base + static_cast<uint32_t>(p)) *
+                    ((emission_serial_base + static_cast<uint32_t>(attempts)) *
                      2246822519u);
                 const float u1 = hashUnitFloat(s);
                 const float u2 = hashUnitFloat(s ^ 0xdeadbeefu);
@@ -264,12 +346,20 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                 if (!Fluid::gridContains(Fluid::liquidGrid(state), spawn_pos)) {
                     continue;
                 }
+                if (!grain_filter.accept(spawn_pos)) {
+                    continue;
+                }
                 state.particles.emit(
                     spawn_pos, emit_vel, emit_kelvin, 0.0f, emit_substance,
-                    nullptr, nullptr, 0.0f, emit_model);
+                    nullptr, nullptr, grain_rest_mass, emit_model);
             }
             source.total_emitted_particles +=
                 static_cast<int>(state.particles.size() - before_emission);
+            if (grain_birth) {
+                source.fluid_emit_sample_serial += attempts;
+                source.fluid_emit_accumulator += static_cast<float>(emit_count -
+                    static_cast<int>(state.particles.size() - before_emission));
+            }
             continue;
         }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../SimulationCompute.h"
+#include "MatterGpuModelView.h"
 #include "../Vec3.h"
 #include <cstdint>
 #include <cstddef>
@@ -10,6 +11,7 @@ namespace RayTrophiSim::Fluid::Granular {
 // One flat GPU buffer per field. Keeping this bundle separate from the liquid
 // buffers prevents an ABI change in the existing P2G/G2P kernels.
 struct GpuBuffers {
+    MatterGpuModelView matter_model;
     ComputeBufferHandle deformation_col0{};
     ComputeBufferHandle deformation_col1{};
     ComputeBufferHandle deformation_col2{};

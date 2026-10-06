@@ -823,6 +823,9 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             gv.density_noise_strength = gs.density_noise_strength;
             gv.density_noise_detail = gs.density_noise_detail;
             gv.density_noise_seed = gs.density_noise_seed;
+            gv.random_walk = gs.random_walk;
+            gv.random_walk_max_events = gs.random_walk_max_events;
+            gv.random_walk_exact_events = gs.random_walk_exact_events;
             gv.voxel_size = renderVoxelSize;
             // Publish the authored range for both color-ramp and blackbody
             // evaluation. A hard-coded 6000 K made these UI controls appear
@@ -934,6 +937,9 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             gv.density_noise_strength = gs.density_noise_strength;
             gv.density_noise_detail = gs.density_noise_detail;
             gv.density_noise_seed = gs.density_noise_seed;
+            gv.random_walk = gs.random_walk;
+            gv.random_walk_max_events = gs.random_walk_max_events;
+            gv.random_walk_exact_events = gs.random_walk_exact_events;
             gv.voxel_size = gas->getSettings().voxel_size;
             const float ambientKelvin = gas->getSettings().ambient_temperature;
             gv.emission_pad = ambientKelvin + shader->emission.temperature_min;

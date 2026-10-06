@@ -318,6 +318,34 @@ ViewportStatusInfo viewportStatus() {
     return out;
 }
 
+RtPipelineStatusInfo rtPipelineStatus() {
+    RtPipelineStatusInfo out;
+    out.state = "none";
+    if (!g_ctx || !g_ctx->backend_ptr) return out;   // available stays false
+    Backend::IBackend* backend = g_ctx->backend_ptr;
+    out.backend = backendName(backend);
+    const Backend::RTPipelineStatus s = backend->getRTPipelineStatus();
+    out.available = s.available;
+    switch (s.state) {
+        case Backend::RTPipelineStatus::State::Compiling: out.state = "compiling"; break;
+        case Backend::RTPipelineStatus::State::Ready:     out.state = "ready";     break;
+        case Backend::RTPipelineStatus::State::Failed:    out.state = "failed";    break;
+        default:                                          out.state = "none";      break;
+    }
+    out.awaiting_install = s.awaitingInstall;
+    out.compile_seconds = s.compileSeconds;
+    out.cache_hit_known = s.cacheHitKnown;
+    out.cache_hit = s.cacheHit;
+    out.cache_loaded = s.cacheLoaded;
+    out.cache_loaded_bytes = s.cacheLoadedBytes;
+    out.cache_path = s.cachePath;
+    out.cache_reject_reason = s.cacheRejectReason;
+    out.deferred_threads = s.deferredThreads;
+    out.build_count = s.buildCount;
+    out.error = s.error;
+    return out;
+}
+
 ViewportShadingInfo viewportShading() {
     ViewportShadingInfo out;
     if (!g_ctx || !g_ctx->scene_ui_ptr) return out;   // mode stays empty

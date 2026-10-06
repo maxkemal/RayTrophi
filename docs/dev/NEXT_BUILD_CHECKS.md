@@ -1,4 +1,541 @@
+# Sıradaki kullanıcı build (C++ + SHADER): dry grain — kova komşuluğu + yığılma açısı (H1-G1)
+
+Değişiklik (2026-10-06, 2. parti): komşuluk bağlı liste yerine **üç dönen sabit kapasiteli
+hash kova tablosu** (kova başına 16 tane; alt adım k: oku k%3, ekle (k+1)%3, temizle (k+2)%3).
+Bağımlı yükleme zinciri yerine bağımsız yüklemeler; hâlâ alt adım başına 1 dispatch.
+Shader revision 6. `grain_diagnostics.pile`: radyal halka profilinden yığılma açısı.
+Yeni test kolu `--repose-only`. `compile_sim_shaders.bat` gerekli.
+
+1. **Statik sözleşme** `python scripts/test/check_matter_grain_contracts.py` → PASS.
+2. **Temel regresyon** `python scripts/test/rt_h1_grain_runtime_ipc.py` → önceki partiyle aynı
+   gate'ler. Bozuksa: `bucket overflow` = 16 kapasite gerçek yoğunlukta yetmedi (gevşetme,
+   ölç); `revision mismatch` = shader derlenmedi.
+3. **Maliyet** `python scripts/test/rt_h1_grain_kernel_profile_ipc.py --counts 1024 4096 --stiffness 200000`
+   → `sim_matter_grain_step` µs/çağrı önceki 243/289'dan düşmeli. Düşmediyse darboğaz zincir
+   değil (history taraması / BVH / register) — sonraki teşhis oraya.
+   Ardından `python scripts/test/rt_h1_dense_grain_scene_ipc.py` → medyan 25.5/24.4/41.1 ms ile kıyas.
+4. **Statik + yakınsama + extended + settle** (`--static-only`, `--convergence-only`,
+   `--extended-only`, `--settle-only --settle-normal-damping 8`) → önceki partinin değerleri;
+   komşuluk değişti, fizik değişmemeli. Settle enerjisi ~1e-12 J/tane, statik kayma 0.
+5. **Yığılma açısı** `--repose-only` (uzun: 4 kol, ~1500–4400 tane):
+   μr .05 vs .3 → açı farkı ≥ 3° (ölçü aleti yuvarlanma yayını görüyor mu);
+   μr .1 açısı 15–45°; r .025 vs .0175 (aynı toplam kütle, k∝r, sönüm∝r²) açı farkı ≤ 4°;
+   her kolda yığın duvara değmiyor, son 1 s açı aralığı ≤ 1.5°, KE/tane ≤ 1e-5 J.
+   Bozuksa: duyarlılık yoksa ölçüm ya da yuvarlanma yayı çalışmıyor; çözünürlük farkı büyükse
+   sertlik/sönüm ölçeklemesi ya da tane boyutu fiziği yanlış.
+
+★ En sinsi başarısızlık: **5. maddede açı "makul" ama μr'ye duyarsız.** Ölçüm (halka profili)
+yığının şeklini değil, örneğin emitter kolonunu ölçüyor olabilir; bu yüzden duyarlılık
+gate'i makullük gate'inden önce okunmalı.
+★ İkinci: kova taşması yalnız yoğun/örtüşmeli durumda tetiklenir — 16384 yoğun sahnede de
+`bucket overflow` görülmediğini ayrıca kontrol et.
+
+
+# Sıradaki kullanıcı build (C++ + SHADER): dry grain — birleşik alt adım, statik sürtünme, tane kütlesi
+
+> **Canlı sonuç (2026-10-06):** 1–7 PASS. Statik tutunma: yay 2/7 kayma 0, yay 0 0.1464 m/s (= analitik). Yakınsama (accuracy bağlı 62→122 alt adım) COM %3.07 / RMS %2.12. Yoğun medyan 25.5/24.4/41.1 ms (eski 173.6/213.8/272.2), dispatch 209 (eski 3471). Step kernel gecikme sınırlı (4× tane ≈ aynı süre). 8. madde (G2) PASS: aynı build iki koşu farkı 1e-5 m düzeyi; 10-05'e göre sabit ~6.6 mm fark emitter tohumunun bellek adresinden gelmesinden (oturumlar arası A/B imkânsız — ayrı iş). Ayrıntı: MATTER_GRAIN_GPU_RUNTIME.md "Fused partisi canlı sonuç".
+
+Değişiklik (2026-10-06): alt adım başına 3 dispatch → 1 (ping-pong durum + nesil damgalı
+hash), CFL 48-temas/0.1 yerine 24-temas Gershgorin + "çarpışma başına N alt adım" doğruluk
+sınırı, Cundall–Strack teğetsel yay + EPSD2 yuvarlanma yayı (tane başına 24 slot temas
+geçmişi), tane kütlesi = yığın yoğunluğu / packing × küre hacmi, Vulkan backend'de aynı
+recording içinde descriptor set yeniden kullanımı (TÜM Vulkan compute çözücülerini etkiler).
+Yeni shader: `sim_matter_grain_step.comp`; `_contact/_integrate/_integrate_hash` silindi.
+`compile_sim_shaders.bat` gerekli. Ayrıntı: [MATTER_GRAIN_GPU_RUNTIME.md](MATTER_GRAIN_GPU_RUNTIME.md) §2026-10-06 fused.
+
+1. **Statik sözleşme** (build gerekmez, saniyeler): `python scripts/test/check_matter_grain_contracts.py`
+   → PASS. Bozuksa: kaynak/ABI uyumsuz, build'e geçme.
+2. **Temel regresyon** (boş, frame0 paused sahne, dış terminal):
+   `python scripts/test/rt_h1_grain_runtime_ipc.py` → serbest düşüş g ±%5, zemin/spin,
+   64-tane pile 60/120 Hz ≤%10. Her örnekte `grain_diagnostics.runtime.dispatches == substeps+2`
+   ve substeps çift. Beklenen: varsayılan profilde (k 20 kN/m, Cn/Cs 4) `substep_limit`
+   = `damping`, 60 Hz'de ~166 alt adım / 168 dispatch (eski formül ~366 alt adım / ~1100).
+   Bozuksa: `shader revision mismatch` = shader derlenmedi; `contact count exceeds the 24` =
+   bütçe gerçek yığında yetmiyor (ölçüm olarak kaydet, gevşetme); pile dt farkı büyüdüyse
+   yeni CFL fazla gevşek → 4. madde ile doğrula.
+3. **Statik tutunma** `--static-only` → 20° eğimde tek tane: ratio 2/7 son 1 s kayma
+   ≤ 0.5 mm, `sticking_contacts_last_substep ≥ 1`, kütle 0.17453 kg (±%0.01);
+   ratio 0 kolu ≥ 1 cm kaymalı (ölçü aletinin ayırt ettiğinin kanıtı).
+   Bozuksa: ratio 2/7 de kayıyorsa geçmiş her karede sıfırlanıyor olabilir
+   (`history_reset_this_step` ilk kareden sonra false olmalı) veya yuvarlanma yayı çalışmıyor.
+   Kütle 0.2 kg çıkarsa doğum yolu eski voxel/PPC kütlesini yazıyor.
+4. **Gerçek yakınsama** `--convergence-only` → aynı 64-tane pile, contact_resolution 24 vs 48
+   (alt adım gerçekten yarıya iner); son COM/RMS göreli fark ≤ %5. Eski 60/120 Hz testi aynı
+   alt-adım dt'sini karşılaştırıyordu, bu yüzden "fark 0" ölçüm değildi.
+5. **Köşe + rampa + yoğunluk** `--corner-only`, sonra `--extended-only` → eski gate'ler aynı.
+6. **Uzun yerleşme** `--settle-only --settle-normal-damping 8` → 8 s enerji/kütle/COM gate'i.
+   Yeni teğetsel yay enerji POMPALIYORSA burada görünür (son 2 s enerji/tane > 1e-5 J).
+7. **Maliyet** `python scripts/test/rt_h1_dense_grain_scene_ipc.py` → 1024/4096/16384 medyan
+   ms eski 173.6/213.8/272.2 ile kıyas; `median_dispatch` ~204 olmalı (eski 3471),
+   `last_runtime.substep_limit` raporlanır. Bozuksa: dispatch düştü ama süre düşmediyse
+   maliyet dispatch ek yükü değil kernel'in kendisi (history taraması) — sonraki parti oraya.
+8. **Diğer Vulkan çözücüleri** (descriptor set yeniden kullanımı ortak backend'de):
+   `python scripts/test/rt_g2_dry_wet_compare_ipc.py --expect-empty-fluid-skipped` + gaz/sıvı
+   herhangi bir hızlı sahne. Beklenen: aynı sonuç, biraz daha az CPU kayıt süresi.
+
+★ En sinsi başarısızlık: **8. madde.** Descriptor set yeniden kullanımı yanlış bağlamaya yol
+açarsa hata vermez; bir kernel önceki dispatch'in tamponunu okur ve "biraz farklı"
+simülasyon üretir. Anahtar buffer id'lerinin tamamı, cache her `synchronize()`'da
+temizleniyor ve destroy/resize senkronize ediyor — ama gaz/sıvı sonuçlarının önceki
+build ile sayısal kıyası tek gerçek kanıt.
+★ İkinci sinsi: 3. maddede ratio 0 kolu da tutunursa test hiçbir şey ölçmüyordur.
+
+
+# Sıradaki kullanıcı build (yalnız SHADER): yürüyüş uçuşu index uzayında
+
+> **Canlı sonuç (2026-10-06, aynı kamera):** 16 spp 5.34 -> 4.99 s (-%6.5), 64 spp 22.9 -> 21.5 s; density 385M -> 353M, walk_events aynı (50.6M); görüntü ort. parlaklık 109.66 vs 109.05, |fark| 5/255 = 64 spp gürültüsü. Sonuç: süre olay sayısıyla ölçekleniyor (~57 ns/olay), sayılan hiçbir kalemle değil (gölge örneği -%56, prob -%64 süreyi değiştirmedi). Kalan: warp sapması / dev closest-hit yazmaç baskısı — büyük yeniden yapılanma ister. Kod tarafı kapatıldı; kalan düğmeler: max_events 8-16, step 1-1.5, daha az spp + denoiser.
+
+> Önceki partinin canlı sonucu: ertelenmiş prob izlemeyi 49.0M -> 17.7M (olay başına
+> 0.99 -> 0.35) düşürdü ama 16 spp süre 5.24 -> 5.34 s: izleme darboğaz DEĞİL ("70 ns/izleme"
+> çıkarımı yanlıştı — iki bilinmeyenli farkı başka ölçümün birim maliyetiyle bölmüştüm).
+> Temas bölgesinde sızıntı görülmedi. Kalan aday: uçuş adımı başına SAYILMAYAN iş — her
+> adımda boş-döşeme sorgusu, yaprak majorantı ve trilineer örnek dünya->yerel->index
+> dönüşümünü üç kez yeniden yapıyordu (step çarpanı 0.5->1 süreyi %26 düşürmüştü).
+
+Değişiklik: NanoVDB fog için uçuş ve gölge kirişi index uzayında: idx = o + d*t uçuş
+başına bir kez; adım başına bir ağaç sorgusu + bir trilineer okuma. Yoğun gaz ve materyal
+gürültülü hacimler eski dünya-uzayı döngüsünde. rwLeafMajorant söküldü (tek tüketici gitti).
+
+1. **Görüntü birebir.** Aynı kare/kamera/IŞIK ile önceki build görüntüsüyle ortalama fark
+   gürültü düzeyinde (< ~2/255). Sistematik kayma = index yoğunluğu sampleDensityAcc ile
+   uyuşmuyor (remap/cutoff/pivot) — en sinsi sonuç: "biraz daha açık/koyu kar".
+2. **Maliyet.** Aynı koşulda 16 spp, max_events 51: süre 5.3 s'den düşmeli; density_samples
+   ve walk_events ~aynı kalmalı (aynı iş, daha ucuz adım). Örnek sayısı değişirse yol farklı.
+3. **Petek yok.** Spread büyük/küçük iki değerde yaprak kenarı deseni görünmemeli.
+
+
+# H1 twisting revision3 - 8 s canlı PASS
+
+- Kullanıcı C++/shader build sonrası twist .1 /Cn8 Ns/m8 s PASS; mass drift0,
+  son2 s COM/RMS aralığı0, enerji/tane6.09e-11 J. Gate korunur.
+- Cn4 koşulu6 s doğrusal KE nedeniyle RED; spin direnci her iki koşulda çalıştı.
+- Default twist0/Cn4 değişmedi; bu paket yeni build beklemez.
+- Kalıcı static contact history ve repose/cache/wet/residency kabulü açık.
+
+
+# Sıradaki kullanıcı build (yalnız SHADER): yürüyüşte ertelenmiş katı probu
+
+> Sayaç ölçümü (kar sahnesi, kare 203, 16 spp, max_events 51 vs 8): 5.24 s vs 3.06 s.
+> İzleme ~70 ns, voksel örneği ~1.3 ns (shadow_steps 8/16 kıyasından). 51 olayda: katı probu
+> 49M izleme = olay başına 0.99 = ~3.4 s (~%65); gölge ışını 9.1M (%82 atlanıyor) ~0.6 s;
+> örnekler 506M ~0.7 s. Yürüyüş ortalama 10.1 olay, %4.5 bütçeye takılıyor.
+
+Değişiklik: prob artık yalnız yürüyüş son probdan probeEps = max(2 voxel, 5 mm) uzaklaşınca,
+son prob noktasından bugünkü noktaya TEK doğru parçası; çıkış uçuşu her zaman problu.
+
+1. **Maliyet.** Aynı kare/kamera/ayarlar, 16 spp: walk_probe_traces/walk_events 0.99'dan
+   belirgin düşmeli (~0.1-0.3); süre 5.2 s'den ~2.5-3 s'ye. Düşmezse olaylar arası yer
+   değiştirme zaten probeEps'i aşıyor (seyrek ortam) — probeEps'i ölç.
+2. **★ Sinsi sonuç: zemin/küre temasında ışık sızıntısı.** Yol bir yüzeye probeEps kadar
+   girip dönebilir. Kar-zemin ve kar-küre temasında yeni ışıklı/koyu bant, ya da yüzeyin
+   ARKASINDA kar ışığı görünürse sızıyor. Önceki görüntüyle temas bölgesini kıyasla.
+3. **Görüntü eşdeğerliği.** Genel parlaklık önceki build ile ~aynı (fark < birkaç/255).
+
+
+# Sıradaki kullanıcı build (C++ + SHADER): yürüyüş maliyet sayaçları
+
+> Önceki partinin canlı sonucu: shadow_steps 8 ile gölge örnekleri 347M -> 154M (-%56) ama
+> 16 spp süre 6.1 -> 5.9 s; 64 spp 22.0 -> 19.8 s (-%10); görüntü farkı 2/255. Örnek SAYISI
+> süreyi taşımıyor -> olay başına sabit maliyet (izleme?) adayı. Bunu ayırmak için sayaç.
+
+Yeni render.volume_stats alanları: walk_paths, walk_events, walk_probe_traces,
+walk_shadow_traces, walk_shadow_skipped, walk_event_capped. VolumePerformanceStats
+160 -> 184 bayt (46 sözcük); tek tanım volume_instrumentation.glsl, 3 shader include eder.
+
+1. **ABI.** Panel Volume Performance ve render.volume_stats eski alanları AYNI değerlerle
+   göstermeli (önceki ölçümle karşılaştır). Kaymış/saçma değerler = glsl ile C++ struct
+   uyuşmuyor.
+2. **Tutarlılık.** walk_probe_traces ≈ walk_events (olay başına bir prob);
+   walk_shadow_traces + walk_shadow_skipped ≈ walk_events (ışık varken). Değilse sayaç
+   yanlış yerde.
+3. **Karar ölçümü.** Kar sahnesi kare 203, 16 spp: max_events 8 / 51 iki koşu. Süre farkını
+   (walk_probe_traces + walk_shadow_traces) farkına ve density+shadow örnek farkına böl:
+   hangisinin birimi süreyi açıklıyorsa hedef odur.
+
+
+# Sıradaki kullanıcı build (yalnız SHADER): yürüyüş gölge kirişi = shadow_steps
+
+Taban ölçüm (kar sahnesi, kare 203, kullanıcı kamerası, 16 spp; step 1.575, res 4x, 612k parçacık):
+yürüyüş 6.1 s — hacme giriş 8.49M, yoğunluk 508M, GÖLGE 347M örnek; yoğunluk≈0 ile 1.1 s
+(salt kutuya giriş+geçiş yükü ≤ %18); march 0.5 s. Gölge kirişi sabit 16 örnekti ve
+shadow_steps (kullanıcıda 8) yok sayılıyordu. Şimdi: örnek = clamp(shadow_steps, 2, 64),
+erken bırakma tau > 6 (önce 12).
+
+1. **Maliyet.** Aynı kare/kamera/ayarlar, 16 spp: shadow_density_samples 347M'den belirgin
+   düşmeli (≈ yarı veya daha az), süre 6.1 s altına. Düşmüyorsa kirişler zaten erken
+   bitiyordu ve maliyet olay başına izleme (iki trace) tarafında.
+2. **★ Sinsi sonuç: kar ışık sızdırıyor.** Az örnekli kiriş ince ama yoğun bir katmanı
+   atlayabilir: gölge tarafı/oyuklar AÇILIR, "biraz daha yumuşak ışık" gibi görünür.
+   shadow_steps 8 vs 16 kıyasla; oyuklarda fark varsa 8 bu sahne için az.
+3. **Açık (ayrı konu):** fluid.set_param visible=false fog hacmini GİZLEMEDİ (sayaçlar
+   march ile birebir). Domain görünmezken fog'un çizilmesi muhtemel hata.
+
+# H1 BVH/manifold/fusion - 2026-10-06 canlı PASS
+
+- Kullanıcı C++/shader build sonrası köşe/ramp/256/1024 ve tam temel grain regresyon PASS.
+- Köşe .019195 m > .0175 gate; dry drift0; shader revision2 doğrulandı.
+- Dispatch3273→2457; 256/1024 son ölçüm39.27/41.33 ms. Genel hız oranı değil.
+- Bu paket rebuild beklemiyor; frame0 paused, test kaynakları kapalı.
+- Kalıcı static friction, uzun settle/repose, cache ve production residency kabulü açık.
+
+
+# Sonraki derleme kontrolleri — RT pipeline asenkron derleme + disk cache (2026-10-05)
+
+> **Canlı (2026-10-05):** ilk Rendered geçişinde ERİŞİM İHLALİ — nvoglv64.dll, renderInteractiveViewportImpl sonundaki endSingleTimeCommands (raster stand-in, derleme sürerken). Geçici karar: kRasterWhileRTPipelineCompiles = false (VulkanBackend.cpp); derleme sürerken son kare yeniden gösterilir, HUD mesajı ve arka plan derleme aynen kalır. Açık: raster stand-in, Rendered-mod geometri/TLAS yeniden kurulumuyla aynı karede validation layer ile doğrulanmalı.
+
+
+> **Durum:** CANLI — bu bölüm en üstte; aşağıdaki eski bölümler duruyor.
+
+Shader değişmedi, yalnızca C++ derlemesi. Yeni dosya: `source/src/Backend/VulkanRTPipelineBuild.cpp`
+(vcxproj + filters'a eklendi). Eski senkron `VulkanDevice::createRTPipeline` silindi.
+Sürmek için: `Start-RayTrophi.ps1`, `Import-Module .\scripts\ipc\RtIpc.psm1 -Force`,
+`Invoke-RtIpc render.rt_pipeline_status`.
+
+★ Önce bilmen gereken: disk cache **shader değiştikten sonraki ilk derlemeyi hızlandırmaz** —
+yeni SPIR-V cache'te yoktur. O ilk derlemeyi taşınabilir yapan (1) worker thread, (2) deferred
+operation. Cache'in işi ikinci açılış.
+
+1. **Derleme + açılış (en hızlı).** Log'da `RT pipeline cache loaded (... KB)` (ilk açılışta yok,
+   normal) ya da `RT pipeline disk cache disabled` YOK olmalı. Bozuksa: `loadRTPipelineCache`
+   `initialize()`'da `loadRayTracingFunctions()`'tan sonra çağrılmıyor ya da LOCALAPPDATA çözülmedi.
+2. **UI donmuyor (asıl şikâyet).** `compile_shaders.bat` çalıştır (shader'ları değiştir ya da
+   sadece yeniden üret — sürücü cache'ini geçersiz kılmak için en az bir .spv içeriği değişmeli),
+   uygulamayı aç, Solid'den Rendered'a geç. Görmen gereken: viewport **Solid çizmeye devam eder**,
+   kamera dönebilir, paneller tepki verir; HUD'da turuncu satır
+   `Compiling ray tracing shaders (first use after a shader update)... 0:42 · showing raster meanwhile`
+   ve saniye sayacı akar. Bitince satır kaybolur, örnek sayacı 1/N'den başlar.
+   Bozuksa: (a) hâlâ donuyorsa `requestRTPipelineBuild` yerine bir şey derlemeyi render
+   thread'inde bekliyor — `pollRTPipelineBuild(block)` `tex == nullptr` ile mi çağrılıyor bak
+   (Main viewport'u `raytrace_texture` geçiyor, null olmamalı); (b) viewport siyah/donuk kare
+   ama UI canlı → `drawRasterWhileRTPipelineUnavailable` false döndü (graphics queue yok ya da
+   raster yolu tekrar renderProgressive'e düştü; log'da "Interactive viewport mode selected").
+3. **IPC durum okuması (2 ile aynı anda).** Derleme sürerken
+   `Invoke-RtIpc render.rt_pipeline_status` → `rt_pipeline_state: "compiling"`, `compile_seconds`
+   artıyor; bitince `"ready"`, `build_count: 1`, `deferred_threads` ≥ 2 (NVIDIA'da beklenen:
+   çekirdek−1'e kadar), `cache_hit: false` ya da `null`.
+   ★ Sinsi: `deferred_threads: 1` ve süre eskisiyle aynı → sürücü işi ertelemedi
+   (`VK_OPERATION_NOT_DEFERRED_KHR`) ya da `maxConcurrency` 1 döndü; asenkron yine çalışır ama
+   paralel derleme kazancı YOK. Bunu hata diye kimse raporlamaz, sayıya bak.
+4. **Paralel kazanç ölçümü (A/B).** Aynı değişmiş shader setiyle iki kez ölç, her seferinde
+   `.spv`'yi yeniden üretip (sürücü cache'i ısınmasın diye bir byte değiştir) ve
+   `RT_VK_PIPELINE_CACHE=0` ile:
+   `RT_VK_RT_COMPILE_THREADS=0` (senkron, deferred yok) vs ayarsız (otomatik). `compile_seconds`
+   oranını yaz. Beklenti: anlamlı düşüş; volume_closesthit tek başına en uzun aşamaysa kazanç
+   aşama sayısıyla sınırlı kalır (sürücü genelde aşama başına paralelleştirir).
+   Bozuksa (fark yok): 3'teki `deferred_threads`'e bak — 1 ise sürücü paralel vermiyor demektir.
+5. **İkinci açılış (cache).** Uygulamayı kapat/aç, Rendered'a geç. Görmen gereken: HUD satırı
+   ya hiç görünmez ya bir saniye; `render.rt_pipeline_status` → `cache_loaded: true`,
+   `cache_hit: true` (ya da sürücü feedback vermiyorsa `null`), `compile_seconds` < ~2.
+   Dosya: `%LOCALAPPDATA%\RayTrophiStudio\vk_pipeline_cache\rt_pipeline_<vendor>_<device>.bin`.
+   Bozuksa: `cache_loaded: false` + `cache_reject_reason` doluysa başlık uyuşmadı (sürücü
+   güncellemesi sonrası beklenen: "written by another driver version", dosya silinip yeniden
+   yazılır). ★ Sinsi: `cache_hit: false` ama süre yine kısa → hızlandıran NVIDIA'nın kendi
+   disk cache'i, bizimki değil; ayırt etmek için `RT_VK_PIPELINE_CACHE=0` ile karşılaştır.
+6. **Bozuk cache dayanıklılığı.** Uygulama kapalıyken `.bin`'in ilk 16 byte'ını sıfırla, aç.
+   Log'da `RT pipeline cache discarded (corrupt header size 0)` / benzeri, çökme yok, derleme
+   normal sürede biter ve dosya yeniden yazılır. Bozuksa: `validateCacheBlob` atlanıyor.
+7. **Hair / sphere / volume sonrası adımlar.** Saç + köpük (prosedürel küre) + hacim içeren bir
+   sahnede derleme bitince: saç doğru hit shader'la görünmeli (log: `Hair SBT offset corrected`
+   gerekiyorsa), küreler görünmeli. Bozuksa: `onRTPipelineInstalled()` (eski createRTPipeline
+   sonrası adımlar) kurulumdan sonra çalışmadı. ★ Sinsi: saç "makul" ama hacim shader'ıyla
+   gölgelenmiş görünür = hair TLAS offset'i eski kaldı.
+8. **Derleme sırasında mod değiştirme.** Derleme sürerken Rendered → Solid → Rendered. Çökme yok;
+   Solid'de HUD'da ek satır olarak sayaç görünür; derleme Solid'deyken biterse satır
+   `Ray tracing shaders compiled (m:ss), switching to Rendered...` olur ve Rendered'a geçince
+   hemen kurulur (`awaiting_install: true` → `ready`).
+9. **render.start derleme sırasında.** Derleme sürerken `render.start` → iş `rendering`'de 0
+   örnekle bekler, derleme bitince örnekler akar ve PNG yazılır. Bozuksa: iş raster görüntüyü
+   kaydettiyse `isAccumulationComplete` derleme sırasında true döndü (`m_rtPipelineInstallPending`
+   kontrolü). ★ Sinsi: çıktı PNG Solid görüntüsü — hata vermez, düzgün görünür.
+10. **Animasyon/sekans render (tex == nullptr).** Shader değiştikten sonra ilk iş bir sekans
+    render olsun: ilk kare derleme bitene kadar bekler (bloklu yol), kare boş/raster OLMAMALI.
+11. **Kapanış derleme sırasında.** Derleme sürerken uygulamayı kapat: log'da
+    `Shutdown is waiting for the RT pipeline compile to finish.`, sonra temiz çıkış
+    (std::terminate / çökme yok). Derleme iptal edilemez; kapanış o kadar sürer.
+12. **Hata yolu.** Bir RT shader'ını bilerek boz (ör. `raygen.spv`'yi kes): HUD kırmızı
+    `Ray tracing pipeline failed: ...`, viewport Solid çizmeye devam eder,
+    `render.rt_pipeline_status` → `failed` + `error`. Aynı shader'larla tekrar denemez
+    (dakikalar sürerdi); shader'ı düzeltip yeniden üretince yeni derleme başlar.
+
+Davranış değişiklikleri (bilerek):
+- Aynı shader'larla tekrar girişte (`rebuildAccelerationStructure` init bayrağını sıfırlar)
+  pipeline artık **yeniden derlenmiyor**; eskiden her seferinde derleniyor ve eski pipeline,
+  layout'lar ve SBT sızıyordu. Descriptor set/pipeline layout cihaz başına bir kez kuruluyor.
+- "Any-hit olmadan tekrar dene" yolu aslında yalnızca **saç gölge any-hit'ini** düşürüyordu
+  (üçgen any-hit'i geri ekliyordu); artık adı buna göre ve yalnızca o aşama varsa deneniyor.
+- Yeni IPC/Python: `render.rt_pipeline_status` / `rt.render.rt_pipeline_status()` (yetki: Read).
+
+---
+
+# Sıradaki kullanıcı build (yalnız SHADER): yürüyüş adımı = shader Step çarpanı
+
+Ölçüm matrisi (kare 203, 16 spp, kullanıcı sahnesi): şu an 15.3 s (111 yoğunluk +
+60 gölge örneği/ışın); olay 8: 8.6 s; fog 1x: 7.6 s; march 0.5 s (ama march
+max_steps 16 + shadow_steps 0 = çok kaba, adil kıyas değil). Petek düzeltmesi
+canlı doğrulandı (boşluklar gitti). Yürüyüşün uçuş/gölge adımı artık
+max(step_size, 0.25 voxel) — step_size = voxel_step_multiplier x fog voxel.
+
+1. **Varsayılan aynı.** voxel_step_multiplier 0.5'te görüntü ve süre önceki
+   build ile aynı olmalı.
+2. **Hız düğmesi.** 0.5 -> 1 -> 2: süre kabaca yarı/çeyrek; kar opaklığı
+   korunmalı, yalnız en ince tane detayı yumuşar. Kar İNCELİYOR/delikleniyorsa
+   adım ince yapıları atlıyor — çarpanı düşür.
+
+# H1 tane referansı — kullanıcı build/canlı 21/21 PASS
+
+- 27-tane .4 s dt-half max konum farkı .285 mm; kütle/momentum/spin/sekme/eğim/yerel S PASS.
+- Sekme fixture k 10→20 kN/m kontrollü dt/k ölçümü; gate aynı, solver değişmedi.
+- Granül için yeni build yok. Fog paketinin aşağıdaki build notları ayrı korunur.
+- Dış IPC: `python scripts/test/rt_h1_grain_reference_ipc.py --preview`.
+- Preview yeni ayrı materyalli 27 grain+zemin/camera, static snapshot; timeline DEM değil.
+- Kanıt/sınırlar: [MATTER_H1_GRAIN_CONTACT.md](MATTER_H1_GRAIN_CONTACT.md).
+
+# Sıradaki kullanıcı build (C++ + SHADER): yaprak-majorant uçuş + mesafe tabanlı yüzey erozyonu
+
+> **Canlı sonuç + düzeltme (shader-only):** ilk sürüm HATALI — kullanıcı: maliyet düşmedi, spread artınca bloklar boş. Ölçüm (kare 203, 16 spp): 145 yoğunluk/ışın (önce 116), 12.7 s; spread 2 renderı PETEK deseni: kar yalnız yaprakların son voxel diliminde. Kök: 4x fog + spread 0.18 parçacıkları sivri tepeye çeviriyor, yaprak max'ı çok yüksek (sigmaBar ~1e4/m), delta döngüsü 512 örnek sınırında yaprağın KALANINI ATLIYORDU. Düzeltme: (1) delta yalnız sigmaBar*adım < 1 (seyrek) yapraklarda, (2) bütçe biterse kalan düzenli adımla, asla atlama. Aynı kontrol: kare 203, 16 spp — petek YOK, yoğunluk/ışın 145 altına. Ek ölçüm: max events 51 -> 8: 12.7 s -> 8.1 s.
+
+Kullanıcı sahnesi (Physics Domain 1, 5 m, sim voxel 7.35 cm, fog 4x = 1.84 cm,
+max_density 10.3, random walk) TABAN ÖLÇÜM, 16 spp: 9.2 s; hacim ışını başına
+116 yoğunluk + 41 gölge örneği. Maliyet olay sayısı değil: uçuşlar aktif ama
+seyrek yapraklarda yarım voxel adımla yürüyordu.
+
+1. **Maliyet (asıl hedef).** Aynı sahne, aynı kare, 16 spp + volume_counters:
+   density_samples/volume_rays 116'dan belirgin düşmeli, süre 9.2 s altına.
+   Düşmüyorsa: grid istatistiksiz kuruluyor (leaf max 0 => sigmaBar 0 =>
+   yaprak BOŞ sayılıp ATLANIR — bu durumda kar KAYBOLUR, aşağıya bak) ya da
+   örnekler son voxel diliminde (regular adım) harcanıyor.
+2. **★ Sinsi sonuç: kar delikli/saydam.** Yaprak maksimumu gerçek değerin
+   altındaysa (istatistik kapalı/yanlış) delta tracking çarpışmaları kaçırır:
+   kar sessizce incelir, hata vermez. Karşılaştır: random_walk açık, aynı
+   kare, önceki build görüntüsüyle opaklık aynı olmalı.
+3. **Erozyon bandı artık mesafe tabanlı.** depth 1.0 ile ince kar katmanı
+   SİLİNMEMELİ (önceki blur tabanlı sürüm gövde bant yarıçapından inceyse her
+   şeyi siliyordu). depth = 2-4 sim voxel, strength 0.8: yüzey topaklanır,
+   en fazla strength*depth derine keser; daha derin hücrelere dokunulmaz.
+4. **Erozyon CPU maliyeti.** 4x gridde chamfer dönüşümü (2 geçiş, 26 komşu)
+   tek iş parçacığı: kare başına ~0.5-1 s olabilir. Oynatımda takılma = bu.
+
+# Sıradaki kullanıcı build (C++ + SHADER): random walk similarity geçişi
+
+> Kullanıcı: max events 8 ile 128 arasında görsel fark yok -> varsayılan 128 -> 32 (kayıtlı sahneler kendi değerini korur). Sonuç: ince katmanda maliyet olay SAYISINDAN değil olay başına işten (gölge marşı + gölge ışını + katı probu + 4x gridde 3 mm adım); madde 3 similarity kazancını küçük gösterebilir — sayaçlarla ayrıştır.
+
+Yürüyüş ilk random_walk_exact_events (varsayılan 4, 1..512) olayı gerçek faz ve
+sigma ile yürür, sonra similarity ortamına geçer: sigma_s*(1-g), izotropik faz;
+g = çift lobun ortalama kosinüsü, yalnız g > 0.05. Kameranın ilk uçuşu hep
+tam. Işığa geçirgenlik artık yürüyüşün kendi rwTransmittance'ı (o anki ortamın
+sigma'sıyla); lightMarchAcc yürüyüşte kullanılmıyor. GPU: _retired_cloud'dan bir
+float daha (random_walk_exact_events), boyut aynı, 4 ayna.
+
+1. **Geri okuma.** fluid.get_fog_shader / gas.get_shader random_walk_exact_events
+   (4); 0 -> 1, 999 -> 512 kırpılır.
+2. **Görünüm eşdeğerliği.** Kullanıcının sahnesi (g 0.99, saçılma 3.51):
+   exact_events 512 (tam) vs 4: genel parlaklık ve gölge dağılımı yakın olmalı;
+   yüzeye yakın ileri-saçılma parıltısı biraz farklı olabilir. Belirgin KARARMA
+   ya da AÇILMA varsa indirgenmiş albedo/sigma yanlış.
+3. **Maliyet.** Aynı sahne 64 spp: 65.7 s (önceki ölçüm, exact) -> belirgin
+   düşüş bekleniyor (g 0.99'da olay sayısı ~1/(1-g)). Düşmüyorsa yürüyüşler zaten
+   olay sınırına değil gölge/izleme maliyetine takılıyor demektir.
+4. **★ Sinsi sonuç: g 0.99'da indirgenmiş ortam neredeyse saydam.** sigma_s'
+   = 3.51*0.01*100 = 3.5/m -> 28 cm serbest yol, 12 cm kar katmanını ışık
+   neredeyse düz geçer ve zemini aydınlatır. Bu similarity'nin hatası değil,
+   g 0.99'un fiziği (tam yürüyüş de aynı yöne gider). Gerçek kar g ~0.8-0.9.
+
+# Sıradaki kullanıcı build (yalnız C++): fog çözünürlük çarpanı + yüzey bandı erozyonu
+
+> **Canlı sonuç (2026-10-05):** 2 PASS (res 5 / depth 2 reddedildi, geri okuma doğru). 3 PASS: 1x→4x gövde parlaklığı korunuyor, kenar keskinleşti (seed karesi okunuyor). 5 PASS: depth 0.05 üst yüzeyi topaklandırdı, gövde delinmedi (etki ince). 6: 64 spp A 1x 28.7 s (ilk render ek yükü dahil), B 4x 47.9 s, C 4x+bant 49.5 s.
+
+Shader değişmedi. Yeni alanlar: `fluid.set_fog resolution_multiplier` (1..4) ve
+`erosion_depth` (0..1 dünya birimi); panelde Fog View → "Fog Resolution",
+"Surface Band". `splatFogDensityForSelection(int ppc)` →
+`splatFogDensityWeighted(float parcel_density)` olarak yeniden adlandırıldı
+(int sayıyı ağırlık diye geçirmek sessizce yanlış olurdu).
+
+Ölçüm notu (bu partiden önce): random walk kalıcı maliyeti march'ın ~3x'i
+(16 spp: march 1.1 s, walk g0.3 2.1 s, g0.99 3.3 s). Ayar değişikliğinden
+sonraki İLK final render ~15 s fazladan sürüyor (aynı ayarla art arda 31 s →
+15 s) — yürüyüş değil; RT viewport da final render ile GPU paylaşıyor.
+
+1. **Varsayılanlar birebir eski görüntü.** resolution 1, depth 0: SnowTest
+   aynı kalmalı (res 1 + tüm parseller fog iken hâlâ solver grid.density
+   kullanılır). Fark varsa yeni dal res 1'de de devreye giriyor.
+2. **Geri okuma / red.** `fluid.get fog_resolution_multiplier`,
+   `fog_erosion_depth`; resolution 5 ve depth 2 reddedilmeli.
+3. **Yoğunluk birimi korunuyor.** res 1 → 2 → 4: aynı spread ile karın genel
+   parlaklığı/opaklığı AYNI kalmalı, yalnız kenarlar keskinleşmeli. Res
+   arttıkça kar inceliyor/koyulaşıyorsa ağırlık (res³/ppc) yanlış.
+4. **★ Spread solver voxel'inde.** res 4'te spread 5.6 = 22 ince voxel sigma:
+   CPU blur ~135 tap × 3 geçiş × 6M hücre → oynatımda saniyeler. Yüksek
+   çözünürlükte spread'i 0.5–1'e indir; bu bir hata değil ama "uygulama
+   dondu" gibi görünür.
+5. **Yüzey bandı.** depth 0.03–0.06, strength 0.8, topak 0.04–0.08: düz kar
+   levhasının ÜST yüzeyi topaklanmalı, içi delinmemeli. Seyrek serpinti bu
+   modda büyük ölçüde silinir — beklenen.
+6. **Maliyet.** res 2/4'te march ve yürüyüş ince voxel'de adım atar: render
+   süresi kabaca res ile doğrusal artar; bellek res³.
+
+# Sıradaki kullanıcı build (C++ + SHADER): path-traced çoklu saçılma (random walk)
+
+> **Düzeltme canlı (2026-10-05):** ince geniş katman + küp, 64 spp: march 8 s, walk 15 s (~1.9x; düzeltme öncesi ~3x). Madde 6 PASS: küpün gölgesi karda mavimsi (yalnız gökyüzü). Küpün saydam görünmesi malzemeydi (kullanıcı doğruladı), yürüyüş değil.
+> **Düzeltme partisi (shader-only, aynı gün):** kullanıcı: gölge var, güneşli taraf fazla saçıyor, çok pahalı. Kök: Nishita modunda yürüyüş güneşi İKİ kez sayıyordu (Directional sahne ışığı + worldData güneş NEE; yüzey shader ikincisini bilerek kapatmış). Nishita NEE söküldü; geometri gölge ışını yalnız hacim geçirgenliği >1e-3 iken; katı probu yalnız uçulan mesafede. Bekleneni: güneşli taraf belirgin sönük (yaklaşık yarı doğrudan ışık), süre 20 s civarından aşağı. Gölge tarafındaki parlamalar büyük olasılıkla güneş DİSKİNE kaçan ışınların firefly'ı (miss 80000x) — gerçek glint değil.
+
+> **Canlı sonuç (2026-10-05):** 2 PASS (random_walk true/128 geri okundu). 3 PASS: kar orta bölge RGB 196/199/204 (march) -> 243/245/248 (walk), zemin 226/238/247 her ikisinde AYNI (kapalı yol değişmedi). 64 spp 7 s -> 20 s (~3x). 5/6/7 henüz bakılmadı; kar düz/az formlu, yere gölgesi bu açıda okunmuyor.
+
+Shader değişti: `volume_closesthit.rchit` (yeni dal), `closesthit.rchit` ve
+`volume_intersection.rint` (yalnız struct alan adı). VkVolumeInstance BOYUTU
+DEĞİŞMEDİ: emekli `_retired_cloud[8]`'in ilk iki float'ı
+`random_walk_enabled / random_walk_max_events` oldu. `params.h` GpuVDBVolume'a
+iki int eklendi → CUDA da yeniden derlenir; OptiX bu alanları OKUMAZ.
+Açma: `fluid.set_fog_shader {random_walk:true}` / `gas.set_shader` /
+panel Edit Fog Medium → Advanced Scattering → "Path-Traced Multiple Scattering".
+
+1. **Kapalıyken birebir eski görüntü.** Varsayılan kapalı; mevcut fog/gaz
+   sahnesi piksel piksel aynı olmalı. Fark varsa: bir struct aynası kaydı
+   (ilk instance doğru, sonrakiler bozuk) — dört bildirimi karşılaştır.
+2. **Geri okuma.** `fluid.get_fog_shader` → `random_walk true`,
+   `random_walk_max_events` 8..512'ye kırpılmış. `gas.get_shader` aynı.
+3. **Kar testi (SnowTest sahnesi, güneş açık).** random_walk açıkken kar,
+   aydınlık zeminle aynı parlaklık ailesinde BEYAZ olmalı; gölge tarafı
+   gökyüzünden mavimsi. Hâlâ griyse: (a) `shadow_steps` 0 mı (öz-gölge yok
+   ama bu PARLATIR, griliği açıklamaz), (b) yürüyüş dalı hiç çalışmıyor —
+   emission_mode ≠ 0, Volume Graph bağlı ya da layered SDF var mı bak.
+4. **Gürültü / hız.** Aynı spp'de belirgin daha gürültülü ve yavaş olması
+   BEKLENEN. Kare süresi 10x'ten fazla uzarsa olay sayısını 32'ye indirip
+   kıyasla; fark büyükse maliyet olay başına iki trace + iki lightMarch'tır.
+5. **★ Zemin teması.** Karın oturduğu zemin karın altında GÖRÜNMEMELİ ve kar
+   zemine gölge düşürmeli. Kar zeminin içinden "sızıyorsa" yürüyüşün katı
+   probu (0xF5) zemini görmüyor demektir.
+6. **Nesne gölgesi.** Kar üstüne bir küp koy: küpün gölgesi karda görünmeli
+   (yürüyüş NEE'si geometri gölgesi çeker; eski march çekmez).
+7. **★ Sinsi sonuç: olay bütçesi.** max_events 32 vs 256: kalın karda 32
+   belirgin KOYU ise yürüyüşler bütçeye takılıyor ve kalan enerji siliniyor —
+   hata gibi değil "biraz koyu kar" gibi görünür. Bütçeyi artır, albedoyu
+   değil.
+8. **Renkli absorpsiyon (bilinen yaklaşım).** absorption_color renkliyken
+   march'a göre biraz daha koyu/az renkli: uçuş en büyük kanal sönümünde
+   örnekleniyor. Gri ortamda (kar) birebir.
+
+RayFusion ve OptiX random walk'u uygulamaz (march/heuristik kalır).
+
+# Sıradaki kullanıcı C++ build: fog erozyonu (kar/pamuk görünümü) + fog medium IPC
+
+> **Canlı sonuç (2026-10-05, build sonrası):** 2 PASS (geri okuma, 3 red), 4 PASS (kenar topaklandı, gövde delinmedi; wet_sand 100k, voxel 2.5 cm, max_density 1.16), 8 geri okuma PASS. ★ AÇIK: güneş altında hacim, aydınlık zeminden GRİ — tek saçılma + multi_scatter heuristiği yüksek albedoyu taşımıyor. Erozyon değil integratör meselesi.
+
+Shader/ABI/.spv değişmedi; yalnız C++. Yeni `.cpp` yok. Erozyon GPU'da değil,
+yüklemeden önce grid'de (`Fluid::erodeFogDensity`, FluidDomainFogVolume.cpp) —
+Vulkan RT, RayFusion ve CPU aynı NanoVDB'yi okur; OptiX'e dokunulmadı.
+Sahne: fog view'u olan bir sıvı/granüler domain (`fluid.set_label_views` body→fog
+ya da render_mode fog), timeline duraklatılmış.
+
+1. **Derleme + descriptor.** `fluid.set_fog` parametrelerinde `erosion_strength/
+   size/detail/seed`, `fluid.set_fog_shader`'da `anisotropy_back/lobe_mix/
+   multi_scatter` görünmeli (`agent.discover`). Yoksa: eski exe ya da üretici
+   çalışmadan derlendi.
+2. **Geri okuma (bağımsız, hızlı).** `fluid.set_fog {erosion_strength:0.8,
+   erosion_size:0.15}` sonra `fluid.get` → `fog_erosion_strength 0.8`,
+   `fog_erosion_size 0.15`. `erosion_strength 1.5` ve `erosion_detail 0` RED
+   dönmeli (sıkıştırılmamalı). Kabul edip değeri kırpıyorsa: doğrulama atlanmış.
+3. **Strength 0 = birebir eski görüntü.** Varsayılan 0; mevcut fog sahneleri
+   piksel piksel aynı kalmalı. Fark varsa erozyon kapalıyken de buffer
+   kopyalanıp değiştiriliyor demektir.
+4. **Görsel: kenar topaklanır, gövde DELİNMEZ.** strength 0.7–1, size 0.1–0.3 m,
+   spread 2–3: seyrek kenar pamuk topaklarına bölünmeli, dolu gövde (hücre ≈1)
+   bütün kalmalı. ★ Sinsi sonuç: gövde de beneklenmişse hata gibi görünmez,
+   "biraz fazla gürültü" gibi görünür. Anlamı: gövde yoğunluğu 1'in altında
+   (granülerde sıkışma ya da düşük ppc) — remap 1.0'ı "dolu" sayıyor. O zaman
+   bir "full level" parametresi gerekiyor, gürültü ayarı değil.
+5. **Ölçek dünya biriminde.** Domain boyutunu/voxel'i değiştir, size sabit:
+   topak boyutu metrede aynı kalmalı. Domain'le büyüyorsa noise AABB'ye
+   normalize ediliyor demektir (eski material density noise yolu karışmış).
+6. **Kare kare titreme yok.** Duraklatılmış karede tekrar sync (spread'i oynat,
+   geri al) → aynı desen. Değişiyorsa hash deterministik değil.
+7. **Hareketli malzeme (bilinen sınır, hata değil).** Düşen karda topaklar
+   malzemeyle gitmez, dünyada sabit durur ("kaynama"). UVW ile taşımak ayrı iş.
+8. **multi_scatter / lobe IPC.** `fluid.set_fog_shader {multi_scatter:0.9,
+   scattering_color:[1,1,1], absorption_coefficient:0}` → Vulkan RT'de beyaz,
+   daha az kontrastlı gölge; `fluid.get_fog_shader` değeri geri vermeli; panelde
+   Edit Fog Medium → Advanced Scattering aynı değeri göstermeli.
+   ★ RayFusion'da bu üçü ETKİSİZ (shader okumuyor) — erozyon görünür, parlaklık
+   değişmez. Bu beklenen; RayFusion pariteleri ayrı iş.
+9. **Kaydet/aç.** Erozyon değerleri .rtp'de `fluid_fog_erosion_*` olarak kalıcı.
+
+Not: overlay JSON'da bir `Â§` bozulması (ATMOSPHERE_WEATHER satırı) düzeltildi.
+Audit'te `fluid.matter_models` yetki aynası uyuşmazlığı bu partiden önce de vardı.
+
+# Son kullanıcı build — boş sıvı lane canlı kontrol tamamlandı
+
+- Yeni build gerekmiyor. Freefall 4/4 ve dry→water/wet→dry dönüşü PASS.
+- 8 s kuru matris kütle/CFL/pressure-off PASS; yerleşme 4/4 RED,
+  dt RMS %27.28 / COM %19.08: G2 açık.
+- Ortak Matter dispatch 1810→453; kontrollü C7 hız kıyası değildir.
+  Pore OFF legacy pure-granular sahne bu optimizasyon kapsamına girmez.
+- Tekrar için dış terminalde üç probe `--expect-empty-fluid-skipped` ile:
+  `rt_g2_free_fall_ipc.py`, `rt_g2_dry_wet_compare_ipc.py`, `rt_g2_dry_matrix_ipc.py`
+  (`scripts/test/` altında). Test runtime resetler, authoring geri yükler; save yapmaz.
+- Güncel sonuç: `matter_g2_dry_matrix_empty_lane_skipped_2026-10-05.json`.
+
+Aşağıdaki bölümler önceki build partilerinin tarihsel kontrol notlarıdır.
+
+# Sıradaki kullanıcı C++ build: granül sönümü eşit fiziksel zaman
+
+- timeScaledSubstepDamping: multiplier^(frame_dt/(1/60)/substeps).
+  Saf/Matter granular ortak; liquid eski outer-step semantiği. 1/60 referans korunur.
+- Shader/ABI/schema yok. GPU/wet/pore/stages ve float32 retention PASS;
+  C++ regression source güncel, test target derlenmedi.
+- Açık/duraklatılmış uygulama, dış terminal:
+  `python scripts/test/rt_g2_dry_matrix_ipc.py --log docs/dev/matter_g2_dry_matrix_time_scaled.json`
+- Baseline: matter_g2_dry_matrix_before_time_scaling_2026-10-05.json.
+  Son build dry kütle/CFL PASS, yerleşme4/4 RED, dt RMS farkı%26.67.
+- Test authoring enabled/visible durumunu geri yükler; runtime reset/frame0;
+  test domain/source disabled/hidden. Proje kaydedilmez.
+- Yeni time scaling henüz canlı ölçülmedi; sleep/force/contact/packing ayrı açık.
+
+# Sıradaki kullanıcı C++ build: ortak alt adım sönümü
+
+- Shader/ABI değişmedi. GranularStepPolicy ortak multiplier kökü; saf ve iki
+  Matter lane outer-step velocity/affine damping ürününü korur.
+- Statik GPU/wet/pore/stages + float32 ürün referansı PASS; C++ regression
+  matter_granular_damping_test.cpp kaynak hazır, test target çalıştırılmadı.
+- Uygulama açık/paused; dış terminal:
+  `python scripts/test/rt_g2_dry_wet_compare_ipc.py`
+  `python scripts/test/rt_g2_dry_matrix_ipc.py`
+- Son eski-binary kuru matris: kütle/CFL PASS; 4/4 yerleşme RED; dt RMS farkı
+  %24.32. Sabit baseline matter_g2_dry_matrix_before_damping_2026-10-05.json.
+- Testler authoring ayarlarını geri yükler; runtime reset/frame0,
+  test domain/source disabled/hidden. Proje kaydedilmez.
+- Yeni sönüm henüz canlı ölçülmedi; değişen fizik için eski bake tekrar alınır.
+
+# Kuru/ıslak solver tutarlılığı — kullanıcı build ve canlı tekrar PASS
+
+- Kullanıcı normal C++ derler; shader değişmedi.
+- Açık uygulama duraklatılmışken dış terminal:
+  `python scripts/test/rt_g2_dry_wet_compare_ipc.py`.
+- Üç sonlu koşu: kuru / su+wet kapalı / su+wet açık. Su öncesi COM/RMS
+  farkı <=1 mm, kaynak sonrası Sand/su kütle kapıları geçmeli.
+- Test authoring ayarlarını geri yükler; runtime resetlenir, frame0 kalır.
+  Test domain/sources disabled/hidden kalır; proje kaydedilmez.
+- Yeni binary: nötr kuru COM farkı .103 mm, RMS .0093 mm PASS; Sand72 kg
+  sabit, su max sapma .726 mg. Hareketli yığın için denge/repose açık.
+- Pore/wet/GPU statik kontrolleri PASS; G2/repose/DEM kabulü hâlâ açık.
+
 # Sonraki derleme kontrolleri — prosedürel küre (splat/whitewater) düzeltmeleri
+
+**Yeni G2 kaynak partisi:** mixed granular-only load/CFL ölçümü ve yayın açığı
+düzeltildi; normal C++ build, shader aynı. Açık sert sahne ve dış probe:
+[MATTER_G2_MECHANICS.md](MATTER_G2_MECHANICS.md). Mekanik kabul henüz açık.
+
+**Güncel Matter partisi — 2026-10-05:** Kullanıcı C6'yı derledi; boş sahne kuruldu.
+Wet/drainage/mixed GPU canlı probları PASS. Emisyon sonrası 180 manuel adımda
+su farkı +0.32 mg, kuru Sand sabit. C6 tam fiziksel kabul matrisi açık.
+Kısa kalan liste: [MATTER_C5_HANDOFF.md](MATTER_C5_HANDOFF.md).
+Shader değişmedi. Test komutları:
+Kabul ölçümleri ve düşük-S band düzeltmesi kullanıcı derlemesinde canlı PASS.
+RT geçici magenta A/B ayrı wet küre materyallerini doğruladı; renk geri yüklendi.
+Son kaynak partisi henüz derlenmedi: full-wet görünüm doluluğu .05 default,
+UI/Python/IPC/JSON/cache hash/spatial ölçümler birlikte. Normal C++ build;
+shader aynı. Pore Water'da Full wet look at pore saturation=0.05, wet appearance
+açık; reset/replay sonrası koyulaşma ve roughness aynı wet kürelerde kontrol edilir.
+[MATTER_ACCEPTANCE_AND_AUTHORING.md](MATTER_ACCEPTANCE_AND_AUTHORING.md).
+Aşağıdaki eski feature kontrolleri tarihsel ve ilgili regresyonlar için korunur.
 
 **Granular GPU occupancy (2026-10-02):** Yeni `sim_fluid_occupancy.comp` i?in ?nce
 shader derlemesi/deploy, sonra C++ derlemesi. Bo? ve duraklat?lm?? sahnede d??
@@ -3972,3 +4509,61 @@ ve yukarıdaki yeni shader/C++ derlemesi gerekli oldu. C4 ortak transfer ve
 contact sonrasında H1 hibrit yüzey taneleri uygulanır. Kimlik, tek fizik sahibi,
 çift impuls ve açısal momentum geçiş kapıları ana planın
 `C4–H1 veri ve momentum sözleşmesi (2026-10-04)` bölümünde tanımlıdır.
+
+## C4a büyük altyapı partisi — 2026-10-04
+
+Shader değişikliği yok. C++ yeni kimlik/model transfer modülleri ve UI/API/IPC
+kayıtları derlenecek. Kesin kabul checklist'i: [MATTER_TRANSFER_CORE.md](MATTER_TRANSFER_CORE.md).
+Disk sim-cache sürümü v10 oldu; eski bake dosyaları yeniden üretilmeli.
+C4b karma su-kum solver henüz uygulanmadı; `mixed_transport_ready=false`.
+Son kalite notları: gas+SDF Liquid Body parametre tutarlılığı, paused domain
+taşıma/splat/cache, eski Liquid Display panel sırası; [MATTER_PHASE_GRID.md](MATTER_PHASE_GRID.md).
+
+C4b ek kontrol: `scripts/test/matter_model_batch_test.cpp` ayrı CPU test hedefinde
+çalıştırılmalı; temas hatasında kanonik grid/parçacık rollback ve lane sidecar
+kimlik eşlemesi doğrulanır. Bu kaynak test Codex tarafından derlenmedi.
+
+C4b GPU partition kaynak kontrolü: `python scripts/test/check_matter_gpu_contracts.py`.
+Tam karma GPU entegrasyonu bekleniyor; şu aşamada yeni derleme istenmiyor.
+Son derlemede `sim_matter_partition.comp` shader'ı da SPIR-V'a derlenmeli;
+Codex shader veya uygulama derlemesi çalıştırmadı.
+
+CPU referans kabul kaynağı: `scripts/test/matter_mac_contact_test.cpp` fiziksel
+yüz-kütlesi momentumu/enerjisi, bozuk layout rollback ve bütçe reddini sınar.
+C++ testi henüz derlenmedi veya çalıştırılmadı.
+
+
+2026-10-04 güncel C4b test noktası: `MATTER_MIXED_GPU_TEST_POINT.md`.
+Karma GPU canlı bağlantısı, ortak alt adım, fiziksel P2G kütlesi ve GPU temas
+kaynakta eklendi; önceki “bağlı değil” kayıtları tarihsel ilerleme notlarıdır.
+Derleme/shader/sahne kabulü henüz kullanıcı tarafından yapılmadı. Sonraki adım
+tek derleme ile karma GPU kabulü; C4 tamamlandı etiketi henüz verilmedi.
+
+
+### 2026-10-05 — C5 büyük kaynak partisi, kabul bekliyor
+GPU emilim/drenaj, kanonik pore mass/capacity/porosity/thermal energy sidecar'ları,
+ıslak taşıyıcı transport kütlesi, korunum kapılı yayın ve ledger olayları yazıldı.
+UI, Python ve IPC ortak authoring servisine bağlı; serializer ve cache v11 hazır.
+Bu bir kaynak teslimidir: C++/shader derlenmedi, canlı C5 kabulü yapılmadı.
+C5 fiziksel kabulü açık; hücre-local ilk adımın dt/çözünürlük, havuz doluluğu ve
+cache round-trip ölçümleri gerekir. C6 wet friction/cohesion/pore-pressure ve
+ıslak görünüm henüz uygulanmadı; C7 kalite kabulü açık. İlk scope Closed Vulkan
+Water + Sand/Gravel/Soil. Eski cache v10 yeniden bake edilir.
+Kesin devir, dosyalar, sınırlamalar ve sonraki kabul adımları:
+[MATTER_C5_HANDOFF.md](MATTER_C5_HANDOFF.md).
+
+Kullanıcı shader derlemesinde sim_matter_pores.spv üretmeli; dış probe:
+`python scripts/test/rt_test_matter_pores_ipc.py "DOMAIN" --expect absorption`
+Sonra drenaj sahnesinde `--expect drainage`. Codex bu turda derleme/probe yapmadı.
+
+
+2026-10-05 canlı C5 testinde emilim/drenaj gözlendi fakat kabul açık: granül mass initialization liquid_density kullanıyor; tiny drainage births 50k havuzu doldurdu. C4 tam drag/buoyancy ve C5 birth batching öncelikli. Ayrıntı MATTER_C5_HANDOFF.md son bölümünde. Bu turda fizik kaynak değişmedi, yeniden derleme gerekmez.
+
+
+### 2026-10-05 C6 ilk kaynak partisi (kullanıcı toplu derlemesini bekliyor)
+Canonical pore saturation -> wet strength/local head ve 8-band granular splat
+appearance; shared UI/Python/IPC authoring, serializer/cache hash ve test kaynakları
+bağlı. C6 fiziksel kabul kapanmadı; local head pressure PDE değildir. Toplu shader
+ABI: stress_update 18/68, stress_p2g 9/52. Güncel kısa durum/test listesi:
+[MATTER_C5_HANDOFF.md](MATTER_C5_HANDOFF.md); model sınırları:
+[MATTER_WET_RESPONSE.md](MATTER_WET_RESPONSE.md).

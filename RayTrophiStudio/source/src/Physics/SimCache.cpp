@@ -18,6 +18,7 @@
 #include <cstring>
 #include <fstream>
 #include <filesystem>
+#include <unordered_set>
 
 namespace fs = std::filesystem;
 
@@ -341,6 +342,15 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
                              : static_cast<uint8_t>(
                                    Fluid::MatterConstitutiveModel::Auto));
         }
+        // Domain-local identities and allocator (v10). Old playback files are
+        // rejected by the version gate rather than fabricating birth identity.
+        writePod(os, d.particles.next_particle_id);
+        for (uint64_t i = 0; i < pcount; ++i) {
+            if (i >= d.particles.particle_id.size()) {
+                return false;
+            }
+            writePod(os, d.particles.particle_id[i]);
+        }
         // ── Physical parcel mass (v7) ────────────────────────────────────────
         // Both values are required: rest_mass_kg identifies the parcel's kg at
         // birth, while mass_fraction records how much survives phase exchange.
@@ -349,6 +359,17 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
                              ? d.particles.mass_fraction[i] : 1.0f);
             writePod(os, i < d.particles.rest_mass_kg.size()
                              ? d.particles.rest_mass_kg[i] : 0.0f);
+        }
+        // C5 carrier-owned pore state (v11).
+        for (uint64_t i = 0; i < pcount; ++i) {
+            writePod(os, i < d.particles.pore_water_mass_kg.size()
+                ? d.particles.pore_water_mass_kg[i] : 0.0f);
+            writePod(os, i < d.particles.pore_capacity_kg.size()
+                ? d.particles.pore_capacity_kg[i] : 0.0f);
+            writePod(os, i < d.particles.pore_porosity.size()
+                ? d.particles.pore_porosity[i] : 0.0f);
+            writePod(os, i < d.particles.pore_water_energy_j.size()
+                ? d.particles.pore_water_energy_j[i] : 0.0f);
         }
         // ── Persistent state bits ────────────────────────────────────────────
         // Label + frozen only; see kVersion. A short flags array writes 0, which
@@ -482,6 +503,10 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         d.particles.flags.assign(static_cast<size_t>(pcount), 0u);
         d.particles.mass_fraction.assign(static_cast<size_t>(pcount), 1.0f);
         d.particles.rest_mass_kg.assign(static_cast<size_t>(pcount), 0.0f);
+        d.particles.pore_water_mass_kg.assign(static_cast<size_t>(pcount), 0.0f);
+        d.particles.pore_capacity_kg.assign(static_cast<size_t>(pcount), 0.0f);
+        d.particles.pore_porosity.assign(static_cast<size_t>(pcount), 0.0f);
+        d.particles.pore_water_energy_j.assign(static_cast<size_t>(pcount), 0.0f);
         // ★ 293 K, not 0. Playback used to assign 0 K here, so a cached frame
         // came back colder than absolute ambient and every thermal threshold
         // read against it behaved differently from the live sim. Same class as
@@ -501,9 +526,32 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         for (uint64_t i = 0; i < pcount; ++i) {
             if (!readPod(is, d.particles.constitutive_model[i])) return false;
         }
+        if (!readPod(is, d.particles.next_particle_id) ||
+            d.particles.next_particle_id == 0) {
+            return false;
+        }
+        d.particles.particle_id.resize(static_cast<size_t>(pcount));
+        std::unordered_set<uint64_t> identities;
+        identities.reserve(static_cast<size_t>(pcount));
+        for (uint64_t i = 0; i < pcount; ++i) {
+            uint64_t& identity = d.particles.particle_id[i];
+            if (!readPod(is, identity) || identity == 0 ||
+                identity >= d.particles.next_particle_id ||
+                !identities.insert(identity).second) {
+                return false;
+            }
+        }
         for (uint64_t i = 0; i < pcount; ++i) {
             if (!readPod(is, d.particles.mass_fraction[i]) ||
                 !readPod(is, d.particles.rest_mass_kg[i])) {
+                return false;
+            }
+        }
+        for (uint64_t i = 0; i < pcount; ++i) {
+            if (!readPod(is, d.particles.pore_water_mass_kg[i]) ||
+                !readPod(is, d.particles.pore_capacity_kg[i]) ||
+                !readPod(is, d.particles.pore_porosity[i]) ||
+                !readPod(is, d.particles.pore_water_energy_j[i])) {
                 return false;
             }
         }
