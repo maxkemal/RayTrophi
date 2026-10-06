@@ -131,6 +131,13 @@ bool partitionMatterGrainOwners(const FluidParticles& particles, bool legacy_gra
     bool wet_grains, std::vector<std::size_t>& liquid, std::vector<std::size_t>& grains,
     std::string& error);
 
+// B8: orders grain indices by the Morton code of their contact cell (size
+// `cell`, from `origin`), ties by identity. Neighbours then sit close in the
+// device arrays, so the step's neighbour reads hit nearby memory; the
+// runtime gathers contact history to the new order by identity.
+void orderMatterGrainsByCell(const FluidParticles& particles, const Vec3& origin, float cell,
+    std::vector<std::size_t>& grains);
+
 // Exact snapshot copies of `order` (identity, every sidecar).
 FluidParticles selectMatterParticles(const FluidParticles& particles,
     const std::vector<std::size_t>& order);

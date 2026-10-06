@@ -639,13 +639,47 @@ bool partitionMatterGrainOwners(const FluidParticles& p, bool legacy_granular,
             liquid.push_back(i);
         }
     }
-    // Identity order keeps contact history slots stable when liquid parcels
-    // are removed or swapped elsewhere in the canonical array.
+    // Identity order is only the deterministic default; the coordinator
+    // re-orders by cell (orderMatterGrainsByCell) and the runtime carries the
+    // contact history across any order by identity.
     std::stable_sort(grains.begin(), grains.end(), [&](std::size_t a, std::size_t b) {
         return p.particle_id[a] < p.particle_id[b];
     });
     error.clear();
     return true;
+}
+
+void orderMatterGrainsByCell(const FluidParticles& particles, const Vec3& origin, float cell,
+    std::vector<std::size_t>& grains) {
+    if (!(cell > 0.0f) || grains.size() < 2) {
+        return;
+    }
+    // 21 bits per axis: every cell of a 100000-grain domain fits.
+    const auto spread = [](uint64_t v) {
+        v &= 0x1fffffull;
+        v = (v | v << 32) & 0x1f00000000ffffull;
+        v = (v | v << 16) & 0x1f0000ff0000ffull;
+        v = (v | v << 8) & 0x100f00f00f00f00full;
+        v = (v | v << 4) & 0x10c30c30c30c30c3ull;
+        v = (v | v << 2) & 0x1249249249249249ull;
+        return v;
+    };
+    std::vector<std::pair<uint64_t, std::size_t>> keyed(grains.size());
+    for (std::size_t k = 0; k < grains.size(); ++k) {
+        const Vec3& p = particles.position[grains[k]];
+        const auto axis = [&](float value, float low) {
+            return static_cast<uint64_t>(std::clamp(std::floor((value - low) / cell), 0.0f, 2097151.0f));
+        };
+        keyed[k] = {spread(axis(p.x, origin.x)) | spread(axis(p.y, origin.y)) << 1 |
+            spread(axis(p.z, origin.z)) << 2, grains[k]};
+    }
+    std::sort(keyed.begin(), keyed.end(), [&](const auto& a, const auto& b) {
+        return a.first != b.first ? a.first < b.first
+            : particles.particle_id[a.second] < particles.particle_id[b.second];
+    });
+    for (std::size_t k = 0; k < grains.size(); ++k) {
+        grains[k] = keyed[k].second;
+    }
 }
 
 FluidParticles selectMatterParticles(const FluidParticles& particles,

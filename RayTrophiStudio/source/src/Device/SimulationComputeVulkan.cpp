@@ -1040,6 +1040,8 @@ private:
             { "sim_matter_grain_clear", "sim_matter_grain_clear.spv", 15, 112 },
             { "sim_matter_grain_hash", "sim_matter_grain_hash.spv", 15, 112 },
             { "sim_matter_grain_step", "sim_matter_grain_step.spv", 15, 112 },
+            { "sim_matter_grain_permute", "sim_matter_grain_permute.spv", 15, 112 },
+            { "sim_matter_grain_permute_copy", "sim_matter_grain_permute_copy.spv", 15, 112 },
             { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 15, 64 },
             { "sim_fluid_granular_stress_p2g",      "sim_fluid_granular_stress_p2g.spv",    4, 48 },
             { "sim_fluid_granular_settle",          "sim_fluid_granular_settle.spv",        3, 32 },

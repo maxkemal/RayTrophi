@@ -70,6 +70,8 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             params.grain.wet_grains, liquid_order, grain_order, error)) {
         return false;
     }
+    Fluid::orderMatterGrainsByCell(state.particles, state.grid.origin,
+        2.0f * params.grain.radius_m, grain_order);
     auto liquid = Fluid::selectMatterParticles(state.particles, liquid_order);
     auto grains = Fluid::selectMatterParticles(state.particles, grain_order);
     Fluid::APICSolverStats stats;
