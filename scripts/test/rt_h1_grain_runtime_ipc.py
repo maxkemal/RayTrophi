@@ -39,6 +39,9 @@ def main():
                         help="B6 wet grains: cohesion A/B (column collapse) and water absorption from a pool")
     parser.add_argument("--coexist-only", action="store_true",
                         help="water + grains in one domain: buoyancy/drag A/B and a water pour onto a pile")
+    parser.add_argument("--coexist-hydrostatic", action="store_true",
+                        help="with --coexist-only: volume exclusion off, so the immersed arm uses "
+                             "hydrostatic buoyancy instead of the projection's pressure gradient")
     args = parser.parse_args()
     args.extended_only = args.extended_only or args.corner_only
     client = RtIpc()
@@ -473,7 +476,8 @@ def main():
                      stiffness_n_m=20000., normal_damping_n_s_m=4., sliding_damping_n_s_m=4.,
                      friction=.5, rolling_friction=.02, twisting_friction=0., max_substeps=1024,
                      tangential_stiffness_ratio=2/7, contact_resolution=24, packing_fraction=.6,
-                     fluid_coupling=coupled, drag_viscosity_pa_s=1e-3)
+                     fluid_coupling=coupled, drag_viscosity_pa_s=1e-3,
+                     volume_exclusion=not args.coexist_hydrostatic)
                 call('flow_source.update', name=WATER, enabled=True)
                 call('flow_source.update', name=SOURCE, domain=COEXIST, position=[0, .15, 0],
                      radius=.0001, velocity=[0, 0, 0], max_emitted_particles=1,
@@ -493,6 +497,18 @@ def main():
                     arm['samples'].append({'step': step, 'time': step/120, 'granular': g,
                         'fluid': totals['fluid'], 'liquid': liquid_of(inventory),
                         'status': inventory['mixed_execution']['status']})
+                    if g['particles'] == 1 and coupled:
+                        # Per-frame upward impulse the grain got from the liquid,
+                        # against Archimedes rho V g dt (same for both models).
+                        liquid = liquid_of(inventory)
+                        print('  t', round(step/120, 4), 'y', round(g['dry_center_of_mass'][1], 5),
+                              'pressure_y', liquid['pressure_impulse_n_s'][1],
+                              'buoyancy_y', liquid['buoyancy_impulse_n_s'][1],
+                              'drag_y', liquid['drag_impulse_n_s'][1],
+                              'archimedes', round(water_density*volume*9.81/120, 6),
+                              'submerged', liquid['max_submerged_fraction'],
+                              'porous_cells', liquid['porous_cells'],
+                              'status', inventory['mixed_execution']['status'], flush=True)
                     if g['particles'] == 1 and len([x for x in arm['samples']
                                                     if x['granular']['particles'] == 1]) >= 10:
                         break
