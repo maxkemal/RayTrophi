@@ -1,6 +1,6 @@
 # H1 tane yol haritası — tek Matter domain'inde kuru/ıslak granül çözücü
 
-> **Durum:** AKTİF — 2026-10-06. B2–B8 + B9a canlı turlarda geçti (coexist/porous/wet/eğim; XPBD tablosu alındı). Yeni parti B9b (fiziksel parametreler, kilitler, domain paneli) kaynakta, tek build bekliyor (NEXT_BUILD_CHECKS en üst). B9b canlıda PASS. H1-G0 kapandı: XPBD söküldü, DEM tek çözücü (söküm build bekliyor); açık: madde başına tane malzemesi, DEM maliyeti (sönüm sınırı).
+> **Durum:** AKTİF — 2026-10-06. B2–B8 + B9a canlı turlarda geçti (coexist/porous/wet/eğim; XPBD tablosu alındı). Yeni parti B9b (fiziksel parametreler, kilitler, domain paneli) kaynakta, tek build bekliyor (NEXT_BUILD_CHECKS en üst). B9b canlıda PASS. H1-G0 kapandı: XPBD söküldü, DEM tek çözücü (rev 14 canlı: 14/16; convergence %6.7 ve repose μr .05 yayılması açık — NEXT_BUILD_CHECKS en üst); açık: madde başına tane malzemesi, DEM maliyeti (sönüm sınırı).
 
 Bu belge H1'in (granül çözücü) **parti sırasıdır**: her partinin ne yazdığı, neyi
 ölçerek kapandığı ve kapanmazsa neyi ifade ettiği. Tasarım gerekçesi ve kapı tablosu

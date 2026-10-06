@@ -1,3 +1,43 @@
+# ★ YARIN BURADAN DEVAM (2026-10-06 akşamı, rev 14 canlı suite sonucu)
+
+`rt_h1_grain_suite.py` tam koşu: **14/16 PASS**, FAIL: `convergence`, `repose`.
+Tam loglar kullanıcının makinesinde `docs/dev/grain_suite/` (git'e girmiyor; gerekirse iste).
+
+**Geçenler ve sayıları:**
+- readiness: 6 bozucu düzenleme sebebiyle reddedildi (`solver_kind` dahil). base: g 9.8101 / 9.8100.
+- settle: KE/tane 4.2e-13, `spin_grows: False`, resident 5 — yeni kapı doğru çalışıyor.
+- **porous: fark .1033 m, beklenen .1023 (+%1)** — geçen tur +%29'du; ε·ppc düzeltmesi oturdu.
+- coexist_hydrostatic 6.10 (beklenen 6.13, −%0.5). **coexist (basınç kuvveti) 5.49 (−%10.5)**:
+  kapı ±%15 içinde ama geçen tur 5.74'tü, kayıyor. İz satırlarında basınç itkisi Arşimet'in
+  %10–25 üstünde dalgalanıyor (.0053–.0067 vs .00535) → tane fazla frenleniyor. İzlenecek.
+- wet: rms .205, 2706 köprü, su sapması 1.9e-6 kg. g2_dry_wet PASS.
+- dense (DEM tek): 4096 → 20.42 ms (p95 35.5), 16384 → 60.11 ms (p95 90.4), 234 alt adım,
+  `damping` sınırlı, en fazla 8/10 temas/tane. XPBD öncesiyle aynı → söküm DEM'e dokunmadı.
+  **Maliyet işinin taban çizgisi bu.**
+
+**FAIL 1 — convergence:** alt adım yarıya inince yığın COM'u %6.7 değişiyor (kapı %5; rms %1.4
+iyi). Eski kayıt (`matter_h1_grain_convergence_2026-10-06.json`, restitution öncesi) %3.1'di.
+Şüpheli: restitution geçişi duvar/zemin sönümünü √2 artırdı (aynı geri sekme, farklı c) — 256
+tane küçük yığında COM tek tanelerin zıplamasına duyarlı. Yarın ilk iş: kol iki kez koşturulup
+gürültü mü (aynı ayarda iki koşu farkı) yoksa sistematik mi ayır; sistematikse sönüm teriminin
+alt adım bağımlılığına (açık Euler'de c·v, dt ile değişen enerji kaybı) bak.
+
+**FAIL 2 — repose (μr .05 kolu):** `measured=false`, peak .090 m, `base_radius_m` 0 (hiçbir
+halka 4r = .1 m yüksekliğe ulaşmadı), 22 halka uydu ama eğim ≥ 0 → yığın değil, **duvarlara
+(1.2 m) kadar yayılmış tabaka**; kenarda birikince profil dışa doğru yükseliyor. Bu kolun
+canlıda daha önce koştuğuna dair kayıt yok (B2 "kaynak, build yok" kalmıştı) — ilk gerçek
+koşu olabilir. Yarın: (a) test sırası — `measured` kontrolünden önce duvara ulaşma raporlansın
+ki sebep okunur olsun; (b) μr .05 + μ .5 küre için literatür ~20°; yayılma sürtünme/yuvarlanma
+yolunun yığında etkisiz kaldığını gösterebilir (tek tane eğim testi geçiyor, kolektif yığın
+geçmiyor) → diğer kollar (μr .3/.1) koşmadan durdu, onların sayıları da gerekli:
+`--only repose` ilk kolda durmasın diye test tüm kolları koşturup sonra assert etmeli.
+
+**Sıradaki iş sırası (öneri):** 1) repose testini teşhis edilebilir yap + tüm kolları koştur,
+2) convergence gürültü/sistematik ayrımı, 3) coexist basınç itkisi aşımı, 4) DEM maliyeti:
+sönüm CFL sınırı (24 temas varsayımı → ölçülen/örtük sönüm), 5) madde başına tane malzemesi.
+
+---
+
 # Sıradaki kullanıcı build (C++ + SHADER): XPBD söküldü (H1-G0 kapandı) + settle kapısı
 
 Bu partide (2026-10-06): 16k tablosu anlaşılan ölçütü geçemedi (hiçbir XPBD ayarı DEM'e %5
