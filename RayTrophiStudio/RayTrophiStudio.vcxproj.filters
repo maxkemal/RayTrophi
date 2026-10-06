@@ -528,6 +528,9 @@
     <ClInclude Include="source\src\UI\scene_ui_fluid_thermal.hpp">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
+    <ClInclude Include="source\src\UI\DomainPanelWidgets.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\scene_data.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>

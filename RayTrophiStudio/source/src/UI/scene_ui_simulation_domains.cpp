@@ -1,3 +1,4 @@
+#include "DomainPanelWidgets.h"
 #include "Fluid/MatterPoreAuthoring.h"
 #include "scene_ui_forcefield.hpp"
 #include "Fluid/MatterPhaseConfig.h"
@@ -282,6 +283,7 @@ void drawSimulationDomainControls(
         if (ImGui::BeginTabBar("DomainSubTabBar", ImGuiTabBarFlags_None)) {
 
             if (ImGui::BeginTabItem("Domain")) {
+                if (ImGui::SmallButton("Collapse all##DomainTab")) UIWidgets::RequestCollapseAll();
                 ImGui::Spacing();
                 // What the domain holds. The unified matter domain will derive this from
                 // its contents; until then it is the solver switch. A standard combo: the
@@ -348,7 +350,6 @@ void drawSimulationDomainControls(
                 RayTrophiSim::Fluid::drawMatterModelSummary(domain,
                     static_cast<std::size_t>(selected_domain_index) < model_states.size()
                         ? &model_states[static_cast<std::size_t>(selected_domain_index)] : nullptr);
-                RayTrophiSim::Fluid::drawMatterGrainControls(domain);
                 RayTrophiSim::Fluid::drawMatterPoolControls(domain,
                     static_cast<std::size_t>(selected_domain_index) < model_states.size()
                         ? &model_states[static_cast<std::size_t>(selected_domain_index)] : nullptr);
@@ -386,7 +387,14 @@ void drawSimulationDomainControls(
                     if (backend_values[bi] == domain.backend) current_backend = bi;
 
                 ImGui::SetNextItemWidth(-FLT_MIN);
-                if (ImGui::Combo("##DomainBackend", &current_backend, backends, 3)) {
+                // Locked by the grain solver (same rule as fluid.update rejects).
+                const bool grain_locked = domain.fluid_params.grain.enabled;
+                ImGui::BeginDisabled(grain_locked);
+                const bool backend_changed =
+                    ImGui::Combo("##DomainBackend", &current_backend, backends, 3);
+                ImGui::EndDisabled();
+                if (grain_locked) DomainUi::Reason("Grains need the Vulkan backend.");
+                if (backend_changed) {
                     domain.backend = backend_values[current_backend];
                     scene.requestSimulationTimelineRenderResync();
                     g_gas_volumes_dirty = true;
@@ -612,7 +620,7 @@ void drawSimulationDomainControls(
                 }
 
                 ImGui::Spacing();
-                ImGui::SetNextItemWidth(150.0f);
+                ImGui::SetNextItemWidth(DomainUi::itemWidth());
                 const int prev_max_auto_res = domain.max_auto_resolution;
                 if (ImGui::DragInt("Max Auto Resolution", &domain.max_auto_resolution, 1.0f, 32, 2048)) {
                     domain.quality_profile = RayTrophiSim::SimulationDomainQualityProfile::Custom;
@@ -651,7 +659,7 @@ void drawSimulationDomainControls(
                 }
 
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(150.0f);
+                ImGui::SetNextItemWidth(DomainUi::itemWidth());
                 ImGui::DragFloat("Boundary Padding", &domain.padding, 0.01f, 0.0f, 1000.0f, "%.3f");
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Buffer padding distance added outside the domain bounds.\n"
@@ -782,9 +790,12 @@ void drawSimulationDomainControls(
                     ImGui::Spacing();
                     const char* boundary_modes[] = { "Open (Outflow - Flows Out)", "Closed (Solid Wall - Collides)", "Periodic (Wrap-around - Re-enters)" };
                     int boundary_mode = static_cast<int>(domain.boundary_mode);
+                    ImGui::BeginDisabled(domain.fluid_params.grain.enabled);
                     if (ImGui::Combo("Boundary Collision Mode", &boundary_mode, boundary_modes, IM_ARRAYSIZE(boundary_modes))) {
                         domain.boundary_mode = static_cast<RayTrophiSim::SimulationGridDomainBoundaryMode>(boundary_mode);
                     }
+                    ImGui::EndDisabled();
+                    if (domain.fluid_params.grain.enabled) DomainUi::Reason("Grains need a Closed boundary.");
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Physical behavior of fluid/smoke when touching domain borders:\n\n"
                                           "1. Open: Outflowing fluid/smoke vanishes at the boundary. Perfect for open scenes.\n"
@@ -814,7 +825,7 @@ void drawSimulationDomainControls(
                     using RayTrophiSim::FluidSeedMode;
                     const char* seed_mode_labels[] = { "Seed Box", "Fill Domain (resting tank)" };
                     int seed_mode_idx = static_cast<int>(domain.fluid_seed_mode);
-                    ImGui::SetNextItemWidth(250.0f);
+                    ImGui::SetNextItemWidth(DomainUi::itemWidth());
                     if (ImGui::Combo("Seed Mode", &seed_mode_idx, seed_mode_labels, IM_ARRAYSIZE(seed_mode_labels))) {
                         domain.fluid_seed_mode = static_cast<FluidSeedMode>(seed_mode_idx);
                         seed_settled = true;
@@ -827,7 +838,7 @@ void drawSimulationDomainControls(
                     }
 
                     if (domain.fluid_seed_mode == FluidSeedMode::FillLevel) {
-                        ImGui::SetNextItemWidth(250.0f);
+                        ImGui::SetNextItemWidth(DomainUi::itemWidth());
                         ImGui::SliderFloat("Fill Level (target)", &domain.fluid_fill_level, 0.0f, 1.0f, "%.2f");
                         seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                         if (ImGui::IsItemHovered()) {
@@ -837,7 +848,7 @@ void drawSimulationDomainControls(
                                               "budget can't reach the target the level drops (complete layers from\n"
                                               "the floor up), never the density.");
                         }
-                        ImGui::SetNextItemWidth(250.0f);
+                        ImGui::SetNextItemWidth(DomainUi::itemWidth());
                         ImGui::DragFloat("Wall Margin", &domain.fluid_fill_wall_margin, 0.01f, 0.0f, 10000.0f, "%.3f");
                         seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                         if (ImGui::IsItemHovered()) {
@@ -897,7 +908,7 @@ void drawSimulationDomainControls(
                     }
                     }
 
-                    ImGui::SetNextItemWidth(250.0f);
+                    ImGui::SetNextItemWidth(DomainUi::itemWidth());
                     ImGui::SliderInt(
                         "Seed Particles Per Voxel",
                         &domain.fluid_seed_particles_per_cell,
@@ -913,7 +924,7 @@ void drawSimulationDomainControls(
                                           "To fit a budget, change Voxel Size or Max Particles \xE2\x80\x94 not this.");
                     }
 
-                    ImGui::SetNextItemWidth(250.0f);
+                    ImGui::SetNextItemWidth(DomainUi::itemWidth());
                     int max_particles_ui = static_cast<int>(std::min<std::size_t>(domain.fluid_max_particles, 10000000u));
                     if (ImGui::DragInt("Max Particles Limit", &max_particles_ui, 1000.0f, 1000, 10000000)) {
                         domain.fluid_max_particles = static_cast<std::size_t>(std::max(1000, max_particles_ui));
@@ -1759,8 +1770,14 @@ void drawSimulationDomainControls(
             }
 
             if (ImGui::BeginTabItem("Matter")) {
+                if (ImGui::SmallButton("Collapse all##MatterTab")) UIWidgets::RequestCollapseAll();
                 if (domain.type == RayTrophiSim::SimulationDomainType::Matter) {
-                    RayTrophiSim::Fluid::drawMatterPoreControls(domain.name);
+                    if (domain.fluid_params.grain.enabled) {
+                        // Pore water is the MPM model's water; grains hold their own.
+                        ImGui::TextDisabled("Pore water (MPM) is off with the grain solver; grains use Wet grains below.");
+                    } else {
+                        RayTrophiSim::Fluid::drawMatterPoreControls(domain.name);
+                    }
                 }
                 ImGui::Spacing();
                 if (is_gas_domain) {
@@ -1960,7 +1977,12 @@ void drawSimulationDomainControls(
                     }
                     }
 
-                    if (UIWidgets::CollapsingHeader("Granular Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    // The grain solver owns granular carriers: the legacy MPM granular
+                    // material is not read, so it is not offered (one line says why).
+                    RayTrophiSim::Fluid::drawMatterGrainMaterial(domain);
+                    if (fp.grain.enabled) {
+                        ImGui::TextDisabled("Legacy MPM granular material is not used while the grain solver is on.");
+                    } else if (UIWidgets::CollapsingHeader("Granular Material", ImGuiTreeNodeFlags_DefaultOpen)) {
                         bool granular_edited = false;
                         granular_edited |= ImGui::Checkbox("Enable Granular MPM", &fp.granular_enabled);
                         if (ImGui::IsItemHovered())
@@ -2024,16 +2046,21 @@ void drawSimulationDomainControls(
                                               "Off for dry sand/gravel; on for wet sand, clay and compacting snow.");
                         ImGui::BeginDisabled(!fp.granular_rebonding);
                         granular_edited |= ImGui::DragFloat("Healing Rate", &fp.granular_healing_rate, 0.01f, 0.0f, 20.0f, "%.2f");
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                            ImGui::SetTooltip("Fractional bond-damage recovery per second under compression.\n"
+                                              "Higher values let compressed fragments clump and rebuild bonds faster.\n"
+                                              "Airborne or freely separated fragments do not heal.");
+                        ImGui::EndDisabled();
                         ImGui::SeparatorText("Thermal / Burn Softening");
                         granular_edited |= ImGui::DragFloat("Softening Temperature (K)",
                                                            &fp.granular_softening_temperature,
                                                            1.0f, 0.0f, 4000.0f, "%.0f");
                         if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Temperature at which the granular skeleton has lost half"
-                                              "its strength. 0 DISABLES softening entirely (sand does not"
-                                              "melt). Bond strength falls faster than stiffness, so the body"
-                                              "stops holding its shape before it goes soft."
-                                              "Remaining mass_fraction multiplies this, so a charring body"
+                            ImGui::SetTooltip("Temperature at which the granular skeleton has lost half\n"
+                                              "its strength. 0 DISABLES softening entirely (sand does not\n"
+                                              "melt). Bond strength falls faster than stiffness, so the body\n"
+                                              "stops holding its shape before it goes soft.\n"
+                                              "Remaining mass_fraction multiplies this, so a charring body\n"
                                               "weakens as it burns off without a second dial.");
                         granular_edited |= ImGui::DragFloat("Softening Range (K)",
                                                            &fp.granular_softening_range,
@@ -2042,13 +2069,8 @@ void drawSimulationDomainControls(
                                                              &fp.granular_residual_strength,
                                                              0.0f, 1.0f, "%.3f");
                         if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Fraction of strength kept once fully softened."
+                            ImGui::SetTooltip("Fraction of strength kept once fully softened.\n"
                                               "0 = a true melt; a small value leaves a molten residue.");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Fractional bond-damage recovery per second under compression.\n"
-                                              "Higher values let compressed fragments clump and rebuild bonds faster.\n"
-                                              "Airborne or freely separated fragments do not heal.");
-                        ImGui::EndDisabled();
                         ImGui::EndDisabled();
                         if (granular_edited) {
                             fp.sanitizeGranularMaterial();
@@ -2073,7 +2095,7 @@ void drawSimulationDomainControls(
                         int chemistry_index = static_cast<int>(
                             domain.fluid_params.chemistry_preset);
                         chemistry_index = std::clamp(chemistry_index, 0, 7);
-                        ImGui::SetNextItemWidth(180.0f);
+                        ImGui::SetNextItemWidth(DomainUi::itemWidth());
                         if (ImGui::Combo("Chemistry Preset##FluidChemistry",
                                          &chemistry_index, chemistry_labels, 8)) {
                             const auto chosen = static_cast<ChemistryPreset>(chemistry_index);
@@ -2203,7 +2225,14 @@ void drawSimulationDomainControls(
                             // and losing — the phase authoring being tested.
                             {
                                 bool solid_on = domain.fluid_solid_phase_enabled;
-                                if (ImGui::Checkbox("Solid Phase Blocks Flow", &solid_on)) {
+                                const bool solid_locked = domain.fluid_params.grain.enabled && !solid_on;
+                                if (solid_locked) ImGui::BeginDisabled();
+                                const bool solid_changed = ImGui::Checkbox("Solid Phase Blocks Flow", &solid_on);
+                                if (solid_locked) {
+                                    ImGui::EndDisabled();
+                                    DomainUi::Reason("Solid phase cannot run with grains yet.");
+                                }
+                                if (solid_changed) {
                                     domain.fluid_solid_phase_enabled = solid_on;
                                     scene.requestSimulationTimelineRenderResync();
                                     ui_ctx.start_render = true;
@@ -2454,6 +2483,7 @@ void drawSimulationDomainControls(
             }
 
             if (ImGui::BeginTabItem("Environment")) {
+                if (ImGui::SmallButton("Collapse all##EnvironmentTab")) UIWidgets::RequestCollapseAll();
                 ImGui::Spacing();
                 {
                     const auto& world = particles->worldThermal();
@@ -2493,7 +2523,14 @@ void drawSimulationDomainControls(
             }
 
             if (ImGui::BeginTabItem("Solvers")) {
+                if (ImGui::SmallButton("Collapse all##SolversTab")) UIWidgets::RequestCollapseAll();
                 ImGui::Spacing();
+                {
+                    const auto& solver_states = particles->gridDomainStates();
+                    RayTrophiSim::Fluid::drawMatterGrainSolver(domain,
+                        static_cast<std::size_t>(selected_domain_index) < solver_states.size()
+                            ? &solver_states[static_cast<std::size_t>(selected_domain_index)] : nullptr);
+                }
                 if (is_gas_domain) {
                     // Gas Channel Flags
                     if (UIWidgets::CollapsingHeader("Simulation Solver Channels (Grids)", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -2810,7 +2847,10 @@ void drawSimulationDomainControls(
                         const Vec3 air = RayTrophiSim::Fluid::atmosphereAirVelocity(fp);
                         ImGui::TextDisabled("Air: (%.2f, %.2f, %.2f) m/s", air.x, air.y, air.z);
                     }
+                    ImGui::BeginDisabled(fp.grain.enabled);
                     ImGui::SliderFloat("Domain Motion Coupling", &fp.domain_motion_coupling, 0.0f, 1.0f, "%.2f");
+                    ImGui::EndDisabled();
+                    if (fp.grain.enabled) DomainUi::Reason("A moving domain holds the grain step; grains need a static domain.");
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Couples domain coordinate translation to fluid velocity. Allows creating sloshing liquids inside a moving cup.");
                     }
@@ -2892,9 +2932,10 @@ void drawSimulationDomainControls(
                     if (UIWidgets::CollapsingHeader("Dynamic Particle Reseeding (Reseed)", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
 
-                    if (fp.granular_enabled) ImGui::BeginDisabled();
+                    const bool reseed_locked = fp.granular_enabled || fp.grain.enabled;
+                    if (reseed_locked) ImGui::BeginDisabled();
                     ImGui::Checkbox("Enable Dynamic Reseeding##Reseed", &fp.reseed_enabled);
-                    if (fp.granular_enabled) ImGui::EndDisabled();
+                    if (reseed_locked) ImGui::EndDisabled();
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Redistributes sampling density without creating liquid mass.\n"
                                           "Only particles removed from crowded cells may be replaced in starved interior cells.\n"
@@ -2921,6 +2962,7 @@ void drawSimulationDomainControls(
             }
 
             if (ImGui::BeginTabItem("Output")) {
+                if (ImGui::SmallButton("Collapse all##OutputTab")) UIWidgets::RequestCollapseAll();
                 ImGui::Spacing();
                 if (is_fluid_domain) {
                     // Fluid Render settings group
@@ -3224,6 +3266,16 @@ void drawSimulationDomainControls(
                     // This does NOT repair the scene data — the panel still
                     // writes nothing (see the note above); it only stops the
                     // combo from claiming a mode the rest of the panel ignores.
+                    if (domain.fluid_params.grain.enabled) {
+                        // Grains are drawn at their physical size; one rule with
+                        // the render bridge (2 x simulation grain radius).
+                        ImGui::SeparatorText("Grain spheres");
+                        ImGui::Text("Diameter %.4f m (2 x simulation grain radius, Solvers)",
+                                    2.0f * domain.fluid_params.grain.radius_m);
+                        DomainUi::Reason("Liquid parcels in this domain use the splat settings below; "
+                                         "grains ignore Radius Factor, Size Multiplier, Virtual Children "
+                                         "and size variation.");
+                    }
                     if (view_plan.splat &&
                         UIWidgets::CollapsingHeader("Splat Geometry & Preview",
                             current_mode_idx == 0 ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
@@ -4256,7 +4308,14 @@ void drawSimulationDomainControls(
             }
 
             if (ImGui::BeginTabItem("Measure")) {
+                if (ImGui::SmallButton("Collapse all##MeasureTab")) UIWidgets::RequestCollapseAll();
                 ImGui::Spacing();
+                {
+                    const auto& report_states = particles->gridDomainStates();
+                    RayTrophiSim::Fluid::drawMatterGrainReport(domain,
+                        static_cast<std::size_t>(selected_domain_index) < report_states.size()
+                            ? &report_states[static_cast<std::size_t>(selected_domain_index)] : nullptr);
+                }
 
                 // Group 4: Statistics Summary
                 if (UIWidgets::CollapsingHeader("Simulation & Collision Statistics", ImGuiTreeNodeFlags_DefaultOpen)) {

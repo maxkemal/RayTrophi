@@ -25,8 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 UI = ROOT / 'RayTrophiStudio/source/src/UI'
 BASELINE = ROOT / 'docs/dev/domain_panel_fields_baseline.json'
 
-# Files that draw the domain panel (scene_ui_simulation_domains.inl is an unused
-# copy and is not scanned). Glob patterns are allowed for helpers added later.
+# Files that draw the domain panel. Glob patterns are allowed for helpers added later.
 FILES = ['scene_ui_simulation_domains.cpp', 'Matter*Controls.cpp', 'scene_ui_fluid_thermal.cpp',
          'DomainPanel*.cpp']
 
@@ -34,13 +33,19 @@ WIDGET = re.compile(
     r'(?:ImGui|UIWidgets|DomainUi)::'
     r'(Checkbox|Combo|SliderFloat\d?|SliderInt\d?|SliderAngle|DragFloat\d?|DragInt\d?|'
     r'DragFloatRange2|InputFloat\d?|InputInt\d?|InputText|ColorEdit\d|RadioButton|'
-    r'Float|Int|Bool|Choice|Color)'
+    r'Float|Int|Bool|Choice|Color|Slider)'
     r'\s*\(\s*("(?:[^"\\]|\\.)*")\s*,\s*([^,)]*)', re.S)
 TAB = re.compile(r'BeginTabItem\s*\(\s*"([^"#]*)')
 
 # Intentional changes: baseline key -> new key, or "removed: reason".
 # Key format: "<label without ##id>".
 CHANGES = {
+    # 2026-10-06 grain reorganisation: material -> Matter tab, solver -> Solvers.
+    'Physical radius (m)': 'Simulation grain radius (m)',
+    'Represented grain radius (m, 0 = same)': 'Real grain radius (m, 0 = simulation)',
+    'Normal damping (Ns/m)': 'Restitution',
+    'Liquid viscosity for drag (Pa s)':
+        'removed: drag uses the liquid substance viscosity (one physical value, one home)',
 }
 
 
@@ -74,6 +79,27 @@ def scan():
                     'tab': tab,
                 })
     return widgets
+
+
+# New helper files follow the standard: every value widget has a tooltip
+# (DomainUi rows carry one by signature; a raw ImGui widget must be followed by
+# DomainUi::tooltip or SetTooltip before the next widget).
+TOOLTIP_FILES = ['Matter*Controls.cpp', 'DomainPanel*.cpp']
+RAW = re.compile(r'ImGui::(Checkbox|Combo|Slider\w*|Drag\w*|Input\w*|ColorEdit\w*)\s*\(')
+
+
+def missing_tooltips():
+    missing = []
+    for pattern in TOOLTIP_FILES:
+        for path in sorted(UI.glob(pattern)):
+            text = path.read_text(encoding='utf-8', errors='replace')
+            matches = list(RAW.finditer(text))
+            for n, m in enumerate(matches):
+                end = matches[n+1].start() if n+1 < len(matches) else len(text)
+                window = text[m.end():min(end, m.end()+1200)]
+                if 'tooltip(' not in window and 'SetTooltip(' not in window:
+                    missing.append(f"{path.name}:{text.count(chr(10), 0, m.start())+1}")
+    return missing
 
 
 def key(widget):
@@ -116,8 +142,12 @@ def main():
     stale = [k for k in CHANGES if k not in {key(w) for w in baseline}]
     for k in stale:
         print(f'STALE  CHANGES entry {k!r} names no baseline widget')
-    if lost or stale:
-        print(f'FAIL domain panel fields: {len(lost)} lost, {len(stale)} stale change entries')
+    untipped = missing_tooltips()
+    for where in untipped:
+        print(f'NO TIP {where}')
+    if lost or stale or untipped:
+        print(f'FAIL domain panel fields: {len(lost)} lost, {len(stale)} stale change entries, '
+              f'{len(untipped)} widgets without tooltip')
         return 1
     print(f'PASS domain panel fields: {len(baseline)} baseline widgets kept or changed on purpose '
           f'({len(moved)} moved, {len(current)} now)')

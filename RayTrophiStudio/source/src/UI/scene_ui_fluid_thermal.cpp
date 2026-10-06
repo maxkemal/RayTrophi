@@ -181,9 +181,15 @@ bool drawDomainControls(
     ImGui::SeparatorText("Thermal Liquid (cools, thickens, sets)");
 
     bool edited = false;
+    const bool grain_locked = params.grain.enabled && !params.thermal_liquid_enabled;
+    ImGui::BeginDisabled(grain_locked);
     edited |= ImGui::Checkbox(
         "Enable Cooling & Freezing",
         &params.thermal_liquid_enabled);
+    ImGui::EndDisabled();
+    if (grain_locked) {
+        ImGui::TextDisabled("Thermal liquid cannot run with grains yet.");
+    }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
             "The domain cools all liquid parcels toward its effective ambient.\n"

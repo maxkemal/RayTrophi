@@ -376,6 +376,7 @@
     <ClInclude Include="source\include\scene_ui.h" />
     <ClInclude Include="source\src\UI\scene_ui_agent_chat.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_fluid_thermal.hpp" />
+    <ClInclude Include="source\src\UI\DomainPanelWidgets.h" />
     <ClInclude Include="source\include\Viewport\RasterFrameTelemetry.h" />
     <ClInclude Include="source\include\Viewport\RasterGpuCull.h" />
     <ClInclude Include="source\include\Viewport\RasterInstanceUpload.h" />

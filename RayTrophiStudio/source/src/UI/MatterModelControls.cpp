@@ -3,8 +3,10 @@
 #include "Fluid/FluidViewResolver.h"
 #include "ParticleSimulation.h"
 #include "imgui.h"
+#include "DomainPanelWidgets.h"
 
 #include <algorithm>
+#include <map>
 
 namespace RayTrophiSim::Fluid {
 
@@ -29,7 +31,9 @@ void drawMatterPoolControls(const SimulationGridDomainDesc& domain,
         ImGui::PopID();
         return;
     }
-    static std::string error;
+    // Last authoring error, per domain (transient feedback, not domain state).
+    static std::map<std::string, std::string> errors;
+    auto& error = errors[domain.name];
     for (auto source : sources) {
         if (source.domain != domain.name || source.phase != "liquid") {
             continue;
@@ -37,12 +41,15 @@ void drawMatterPoolControls(const SimulationGridDomainDesc& domain,
         ImGui::PushID(source.name.c_str());
         ImGui::Separator();
         ImGui::TextUnformatted(source.name.c_str());
-        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SetNextItemWidth(DomainUi::itemWidth());
         if (ImGui::DragFloat("Pool weight", &source.particle_pool_weight,
                              0.05f, 0.001f, 1000.0f, "%.3f")) {
             const auto result = rtapi::updateSimulationFlowSource(source.name, source);
             error = result.ok ? "" : result.error;
         }
+        DomainUi::tooltip("This source's share of the domain's free particle capacity (0.001..1000).\n"
+            "Unused shares return to the common pool; not a reservation.\n"
+            "Script: flow_source.update(name=..., particle_pool_weight=...)");
         ImGui::TextDisabled("Last injection requested / allocated: %d / %d",
             source.pool_requested_particles, source.pool_granted_particles);
         ImGui::PopID();
@@ -90,7 +97,9 @@ void drawMatterOutputControls(const SimulationGridDomainDesc& domain) {
 
     const auto materials = rtapi::listMaterials();
     const auto plan = resolveFluidViews(domain, {});
-    static std::string error;
+    // Last authoring error, per domain (transient feedback, not domain state).
+    static std::map<std::string, std::string> errors;
+    auto& error = errors[domain.name];
     for (const auto& substance : substances) {
         ImGui::PushID(substance.c_str());
         ImGui::Separator();
@@ -107,13 +116,16 @@ void drawMatterOutputControls(const SimulationGridDomainDesc& domain) {
         int selected = static_cast<int>(representation);
         const char* choices[] = {"Domain fallback", "Splat", "SDF", "Fog"};
         const char* names[] = {"inherit", "splat", "sdf", "fog"};
-        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SetNextItemWidth(DomainUi::itemWidth());
         if (ImGui::Combo("Output", &selected, choices, 4)) {
             const std::string route = names[selected];
             const auto result = rtapi::setFluidSubstanceMaterial(
                 domain.name, substance, "", &route, nullptr, nullptr, nullptr, nullptr);
             error = result.ok ? "" : result.error;
         }
+        DomainUi::tooltip("How this substance is drawn: the domain's view, splat spheres, SDF\n"
+            "surface or fog. Binding only; the material itself is edited in Material Properties.\n"
+            "Script: fluid.set_substance_material(domain, substance, representation=...)");
 
         std::string current = "Domain material";
         for (const auto& material : materials) {
