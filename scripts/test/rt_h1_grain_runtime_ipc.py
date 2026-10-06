@@ -453,9 +453,15 @@ def main():
                     if exclude:
                         assert after['liquid']['pressure_force'], after['liquid']
                         assert after['liquid']['porous_cells'] > 0, after['liquid']
-                        assert .5*rise <= surface <= 1.5*rise, ('displacement not seen', surface, rise)
-                    else:
-                        assert surface <= .25*rise, ('surface rose without volume exclusion', surface)
+                # The pool's own settling drift (seen live: +.041 m with the
+                # exclusion off) is common to both arms; only the difference is
+                # the grains' displacement.
+                porous = data['coexist']['porous']
+                displaced = porous['True']['surface_rise_m'] - porous['False']['surface_rise_m']
+                porous['displacement_m'] = displaced
+                save()
+                print('porous displacement (on - off)', displaced, 'expected', rise, flush=True)
+                assert .5*rise <= displaced <= 1.5*rise, ('displacement not seen', displaced, rise)
                 call('flow_source.update', name=WATER, enabled=False)
                 call('flow_source.update', name=SOURCE, domain=DOMAIN, enabled=False)
                 data['completed'] = True

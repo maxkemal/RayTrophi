@@ -141,6 +141,9 @@ CPU + 2 yükleme/indirme). B4 bunu GPU'ya taşır.
 > Artık kuvvet sıvının **ölçülen** ivmesinden: F = batma · ρV (Du/Dt − g), Du/Dt tanenin 8
 > hücresindeki sıvı parsellerinin kare boyu kütle ağırlıklı hız değişimi (kimlikle,
 > Lagrange). Durgun suda tam Arşimet; GPU basınç okuması yok.
+> Aynı turda: batma oranı hacimden değil doluluktan (seyrek FLIP havuzu derindeki taneyi
+> %69 ıslak sayıyordu), porous diverjans yoğunluk düzeltmesini ε·ppc'ye hedefliyor (tam
+> ppc hedefi gözenekleri yeniden dolduruyordu: canlıda dışlama beklenenin %23'üydü).
 > Kabul: `--porous-only` (yer değiştirme A/B); Richardson–Zaki/Ergun kıyasları sonraki tur.
 
 - **Kod:** sıvı süreklilik denklemi gözeneklilikle (ε = 1 − φ_s): P2G'de katı hacim kesri,

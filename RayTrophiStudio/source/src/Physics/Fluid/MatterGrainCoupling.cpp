@@ -173,7 +173,7 @@ void prepareMatterGrainCoupling(const FluidParticles& grains, const MatterGrainP
         int c[8];
         double w[8];
         neighbours(f, grains.position[g], c, w);
-        double weight = 0.0, liquid_mass = 0.0, liquid_volume = 0.0, solid = 0.0;
+        double weight = 0.0, liquid_mass = 0.0, liquid_volume = 0.0, solid = 0.0, wet = 0.0;
         double lump = 0.0, lump_momentum[3] = {};
         double share[8] = {};
         for (int n = 0; n < 8; ++n) {
@@ -184,6 +184,13 @@ void prepareMatterGrainCoupling(const FluidParticles& grains, const MatterGrainP
             liquid_mass += w[n] * f.mass[c[n]];
             liquid_volume += w[n] * f.volume[c[n]];
             solid += w[n] * f.solid[c[n]];
+            // A cell counts as liquid once its parcels fill half its pores
+            // (the pressure solve's own liquid test is one parcel in eight);
+            // a sparse FLIP pool holds ~.65-.85 of a cell's volume in parcels,
+            // so a volume ratio would call a deeply submerged grain 70% wet.
+            const double pores = std::clamp(1.0 - f.solid[c[n]] / cell_volume,
+                kMinimumVoidage, 1.0) * cell_volume;
+            wet += w[n] * std::min(1.0, f.volume[c[n]] / (.5 * pores));
             // This grain's share of the cell's liquid: its trilinear weight,
             // scaled down once the grains overlapping the cell hold more than
             // one grain volume. sum_i w_i V / max(Vs, V) = Vs / max(Vs, V) <= 1,
@@ -201,10 +208,9 @@ void prepareMatterGrainCoupling(const FluidParticles& grains, const MatterGrainP
         if (weight <= 0.0 || lump <= 0.0 || liquid_volume <= 0.0) {
             continue;
         }
-        const double alpha = liquid_volume / (weight * cell_volume);
         const double voidage = std::clamp(1.0 - solid / (weight * cell_volume),
             kMinimumVoidage, 1.0);
-        const double submerged = std::clamp(alpha / voidage, 0.0, 1.0);
+        const double submerged = std::clamp(wet / weight, 0.0, 1.0);
         const double density = liquid_mass / liquid_volume;
         const double grain_mass = grainMass(grains, g);
         if (!(grain_mass > 0.0) || submerged <= 0.0) {

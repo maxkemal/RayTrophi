@@ -30,6 +30,14 @@ su = tam Arşimet, yukarı g ivmelenen su = 2×). Tanesiz liquid subset granular
 adım sayısını ödemiyor (yalnız CFL). **Build:** C++ + `compile_sim_shaders.bat` (silinen
 kernel listeden çıktı; eski `sim_matter_accumulate.spv` kalırsa zararsız).
 Canlı sonuçlar: 0, 2, 3, settle PASS; hidrostatik kol + pour PASS; 6'dan devam.
+**İkinci tur (ivme kuvveti canlıda):** gömülü tane 6.96 (±%15 içinde), itki gürültüsüz;
+ama `submerged` .69 (25 cm derindeki tane!) ve porous farkı yalnız .023 m (beklenen .102).
+Düzeltmeler: (a) batma artık doluluk — hücre, parselleri gözeneklerinin yarısını
+doldurunca sıvı sayılır (seyrek FLIP havuzu hacmin .65–.85'ini tutar); (b)
+`sim_fluid_divergence_porous` yoğunluk düzeltmesini gözenek hacmine (ε·ppc) hedefler —
+eskiden tam ppc'ye çekip gözenekleri yeniden dolduruyordu (dışlamayı zamanla geri
+alıyordu); (c) `--porous-only` kapısı artık iki kolun **farkı** (havuzun kendi oturma
+kayması +.041 m iki kolda ortak). **Build:** C++ + shader.
 
 0. **Statik sözleşme** `python scripts/test/check_matter_grain_contracts.py` → PASS.
 1. **Açılış/revizyon.** Herhangi bir tane koşusunda `shader revision mismatch` yok. Varsa

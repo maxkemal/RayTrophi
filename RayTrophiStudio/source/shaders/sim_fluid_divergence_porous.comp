@@ -138,5 +138,30 @@ void main() {
     vz_lo = wzl * vz_lo + (1.0 - wzl) * sv_z(i, j, k    );
     vz_hi = wzh * vz_hi + (1.0 - wzh) * sv_z(i, j, k + 1);
 
-    divergence[id] = ((vx_hi - vx_lo) + (vy_hi - vy_lo) + (vz_hi - vz_lo)) * inv_h;
+    float div = ((vx_hi - vx_lo) + (vy_hi - vy_lo) + (vz_hi - vz_lo)) * inv_h;
+
+    // Density correction with the pore volume as the target. residual_init
+    // pushes a cell back once it holds more than particles_per_cell parcels;
+    // a cell that is (1 - eps) grain holds only eps of that liquid at rest.
+    // Without this the correction refills the pores and undoes the exclusion
+    // the projection just enforced. eps is the mean open weight of the cell's
+    // interior faces that border no collider (porosity is the only thing that
+    // closes those); the extra term enters as rhs = -div h^2/dt.
+    if (pc.density_correction > 0.0 && pc.particles_per_cell > 0) {
+        float open = 0.0, faces = 0.0;
+        if (i > 0 && !is_solid(i - 1, j, k))          { open += wxl; faces += 1.0; }
+        if (i + 1 < pc.nx && !is_solid(i + 1, j, k))  { open += wxh; faces += 1.0; }
+        if (j > 0 && !is_solid(i, j - 1, k))          { open += wyl; faces += 1.0; }
+        if (j + 1 < pc.ny && !is_solid(i, j + 1, k))  { open += wyh; faces += 1.0; }
+        if (k > 0 && !is_solid(i, j, k - 1))          { open += wzl; faces += 1.0; }
+        if (k + 1 < pc.nz && !is_solid(i, j, k + 1))  { open += wzh; faces += 1.0; }
+        float eps = faces > 0.0 ? clamp(open / faces, 0.0, 1.0) : 1.0;
+        if (eps < 0.999) {
+            float ppc = float(pc.particles_per_cell);
+            float count = fluid_mask[id];
+            float extra = max(count - eps * ppc, 0.0) - max(count - ppc, 0.0);
+            div -= pc.density_correction * extra / (ppc * (pc.voxel_size > 1e-6 ? pc.voxel_size : 1.0));
+        }
+    }
+    divergence[id] = div;
 }

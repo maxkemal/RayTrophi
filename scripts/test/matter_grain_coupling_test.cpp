@@ -156,6 +156,34 @@ int main() {
         restoreMatterGrainPorosity(grid, backup);
         assert(grid.u_weight.empty() || grid.u_weight[grid.velXIndex(2, 1, 1)] == 255);
     }
+    // Submersion is occupancy, not volume: a sparse FLIP pool (6 of 8 parcels
+    // per cell, 75% of the volume) still fully submerges a grain at depth.
+    {
+        FluidParticles sparse;
+        for (std::size_t p = 0; p < liquid.size(); ++p) {
+            if (p % 8 < 6) emit(sparse, liquid.position[p], Vec3(0.0f, 0.0f, 0.0f),
+                                liquid.rest_mass_kg[p], MatterConstitutiveModel::Fluid);
+        }
+        MatterGrainCouplingFrame pool;
+        assert(buildMatterGrainLiquidField(sparse, grains, r, static_cast<FluidChemistryPreset>(0),
+            Vec3(0.0f, 0.0f, 0.0f), n, 2 * n, n, h, pool.field, error));
+        MatterGrainStepReport pool_report;
+        prepareMatterGrainCoupling(grains, params, Vec3(0.0f, -9.81f, 0.0f), dt, pool, pool_report);
+        std::printf("sparse pool submerged %.3f\n", pool.submerged[0]);
+        assert(pool.submerged[0] == 1.0f);
+        // A grain centred on the free surface (y = .4) is about half wet.
+        FluidParticles surface_grain;
+        emit(surface_grain, Vec3(.2f, .4f, .2f), Vec3(0.0f, 0.0f, 0.0f), grain_mass,
+             MatterConstitutiveModel::Granular);
+        MatterGrainCouplingFrame edge;
+        assert(buildMatterGrainLiquidField(liquid, surface_grain, r,
+            static_cast<FluidChemistryPreset>(0), Vec3(0.0f, 0.0f, 0.0f), n, 2 * n, n, h,
+            edge.field, error));
+        prepareMatterGrainCoupling(surface_grain, params, Vec3(0.0f, -9.81f, 0.0f), dt, edge,
+            pool_report);
+        std::printf("surface grain submerged %.3f\n", edge.submerged[0]);
+        assert(edge.submerged[0] > .4f && edge.submerged[0] < .6f);
+    }
     // B5 pressure force from the liquid's own acceleration: liquid at rest
     // (no velocity change over the step) gives exactly Archimedes, -rho V g;
     // liquid accelerating upward at g pushes twice as hard; a changed
