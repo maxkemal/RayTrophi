@@ -128,6 +128,15 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             return false;
         }
         liquid_params.external_forces_preintegrated = true;
+        if (!buffers.matter_runtime) {
+            buffers.matter_runtime = std::make_shared<Fluid::MatterGpuRuntime>();
+        }
+        auto& liquid_runtime = *buffers.matter_runtime;
+        liquid_runtime.frame_pressure_requested = exclude;
+        struct ClearRequest {
+            Fluid::MatterGpuRuntime& runtime;
+            ~ClearRequest() { runtime.frame_pressure_requested = false; }
+        } clear_request{liquid_runtime};
         if (!runMatterGpuStep(state, liquid_params, legacy_granular, dt, compute, buffers,
                 ensure, ledger, error)) {
             error = "grain domain liquid lane: " + error;
@@ -138,9 +147,15 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             const std::size_t cells = state.grid.getCellCount();
             liquid_pressure.resize(cells);
             liquid_mask.resize(cells);
+            // The substep-averaged pressure, not buffers.pressure: that is
+            // only the last substep's, which sees almost no gravity load.
+            if (!liquid_runtime.frame_pressure_valid) {
+                error = "grain domain: liquid lane did not publish its frame pressure";
+                return false;
+            }
             compute->beginTransferBatch();
-            bool read = compute->downloadBuffer(buffers.pressure, liquid_pressure.data(),
-                cells * sizeof(float));
+            bool read = compute->downloadBuffer(liquid_runtime.frame_pressure,
+                liquid_pressure.data(), cells * sizeof(float));
             read = compute->downloadBuffer(buffers.fluid_mask, liquid_mask.data(),
                 cells * sizeof(float)) && read;
             read = compute->endTransferBatch() && read;
