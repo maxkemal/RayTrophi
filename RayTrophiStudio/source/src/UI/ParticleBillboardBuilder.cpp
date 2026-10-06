@@ -159,7 +159,11 @@ void appendFluidSphereProxies(const SceneData& scene,
         for (std::size_t d = 0; d < count; ++d) {
             const auto& desc = domains[d];
             const auto& state = states[d];
-            if (!state.valid ||
+            // Grain domains stay on the CPU bridge: it sizes every carrier by
+            // its own owner (granular -> 2 * grain radius, liquid -> voxel
+            // radius), while this proxy has one radius per domain, and the
+            // resident position stream holds only the liquid lane's subset.
+            if (!state.valid || desc.fluid_params.grain.enabled ||
                 desc.fluid_render_mode != RayTrophiSim::Fluid::FluidRenderMode::Particles ||
                 desc.fluid_particle_geometry_mode != 0 ||
                 d >= system.domain_particle_render_group_ids.size()) {
