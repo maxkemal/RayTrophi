@@ -3,6 +3,7 @@
 #include "../SimulationCompute.h"
 #include "../Vec3.h"
 #include "MatterConstitutive.h"
+#include "FluidParticles.h"
 #include <json.hpp>
 #include <cstddef>
 #include <string>
@@ -113,6 +114,11 @@ struct MatterGrainStepReport {
     // allocation | host_state_changed | first_step | "" (history carried over)
     std::string history_reset_reason;
     bool history_remapped = false;  // order changed; history gathered on device
+    // B4 / H1-C7 transfer accounting for this step (grain path only).
+    bool state_resident = false;    // bank 0 reused, no state upload
+    std::size_t upload_bytes = 0;
+    std::size_t download_bytes = 0;
+    int transfer_batches = 0;       // host<->device synchronisation points
     std::size_t working_set_bytes = 0;
     // Same-domain liquid (transport owner mpm) beside the grains.
     std::size_t grains = 0;
@@ -186,6 +192,10 @@ struct MatterGrainGpuRuntime {
     // is gathered to the new indices on the device (B8).
     std::vector<uint64_t> published_ids;
     std::vector<Vec3> published_positions;
+    // B4: the rest of the published state, to skip re-uploading it.
+    std::vector<Vec3> published_velocities;
+    std::vector<AffineC> published_affines;
+    std::vector<float> published_masses;
     std::size_t capacity = 0;
     std::size_t triangle_capacity = 0;
     uint32_t buckets = 0;

@@ -370,25 +370,6 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         return false;
     }
     std::array<uint32_t, kDiagnosticWords> diagnostics{};
-    compute.beginTransferBatch();
-    bool uploaded = compute.uploadBuffer(runtime.diagnostics, diagnostics.data(), sizeof(diagnostics));
-    uploaded = compute.uploadBuffer(runtime.mass, masses.data(), masses.size() * sizeof(float)) &&
-        uploaded;
-    uploaded = compute.uploadBuffer(runtime.ids, ids.data(), ids.size() * sizeof(uint32_t)) &&
-        uploaded;
-    uploaded = compute.uploadBuffer(runtime.positions, p.position.data(), count * sizeof(Vec3)) &&
-        uploaded;
-    uploaded = compute.uploadBuffer(runtime.velocities, p.velocity.data(), count * sizeof(Vec3)) &&
-        uploaded;
-    uploaded = compute.uploadBuffer(runtime.affines, p.affine.data(), count * sizeof(AffineC)) &&
-        uploaded;
-    uploaded = compute.uploadBuffer(runtime.coupling, coupling_rows.data(),
-        coupling_rows.size() * sizeof(float)) && uploaded;
-    uploaded = compute.endTransferBatch() && uploaded;
-    if (!uploaded) {
-        error = "grain state/mass/identity/coupling upload failed";
-        return false;
-    }
     if (refresh_collider) {
         runtime.collider_uploaded = false;
         if ((!collider.vertices.empty() && !compute.uploadBuffer(runtime.triangles,
@@ -463,6 +444,41 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             remap = remap || found->second != i;
         }
         remap = remap && !runtime.history_fresh;
+    }
+    // B4: when the incoming grains are exactly what this runtime published
+    // (same order, bits, mass), bank 0 already holds them: upload only the
+    // per-frame rows. Any births, reorder, absorption or host edit re-uploads.
+    const bool resident = !runtime.history_fresh && !remap &&
+        runtime.published_ids.size() == count &&
+        std::memcmp(runtime.published_ids.data(), p.particle_id.data(), count * sizeof(uint64_t)) == 0 &&
+        std::memcmp(runtime.published_positions.data(), p.position.data(), count * sizeof(Vec3)) == 0 &&
+        runtime.published_velocities.size() == count &&
+        std::memcmp(runtime.published_velocities.data(), p.velocity.data(), count * sizeof(Vec3)) == 0 &&
+        runtime.published_affines.size() == count &&
+        std::memcmp(runtime.published_affines.data(), p.affine.data(), count * sizeof(AffineC)) == 0 &&
+        runtime.published_masses == masses;
+    std::size_t upload_bytes = sizeof(diagnostics) + coupling_rows.size() * sizeof(float);
+    compute.beginTransferBatch();
+    bool uploaded = compute.uploadBuffer(runtime.diagnostics, diagnostics.data(), sizeof(diagnostics));
+    if (!resident) {
+        uploaded = compute.uploadBuffer(runtime.mass, masses.data(), masses.size() * sizeof(float)) &&
+            uploaded;
+        uploaded = compute.uploadBuffer(runtime.ids, ids.data(), ids.size() * sizeof(uint32_t)) &&
+            uploaded;
+        uploaded = compute.uploadBuffer(runtime.positions, p.position.data(), count * sizeof(Vec3)) &&
+            uploaded;
+        uploaded = compute.uploadBuffer(runtime.velocities, p.velocity.data(), count * sizeof(Vec3)) &&
+            uploaded;
+        uploaded = compute.uploadBuffer(runtime.affines, p.affine.data(), count * sizeof(AffineC)) &&
+            uploaded;
+        upload_bytes += count * (sizeof(float) + sizeof(uint32_t) + 2 * sizeof(Vec3) + sizeof(AffineC));
+    }
+    uploaded = compute.uploadBuffer(runtime.coupling, coupling_rows.data(),
+        coupling_rows.size() * sizeof(float)) && uploaded;
+    uploaded = compute.endTransferBatch() && uploaded;
+    if (!uploaded) {
+        error = "grain state/mass/identity/coupling upload failed";
+        return false;
     }
     // Bridges reach past contact up to the rupture distance; the hash cell
     // grows by that skin so the 27-cell search still finds every bridge.
@@ -581,6 +597,9 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     runtime.history_fresh = false;
     runtime.published_ids = p.particle_id;
     runtime.published_positions = p.position;
+    runtime.published_velocities = p.velocity;
+    runtime.published_affines = p.affine;
+    runtime.published_masses = std::move(masses);
     report.substeps = static_cast<int>(substeps);
     report.dispatches = static_cast<int>(substeps + 2);
     report.substep_dt = dt / substeps;
@@ -593,6 +612,14 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     report.history_reset = history_reset;
     report.history_reset_reason = reset_reason;
     report.history_remapped = remap;  // +2 gather dispatches, outside `dispatches`
+    report.state_resident = resident;
+    report.upload_bytes = upload_bytes + (remap ? count * sizeof(uint32_t) : 0) +
+        (refresh_collider ? collider.vertices.size() * sizeof(Vec3) +
+            collider.nodes.size() * sizeof(MatterGrainBvhNode) +
+            collider.surface_patches.size() * sizeof(uint32_t) : 0);
+    report.download_bytes = count * (2 * sizeof(Vec3) + sizeof(AffineC)) + sizeof(diagnostics) +
+        (coupling && drag_out ? coupling_rows.size() * sizeof(float) : 0);
+    report.transfer_batches = 2 + (remap ? 1 : 0) + (refresh_collider ? 1 : 0);
     report.grains = count;
     report.working_set_bytes = working;
     return true;

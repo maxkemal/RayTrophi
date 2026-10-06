@@ -807,11 +807,21 @@ def main():
             data['settle_gates'] = {'mass_drift_kg': max(masses)-min(masses),
                 'tail_com_range_m': max(com)-min(com), 'tail_rms_range_m': max(rms)-min(rms),
                 'tail_energy_per_grain_j': max(energy)/256}
+            # B4: a settled pile with no births and no liquid is exactly what
+            # the runtime published, so bank 0 must be reused (no state upload).
+            # Never resident = some host stage touches grains every frame.
+            resident = [s['inventory']['grain_diagnostics']['runtime'].get('state_resident')
+                        for s in tail]
+            data['settle_gates']['resident_tail_samples'] = sum(1 for r in resident if r)
+            data['settle_gates']['tail_upload_bytes'] = [
+                s['inventory']['grain_diagnostics']['runtime'].get('upload_bytes') for s in tail]
             data['completed'] = (max(masses)-min(masses) <= 1e-5 and
                                  max(com)-min(com) <= .001 and max(rms)-min(rms) <= .001 and
                                  max(energy)/256 <= 1e-5)
             save()
             assert data['completed'], data['settle_gates']
+            assert data['settle_gates']['resident_tail_samples'] > 0, \
+                ('grain state re-uploaded every frame of a settled pile', data['settle_gates'])
             return
         if args.extended_only:
             # A real transformed flat TriangleMesh, not an analytic test plane.
