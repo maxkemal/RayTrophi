@@ -38,6 +38,9 @@ doldurunca sıvı sayılır (seyrek FLIP havuzu hacmin .65–.85'ini tutar); (b)
 eskiden tam ppc'ye çekip gözenekleri yeniden dolduruyordu (dışlamayı zamanla geri
 alıyordu); (c) `--porous-only` kapısı artık iki kolun **farkı** (havuzun kendi oturma
 kayması +.041 m iki kolda ortak). **Build:** C++ + shader.
+**Üçüncü tur: 6 ve 7 PASS.** Gömülü tane 5.74 (beklenen 6.13, −%6), batma .97–1.0, itki
+Arşimet'in ~%8 üstünde (dışlamanın dinamik basıncı; makul). Kapalı kol 9.81, pour PASS.
+Porous fark .132 m (beklenen .102, +%29). Sıradaki: 8 (`--wet-only`), 9 (`--xpbd-compare`).
 
 0. **Statik sözleşme** `python scripts/test/check_matter_grain_contracts.py` → PASS.
 1. **Açılış/revizyon.** Herhangi bir tane koşusunda `shader revision mismatch` yok. Varsa
