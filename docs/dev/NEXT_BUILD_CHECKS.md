@@ -19,6 +19,16 @@ geçti (Windows/CUDA/SDL başlıkları taklit edilerek — MSVC'ye özgü hatala
 `compile_sim_shaders.bat` (yenileri listeye eklendi). Grain shader revision **10**, push
 constant **112 bayt**, 15 buffer.
 
+**★ Ara düzeltme (2026-10-06, ilk canlı turdan sonra):** `--coexist-only` gömülü tane
+ivmesi 9.43 çıktı (beklenen 6.13): kaldırma kuvveti ≈ %10. Kök neden: liquid lane
+yerçekimini kare başında bir kez uygulayıp kareyi N alt adıma bölüyor; hidrostatik yükü
+ilk alt adımın projeksiyonu taşıyor, tane ise **son** alt adımın (≈0) basıncını okuyordu.
+Artık basınç alt adımlar boyunca `dt/frame_dt` ağırlığıyla GPU'da biriktiriliyor (yeni
+`sim_matter_accumulate.comp`, `MatterGpuRuntime::frame_pressure`). Ayrıca tanesiz liquid
+subset artık granular elastik alt adım sayısını ödemiyor (yalnız CFL) — su+tane karesi
+hızlanmalı. **Build:** C++ + shader (`compile_sim_shaders.bat` yeni kernel'i derler).
+Canlı tur sonuçları: 0, 2, 3, settle PASS; 6'dan devam.
+
 0. **Statik sözleşme** `python scripts/test/check_matter_grain_contracts.py` → PASS.
 1. **Açılış/revizyon.** Herhangi bir tane koşusunda `shader revision mismatch` yok. Varsa
    shader'lar derlenmedi (ya da yalnız eski bat çalıştı).

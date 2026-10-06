@@ -1033,6 +1033,7 @@ private:
             { "sim_matter_occupancy", "sim_matter_occupancy.spv", 6, 40 },
             { "sim_matter_contact", "sim_matter_contact.spv", 19, 16 },
             { "sim_matter_copy", "sim_matter_copy.spv", 2, 4 },
+            { "sim_matter_accumulate", "sim_matter_accumulate.spv", 2, 8 },
             { "sim_matter_clear", "sim_matter_clear.spv", 1, 4 },
             { "sim_matter_pores", "sim_matter_pores.spv", 13, 40 },
             { "sim_matter_zero_faces", "sim_matter_zero_faces.spv", 4, 36 },
