@@ -1,6 +1,6 @@
 # H1 tane yol haritası — tek Matter domain'inde kuru/ıslak granül çözücü
 
-> **Durum:** AKTİF — 2026-10-06. B2–B8 + B9a canlı turlarda geçti (coexist/porous/wet/eğim; XPBD tablosu alındı). Yeni parti B9b (fiziksel parametreler, kilitler, domain paneli) kaynakta, tek build bekliyor (NEXT_BUILD_CHECKS en üst). Açık: madde başına tane malzemesi, H1-G0 16k kararı.
+> **Durum:** AKTİF — 2026-10-06. B2–B8 + B9a canlı turlarda geçti (coexist/porous/wet/eğim; XPBD tablosu alındı). Yeni parti B9b (fiziksel parametreler, kilitler, domain paneli) kaynakta, tek build bekliyor (NEXT_BUILD_CHECKS en üst). H1-G0 kapandı: XPBD söküldü, DEM tek çözücü. B9b canlıda; açık: madde başına tane malzemesi, DEM maliyeti (sönüm sınırı).
 
 Bu belge H1'in (granül çözücü) **parti sırasıdır**: her partinin ne yazdığı, neyi
 ölçerek kapandığı ve kapanmazsa neyi ifade ettiği. Tasarım gerekçesi ve kapı tablosu
@@ -26,7 +26,7 @@ koşturulur; uygulama derlemesi ve canlı IPC testleri kullanıcının makinesin
 | **B3** parçacık başına sahiplik + su–tane bağlama + `--coexist-only` | Kaynak, build yok; bağlama matematiği bulutta C++ ile koşturuldu (PASS) | `scripts/test/matter_grain_coupling_test.cpp` |
 | **B5** hacim dışlama (porous projeksiyon) + basınç kuvveti + `--porous-only` | Kaynak; gözenek ağırlığı ve hidrostatik basınç = Arşimet C++ ile PASS | aynı test |
 | **B6** ıslak tane (emilim/kuruma, Willett köprüsü, doğum ıslaklığı) + `--wet-only` | Kaynak; su bilançosu 7e-9 kg, momentum birebir (C++ PASS) | aynı test |
-| **B7** XPBD adayı + `--xpbd-compare` | İlk canlı tablo alındı; maliyet sütunu eklendi, karar açık | — |
+| **B7** XPBD adayı | **KAPANDI: XPBD söküldü** (16k ölçütünü geçemedi; DEM tek çözücü) | B7 bölümü |
 | **B8** hücre sırası + kimlikle taşınan temas geçmişi (rev 10) | Kaynak; shader doğrulandı | — |
 | **B4** yerleşik durum yeniden kullanımı + transfer sayaçları | Kaynak (ilk adım) | — |
 | **B9a** geçmiş geçersiz kılma + CPU referansı EPSD2 | Kaynak; eğim parity testi C++ PASS (μr=1 kayma 0, μr=0 3.588 m = analitik) | `matter_grain_reference_slope_test.cpp` |
@@ -207,13 +207,36 @@ CPU + 2 yükleme/indirme). B4 bunu GPU'ya taşır.
 > baskın ve gürültülü. **Ölçüt:** 16k tanede, DEM'e %5 içinde yaklaştığı alt adımda XPBD
 > ≥3× ucuz değilse sökülür; ucuzsa yalnız "önizleme (yaklaşık malzeme)" olarak kalır. O
 > ölçüme kadar UI'de yok, yalnız IPC.
+>
+> ★★ **KARAR (2026-10-06, canlı 16k tablosu): XPBD SÖKÜLDÜ.** Yoğun dökülme, 120 adım:
+>
+> | çözücü | alt adım | tane | medyan ms | p95 ms | rms/DEM | ms/DEM |
+> |---|---|---|---|---|---|---|
+> | DEM | 234 | 4096 | 19.88 | 27.07 | 1 | 1 |
+> | DEM | 234 | 16384 | 60.43 | 96.24 | 1 | 1 |
+> | XPBD 20 | 22 | 16384 | 20.87 | 25.48 | .923 | .35 |
+> | XPBD 40 | 42 | 16384 | 25.01 | 27.86 | .909 | .41 |
+> | XPBD 80 | 82 | 16384 | 32.31 | 35.48 | .949 | .53 |
+>
+> Ölçütün iki bacağı da tutmadı: hiçbir XPBD ayarı DEM'e %5 içinde gelmedi (en yakın .949,
+> 80 alt adım) ve o ayarda maliyet DEM'in .53'ü (≥3× ucuz değil). Ucuz ayarda (20) malzeme
+> %8 farklı ve alt adımla değişiyor (256 tanede rms kayması %15) — yani "önizleme"de görülen
+> son render'da görülen olmaz; profesyonel üretimde bu kabul edilemez. Serbest düşüş de
+> XPBD'de 9.97 (DEM 9.81). Söken commit: shader rev 14, `solver_kind`/`xpbd_substeps`
+> reddedilir, eski sahnelerde yüklenirken atılır; `--xpbd-compare` ve CPU kopyası silindi.
+>
+> **Tablonun asıl öğrettiği:** DEM'in maliyeti fizikten değil, **sönüm CFL sınırından**
+> geliyor (`substep_limit: damping`, 234 alt adım). Bu sınır 24 temas bütçesinin hepsinin
+> aynı anda sönümlediğini varsayıyor (ölçülen en fazla 9–10). DEM'i ucuzlatmanın yolu
+> XPBD değil, bu sınırı gerçekçi yapmak (ölçülen temas sayısı ya da sönümü örtük
+> entegrasyon) — sıradaki maliyet işi bu.
 
 - **Kod:** aynı runtime içinde (aynı kova hash, aynı collider BVH, aynı sahiplik) XPBD temas
   adayı: pozisyon kısıtı + sürtünme kısıtı + açısal güncelleme (spin için ayrıca tasarlanır;
   PBD nokta teması spin üretmez). Ayar `grain_solver_kind = dem | xpbd`.
 - **Karşılaştırma:** repose açısı, runout mesafesi, dt/iterasyon duyarlılığı, enerji
   sönümü, 16k/64k/100k maliyet — aynı sahne, aynı tane sayısı, aynı GPU.
-- **Karar kaydı:** kazanan varsayılan olur, kaybeden **sökülür** (CLAUDE.md §5).
+- **Karar kaydı:** kazanan varsayılan olur, kaybeden **sökülür** (CLAUDE.md §5). → DEM kazandı.
 - **Sinsi risk:** XPBD'nin iterasyonla "sertleşmesi" — CLAUDE.md teşhis dersi: yakınsadıkça
   sertleşen belirti fizik değildir; iterasyon taraması zorunlu.
 

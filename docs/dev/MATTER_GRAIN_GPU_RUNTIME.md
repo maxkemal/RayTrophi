@@ -255,7 +255,7 @@ akışkan taşıyıcıyı görünce bütün adımı reddediyordu). Artık taşı
 | B9a | Cihaz geçmişi yalnız yayımlandığı durum için geçerli; CPU referansı EPSD2 | MatterGrainGpu.cpp, GranularContact.cpp, GranularReference.cpp |
 | B5 | Gözenek ağırlıkları + tane hızı → `sim_fluid_divergence_porous`; basınç kuvveti −Vρ∇p | MatterGrainCoupling.cpp, FluidGpuPressure.inl, MatterGrainStep.inl |
 | B6 | Tane suyu (emilim/kuruma/doğum), Willett köprüsü, Bond ölçeği | MatterGrainCoupling.cpp, sim_matter_grain.glsl, MatterDomainSources.inl |
-| B7 | `solver_kind = xpbd` küçük adımlı aday | sim_matter_grain.glsl, MatterGrainGpu.cpp |
+| B7 | `solver_kind = xpbd` küçük adımlı aday — **2026-10-06 söküldü** (H1-G0, roadmap B7) | — |
 | B8 | Morton hücre sırası; geçmiş kimlikle GPU'da taşınır | sim_matter_grain_permute{,_copy}.comp, MatterGrainCoupling.cpp |
 | B4 | Yerleşik bank 0 yeniden kullanımı; transfer sayaçları | MatterGrainGpu.cpp |
 
@@ -263,6 +263,6 @@ ABI: shader revision 10, push constant 112 bayt (`wet`: hücre boyu, kılcal ön
 sınırı, çözücü türü), 15 buffer; bağlama satırı 2'nin w bileşeni köprü suyu hacmi.
 Yeni ayarlar: `volume_exclusion`, `wet_grains`, `water_capacity_fraction`,
 `absorption_rate_per_s`, `drying_rate_per_s`, `surface_tension_n_m`, `contact_angle_deg`,
-`represented_grain_radius_m`, `birth_saturation`, `solver_kind`, `xpbd_substeps` — panel,
+`represented_grain_radius_m`, `birth_saturation` (`solver_kind`, `xpbd_substeps` XPBD ile söküldü) — panel,
 IPC, Python, kayıt, descriptor. Yeni test kolları: `--history-only`, `--porous-only`,
-`--wet-only`, `--xpbd-compare`. Kabul sırası NEXT_BUILD_CHECKS en üst.
+`--wet-only`. Kabul sırası NEXT_BUILD_CHECKS en üst.

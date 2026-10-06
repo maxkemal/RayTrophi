@@ -315,14 +315,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     const std::array<std::pair<double, const char*>, 4> bounds{{
         {accuracy_dt, "accuracy"}, {stability_dt, "stability"},
         {damping_dt, "damping"}, {travel_dt, "travel"}}};
-    const bool xpbd = params.solver_kind == "xpbd";
-    // XPBD is unconditionally stable in stiffness; only travel and its own
-    // substep floor bound it.
-    const double xpbd_dt = dt / params.xpbd_substeps;
-    const std::pair<double, const char*> xpbd_bound = travel_dt < xpbd_dt
-        ? std::pair<double, const char*>{travel_dt, "travel"}
-        : std::pair<double, const char*>{xpbd_dt, "xpbd_substeps"};
-    const auto& limiting = xpbd ? xpbd_bound : *std::min_element(bounds.begin(), bounds.end(),
+    const auto& limiting = *std::min_element(bounds.begin(), bounds.end(),
         [](const auto& a, const auto& b) { return a.first < b.first; });
     const double requested = std::ceil(dt / limiting.first - 1e-9);
     if (!std::isfinite(requested) || requested > params.max_substeps) {
@@ -489,13 +482,11 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     }
     // Bridges reach past contact up to the rupture distance; the hash cell
     // grows by that skin so the 27-cell search still finds every bridge.
-    // XPBD pairs are found on predicted positions, up to .1 r travel each.
     const float rupture_cap = params.wet_grains ? .5f * params.radius_m : 0.0f;
-    const float skin = std::max(rupture_cap, xpbd ? .2f * params.radius_m : 0.0f);
-    constants.wet[0] = 2.0f * params.radius_m + skin;
+    constants.wet[0] = 2.0f * params.radius_m + rupture_cap;
     constants.wet[1] = static_cast<float>(capillary);
     constants.wet[2] = rupture_cap;
-    constants.wet[3] = xpbd ? 1.0f : 0.0f;
+    constants.wet[3] = 0.0f;
     constants.reset_history = runtime.history_fresh ? 1u : 0u;
     constants.last_substep = substeps - 1;
     const bool history_reset = runtime.history_fresh;
@@ -611,7 +602,6 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     report.dispatches = static_cast<int>(substeps + 2);
     report.substep_dt = dt / substeps;
     report.limit = limiting.second;
-    report.solver_kind = params.solver_kind;
     report.max_contacts = diagnostics[2];
     report.sticking_contacts = diagnostics[3];
     report.contacts = diagnostics[4];

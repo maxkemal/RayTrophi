@@ -39,9 +39,8 @@ layout(push_constant) uniform Constants {
     vec4 step_contact; // dt, normal damping, sliding damping, friction
     vec4 rolling; // rolling coefficient, gravity xyz
     uvec4 substep; // index, reset history, tangential stiffness bits, last index
-    // Hash cell size (2r + skin: bridge rupture cap, XPBD prediction margin),
-    // capillary prefactor 2 pi gamma cos(theta) x cohesion scale, rupture cap
-    // (m), solver kind (0 DEM, 1 XPBD).
+    // Hash cell size (2r + bridge rupture cap), capillary prefactor
+    // 2 pi gamma cos(theta) x cohesion scale, rupture cap (m), unused.
     vec4 wet;
 } pc;
 
@@ -54,7 +53,7 @@ const uint BUCKET = 16u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 13u;
+const uint REVISION = 14u;
 
 uint readBank() { return pc.substep.x & 1u; }
 uint writeBank() { return readBank() ^ 1u; }
@@ -188,60 +187,6 @@ void bridge(uint i, uint j, float d, vec3 n, float r, inout vec3 force) {
     ++g_bridges;
 }
 
-// ---- XPBD candidate (grain_solver_kind = xpbd, H1-G0 comparison) --------
-// Small-steps XPBD (Macklin et al. 2019): one Jacobi projection per substep
-// on predicted positions, compliance alpha = 1/k (same material stiffness as
-// the DEM), positional Coulomb friction (static while the tangential
-// correction fits inside mu * normal correction) acting through the contact
-// arm, so friction spins grains as in the DEM. Normal contact is fully
-// inelastic; rolling resistance caps the spin change by mu_r * lambda * R.
-// Neighbour predictions use gravity + buoyancy only (their drag lump is
-// being written concurrently).
-vec3 g_dx = vec3(0.0), g_dtheta = vec3(0.0);
-float g_normal_sum = 0.0, g_alpha = 0.0;
-uint g_constraints = 0u;
-
-vec3 predicted(uint j, uint bank) {
-    float dt = pc.step_contact.x;
-    return position(j,bank)+dt*(velocity(j,bank)+dt*(pc.rolling.yzw+coupling[3u*j+1u].xyz));
-}
-
-void xpbdConstraint(vec3 n, float penetration, vec3 motion, float wi, float wj,
-                    vec3 arm, float ii) {
-    if (penetration <= 0.0) return;
-    ++g_contacts;
-    ++g_constraints;
-    float lambda = penetration/(wi+wj+g_alpha);
-    g_dx += wi*lambda*n;
-    g_normal_sum += lambda;
-    vec3 slip = motion-dot(motion,n)*n;
-    float s = length(slip);
-    if (s <= 1e-12) return;
-    // Friction as translation while the rolling resistance can carry its
-    // torque: the full-stop translational correction, capped by the sliding
-    // cone, is F; if F <= mu_r * lambda the contact neither rolls (torque
-    // F r fits inside mu_r lambda r) nor needs rotation, so the grain sticks
-    // (F below the cone) or slides without spinning. Routing it through the
-    // 3.5/m rolling inverse mass instead stopped only the contact point; the
-    // spin cap then removed the spin but not the centre's motion, and a grain
-    // held on a slope crept at 2.5 h g sin(theta) forever (live: 3.3 mm/s).
-    float translate = wi+wj;
-    float cone = pc.step_contact.w*lambda;
-    float force = min(s/translate, cone);
-    if (force <= pc.rolling.x*lambda) {
-        if (s/translate <= cone) ++g_sticking;
-        g_dx -= wi*slip*(force/s);
-        return;
-    }
-    // Rolls: tangential generalized inverse mass of a sphere 1/m + r^2/I.
-    float wt = 3.5*(wi+wj);
-    float limit = cone;
-    vec3 correction = s/wt <= limit ? slip/wt : slip*(limit/s);
-    if (s/wt <= limit) ++g_sticking;
-    g_dx -= wi*correction;
-    g_dtheta -= ii*cross(arm,correction);
-}
-
 void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
              vec3 spin, float inv_inertia, float other_inv_inertia,
              float effective_radius, float inverse_tangent_mass,
@@ -357,10 +302,6 @@ void main() {
     vec3 p = position(i,bank), v = velocity(i,bank), w = omega(i,bank);
     float r = pc.low_radius.w, im = 1.0/masses[i], ii = 2.5*im/(r*r);
     vec3 f = vec3(0.0), t = vec3(0.0);
-    bool xpbd = pc.wet.w > .5;
-    float h = pc.step_contact.x;
-    vec3 own_pred = p+h*(v+h*(pc.rolling.yzw+coupling[3u*i+1u].xyz));
-    g_alpha = 1.0/(pc.high_stiffness.w*h*h);
     ivec3 own = cell(p);
     for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
         ivec3 wanted = own+ivec3(x,y,z);
@@ -373,17 +314,7 @@ void main() {
                 vec3 separation = p-pj;
                 float d = length(separation);
                 if (d < 2.0*r+pc.wet.z && d > 1e-9) bridge(i,j,d,separation/d,r,f);
-                if (xpbd) {
-                    vec3 pred_j = predicted(j,bank);
-                    vec3 gap = own_pred-pred_j;
-                    float dp = length(gap);
-                    if (dp < 2.0*r) {
-                        vec3 n = dp > 1e-9 ? gap/dp : vec3(i<j ? -1.0 : 1.0,0,0);
-                        vec3 motion = (own_pred-p)-(pred_j-pj)+
-                            h*(cross(w,-n*r)-cross(omega(j,bank),n*r));
-                        xpbdConstraint(n,2.0*r-dp,motion,im,1.0/masses[j],-n*r,ii);
-                    }
-                } else if (d < 2.0*r) {
+                if (d < 2.0*r) {
                     vec3 n = d > 1e-9 ? separation/d : vec3(i<j ? -1.0 : 1.0,0,0);
                     vec3 arm = -n*(.5*d);
                     vec3 wj = omega(j,bank);
@@ -400,13 +331,8 @@ void main() {
         vec3 n = vec3(0.0); n[axis] = side == 0 ? 1.0 : -1.0;
         float distance = side == 0 ? p[axis]-pc.low_radius[axis] : pc.high_stiffness[axis]-p[axis];
         vec3 arm = -n*r;
-        if (xpbd) {
-            float predicted_distance = distance+dot(own_pred-p,n);
-            xpbdConstraint(n,r-predicted_distance,(own_pred-p)+h*cross(w,arm),im,0.0,arm,ii);
-        } else {
-            contact(i,WALL_KEY|uint(2*axis+side),n,r-distance,arm,v+cross(w,arm),w,ii,0.0,r,
-                im+r*r*ii,im,f,t);
-        }
+        contact(i,WALL_KEY|uint(2*axis+side),n,r-distance,arm,v+cross(w,arm),w,ii,0.0,r,
+            im+r*r*ii,im,f,t);
     }
     // Balanced BVH, up to four independent support features. Connected
     // coplanar triangles share one patch; a common edge/vertex is not doubled.
@@ -482,16 +408,10 @@ void main() {
     }
     for (uint m=0u; m<manifold_count; ++m) {
         vec3 n = manifold_n[m], arm = -n*r;
-        if (xpbd) {
-            float predicted_distance = manifold_d[m]+dot(own_pred-p,n);
-            xpbdConstraint(n,r-predicted_distance,(own_pred-p)+h*cross(w,arm),im,0.0,arm,ii);
-        } else {
-            contact(i,manifold_key[m],n,r-manifold_d[m],arm,v+cross(w,arm),w,ii,0.0,r,
-                im+r*r*ii,im,f,t);
-        }
+        contact(i,manifold_key[m],n,r-manifold_d[m],arm,v+cross(w,arm),w,ii,0.0,r,
+            im+r*r*ii,im,f,t);
     }
-    // The contact budget sizes DEM spring history; XPBD keeps none.
-    if (!xpbd && g_contacts > SLOTS) atomicOr(diagnostics[0],1u);
+    if (g_contacts > SLOTS) atomicOr(diagnostics[0],1u);
     uint dst = writeBank();
     if (g_written < SLOTS) history[slotBase(dst,i)+2u*g_written] = uvec4(EMPTY);
     history_owner[dst*pc.meta.x+i] = ids[i];
@@ -505,22 +425,7 @@ void main() {
     float dt = pc.step_contact.x;
     vec4 drag = coupling[3u*i];
     vec4 lift = coupling[3u*i+1u];
-    if (xpbd) {
-        // Jacobi averaging with over-relaxation 1.5 (Macklin 2014).
-        float relax = g_constraints > 1u ? min(1.0,1.5/float(g_constraints)) : 1.0;
-        // Bridges act as external forces on the prediction.
-        vec3 x_new = own_pred+dt*dt*f*im+relax*g_dx;
-        v = (x_new-p)/dt;
-        w += relax*g_dtheta/dt;
-        float spin = length(w);
-        float cap = pc.rolling.x*g_normal_sum*r*ii/dt;
-        if (spin > 0.0 && cap > 0.0) w *= max(0.0,1.0-cap/spin);
-        f = vec3(0.0);
-        t = vec3(0.0);
-        p = x_new-dt*v;  // the shared update below adds dt*v back
-    } else {
-        v += dt*(f*im+pc.rolling.yzw+lift.xyz);
-    }
+    v += dt*(f*im+pc.rolling.yzw+lift.xyz);
     if (drag.w > 0.0 && lift.w > 0.0) {
         // Implicit drag pair: grain (m) and its private liquid lump (M).
         // The relative velocity decays by 1/(1 + dt beta (1/m + 1/M)) and

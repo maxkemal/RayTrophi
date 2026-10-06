@@ -46,6 +46,9 @@ CHANGES = {
     'Normal damping (Ns/m)': 'Restitution',
     'Liquid viscosity for drag (Pa s)':
         'removed: drag uses the liquid substance viscosity (one physical value, one home)',
+    # 2026-10-06 H1-G0: XPBD failed the 16k accuracy/cost gate, DEM is the only solver.
+    'Solver (comparison)': 'removed: XPBD removed (H1-G0), DEM is the only grain solver',
+    'XPBD substeps per frame': 'removed: XPBD removed (H1-G0)',
 }
 
 
