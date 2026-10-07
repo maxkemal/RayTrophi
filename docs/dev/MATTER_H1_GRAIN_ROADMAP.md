@@ -22,7 +22,7 @@ koşturulur; uygulama derlemesi ve canlı IPC testleri kullanıcının makinesin
 | Fused alt adım (1 dispatch/alt adım), 24-temas CFL, Cundall–Strack + EPSD2, tane kütlesi | CANLI PASS | `matter_h1_grain_fused_*_2026-10-06.json` |
 | Yoğun maliyet 1024/4096/16384 | 25.5/24.4/41.1 ms (eski 173.6/213.8/272.2) | `matter_h1_dense_grain_fused_2026-10-06.json` |
 | Diğer Vulkan çözücüleri (descriptor yeniden kullanımı) | G2 PASS | `matter_g2_dry_wet_after_descriptor_reuse*` |
-| **B2** kova komşuluğu (rev 6) + `grain_diagnostics.pile` + `--repose-only` | Kaynak, build yok | NEXT_BUILD_CHECKS |
+| **B2** kova komşuluğu (rev 6) + `grain_diagnostics.pile` + `--repose-only` | **CANLI PASS** 2026-10-07 (kum e .5): μr .05/.1/.3 → 18.2/23.1/34.8°, r .0175 → 24.4°; e .87 test malzemesi tanelerin %97'sini saçıyordu (profil artık saçılanı ayırıyor) | NEXT_BUILD_CHECKS |
 | **B3** parçacık başına sahiplik + su–tane bağlama + `--coexist-only` | Kaynak, build yok; bağlama matematiği bulutta C++ ile koşturuldu (PASS) | `scripts/test/matter_grain_coupling_test.cpp` |
 | **B5** hacim dışlama (porous projeksiyon) + basınç kuvveti + `--porous-only` | Kaynak; gözenek ağırlığı ve hidrostatik basınç = Arşimet C++ ile PASS | aynı test |
 | **B6** ıslak tane (emilim/kuruma, Willett köprüsü, doğum ıslaklığı) + `--wet-only` | Kaynak; su bilançosu 7e-9 kg, momentum birebir (C++ PASS) | aynı test |

@@ -714,26 +714,56 @@ def main():
             data['completed'] = True
             return
         if args.convergence_only:
-            # The old 60/120 Hz pile compared runs with the SAME substep dt.
-            # Halving the substep itself is the convergence measurement.
-            arms = []
-            for resolution in (24, 48):
+            # Halving the substep itself is the convergence measurement, on sand
+            # (e .5). The old arms used e .96 so that the accuracy bound would
+            # bind; 64 grains still bouncing after .6 s made the COM snapshot
+            # chaotic (6.7% live), not a convergence figure. At e .5 the explicit
+            # damping bound (7.3e-5 s at k 2e4, no sliding damping) binds unless
+            # the accuracy bound is below it: resolutions 100 / 200 give 6.6e-5 /
+            # 3.3e-5 s, both accuracy-bound.
+            resolutions = (100, 200)
+            data['convergence'] = {'rebound': {}, 'pile': []}
+
+            def configure(resolution):
                 call('timeline.set_frame', frame=0)
                 call('fluid.reset')
-                # Cn=Cs=1 loosens the damping bound (4.0e-4 s) so the accuracy
-                # bound (2.7e-4 / 1.4e-4 s) is the one being halved. With the
-                # default profile damping binds and both arms run identical
-                # substeps: a 0.0 difference that measures nothing.
                 call('fluid.set_grain_settings', domain=DOMAIN, contact_resolution=resolution,
-                     max_substeps=4096, restitution=restitution_of(1., 20000.), sliding_damping_n_s_m=1.)
+                     max_substeps=4096, stiffness_n_m=20000., restitution=.5,
+                     sliding_damping_n_s_m=0.)
+
+            # 1. One grain dropped on the floor: rebound height gives the
+            # restitution the contact really produces (y0 - r fall, apex - r rise).
+            rebound = {}
+            for resolution in resolutions:
+                configure(resolution)
+                y0 = .2
+                call('flow_source.update', name=SOURCE, position=[0, y0, 0], radius=.0001,
+                     velocity=[0, 0, 0], max_emitted_particles=1, end_time=.05, enabled=True)
+                ys = []
+                for step in range(1, 271):
+                    call('fluid.step', dt=1/600)
+                    g = call('fluid.matter_models', domain=DOMAIN)['acceptance_metrics']['granular']
+                    ys.append(g['dry_center_of_mass'][1])
+                bottom = min(range(len(ys)), key=lambda n: ys[n])
+                apex = max(ys[bottom:])
+                e = math.sqrt(max(apex-.025, 0.)/(y0-.025))
+                rebound[resolution] = e
+                data['convergence']['rebound'][str(resolution)] = {'e': e, 'apex_m': apex,
+                                                                    'contact_y_m': ys[bottom]}
+                save()
+                print('convergence rebound resolution', resolution, 'e', e, flush=True)
+            # 2. A 64-grain pile, compared at rest (1 s).
+            arms = []
+            for resolution in resolutions:
+                configure(resolution)
                 call('flow_source.update', name=SOURCE, position=[0, .25, 0], radius=.16,
                      velocity=[0, -.2, 0], max_emitted_particles=64,
                      fluid_particles_per_second=64*1.01*60, enabled=True, end_time=2/60)
                 control = call('sim.control_state')
                 arm = {'contact_resolution': resolution, 'samples': []}
                 arms.append(arm)
-                data['convergence'] = arms
-                for step in range(1, 37):
+                data['convergence']['pile'] = arms
+                for step in range(1, 61):
                     call('fluid.step', dt=1/60)
                     assert call('sim.control_state') == control
                     inventory = call('fluid.matter_models', domain=DOMAIN)
@@ -745,7 +775,8 @@ def main():
                 save()
                 print('convergence', resolution, arm['samples'][-1]['runtime'], flush=True)
             a, b = [arm['samples'][-1] for arm in arms]
-            assert a['runtime']['substep_limit'] == b['runtime']['substep_limit'] == 'accuracy',                 ('convergence arm is not halving the accuracy bound', a['runtime'], b['runtime'])
+            assert a['runtime']['substep_limit'] == b['runtime']['substep_limit'] == 'accuracy', \
+                ('convergence arm is not halving the accuracy bound', a['runtime'], b['runtime'])
             assert b['runtime']['substeps'] >= 1.8*a['runtime']['substeps'], (a['runtime'], b['runtime'])
             ga, gb = a['granular'], b['granular']
             data['convergence_com_relative'] = abs(ga['dry_center_of_mass'][1]-gb['dry_center_of_mass'][1]) / max(
@@ -753,10 +784,14 @@ def main():
             data['convergence_rms_relative'] = abs(ga['horizontal_rms_radius_m']-gb['horizontal_rms_radius_m']) / max(
                 gb['horizontal_rms_radius_m'], .025)
             save()
-            print('convergence COM/RMS relative', data['convergence_com_relative'],
-                  data['convergence_rms_relative'], flush=True)
+            e1, e2 = (rebound[r] for r in resolutions)
+            print('convergence rebound e', e1, e2, 'target .5; pile COM/RMS relative',
+                  data['convergence_com_relative'], data['convergence_rms_relative'], flush=True)
+            assert abs(e1-e2) <= .02, ('rebound restitution changes when the substep halves', e1, e2)
+            assert abs(e2-.5) <= .05, ('wall contact does not produce the authored restitution', e2)
             assert data['convergence_com_relative'] <= .05, 'pile COM changes >5% when substep halves'
             assert data['convergence_rms_relative'] <= .05, 'pile spread changes >5% when substep halves'
+            print('PASS convergence', flush=True)
             data['completed'] = True
             return
         if args.settle_only:
