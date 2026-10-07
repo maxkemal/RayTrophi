@@ -144,6 +144,10 @@ def main():
     assert 'json.erase("normal_damping_n_s_m")' in params_src
     coupling_src = read('src/Physics/Fluid/MatterGrainCoupling.cpp')
     assert 'liquid_kinematic_viscosity' in coupling_src and 'viscous_mass / liquid_mass' in coupling_src
+    # 2026-10-07: with volume exclusion the pressure force reaches the liquid
+    # through the porous projection only; also kicking the liquid with it fed
+    # back through the next frame's measured acceleration (50 m/s parcels).
+    assert 'pressure_in_projection ? drag[g].drag_impulse' in coupling_src
     shader_src = read('shaders/sim_matter_grain.glsl')
     assert 'float cn = 2.0*pc.step_contact.y*sqrt(k/inverse_normal_mass);' in shader_src
     assert 'im+jm,f,t);' in shader_src and shader_src.count('im,f,t);') == 2

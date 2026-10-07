@@ -1,3 +1,34 @@
+# Sıradaki kullanıcı build (YALNIZ C++): kum–su basınç geri beslemesi söküldü
+
+**Ölçüm (`rt_grain_float_probe.py --compare --frames 120`, 24 fps, ikisi de 0. kareden):**
+
+| | toplam ms | sıvı alt adım | maks m/s | p99 m/s |
+|---|---|---|---|---|
+| etkileşim açık | 420.99 | 68 | 50.44 | 7.51 |
+| etkileşim kapalı | 146.73 | 12 | 7.92 | 7.08 |
+
+**Sebep:** volume exclusion açıkken tanenin basınç kuvveti sıvının ölçülen ivmesinden geliyor
+(ρV(Du/Dt − g)) ve tepkisi sıvıya darbe olarak da veriliyordu. Ama taneler poröz projeksiyonda
+zaten engel; projeksiyon darbeyi geri alıyor, sonraki kare bunu sıvı ivmesi diye ölçüyor ve kuvvet
+hücredeki tane/sıvı hacim oranıyla büyüyor. Kum hücrenin sıvıdan fazlasını doldurunca (paketleme .6
+> gözenek .4) sınırsız: 50 m/s uç parseller → 68 alt adım → 3× maliyet. Aynı döngü taneye büyük
+yukarı kuvvet verir: **dalga üzerinde kalan kum topaklarının da muhtemel sebebi.**
+**Düzeltme:** volume exclusion açıkken sıvıya yalnız sürükleme darbesi döner; basınç tepkisi
+projeksiyonda (çift sayım yok). Hidrostatik kipte (exclusion kapalı) değişiklik yok.
+
+Sıra:
+1. `python scripts/test/check_matter_grain_contracts.py` → PASS.
+2. Aynı sahne: `python scripts/test/rt_grain_float_probe.py --compare --frames 120`.
+   Görmen gereken: coupled satırında maks m/s ≈ p99'un ~1–2 katı (≈8–15), sıvı alt adım 68 → ~12–20,
+   toplam ms uncoupled'a yakın (~150–200). Hâlâ 50 m/s ise sebep başka (sürükleme tepkisi) — getir.
+3. Gözle: kum suya düşünce batmalı/çökelmeli, dalga sırtında topak kalmamalı.
+   ★ Sinsi: kum hiç batmıyor ama "sakin" görünüyorsa sürükleme baskın — `rt_grain_float_probe.py`
+   (parametresiz) üç kolunu koş.
+4. `python scripts/test/rt_h1_grain_suite.py --only coexist coexist_hydrostatic porous wet` → PASS.
+   coexist ivmesi eklenen kütle kapsamı düşebilir (gate [4.90, 6.31] içinde kalmalı); FAIL ise getir.
+
+---
+
 # Sıradaki kullanıcı build (YALNIZ C++): tane adımının CPU maliyeti — önce ölç
 
 Kullanıcı gözlemi: GPU tane adımı sırasında CPU kullanımı periyodik inip çıkıyor. Kodda CPU her
