@@ -69,7 +69,7 @@ def main():
     assert 'BUDGET*dt*inverse_pair_inertia' in shader
     assert 'twist_limit' in shader and 'twist_torque*n' in shader
     assert '(!params.wet_grains && water != 0.0f)' in gpu
-    assert gpu.index('if (!ok || overflow)') < gpu.index('p = std::move(result)')
+    assert gpu.index('if (!ok || overflow)') < gpu.index('p.position = std::move(new_position);')
     geometry = read('src/Physics/Fluid/MatterGrainGeometry.cpp')
     assert 'TriangleMesh*' in geometry and 'get_attribute_data<Vec3>' in geometry
     assert 'shared_ptr<Triangle>' not in geometry and 'dynamic_cast<const Triangle*' not in geometry
@@ -155,7 +155,7 @@ def main():
     # B9a: device history is valid only for the state it was published with.
     assert 'std::memcmp(&was, &p.position[i], sizeof(Vec3)) != 0' in gpu
     assert gpu.index('reset_reason = "host_state_changed";') < gpu.index('const bool history_reset = runtime.history_fresh;')
-    assert gpu.index('p = std::move(result);') < gpu.index('runtime.published_positions = p.position;')
+    assert gpu.index('p.position = std::move(new_position);') < gpu.index('runtime.published_positions = p.position;')
     # B8: history follows identity across any order; grains sorted by cell.
     assert gpu.index('"sim_matter_grain_permute", "sim_matter_grain_permute_copy"') < gpu.index('if (!dispatchMatterGrainStages(')
     assert 'GRAIN_PERMUTE_COPY' in read('shaders/sim_matter_grain_permute_copy.comp')
