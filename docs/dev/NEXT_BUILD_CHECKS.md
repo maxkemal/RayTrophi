@@ -11,8 +11,17 @@ Bu parti **ölçer** ve en bariz israfı söker:
 - Yayında tüm `FluidParticles`'ın kare başına kopyası (`auto result = p`) kaldırıldı: yalnız
   GPU'nun sahip olduğu 3 dizi indirilir ve taşınır.
 
+**Ek (kullanıcı bildirimi):** yarıçap küçültülünce taneler doğduğu yerde kalıyor. Sebep: kütle
+r³ ile düşer, sertlik N/m sabit kalır → alt adım ~r^1.5 kısalır (r .025→.01: ~196→~770 alt adım
+> max_substeps 512) → adım tutulur, taneler donar; sebep yalnız gri bir satırdaydı. Şimdi:
+Solvers'ta "Step held - grains do not move: …" normal renkte; CFL hata metni gereken alt adımı ve
+sığan sertliği sayıyla verir ("Lower Contact stiffness to <= X N/m"); yarıçap tooltip'i ilişkiyi
+anlatır. Kalıcı çözüm açık iş: örtüşmeden türetilen sertlik (yarıçap değişince kendiliğinden doğru).
+
 **Build:** yalnız C++.
 
+0. Yarıçapı .01'e indir, reset, oynat: Solvers'ta held satırı ve önerilen sertlik görünmeli; o
+   sertliği gir → taneler düşmeli.
 1. `python scripts/test/rt_h1_grain_suite.py --only dense` → tablonun yeni sütunlarını getir.
    Okuma: `gpu_wait` büyükse GPU (ya da senkron bekleme) baskın; `order`/`merge`/`prepare`
    büyükse CPU kopyaları/sıralama — sıradaki adım onları söker (sıralamayı GPU'ya taşımak,

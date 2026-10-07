@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <initializer_list>
 #include <limits>
@@ -332,8 +333,19 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         [](const auto& a, const auto& b) { return a.first < b.first; });
     const double requested = std::ceil(dt / limiting.first - 1e-9);
     if (!std::isfinite(requested) || requested > params.max_substeps) {
-        error = std::string("grain ") + limiting.second +
-            " CFL exceeds max_substeps; reduce dt or stiffness";
+        // Say what fits. Stability and accuracy substeps scale with sqrt(k):
+        // the stiffness that fits the cap is k (cap / needed)^2. A smaller
+        // radius at the same N/m is a stiffer material for a lighter grain
+        // (mass ~ r^3), which is the usual way to get here.
+        const double ratio = std::isfinite(requested) ? params.max_substeps / requested : 0.0;
+        char text[320];
+        std::snprintf(text, sizeof(text),
+            "grain %s bound needs %.0f substeps per frame > max_substeps %d at radius %.4f m. "
+            "Lower Contact stiffness to <= %.0f N/m, or raise the substep limit.",
+            limiting.second, requested, params.max_substeps, params.radius_m,
+            std::strcmp(limiting.second, "travel") == 0 ? params.stiffness_n_m
+                : params.stiffness_n_m * ratio * ratio);
+        error = text;
         return false;
     }
     // Even: the ping-pong must end in the bank 0 buffers.
