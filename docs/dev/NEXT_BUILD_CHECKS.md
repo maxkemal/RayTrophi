@@ -6,6 +6,10 @@
 |---|---|---|---|---|
 | etkileşim açık | 420.99 | 68 | 50.44 | 7.51 |
 | etkileşim kapalı | 146.73 | 12 | 7.92 | 7.08 |
+| **düzeltme sonrası** açık | 164.12 | 11 | 7.73 | 7.02 |
+| düzeltme sonrası kapalı | 140.55 | 12 | 7.90 | 7.07 |
+
+✅ Madde 2 canlı PASS (2026-10-07): uç hızlar kalktı, etkileşimin ek maliyeti ~24 ms (%17).
 
 **Sebep:** volume exclusion açıkken tanenin basınç kuvveti sıvının ölçülen ivmesinden geliyor
 (ρV(Du/Dt − g)) ve tepkisi sıvıya darbe olarak da veriliyordu. Ama taneler poröz projeksiyonda
