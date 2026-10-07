@@ -104,7 +104,11 @@ def main():
             stats = call('fluid.step_stats', domain=domain)
             inv = call('fluid.matter_models', domain=domain)
             runtime = ((inv.get('grain_diagnostics') or {}).get('runtime')) or {}
+            liquid = ((inv.get('grain_diagnostics') or {}).get('liquid')) or {}
             frames.append({'stats': stats, 'host_ms': runtime.get('host_ms', {}),
+                           'liquid_speed_max': liquid.get('speed_max_m_s'),
+                           'liquid_speed_p99': liquid.get('speed_p99_m_s'),
+                           'liquid_substeps': liquid.get('liquid_substeps'),
                            'substeps': runtime.get('substeps'), 'limit': runtime.get('substep_limit'),
                            'grains': inv['acceptance_metrics']['granular'].get('particles'),
                            'held': inv['mixed_execution']['step_held']})
@@ -128,6 +132,9 @@ def main():
               f"particles {tail[-1]['stats'].get('particle_count')}, grain substeps {tail[-1]['substeps']} "
               f"({tail[-1]['limit']})")
         print(f"step total (median)          {total:8.2f} ms")
+        lq = lambda k: med([f[k] for f in tail if isinstance(f.get(k), (int, float))])
+        print(f"  liquid substeps {lq('liquid_substeps'):.0f}, parcel speed max {lq('liquid_speed_max'):.2f} m/s, "
+              f"p99 {lq('liquid_speed_p99'):.2f} m/s (CFL follows the max)")
         for key in ('p2g_ms', 'pressure_ms', 'g2p_ms', 'advect_ms', 'density_ms'):
             print(f"  liquid {key:<20} {stat(key):8.2f} ms")
         for key in ('order', 'coupling', 'prepare', 'gpu_wait', 'publish', 'merge'):

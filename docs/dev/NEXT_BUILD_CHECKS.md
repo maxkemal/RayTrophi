@@ -52,6 +52,12 @@ değdiği yüzler/hücreler değişir ve yedeklenir (sonuç aynı: C++ testi + s
 bit-bit eşitliği PASS). Beklenen: bağlama 10 ms → ~1 ms. 26.75 MB yükleme ve 33 senkron sıvı
 şeridinin ızgara yükleme yolunda — sıradaki iş (bu ölçümle hangisinin kaldığı görülecek).
 
+**Ek 7 (kernel ölçümü):** bağlama 10.3 → 3.4 ms (canlı). GPU 57 ms/kare: sıvı basınç CG ~36 ms
+(~10 basınç çözümü/kare × ~19 iterasyon), tane DEM 12 ms. Sıvı şeridi kare başına ~10 alt adım
+koşuyor: CFL en hızlı tek parselden. Şimdi `grain_diagnostics.liquid` {speed_max_m_s,
+speed_p99_m_s, liquid_substeps} ve `--cost` bunları basar. max ≫ p99 ise birkaç uç parsel
+(muhtemelen tane tepki itkisi az parselli hücrelerde) tüm karenin basınç çözümlerini çoğaltıyor.
+
 **Build:** yalnız C++.
 
 00000. Aynı sahne, `python scripts/test/rt_grain_float_probe.py --cost --frames 120` → `coupling`

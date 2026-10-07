@@ -214,6 +214,9 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
             {"unmatched_impulse_n_s", report->unmatched_impulse},
             {"max_drag_coefficient_kg_s", report->max_drag_coefficient},
             {"max_submerged_fraction", report->max_submerged_fraction},
+            {"speed_max_m_s", report->liquid_speed_max},
+            {"speed_p99_m_s", report->liquid_speed_p99},
+            {"liquid_substeps", report->liquid_substeps},
             {"model", report->volume_exclusion
                 ? "di_felice_implicit_pair_drag+porous_projection_liquid_acceleration_force"
                 : "di_felice_implicit_pair_drag+hydrostatic_buoyancy"},

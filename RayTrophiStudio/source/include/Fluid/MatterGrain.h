@@ -145,6 +145,12 @@ struct MatterGrainStepReport {
     // Liquid-field binning, drag/pressure preparation, reaction and water
     // exchange around the grain step (host, every coupled frame).
     float host_coupling_ms = 0.0f;
+    // Liquid parcel speed entering the frame (m/s): the liquid lane's CFL
+    // substeps follow the maximum, so a few outliers far above the 99th
+    // percentile multiply the pressure solves of the whole frame.
+    float liquid_speed_max = 0.0f;
+    float liquid_speed_p99 = 0.0f;
+    int liquid_substeps = 0;
     std::size_t working_set_bytes = 0;
     // Same-domain liquid (transport owner mpm) beside the grains.
     std::size_t grains = 0;
