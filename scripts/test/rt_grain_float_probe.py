@@ -49,6 +49,8 @@ def main():
     parser.add_argument('--cost', action='store_true')
     parser.add_argument('--no-coupling', action='store_true',
                         help='with --cost: fluid_coupling off for the run, restored after')
+    parser.add_argument('--compare', action='store_true',
+                        help='cost coupled vs uncoupled, each from fluid.reset (same frames)')
     args = parser.parse_args()
     client = RtIpc()
 
@@ -91,6 +93,29 @@ def main():
                 'held': inv['mixed_execution']['step_held'],
                 'status': inv['mixed_execution']['status'][:90]}
 
+    if args.compare:
+        # Both runs start from fluid.reset (frame 0, empty emitters), so they
+        # see the same frames and particle counts; only coupling differs.
+        results = {}
+        for name, coupled in (('coupled', True), ('uncoupled', False)):
+            call('fluid.reset')
+            call('fluid.set_grain_settings', domain=domain,
+                 fluid_coupling=authored['fluid_coupling'] and coupled,
+                 volume_exclusion=authored['volume_exclusion'] and coupled)
+            try:
+                print(f'\n==== {name}', flush=True)
+                results[name] = cost(call, args, domain)
+            finally:
+                call('fluid.set_grain_settings', domain=domain, fluid_coupling=authored['fluid_coupling'],
+                     volume_exclusion=authored['volume_exclusion'])
+        call('fluid.reset')
+        print(f"\n==== compare from frame 0, {args.frames} frames (medians after warm-up)")
+        print(f"{'':<16}{'total ms':>10}{'pressure':>10}{'liq sub':>9}{'max m/s':>9}{'p99 m/s':>9}"
+              f"{'parcels':>9}{'grains':>8}")
+        for name, r in results.items():
+            print(f"{name:<16}{r['total_ms']:10.2f}{r['pressure_ms']:10.2f}{r['liquid_substeps']:9.0f}"
+                  f"{r['speed_max']:9.2f}{r['speed_p99']:9.2f}{r['particles'] or 0:9}{r['grains'] or 0:8}")
+        return
     if args.cost and args.no_coupling:
         # Same scene with grains and liquid ignoring each other: if the liquid's
         # speed max drops, the grain reaction is what drives the liquid CFL.
@@ -171,6 +196,10 @@ def cost(call, args, domain):
                 extra = {key: k[key] for key in ('count', 'calls', 'dispatches') if key in k}
                 print(f"  {k.get('kernel', '?'):<44} {k.get('ms', 0.)/timed_frames:8.2f}  {extra}")
         print('log:', LOG.with_name('grain_cost_probe_live.json').relative_to(LOG.parents[2]))
+        return {'total_ms': total, 'pressure_ms': stat('pressure_ms'),
+                'liquid_substeps': lq('liquid_substeps'), 'speed_max': lq('liquid_speed_max'),
+                'speed_p99': lq('liquid_speed_p99'), 'particles': tail[-1]['stats'].get('particle_count'),
+                'grains': tail[-1]['grains']}
 
 
 def run_arms(call, args, domain, authored, sample):
