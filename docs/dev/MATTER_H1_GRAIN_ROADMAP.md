@@ -348,6 +348,18 @@ birbirini görmez.
 - Sinsi kol: MPM dolu hücrede tane sayısı > 0 iken temas impulsu 0 ise FAIL (taneler
   içinden geçiyor ama "çalışıyor" görünüyor).
 
+**Bilinen sınırlar (2026-10-07, aynı konunun yanı):**
+- **Gaz ↔ grain bağlantısı yok.** Gaz şeridi aynı domain'de koşar ama tane yalnız sıvı alanını
+  örnekler (`buildMatterGrainLiquidField`); duman/sıcak hava/rüzgâr kumu sürüklemez, tane gazı
+  itmez. Yapılacaksa: gaz hız alanından aynı implicit sürükleme (ρ_gaz, μ_gaz), tepki gaz
+  momentumuna; çift sayım dersi burada da geçerli.
+- **Force field / hareketli domain / kinematik collider grain adımını TUTAR**
+  (`FluidDomainStep.inl` → `runMatterGrainStep(..., unsupported_motion_or_fields)`; hata
+  "static colliders, gravity only"). Rüzgâr kuvveti eklenen ya da collider'ı animasyonlu bir
+  sahne donar. Sıra: (1) force field'ı tane ivmesine ekle (GPU'ya alan örneği ya da düzgün
+  alanlar için sabit ivme), (2) kinematik collider: üçgen hızını BVH'ye ekle ve temasta
+  göreli hız kullan, (3) hareketli domain: çerçeve ivmesi.
+
 **Dosyalar:** `MatterGrainCoupling.cpp` (partition/merge), `MatterGrainStep.inl` (kare sırası),
 `MatterGpuStep.inl` (MPM şeridi), `shaders/sim_matter_grain.glsl` (tane tarafı temas),
 `MatterGrainParams.cpp` (sahip alanı, blockers), `src/Api/RtApiMatterGrain.cpp` + IPC/Python,
