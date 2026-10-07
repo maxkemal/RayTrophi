@@ -148,8 +148,14 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
     if (p.enabled || !blockers.empty()) {
         if (blockers.empty()) {
             const bool held = state && state->fluid_stats.mixed_step_held;
-            DomainUi::Reason(held ? ("Held: " + state->fluid_stats.gpu_status).c_str()
-                                  : "Ready.");
+            if (held) {
+                // Not greyed: a held step freezes every grain where it was born,
+                // and this line is the only place that says why.
+                ImGui::TextWrapped("Step held - grains do not move: %s",
+                                   state->fluid_stats.gpu_status.c_str());
+            } else {
+                DomainUi::Reason("Ready.");
+            }
         }
         for (const auto& blocker : blockers) {
             DomainUi::Reason(blocker.message.c_str());
@@ -159,6 +165,9 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
         changed |= DomainUi::Float("Simulation grain radius (m)", &p.radius_m, .001f, .001f, 1.0f,
             "%.4f",
             "Radius of one simulated grain (0.001..1 m). Sets cost: grain count ~ 1/r^3.\n"
+            "Mass falls with r^3 while Contact stiffness stays in N/m, so a smaller\n"
+            "grain is a stiffer contact: the substep shrinks ~ r^1.5. Lower stiffness\n"
+            "with the radius (k ~ r keeps the same impact overlap fraction).\n"
             "A real grain size below it is set in Matter (coarse graining).\n"
             "Reset particles after editing.\n"
             "Script: fluid.set_grain_settings(radius_m=...)");
