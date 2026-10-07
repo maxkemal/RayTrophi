@@ -210,6 +210,7 @@ def main():
     # was removed; DEM is the only grain solver, the old keys are rejected.
     assert 'xpbd' not in shader.lower() and 'solver_kind' not in gpu
     assert 'it.key() == "solver_kind" || it.key() == "xpbd_substeps"' in params_src
+    assert 'd["matter_grain"] = RayTrophiSim::Fluid::matterGrainParamsToJson' in read('src/Core/ProjectManager.cpp'), 'project save drops grain settings'
     assert 'json.erase("solver_kind");' in params_src and "solver_kind='xpbd'" in runtime_test
     # Domain panel (2026-09-27 six-tab decision): grain material in Matter,
     # solver + coupling + readiness in Solvers, report in Measure; the legacy

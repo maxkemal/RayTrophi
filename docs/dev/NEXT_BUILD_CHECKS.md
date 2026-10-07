@@ -31,8 +31,15 @@ ObjectAABB o yüzeyin dünya kutusu. Ayrıca dolu domain'de tane ayarlarının H
 (ıslak tane seçimi bu yüzden reddediliyordu); artık yalnız doğumda sabitlenenler (enabled,
 radius_m, packing_fraction, wet_grains kapatma) reset ister, gerisi sonraki adımda uygulanır.
 
+**Ek 4:** (a) Proje kaydı tane ayarlarını yazmıyordu (yalnız SceneSerializer yazıyordu;
+ProjectManager domain'leri ayrıca yazar) → açılışta "Enable discrete grains" kapalı, kum MPM gibi.
+Şimdi `matter_grain` proje dosyasında; kontrat bunu kontrol ediyor. (b) Dalga üstünde kalan kum
+topakları için tanı: `python scripts/test/rt_grain_float_probe.py` — açık sahnede 3 kol (olduğu gibi /
+volume_exclusion kapalı / fluid_coupling kapalı), ayarları sonunda geri koyar; tabloyu getir.
+
 **Build:** yalnız C++.
 
+0000. Kum+su sahnesini kaydet, kapat, aç → Solvers'ta grains açık kalmalı.
 000. Kum + su + Sphere/Box collider: taneler ve su collider'a çarpıp akmalı; Solvers "Ready.".
      Oynarken Wet grains aç → kabul edilmeli, sudaki taneler su emmeli (Measure: grain water).
 00. Yeni Matter domain + point source (Sand, Granular) → Solvers'ta enable kabul edilmeli, "Ready.".
