@@ -743,7 +743,9 @@ def main():
                 for step in range(1, 271):
                     call('fluid.step', dt=1/600)
                     g = call('fluid.matter_models', domain=DOMAIN)['acceptance_metrics']['granular']
-                    ys.append(g['dry_center_of_mass'][1])
+                    if g.get('particles') == 1 and g.get('dry_center_of_mass'):
+                        ys.append(g['dry_center_of_mass'][1])
+                assert len(ys) > 200, ('rebound grain was not born', len(ys))
                 bottom = min(range(len(ys)), key=lambda n: ys[n])
                 apex = max(ys[bottom:])
                 e = math.sqrt(max(apex-.025, 0.)/(y0-.025))
