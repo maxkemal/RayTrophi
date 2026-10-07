@@ -142,6 +142,9 @@ struct MatterGrainStepReport {
     float gpu_wait_ms = 0.0f;
     float host_publish_ms = 0.0f;
     float host_merge_ms = 0.0f;
+    // Liquid-field binning, drag/pressure preparation, reaction and water
+    // exchange around the grain step (host, every coupled frame).
+    float host_coupling_ms = 0.0f;
     std::size_t working_set_bytes = 0;
     // Same-domain liquid (transport owner mpm) beside the grains.
     std::size_t grains = 0;

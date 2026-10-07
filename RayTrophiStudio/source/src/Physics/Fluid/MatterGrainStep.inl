@@ -244,6 +244,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         if (!buffers.matter_runtime) {
             buffers.matter_runtime = std::make_shared<Fluid::MatterGpuRuntime>();
         }
+        const auto coupling_start = std::chrono::steady_clock::now();
         Fluid::MatterGrainCouplingFrame frame;
         if (coupled) {
             if (!Fluid::buildMatterGrainLiquidField(liquid, grains, params.grain.radius_m,
@@ -260,6 +261,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             }
             report.volume_exclusion = exclude;
         }
+        float coupling_ms = ms_since(coupling_start);
         std::vector<Fluid::MatterGrainCouplingOutput> drag;
         const std::size_t grain_budget = budget > stats.mixed_working_set_bytes
             ? budget - stats.mixed_working_set_bytes : budget;
@@ -273,12 +275,14 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             return false;
         }
         report.coupling_enabled = coupled;
+        const auto reaction_start = std::chrono::steady_clock::now();
         if (coupled) {
             Fluid::applyMatterGrainLiquidReaction(liquid, frame, drag, report);
         }
         // B6: after the reaction, so the reaction used the masses it was
         // computed with. Without liquid (or coupling) only drying runs.
         Fluid::exchangeMatterGrainWater(liquid, grains, frame, params.grain, dt, report);
+        report.host_coupling_ms = coupling_ms + ms_since(reaction_start);
     }
 
     const auto merge_start = std::chrono::steady_clock::now();

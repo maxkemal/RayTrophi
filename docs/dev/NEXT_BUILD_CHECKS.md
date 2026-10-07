@@ -37,6 +37,12 @@ ProjectManager domain'leri ayrıca yazar) → açılışta "Enable discrete grai
 topakları için tanı: `python scripts/test/rt_grain_float_probe.py` — açık sahnede 3 kol (olduğu gibi /
 volume_exclusion kapalı / fluid_coupling kapalı), ayarları sonunda geri koyar; tabloyu getir.
 
+**Ek 5 (maliyet):** kum+su sahnesinde CPU sürekli ~%8 meşgul, GPU dolu çalışmıyor. `host_ms`'e
+`coupling` eklendi (sıvı alanı, sürüklenme/basınç hazırlığı, tepki, su alışverişi). Ölçüm:
+`python scripts/test/rt_grain_float_probe.py --cost --frames 120` → kare süresinin sıvı aşamaları,
+tane host aşamaları, aktarım ve senkron noktaları (medyan). Tabloyu getir; GPU'nun boş kalması
+genelde CPU'nun bu senkron noktaları arasında bekletmesidir.
+
 **Build:** yalnız C++.
 
 0000. Kum+su sahnesini kaydet, kapat, aç → Solvers'ta grains açık kalmalı.

@@ -19,7 +19,16 @@ artefact), one that sinks only in C by drag; floating in all three = contacts
     python scripts/test/rt_grain_float_probe.py --domain Matter --frames 90
 
 The timeline advances by 3N frames; reload the scene afterwards if needed.
+
+    python scripts/test/rt_grain_float_probe.py --cost --frames 120
+
+--cost only steps the scene as authored and prints where a frame goes: the
+liquid lane (p2g/pressure/g2p/advect), the grain step by host stage
+(order/prepare/gpu_wait/publish/merge/coupling), transfers and host<->GPU
+synchronisation points. A GPU that never runs full is usually waiting for
+the CPU between these synchronisation points.
 """
+import statistics
 import argparse
 import json
 import sys
@@ -36,6 +45,7 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--domain')
     parser.add_argument('--frames', type=int, default=90)
+    parser.add_argument('--cost', action='store_true')
     args = parser.parse_args()
     client = RtIpc()
 
@@ -77,6 +87,43 @@ def main():
                 'bridges': wet.get('liquid_bridges_last_substep'),
                 'held': inv['mixed_execution']['step_held'],
                 'status': inv['mixed_execution']['status'][:90]}
+
+    if args.cost:
+        frames = []
+        for frame in range(1, args.frames + 1):
+            call('fluid.step', dt=1/60)
+            stats = call('fluid.step_stats', domain=domain)
+            inv = call('fluid.matter_models', domain=domain)
+            runtime = ((inv.get('grain_diagnostics') or {}).get('runtime')) or {}
+            frames.append({'stats': stats, 'host_ms': runtime.get('host_ms', {}),
+                           'substeps': runtime.get('substeps'), 'limit': runtime.get('substep_limit'),
+                           'grains': inv['acceptance_metrics']['granular'].get('particles'),
+                           'held': inv['mixed_execution']['step_held']})
+            if frames[-1]['held']:
+                print('HELD', inv['mixed_execution']['status'], flush=True)
+                break
+        LOG.with_name('grain_cost_probe_live.json').write_text(
+            json.dumps({'domain': domain, 'frames': frames}, indent=1), encoding='utf-8')
+        tail = frames[min(10, len(frames)-1):]
+        med = lambda xs: statistics.median(xs) if xs else 0.
+        stat = lambda k: med([f['stats'].get(k, 0.) or 0. for f in tail])
+        host = lambda k: med([f['host_ms'].get(k, 0.) or 0. for f in tail])
+        total = stat('total_ms')
+        print(f"\nframes {len(tail)} (after warm-up), grains {tail[-1]['grains']}, "
+              f"particles {tail[-1]['stats'].get('particle_count')}, grain substeps {tail[-1]['substeps']} "
+              f"({tail[-1]['limit']})")
+        print(f"step total (median)          {total:8.2f} ms")
+        for key in ('p2g_ms', 'pressure_ms', 'g2p_ms', 'advect_ms', 'density_ms'):
+            print(f"  liquid {key:<20} {stat(key):8.2f} ms")
+        for key in ('order', 'coupling', 'prepare', 'gpu_wait', 'publish', 'merge'):
+            print(f"  grain host {key:<16} {host(key):8.2f} ms")
+        for key in ('synchronize_ms', 'batch_end_ms', 'upload_call_ms', 'download_call_ms', 'dispatch_call_ms'):
+            print(f"  transfer {key:<18} {stat(key):8.2f} ms")
+        print(f"  sync points: synchronize {stat('synchronize_calls'):.0f}, batch_end {stat('batch_end_calls'):.0f}, "
+              f"dispatches {stat('dispatch_calls'):.0f}; upload {stat('upload_bytes')/1e6:.2f} MB, "
+              f"download {stat('download_bytes')/1e6:.2f} MB per frame")
+        print('log:', LOG.with_name('grain_cost_probe_live.json').relative_to(LOG.parents[2]))
+        return
 
     rows = []
     arms = [('A authored', {}), ('B volume_exclusion off', {'volume_exclusion': False}),
