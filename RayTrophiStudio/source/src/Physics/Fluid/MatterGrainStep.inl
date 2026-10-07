@@ -65,6 +65,10 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         }
     }
 
+    const auto order_start = std::chrono::steady_clock::now();
+    const auto ms_since = [](std::chrono::steady_clock::time_point t) {
+        return std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t).count();
+    };
     std::vector<std::size_t> liquid_order, grain_order;
     if (!Fluid::partitionMatterGrainOwners(state.particles, legacy_granular,
             params.grain.wet_grains, liquid_order, grain_order, error)) {
@@ -76,6 +80,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     auto grains = Fluid::selectMatterParticles(state.particles, grain_order);
     Fluid::APICSolverStats stats;
     Fluid::MatterGrainStepReport report;
+    report.host_order_ms = ms_since(order_start);
     report.liquid_parcels = liquid.size();
     const auto budget = params.mixed_working_set_budget_bytes;
     const bool coupled = !liquid.empty() && !grains.empty() && params.grain.fluid_coupling;
@@ -182,9 +187,11 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         Fluid::exchangeMatterGrainWater(liquid, grains, frame, params.grain, dt, report);
     }
 
+    const auto merge_start = std::chrono::steady_clock::now();
     if (!Fluid::mergeMatterGrainOwners(state.particles, liquid, grains, error)) {
         return false;
     }
+    report.host_merge_ms = ms_since(merge_start);
     report.grains = grains.size();
     stats.particle_count = state.particles.size();
     stats.grain_report = report;

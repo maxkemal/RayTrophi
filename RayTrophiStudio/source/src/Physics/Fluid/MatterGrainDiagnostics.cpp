@@ -196,6 +196,9 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
             {"upload_bytes", report->upload_bytes},
             {"download_bytes", report->download_bytes},
             {"transfer_batches", report->transfer_batches},
+            {"host_ms", {{"order", report->host_order_ms}, {"prepare", report->host_prepare_ms},
+                {"gpu_wait", report->gpu_wait_ms}, {"publish", report->host_publish_ms},
+                {"merge", report->host_merge_ms}}},
             {"working_set_bytes", report->working_set_bytes}};
     }
     nlohmann::json liquid = nullptr;

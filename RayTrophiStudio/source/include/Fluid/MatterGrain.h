@@ -133,6 +133,15 @@ struct MatterGrainStepReport {
     std::size_t upload_bytes = 0;
     std::size_t download_bytes = 0;
     int transfer_batches = 0;       // host<->device synchronisation points
+    // Host wall time of one grain step by stage (ms): owner split + cell
+    // order + subset copies, upload preparation (identity remap, residency
+    // compare, uploads), dispatch + download (includes waiting for the GPU),
+    // validation and publication copies, merge back into the domain.
+    float host_order_ms = 0.0f;
+    float host_prepare_ms = 0.0f;
+    float gpu_wait_ms = 0.0f;
+    float host_publish_ms = 0.0f;
+    float host_merge_ms = 0.0f;
     std::size_t working_set_bytes = 0;
     // Same-domain liquid (transport owner mpm) beside the grains.
     std::size_t grains = 0;
