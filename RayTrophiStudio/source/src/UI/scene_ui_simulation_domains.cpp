@@ -521,6 +521,33 @@ void drawSimulationDomainControls(
                         "Manual edits remain available and switch the profile to Custom.\n\n"
                         "Cinema: removes RAM limit, forces disk bake, enables up to 1024 grid.");
                 }
+                // The profile writes these two; they were editable only from
+                // script, so a grain domain that outgrew 512 MiB (Interactive)
+                // held its step with no panel field to raise it.
+                if (ImGui::Checkbox("Enforce Resource Budget##DomainBudgetOn", &domain.enforce_resource_budget)) {
+                    domain.quality_profile = RayTrophiSim::SimulationDomainQualityProfile::Custom;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "Refuse a step whose GPU buffers would exceed the budget below.\n"
+                        "Off: no limit (allocation may still fail on the device).");
+                }
+                if (domain.enforce_resource_budget) {
+                    int budget_mb = static_cast<int>(domain.resource_budget_mb);
+                    ImGui::SetNextItemWidth(DomainUi::itemWidth());
+                    if (ImGui::DragInt("Resource Budget (MiB)##DomainBudget", &budget_mb, 16.0f, 64, 65536)) {
+                        domain.resource_budget_mb = static_cast<uint32_t>(std::clamp(budget_mb, 64, 65536));
+                        domain.quality_profile = RayTrophiSim::SimulationDomainQualityProfile::Custom;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "GPU working set this domain may use: liquid lane, grids and\n"
+                            "discrete grains together. Grains take ~3 KB each (contact\n"
+                            "history + neighbour tables) and briefly ~2.5x while their\n"
+                            "buffers grow. When exceeded the step is held and particles\n"
+                            "stop where they are.");
+                    }
+                }
 
                 // Group 2: Grid Resolution & Scaling
                 if (UIWidgets::CollapsingHeader("Grid Resolution & Scaling", ImGuiTreeNodeFlags_DefaultOpen)) {

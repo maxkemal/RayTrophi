@@ -20,8 +20,17 @@ yukarı kuvvet verir: **dalga üzerinde kalan kum topaklarının da muhtemel seb
 **Düzeltme:** volume exclusion açıkken sıvıya yalnız sürükleme darbesi döner; basınç tepkisi
 projeksiyonda (çift sayım yok). Hidrostatik kipte (exclusion kapalı) değişiklik yok.
 
+**Ek (kullanıcı bildirimi): "grain buffers exceed the domain…" ile adım tutuluyor, taneler donuyor.**
+Sebep aygıt değil, domain kaynak bütçesi: Interactive 512 MiB, Preview 1024 MiB; sıvı şeridi önce
+alır, tane kalanı kullanır (tane başına ~3 KB, büyürken eski+yeni ~2.5×). Bütçe panelde yalnız
+Quality Profile ile değişiyordu (script'ten yazılabilir, panelden değil — kural ihlali). Şimdi
+Quality Profile altında "Enforce Resource Budget" + "Resource Budget (MiB)" (değiştirince profil
+Custom olur). Hata metni hangi sınır olduğunu, tane sayısını, gereken ve kalan MiB'i söylüyor;
+aygıt sınırı ayrı mesaj. Not: ayrıca sabit 100000 tane üst sınırı var (ayrı mesaj).
+
 Sıra:
 1. `python scripts/test/check_matter_grain_contracts.py` → PASS.
+1b. Domain paneli: Quality Profile altında iki yeni alan; bütçeyi büyütünce tutulan adım bir sonraki karede yürümeli.
 2. Aynı sahne: `python scripts/test/rt_grain_float_probe.py --compare --frames 120`.
    Görmen gereken: coupled satırında maks m/s ≈ p99'un ~1–2 katı (≈8–15), sıvı alt adım 68 → ~12–20,
    toplam ms uncoupled'a yakın (~150–200). Hâlâ 50 m/s ise sebep başka (sürükleme tepkisi) — getir.
