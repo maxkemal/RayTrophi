@@ -268,15 +268,15 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     // Substep size. Every grain owns at most kMatterGrainContactBudget contact
     // springs (grain, wall and mesh patch); exceeding it refuses publication,
     // so the bounds below hold for any state that is published.
-    //  stability: Gershgorin bound of the coupled spring system,
-    //             omega_max^2 <= 2 * Z * k_eff / m (pair sum, equal masses);
-    //             half the symplectic-Euler limit 2/omega_max.
+    //  stability: Gershgorin bound of the coupled spring-dashpot system,
+    //             omega_max^2 <= 2 * Z * k_eff / m (pair sum, equal masses),
+    //             aggregate damping rate Z*(2cn + 7cs)/m (7 = tangential
+    //             1/m + r^2/I for both grains; cn = 2 zeta sqrt(k m), the
+    //             largest per-contact normal damping, a wall contact);
+    //             half the damped symplectic-Euler limit. Reported as
+    //             "damping" when the dashpots shorten it (aggregate zeta > .1).
     //  accuracy:  `contact_resolution` substeps per binary collision,
     //             t_c = pi * sqrt(m_pair / k), m_pair = m/2.
-    //  damping:   aggregate explicit damping rate Z*(2cn + 7cs)/m below 0.5
-    //             per substep (7 = tangential 1/m + r^2/I for both grains);
-    //             cn = 2 zeta sqrt(k m), the largest per-contact normal
-    //             damping (a wall contact, effective mass m).
     //  travel:    no grain moves more than 10% of its radius per substep
     //             (the liquid lump speed counts: drag can carry a grain there).
     // Liquid drag is integrated implicitly and adds no bound.
@@ -301,20 +301,27 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         : 0.0;
     const double k_effective = std::max({k, 3.5 * kt, 2.8125 * mu_r * mu_r * k,
         bridge_stiffness});
-    const double stability_dt = 1.0 / std::sqrt(2.0 * budget * k_effective / m);
     const double accuracy_dt = 3.14159265358979 * std::sqrt(.5 * m / k) /
         params.contact_resolution;
     const double zeta = matterGrainDampingRatio(params.restitution);
     const double normal_damping = 2.0 * zeta * std::sqrt(k * m);
     const double damping_rate = budget *
         (2.0 * normal_damping + 7.0 * params.sliding_damping_n_s_m) / m;
-    const double damping_dt = damping_rate > 0.0 ? .5 / damping_rate
-        : std::numeric_limits<double>::infinity();
+    // Spring and dashpot together: symplectic Euler on x'' = -w^2 x - 2 z w x'
+    // is stable for w^2 h^2 + 4 z w h < 4, i.e. h < (2/w)(sqrt(1+z^2) - z).
+    // Half of that, as the undamped bound always had (z = 0 gives the old
+    // 1/w). The two bounds used to be applied separately, the dashpot one at
+    // .5 / rate = 1/(4 z w), which is half the combined limit at large z and
+    // set the substep of every damped scene (234 substeps per frame at 16k).
+    const double omega = std::sqrt(2.0 * budget * k_effective / m);
+    const double aggregate_zeta = damping_rate / (2.0 * omega);
+    const double stability_dt =
+        (std::sqrt(1.0 + aggregate_zeta * aggregate_zeta) - aggregate_zeta) / omega;
+    const char* stability_name = aggregate_zeta > .1 ? "damping" : "stability";
     const double travel_dt = .1 * params.radius_m /
         std::max(double(maximum_speed) + double(gravity.length()) * dt, 1e-8);
-    const std::array<std::pair<double, const char*>, 4> bounds{{
-        {accuracy_dt, "accuracy"}, {stability_dt, "stability"},
-        {damping_dt, "damping"}, {travel_dt, "travel"}}};
+    const std::array<std::pair<double, const char*>, 3> bounds{{
+        {accuracy_dt, "accuracy"}, {stability_dt, stability_name}, {travel_dt, "travel"}}};
     const auto& limiting = *std::min_element(bounds.begin(), bounds.end(),
         [](const auto& a, const auto& b) { return a.first < b.first; });
     const double requested = std::ceil(dt / limiting.first - 1e-9);

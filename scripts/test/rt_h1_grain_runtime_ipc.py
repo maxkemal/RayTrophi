@@ -419,6 +419,14 @@ def main():
             water_density = 1000.
             volume = 4/3*math.pi*.025**3
             expected = {True: 9.81*(1-water_density*volume/expected_grain_mass), False: 9.81}
+            # A sphere released from rest in still water also has to accelerate
+            # the water it displaces (added mass, C_m = .5 for a sphere): the true
+            # first acceleration is g (m - rho V) / (m + .5 rho V) = 5.16, not the
+            # buoyancy-only 6.13. The hydrostatic arm has no way to see it and
+            # must give 6.13; the pressure-force arm feels the liquid pushed aside
+            # and lands between (live 5.49-5.74). Outside [5.16, 6.13] is wrong.
+            added_mass = 9.81*(expected_grain_mass-water_density*volume)/(
+                expected_grain_mass+.5*water_density*volume)
             for coupled in (True, False):
                 call('timeline.set_frame', frame=0)
                 call('fluid.reset')
@@ -483,8 +491,18 @@ def main():
                 print('coexist immersed coupled' if coupled else 'coexist immersed uncoupled',
                       'a', acceleration, 'expected', expected[coupled], flush=True)
                 tolerance = .15 if coupled else .05
-                assert abs(acceleration-expected[coupled]) <= tolerance*expected[coupled], \
-                    ('immersed grain acceleration', coupled, acceleration, expected[coupled])
+                if coupled and not args.coexist_hydrostatic:
+                    captured = (expected[True]-acceleration)/(expected[True]-added_mass)
+                    arm['added_mass_captured'] = captured
+                    save()
+                    print('coexist added mass: physical a', added_mass, 'buoyancy-only', expected[True],
+                          'fraction of added mass captured', captured, flush=True)
+                    assert .95*added_mass <= acceleration <= 1.03*expected[True], \
+                        ('immersed grain acceleration outside [added mass, buoyancy only]',
+                         acceleration, added_mass, expected[True])
+                else:
+                    assert abs(acceleration-expected[coupled]) <= tolerance*expected[coupled], \
+                        ('immersed grain acceleration', coupled, acceleration, expected[coupled])
                 if coupled:
                     liquid = born[2]['liquid']
                     assert liquid['coupled_grains'] == 1 and liquid['max_submerged_fraction'] >= .8, liquid
