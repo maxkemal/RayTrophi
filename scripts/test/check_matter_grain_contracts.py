@@ -31,7 +31,8 @@ def main():
     assert gpu.index(' CFL exceeds max_substeps') < gpu.index('ensureParticles(compute, runtime')
     assert 'substeps += substeps & 1u;' in gpu
     begin = gpu.index('if (!dispatchMatterGrainStages(')
-    end = gpu.index('auto result = p;')
+    end = gpu.index('std::vector<Vec3> new_position(count), new_velocity(count);')
+    assert 'auto result = p;' not in gpu, 'full FluidParticles copy at publication is back'
     assert 'downloadBuffer' not in gpu[begin:end]
     assert 'uploadBuffer' not in gpu[begin:end]
     stages = read('include/Fluid/MatterGrainStages.h')
