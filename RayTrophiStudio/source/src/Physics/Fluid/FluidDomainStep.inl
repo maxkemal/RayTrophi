@@ -627,11 +627,9 @@
                                 return context.compute && ensureGridDomainComputeBuffers(
                                     *context.compute, buffers, state.grid);
                             }, matter_exchange_ledger_, colliders_,
-                            grain_collider_mesh_resolver_, has_kinematic_solids || motion_mag > 1e-7f ||
-                                (context.force_snapshot && !context.force_snapshot->empty()) ||
-                                std::any_of(collider_velocities_.begin(), collider_velocities_.end(),
-                                    [](const Vec3& velocity) { return velocity.length() > 1e-7f; }),
-                            mixed_error);
+                            grain_collider_mesh_resolver_, collider_velocities_, kinematic_samples,
+                            context.force_snapshot, context.force_compute_buffer,
+                            motion_mag > 1e-7f, mixed_error);
                     } else if (step_params.grain.enabled) {
                         mixed_error = "grain Vulkan compute buffers unavailable";
                     } else if (!fluid_gpu_requested) {

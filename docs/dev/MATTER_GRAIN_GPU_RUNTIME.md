@@ -29,7 +29,7 @@ H1-G0/G1 veya üretim çözücü kararı tamamlandı sayılmaz.
   displacement/statik sürtünme geçmişi yok. Disipasyon henüz termal enerjiye aktarılmaz.
 - Temas alt adımları arasında full-state CPU transferi yok. Frame sonunda host
   publication ve mevcut render/cache köprüsü sürer; uçtan uca GPU residency yok.
-- Closed Vulkan, explicit dry granular carriers, gravity only. Pore/wet/thermal/
+- Closed Vulkan, explicit dry granular carriers; gravity + force fields (2026-10-07), moving/skinned colliders and bone proxies with vertex velocities. Pore/wet/thermal/
   solid phase kapalı; sıvı/frozen/wet taşıyıcı, hareketli/kinematic collider veya
   force field step'i tutar. Static PlaneY ve doğrudan TriangleMesh/DNA SoA'dan
   flat mesh desteklenir; eski per-face facade resolver kullanılmaz.

@@ -104,27 +104,41 @@ std::vector<uint32_t> surfacePatches(const std::vector<SurfaceMeshTriangle>& tri
 }
 } // namespace
 
-uint64_t matterGrainColliderFingerprint(const std::vector<SurfaceMeshTriangle>& triangles) {
+uint64_t matterGrainColliderFingerprint(const std::vector<SurfaceMeshTriangle>& triangles,
+                                        const std::vector<Vec3>* velocities) {
     uint64_t hash = 14695981039346656037ull;
+    const auto mix = [&](const Vec3& p) {
+        for (int axis = 0; axis < 3; ++axis) {
+            const float value = component(p, axis);
+            uint32_t bits = 0;
+            std::memcpy(&bits, &value, sizeof(bits));
+            for (int byte = 0; byte < 4; ++byte) {
+                hash = (hash ^ ((bits >> (8 * byte)) & 255u)) * 1099511628211ull;
+            }
+        }
+    };
     for (const auto& t : triangles) {
         for (const auto& p : {t.p0, t.p1, t.p2}) {
-            for (int axis = 0; axis < 3; ++axis) {
-                const float value = component(p, axis);
-                uint32_t bits = 0;
-                std::memcpy(&bits, &value, sizeof(bits));
-                for (int byte = 0; byte < 4; ++byte) {
-                    hash = (hash ^ ((bits >> (8 * byte)) & 255u)) * 1099511628211ull;
-                }
-            }
+            mix(p);
+        }
+    }
+    if (velocities) {
+        for (const auto& v : *velocities) {
+            mix(v);
         }
     }
     return hash;
 }
 
 bool buildMatterGrainColliderBvh(const std::vector<SurfaceMeshTriangle>& triangles,
-                                MatterGrainColliderBvh& result, std::string& error) {
+                                MatterGrainColliderBvh& result, std::string& error,
+                                const std::vector<Vec3>* velocities, float sweep_seconds) {
     if (triangles.size() > 4096) {
         error = "grain collider BVH exceeds 4096 flat faces";
+        return false;
+    }
+    if (velocities && velocities->size() != 3 * triangles.size()) {
+        error = "grain collider BVH: one velocity per triangle vertex expected";
         return false;
     }
     MatterGrainColliderBvh candidate;
@@ -142,8 +156,23 @@ bool buildMatterGrainColliderBvh(const std::vector<SurfaceMeshTriangle>& triangl
             error = "grain collider BVH received nonfinite/degenerate geometry";
             return false;
         }
-        const Vec3 lo = Vec3::min(t.p0, Vec3::min(t.p1, t.p2));
-        const Vec3 hi = Vec3::max(t.p0, Vec3::max(t.p1, t.p2));
+        Vec3 lo = Vec3::min(t.p0, Vec3::min(t.p1, t.p2));
+        Vec3 hi = Vec3::max(t.p0, Vec3::max(t.p1, t.p2));
+        if (velocities) {
+            // The triangle sweeps from end - v * sweep to end during the frame.
+            const std::size_t face = lower.size();
+            const Vec3 points[] = {t.p0, t.p1, t.p2};
+            for (int corner = 0; corner < 3; ++corner) {
+                const Vec3& v = (*velocities)[3 * face + corner];
+                if (!finite(v)) {
+                    error = "grain collider BVH received a nonfinite vertex velocity";
+                    return false;
+                }
+                const Vec3 start = points[corner] - v * sweep_seconds;
+                lo = Vec3::min(lo, start);
+                hi = Vec3::max(hi, start);
+            }
+        }
         lower.push_back(lo);
         upper.push_back(hi);
         centers.push_back(lo * .5f + hi * .5f);
@@ -191,6 +220,10 @@ bool buildMatterGrainColliderBvh(const std::vector<SurfaceMeshTriangle>& triangl
         candidate.vertices.insert(candidate.vertices.end(), {t.p0, t.p1, t.p2});
         candidate.source_faces.push_back(face);
         candidate.surface_patches.push_back(patches[face]);
+        if (velocities) {
+            candidate.velocities.insert(candidate.velocities.end(), {(*velocities)[3 * face],
+                (*velocities)[3 * face + 1], (*velocities)[3 * face + 2]});
+        }
     }
     result = std::move(candidate);
     error.clear();

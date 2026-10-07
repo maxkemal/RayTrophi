@@ -1,3 +1,40 @@
+# Sıradaki kullanıcı build (C++ + shader): tane için force field ve hareketli collider
+
+Diğer çözücüler gibi tane de artık force field'ları ve hareket eden collider'ları hissediyor.
+Öncesinde grain domain'i bunlardan biri varken adımı tutuyordu ("static colliders, gravity only").
+
+**Ne değişti:**
+- **Force field:** her tane için kare başına `force_snapshot->evaluateAt(..., Fluid)` (sıvıyla aynı
+  alanlar ve affects_fluid maskesi); DEM alt adımları boyunca sabit ivme (lift satırına eklenir).
+  Sıvı şeridi: paketlenebilir alanlar GPU force pass'ine (önceden `nullptr` geçiliyordu), CPU-only
+  olanlar (noise, wind surface drag) host'ta + upload — tane'siz domain ile aynı yol.
+- **Hareketli collider:** her collider'ın yüzleri ayrı aralık; köşe hızı = (şimdiki − önceki kare
+  köşesi)/dt → katı, dönen ve iskeletli (bone anim) mesh aynı yoldan. Önceki köşe yalnız zamanda
+  bir kare geriyse geçerli (scrub/reset sıçraması hız sayılmaz; o zaman collider'ın kendi doğrusal hızı).
+- **Kemik proxy'leri** (ayak/el kapsülleri, `physics.collider.proxy_set.*`, Granular tüketicisi):
+  8×4 küre/kapsül ya da dönük kutu olarak üçgenlenir, domain'e ulaşanlar alınır; hız = linear +
+  angular × (x − merkez).
+- **Shader (rev 15):** yüz, alt adımda `son − v·(kalan süre)` konumunda (kare içinde süpürür, kare
+  başı sıçramaz); temas göreli hızı `v_tane − v_duvar` (barisentrik) → ayak taneyi iter, sürtünme
+  sürükler. BVH düğümleri süpürmeyi kapsar. Travel CFL'i collider hızını da sayar.
+- Hâlâ tutulan tek şey: **hareketli domain**.
+- Rapor: `grain_diagnostics.runtime.collider_faces`, `collider_speed_max_m_s`,
+  `field_acceleration_max_m_s2`.
+
+Sıra:
+1. `python scripts/test/check_matter_grain_contracts.py` → PASS (bulutta PASS).
+   `matter_grain_collider_bvh_test.cpp` bulutta PASS (süpürme sınırları + hız sırası).
+2. `python scripts/test/rt_grain_motion_ipc.py` (yeni; x64'e de kopyala) → `PASS grain force fields + moving collider`.
+   RESULT satırını getir: wind kolu COM x > rest + .05, rüzgâr ivmesi ≈ 4, küre hızı ≈ 1 m/s, sweep yığını iter.
+   ★ Sinsi: `collider_speed_max` ≈ 1 ama COM kıpırdamıyorsa göreli hız shader'a ulaşmıyor (rev 15
+   yüklenmemiş = eski SPIR-V; exe/shader zaman damgası).
+3. Kendi sahnen: rüzgâr force field + kum → savrulmalı; bone anim ayak proxy'li karakter kumda
+   yürüyünce kum itilmeli/iz kalmalı. Proxy sayısı fazlaysa "4096 faces" hatası (o zaman proxy azalt).
+4. Suite regresyonu: `python scripts/test/rt_h1_grain_suite.py --quick` → hepsi PASS (statik
+   sahnelerde hız yok: `triangle_velocity` boş, eski yol birebir).
+
+---
+
 # Sıradaki kullanıcı build (YALNIZ C++): kum–su basınç geri beslemesi söküldü
 
 **Ölçüm (`rt_grain_float_probe.py --compare --frames 120`, 24 fps, ikisi de 0. kareden):**

@@ -40,6 +40,7 @@ ARMS = [
      ['--coexist-only', '--coexist-hydrostatic'], RUNTIME_LOG, False),
     ('porous', 'rt_h1_grain_runtime_ipc.py', ['--porous-only'], RUNTIME_LOG, False),
     ('wet', 'rt_h1_grain_runtime_ipc.py', ['--wet-only'], RUNTIME_LOG, False),
+    ('motion', 'rt_grain_motion_ipc.py', [], None, False),
     ('dense', 'rt_h1_dense_grain_scene_ipc.py', ['--counts', '4096', '16384', '--steps', '120'],
      DENSE_LOG, True),
     ('repose', 'rt_h1_grain_runtime_ipc.py', ['--repose-only'], RUNTIME_LOG, True),
