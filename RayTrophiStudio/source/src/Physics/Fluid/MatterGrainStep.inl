@@ -15,8 +15,8 @@
 // chord sag under 1% of the radius (a grain of radius r sees a facet error
 // below r for colliders up to ~100 r).
 void appendGrainSphereCollider(const Vec3& centre, float radius,
-                               std::vector<SurfaceMeshTriangle>& out) {
-    constexpr int slices = 24, stacks = 12;
+                               std::vector<SurfaceMeshTriangle>& out,
+                               int slices = 24, int stacks = 12) {
     const auto point = [&](int stack, int slice) {
         const float theta = 3.14159265f * stack / stacks;
         const float phi = 6.28318531f * slice / slices;
@@ -35,10 +35,11 @@ void appendGrainSphereCollider(const Vec3& centre, float radius,
 }
 
 void appendGrainCapsuleCollider(const Vec3& start, const Vec3& end, float radius,
-                                std::vector<SurfaceMeshTriangle>& out) {
+                                std::vector<SurfaceMeshTriangle>& out,
+                                int slices = 24, int stacks = 12) {
     // Two hemispheres (as spheres; the inner halves are buried) + the tube.
-    appendGrainSphereCollider(start, radius, out);
-    appendGrainSphereCollider(end, radius, out);
+    appendGrainSphereCollider(start, radius, out, slices, stacks);
+    appendGrainSphereCollider(end, radius, out, slices, stacks);
     const Vec3 axis = end - start;
     const float length = axis.length();
     if (!(length > 1e-6f)) return;
@@ -46,7 +47,6 @@ void appendGrainCapsuleCollider(const Vec3& start, const Vec3& end, float radius
     const Vec3 helper = std::abs(w.y) < .9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0);
     const Vec3 u = Vec3::cross(helper, w).normalize();
     const Vec3 v = Vec3::cross(w, u);
-    constexpr int slices = 24;
     for (int b = 0; b < slices; ++b) {
         const float a0 = 6.28318531f * b / slices, a1 = 6.28318531f * (b + 1) / slices;
         const Vec3 r0 = (u * std::cos(a0) + v * std::sin(a0)) * radius;
@@ -60,9 +60,12 @@ void appendGrainCapsuleCollider(const Vec3& start, const Vec3& end, float radius
 }
 
 void appendGrainBoxCollider(const Vec3& low, const Vec3& high,
-                            std::vector<SurfaceMeshTriangle>& out) {
+                            std::vector<SurfaceMeshTriangle>& out,
+                            const Matrix4x4* transform = nullptr) {
+    // With a transform, low/high are local and the corners go to world.
     const auto corner = [&](int i) {
-        return Vec3(i & 1 ? high.x : low.x, i & 2 ? high.y : low.y, i & 4 ? high.z : low.z);
+        const Vec3 local(i & 1 ? high.x : low.x, i & 2 ? high.y : low.y, i & 4 ? high.z : low.z);
+        return transform ? transform->transform_point(local) : local;
     };
     static const int faces[6][4] = {{0, 1, 3, 2}, {4, 6, 7, 5}, {0, 4, 5, 1},
                                     {2, 3, 7, 6}, {0, 2, 6, 4}, {1, 5, 7, 3}};
@@ -83,21 +86,46 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     const std::vector<ParticleColliderDesc>& colliders,
     const std::function<bool(const ParticleColliderDesc&,
         std::vector<SurfaceMeshTriangle>&, uint64_t&)>& resolve_mesh,
-    bool unsupported_motion_or_fields, std::string& error) {
+    const std::vector<Vec3>& collider_velocities,
+    const std::vector<KinematicProxySample>& kinematic,
+    const SimulationForceFieldSnapshot* forces,
+    const SimulationForceFieldComputeBuffer* force_buffer,
+    bool domain_moving, std::string& error) {
     if (!compute || params.boundary != Fluid::APICSolverParams::BoundaryMode::Closed ||
         params.pore_exchange.enabled || params.pore_exchange.wet_response_enabled ||
-        params.thermal_liquid_enabled || unsupported_motion_or_fields) {
-        error = "dry grain candidate requires Closed Vulkan, static colliders, gravity only; "
-            "pore/wet/thermal coupling disabled";
+        params.thermal_liquid_enabled) {
+        error = "grain domain requires Closed Vulkan; MPM pore/wet physics and thermal "
+            "liquid disabled";
+        return false;
+    }
+    if (domain_moving) {
+        error = "grain domain cannot move yet (domain motion would need a frame "
+            "acceleration on every grain); keep the domain still";
         return false;
     }
     std::vector<SurfaceMeshTriangle> triangles;
     Vec3 low, high;
     state.grid.getWorldBounds(low, high);
-    for (const auto& collider : colliders) {
+    // Each collider's faces as one range, so its vertex velocities can be
+    // taken from its own previous vertices (rigid, rotating or skinned alike).
+    struct ColliderRange {
+        std::string key;
+        std::size_t first = 0;
+        Vec3 fallback = Vec3(0.0f);  // linear velocity when no previous vertices
+        bool analytic = false;       // kinematic proxy with a known twist
+        Vec3 linear = Vec3(0.0f), angular = Vec3(0.0f), centre = Vec3(0.0f);
+    };
+    std::vector<ColliderRange> ranges;
+    for (std::size_t ci = 0; ci < colliders.size(); ++ci) {
+        const auto& collider = colliders[ci];
         if (!collider.enabled || !collider.fluid_collision_enabled) {
             continue;
         }
+        ColliderRange range;
+        range.key = "collider:" + std::to_string(ci) + ":" + collider.name;
+        range.first = triangles.size();
+        range.fallback = ci < collider_velocities.size() ? collider_velocities[ci] : Vec3(0.0f);
+        ranges.push_back(range);
         if (collider.source_mode == ParticleColliderSourceMode::PlaneY) {
             if (std::abs(collider.plane_y - low.y) < 1e-6f) {
                 continue;
@@ -158,6 +186,104 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             return false;
         }
     }
+    // Bone-driven kinematic proxies (feet, hands): the same capsules/spheres/
+    // boxes the liquid and MPM stamp, coarse (8 x 4) since a character has
+    // tens of them; only the ones that reach the domain.
+    for (const auto& proxy : kinematic) {
+        if (!proxy.resolved || !(proxy.consumer_mask & KinematicConsumerGranular)) {
+            continue;
+        }
+        Vec3 proxy_low, proxy_high;
+        if (proxy.shape == KinematicProxyShape::Box) {
+            const float reach = proxy.half_extents.length();
+            const Vec3 centre = proxy.world_transform.transform_point(Vec3(0.0f));
+            proxy_low = centre - Vec3(reach);
+            proxy_high = centre + Vec3(reach);
+        } else {
+            const Vec3 a = proxy.shape == KinematicProxyShape::Sphere ? proxy.center : proxy.capsule_start;
+            const Vec3 b = proxy.shape == KinematicProxyShape::Sphere ? proxy.center : proxy.capsule_end;
+            proxy_low = Vec3::min(a, b) - Vec3(proxy.radius);
+            proxy_high = Vec3::max(a, b) + Vec3(proxy.radius);
+        }
+        // A proxy that moves this frame may enter: pad by its travel.
+        const Vec3 pad(proxy.linear_velocity.length() * dt + params.grain.radius_m);
+        if (proxy_high.x < low.x - pad.x || proxy_low.x > high.x + pad.x ||
+            proxy_high.y < low.y - pad.y || proxy_low.y > high.y + pad.y ||
+            proxy_high.z < low.z - pad.z || proxy_low.z > high.z + pad.z) {
+            continue;
+        }
+        ColliderRange range;
+        range.key = "proxy:" + std::to_string(proxy.set_id) + ":" + std::to_string(proxy.proxy_id);
+        range.first = triangles.size();
+        range.analytic = proxy.velocity_valid;
+        range.linear = proxy.linear_velocity;
+        range.angular = proxy.angular_velocity;
+        range.centre = proxy.shape == KinematicProxyShape::Sphere ? proxy.center
+            : proxy.shape == KinematicProxyShape::Capsule
+                ? (proxy.capsule_start + proxy.capsule_end) * .5f
+                : proxy.world_transform.transform_point(Vec3(0.0f));
+        ranges.push_back(range);
+        if (proxy.shape == KinematicProxyShape::Sphere) {
+            appendGrainSphereCollider(proxy.center, proxy.radius, triangles, 8, 4);
+        } else if (proxy.shape == KinematicProxyShape::Capsule) {
+            appendGrainCapsuleCollider(proxy.capsule_start, proxy.capsule_end, proxy.radius,
+                triangles, 8, 4);
+        } else {
+            appendGrainBoxCollider(proxy.half_extents * -1.0f, proxy.half_extents, triangles,
+                &proxy.world_transform);
+        }
+        if (triangles.size() > 4096) {
+            error = "grain collider budget is 4096 faces (colliders + kinematic proxies "
+                "reaching the domain); fewer proxies or a coarser collider mesh";
+            return false;
+        }
+    }
+    // Vertex velocities. Previous vertices are valid only one frame back in
+    // time; a scrub/reset/first frame uses the collider's own velocity (or the
+    // proxy's twist), never the jump.
+    Fluid::MatterGrainMotion motion;
+    float moving_speed_max = 0.0f;
+    {
+        if (!buffers.matter_runtime) {
+            buffers.matter_runtime = std::make_shared<Fluid::MatterGpuRuntime>();
+        }
+        auto& runtime = buffers.matter_runtime->grain;
+        const bool continuous = runtime.collider_previous_time >= 0.0 && dt > 0.0f &&
+            std::abs(double(time_seconds) - runtime.collider_previous_time - dt) < .25 * dt;
+        std::map<std::string, std::vector<Vec3>> current;
+        motion.triangle_velocity.assign(3 * triangles.size(), Vec3(0.0f));
+        bool moving = false;
+        for (std::size_t r = 0; r < ranges.size(); ++r) {
+            const auto& range = ranges[r];
+            const std::size_t end = r + 1 < ranges.size() ? ranges[r + 1].first : triangles.size();
+            auto& now = current[range.key];
+            now.reserve(3 * (end - range.first));
+            for (std::size_t t = range.first; t < end; ++t) {
+                now.insert(now.end(), {triangles[t].p0, triangles[t].p1, triangles[t].p2});
+            }
+            const auto before = runtime.collider_previous_vertices.find(range.key);
+            const bool differenced = continuous && before != runtime.collider_previous_vertices.end() &&
+                before->second.size() == now.size();
+            for (std::size_t k = 0; k < now.size(); ++k) {
+                Vec3 v = range.fallback;
+                if (range.analytic) {
+                    v = range.linear + Vec3::cross(range.angular, now[k] - range.centre);
+                } else if (differenced) {
+                    v = (now[k] - before->second[k]) * (1.0f / dt);
+                }
+                motion.triangle_velocity[3 * range.first + k] = v;
+                moving = moving || v.x != 0.0f || v.y != 0.0f || v.z != 0.0f;
+            }
+        }
+        for (const auto& v : motion.triangle_velocity) {
+            moving_speed_max = std::max(moving_speed_max, v.length());
+        }
+        runtime.collider_previous_vertices = std::move(current);
+        runtime.collider_previous_time = time_seconds;
+        if (!moving) {
+            motion.triangle_velocity.clear();  // static set: no sweep, no velocity reads
+        }
+    }
 
     const auto order_start = std::chrono::steady_clock::now();
     const auto ms_since = [](std::chrono::steady_clock::time_point t) {
@@ -175,6 +301,8 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     Fluid::APICSolverStats stats;
     Fluid::MatterGrainStepReport report;
     report.host_order_ms = ms_since(order_start);
+    report.collider_faces = triangles.size();
+    report.collider_speed_max = moving_speed_max;
     if (!liquid.empty()) {
         std::vector<float> speeds(liquid.size());
         for (std::size_t p = 0; p < liquid.size(); ++p) {
@@ -235,8 +363,20 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             buffers.porous_solid_velocity = true;
             liquid_params.variational_solids = true;
         }
-        if (!runGpuFluidParticleIntegrateForces(state, liquid_params, Vec3(0.0f, 0.0f, 0.0f), dt,
-                time_seconds, nullptr, compute, buffers)) {
+        // Force fields reach the liquid exactly as in a grain-free domain:
+        // packed fields in the GPU pass, CPU-only ones (noise, wind surface
+        // drag) on the host followed by the upload.
+        const bool fields = forces && !forces->empty();
+        if (fields && !(force_buffer && force_buffer->valid())) {
+            Fluid::applyExternalForces(state.particles, state.grid, liquid_params, forces,
+                time_seconds, dt);
+            if (!ensureGpuFluidParticleBuffers(state, compute, buffers)) {
+                error = "grain domain: liquid upload after CPU force fields failed";
+                return false;
+            }
+        } else if (!runGpuFluidParticleIntegrateForces(state, liquid_params,
+                Vec3(0.0f, 0.0f, 0.0f), dt, time_seconds, fields ? force_buffer : nullptr,
+                compute, buffers)) {
             error = "grain domain: liquid force integration failed";
             return false;
         }
@@ -285,6 +425,18 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             }
             report.volume_exclusion = exclude;
         }
+        // Force fields on grains: evaluated once per frame at the grain (the
+        // same fields and mask as the liquid), held as an acceleration over
+        // the DEM substeps.
+        if (forces && !forces->empty()) {
+            motion.external_acceleration.resize(grains.size());
+            for (std::size_t g = 0; g < grains.size(); ++g) {
+                motion.external_acceleration[g] = forces->evaluateAt(grains.position[g],
+                    time_seconds, grains.velocity[g], SimulationSystemKind::Fluid);
+                report.field_acceleration_max = std::max(report.field_acceleration_max,
+                    motion.external_acceleration[g].length());
+            }
+        }
         float coupling_ms = ms_since(coupling_start);
         std::vector<Fluid::MatterGrainCouplingOutput> drag;
         const std::size_t grain_budget = budget > stats.mixed_working_set_bytes
@@ -295,7 +447,8 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         }
         if (!Fluid::stepMatterGrainGpu(grains, low, high, params.grain, dt, params.gravity,
                 grain_budget, *compute, buffers.matter_runtime->grain, triangles,
-                coupled ? &frame.inputs : nullptr, coupled ? &drag : nullptr, report, error)) {
+                coupled ? &frame.inputs : nullptr, coupled ? &drag : nullptr, report, error,
+                &motion)) {
             return false;
         }
         report.coupling_enabled = coupled;

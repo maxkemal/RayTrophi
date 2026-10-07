@@ -40,7 +40,9 @@ layout(push_constant) uniform Constants {
     vec4 rolling; // rolling coefficient, gravity xyz
     uvec4 substep; // index, reset history, tangential stiffness bits, last index
     // Hash cell size (2r + bridge rupture cap), capillary prefactor
-    // 2 pi gamma cos(theta) x cohesion scale, rupture cap (m), unused.
+    // 2 pi gamma cos(theta) x cohesion scale, rupture cap (m), and the float
+    // offset of the collider vertex velocities in `triangles` (uint bits;
+    // 0 = static colliders).
     vec4 wet;
 } pc;
 
@@ -53,7 +55,7 @@ const uint BUCKET = 16u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 14u;
+const uint REVISION = 15u;
 
 uint readBank() { return pc.substep.x & 1u; }
 uint writeBank() { return readBank() ^ 1u; }
@@ -339,9 +341,17 @@ void main() {
     vec3 manifold_n[4];
     float manifold_d[4];
     uint manifold_key[4];
+    vec3 manifold_v[4];
     vec3 patch_n[8];
     float patch_d[8];
     uint patch_id[8];
+    vec3 patch_v[8];
+    // Moving colliders: a face sits at end - v * (frame time left), so it
+    // sweeps through the substeps; the wall velocity at the contact point
+    // enters the relative velocity (friction drags grains along, a foot
+    // pushes them away). Static scenes read no velocity.
+    uint velocity_offset = floatBitsToUint(pc.wet.w);
+    float time_left = float(pc.substep.w+1u-pc.substep.x)*pc.step_contact.x;
     uint patch_count = 0u;
     uint manifold_count = 0u;
     uint stack[64];
@@ -366,10 +376,29 @@ void main() {
             vec3 a = vec3(triangles[b],triangles[b+1],triangles[b+2]);
             vec3 bp = vec3(triangles[b+3],triangles[b+4],triangles[b+5]);
             vec3 c = vec3(triangles[b+6],triangles[b+7],triangles[b+8]);
+            vec3 va = vec3(0.0), vb = vec3(0.0), vc = vec3(0.0);
+            if (velocity_offset != 0u) {
+                uint e = velocity_offset+b;
+                va = vec3(triangles[e],triangles[e+1],triangles[e+2]);
+                vb = vec3(triangles[e+3],triangles[e+4],triangles[e+5]);
+                vc = vec3(triangles[e+6],triangles[e+7],triangles[e+8]);
+                a -= va*time_left; bp -= vb*time_left; c -= vc*time_left;
+            }
             vec3 q = closestTriangle(p,a,bp,c);
             float d = length(p-q);
             if (d >= r) continue;
             vec3 n = d > 1e-9 ? (p-q)/d : normalize(cross(bp-a,c-a));
+            vec3 wall = vec3(0.0);
+            if (velocity_offset != 0u) {
+                // Barycentric weights of the contact point.
+                vec3 e0 = bp-a, e1 = c-a, e2 = q-a;
+                float d00 = dot(e0,e0), d01 = dot(e0,e1), d11 = dot(e1,e1);
+                float d20 = dot(e2,e0), d21 = dot(e2,e1);
+                float den = d00*d11-d01*d01;
+                float wb = den > 1e-20 ? (d11*d20-d01*d21)/den : 0.0;
+                float wc = den > 1e-20 ? (d00*d21-d01*d20)/den : 0.0;
+                wall = (1.0-wb-wc)*va+wb*vb+wc*vc;
+            }
             uint slot = patch_count;
             for (uint m=0u; m<patch_count; ++m) {
                 if (patch_id[m] == patches[k]) { slot = m; break; }
@@ -383,9 +412,11 @@ void main() {
                 patch_n[slot] = n;
                 patch_d[slot] = d;
                 patch_id[slot] = patches[k];
+                patch_v[slot] = wall;
             } else if (d < patch_d[slot]) {
                 patch_n[slot] = n;
                 patch_d[slot] = d;
+                patch_v[slot] = wall;
             }
         }
     }
@@ -404,11 +435,12 @@ void main() {
         }
         manifold_n[manifold_count] = patch_n[k];
         manifold_d[manifold_count] = patch_d[k];
+        manifold_v[manifold_count] = patch_v[k];
         manifold_key[manifold_count++] = PATCH_KEY|(patch_id[k] & 0x3fffffffu);
     }
     for (uint m=0u; m<manifold_count; ++m) {
         vec3 n = manifold_n[m], arm = -n*r;
-        contact(i,manifold_key[m],n,r-manifold_d[m],arm,v+cross(w,arm),w,ii,0.0,r,
+        contact(i,manifold_key[m],n,r-manifold_d[m],arm,v+cross(w,arm)-manifold_v[m],w,ii,0.0,r,
             im+r*r*ii,im,f,t);
     }
     if (g_contacts > SLOTS) atomicOr(diagnostics[0],1u);

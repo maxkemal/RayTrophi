@@ -57,7 +57,8 @@ std::size_t particleBytes(std::size_t capacity) {
 
 std::size_t colliderBytes(std::size_t triangles) {
     triangles = std::max(triangles, std::size_t{1});
-    return triangles * 3 * sizeof(Vec3) + triangles * 2 * sizeof(MatterGrainBvhNode) +
+    // End positions, then vertex velocities of moving colliders.
+    return triangles * 6 * sizeof(Vec3) + triangles * 2 * sizeof(MatterGrainBvhNode) +
         triangles * sizeof(uint32_t);
 }
 
@@ -154,7 +155,7 @@ bool ensureCollider(SimulationComputeContext& compute, MatterGrainGpuRuntime& ru
                     std::size_t triangles, std::string& error) {
     triangles = std::max(triangles, std::size_t{1});
     MatterGrainGpuRuntime candidate;
-    candidate.triangles = makeBuffer(compute, "grain_flat_triangles", triangles * 3 * sizeof(Vec3));
+    candidate.triangles = makeBuffer(compute, "grain_flat_triangles", triangles * 6 * sizeof(Vec3));
     candidate.collider_nodes = makeBuffer(compute, "grain_collider_nodes",
         triangles * 2 * sizeof(MatterGrainBvhNode));
     candidate.collider_patches = makeBuffer(compute, "grain_collider_patches",
@@ -190,7 +191,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     MatterGrainGpuRuntime& runtime, const std::vector<SurfaceMeshTriangle>& triangles,
     const std::vector<MatterGrainCouplingInput>* coupling,
     std::vector<MatterGrainCouplingOutput>* drag_out,
-    MatterGrainStepReport& report, std::string& error) {
+    MatterGrainStepReport& report, std::string& error, const MatterGrainMotion* motion) {
     error.clear();
     using Clock = std::chrono::steady_clock;
     const auto ms_since = [](Clock::time_point t) {
@@ -209,7 +210,11 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         p.rest_mass_kg.size() != count || p.mass_fraction.size() != count ||
         p.pore_water_mass_kg.size() != count || p.affine.size() != count ||
         p.velocity.size() != count || p.constitutive_model.size() != count ||
-        p.particle_id.size() != count || (coupling && coupling->size() != count)) {
+        p.particle_id.size() != count || (coupling && coupling->size() != count) ||
+        (motion && !motion->external_acceleration.empty() &&
+         motion->external_acceleration.size() != count) ||
+        (motion && !motion->triangle_velocity.empty() &&
+         motion->triangle_velocity.size() != 3 * triangles.size())) {
         error = "dry grain requires Vulkan compute, 1..100000 grains, <=4096 faces";
         return false;
     }
@@ -270,6 +275,30 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             row[6] = in.buoyancy_acceleration.z;
             row[7] = in.lump_mass_kg;
             maximum_speed = std::max(maximum_speed, in.lump_velocity.length());
+        }
+    }
+    // Force fields ride in the acceleration row next to buoyancy (lift.xyz in
+    // the shader): a constant acceleration over the frame, like gravity.
+    if (motion && !motion->external_acceleration.empty()) {
+        for (std::size_t i = 0; i < count; ++i) {
+            const Vec3& a = motion->external_acceleration[i];
+            if (!finite(a)) {
+                error = "grain force-field acceleration is not finite";
+                return false;
+            }
+            coupling_rows[12 * i + 4] += a.x;
+            coupling_rows[12 * i + 5] += a.y;
+            coupling_rows[12 * i + 6] += a.z;
+            maximum_speed = std::max(maximum_speed, a.length() * dt);
+        }
+    }
+    // A moving collider face approaches at its own speed: the travel bound
+    // keeps it under 10% of a radius per substep relative to the grains too.
+    const std::vector<Vec3>* triangle_velocity =
+        motion && !motion->triangle_velocity.empty() ? &motion->triangle_velocity : nullptr;
+    if (triangle_velocity) {
+        for (const auto& v : *triangle_velocity) {
+            maximum_speed = std::max(maximum_speed, v.length());
         }
     }
     // Substep size. Every grain owns at most kMatterGrainContactBudget contact
@@ -374,7 +403,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         std::size_t{kMatterGrainBucketTables} * bucketsFor(capacity) *
             kMatterGrainBucketCapacity * sizeof(uint32_t),
         triangle_capacity * 2 * sizeof(MatterGrainBvhNode),
-        triangle_capacity * 3 * sizeof(Vec3)});
+        triangle_capacity * 6 * sizeof(Vec3)});
     // Say which limit and by how much: the two used to share one message, and
     // a domain budget read as a device limit sends the user to the wrong fix.
     if (budget_bytes && working > budget_bytes) {
@@ -396,11 +425,12 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             std::to_string(compute.caps().max_storage_buffer_bytes / (1024 * 1024)) + " MiB";
         return false;
     }
-    const auto fingerprint = matterGrainColliderFingerprint(triangles);
+    const auto fingerprint = matterGrainColliderFingerprint(triangles, triangle_velocity);
     const bool refresh_collider = grow_collider || !runtime.collider_uploaded ||
         runtime.collider_fingerprint != fingerprint;
     MatterGrainColliderBvh collider;
-    if (refresh_collider && !buildMatterGrainColliderBvh(triangles, collider, error)) {
+    if (refresh_collider && !buildMatterGrainColliderBvh(triangles, collider, error,
+            triangle_velocity, dt)) {
         return false;
     }
     if ((grow_particles && !ensureParticles(compute, runtime, capacity, error)) ||
@@ -410,8 +440,14 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     std::array<uint32_t, kDiagnosticWords> diagnostics{};
     if (refresh_collider) {
         runtime.collider_uploaded = false;
-        if ((!collider.vertices.empty() && !compute.uploadBuffer(runtime.triangles,
-                collider.vertices.data(), collider.vertices.size() * sizeof(Vec3))) ||
+        // Velocities follow the end positions in the same buffer (offset 9 N
+        // floats, in the push constants); none = a static collider set.
+        std::vector<Vec3> flat = collider.vertices;
+        flat.insert(flat.end(), collider.velocities.begin(), collider.velocities.end());
+        runtime.collider_velocity_offset = collider.velocities.empty()
+            ? 0u : static_cast<uint32_t>(3 * collider.vertices.size());
+        if ((!flat.empty() && !compute.uploadBuffer(runtime.triangles,
+                flat.data(), flat.size() * sizeof(Vec3))) ||
             (!collider.nodes.empty() && !compute.uploadBuffer(runtime.collider_nodes,
                 collider.nodes.data(), collider.nodes.size() * sizeof(MatterGrainBvhNode))) ||
             (!collider.surface_patches.empty() && !compute.uploadBuffer(runtime.collider_patches,
@@ -430,7 +466,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         float contact[4];
         float rolling[4];
         uint32_t substep, reset_history, tangential_stiffness_bits, last_substep;
-        float wet[4];  // hash cell size, capillary prefactor, rupture cap, -
+        float wet[4];  // hash cell size, capillary prefactor, rupture cap, velocity offset bits
     } constants{};
     static_assert(sizeof(Constants) == 112);
     constants.count = static_cast<uint32_t>(count);
@@ -525,7 +561,8 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     constants.wet[0] = 2.0f * params.radius_m + rupture_cap;
     constants.wet[1] = static_cast<float>(capillary);
     constants.wet[2] = rupture_cap;
-    constants.wet[3] = 0.0f;
+    // Float slot carrying the uint offset of the collider vertex velocities.
+    std::memcpy(&constants.wet[3], &runtime.collider_velocity_offset, sizeof(uint32_t));
     constants.reset_history = runtime.history_fresh ? 1u : 0u;
     constants.last_substep = substeps - 1;
     const bool history_reset = runtime.history_fresh;

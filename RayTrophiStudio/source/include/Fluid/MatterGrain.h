@@ -6,6 +6,7 @@
 #include "FluidParticles.h"
 #include <json.hpp>
 #include <cstddef>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -77,7 +78,7 @@ struct MatterGrainParams {
 
 // Host CFL and GLSL history slots share this budget (sim_matter_grain.glsl).
 inline constexpr int kMatterGrainContactBudget = 24;
-inline constexpr uint32_t kMatterGrainShaderRevision = 14;
+inline constexpr uint32_t kMatterGrainShaderRevision = 15;
 // Neighbour hash: three rotating tables of fixed-capacity buckets.
 inline constexpr uint32_t kMatterGrainBucketCapacity = 16;
 inline constexpr uint32_t kMatterGrainBucketTables = 3;
@@ -145,6 +146,10 @@ struct MatterGrainStepReport {
     // Liquid-field binning, drag/pressure preparation, reaction and water
     // exchange around the grain step (host, every coupled frame).
     float host_coupling_ms = 0.0f;
+    // Moving colliders and force fields seen by this step.
+    std::size_t collider_faces = 0;
+    float collider_speed_max = 0.0f;       // fastest collider vertex, m/s
+    float field_acceleration_max = 0.0f;   // largest force-field acceleration on a grain, m/s^2
     // Liquid parcel speed entering the frame (m/s): the liquid lane's CFL
     // substeps follow the maximum, so a few outliers far above the 99th
     // percentile multiply the pressure solves of the whole frame.
@@ -213,6 +218,8 @@ struct MatterGrainGpuRuntime {
     ComputeBufferHandle collider_patches;
     uint64_t collider_fingerprint = 0;
     uint32_t collider_node_count = 0;
+    // Float offset of the vertex velocities in `triangles` (0 = static).
+    uint32_t collider_velocity_offset = 0;
     bool collider_uploaded = false;
     bool history_fresh = true;
     // Device contact history is valid only for the grain state it was
@@ -231,6 +238,22 @@ struct MatterGrainGpuRuntime {
     std::size_t capacity = 0;
     std::size_t triangle_capacity = 0;
     uint32_t buckets = 0;
+    // Moving colliders: each collider's flat vertices at the previous frame,
+    // keyed by collider, so a vertex velocity is (now - then) / dt for rigid,
+    // rotating and skinned colliders alike. Valid only for the next step in
+    // time (scrub/reset drop it: a jump is not a velocity).
+    std::map<std::string, std::vector<Vec3>> collider_previous_vertices;
+    double collider_previous_time = -1.0;
+};
+
+// Per-frame motion inputs of one grain step (optional, empty = none).
+struct MatterGrainMotion {
+    // One velocity per triangle vertex, same order as the triangles (m/s).
+    // The shader places each triangle at end - v * (frame time left), so the
+    // collider sweeps through the substeps instead of jumping per frame.
+    std::vector<Vec3> triangle_velocity;
+    // Force-field acceleration per grain (m/s^2), held over the frame.
+    std::vector<Vec3> external_acceleration;
 };
 
 nlohmann::json matterGrainDiagnostics(const FluidParticles& particles,
@@ -267,7 +290,8 @@ bool stepMatterGrainGpu(FluidParticles& grains, const Vec3& low, const Vec3& hig
     MatterGrainGpuRuntime& runtime, const std::vector<SurfaceMeshTriangle>& triangles,
     const std::vector<MatterGrainCouplingInput>* coupling,
     std::vector<MatterGrainCouplingOutput>* drag_out,
-    MatterGrainStepReport& report, std::string& error);
+    MatterGrainStepReport& report, std::string& error,
+    const MatterGrainMotion* motion = nullptr);
 
 } // namespace Fluid
 } // namespace RayTrophiSim

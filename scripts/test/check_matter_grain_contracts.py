@@ -148,6 +148,16 @@ def main():
     # through the porous projection only; also kicking the liquid with it fed
     # back through the next frame's measured acceleration (50 m/s parcels).
     assert 'pressure_in_projection ? drag[g].drag_impulse' in coupling_src
+    # 2026-10-07: force fields and moving colliders. The step no longer holds
+    # for them; colliders carry vertex velocities and sweep through substeps.
+    step_src = read('src/Physics/Fluid/MatterGrainStep.inl')
+    assert 'static colliders, gravity only' not in step_src
+    assert 'forces->evaluateAt(grains.position[g]' in step_src
+    assert 'KinematicConsumerGranular' in step_src and 'collider_previous_vertices' in step_src
+    assert 'fields ? force_buffer : nullptr' in step_src
+    motion_shader = read('shaders/sim_matter_grain.glsl')
+    assert 'v+cross(w,arm)-manifold_v[m]' in motion_shader and 'a -= va*time_left' in motion_shader
+    assert 'triangles * 6 * sizeof(Vec3)' in gpu
     shader_src = read('shaders/sim_matter_grain.glsl')
     assert 'float cn = 2.0*pc.step_contact.y*sqrt(k/inverse_normal_mass);' in shader_src
     assert 'im+jm,f,t);' in shader_src and shader_src.count('im,f,t);') == 2
