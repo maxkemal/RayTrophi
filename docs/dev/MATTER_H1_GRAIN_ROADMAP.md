@@ -295,6 +295,64 @@ CPU + 2 yükleme/indirme). B4 bunu GPU'ya taşır.
 - MPM↔grain hibrit geçiş, yerel bağ kopması (kar/çığ, heyelan), yanma/erime ledger kancaları.
   Ön şart: B7 kararı ve B5/B6'nın kapanması.
 
+### B11 — H1-M: tek domain'de üç sahip (sıvı + grain + MPM)
+
+> Eklendi 2026-10-07 (kullanıcı isteği: aynı domain'de kum + su + MPM çamur/kar emitter). Henüz
+> başlanmadı; bu bölüm başka bir ajanın sıfırdan başlayabileceği kadar ayrıntılıdır.
+
+**Bugünkü durum (kod):** `partitionMatterGrainOwners`
+(`src/Physics/Fluid/MatterGrainCoupling.cpp`) grain açık domain'de sahipliği YALNIZ
+`constitutive_model`'e göre verir: Granular → DEM grain, Fluid/Auto-sıvı → sıvı şeridi,
+Elastic/donmuş → hata ("grain domain carries a frozen/elastic carrier") ve adım tutulur.
+Sonuç: MPM toprak/çamur (Granular) emitter'ı sessizce taneye döner (çamur davranışı kaybolur —
+**sinsi, hata vermez**), elastik/kar emitter'ı tüm domain'i dondurur. İki ayrı domain çalışır ama
+birbirini görmez.
+
+**Hedef:** aynı domain'de üç sahip: sıvı şeridi (P2G/MGPCG/G2P), DEM grain, MPM (mevcut
+`MatterGpuStep.inl` granular/elastic yolu). Örnek sahne: kum + su + çamur; kum çamura çarpar,
+çamur suyu iter, su kumu sürükler.
+
+**Fazlar (sırayla; her biri kendi kabulüyle kapanır):**
+
+1. **Madde başına sahip** (`MatterGrainParams` ya da madde bağlaması üzerinde
+   `transport_owner = grain|mpm`, varsayılan: Sand/Gravel → grain, Soil/Mud/Snow → mpm).
+   Partition model yerine maddenin sahibine bakar; Elastic → mpm. RtApi + IPC + Python +
+   capability + overlay + panel (Matter sekmesi, madde satırında sahip) + serializer
+   (`ProjectManager` `matter_grain`). Kabul: sahiplik raporu (`fluid.matter_models` →
+   sahip başına parçacık sayısı); eski projeler aynı sahibi alır.
+   ★ Bu faz TEK BAŞINA birleştirilmez: MPM ile tane birbirini görmeden üçüncü sahibi açmak,
+   tanelerin çamurun içinden geçtiği makul görünen yanlış sonucu üretir (CLAUDE.md "sessizce
+   makul görünen sonuç"). Faz 2 ile aynı partide gelir ya da çakışma varken readiness engeli koyar.
+2. **MPM şeridi grain domain içinde:** üç sahibin kare sırası (sıvı → MPM → grain → tepkiler)
+   ve sıvı↔MPM bağlantısının bugünkü karma yoldaki gibi kalması. Ortak grid; bütçe
+   (`resource_budget_mb`) üç sahibe paylaştırılır ve raporlanır.
+3. **MPM↔tane teması** (asıl zor iş). Önerilen başlangıç: MPM kütlesini tane için bir
+   **hareketli engel alanı** olarak görmek — MPM grid'inden yoğunluk/hız (ve yüzey normali
+   ∇ρ) örneklenir; tane, MPM dolu hücreye girdiğinde penalty normal kuvvet + sürtünme alır
+   (DEM duvar temasıyla aynı yay/sönüm, sertlik MPM'in Young modülünden sınırlı); eşit-zıt
+   impuls MPM grid momentumuna P2G ile geri döner. Alternatif (daha doğru, daha pahalı): taneyi
+   MPM P2G'ye katı hacim olarak katmak (volume exclusion'ın MPM karşılığı).
+   ★ Grain↔sıvı bağlantısında yaşanan ders (2026-10-07): bir tepkiyi hem projeksiyondan/
+   gridden HEM darbe olarak vermek çift sayımdır ve ölçülen ivmeyle geri besleme döngüsü
+   kurar (50 m/s parseller, 68 alt adım). Her temas kuvvetinin tepkisi tek yoldan döner.
+4. **Dönüşüm (H1-H ile ortak, isteğe bağlı):** kum + su → çamur dönüşümü fiziksel değildir
+   (çamur ince taneden/kilden gelir); yalnız ölçek/LOD gerekçesiyle grain↔MPM devir B10'da.
+
+**Kabul matrisi:**
+- Kum yağmuru durgun çamur havuzuna: taneler yüzeyde/çökerek durur, içinden geçmez (en derin
+  tane ≤ yüzey + birkaç r); kütle ve toplam momentum kapalı (rezidü raporlanır).
+- Çamur bloğu kum yığınına kayar: yığını iter; tane yığını çamura gömülmez.
+- Üç sahip + collider + 24 fps: tutulan adım yok; maliyet tablosu (`rt_grain_float_probe.py
+  --cost`) sahip başına ms verir.
+- Regresyon: saf grain domain (H1 suite tümü) ve grain'siz MPM domain'i değişmez.
+- Sinsi kol: MPM dolu hücrede tane sayısı > 0 iken temas impulsu 0 ise FAIL (taneler
+  içinden geçiyor ama "çalışıyor" görünüyor).
+
+**Dosyalar:** `MatterGrainCoupling.cpp` (partition/merge), `MatterGrainStep.inl` (kare sırası),
+`MatterGpuStep.inl` (MPM şeridi), `shaders/sim_matter_grain.glsl` (tane tarafı temas),
+`MatterGrainParams.cpp` (sahip alanı, blockers), `src/Api/RtApiMatterGrain.cpp` + IPC/Python,
+`src/UI/MatterGrainControls.cpp`, `ProjectManager.cpp`.
+
 ---
 
 ## 3. Test matrisi (hangi kol hangi partiyi kapatır)
