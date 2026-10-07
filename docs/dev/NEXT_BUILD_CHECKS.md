@@ -1,5 +1,11 @@
 # Sıradaki kullanıcı build (YALNIZ C++): DEM birleşik kararlılık sınırı + coexist eklenmiş kütle
 
+**SONUÇ (2026-10-07): `--quick` 13/13 PASS, dense PASS.** Alt adım 234 → **196** (tahmin
+tuttu), dispatch 243 → 205. 16384: medyan 60.1 → **53.4 ms** (−%11), p95 90.4 → **73.1**
+(−%19). 4096: 20.4 → 27.3 ms medyan ama p95 aynı (35.5 → 35.7) — o boyutta kare süresini
+ek yük/gürültü belirliyor (önceki iki koşu 19.9 ve 20.4). Sıradaki maliyet adımı: 24 temas
+bütçesi (ölçülen en fazla 9).
+
 1. **DEM maliyeti.** Sertlik ve sönüm sınırları ayrı ayrı uygulanıyordu; sönüm sınırı .5/oran =
    1/(4ζω), büyük ζ'de birleşik limitin yarısı ve her sönümlü sahnenin alt adımını o belirliyordu
    (16k'da 234/kare). Şimdi tek sınır: sembolik Euler x'' = −ω²x − 2ζωx' için kesin kararlılık
