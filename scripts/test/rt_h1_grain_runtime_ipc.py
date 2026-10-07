@@ -623,20 +623,20 @@ def main():
             call('flow_source.update', name=SOURCE, domain=REPOSE, enabled=False)
             data['repose'] = []
             failures = []
-            # The historic arms use restitution_of(8 Ns/m) = e .87 (very bouncy;
-            # sand is ~.5). The last arm repeats mu_r .1 at e .5: if only it forms a
-            # pile, the spread is bounce scatter, not a rolling/friction defect.
-            for label, radius, mu_r, count, e in [('mu_r_.05', .025, .05, 1500, None),
-                                                  ('mu_r_.3', .025, .3, 1500, None),
-                                                  ('mu_r_.1', .025, .1, 1500, None),
-                                                  ('mu_r_.1_r_.0175', .0175, .1, 4373, None),
-                                                  ('mu_r_.1_e_.5', .025, .1, 1500, .5)]:
+            # Sand: restitution .5. The arms first ran at restitution_of(8 Ns/m)
+            # = e .87; at mu_r .1 that scattered 97% of the grains over the floor
+            # while e .5 built a 20.9 deg cone with 9% scattered (live 2026-10-07):
+            # the spread was bounce scatter of a marble-like material, not a
+            # rolling defect. Restitution is dimensionless, so the size arm keeps it.
+            for label, radius, mu_r, count in [('mu_r_.05', .025, .05, 1500), ('mu_r_.3', .025, .3, 1500),
+                                               ('mu_r_.1', .025, .1, 1500),
+                                               ('mu_r_.1_r_.0175', .0175, .1, 4373)]:
                 scale = radius/.025
                 call('timeline.set_frame', frame=0)
                 call('fluid.reset')
                 call('fluid.set_grain_settings', domain=REPOSE, enabled=True, radius_m=radius,
                      stiffness_n_m=100000.*scale,
-                     restitution=e if e else restitution_of(8.*scale**2, 100000.*scale, radius),
+                     restitution=.5,
                      sliding_damping_n_s_m=4.*scale**2, friction=.5, rolling_friction=mu_r,
                      twisting_friction=.1, tangential_stiffness_ratio=2/7, contact_resolution=24,
                      packing_fraction=.6, max_substeps=4096)
@@ -694,6 +694,9 @@ def main():
                                 (sm['tail_angle_range_deg'] is not None and sm['tail_angle_range_deg'] <= 1.5,
                                  'pile still moving'),
                                 (sm['kinetic_energy_per_grain_j'] <= 1e-5, 'pile not at rest'),
+                                # An angle of the leftover core is not the material's.
+                                (sm['scattered_fraction'] is not None and sm['scattered_fraction'] <= .3,
+                                 f"{sm['scattered_fraction']} of the grains scattered outside the pile"),
                                 (sm['mass_drift_after_birth_kg'] <= 1e-5, 'mass drift')]:
                     if not ok:
                         failures.append(f'{label}: {why}')

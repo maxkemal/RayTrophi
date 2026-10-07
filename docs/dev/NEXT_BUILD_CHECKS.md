@@ -1,3 +1,18 @@
+# Sıradaki koşu (BUILD YOK, yalnız script): repose kum malzemesiyle
+
+Canlı teşhis (2026-10-07): μr .1 yığını e .87'de (eski test malzemesi, `restitution_of(8 Ns/m)`)
+tanelerin %97'sini zemine saçtı; aynı yığın **e .5 ile 20.9°, saçılan %9.4**. Çekirdek doğru,
+test malzemesi bilye gibi sekiyordu (kum ~.5; ürün varsayılanı da .5). Tüm repose kolları
+e .5'e çekildi; saçılan pay > .3 artık FAIL (kalan çekirdeğin açısı malzemenin açısı değil).
+Eski koşu: μr .3 28.1°, μr .1 r .0175 28.1° (ikisi de e ≈ .87, saçılan .22/.31).
+
+1. `git pull`, sonra `python scripts/test/rt_h1_grain_suite.py --only repose` → 4 satır + `repose angles`.
+   Kapılar: μr .1 açısı 15–45°, μr .3 ≥ μr .05 + 3°, iki tane boyu arasında ≤ 4°, saçılan ≤ .3.
+   ★ μr .05 yine `no_pile` ise: düşük yuvarlanma direncinde kum gerçekten yayılabilir; sayıları getir,
+   kapıyı fizik tartışmasıyla birlikte belirleriz.
+
+---
+
 # Sıradaki kullanıcı build (YALNIZ C++): repose teşhisi
 
 Dünkü FAIL: μr .05 kolunda "yığın" duvarlara kadar yayılmış tabaka; ölçüm `measured=false`
