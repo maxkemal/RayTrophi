@@ -25,7 +25,8 @@ The timeline advances by 3N frames; reload the scene afterwards if needed.
 --cost only steps the scene as authored and prints where a frame goes: the
 liquid lane (p2g/pressure/g2p/advect), the grain step by host stage
 (order/prepare/gpu_wait/publish/merge/coupling), transfers and host<->GPU
-synchronisation points. A GPU that never runs full is usually waiting for
+synchronisation points. --no-coupling repeats it with fluid_coupling off
+(restored after) to show whether the grain reaction sets the liquid CFL. A GPU that never runs full is usually waiting for
 the CPU between these synchronisation points.
 """
 import statistics
@@ -46,6 +47,8 @@ def main():
     parser.add_argument('--domain')
     parser.add_argument('--frames', type=int, default=90)
     parser.add_argument('--cost', action='store_true')
+    parser.add_argument('--no-coupling', action='store_true',
+                        help='with --cost: fluid_coupling off for the run, restored after')
     args = parser.parse_args()
     client = RtIpc()
 
@@ -88,7 +91,23 @@ def main():
                 'held': inv['mixed_execution']['step_held'],
                 'status': inv['mixed_execution']['status'][:90]}
 
+    if args.cost and args.no_coupling:
+        # Same scene with grains and liquid ignoring each other: if the liquid's
+        # speed max drops, the grain reaction is what drives the liquid CFL.
+        call('fluid.set_grain_settings', domain=domain, fluid_coupling=False, volume_exclusion=False)
+        try:
+            return cost(call, args, domain)
+        finally:
+            call('fluid.set_grain_settings', domain=domain, fluid_coupling=authored['fluid_coupling'],
+                 volume_exclusion=authored['volume_exclusion'])
     if args.cost:
+        return cost(call, args, domain)
+
+    run_arms(call, args, domain, authored, sample)
+
+
+def cost(call, args, domain):
+    if True:
         frames = []
         # Per-kernel GPU time: batch_end waits for the GPU, so it hides which
         # kernels the frame is spent in. Timed over the frames after warm-up.
@@ -152,8 +171,9 @@ def main():
                 extra = {key: k[key] for key in ('count', 'calls', 'dispatches') if key in k}
                 print(f"  {k.get('kernel', '?'):<44} {k.get('ms', 0.)/timed_frames:8.2f}  {extra}")
         print('log:', LOG.with_name('grain_cost_probe_live.json').relative_to(LOG.parents[2]))
-        return
 
+
+def run_arms(call, args, domain, authored, sample):
     rows = []
     arms = [('A authored', {}), ('B volume_exclusion off', {'volume_exclusion': False}),
             ('C fluid_coupling off', {'fluid_coupling': False, 'volume_exclusion': False})]
