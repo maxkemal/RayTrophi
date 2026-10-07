@@ -1,4 +1,5 @@
 #include "Fluid/MatterPoreAuthoring.h"
+#include "Fluid/MatterGrain.h"
 #include "Animation/RigBindingScope.h"
 #include "Fluid/MatterPhaseConfig.h"
 #include "Fluid/FluidFogDensity.h"
@@ -5980,6 +5981,9 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             }
             d["fluid_substance_materials"] = binds;
             d["matter_pore_exchange"] = RayTrophiSim::Fluid::matterPoreParamsToJson(domain.fluid_params.pore_exchange);
+            // The grain owner and its material. Missing here, a reopened
+            // project lost "Enable discrete grains" and its sand ran as MPM.
+            d["matter_grain"] = RayTrophiSim::Fluid::matterGrainParamsToJson(domain.fluid_params.grain);
             d["fluid_solid_phase_enabled"] = domain.fluid_solid_phase_enabled;
             d["fluid_solid_phase_fill"] = domain.fluid_solid_phase_fill;
         }
@@ -6646,6 +6650,9 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         // miscibility defaults to 1.0, which is what the flag's default meant.
         if (item.contains("matter_pore_exchange")) {
             domain.fluid_params.pore_exchange = RayTrophiSim::Fluid::matterPoreParamsFromJson(item.at("matter_pore_exchange"));
+        }
+        if (item.contains("matter_grain")) {
+            domain.fluid_params.grain = RayTrophiSim::Fluid::matterGrainParamsFromJson(item.at("matter_grain"));
         }
         domain.fluid_substance_materials.clear();
         if (item.contains("fluid_substance_materials") &&
