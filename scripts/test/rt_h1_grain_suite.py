@@ -59,7 +59,10 @@ def key_lines(text, table_after=None):
             if l.startswith(table_after):
                 picked += lines[n:]
                 break
-    # The last line is where a failure says why.
+    # A traceback: its last frame (file:line) and the error line say where and why.
+    frames = [l for l in lines if l.lstrip().startswith('File "')]
+    if frames and frames[-1] not in picked:
+        picked.append(frames[-1])
     if lines and lines[-1] not in picked:
         picked.append(lines[-1])
     seen, out = set(), []
