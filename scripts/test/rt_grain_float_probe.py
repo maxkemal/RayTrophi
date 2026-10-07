@@ -46,6 +46,9 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--domain')
     parser.add_argument('--frames', type=int, default=90)
+    # One fluid.step = one timeline frame of the scene. fluid.step does not move
+    # the timeline, and there is no fps query yet: pass the scene's rate.
+    parser.add_argument('--fps', type=float, default=24.)
     parser.add_argument('--cost', action='store_true')
     parser.add_argument('--no-coupling', action='store_true',
                         help='with --cost: fluid_coupling off for the run, restored after')
@@ -109,7 +112,7 @@ def main():
                 call('fluid.set_grain_settings', domain=domain, fluid_coupling=authored['fluid_coupling'],
                      volume_exclusion=authored['volume_exclusion'])
         call('fluid.reset')
-        print(f"\n==== compare from frame 0, {args.frames} frames (medians after warm-up)")
+        print(f"\n==== compare from frame 0, {args.frames} frames at {args.fps:g} fps (medians after warm-up)")
         print(f"{'':<16}{'total ms':>10}{'pressure':>10}{'liq sub':>9}{'max m/s':>9}{'p99 m/s':>9}"
               f"{'parcels':>9}{'grains':>8}")
         for name, r in results.items():
@@ -144,7 +147,7 @@ def cost(call, args, domain):
         for frame in range(1, args.frames + 1):
             if timing and frame == 11:
                 call('perf.gpu_kernel_timings', reset=True)
-            call('fluid.step', dt=1/60)
+            call('fluid.step', dt=1/args.fps)
             stats = call('fluid.step_stats', domain=domain)
             inv = call('fluid.matter_models', domain=domain)
             runtime = ((inv.get('grain_diagnostics') or {}).get('runtime')) or {}
@@ -172,7 +175,7 @@ def cost(call, args, domain):
         stat = lambda k: med([f['stats'].get(k, 0.) or 0. for f in tail])
         host = lambda k: med([f['host_ms'].get(k, 0.) or 0. for f in tail])
         total = stat('total_ms')
-        print(f"\nframes {len(tail)} (after warm-up), grains {tail[-1]['grains']}, "
+        print(f"\nframes {len(tail)} at {args.fps:g} fps (after warm-up), grains {tail[-1]['grains']}, "
               f"particles {tail[-1]['stats'].get('particle_count')}, grain substeps {tail[-1]['substeps']} "
               f"({tail[-1]['limit']})")
         print(f"step total (median)          {total:8.2f} ms")
@@ -211,7 +214,7 @@ def run_arms(call, args, domain, authored, sample):
             restore = {k: authored[k] for k in ('volume_exclusion', 'fluid_coupling')}
             call('fluid.set_grain_settings', domain=domain, **{**restore, **patch})
             for frame in range(1, args.frames + 1):
-                call('fluid.step', dt=1/60)
+                call('fluid.step', dt=1/args.fps)
                 if frame % 15 == 0 or frame == 1:
                     row = sample(name, frame)
                     rows.append(row)
