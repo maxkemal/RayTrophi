@@ -246,6 +246,19 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         }
         const auto coupling_start = std::chrono::steady_clock::now();
         Fluid::MatterGrainCouplingFrame frame;
+        // The liquid field keeps its grid-sized arrays between frames and
+        // clears only the cells it wrote (one step runs on one thread).
+        static thread_local Fluid::MatterGrainLiquidField field_cache;
+        frame.field = std::move(field_cache);
+        struct KeepField {
+            Fluid::MatterGrainLiquidField& cache;
+            Fluid::MatterGrainLiquidField& field;
+            ~KeepField() { cache = std::move(field); }
+        } keep_field{field_cache, frame.field};
+        if (!coupled) {
+            // Not rebuilt this frame: no parcel may map to last frame's cells.
+            frame.field.parcel_cell.clear();
+        }
         if (coupled) {
             if (!Fluid::buildMatterGrainLiquidField(liquid, grains, params.grain.radius_m,
                     params.chemistry_preset, state.grid.origin, state.grid.nx, state.grid.ny,

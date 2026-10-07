@@ -155,6 +155,27 @@ int main() {
         assert(std::abs(grid.solid_vel[grid.cellIndex(1, 1, 1)].y + .5f) < 1e-6f);
         restoreMatterGrainPorosity(grid, backup);
         assert(grid.u_weight.empty() || grid.u_weight[grid.velXIndex(2, 1, 1)] == 255);
+        // Sparse path (collider weights kept): only touched faces/cells change
+        // and the restore returns every array bit for bit.
+        grid.u_weight.assign(5 * 4 * 4, 200u);
+        grid.v_weight.assign(4 * 5 * 4, 210u);
+        grid.w_weight.assign(4 * 4 * 5, 220u);
+        grid.solid_vel.assign(64, Vec3(.25f, 0.0f, 0.0f));
+        const auto u0 = grid.u_weight, v0 = grid.v_weight, w0 = grid.w_weight;
+        const auto s0 = grid.solid_vel;
+        MatterGrainPorosityBackup sparse_backup;
+        applyMatterGrainPorosity(grid, packed, .025f, true, .3f, sparse_backup, porous_report);
+        assert(grid.u_weight[grid.velXIndex(2, 1, 1)] ==
+               static_cast<int>(std::lround(200.0f * (1.0f - .5f * phi))));
+        assert(grid.u_weight[grid.velXIndex(3, 1, 1)] == 200);
+        assert(std::abs(grid.solid_vel[grid.cellIndex(1, 1, 1)].y + .5f) < 1e-6f);
+        assert(grid.solid_vel[grid.cellIndex(2, 2, 2)].x == .25f);
+        restoreMatterGrainPorosity(grid, sparse_backup);
+        assert(grid.u_weight == u0 && grid.v_weight == v0 && grid.w_weight == w0);
+        for (std::size_t c = 0; c < s0.size(); ++c) {
+            assert(grid.solid_vel[c].x == s0[c].x && grid.solid_vel[c].y == s0[c].y);
+        }
+        std::printf("sparse porosity restore exact\n");
     }
     // Submersion is occupancy, not volume: a sparse FLIP pool (6 of 8 parcels
     // per cell, 75% of the volume) still fully submerges a grain at depth.
