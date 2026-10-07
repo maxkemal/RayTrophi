@@ -1,15 +1,19 @@
-# Sıradaki koşu (BUILD YOK, yalnız script): repose kum malzemesiyle
+# Sıradaki koşu (BUILD YOK, yalnız script): convergence kum malzemesiyle
 
-Canlı teşhis (2026-10-07): μr .1 yığını e .87'de (eski test malzemesi, `restitution_of(8 Ns/m)`)
-tanelerin %97'sini zemine saçtı; aynı yığın **e .5 ile 20.9°, saçılan %9.4**. Çekirdek doğru,
-test malzemesi bilye gibi sekiyordu (kum ~.5; ürün varsayılanı da .5). Tüm repose kolları
-e .5'e çekildi; saçılan pay > .3 artık FAIL (kalan çekirdeğin açısı malzemenin açısı değil).
-Eski koşu: μr .3 28.1°, μr .1 r .0175 28.1° (ikisi de e ≈ .87, saçılan .22/.31).
+**Repose PASS (2026-10-07, e .5):** μr .05/.1/.3 → 18.2/23.1/34.8° (monoton), r .0175 → 24.4°
+(boydan bağımsız, Δ1.3°), saçılan ≤ .22. Kayıt: roadmap B2.
 
-1. `git pull`, sonra `python scripts/test/rt_h1_grain_suite.py --only repose` → 4 satır + `repose angles`.
-   Kapılar: μr .1 açısı 15–45°, μr .3 ≥ μr .05 + 3°, iki tane boyu arasında ≤ 4°, saçılan ≤ .3.
-   ★ μr .05 yine `no_pile` ise: düşük yuvarlanma direncinde kum gerçekten yayılabilir; sayıları getir,
-   kapıyı fizik tartışmasıyla birlikte belirleriz.
+**Convergence teşhisi:** eski kol e ≈ .96 kullanıyordu (accuracy sınırı bağlasın diye); 64 tane
+.6 s sonunda hâlâ zıplıyor, COM anlık değeri kaotik → %6.7 bir yakınsama ölçüsü değil. Yeni kol:
+kum (e .5, kayma sönümü 0), çözünürlük 100/200 (ikisi de accuracy sınırlı: 6.6e-5 / 3.3e-5 s;
+sönüm sınırı 7.3e-5 s). İki ölçü: (1) **tek tane sekmesi** → gerçek restitution; alt adım yarıya
+inince |Δe| ≤ .02 ve e = .5 ± .05 (yeni restitution eşlemesinin canlı doğrulaması — duvar
+temasında m_eff = m); (2) 64 tanelik yığın 1 s sonra durmuşken COM/rms ≤ %5.
+
+1. `git pull`, `python scripts/test/rt_h1_grain_suite.py --only convergence` → `convergence rebound e …`
+   ve `PASS convergence` satırları.
+   ★ e ≈ .35 çıkarsa: duvar sönümü eşlemede m yerine m/2 kullanılmış gibi (√2 fazla sönüm);
+   e ≈ .5 ama |Δe| büyükse: açık Euler sönüm terimi alt adıma duyarlı.
 
 ---
 
