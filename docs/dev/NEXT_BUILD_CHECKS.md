@@ -1,3 +1,40 @@
+# Sıradaki kullanıcı build (YALNIZ C++): repose teşhisi
+
+Dünkü FAIL: μr .05 kolunda "yığın" duvarlara kadar yayılmış tabaka; ölçüm `measured=false`
+ve test ilk kolda durdu (diğer kolların sayıları yok). İki ayrı sorun ayrıldı:
+
+1. **Ölçüm kırılgandı.** Profil her halkanın EN YÜKSEK tanesini alıyordu; zemine tek kat saçılmış
+   taneler ve duvara yığılan küme eğimi düz/pozitif yapıyordu, merkez de dağılmış tanelerle
+   kayıyordu. Yeni `grain_diagnostics.pile`: eksen = ilk katın üstündeki tanelerin merkezi
+   (duvar kümesi ikinci geçişte dışlanır); yığın = eksenden itibaren 1.5 kattan kalın halkalar,
+   `base_radius_m` eteği; dışarıdakiler `scattered_grains/scattered_fraction`; ölçülemezse
+   `reason` (no_pile | too_few_slope_rings | slope_not_decreasing), `max_extent_m`. Bulutta
+   sentetik koni 20/30/38° → 19.5/29.1/39.4°, 400 saçılmış tane + duvar kümesi eklenince aynı,
+   düz tabaka → no_pile.
+2. **Test parametresi çok sekken.** Tarihî kollar `restitution_of(8 Ns/m)` = **e .87** (kum ~.5)
+   kullanıyor. Yeni kol `mu_r_.1_e_.5`: aynı yığın e .5 ile. Yalnız o yığın kurarsa yayılma
+   sekme saçılmasıdır (fizik doğru, test malzemesi yanlış); o da yayılırsa yuvarlanma/sürtünme
+   yığında etkisiz → çekirdek hatası.
+
+Test artık bütün kolları koşturur, her kol için tek satır basar (`angle peak base scattered
+extent KE/grain reason`), hükmü sonda verir.
+
+**Build:** yalnız C++ (shader değişmedi, revision 14).
+
+1. `python scripts/test/rt_h1_grain_suite.py --only repose` → özetteki 5 `repose …` satırını
+   ve `repose angles` satırını getir. FAIL olsa da tablo tam çıkmalı.
+   - e .5 kolunda açı 15–35° ve scattered küçük (< .2) → sorun test malzemesi; tarihî kolları
+     e .5'e çekeriz.
+   - e .5 kolu da `no_pile` → çekirdek; sıradaki iş yuvarlanma yolunun yığın içi davranışı.
+   ★ Sinsi: açı ölçülür ama `scattered` > .3 → yığının üçte biri saçılmış; açı yalnız kalan
+   çekirdeğin, malzemenin değil.
+2. İstersen tam suite (`--quick` yeter); diğer kollar değişmemeli.
+
+Not: `scripts/test/matter_grain_params_test.cpp` zaten derlenmiyordu (`resizeAll` private,
+önceki bir değişiklik); pile kısmı bulutta ayrı düzenekte koşturuldu. Ayrı iş olarak düzeltilecek.
+
+---
+
 # ★ YARIN BURADAN DEVAM (2026-10-06 akşamı, rev 14 canlı suite sonucu)
 
 `rt_h1_grain_suite.py` tam koşu: **14/16 PASS**, FAIL: `convergence`, `repose`.
