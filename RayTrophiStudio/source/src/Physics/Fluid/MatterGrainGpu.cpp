@@ -375,11 +375,25 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             kMatterGrainBucketCapacity * sizeof(uint32_t),
         triangle_capacity * 2 * sizeof(MatterGrainBvhNode),
         triangle_capacity * 3 * sizeof(Vec3)});
-    if ((budget_bytes && working > budget_bytes) ||
-        (compute.caps().max_storage_buffer_bytes &&
-         largest_buffer > compute.caps().max_storage_buffer_bytes)) {
-        error = "grain buffers exceed the domain resource budget or device limits (" +
-            std::to_string(working / (1024 * 1024)) + " MB requested)";
+    // Say which limit and by how much: the two used to share one message, and
+    // a domain budget read as a device limit sends the user to the wrong fix.
+    if (budget_bytes && working > budget_bytes) {
+        char text[360];
+        std::snprintf(text, sizeof(text),
+            "grain buffers for %zu grains need %zu MiB%s; the domain resource budget leaves %zu MiB "
+            "after the liquid lane. Raise Resource Budget (MiB) on the domain (or turn Enforce off), "
+            "or emit fewer grains.",
+            count, working / (1024 * 1024),
+            (grow_particles || grow_collider) ? " while growing (old + new buffers)" : "",
+            budget_bytes / (1024 * 1024));
+        error = text;
+        return false;
+    }
+    if (compute.caps().max_storage_buffer_bytes &&
+        largest_buffer > compute.caps().max_storage_buffer_bytes) {
+        error = "grain buffer of " + std::to_string(largest_buffer / (1024 * 1024)) +
+            " MiB exceeds the device storage-buffer limit of " +
+            std::to_string(compute.caps().max_storage_buffer_bytes / (1024 * 1024)) + " MiB";
         return false;
     }
     const auto fingerprint = matterGrainColliderFingerprint(triangles);
