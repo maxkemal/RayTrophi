@@ -90,7 +90,16 @@ def main():
 
     if args.cost:
         frames = []
+        # Per-kernel GPU time: batch_end waits for the GPU, so it hides which
+        # kernels the frame is spent in. Timed over the frames after warm-up.
+        timing = True
+        try:
+            call('perf.set_gpu_kernel_timing', enabled=True)
+        except RuntimeError:
+            timing = False
         for frame in range(1, args.frames + 1):
+            if timing and frame == 11:
+                call('perf.gpu_kernel_timings', reset=True)
             call('fluid.step', dt=1/60)
             stats = call('fluid.step_stats', domain=domain)
             inv = call('fluid.matter_models', domain=domain)
@@ -102,8 +111,14 @@ def main():
             if frames[-1]['held']:
                 print('HELD', inv['mixed_execution']['status'], flush=True)
                 break
+        kernels = []
+        if timing:
+            timed = call('perf.gpu_kernel_timings', reset=True)
+            call('perf.set_gpu_kernel_timing', enabled=False)
+            kernels = sorted(timed.get('kernels', []), key=lambda k: -k.get('ms', 0.))
         LOG.with_name('grain_cost_probe_live.json').write_text(
-            json.dumps({'domain': domain, 'frames': frames}, indent=1), encoding='utf-8')
+            json.dumps({'domain': domain, 'frames': frames, 'kernels': kernels}, indent=1),
+            encoding='utf-8')
         tail = frames[min(10, len(frames)-1):]
         med = lambda xs: statistics.median(xs) if xs else 0.
         stat = lambda k: med([f['stats'].get(k, 0.) or 0. for f in tail])
@@ -122,6 +137,13 @@ def main():
         print(f"  sync points: synchronize {stat('synchronize_calls'):.0f}, batch_end {stat('batch_end_calls'):.0f}, "
               f"dispatches {stat('dispatch_calls'):.0f}; upload {stat('upload_bytes')/1e6:.2f} MB, "
               f"download {stat('download_bytes')/1e6:.2f} MB per frame")
+        if kernels:
+            timed_frames = max(1, len(frames) - 10)
+            total_gpu = sum(k.get('ms', 0.) for k in kernels) / timed_frames
+            print(f"\nGPU kernels (ms per frame, {timed_frames} frames), total {total_gpu:.2f} ms:")
+            for k in kernels[:15]:
+                extra = {key: k[key] for key in ('count', 'calls', 'dispatches') if key in k}
+                print(f"  {k.get('kernel', '?'):<44} {k.get('ms', 0.)/timed_frames:8.2f}  {extra}")
         print('log:', LOG.with_name('grain_cost_probe_live.json').relative_to(LOG.parents[2]))
         return
 
