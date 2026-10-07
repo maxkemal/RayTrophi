@@ -1,5 +1,11 @@
 # Sıradaki koşu (BUILD YOK, yalnız script): convergence kum malzemesiyle
 
+**SONUÇ (2026-10-07): PASS.** Sekme e .541 / .539 (100 / 200; Δ .002 → yakınsak), hedef .5:
++%8, eşlemenin sistematik payı — doğrusal yay-sönüm `fn = max(0, kδ − c v)` çekme kuvvetini
+kestiği için temas erken biter, analitik ζ(e)'den az enerji kaybeder (bilinen etki). Gerekirse
+eşleme sayısal tersine çevrilir; şimdilik ±.05 içinde. Yığın COM %0.18, rms %1.6.
+Açık kalan (öneri sırası): coexist basınç itkisi aşımı (%10–25), DEM maliyeti (sönüm CFL).
+
 **Repose PASS (2026-10-07, e .5):** μr .05/.1/.3 → 18.2/23.1/34.8° (monoton), r .0175 → 24.4°
 (boydan bağımsız, Δ1.3°), saçılan ≤ .22. Kayıt: roadmap B2.
 
