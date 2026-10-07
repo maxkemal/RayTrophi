@@ -1,3 +1,32 @@
+# Sıradaki kullanıcı build (YALNIZ C++): DEM birleşik kararlılık sınırı + coexist eklenmiş kütle
+
+1. **DEM maliyeti.** Sertlik ve sönüm sınırları ayrı ayrı uygulanıyordu; sönüm sınırı .5/oran =
+   1/(4ζω), büyük ζ'de birleşik limitin yarısı ve her sönümlü sahnenin alt adımını o belirliyordu
+   (16k'da 234/kare). Şimdi tek sınır: sembolik Euler x'' = −ω²x − 2ζωx' için kesin kararlılık
+   h < (2/ω)(√(1+ζ²) − ζ), yarısı (ζ = 0'da eski 1/ω, güvenlik payı aynı). Etiket ζ > .1 ise
+   `damping`, değilse `stability`. Beklenen: yoğun sahnede ~234 → ~196 alt adım (~%16 hız).
+   24 temas bütçesi değişmedi (ölçülen en fazla 10; asıl kazanç orada, ayrı ve riskli iş).
+2. **Coexist "aşımı" fizikmiş.** Durgun suda bırakılan küre yer değiştirdiği suyu da ivmelendirir
+   (eklenmiş kütle, C_m = .5): gerçek ilk ivme g(m − ρV)/(m + .5ρV) = **5.16**, test yalnız
+   kaldırmayla 6.13 bekliyordu. Hidrostatik kol (suyun tepkisini göremez) 6.10 ✓; basınç kolu
+   5.49–5.74 = eklenmiş kütlenin bir kısmını yakalıyor. Kapı artık [.95·5.16, 1.03·6.13] ve
+   yakalanan pay basılır. Tam eklenmiş kütle terimi ayrı tasarım işi (çözünürlüğü olmayan
+   CFD-DEM'de açık C_m terimi + tanenin kendi sürüklediği akışı çift saymama).
+
+Bulutta: değişen C++ sözdizimi PASS, kontrat PASS, descriptor/IPC denetimi PASS.
+
+**Build:** yalnız C++ (shader değişmedi, rev 14).
+
+1. `python scripts/test/rt_h1_grain_suite.py --quick` (yavaşları atlar) → hepsi PASS.
+   - `settle`, `base`, `convergence` alt adım sayıları değişebilir; kapılar aynı kalmalı.
+   - `coexist`: `coexist added mass: … fraction of added mass captured …` satırı.
+2. `python scripts/test/rt_h1_grain_suite.py --only dense` → tabloda substeps ~196 ve limit `damping`,
+   ms düşmüş olmalı (önce 20.4 / 60.1).
+   ★ Sinsi: dense geçer ama `settle` KE kuyruğu büyür ya da `spin_grows: True` → yeni sınır
+   kararlılığın sınırında; sayıları getir.
+
+---
+
 # Sıradaki koşu (BUILD YOK, yalnız script): convergence kum malzemesiyle
 
 **SONUÇ (2026-10-07): PASS.** Sekme e .541 / .539 (100 / 200; Δ .002 → yakınsak), hedef .5:
