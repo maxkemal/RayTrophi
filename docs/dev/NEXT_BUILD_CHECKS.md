@@ -24,8 +24,17 @@ varsayılan AÇIK ve kural maddeye bakmadan engelliyordu; anahtar yalnız Solid 
 iş yapar (FluidDomainStep aynı şekilde okur). Kural artık yalnız Solid bağlı madde varsa engeller ve
 nereden kaldırılacağını söyler; reddedilen enable'ın hata metni engel satırlarını tekrar basmıyor.
 
+**Ek 3 (kullanıcı senaryosu):** kum + su emitter çalışırken collider eklenince iki emitterin
+parçacıkları donuyor. Sebep: tane adımı yalnız PlaneY ve mesh collider kabul ediyordu, diğerleri
+adımı tutuyordu. Şimdi Sphere/Capsule üçgenlenir (24×12), ObjectOBB/ConvexDecomp nesnenin yüzeyi,
+ObjectAABB o yüzeyin dünya kutusu. Ayrıca dolu domain'de tane ayarlarının HEPSİ reset istiyordu
+(ıslak tane seçimi bu yüzden reddediliyordu); artık yalnız doğumda sabitlenenler (enabled,
+radius_m, packing_fraction, wet_grains kapatma) reset ister, gerisi sonraki adımda uygulanır.
+
 **Build:** yalnız C++.
 
+000. Kum + su + Sphere/Box collider: taneler ve su collider'a çarpıp akmalı; Solvers "Ready.".
+     Oynarken Wet grains aç → kabul edilmeli, sudaki taneler su emmeli (Measure: grain water).
 00. Yeni Matter domain + point source (Sand, Granular) → Solvers'ta enable kabul edilmeli, "Ready.".
 0. Yarıçapı .01'e indir, reset, oynat: Solvers'ta held satırı ve önerilen sertlik görünmeli; o
    sertliği gir → taneler düşmeli.

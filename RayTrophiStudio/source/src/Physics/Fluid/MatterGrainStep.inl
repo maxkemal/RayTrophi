@@ -11,6 +11,70 @@
 //      lump per grain + Archimedes buoyancy;
 //   4. the equal and opposite impulse goes back to the liquid parcels.
 // Canonical particles change only after every stage succeeded.
+// Analytic colliders as triangles for the grain BVH. 24 x 12 facets keep the
+// chord sag under 1% of the radius (a grain of radius r sees a facet error
+// below r for colliders up to ~100 r).
+void appendGrainSphereCollider(const Vec3& centre, float radius,
+                               std::vector<SurfaceMeshTriangle>& out) {
+    constexpr int slices = 24, stacks = 12;
+    const auto point = [&](int stack, int slice) {
+        const float theta = 3.14159265f * stack / stacks;
+        const float phi = 6.28318531f * slice / slices;
+        return centre + Vec3(std::sin(theta) * std::cos(phi), std::cos(theta),
+                             std::sin(theta) * std::sin(phi)) * radius;
+    };
+    for (int a = 0; a < stacks; ++a) {
+        for (int b = 0; b < slices; ++b) {
+            SurfaceMeshTriangle t;
+            t.p0 = point(a, b); t.p1 = point(a + 1, b); t.p2 = point(a + 1, b + 1);
+            if (a + 1 < stacks) out.push_back(t);
+            t.p1 = point(a + 1, b + 1); t.p2 = point(a, b + 1);
+            if (a > 0) out.push_back(t);
+        }
+    }
+}
+
+void appendGrainCapsuleCollider(const Vec3& start, const Vec3& end, float radius,
+                                std::vector<SurfaceMeshTriangle>& out) {
+    // Two hemispheres (as spheres; the inner halves are buried) + the tube.
+    appendGrainSphereCollider(start, radius, out);
+    appendGrainSphereCollider(end, radius, out);
+    const Vec3 axis = end - start;
+    const float length = axis.length();
+    if (!(length > 1e-6f)) return;
+    const Vec3 w = axis / length;
+    const Vec3 helper = std::abs(w.y) < .9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0);
+    const Vec3 u = Vec3::cross(helper, w).normalize();
+    const Vec3 v = Vec3::cross(w, u);
+    constexpr int slices = 24;
+    for (int b = 0; b < slices; ++b) {
+        const float a0 = 6.28318531f * b / slices, a1 = 6.28318531f * (b + 1) / slices;
+        const Vec3 r0 = (u * std::cos(a0) + v * std::sin(a0)) * radius;
+        const Vec3 r1 = (u * std::cos(a1) + v * std::sin(a1)) * radius;
+        SurfaceMeshTriangle t;
+        t.p0 = start + r0; t.p1 = end + r0; t.p2 = end + r1;
+        out.push_back(t);
+        t.p1 = end + r1; t.p2 = start + r1;
+        out.push_back(t);
+    }
+}
+
+void appendGrainBoxCollider(const Vec3& low, const Vec3& high,
+                            std::vector<SurfaceMeshTriangle>& out) {
+    const auto corner = [&](int i) {
+        return Vec3(i & 1 ? high.x : low.x, i & 2 ? high.y : low.y, i & 4 ? high.z : low.z);
+    };
+    static const int faces[6][4] = {{0, 1, 3, 2}, {4, 6, 7, 5}, {0, 4, 5, 1},
+                                    {2, 3, 7, 6}, {0, 2, 6, 4}, {1, 5, 7, 3}};
+    for (const auto& f : faces) {
+        SurfaceMeshTriangle t;
+        t.p0 = corner(f[0]); t.p1 = corner(f[1]); t.p2 = corner(f[2]);
+        out.push_back(t);
+        t.p1 = corner(f[2]); t.p2 = corner(f[3]);
+        out.push_back(t);
+    }
+}
+
 bool runMatterGrainStep(SimulationGridDomainState& state,
     const Fluid::APICSolverParams& params, bool legacy_granular, float dt, float time_seconds,
     SimulationComputeContext* compute, SimulationGridDomainComputeBuffers& buffers,
@@ -55,8 +119,38 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
                 return false;
             }
             triangles.insert(triangles.end(), flat.begin(), flat.end());
+        } else if (collider.source_mode == ParticleColliderSourceMode::Sphere) {
+            appendGrainSphereCollider(collider.sphere_center, collider.sphere_radius, triangles);
+        } else if (collider.source_mode == ParticleColliderSourceMode::Capsule) {
+            appendGrainCapsuleCollider(collider.capsule_start, collider.capsule_end,
+                collider.capsule_radius, triangles);
+        } else if (collider.source_mode == ParticleColliderSourceMode::ObjectAABB ||
+                   collider.source_mode == ParticleColliderSourceMode::ObjectOBB ||
+                   collider.source_mode == ParticleColliderSourceMode::ObjectConvexDecomp) {
+            // Grains collide with triangles: an object-bound collider uses the
+            // object's own surface (a box object is its OBB; AABB keeps the
+            // world box of that surface). Without an object, the authored box.
+            std::vector<SurfaceMeshTriangle> surface;
+            uint64_t revision = 0;
+            const bool has_surface = !collider.source_name.empty() && resolve_mesh &&
+                resolve_mesh(collider, surface, revision) && !surface.empty();
+            if (collider.source_mode == ParticleColliderSourceMode::ObjectAABB || !has_surface) {
+                Vec3 box_low = collider.bounds_min, box_high = collider.bounds_max;
+                if (has_surface) {
+                    box_low = box_high = surface.front().p0;
+                    for (const auto& t : surface) {
+                        for (const Vec3& v : {t.p0, t.p1, t.p2}) {
+                            box_low = Vec3::min(box_low, v);
+                            box_high = Vec3::max(box_high, v);
+                        }
+                    }
+                }
+                appendGrainBoxCollider(box_low, box_high, triangles);
+            } else {
+                triangles.insert(triangles.end(), surface.begin(), surface.end());
+            }
         } else {
-            error = "grain candidate supports PlaneY and flat mesh colliders: " + collider.name;
+            error = "grain collider type not supported: " + collider.name;
             return false;
         }
         if (triangles.size() > 4096) {
