@@ -1,3 +1,26 @@
+# Sıradaki kullanıcı build (YALNIZ C++): tane adımının CPU maliyeti — önce ölç
+
+Kullanıcı gözlemi: GPU tane adımı sırasında CPU kullanımı periyodik inip çıkıyor. Kodda CPU her
+kare: sahip ayırma + Morton sıralaması (N log N) + alt kümelerin TAM kopyası (sıvı ve tane için
+ayrı `FluidParticles` kopyası + compact), kimlik eşlemesi için `unordered_map` (tane başına
+düğüm ayırma), tüm durumu GPU'ya yükleme (sıra her kare değiştiği için `state_resident` false),
+GPU'yu bekleyen senkron indirme (16k'da ~1 MB), yayın kopyaları ve geri birleştirme yapıyor.
+Bu parti **ölçer** ve en bariz israfı söker:
+- `fluid.matter_models → grain_diagnostics.runtime.host_ms` {order, prepare, gpu_wait, publish,
+  merge}; dense tablosunda medyanları.
+- Yayında tüm `FluidParticles`'ın kare başına kopyası (`auto result = p`) kaldırıldı: yalnız
+  GPU'nun sahip olduğu 3 dizi indirilir ve taşınır.
+
+**Build:** yalnız C++.
+
+1. `python scripts/test/rt_h1_grain_suite.py --only dense` → tablonun yeni sütunlarını getir.
+   Okuma: `gpu_wait` büyükse GPU (ya da senkron bekleme) baskın; `order`/`merge`/`prepare`
+   büyükse CPU kopyaları/sıralama — sıradaki adım onları söker (sıralamayı GPU'ya taşımak,
+   alt küme kopyası yerine indeks, durumu GPU'da tutmak).
+2. `--quick` (regresyon): 13/13 PASS kalmalı.
+
+---
+
 # Sıradaki kullanıcı build (YALNIZ C++): DEM birleşik kararlılık sınırı + coexist eklenmiş kütle
 
 **SONUÇ (2026-10-07): `--quick` 13/13 PASS, dense PASS.** Alt adım 234 → **196** (tahmin

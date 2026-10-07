@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <cstring>
 #include <initializer_list>
 #include <limits>
@@ -190,6 +191,11 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     std::vector<MatterGrainCouplingOutput>* drag_out,
     MatterGrainStepReport& report, std::string& error) {
     error.clear();
+    using Clock = std::chrono::steady_clock;
+    const auto ms_since = [](Clock::time_point t) {
+        return std::chrono::duration<float, std::milli>(Clock::now() - t).count();
+    };
+    const auto prepare_start = Clock::now();
     const auto count = p.size();
     auto checked = params;
     if (!patchMatterGrainParams(matterGrainParamsToJson(params), checked, error)) {
@@ -504,6 +510,8 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         runtime.scratch, runtime.history, runtime.history_owner, runtime.diagnostics,
         runtime.triangles, runtime.collider_nodes, runtime.collider_patches, runtime.coupling};
     static_assert(sizeof(handles) / sizeof(handles[0]) == 15);
+    report.host_prepare_ms = ms_since(prepare_start);
+    const auto gpu_start = Clock::now();
     if (remap) {
         // bucket_slots is scratch until the clear/hash below: it carries the
         // new -> previous index map for the two gather dispatches.
@@ -553,13 +561,17 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         })) {
         return false;
     }
-    auto result = p;
+    // Only the three device-owned arrays come back; the rest of the grain
+    // state is untouched, so it is not copied (a full FluidParticles copy per
+    // frame was most of the publication cost).
+    std::vector<Vec3> new_position(count), new_velocity(count);
+    std::vector<AffineC> new_affine(count);
     compute.beginTransferBatch();
-    bool ok = compute.downloadBuffer(runtime.positions, result.position.data(),
+    bool ok = compute.downloadBuffer(runtime.positions, new_position.data(),
         count * sizeof(Vec3));
-    ok = compute.downloadBuffer(runtime.velocities, result.velocity.data(),
+    ok = compute.downloadBuffer(runtime.velocities, new_velocity.data(),
         count * sizeof(Vec3)) && ok;
-    ok = compute.downloadBuffer(runtime.affines, result.affine.data(),
+    ok = compute.downloadBuffer(runtime.affines, new_affine.data(),
         count * sizeof(AffineC)) && ok;
     ok = compute.downloadBuffer(runtime.diagnostics, diagnostics.data(), sizeof(diagnostics)) && ok;
     if (coupling && drag_out) {
@@ -567,10 +579,12 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             coupling_rows.size() * sizeof(float)) && ok;
     }
     ok = compute.endTransferBatch() && ok;
+    report.gpu_wait_ms = ms_since(gpu_start);
+    const auto publish_start = Clock::now();
     for (std::size_t i = 0; i < count && ok; ++i) {
-        ok = finite(result.position[i]) && finite(result.velocity[i]) &&
-            finite(result.affine[i].col0) && finite(result.affine[i].col1) &&
-            finite(result.affine[i].col2);
+        ok = finite(new_position[i]) && finite(new_velocity[i]) &&
+            finite(new_affine[i].col0) && finite(new_affine[i].col1) &&
+            finite(new_affine[i].col2);
     }
     if (ok && diagnostics[1] != kMatterGrainShaderRevision) {
         error = "grain step shader revision mismatch; rebuild simulation shaders";
@@ -597,8 +611,10 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             }
         }
     }
-    result.advanceMaterialCoordinates();
-    p = std::move(result);
+    p.position = std::move(new_position);
+    p.velocity = std::move(new_velocity);
+    p.affine = std::move(new_affine);
+    p.advanceMaterialCoordinates();
     runtime.history_fresh = false;
     runtime.published_ids = p.particle_id;
     runtime.published_positions = p.position;
@@ -626,6 +642,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     report.transfer_batches = 2 + (remap ? 1 : 0) + (refresh_collider ? 1 : 0);
     report.grains = count;
     report.working_set_bytes = working;
+    report.host_publish_ms = ms_since(publish_start);
     return true;
 }
 

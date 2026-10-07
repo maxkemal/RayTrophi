@@ -142,13 +142,16 @@ def main():
                 print('RESULT', json.dumps(arm['summary']), flush=True)
                 save()
         if data['arms']:
-            print('count   median_ms  p95_ms  substeps  limit      contacts  max/grain', flush=True)
+            print('count   median_ms  p95_ms  substeps  limit      contacts  max/grain  '
+                  'host ms: order prepare gpu_wait publish merge (median)', flush=True)
             for arm in data['arms']:
                 sm = arm['summary']
                 rt = sm['last_runtime']
                 print(f"{arm['requested']:>5}  {sm['median_sim_ms']:>9.2f}  {sm['p95_sim_ms']:>6.2f}  "
                       f"{rt.get('substeps', 0):>8}  {rt.get('substep_limit', ''):<9}  "
-                      f"{rt.get('contacts_last_substep', 0):>8}  {rt.get('max_contacts_per_grain', 0):>9}",
+                      f"{rt.get('contacts_last_substep', 0):>8}  {rt.get('max_contacts_per_grain', 0):>9}  "
+                      + ' '.join(f"{statistics.median(x['runtime'].get('host_ms', {}).get(k, 0.) for x in arm['samples'][5:]):7.2f}"
+                                 for k in ('order', 'prepare', 'gpu_wait', 'publish', 'merge')),
                       flush=True)
         call('timeline.set_frame', frame=0)
         call('fluid.reset')
