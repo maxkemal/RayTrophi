@@ -9,8 +9,11 @@
 
 namespace RayTrophiSim::Fluid {
 
-void drawMatterPoreControls(const std::string& domain_name) {
-    if (!UIWidgets::CollapsingHeader("Pore Water")) {
+void drawMatterPoreControls(const std::string& domain_name, bool grains) {
+    // With the grain solver the MPM pore physics is off (grains hold their own
+    // film water, Wet grains), but the wet look reads the same per-particle
+    // saturation (pore_water_mass_kg / pore_capacity_kg), so only it is shown.
+    if (!UIWidgets::CollapsingHeader(grains ? "Wet Look" : "Pore Water")) {
         return;
     }
     ImGui::PushID(domain_name.c_str());
@@ -20,14 +23,6 @@ void drawMatterPoreControls(const std::string& domain_name) {
         const auto state = rtapi::getMatterModels(domain_name, false).at("pore_exchange");
         const auto settings = state.at("settings");
         nlohmann::json patch = nlohmann::json::object();
-        bool enabled = settings.at("enabled").get<bool>();
-        if (ImGui::Checkbox("Enable water absorption / drainage", &enabled)) {
-            patch["enabled"] = enabled;
-        }
-        DomainUi::tooltip("MPM granular carriers absorb water from liquid parcels into their pores\n"
-            "and drain it back; water is held once (pore_water_mass_kg).\n"
-            "Needs Closed Vulkan Matter; not with the grain solver.\n"
-            "Script: fluid.set_pore_exchange(enabled=...)");
         auto slider = [&](const char* label, const char* key, float low, float high,
                           const char* format, const char* tip) {
             float value = settings.at(key).get<float>();
@@ -38,6 +33,15 @@ void drawMatterPoreControls(const std::string& domain_name) {
             }
             DomainUi::tooltip(tip);
         };
+        if (!grains) {
+        bool enabled = settings.at("enabled").get<bool>();
+        if (ImGui::Checkbox("Enable water absorption / drainage", &enabled)) {
+            patch["enabled"] = enabled;
+        }
+        DomainUi::tooltip("MPM granular carriers absorb water from liquid parcels into their pores\n"
+            "and drain it back; water is held once (pore_water_mass_kg).\n"
+            "Needs Closed Vulkan Matter; not with the grain solver.\n"
+            "Script: fluid.set_pore_exchange(enabled=...)");
         slider("Porosity", "porosity", 0.01f, 0.8f, "%.3f",
             "Pore volume fraction of a granular carrier (0.01..0.8; sand ~0.35-0.4).\n"
             "Sets how much water a carrier can hold.\nScript: fluid.set_pore_exchange(porosity=...)");
@@ -61,13 +65,19 @@ void drawMatterPoreControls(const std::string& domain_name) {
         DomainUi::tooltip("Saturation changes the MPM friction, dilatancy and capillary cohesion\n"
             "(multipliers below). Physics, not look.\n"
             "Script: fluid.set_pore_exchange(wet_response_enabled=...)");
+        }
         bool wet_appearance = settings.at("wet_appearance_enabled").get<bool>();
         if (ImGui::Checkbox("Saturation darkens Principled granular splats", &wet_appearance)) {
             patch["wet_appearance_enabled"] = wet_appearance;
         }
-        DomainUi::tooltip("Look only: wet carriers render darker and smoother (eight bands).\n"
-            "Physics and saturation are unchanged.\n"
-            "Script: fluid.set_pore_exchange(wet_appearance_enabled=...)");
+        DomainUi::tooltip(grains
+            ? "Look only: grains render darker and smoother as they take up water\n"
+              "(eight bands of film water / Water capacity, Wet grains on).\n"
+              "Script: fluid.set_pore_exchange(wet_appearance_enabled=...)"
+            : "Look only: wet carriers render darker and smoother (eight bands).\n"
+              "Physics and saturation are unchanged.\n"
+              "Script: fluid.set_pore_exchange(wet_appearance_enabled=...)");
+        if (!grains) {
         slider("Saturated friction multiplier", "wet_friction_scale", 0.0f, 1.0f, "%.3f",
             "Friction multiplier at full saturation (0..1).\nScript: fluid.set_pore_exchange(wet_friction_scale=...)");
         slider("Saturated dilatancy multiplier", "wet_dilatancy_scale", 0.0f, 1.0f, "%.3f",
@@ -76,6 +86,7 @@ void drawMatterPoreControls(const std::string& domain_name) {
             "Peak capillary cohesion at intermediate saturation, Pa (damp sand ~1e3).\nScript: fluid.set_pore_exchange(capillary_cohesion_pa=...)");
         slider("Local pore pressure multiplier", "pore_pressure_scale", 0.0f, 10.0f, "%.3f",
             "Multiplier on the empirical cell-height pore pressure head (0..10).\nScript: fluid.set_pore_exchange(pore_pressure_scale=...)");
+        }
         slider("Saturated color multiplier", "wet_color_scale", 0.05f, 1.0f, "%.3f",
             "Look: base color multiplier at full wetness (0.05..1).\nScript: fluid.set_pore_exchange(wet_color_scale=...)");
         slider("Saturated roughness multiplier", "wet_roughness_scale", 0.05f, 1.0f, "%.3f",
@@ -90,6 +101,11 @@ void drawMatterPoreControls(const std::string& domain_name) {
         if (!patch.empty()) {
             rtapi::setMatterPoreExchange(domain_name, patch);
             error.clear();
+        }
+        if (grains) {
+            ImGui::TextWrapped("Grain saturation is film water over Water capacity (Wet grains).");
+            ImGui::PopID();
+            return;
         }
         ImGui::Text("Stored / capacity: %.6g / %.6g kg",
             state.at("pore_water_kg").get<double>(), state.at("capacity_kg").get<double>());

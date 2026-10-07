@@ -1801,6 +1801,7 @@ void drawSimulationDomainControls(
                     if (domain.fluid_params.grain.enabled) {
                         // Pore water is the MPM model's water; grains hold their own.
                         ImGui::TextDisabled("Pore water (MPM) is off with the grain solver; grains use Wet grains below.");
+                        RayTrophiSim::Fluid::drawMatterPoreControls(domain.name, true);
                     } else {
                         RayTrophiSim::Fluid::drawMatterPoreControls(domain.name);
                     }

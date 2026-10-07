@@ -28,6 +28,14 @@ Quality Profile altında "Enforce Resource Budget" + "Resource Budget (MiB)" (de
 Custom olur). Hata metni hangi sınır olduğunu, tane sayısını, gereken ve kalan MiB'i söylüyor;
 aygıt sınırı ayrı mesaj. Not: ayrıca sabit 100000 tane üst sınırı var (ayrı mesaj).
 
+**Ek (kullanıcı isteği): ıslanan tanenin koyulaşması.** MPM'in ıslak görünüm sistemi (8 doygunluk
+bandı, Principled kopyaları) parçacık başına `pore_water_mass_kg / pore_capacity_kg` okur; Wet grains
+bu ikisini tanelerde zaten yazıyor. Eksik olan paneldi: grain açıkken Pore Water bölümü tümden
+gizleniyordu. Şimdi Matter sekmesinde "Wet Look": "Saturation darkens…" + renk/pürüzlülük çarpanı +
+tam ıslak doygunluk. MPM fiziği (emme, Darcy, ıslak dayanım) grain'de kapalı kalır.
+Görmen gereken: Wet grains + bu kutu açık → suya giren kum koyulaşır, kuruyunca açılır.
+★ Hiç koyulaşmıyorsa: Wet grains kapalı (film suyu 0) ya da tanenin malzemesi Principled değil.
+
 Sıra:
 1. `python scripts/test/check_matter_grain_contracts.py` → PASS.
 1b. Domain paneli: Quality Profile altında iki yeni alan; bütçeyi büyütünce tutulan adım bir sonraki karede yürümeli.
