@@ -175,6 +175,16 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     Fluid::APICSolverStats stats;
     Fluid::MatterGrainStepReport report;
     report.host_order_ms = ms_since(order_start);
+    if (!liquid.empty()) {
+        std::vector<float> speeds(liquid.size());
+        for (std::size_t p = 0; p < liquid.size(); ++p) {
+            speeds[p] = liquid.velocity[p].length();
+        }
+        const auto p99 = speeds.begin() + static_cast<std::ptrdiff_t>(.99 * (speeds.size() - 1));
+        std::nth_element(speeds.begin(), p99, speeds.end());
+        report.liquid_speed_p99 = *p99;
+        report.liquid_speed_max = *std::max_element(p99, speeds.end());
+    }
     report.liquid_parcels = liquid.size();
     const auto budget = params.mixed_working_set_budget_bytes;
     const bool coupled = !liquid.empty() && !grains.empty() && params.grain.fluid_coupling;
@@ -237,6 +247,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             return false;
         }
         stats = state.fluid_stats;
+        report.liquid_substeps = stats.mixed_common_substeps;
     }
 
     // 2-4. Grain owner with the liquid coupling.
