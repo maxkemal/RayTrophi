@@ -198,11 +198,13 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
             {"transfer_batches", report->transfer_batches},
             {"host_ms", {{"order", report->host_order_ms}, {"prepare", report->host_prepare_ms},
                 {"gpu_wait", report->gpu_wait_ms}, {"publish", report->host_publish_ms},
-                {"merge", report->host_merge_ms}, {"coupling", report->host_coupling_ms}}},
+                {"merge", report->host_merge_ms}, {"coupling", report->host_coupling_ms},
+                {"motion", report->host_motion_ms}}},
             {"working_set_bytes", report->working_set_bytes},
             {"collider_faces", report->collider_faces},
             {"collider_speed_max_m_s", report->collider_speed_max},
-            {"field_acceleration_max_m_s2", report->field_acceleration_max}};
+            {"field_acceleration_max_m_s2", report->field_acceleration_max},
+            {"collider_manifold_truncated", report->collider_manifold_truncated}};
     }
     nlohmann::json liquid = nullptr;
     if (report) {

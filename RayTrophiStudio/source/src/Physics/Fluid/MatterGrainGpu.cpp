@@ -657,7 +657,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     if (!ok || overflow) {
         error = (overflow & 4u) ? "grain neighbour bucket overflow (more than 16 grains hashed "
                 "to one bucket); grains overlap far beyond contact" :
-            (overflow & 2u) ? "grain collider traversal/manifold budget exceeded" :
+            (overflow & 2u) ? "grain collider BVH traversal stack exceeded (64)" :
             overflow ? "grain contact count exceeds the 24-contact history/CFL budget; "
                 "reduce emitter packing or stiffness overlap" :
             "grain publication rejected nonfinite/readback state";
@@ -692,6 +692,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     report.sticking_contacts = diagnostics[3];
     report.contacts = diagnostics[4];
     report.liquid_bridges = diagnostics[5];
+    report.collider_manifold_truncated = diagnostics[6];
     report.history_reset = history_reset;
     report.history_reset_reason = reset_reason;
     report.history_remapped = remap;  // +2 gather dispatches, outside `dispatches`

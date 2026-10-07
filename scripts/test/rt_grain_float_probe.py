@@ -184,7 +184,7 @@ def cost(call, args, domain):
               f"p99 {lq('liquid_speed_p99'):.2f} m/s (CFL follows the max)")
         for key in ('p2g_ms', 'pressure_ms', 'g2p_ms', 'advect_ms', 'density_ms'):
             print(f"  liquid {key:<20} {stat(key):8.2f} ms")
-        for key in ('order', 'coupling', 'prepare', 'gpu_wait', 'publish', 'merge'):
+        for key in ('order', 'motion', 'coupling', 'prepare', 'gpu_wait', 'publish', 'merge'):
             print(f"  grain host {key:<16} {host(key):8.2f} ms")
         for key in ('synchronize_ms', 'batch_end_ms', 'upload_call_ms', 'download_call_ms', 'dispatch_call_ms'):
             print(f"  transfer {key:<18} {stat(key):8.2f} ms")

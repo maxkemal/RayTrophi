@@ -55,7 +55,7 @@ const uint BUCKET = 16u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 15u;
+const uint REVISION = 16u;
 
 uint readBank() { return pc.substep.x & 1u; }
 uint writeBank() { return readBank() ^ 1u; }
@@ -399,15 +399,31 @@ void main() {
                 float wc = den > 1e-20 ? (d00*d21-d01*d20)/den : 0.0;
                 wall = (1.0-wb-wc)*va+wb*vb+wc*vc;
             }
+            // Adjacent faces of a tessellated curve (each its own patch) reach
+            // the grain through the same shared edge/vertex: one feature, one
+            // slot. A sphere pole fans 24 faces into one point.
+            bool same_feature = false;
+            for (uint m=0u; m<patch_count; ++m) {
+                if (patch_id[m] != patches[k] && dot(patch_n[m],n) > .99999 &&
+                    abs(patch_d[m]-d) < r*1e-4) { same_feature = true; break; }
+            }
+            if (same_feature) continue;
             uint slot = patch_count;
             for (uint m=0u; m<patch_count; ++m) {
                 if (patch_id[m] == patches[k]) { slot = m; break; }
             }
-            if (slot == patch_count) {
-                if (patch_count == 8u) {
-                    atomicOr(diagnostics[0],2u);
-                    continue;
-                }
+            if (slot == patch_count && patch_count == 8u) {
+                // Full: keep the eight deepest features (counted, not fatal).
+                uint far = 0u;
+                for (uint m=1u; m<8u; ++m) if (patch_d[m] > patch_d[far]) far = m;
+                atomicAdd(diagnostics[6],1u);
+                if (d >= patch_d[far]) continue;
+                slot = far;
+                patch_n[slot] = n;
+                patch_d[slot] = d;
+                patch_id[slot] = patches[k];
+                patch_v[slot] = wall;
+            } else if (slot == patch_count) {
                 ++patch_count;
                 patch_n[slot] = n;
                 patch_d[slot] = d;
@@ -430,7 +446,15 @@ void main() {
         }
         if (duplicate) continue;
         if (manifold_count == 4u) {
-            atomicOr(diagnostics[0],2u);
+            // Keep the four deepest supports (counted, not fatal).
+            uint far = 0u;
+            for (uint m=1u; m<4u; ++m) if (manifold_d[m] > manifold_d[far]) far = m;
+            atomicAdd(diagnostics[6],1u);
+            if (patch_d[k] >= manifold_d[far]) continue;
+            manifold_n[far] = patch_n[k];
+            manifold_d[far] = patch_d[k];
+            manifold_v[far] = patch_v[k];
+            manifold_key[far] = PATCH_KEY|(patch_id[k] & 0x3fffffffu);
             continue;
         }
         manifold_n[manifold_count] = patch_n[k];

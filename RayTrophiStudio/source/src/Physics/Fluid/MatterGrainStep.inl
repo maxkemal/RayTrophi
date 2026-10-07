@@ -243,6 +243,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     // proxy's twist), never the jump.
     Fluid::MatterGrainMotion motion;
     float moving_speed_max = 0.0f;
+    const auto motion_start = std::chrono::steady_clock::now();
     {
         if (!buffers.matter_runtime) {
             buffers.matter_runtime = std::make_shared<Fluid::MatterGpuRuntime>();
@@ -301,6 +302,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     Fluid::APICSolverStats stats;
     Fluid::MatterGrainStepReport report;
     report.host_order_ms = ms_since(order_start);
+    report.host_motion_ms = std::chrono::duration<float, std::milli>(order_start - motion_start).count();
     report.collider_faces = triangles.size();
     report.collider_speed_max = moving_speed_max;
     if (!liquid.empty()) {
@@ -429,13 +431,20 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         // same fields and mask as the liquid), held as an acceleration over
         // the DEM substeps.
         if (forces && !forces->empty()) {
+            const auto field_start = std::chrono::steady_clock::now();
             motion.external_acceleration.resize(grains.size());
-            for (std::size_t g = 0; g < grains.size(); ++g) {
+            const auto count = static_cast<int64_t>(grains.size());
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(count > 4096)
+#endif
+            for (int64_t g = 0; g < count; ++g) {
                 motion.external_acceleration[g] = forces->evaluateAt(grains.position[g],
                     time_seconds, grains.velocity[g], SimulationSystemKind::Fluid);
-                report.field_acceleration_max = std::max(report.field_acceleration_max,
-                    motion.external_acceleration[g].length());
             }
+            for (const auto& a : motion.external_acceleration) {
+                report.field_acceleration_max = std::max(report.field_acceleration_max, a.length());
+            }
+            report.host_motion_ms += ms_since(field_start);
         }
         float coupling_ms = ms_since(coupling_start);
         std::vector<Fluid::MatterGrainCouplingOutput> drag;

@@ -21,6 +21,15 @@ Diğer çözücüler gibi tane de artık force field'ları ve hareket eden colli
 - Rapor: `grain_diagnostics.runtime.collider_faces`, `collider_speed_max_m_s`,
   `field_acceleration_max_m_s2`.
 
+**Ek (canlı, ilk koşu):** rest/wind PASS (rüzgâr 4.000 m/s², COM x .03 → .53); sweep 37. karede
+"grain collider traversal/manifold budget exceeded" ile tutuldu. Sebep: küre 24×12 dilimli, kutbunda
+24 üçgen tek noktada birleşiyor; küre zemine değiyor (y .15, r .15) → tane her üçgeni ayrı özellik
+sayıp 8 yuvayı aştı → tüm adım tutuldu. Düzeltme (shader rev 16): komşu yüzlerin aynı kenar/köşe
+noktası tek özellik; yuva dolarsa EN DERİN 8 özellik / 4 destek tutulur, sayılır
+(`collider_manifold_truncated`), adım TUTULMAZ. Yalnız BVH yığın taşması ölümcül kaldı. Ayrıca
+`host_ms.motion` (collider toplama + köşe hızı + alan) ölçülüyor; alan değerlendirmesi OpenMP.
+Test: küre artık yığının hizasından başlıyor (önceki z .45 → 0 sıçraması 11 m/s sahte hız veriyordu).
+
 Sıra:
 1. `python scripts/test/check_matter_grain_contracts.py` → PASS (bulutta PASS).
    `matter_grain_collider_bvh_test.cpp` bulutta PASS (süpürme sınırları + hız sırası).

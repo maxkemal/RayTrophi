@@ -77,7 +77,7 @@ def main():
              affects_cloth=False, affects_rigidbody=False)
         colliders = {c['name'] for c in call('collider.list')['colliders']}
         call('collider.update' if SPHERE in colliders else 'collider.create', name=SPHERE,
-             source_mode='sphere', sphere_center=[-.45, .15, .45], sphere_radius=.15,
+             source_mode='sphere', sphere_center=[-.5, .15, 0.], sphere_radius=.15,
              enabled=True, fluid_collision_enabled=True)
 
         def sample():
@@ -89,12 +89,14 @@ def main():
                     'status': inv['mixed_execution']['status'][:160],
                     'collider_faces': runtime.get('collider_faces'),
                     'collider_speed_max': runtime.get('collider_speed_max_m_s'),
-                    'field_acceleration_max': runtime.get('field_acceleration_max_m_s2')}
+                    'field_acceleration_max': runtime.get('field_acceleration_max_m_s2'),
+                    'truncated': runtime.get('collider_manifold_truncated'),
+                    'motion_ms': (runtime.get('host_ms') or {}).get('motion')}
 
         def run(arm, wind, sweep):
             call('fluid.reset')
             call('forcefield.set_param', field=FIELD, enabled=wind)
-            call('collider.update', name=SPHERE, sphere_center=[-.45, .15, .45])
+            call('collider.update', name=SPHERE, sphere_center=[-.5, .15, 0.])
             rows = []
             for frame in range(1, 73):
                 if sweep and frame > 24:
@@ -112,7 +114,9 @@ def main():
             print(f"{arm:<6} grains {last['grains']} com {[round(v, 4) for v in last['com']]} "
                   f"faces {last['collider_faces']} collider max "
                   f"{max((r['collider_speed_max'] or 0) for r in rows):.3f} m/s "
-                  f"field max {max((r['field_acceleration_max'] or 0) for r in rows):.3f} m/s2",
+                  f"field max {max((r['field_acceleration_max'] or 0) for r in rows):.3f} m/s2 "
+                  f"truncated {sum((r['truncated'] or 0) for r in rows)} "
+                  f"motion ms max {max((r['motion_ms'] or 0) for r in rows):.2f}",
                   flush=True)
             return rows
 

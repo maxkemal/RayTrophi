@@ -78,7 +78,7 @@ struct MatterGrainParams {
 
 // Host CFL and GLSL history slots share this budget (sim_matter_grain.glsl).
 inline constexpr int kMatterGrainContactBudget = 24;
-inline constexpr uint32_t kMatterGrainShaderRevision = 15;
+inline constexpr uint32_t kMatterGrainShaderRevision = 16;
 // Neighbour hash: three rotating tables of fixed-capacity buckets.
 inline constexpr uint32_t kMatterGrainBucketCapacity = 16;
 inline constexpr uint32_t kMatterGrainBucketTables = 3;
@@ -146,10 +146,15 @@ struct MatterGrainStepReport {
     // Liquid-field binning, drag/pressure preparation, reaction and water
     // exchange around the grain step (host, every coupled frame).
     float host_coupling_ms = 0.0f;
+    // Collider gather + vertex velocities + force-field evaluation.
+    float host_motion_ms = 0.0f;
     // Moving colliders and force fields seen by this step.
     std::size_t collider_faces = 0;
     float collider_speed_max = 0.0f;       // fastest collider vertex, m/s
     float field_acceleration_max = 0.0f;   // largest force-field acceleration on a grain, m/s^2
+    // Grain-substeps whose collider contacts exceeded 8 features / 4 supports;
+    // the deepest were kept (a dense tessellated curve, not an error).
+    uint32_t collider_manifold_truncated = 0;
     // Liquid parcel speed entering the frame (m/s): the liquid lane's CFL
     // substeps follow the maximum, so a few outliers far above the 99th
     // percentile multiply the pressure solves of the whole frame.
