@@ -12,36 +12,101 @@ nlohmann::json matterGrainPileProfile(const std::vector<Vec3>& centres, float ra
     if (centres.size() < 32 || !(radius > 0.0f)) {
         return {{"measured", false}, {"grains", centres.size()}};
     }
-    double floor = std::numeric_limits<double>::max(), cx = 0.0, cz = 0.0;
+    double floor = std::numeric_limits<double>::max();
     for (const auto& c : centres) {
         floor = std::min(floor, double(c.y) - radius);
-        cx += c.x;
-        cz += c.z;
     }
-    cx /= double(centres.size());
-    cz /= double(centres.size());
+    // Centre of the pile, not of every grain: grains above the first layer
+    // stand in the pile; a monolayer scattered over the floor (bounced or
+    // rolled away, piled against a wall) must not drag the axis off-centre.
+    double cx = 0.0, cz = 0.0;
+    std::size_t stacked = 0;
+    for (const auto& c : centres) {
+        if (double(c.y) - floor > 3.0 * radius) {
+            cx += c.x;
+            cz += c.z;
+            ++stacked;
+        }
+    }
+    if (stacked == 0) {
+        for (const auto& c : centres) {
+            cx += c.x;
+            cz += c.z;
+        }
+        stacked = centres.size();
+    }
+    cx /= double(stacked);
+    cz /= double(stacked);
+    // Second pass: a clump stacked against a wall is stacked too. Keep the
+    // stacked grains within twice their median distance of the first centre.
+    {
+        std::vector<double> distances;
+        for (const auto& c : centres) {
+            if (double(c.y) - floor > 3.0 * radius) {
+                distances.push_back(std::hypot(double(c.x) - cx, double(c.z) - cz));
+            }
+        }
+        if (distances.size() >= 8) {
+            std::nth_element(distances.begin(), distances.begin() + distances.size() / 2,
+                distances.end());
+            const double reach = 2.0 * distances[distances.size() / 2] + 2.0 * radius;
+            double nx = 0.0, nz = 0.0;
+            std::size_t kept = 0;
+            for (const auto& c : centres) {
+                if (double(c.y) - floor > 3.0 * radius &&
+                    std::hypot(double(c.x) - cx, double(c.z) - cz) <= reach) {
+                    nx += c.x;
+                    nz += c.z;
+                    ++kept;
+                }
+            }
+            if (kept > 0) {
+                cx = nx / double(kept);
+                cz = nz / double(kept);
+            }
+        }
+    }
     const double ring = 2.0 * radius;
     std::vector<double> top;
+    std::vector<std::size_t> count;
     for (const auto& c : centres) {
         const double distance = std::hypot(double(c.x) - cx, double(c.z) - cz);
         const auto k = static_cast<std::size_t>(distance / ring);
         if (k >= top.size()) {
             top.resize(k + 1, 0.0);
+            count.resize(k + 1, 0);
         }
         top[k] = std::max(top[k], double(c.y) + radius - floor);
+        ++count[k];
     }
-    const double peak = *std::max_element(top.begin(), top.end());
+    // The pile is the run of rings from the axis that hold more than a
+    // monolayer: coverage = grains x (2r)^2 / ring area, 1 = one square-packed
+    // layer. The first thinner ring is the toe; everything outside it is
+    // scattered (reported, never fitted -- a few grains against a wall used
+    // to make the profile rise outwards and the slope positive).
+    std::size_t pile_rings = 0;
+    for (std::size_t k = 0; k < top.size(); ++k) {
+        const double area = 3.14159265358979 * ring * ring * double(2 * k + 1);
+        if (double(count[k]) * ring * ring / area < 1.5) {
+            break;
+        }
+        pile_rings = k + 1;
+    }
+    std::size_t scattered = 0;
+    for (std::size_t k = pile_rings; k < count.size(); ++k) {
+        scattered += count[k];
+    }
+    double peak = 0.0;
+    for (std::size_t k = 0; k < pile_rings; ++k) {
+        peak = std::max(peak, top[k]);
+    }
     double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
     int used = 0;
-    double base_radius = 0.0;
-    for (std::size_t k = 0; k < top.size(); ++k) {
-        const double x = (double(k) + .5) * ring;
-        if (top[k] >= 2.0 * ring) {
-            base_radius = x;
-        }
-        if (k == 0 || top[k] < .2 * peak || top[k] > .8 * peak) {
+    for (std::size_t k = 1; k < pile_rings; ++k) {
+        if (top[k] < .2 * peak || top[k] > .8 * peak) {
             continue;
         }
+        const double x = (double(k) + .5) * ring;
         sx += x;
         sy += top[k];
         sxx += x * x;
@@ -56,10 +121,16 @@ nlohmann::json matterGrainPileProfile(const std::vector<Vec3>& centres, float ra
             angle = std::atan(-slope) * 57.29577951308232;
         }
     }
+    const char* reason = angle != nullptr ? ""
+        : pile_rings < 4 ? "no_pile: fewer than 4 rings hold more than a monolayer (grains spread flat)"
+        : used < 3 ? "too_few_slope_rings" : "slope_not_decreasing";
     return {{"measured", angle != nullptr}, {"grains", centres.size()},
         {"centre_xz", {cx, cz}}, {"peak_height_m", peak},
-        {"base_radius_m", base_radius}, {"rings_fit", used},
-        {"repose_angle_deg", angle}};
+        {"base_radius_m", double(pile_rings) * ring}, {"rings_fit", used},
+        {"scattered_grains", scattered},
+        {"scattered_fraction", double(scattered) / double(centres.size())},
+        {"max_extent_m", double(top.size()) * ring},
+        {"reason", reason}, {"repose_angle_deg", angle}};
 }
 
 nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrainParams& params,

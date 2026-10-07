@@ -622,14 +622,21 @@ def main():
                  wet_response_enabled=False, wet_appearance_enabled=False)
             call('flow_source.update', name=SOURCE, domain=REPOSE, enabled=False)
             data['repose'] = []
-            for label, radius, mu_r, count in [('mu_r_.05', .025, .05, 1500), ('mu_r_.3', .025, .3, 1500),
-                                               ('mu_r_.1', .025, .1, 1500),
-                                               ('mu_r_.1_r_.0175', .0175, .1, 4373)]:
+            failures = []
+            # The historic arms use restitution_of(8 Ns/m) = e .87 (very bouncy;
+            # sand is ~.5). The last arm repeats mu_r .1 at e .5: if only it forms a
+            # pile, the spread is bounce scatter, not a rolling/friction defect.
+            for label, radius, mu_r, count, e in [('mu_r_.05', .025, .05, 1500, None),
+                                                  ('mu_r_.3', .025, .3, 1500, None),
+                                                  ('mu_r_.1', .025, .1, 1500, None),
+                                                  ('mu_r_.1_r_.0175', .0175, .1, 4373, None),
+                                                  ('mu_r_.1_e_.5', .025, .1, 1500, .5)]:
                 scale = radius/.025
                 call('timeline.set_frame', frame=0)
                 call('fluid.reset')
                 call('fluid.set_grain_settings', domain=REPOSE, enabled=True, radius_m=radius,
-                     stiffness_n_m=100000.*scale, restitution=restitution_of(8.*scale**2, 100000.*scale, radius),
+                     stiffness_n_m=100000.*scale,
+                     restitution=e if e else restitution_of(8.*scale**2, 100000.*scale, radius),
                      sliding_damping_n_s_m=4.*scale**2, friction=.5, rolling_friction=mu_r,
                      twisting_friction=.1, tangential_stiffness_ratio=2/7, contact_resolution=24,
                      packing_fraction=.6, max_substeps=4096)
@@ -666,6 +673,8 @@ def main():
                 angles = [x['pile']['repose_angle_deg'] for x in tail]
                 arm['summary'] = {'angle_deg': pile['repose_angle_deg'], 'peak_m': pile['peak_height_m'],
                     'base_radius_m': pile['base_radius_m'], 'rings_fit': pile['rings_fit'],
+                    'scattered_fraction': pile.get('scattered_fraction'),
+                    'max_extent_m': pile.get('max_extent_m'), 'reason': pile.get('reason'),
                     'tail_angle_range_deg': (max(angles)-min(angles)) if None not in angles else None,
                     'tail_peak_range_m': max(x['pile']['peak_height_m'] for x in tail) -
                         min(x['pile']['peak_height_m'] for x in tail),
@@ -674,16 +683,26 @@ def main():
                         min(x['dry_mass_kg'] for x in tail),
                     'runtime': last['runtime']}
                 save()
-                print('repose', label, json.dumps(arm['summary']), flush=True)
-                assert pile['measured'], ('pile profile not measurable', label, pile)
-                assert pile['base_radius_m'] <= 1.2 - .3, ('pile reaches the walls; not free-standing', label)
-                assert (arm['summary']['tail_angle_range_deg'] is not None and
-                        arm['summary']['tail_angle_range_deg'] <= 1.5), ('pile still moving', label)
-                assert arm['summary']['kinetic_energy_per_grain_j'] <= 1e-5, ('pile not at rest', label)
-                assert arm['summary']['mass_drift_after_birth_kg'] <= 1e-5
+                sm = arm['summary']
+                print('repose', label, 'angle', sm['angle_deg'], 'peak', round(sm['peak_m'], 4),
+                      'base', sm['base_radius_m'], 'scattered', sm['scattered_fraction'],
+                      'extent', sm['max_extent_m'], 'KE/grain', sm['kinetic_energy_per_grain_j'],
+                      sm['reason'] or '', flush=True)
+                # Every arm runs; the verdicts come after the whole table.
+                for ok, why in [(pile['measured'], f"no measurable pile ({sm['reason']})"),
+                                (pile['base_radius_m'] <= 1.2 - .3, 'pile reaches the walls'),
+                                (sm['tail_angle_range_deg'] is not None and sm['tail_angle_range_deg'] <= 1.5,
+                                 'pile still moving'),
+                                (sm['kinetic_energy_per_grain_j'] <= 1e-5, 'pile not at rest'),
+                                (sm['mass_drift_after_birth_kg'] <= 1e-5, 'mass drift')]:
+                    if not ok:
+                        failures.append(f'{label}: {why}')
             angle = {arm['label']: arm['summary']['angle_deg'] for arm in data['repose']}
             data['repose_gates'] = angle
+            data['repose_failures'] = failures
             save()
+            print('repose angles', angle, flush=True)
+            assert not failures, failures
             # Sensitivity proves the measurement sees the rolling spring at all.
             assert angle['mu_r_.3'] >= angle['mu_r_.05'] + 3, ('repose insensitive to mu_r', angle)
             assert 15 <= angle['mu_r_.1'] <= 45, ('implausible repose angle', angle)
