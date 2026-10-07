@@ -43,8 +43,19 @@ volume_exclusion kapalı / fluid_coupling kapalı), ayarları sonunda geri koyar
 tane host aşamaları, aktarım ve senkron noktaları (medyan). Tabloyu getir; GPU'nun boş kalması
 genelde CPU'nun bu senkron noktaları arasında bekletmesidir.
 
+**Ek 6 (canlı maliyet, kum+su 5832 parçacık):** kare 99.7 ms: `batch_end` 45.3 ms (33 senkron),
+yükleme 26.75 MB/kare, tane GPU 12.6 ms, bağlama host 10.3 ms. Bağlamanın dört fonksiyonu
+(sıvı alanı, gözeneklilik, basınç kuvveti, su alışverişi) her kare ızgara boyutunda diziler ayırıp
+sıfırlıyor ve tüm ızgarayı dolaşıyordu; gözeneklilik dört ızgara dizisini tamamen yedekleyip geri
+yazıyordu. Şimdi: kalıcı tamponlar + yalnız yazılan hücrelerin temizliği, yalnız tanelerin
+değdiği yüzler/hücreler değişir ve yedeklenir (sonuç aynı: C++ testi + seyrek geri yüklemenin
+bit-bit eşitliği PASS). Beklenen: bağlama 10 ms → ~1 ms. 26.75 MB yükleme ve 33 senkron sıvı
+şeridinin ızgara yükleme yolunda — sıradaki iş (bu ölçümle hangisinin kaldığı görülecek).
+
 **Build:** yalnız C++.
 
+00000. Aynı sahne, `python scripts/test/rt_grain_float_probe.py --cost --frames 120` → `coupling`
+       ~1 ms olmalı; tabloyu getir (önce: 99.7 ms toplam).
 0000. Kum+su sahnesini kaydet, kapat, aç → Solvers'ta grains açık kalmalı.
 000. Kum + su + Sphere/Box collider: taneler ve su collider'a çarpıp akmalı; Solvers "Ready.".
      Oynarken Wet grains aç → kabul edilmeli, sudaki taneler su emmeli (Measure: grain water).

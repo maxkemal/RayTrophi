@@ -5,7 +5,9 @@
 #include "../Vec3.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace RayTrophiSim::Fluid {
@@ -50,6 +52,9 @@ struct MatterGrainLiquidField {
     std::vector<double> viscosity;    // sum of mass x dynamic viscosity, kg Pa s
     std::vector<double> solid;        // grain m^3 (trilinear volume weights)
     std::vector<int> parcel_cell;     // liquid parcel -> cell, -1 outside
+    // Cells written by the last build: the next build clears only these.
+    std::vector<uint32_t> touched;
+    std::vector<uint8_t> touched_mark;
 };
 
 struct MatterGrainCouplingFrame {
@@ -87,10 +92,16 @@ void applyMatterGrainLiquidReaction(FluidParticles& liquid, const MatterGrainCou
     const std::vector<MatterGrainCouplingOutput>& drag, MatterGrainStepReport& report);
 
 // Grid state the porous projection overwrites for one liquid step.
+// What applyMatterGrainPorosity changed: old values of the touched faces
+// and cells, or a whole array when it had to be rebuilt.
 struct MatterGrainPorosityBackup {
     bool active = false;
-    std::vector<uint8_t> u_weight, v_weight, w_weight;
+    bool weights_whole[3] = {false, false, false};
+    std::vector<uint8_t> weights[3];
+    std::vector<std::pair<uint32_t, uint8_t>> weight_changes[3];
+    bool solid_vel_whole = false;
     std::vector<Vec3> solid_vel;
+    std::vector<std::pair<uint32_t, Vec3>> solid_vel_changes;
     bool weights_init = false;
     uint64_t weights_sig = 0;
 };

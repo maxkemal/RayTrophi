@@ -27,6 +27,50 @@ std::size_t cellIndex(const MatterGrainLiquidField& f, int i, int j, int k) {
     return (static_cast<std::size_t>(k) * f.ny + j) * f.nx + i;
 }
 
+// Per-cell accumulators over the whole domain grid, kept allocated between
+// frames: only the cells written in one use are cleared when it ends. Grains
+// and parcels touch a small part of the grid, and allocating and zeroing
+// every channel of every cell each frame was most of the coupling's host
+// time (10 ms for 2916 grains, growing with the grid, not the content).
+struct CellScratch {
+    std::vector<double> data[7];
+    std::vector<uint8_t> mark;
+    std::vector<uint32_t> touched;
+    void begin(std::size_t cells) {
+        if (mark.size() != cells) {
+            for (auto& channel : data) channel.assign(cells, 0.0);
+            mark.assign(cells, 0);
+            touched.clear();
+        }
+    }
+    void touch(std::size_t c) {
+        if (!mark[c]) {
+            mark[c] = 1;
+            touched.push_back(static_cast<uint32_t>(c));
+        }
+    }
+    ~CellScratch() = default;
+};
+
+struct ScratchUse {
+    CellScratch& s;
+    ScratchUse(CellScratch& scratch, std::size_t cells) : s(scratch) { s.begin(cells); }
+    ~ScratchUse() {
+        for (const uint32_t c : s.touched) {
+            for (auto& channel : s.data) channel[c] = 0.0;
+            s.mark[c] = 0;
+        }
+        s.touched.clear();
+    }
+};
+
+// One scratch per function: they are used one after another in a step, and
+// a step runs on one thread.
+CellScratch& cellScratch(int slot) {
+    static thread_local CellScratch scratch[3];
+    return scratch[slot];
+}
+
 // Eight cell-centre neighbours of `p` with trilinear weights; cells outside
 // the grid get index -1 and weight 0.
 void neighbours(const MatterGrainLiquidField& f, const Vec3& p, int cells[8], double weights[8]) {
@@ -97,13 +141,32 @@ bool buildMatterGrainLiquidField(const FluidParticles& liquid, const FluidPartic
     f.origin = origin;
     f.h = h;
     const std::size_t cells = static_cast<std::size_t>(nx) * ny * nz;
-    f.mass.assign(cells, 0.0);
-    f.volume.assign(cells, 0.0);
-    for (auto& axis : f.momentum) {
-        axis.assign(cells, 0.0);
+    // A field reused from the previous frame is cleared only where it was
+    // written (callers keep one alive across frames; see MatterGrainStep).
+    if (f.mass.size() != cells || f.touched_mark.size() != cells) {
+        f.mass.assign(cells, 0.0);
+        f.volume.assign(cells, 0.0);
+        for (auto& axis : f.momentum) {
+            axis.assign(cells, 0.0);
+        }
+        f.solid.assign(cells, 0.0);
+        f.viscosity.assign(cells, 0.0);
+        f.touched_mark.assign(cells, 0);
+        f.touched.clear();
+    } else {
+        for (const uint32_t c : f.touched) {
+            f.mass[c] = f.volume[c] = f.solid[c] = f.viscosity[c] = 0.0;
+            f.momentum[0][c] = f.momentum[1][c] = f.momentum[2][c] = 0.0;
+            f.touched_mark[c] = 0;
+        }
+        f.touched.clear();
     }
-    f.solid.assign(cells, 0.0);
-    f.viscosity.assign(cells, 0.0);
+    const auto touch = [&](std::size_t c) {
+        if (!f.touched_mark[c]) {
+            f.touched_mark[c] = 1;
+            f.touched.push_back(static_cast<uint32_t>(c));
+        }
+    };
     f.parcel_cell.assign(liquid.size(), -1);
     std::unordered_map<uint32_t, double> density_by_tag, viscosity_by_tag;
     for (std::size_t p = 0; p < liquid.size(); ++p) {
@@ -139,6 +202,7 @@ bool buildMatterGrainLiquidField(const FluidParticles& liquid, const FluidPartic
         }
         const auto c = cellIndex(f, i, j, k);
         f.parcel_cell[p] = static_cast<int>(c);
+        touch(c);
         f.viscosity[c] += mass * viscous->second;
         f.mass[c] += mass;
         f.volume[c] += mass / found->second;
@@ -153,6 +217,7 @@ bool buildMatterGrainLiquidField(const FluidParticles& liquid, const FluidPartic
         neighbours(f, x, c, w);
         for (int n = 0; n < 8; ++n) {
             if (c[n] >= 0) {
+                touch(static_cast<std::size_t>(c[n]));
                 f.solid[c[n]] += w[n] * sphere;
             }
         }
@@ -328,11 +393,12 @@ void applyMatterGrainPorosity(FluidSim::FluidGrid& grid, const FluidParticles& g
     const std::size_t cells = static_cast<std::size_t>(nx) * ny * nz;
     const std::size_t faces[3] = {static_cast<std::size_t>(nx + 1) * ny * nz,
         static_cast<std::size_t>(nx) * (ny + 1) * nz, static_cast<std::size_t>(nx) * ny * (nz + 1)};
+    // Only the faces and cells the grains reach change; the backup keeps
+    // their old values (a whole-array copy of four grid arrays per frame
+    // was the rest of the coupling's host time). An array that has to be
+    // rebuilt from scratch is moved into the backup whole instead.
+    backup = MatterGrainPorosityBackup{};
     backup.active = true;
-    backup.u_weight = grid.u_weight;
-    backup.v_weight = grid.v_weight;
-    backup.w_weight = grid.w_weight;
-    backup.solid_vel = grid.solid_vel;
     backup.weights_init = grid.collider_weights_init;
     backup.weights_sig = grid.collider_weights_sig;
 
@@ -342,10 +408,10 @@ void applyMatterGrainPorosity(FluidSim::FluidGrid& grid, const FluidParticles& g
     f.nz = nz;
     f.origin = grid.origin;
     f.h = h;
-    std::vector<double> solid(cells, 0.0), momentum[3];
-    for (auto& axis : momentum) {
-        axis.assign(cells, 0.0);
-    }
+    ScratchUse use(cellScratch(2), cells);
+    auto& solid = use.s.data[0];
+    std::vector<double>* momentum = &use.s.data[1];
+    auto& fraction = use.s.data[4];
     const double sphere = 4.0 / 3.0 * kPi * double(grain_radius) * grain_radius * grain_radius;
     for (std::size_t g = 0; g < grains.size(); ++g) {
         int c[8];
@@ -355,6 +421,7 @@ void applyMatterGrainPorosity(FluidSim::FluidGrid& grid, const FluidParticles& g
             if (c[n] < 0) {
                 continue;
             }
+            use.s.touch(static_cast<std::size_t>(c[n]));
             const double v = w[n] * sphere;
             solid[c[n]] += v;
             momentum[0][c[n]] += v * grains.velocity[g].x;
@@ -364,21 +431,26 @@ void applyMatterGrainPorosity(FluidSim::FluidGrid& grid, const FluidParticles& g
     }
     const double cell_volume = double(h) * h * h;
     const double cap = 1.0 - std::clamp(double(minimum_voidage), 0.05, 1.0);
-    std::vector<float> fraction(cells, 0.0f);
     if (grid.solid_vel.size() != cells) {
+        backup.solid_vel_whole = true;
+        backup.solid_vel = std::move(grid.solid_vel);
         grid.solid_vel.assign(cells, Vec3(0.0f, 0.0f, 0.0f));
     }
-    for (std::size_t c = 0; c < cells; ++c) {
+    for (const uint32_t c : use.s.touched) {
         if (solid[c] <= 0.0) {
             continue;
         }
-        fraction[c] = static_cast<float>(std::min(solid[c] / cell_volume, cap));
-        report.max_solid_fraction = std::max(report.max_solid_fraction, fraction[c]);
+        fraction[c] = std::min(solid[c] / cell_volume, cap);
+        report.max_solid_fraction = std::max(report.max_solid_fraction,
+            static_cast<float>(fraction[c]));
         ++report.porous_cells;
         // Collider cells keep their wall velocity; the grains' mean velocity
         // is only read by the porous divergence at non-solid cells.
         if (c < grid.solid.size() && grid.solid[c]) {
             continue;
+        }
+        if (!backup.solid_vel_whole) {
+            backup.solid_vel_changes.emplace_back(c, grid.solid_vel[c]);
         }
         grid.solid_vel[c] = Vec3(static_cast<float>(momentum[0][c] / solid[c]),
             static_cast<float>(momentum[1][c] / solid[c]),
@@ -387,6 +459,8 @@ void applyMatterGrainPorosity(FluidSim::FluidGrid& grid, const FluidParticles& g
     std::vector<uint8_t>* weights[3] = {&grid.u_weight, &grid.v_weight, &grid.w_weight};
     for (int axis = 0; axis < 3; ++axis) {
         if (!keep_collider_weights || weights[axis]->size() != faces[axis]) {
+            backup.weights_whole[axis] = true;
+            backup.weights[axis] = std::move(*weights[axis]);
             weights[axis]->assign(faces[axis], 255u);
         }
     }
@@ -394,36 +468,51 @@ void applyMatterGrainPorosity(FluidSim::FluidGrid& grid, const FluidParticles& g
         if (i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz) {
             return -1.0f;  // outside: the face takes the in-grid side only
         }
-        return fraction[(static_cast<std::size_t>(k) * ny + j) * nx + i];
+        return static_cast<float>(fraction[(static_cast<std::size_t>(k) * ny + j) * nx + i]);
     };
-    const auto closeFace = [&](uint8_t& weight, float lo, float hi) {
+    // Each face next to a porous cell once: phi is zero on every other face,
+    // so the result equals the full sweep it replaces.
+    static thread_local std::vector<uint8_t> face_seen[3];
+    std::vector<uint32_t> seen_list[3];
+    for (int axis = 0; axis < 3; ++axis) {
+        if (face_seen[axis].size() != faces[axis]) {
+            face_seen[axis].assign(faces[axis], 0);
+        }
+    }
+    const auto closeFace = [&](int axis, std::size_t index, float lo, float hi) {
+        if (face_seen[axis][index]) {
+            return;
+        }
+        face_seen[axis][index] = 1;
+        seen_list[axis].push_back(static_cast<uint32_t>(index));
         const float phi = lo < 0.0f ? hi : hi < 0.0f ? lo : .5f * (lo + hi);
         if (phi > 0.0f) {
+            uint8_t& weight = (*weights[axis])[index];
+            if (!backup.weights_whole[axis]) {
+                backup.weight_changes[axis].emplace_back(static_cast<uint32_t>(index), weight);
+            }
             weight = static_cast<uint8_t>(std::lround(weight * (1.0f - phi)));
         }
     };
-    for (int k = 0; k < nz; ++k) {
-        for (int j = 0; j < ny; ++j) {
-            for (int i = 0; i <= nx; ++i) {
-                closeFace(grid.u_weight[grid.velXIndex(i, j, k)],
-                    cellFraction(i - 1, j, k), cellFraction(i, j, k));
-            }
+    for (const uint32_t c : use.s.touched) {
+        if (!(fraction[c] > 0.0)) {
+            continue;
+        }
+        const int i = static_cast<int>(c % nx);
+        const int j = static_cast<int>((c / nx) % ny);
+        const int k = static_cast<int>(c / (static_cast<std::size_t>(nx) * ny));
+        for (int side = 0; side < 2; ++side) {
+            closeFace(0, grid.velXIndex(i + side, j, k),
+                cellFraction(i + side - 1, j, k), cellFraction(i + side, j, k));
+            closeFace(1, grid.velYIndex(i, j + side, k),
+                cellFraction(i, j + side - 1, k), cellFraction(i, j + side, k));
+            closeFace(2, grid.velZIndex(i, j, k + side),
+                cellFraction(i, j, k + side - 1), cellFraction(i, j, k + side));
         }
     }
-    for (int k = 0; k < nz; ++k) {
-        for (int j = 0; j <= ny; ++j) {
-            for (int i = 0; i < nx; ++i) {
-                closeFace(grid.v_weight[grid.velYIndex(i, j, k)],
-                    cellFraction(i, j - 1, k), cellFraction(i, j, k));
-            }
-        }
-    }
-    for (int k = 0; k <= nz; ++k) {
-        for (int j = 0; j < ny; ++j) {
-            for (int i = 0; i < nx; ++i) {
-                closeFace(grid.w_weight[grid.velZIndex(i, j, k)],
-                    cellFraction(i, j, k - 1), cellFraction(i, j, k));
-            }
+    for (int axis = 0; axis < 3; ++axis) {
+        for (const uint32_t index : seen_list[axis]) {
+            face_seen[axis][index] = 0;
         }
     }
 }
@@ -432,13 +521,26 @@ void restoreMatterGrainPorosity(FluidSim::FluidGrid& grid, MatterGrainPorosityBa
     if (!backup.active) {
         return;
     }
-    grid.u_weight = std::move(backup.u_weight);
-    grid.v_weight = std::move(backup.v_weight);
-    grid.w_weight = std::move(backup.w_weight);
-    grid.solid_vel = std::move(backup.solid_vel);
+    std::vector<uint8_t>* weights[3] = {&grid.u_weight, &grid.v_weight, &grid.w_weight};
+    for (int axis = 0; axis < 3; ++axis) {
+        if (backup.weights_whole[axis]) {
+            *weights[axis] = std::move(backup.weights[axis]);
+        } else {
+            for (const auto& [index, value] : backup.weight_changes[axis]) {
+                (*weights[axis])[index] = value;
+            }
+        }
+    }
+    if (backup.solid_vel_whole) {
+        grid.solid_vel = std::move(backup.solid_vel);
+    } else {
+        for (const auto& [index, value] : backup.solid_vel_changes) {
+            grid.solid_vel[index] = value;
+        }
+    }
     grid.collider_weights_init = backup.weights_init;
     grid.collider_weights_sig = backup.weights_sig;
-    backup.active = false;
+    backup = MatterGrainPorosityBackup{};
 }
 
 bool applyMatterGrainLiquidAccelerationForce(const FluidParticles& liquid,
@@ -460,10 +562,9 @@ bool applyMatterGrainLiquidAccelerationForce(const FluidParticles& liquid,
         return false;
     }
     // Per cell: liquid mass and mass-weighted velocity change of its parcels.
-    std::vector<double> mass(cells, 0.0), change[3];
-    for (auto& axis : change) {
-        axis.assign(cells, 0.0);
-    }
+    ScratchUse use(cellScratch(0), cells);
+    auto& mass = use.s.data[0];
+    std::vector<double>* change = &use.s.data[1];
     for (std::size_t p = 0; p < liquid.size(); ++p) {
         const int c = f.parcel_cell[p];
         if (c < 0) {
@@ -474,6 +575,7 @@ bool applyMatterGrainLiquidAccelerationForce(const FluidParticles& liquid,
         if (!(m > 0.0) || !finite(dv)) {
             continue;
         }
+        use.s.touch(static_cast<std::size_t>(c));
         mass[c] += m;
         change[0][c] += m * dv.x;
         change[1][c] += m * dv.y;
@@ -533,10 +635,12 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
     constexpr double kWaterHeat = 4186.0;
     const double capacity = matterGrainWaterCapacityKg(params);
     // Current liquid per cell (the drag reaction already changed velocities).
-    std::vector<double> mass(cells, 0.0), momentum[3];
-    for (auto& axis : momentum) {
-        axis.assign(cells, 0.0);
-    }
+    ScratchUse use(cellScratch(1), cells);
+    auto& mass = use.s.data[0];
+    std::vector<double>* momentum = &use.s.data[1];
+    auto& demand = use.s.data[4];
+    auto& scale = use.s.data[5];
+    auto& taken = use.s.data[6];
     double liquid_before = 0.0, grain_before = 0.0;
     for (std::size_t p = 0; p < liquid.size(); ++p) {
         const double m = double(liquid.rest_mass_kg[p]) * liquid.mass_fraction[p];
@@ -545,6 +649,7 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
         if (c < 0 || m <= 0.0) {
             continue;
         }
+        use.s.touch(static_cast<std::size_t>(c));
         mass[c] += m;
         momentum[0][c] += m * liquid.velocity[p].x;
         momentum[1][c] += m * liquid.velocity[p].y;
@@ -557,7 +662,7 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
     // cell gives more than half its liquid in a frame.
     const bool absorbing = params.absorption_rate_per_s > 0.0f && frame.cells.size() == count * 8;
     const double uptake = 1.0 - std::exp(-double(params.absorption_rate_per_s) * dt);
-    std::vector<double> want(count, 0.0), demand(cells, 0.0);
+    std::vector<double> want(count, 0.0);
     if (absorbing) {
         for (std::size_t g = 0; g < count; ++g) {
             const double free = capacity - grains.pore_water_mass_kg[g];
@@ -569,13 +674,13 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
             for (int n = 0; n < 8; ++n) {
                 const int c = frame.cells[g * 8 + n];
                 if (c >= 0) {
+                    use.s.touch(static_cast<std::size_t>(c));
                     demand[c] += want[g] * frame.shares[g * 8 + n];
                 }
             }
         }
     }
-    std::vector<double> scale(cells, 0.0), taken(cells, 0.0);
-    for (std::size_t c = 0; c < cells; ++c) {
+    for (const uint32_t c : use.s.touched) {
         if (demand[c] > 0.0 && mass[c] > 0.0) {
             scale[c] = std::min(1.0, .5 * mass[c] / demand[c]);
         }
