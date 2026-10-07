@@ -254,8 +254,14 @@ std::vector<MatterGrainBlocker> matterGrainBlockers(const SimulationGridDomainDe
     if (d.fluid_params.thermal_liquid_enabled) {
         add("thermal_liquid", "Thermal liquid cannot run with grains yet.");
     }
-    if (d.fluid_solid_phase_enabled) {
-        add("solid_phase", "Solid phase cannot run with grains yet.");
+    // The switch is on by default and stamps only substances bound as Solid
+    // (FluidDomainStep reads it the same way): with none authored it does
+    // nothing, and blocking on it refused grains in every new Matter domain.
+    if (d.fluid_solid_phase_enabled &&
+        std::any_of(d.fluid_substance_materials.begin(), d.fluid_substance_materials.end(),
+            [](const auto& b) { return !b.substance.empty() && b.phase == SubstancePhase::Solid; })) {
+        add("solid_phase", "A substance is bound as Solid in this domain; solid phase cannot run "
+            "with grains yet (Matter tab: turn off Solid Phase Blocks Flow, or unbind it).");
     }
     return blockers;
 }

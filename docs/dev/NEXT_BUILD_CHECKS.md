@@ -18,8 +18,15 @@ Solvers'ta "Step held - grains do not move: …" normal renkte; CFL hata metni g
 sığan sertliği sayıyla verir ("Lower Contact stiffness to <= X N/m"); yarıçap tooltip'i ilişkiyi
 anlatır. Kalıcı çözüm açık iş: örtüşmeden türetilen sertlik (yarıçap değişince kendiliğinden doğru).
 
+**Ek 2 (kullanıcı bildirimi):** yeni Matter domain + Sand point source + Granular → "Enable discrete
+grains" reddediliyor, altında iki kez "Solid phase cannot run with grains yet". Sebep: katı faz anahtarı
+varsayılan AÇIK ve kural maddeye bakmadan engelliyordu; anahtar yalnız Solid bağlı bir madde varsa
+iş yapar (FluidDomainStep aynı şekilde okur). Kural artık yalnız Solid bağlı madde varsa engeller ve
+nereden kaldırılacağını söyler; reddedilen enable'ın hata metni engel satırlarını tekrar basmıyor.
+
 **Build:** yalnız C++.
 
+00. Yeni Matter domain + point source (Sand, Granular) → Solvers'ta enable kabul edilmeli, "Ready.".
 0. Yarıçapı .01'e indir, reset, oynat: Solvers'ta held satırı ve önerilen sertlik görünmeli; o
    sertliği gir → taneler düşmeli.
 1. `python scripts/test/rt_h1_grain_suite.py --only dense` → tablonun yeni sütunlarını getir.

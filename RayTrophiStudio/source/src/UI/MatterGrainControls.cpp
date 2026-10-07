@@ -219,7 +219,10 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
     if (changed) {
         apply(domain, p);
     }
-    showError(domain);
+    // A rejected enable repeats the blocker lines above; show only other errors.
+    if (blockers.empty()) {
+        showError(domain);
+    }
     ImGui::PopID();
 }
 
