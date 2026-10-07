@@ -334,8 +334,18 @@ void applyMatterGrainLiquidReaction(FluidParticles& liquid, const MatterGrainCou
     }
     double grain_gain[3] = {}, unmatched = 0.0;
     report.drag_impulse = Vec3(0.0f, 0.0f, 0.0f);
+    // With volume exclusion the grains are obstacles in the porous projection,
+    // so the liquid already feels their pressure reaction there. Returning the
+    // measured-acceleration pressure force as an impulse as well counts it
+    // twice and closes a loop: the projection undoes the kick, the next frame
+    // measures that as liquid acceleration, and the force grows by the
+    // cell's grain/liquid volume ratio each frame (unbounded once grains fill
+    // more of a cell than liquid: 50 m/s parcels, 68 liquid substeps, sand
+    // held up on the surface). Only drag is exchanged as an impulse then.
+    const bool pressure_in_projection = report.volume_exclusion;
     for (std::size_t g = 0; g < count && g < drag.size(); ++g) {
-        const Vec3 gain = drag[g].drag_impulse + frame.buoyancy_impulse[g];
+        const Vec3 gain = pressure_in_projection ? drag[g].drag_impulse
+                                                 : drag[g].drag_impulse + frame.buoyancy_impulse[g];
         report.drag_impulse = report.drag_impulse + drag[g].drag_impulse;
         grain_gain[0] += gain.x;
         grain_gain[1] += gain.y;
