@@ -15,6 +15,7 @@ def main():
     simulation += source("src/Physics/Fluid/MatterDomainSynchronization.inl")
     simulation += source("src/Physics/Fluid/MatterDomainRestore.inl")
     simulation += source("src/Physics/Fluid/MatterDomainSources.inl")
+    simulation += source("src/Physics/Fluid/FluidDomainStep.inl")
     assert "std::swap(state.grid, state.matter_liquid_grid)" not in simulation
     assert "Fluid::MatterLiquidScope liquid_scope(" in simulation
     assert "liquid_scope.restore();" in simulation

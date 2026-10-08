@@ -21,7 +21,8 @@ def main():
         assert f"{field}[i] = {field}[last]" in particles, field
         assert f"allocationBytes(particles.{field})" in memory, field
         assert cache.count(field) >= 3, field
-    assert "kVersion = 11u" in read("include/SimCache.h")
+    assert "kVersion = 12u" in read("include/SimCache.h")
+    assert "version == 11u || version == kVersion" in read("include/SimCache.h")
     core = read("src/Physics/Fluid/MatterPoreExchange.cpp")
     assert core.index("working > budget_bytes") < core.index("auto candidate = particles")
     assert core.index("C5 conservation gate rejected") < core.index("particles = std::move(candidate)")

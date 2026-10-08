@@ -9,6 +9,7 @@ import math
 from pathlib import Path
 
 from rt_ipc import RtIpc
+from rt_domain_material import domain_material  # noqa: E402
 
 
 DOMAIN = 'G2_Dry_Matrix'
@@ -66,8 +67,7 @@ def main():
         existing_sources = {s['name'] for s in call('flow_source.list')}
         call('flow_source.update' if SOURCE in existing_sources else 'flow_source.create',
              name=SOURCE, domain=DOMAIN, enabled=False, phase='liquid', source_mode='point',
-             fluid_substance='Sand', initial_constitutive_model='granular',
-             position=[0, .6, 0], radius=.26, velocity=[0, 0, 0], fluid_velocity_spread=0.,
+             fluid_substance='Sand', position=[0, .6, 0], radius=.26, velocity=[0, 0, 0], fluid_velocity_spread=0.,
              fluid_temperature_override=True, fluid_temperature_kelvin=293.15,
              use_time_limit=True, start_time=0., end_time=.35, use_particle_limit=True,
              max_emitted_particles=360, fluid_particles_per_second=1200)
@@ -77,13 +77,11 @@ def main():
                                        ('grid_finer', .08, 1 / 60, 1),
                                        ('load_double', .1, 1 / 60, 2)]:
             count = round(360 * load * (.1 / voxel) ** 3)
+            material = domain_material(call, 'T: g2_dry_matrix', 'Sand',
+                granular_young_modulus=2000000., granular_poisson_ratio=.3, granular_friction_angle=35., granular_dilatancy=0., granular_hardening=0., granular_cohesion=0., granular_tensile_cutoff=0., granular_rebonding=False, granular_damage_rate=0.)
             call('fluid.set_param', domain=DOMAIN, enabled=True, visible=False,
-                 voxel_size=voxel, backend='vulkan', boundary='closed', preset='sand',
-                 granular_enabled=True, granular_young_modulus=2000000.,
-                 granular_poisson_ratio=.3, granular_friction_angle=35.,
-                 granular_dilatancy=0., granular_hardening=0., granular_cohesion=0.,
-                 granular_tensile_cutoff=0., granular_rebonding=False,
-                 granular_damage_rate=0., solid_phase=False, thermal_liquid_enabled=False)
+                 voxel_size=voxel, backend='vulkan', boundary='closed', default_substance=material,
+                 solid_phase=False, thermal_liquid_enabled=False)
             call('fluid.set_pore_exchange', domain=DOMAIN, enabled=True, porosity=.35,
                  wet_response_enabled=False, wet_appearance_enabled=False)
             call('flow_source.update', name=SOURCE, enabled=True,

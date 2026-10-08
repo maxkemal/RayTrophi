@@ -1,5 +1,8 @@
 #include "Fluid/MatterPoreAuthoring.h"
 #include "Fluid/MatterGrain.h"
+#include "Fluid/FluidDomainSubstance.h"
+#include "MaterialStateField.h"
+#include "SubstanceLibrary.h"
 #include "SceneSerializer.h"
 #include "Fluid/MatterPhaseConfig.h"
 #include "globals.h"
@@ -351,9 +354,9 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
 
     // APICSolverParams
     j["fluid_params"]["gravity"] = vec3ToJson(d.fluid_params.gravity);
-    // ν in m²/s. Renamed from the old unitless `viscosity` rather than reused —
-    // see APICSolverParams::kinematic_viscosity.
-    j["fluid_params"]["kinematic_viscosity"] = d.fluid_params.kinematic_viscosity;
+    // The material: physics resolve from it (see FluidDomainSubstance.h), so
+    // viscosity, the granular skeleton, freeze point and fuel are not stored.
+    j["fluid_params"]["default_substance"] = d.fluid_params.default_substance;
     j["fluid_params"]["viscosity_wall_slip"] = d.fluid_params.viscosity_wall_slip;
     j["fluid_params"]["particles_per_cell"] = d.fluid_params.particles_per_cell;
     j["fluid_params"]["cfl"] = d.fluid_params.cfl;
@@ -364,42 +367,21 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_params"]["apic_blend"] = d.fluid_params.apic_blend;
     j["fluid_params"]["flip_blend"] = d.fluid_params.flip_blend;
     j["fluid_params"]["internal_friction"] = d.fluid_params.internal_friction;
-    j["fluid_params"]["granular_enabled"] = d.fluid_params.granular_enabled;
-    j["fluid_params"]["granular_softening_temperature"] = d.fluid_params.granular_softening_temperature;
-    j["fluid_params"]["granular_softening_range"] = d.fluid_params.granular_softening_range;
-    j["fluid_params"]["granular_residual_strength"] = d.fluid_params.granular_residual_strength;
-    j["fluid_params"]["granular_tack_peak"] = d.fluid_params.granular_tack_peak;
-    j["fluid_params"]["granular_thermal_conductivity"] = d.fluid_params.granular_thermal_conductivity;
     j["fluid_params"]["thermal_liquid_enabled"] = d.fluid_params.thermal_liquid_enabled;
     j["fluid_params"]["thermal_air_cooling_rate"] = d.fluid_params.thermal_air_cooling_rate;
     j["fluid_params"]["thermal_contact_cooling_rate"] = d.fluid_params.thermal_contact_cooling_rate;
-    j["fluid_params"]["thermal_freeze_kelvin"] = d.fluid_params.thermal_freeze_kelvin;
-    j["fluid_params"]["thermal_viscosity_range"] = d.fluid_params.thermal_viscosity_range;
-    j["fluid_params"]["thermal_cold_viscosity"] = d.fluid_params.thermal_cold_viscosity;
-    j["fluid_params"]["granular_friction_angle_degrees"] = d.fluid_params.granular_friction_angle_degrees;
-    j["fluid_params"]["granular_cohesion"] = d.fluid_params.granular_cohesion;
-    j["fluid_params"]["granular_dilatancy_degrees"] = d.fluid_params.granular_dilatancy_degrees;
-    j["fluid_params"]["granular_young_modulus"] = d.fluid_params.granular_young_modulus;
-    j["fluid_params"]["granular_poisson_ratio"] = d.fluid_params.granular_poisson_ratio;
-    j["fluid_params"]["granular_tensile_cutoff"] = d.fluid_params.granular_tensile_cutoff;
-    j["fluid_params"]["granular_hardening"] = d.fluid_params.granular_hardening;
-    j["fluid_params"]["granular_fracture_strain"] = d.fluid_params.granular_fracture_strain;
-    j["fluid_params"]["granular_damage_rate"] = d.fluid_params.granular_damage_rate;
-    j["fluid_params"]["granular_healing_rate"] = d.fluid_params.granular_healing_rate;
-    j["fluid_params"]["granular_rebonding"] = d.fluid_params.granular_rebonding;
     j["fluid_params"]["granular_max_solver_substeps"] = d.fluid_params.granular_max_solver_substeps;
     j["fluid_params"]["air_drag"] = d.fluid_params.air_drag;
     j["fluid_params"]["inherit_atmosphere"] = d.fluid_params.inherit_atmosphere;
     j["fluid_params"]["reseed_enabled"] = d.fluid_params.reseed_enabled;
-    // Remaining preset-driven rheology so a material preset round-trips fully
-    // (these were previously dropped, resetting Honey/Lava/Sand on reload).
+    // Numerical settings (solver hints written when the substance was chosen,
+    // then editable on the domain).
     j["fluid_params"]["velocity_damping"] = d.fluid_params.velocity_damping;
     j["fluid_params"]["wall_damping"] = d.fluid_params.wall_damping;
     j["fluid_params"]["density_correction"] = d.fluid_params.density_correction;
     j["fluid_params"]["affine_damping"] = d.fluid_params.affine_damping;
     j["fluid_params"]["max_velocity"] = d.fluid_params.max_velocity;
     j["fluid_params"]["viscosity_sweeps"] = d.fluid_params.viscosity_sweeps;
-    j["fluid_params"]["current_preset"] = static_cast<int>(d.fluid_params.current_preset);
     j["fluid_params"]["free_surface"] = d.fluid_params.free_surface;
     j["fluid_params"]["ghost_fluid_surface"] = d.fluid_params.ghost_fluid_surface;
     j["fluid_params"]["variational_solids"] = d.fluid_params.variational_solids;
@@ -412,20 +394,6 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_params"]["max_affine"] = d.fluid_params.max_affine;
     j["fluid_params"]["cpu_threads"] = d.fluid_params.cpu_threads;
     j["fluid_params"]["parallel_particle_threshold"] = d.fluid_params.parallel_particle_threshold;
-    j["fluid_params"]["fuel_profile"] = {
-        {"flammable", d.fluid_params.fuel_profile.flammable},
-        {"extinguishing", d.fluid_params.fuel_profile.extinguishing},
-        {"flash_temperature", d.fluid_params.fuel_profile.flash_temperature},
-        {"autoignition_temperature", d.fluid_params.fuel_profile.autoignition_temperature},
-        {"vaporization_rate", d.fluid_params.fuel_profile.vaporization_rate},
-        {"heat_capacity", d.fluid_params.fuel_profile.heat_capacity},
-        {"latent_heat", d.fluid_params.fuel_profile.latent_heat},
-        {"cooling_power", d.fluid_params.fuel_profile.cooling_power},
-        {"oxygen_dilution", d.fluid_params.fuel_profile.oxygen_dilution},
-        {"flame_persistence", d.fluid_params.fuel_profile.flame_persistence}
-    };
-    j["fluid_params"]["chemistry_preset"] =
-        static_cast<int>(d.fluid_params.chemistry_preset);
 
     j["fluid_seed_min"] = vec3ToJson(d.fluid_seed_min);
     j["fluid_seed_max"] = vec3ToJson(d.fluid_seed_max);
@@ -589,7 +557,6 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_params")) {
         const auto& fp = j["fluid_params"];
         if (fp.contains("gravity")) d.fluid_params.gravity = jsonToVec3(fp["gravity"]);
-        if (fp.contains("kinematic_viscosity")) d.fluid_params.kinematic_viscosity = fp["kinematic_viscosity"];
         if (fp.contains("viscosity_wall_slip")) d.fluid_params.viscosity_wall_slip = fp["viscosity_wall_slip"];
         if (fp.contains("particles_per_cell")) d.fluid_params.particles_per_cell = fp["particles_per_cell"];
         if (fp.contains("cfl")) d.fluid_params.cfl = fp["cfl"];
@@ -600,35 +567,11 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fp.contains("apic_blend")) d.fluid_params.apic_blend = fp["apic_blend"];
         if (fp.contains("flip_blend")) d.fluid_params.flip_blend = fp["flip_blend"];
         if (fp.contains("internal_friction")) d.fluid_params.internal_friction = fp["internal_friction"];
-        if (fp.contains("granular_enabled")) d.fluid_params.granular_enabled = fp["granular_enabled"];
-        if (fp.contains("granular_softening_temperature")) d.fluid_params.granular_softening_temperature = fp["granular_softening_temperature"];
-        if (fp.contains("granular_softening_range")) d.fluid_params.granular_softening_range = fp["granular_softening_range"];
-        if (fp.contains("granular_residual_strength")) d.fluid_params.granular_residual_strength = fp["granular_residual_strength"];
-        if (fp.contains("granular_tack_peak")) d.fluid_params.granular_tack_peak = fp["granular_tack_peak"];
-        if (fp.contains("granular_thermal_conductivity")) d.fluid_params.granular_thermal_conductivity = fp["granular_thermal_conductivity"];
         if (fp.contains("thermal_liquid_enabled")) d.fluid_params.thermal_liquid_enabled = fp["thermal_liquid_enabled"];
         if (fp.contains("thermal_air_cooling_rate")) d.fluid_params.thermal_air_cooling_rate = fp["thermal_air_cooling_rate"];
         if (fp.contains("thermal_contact_cooling_rate")) d.fluid_params.thermal_contact_cooling_rate = fp["thermal_contact_cooling_rate"];
-        if (fp.contains("thermal_freeze_kelvin")) d.fluid_params.thermal_freeze_kelvin = fp["thermal_freeze_kelvin"];
-        if (fp.contains("thermal_viscosity_range")) d.fluid_params.thermal_viscosity_range = fp["thermal_viscosity_range"];
-        if (fp.contains("thermal_cold_viscosity")) d.fluid_params.thermal_cold_viscosity = fp["thermal_cold_viscosity"];
         d.fluid_params.sanitizeThermalLiquid();
-        if (fp.contains("granular_friction_angle_degrees")) d.fluid_params.granular_friction_angle_degrees = fp["granular_friction_angle_degrees"];
-        if (fp.contains("granular_cohesion")) d.fluid_params.granular_cohesion = fp["granular_cohesion"];
-        if (fp.contains("granular_dilatancy_degrees")) d.fluid_params.granular_dilatancy_degrees = fp["granular_dilatancy_degrees"];
-        if (fp.contains("granular_young_modulus")) d.fluid_params.granular_young_modulus = fp["granular_young_modulus"];
-        if (fp.contains("granular_poisson_ratio")) d.fluid_params.granular_poisson_ratio = fp["granular_poisson_ratio"];
-        if (fp.contains("granular_tensile_cutoff")) d.fluid_params.granular_tensile_cutoff = fp["granular_tensile_cutoff"];
-        if (fp.contains("granular_hardening")) d.fluid_params.granular_hardening = fp["granular_hardening"];
-        if (fp.contains("granular_fracture_strain")) d.fluid_params.granular_fracture_strain = fp["granular_fracture_strain"];
-        if (fp.contains("granular_damage_rate")) d.fluid_params.granular_damage_rate = fp["granular_damage_rate"];
-        if (fp.contains("granular_healing_rate")) d.fluid_params.granular_healing_rate = fp["granular_healing_rate"];
-        if (fp.contains("granular_rebonding")) d.fluid_params.granular_rebonding = fp["granular_rebonding"];
         if (fp.contains("granular_max_solver_substeps")) d.fluid_params.granular_max_solver_substeps = fp["granular_max_solver_substeps"];
-        // Same clamp the UI applies after every edit, so a hand-edited or
-        // partially-written file cannot hand the solver an out-of-range material.
-        d.fluid_params.sanitizeGranularMaterial();
-        d.fluid_params.sanitizeGranularMaterial();
         if (fp.contains("air_drag")) d.fluid_params.air_drag = fp["air_drag"];
         d.fluid_params.inherit_atmosphere = fp.value("inherit_atmosphere", true);
         if (fp.contains("reseed_enabled")) d.fluid_params.reseed_enabled = fp["reseed_enabled"];
@@ -638,17 +581,6 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fp.contains("affine_damping")) d.fluid_params.affine_damping = fp["affine_damping"];
         if (fp.contains("max_velocity")) d.fluid_params.max_velocity = fp["max_velocity"];
         if (fp.contains("viscosity_sweeps")) d.fluid_params.viscosity_sweeps = fp["viscosity_sweeps"];
-        if (fp.contains("current_preset")) {
-            d.fluid_params.current_preset =
-                static_cast<RayTrophiSim::Fluid::APICSolverParams::FluidPreset>(fp["current_preset"].get<int>());
-            // Pre-rework scene: no ν key. Re-apply the named preset so "Honey"
-            // does not load as an inviscid liquid still labelled Honey.
-            if (!fp.contains("kinematic_viscosity") &&
-                d.fluid_params.current_preset !=
-                    RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom) {
-                d.fluid_params.applyPreset(d.fluid_params.current_preset);
-            }
-        }
         if (fp.contains("free_surface")) d.fluid_params.free_surface = fp["free_surface"];
         if (fp.contains("ghost_fluid_surface")) d.fluid_params.ghost_fluid_surface = fp["ghost_fluid_surface"];
         if (fp.contains("variational_solids")) d.fluid_params.variational_solids = fp["variational_solids"];
@@ -661,24 +593,24 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fp.contains("max_affine")) d.fluid_params.max_affine = fp["max_affine"];
         if (fp.contains("cpu_threads")) d.fluid_params.cpu_threads = fp["cpu_threads"];
         if (fp.contains("parallel_particle_threshold")) d.fluid_params.parallel_particle_threshold = fp["parallel_particle_threshold"];
-        if (fp.contains("fuel_profile")) {
-            const auto& fuel = fp["fuel_profile"];
-            auto& profile = d.fluid_params.fuel_profile;
-            profile.flammable = fuel.value("flammable", profile.flammable);
-            profile.extinguishing = fuel.value("extinguishing", profile.extinguishing);
-            profile.flash_temperature = fuel.value("flash_temperature", profile.flash_temperature);
-            profile.autoignition_temperature = fuel.value("autoignition_temperature", profile.autoignition_temperature);
-            profile.vaporization_rate = fuel.value("vaporization_rate", profile.vaporization_rate);
-            profile.heat_capacity = fuel.value("heat_capacity", profile.heat_capacity);
-            profile.latent_heat = fuel.value("latent_heat", profile.latent_heat);
-            profile.cooling_power = fuel.value("cooling_power", profile.cooling_power);
-            profile.oxygen_dilution = fuel.value("oxygen_dilution", profile.oxygen_dilution);
-            profile.flame_persistence = fuel.value("flame_persistence", profile.flame_persistence);
+        // The material (FluidDomainSubstance.h). An older file has no
+        // default_substance: migrate its preset pair and stored physics.
+        if (fp.contains("default_substance") && fp["default_substance"].is_string()) {
+            d.fluid_params.default_substance = fp["default_substance"].get<std::string>();
+        } else {
+            std::string migrated, migration_error;
+            if (RayTrophiSim::Fluid::migrateLegacyDomainMaterial(fp, d.name, d.voxel_size,
+                    migrated, migration_error)) {
+                d.fluid_params.default_substance = migrated;
+            } else {
+                SCENE_LOG_ERROR("[SceneSerializer] Domain '" + d.name +
+                                "' material could not be migrated (" + migration_error + ")");
+            }
         }
-        if (fp.contains("chemistry_preset")) {
-            d.fluid_params.chemistry_preset =
-                static_cast<RayTrophiSim::Fluid::FluidChemistryPreset>(
-                    fp.value("chemistry_preset", static_cast<int>(d.fluid_params.chemistry_preset)));
+        std::string resolve_error;
+        if (!RayTrophiSim::Fluid::resolveDomainSubstancePhysics(d.fluid_params, d.voxel_size,
+                RayTrophiSim::MaterialTemperatureScale{}, resolve_error)) {
+            SCENE_LOG_ERROR("[SceneSerializer] Domain '" + d.name + "': " + resolve_error);
         }
     }
 
@@ -862,9 +794,6 @@ json flowSourceToJson(const RayTrophiSim::SimulationFlowSourceDesc& fs) {
     j["fluid_emit_along_normal"] = fs.fluid_emit_along_normal;
     j["fluid_substance"] = fs.fluid_substance;
     j["particle_pool_weight"] = fs.particle_pool_weight;
-    j["initial_constitutive_model"] =
-        RayTrophiSim::Fluid::matterConstitutiveModelName(
-            fs.initial_constitutive_model);
     j["fluid_temperature_override"] = fs.fluid_temperature_override;
     j["fluid_temperature_kelvin"] = fs.fluid_temperature_kelvin;
     j["use_time_limit"] = fs.use_time_limit;
@@ -898,11 +827,6 @@ RayTrophiSim::SimulationFlowSourceDesc jsonToFlowSource(const json& j) {
     if (j.contains("fluid_emit_along_normal")) fs.fluid_emit_along_normal = j["fluid_emit_along_normal"];
     if (j.contains("fluid_substance")) fs.fluid_substance = j["fluid_substance"];
     fs.particle_pool_weight = j.value("particle_pool_weight", 1.0f);
-    if (j.contains("initial_constitutive_model")) {
-        RayTrophiSim::Fluid::parseMatterConstitutiveModel(
-            j["initial_constitutive_model"].get<std::string>(),
-            fs.initial_constitutive_model);
-    }
     if (j.contains("fluid_temperature_override")) fs.fluid_temperature_override = j["fluid_temperature_override"];
     if (j.contains("fluid_temperature_kelvin")) fs.fluid_temperature_kelvin = j["fluid_temperature_kelvin"];
     if (j.contains("use_time_limit")) fs.use_time_limit = j["use_time_limit"];
@@ -1062,6 +986,13 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
         json jg;
         MaterialNodesV2::serializeMaterialGraph(*graphPtr, jg);
         root["material_node_graphs"][matName] = jg;
+    }
+
+    // 9.55 Project substances (derived from built-ins; before anything names one).
+    root["substances"] = json::array();
+    for (const auto& item : RayTrophiSim::projectSubstances()) {
+        root["substances"].push_back({{"name", item.name}, {"based_on", item.based_on},
+                                      {"overrides", item.overrides}});
     }
 
     // 9.6 Particle Systems
@@ -1557,6 +1488,28 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                 }
                 scene.world.objects = remainingObjects;
             }
+        }
+    }
+
+    // 9.55 Project substances: always replaced (an empty set too), so the
+    // previous scene's substances cannot leak into this one.
+    {
+        std::vector<RayTrophiSim::ProjectSubstance> substances;
+        simdjson::dom::element substancesRoot;
+        if (!root["substances"].get(substancesRoot)) {
+            for (const auto& item : sjsonToNlohmann(substancesRoot)) {
+                RayTrophiSim::ProjectSubstance substance;
+                substance.name = item.value("name", std::string());
+                substance.based_on = item.value("based_on", std::string());
+                substance.overrides = item.value("overrides", json::object());
+                substances.push_back(std::move(substance));
+            }
+        }
+        std::string substance_error;
+        if (!RayTrophiSim::replaceProjectSubstances(substances, substance_error)) {
+            const std::string load_error = substance_error;
+            RayTrophiSim::replaceProjectSubstances({}, substance_error);
+            SCENE_LOG_ERROR("[SceneSerializer] Project substances not loaded: " + load_error);
         }
     }
 

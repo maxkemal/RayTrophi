@@ -103,6 +103,10 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             int emit_count = static_cast<int>(std::min(
                 static_cast<double>(source.fluid_emit_accumulator), 2147483647.0));
             if (emit_count <= 0) continue;
+            // Birth cost per liquid source. Covers the spawn that follows this
+            // point in the iteration; the first-water frames showed 170-210 ms
+            // spikes that no existing section attributes.
+            RTPERF_FRAME_SCOPE("sim.matter.emit");
             source.fluid_emit_accumulator -= static_cast<float>(emit_count);
 
             // Hysteresis gate: reseed trims over-populated cells every step,
@@ -199,22 +203,12 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             // behaviour every existing scene has.
             const uint32_t emit_substance =
                 RayTrophiSim::Fluid::substanceTag(source.fluid_substance);
+            // Birth model comes from the substance alone: its row's default
+            // model, else the domain's granular switch for untagged/unknown
+            // substances. No per-emitter or per-binding override exists.
             RayTrophiSim::Fluid::MatterConstitutiveModel emit_model =
-                source.initial_constitutive_model;
-            if (emit_model == RayTrophiSim::Fluid::MatterConstitutiveModel::Auto &&
-                !source.fluid_substance.empty()) {
-                const auto binding = std::find_if(
-                    fluid_domain.fluid_substance_materials.begin(),
-                    fluid_domain.fluid_substance_materials.end(),
-                    [&](const auto& entry) {
-                        return entry.substance == source.fluid_substance;
-                    });
-                if (binding != fluid_domain.fluid_substance_materials.end()) {
-                    emit_model = binding->constitutive_model;
-                }
-            }
-            if (emit_model == RayTrophiSim::Fluid::MatterConstitutiveModel::Auto &&
-                !source.fluid_substance.empty()) {
+                RayTrophiSim::Fluid::MatterConstitutiveModel::Auto;
+            if (!source.fluid_substance.empty()) {
                 if (const SubstanceProfile* profile =
                         tryFindSubstance(source.fluid_substance)) {
                     emit_model = profile->default_constitutive_model;
@@ -259,7 +253,7 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             // so grain size and grid resolution stay independent.
             const float grain_rest_mass = grain_birth
                 ? Fluid::matterGrainRestMassKg(fluid_domain.fluid_params.grain, emit_substance,
-                      fluid_domain.fluid_params.chemistry_preset, emit_model,
+                      Fluid::domainSubstance(fluid_domain.fluid_params), emit_model,
                       fluid_domain.fluid_params.granular_enabled)
                 : 0.0f;
             if (!grain_birth) {

@@ -71,6 +71,10 @@
     <Filter Include="Kaynak Dosyalar\MeshEdit">
       <UniqueIdentifier>{8c5b1f2a-94d3-4e7b-a1c6-3f0e9d27b541}</UniqueIdentifier>
     </Filter>
+    <ClInclude Include="source\include\SubstanceLibrary.h" />
+    <ClInclude Include="source\include\Fluid\FluidDomainSubstance.h" />
+    <ClCompile Include="source\src\Physics\SubstanceLibrary.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\FluidDomainSubstance.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Fluid\MatterPhaseSettings.h">
@@ -261,6 +265,9 @@
       <Filter>Kaynak Dosyalar</Filter>
     </ClInclude>
     <ClInclude Include="source\include\SimCache.h">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\ProjectSimulationCache.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
     <ClInclude Include="source\include\SimFrameCompress.h">

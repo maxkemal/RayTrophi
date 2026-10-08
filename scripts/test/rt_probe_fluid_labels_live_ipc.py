@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 from rt_ipc import RtIpc
+from rt_domain_material import domain_material  # noqa: E402
 from rt_test_fluid_labels_ipc import check_report
 
 
@@ -56,7 +57,7 @@ def main():
                     voxel_size=0.05 if args.benchmark else 0.1)
         created = True
         client.call("fluid.set_param", domain=name, backend=args.backend,
-                    boundary="closed", preset="water", render_mode="surface")
+                    boundary="closed", default_substance="Water", render_mode="surface")
         if args.benchmark:
             client.call("fluid.set_param", domain=name, visible=False)
         client.call("fluid.seed", domain=name,
@@ -99,8 +100,10 @@ def main():
         info = record("isolated_step")
         assert info["particle_labels"]["primary"]["spray"] > 0
 
+        material = domain_material(client.call, 'T: probe_fluid_labels_live', 'Water',
+            thermal_freeze_kelvin=330.0, thermal_cold_viscosity=0.001)
         client.call("fluid.set_param", domain=name, thermal_liquid_enabled=True,
-                    thermal_freeze_kelvin=330.0, thermal_cold_viscosity=0.001)
+                    default_substance=material)
         client.call("fluid.seed", domain=name, seed_min=[5.5, 0.01, 0.5],
                     seed_max=[6.5, 0.19, 1.5], particles_per_cell=4,
                     replace=True, persistent=True)

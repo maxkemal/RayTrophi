@@ -1,4 +1,5 @@
 #include "Fluid/FluidGasMovingBoundary.h"
+#include "Fluid/FluidDomainSubstance.h"
 
 #include "Fluid/FluidParticleLabels.h"
 #include "Fluid/FluidPhysicalMass.h"
@@ -83,7 +84,7 @@ FluidGasMovingBoundaryStats buildFluidGasMovingBoundary(
             const uint32_t tag = particle < particles.substance_tag.size()
                 ? particles.substance_tag[particle] : kSubstanceUntagged;
             const SubstanceProfile* profile = resolveFluidSubstanceProfile(
-                tag, fluid_domain.fluid_params.chemistry_preset);
+                tag, Fluid::domainSubstance(fluid_domain.fluid_params));
             const float density = profile && profile->liquid_density > 0.0f
                 ? profile->liquid_density : 1000.0f;
             const Vec3 local = (particles.position[particle] - gas.origin) * inv_h;

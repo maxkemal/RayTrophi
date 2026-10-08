@@ -1,0 +1,51 @@
+{
+  "date": "2026-10-08",
+  "timezone": "Europe/Istanbul",
+  "build": "User reported successful build and open application",
+  "transport": "External scripts/test/rt_ipc.py; sandbox escalation after Windows error 5",
+  "tests": {
+    "rt_test_substance_profiles_ipc.py": {
+      "result": "PASS",
+      "builtin_count": 21,
+      "checks": [
+        "categories",
+        "derive",
+        "override",
+        "inherit",
+        "revert",
+        "reject invalid patch",
+        "refuse referenced removal"
+      ]
+    },
+    "rt_test_domain_substance_ipc.py": {
+      "result": "PASS",
+      "checks": [
+        "default substance selection",
+        "retired input rejection",
+        "immediate physical readback",
+        "preserve numerical tuning",
+        "reapply hints on selection",
+        "refuse referenced removal"
+      ]
+    }
+  },
+  "cleanup": {
+    "result": "PASS",
+    "leftovers": {
+      "domains": [],
+      "substances": [],
+      "colliders": []
+    }
+  },
+  "simulation_steps": 0,
+  "project_saved": false,
+  "not_verified": [
+    "legacy project migration",
+    "save/open roundtrip",
+    "panel visual QA",
+    "Wax MSF viscosity regression",
+    "node reversibility",
+    "T2 particle phase/model unification",
+    "full T3 physical acceptance"
+  ]
+}

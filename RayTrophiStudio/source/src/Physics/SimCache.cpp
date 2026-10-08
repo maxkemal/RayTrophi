@@ -8,17 +8,22 @@
 * =========================================================================
 */
 #include "SimCache.h"
+#include "PerfProfile.h"
 
 #include "Fluid/SubstanceTag.h"
 #include "Fluid/FluidParticleLabels.h"
 #include "Fluid/FluidParticles.h"
 #include "json.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <filesystem>
-#include <unordered_set>
+#include <limits>
+#include <type_traits>
 
 namespace fs = std::filesystem;
 
@@ -53,15 +58,115 @@ inline bool readVec3(std::istream& is, Vec3& v) {
     return readPod(is, v.x) && readPod(is, v.y) && readPod(is, v.z);
 }
 
-// A float scalar array: u64 count followed by count floats. count==0 → absent.
+template <typename T>
+bool readPodArray(std::istream& is, std::vector<T>& values) {
+    static_assert(std::is_trivially_copyable<T>::value, "POD only");
+    if (!values.empty()) {
+        is.read(reinterpret_cast<char*>(values.data()),
+                static_cast<std::streamsize>(values.size() * sizeof(T)));
+    }
+    return static_cast<bool>(is);
+}
+
+bool readParticleIdentities(std::istream& is, std::vector<uint64_t>& values,
+                            uint64_t next_identity) {
+    RTPERF_FRAME_SCOPE("sim.cache.disk.particle_identities");
+    if (!readPodArray(is, values)) {
+        return false;
+    }
+    // Validate a contiguous scratch copy: a node-based set allocated one node
+    // per particle on every replayed frame. Keep the original particle order.
+    auto sorted = values;
+    std::sort(sorted.begin(), sorted.end());
+    if (!sorted.empty() && (sorted.front() == 0 || sorted.back() >= next_identity)) {
+        return false;
+    }
+    return std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end();
+}
+
+inline bool readVec3Array(std::istream& is, std::vector<Vec3>& values) {
+    // The disk format is three contiguous floats. Keep the component-wise
+    // fallback if a future Vec3 implementation adds padding or other state.
+    if constexpr (std::is_trivially_copyable<Vec3>::value &&
+                  std::is_standard_layout<Vec3>::value &&
+                  sizeof(Vec3) == 3 * sizeof(float) &&
+                  offsetof(Vec3, x) == 0 && offsetof(Vec3, y) == sizeof(float) &&
+                  offsetof(Vec3, z) == 2 * sizeof(float)) {
+        if (!values.empty()) {
+            is.read(reinterpret_cast<char*>(values.data()),
+                    static_cast<std::streamsize>(values.size() * sizeof(Vec3)));
+        }
+        return static_cast<bool>(is);
+    }
+    for (auto& value : values) {
+        if (!readVec3(is, value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <std::size_t Columns>
+bool readParticleFloatColumns(std::istream& is, std::size_t count,
+                              const std::array<std::vector<float>*, Columns>& columns) {
+    // Existing files store these values per particle. Bounded block reads keep
+    // that format while avoiding a stream call for every scalar.
+    std::array<std::array<float, Columns>, 4096> block;
+    for (std::size_t base = 0; base < count;) {
+        const std::size_t rows = std::min(block.size(), count - base);
+        is.read(reinterpret_cast<char*>(block.data()),
+                static_cast<std::streamsize>(rows * Columns * sizeof(float)));
+        if (!is) {
+            return false;
+        }
+        for (std::size_t column = 0; column < Columns; ++column) {
+            for (std::size_t row = 0; row < rows; ++row) {
+                (*columns[column])[base + row] = block[row][column];
+            }
+        }
+        base += rows;
+    }
+    return true;
+}
+
+// v12 uses the count's high bit to encode an all-positive-zero field. Preserve
+// length and distinguish negative zero, NaN and nonzero values bit-for-bit.
+constexpr uint64_t kZeroScalarArray = uint64_t{1} << 63;
+static_assert(sizeof(float) == sizeof(uint32_t), "Cache uses 32-bit floats");
+
 inline void writeFloatArray(std::ostream& os, const std::vector<float>& a) {
     const uint64_t n = a.size();
-    writePod(os, n);
-    if (n) os.write(reinterpret_cast<const char*>(a.data()), n * sizeof(float));
+    const bool zero = !a.empty() && std::all_of(a.begin(), a.end(), [](float value) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return bits == 0;
+    });
+    writePod(os, zero ? n | kZeroScalarArray : n);
+    if (n && !zero) {
+        os.write(reinterpret_cast<const char*>(a.data()), n * sizeof(float));
+    }
 }
-inline bool readFloatArray(std::istream& is, std::vector<float>& a) {
+inline bool readFloatArray(std::istream& is, std::vector<float>& a, uint32_t version) {
     uint64_t n = 0;
-    if (!readPod(is, n)) return false;
+    if (!readPod(is, n)) {
+        return false;
+    }
+    const bool zero = version >= 12u && (n & kZeroScalarArray) != 0;
+    if (zero) {
+        n &= ~kZeroScalarArray;
+        if (n == 0) {
+            return false;
+        }
+    }
+    if (n > a.max_size() ||
+        n > static_cast<uint64_t>(std::numeric_limits<std::streamsize>::max()) /
+            sizeof(float)) {
+        return false;
+    }
+    if (zero) {
+        a.assign(static_cast<size_t>(n), 0.0f);
+        return true;
+    }
     a.resize(static_cast<size_t>(n));
     if (n) is.read(reinterpret_cast<char*>(a.data()), n * sizeof(float));
     return static_cast<bool>(is);
@@ -163,7 +268,7 @@ bool readSoftFrame(const std::string& cache_dir, int frame,
 
     uint32_t magic = 0, version = 0, count = 0;
     if (!readPod(is, magic) || !readPod(is, version) || !readPod(is, count)) return false;
-    if (magic != kMagic || version != kVersion) return false;
+    if (magic != kMagic || !supportsVersion(version)) return false;
 
     out_bodies.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
@@ -223,7 +328,7 @@ bool readRigidFrame(const std::string& cache_dir, int frame,
 
     uint32_t magic = 0, version = 0, count = 0;
     if (!readPod(is, magic) || !readPod(is, version) || !readPod(is, count)) return false;
-    if (magic != kMagic || version != kVersion) return false;
+    if (magic != kMagic || !supportsVersion(version)) return false;
 
     out_bodies.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
@@ -416,13 +521,20 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
 bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame,
                      std::vector<SimulationGridDomainState>& out_domains,
                      std::vector<MaterialStateFieldSnapshot>& out_msf) {
+    RTPERF_FRAME_SCOPE("sim.cache.disk.read_system");
     out_msf.clear();
-    std::ifstream is(framePath(cache_dir, system_id, frame), std::ios::binary);
+    // Configure buffering before opening the file. Large scalar columns should
+    // not be split into the default filebuf's small underlying disk requests.
+    std::vector<char> input_buffer(1024 * 1024);
+    std::ifstream is;
+    is.rdbuf()->pubsetbuf(input_buffer.data(),
+                        static_cast<std::streamsize>(input_buffer.size()));
+    is.open(framePath(cache_dir, system_id, frame), std::ios::binary);
     if (!is) return false;
 
     uint32_t magic = 0, version = 0, domain_count = 0;
     if (!readPod(is, magic) || magic != kMagic) return false;
-    if (!readPod(is, version) || version != kVersion) return false;
+    if (!readPod(is, version) || !supportsVersion(version)) return false;
     if (!readPod(is, domain_count)) return false;
 
     out_domains.clear();
@@ -458,18 +570,38 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         if (!readPod(is, gvoxel)) return false;
         if (!readVec3(is, gorigin)) return false;
 
-        // Reconstruct the grid (allocates all fields zero-filled), then overwrite
-        // the present scalar fields. Velocity stays zero — unused for rendering.
-        d.grid.resize(gnx, gny, gnz, gvoxel, gorigin);
+        // Matter replay needs the layout and saved scalar fields, not solver
+        // scratch. Its phase synchronizer allocates that storage before solving.
+        // Keep the legacy allocation path for specialized domains.
+        {
+            RTPERF_FRAME_SCOPE("sim.cache.disk.allocate_primary_grid");
+            d.grid.allocate_gas_channels = simulationDomainHasGas(d.type);
+            if (d.type == SimulationDomainType::Matter) {
+                d.grid.nx = gnx;
+                d.grid.ny = gny;
+                d.grid.nz = gnz;
+                d.grid.voxel_size = gvoxel;
+                d.grid.origin = gorigin;
+                d.grid.tiles_x = (gnx + FluidSim::TILE_SIZE - 1) / FluidSim::TILE_SIZE;
+                d.grid.tiles_y = (gny + FluidSim::TILE_SIZE - 1) / FluidSim::TILE_SIZE;
+                d.grid.tiles_z = (gnz + FluidSim::TILE_SIZE - 1) / FluidSim::TILE_SIZE;
+                d.grid.total_tiles = d.grid.tiles_x * d.grid.tiles_y * d.grid.tiles_z;
+            } else {
+                d.grid.resize(gnx, gny, gnz, gvoxel, gorigin);
+            }
+        }
 
         std::vector<float> density, temperature, fuel, interaction;
         std::vector<float> gas_phase_mass_kg, gas_phase_energy_j;
-        if (!readFloatArray(is, density))     return false;
-        if (!readFloatArray(is, temperature)) return false;
-        if (!readFloatArray(is, fuel))        return false;
-        if (!readFloatArray(is, interaction)) return false;
-        if (!readFloatArray(is, gas_phase_mass_kg)) return false;
-        if (!readFloatArray(is, gas_phase_energy_j)) return false;
+        {
+            RTPERF_FRAME_SCOPE("sim.cache.disk.scalar_fields");
+            if (!readFloatArray(is, density, version)) return false;
+            if (!readFloatArray(is, temperature, version)) return false;
+            if (!readFloatArray(is, fuel, version)) return false;
+            if (!readFloatArray(is, interaction, version)) return false;
+            if (!readFloatArray(is, gas_phase_mass_kg, version)) return false;
+            if (!readFloatArray(is, gas_phase_energy_j, version)) return false;
+        }
         if (!density.empty())     d.grid.density     = std::move(density);
         if (!temperature.empty()) d.grid.temperature = std::move(temperature);
         if (!fuel.empty())        d.grid.fuel        = std::move(fuel);
@@ -483,17 +615,11 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         if (!readPod(is, pcount)) return false;
         d.particles.clear();
         d.particles.position.resize(static_cast<size_t>(pcount));
-        for (uint64_t i = 0; i < pcount; ++i) {
-            if (!readVec3(is, d.particles.position[i])) return false;
-        }
+        if (!readVec3Array(is, d.particles.position)) return false;
         d.particles.uvw.resize(static_cast<size_t>(pcount));
-        for (uint64_t i = 0; i < pcount; ++i) {
-            if (!readVec3(is, d.particles.uvw[i])) return false;
-        }
+        if (!readVec3Array(is, d.particles.uvw)) return false;
         d.particles.uvw_b.resize(static_cast<size_t>(pcount));
-        for (uint64_t i = 0; i < pcount; ++i) {
-            if (!readVec3(is, d.particles.uvw_b[i])) return false;
-        }
+        if (!readVec3Array(is, d.particles.uvw_b)) return false;
         int32_t period = 0;
         if (!readPod(is, d.particles.uvw_step)) return false;
         if (!readPod(is, period)) return false;
@@ -519,46 +645,36 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         // if the frame is inspected or resumed through the live domain path.
         d.particles.ensureGranularStateSize();
         d.particles.substance_tag.resize(static_cast<size_t>(pcount));
-        for (uint64_t i = 0; i < pcount; ++i) {
-            if (!readPod(is, d.particles.substance_tag[i])) return false;
+        if (!readPodArray(is, d.particles.substance_tag)) {
+            return false;
         }
         d.particles.constitutive_model.resize(static_cast<size_t>(pcount));
-        for (uint64_t i = 0; i < pcount; ++i) {
-            if (!readPod(is, d.particles.constitutive_model[i])) return false;
+        if (!readPodArray(is, d.particles.constitutive_model)) {
+            return false;
         }
         if (!readPod(is, d.particles.next_particle_id) ||
             d.particles.next_particle_id == 0) {
             return false;
         }
         d.particles.particle_id.resize(static_cast<size_t>(pcount));
-        std::unordered_set<uint64_t> identities;
-        identities.reserve(static_cast<size_t>(pcount));
-        for (uint64_t i = 0; i < pcount; ++i) {
-            uint64_t& identity = d.particles.particle_id[i];
-            if (!readPod(is, identity) || identity == 0 ||
-                identity >= d.particles.next_particle_id ||
-                !identities.insert(identity).second) {
-                return false;
-            }
+        if (!readParticleIdentities(is, d.particles.particle_id,
+                                    d.particles.next_particle_id)) {
+            return false;
         }
-        for (uint64_t i = 0; i < pcount; ++i) {
-            if (!readPod(is, d.particles.mass_fraction[i]) ||
-                !readPod(is, d.particles.rest_mass_kg[i])) {
-                return false;
-            }
+        if (!readParticleFloatColumns<2>(is, static_cast<std::size_t>(pcount),
+                {&d.particles.mass_fraction, &d.particles.rest_mass_kg})) {
+            return false;
         }
-        for (uint64_t i = 0; i < pcount; ++i) {
-            if (!readPod(is, d.particles.pore_water_mass_kg[i]) ||
-                !readPod(is, d.particles.pore_capacity_kg[i]) ||
-                !readPod(is, d.particles.pore_porosity[i]) ||
-                !readPod(is, d.particles.pore_water_energy_j[i])) {
-                return false;
-            }
+        if (!readParticleFloatColumns<4>(is, static_cast<std::size_t>(pcount),
+                {&d.particles.pore_water_mass_kg, &d.particles.pore_capacity_kg,
+                 &d.particles.pore_porosity, &d.particles.pore_water_energy_j})) {
+            return false;
         }
-        for (uint64_t i = 0; i < pcount; ++i) {
-            uint32_t f = 0u;
-            if (!readPod(is, f)) return false;
-            d.particles.flags[static_cast<size_t>(i)] = f & kPersistentParticleFlags;
+        if (!readPodArray(is, d.particles.flags)) {
+            return false;
+        }
+        for (auto& flags : d.particles.flags) {
+            flags &= kPersistentParticleFlags;
         }
 
         // Foam — position + type + lifetime restored; velocity zeroed.
@@ -566,9 +682,7 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         if (!readPod(is, fcount)) return false;
         d.foam.clear();
         d.foam.position.resize(static_cast<size_t>(fcount));
-        for (uint64_t i = 0; i < fcount; ++i) {
-            if (!readVec3(is, d.foam.position[i])) return false;
-        }
+        if (!readVec3Array(is, d.foam.position)) return false;
         d.foam.type.resize(static_cast<size_t>(fcount));
         d.foam.lifetime.resize(static_cast<size_t>(fcount));
         if (fcount) {
@@ -591,13 +705,13 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         if (!readPod(is, res)) return false;
         if (!readPod(is, f.element_count)) return false;
         f.mask_resolution = static_cast<int>(res);
-        if (!readFloatArray(is, f.temperature)) return false;
-        if (!readFloatArray(is, f.fuel))        return false;
-        if (!readFloatArray(is, f.charred))     return false;
-        if (!readFloatArray(is, f.moisture))    return false;
-        if (!readFloatArray(is, f.melt))        return false;
-        if (!readFloatArray(is, f.mass_loss))   return false;
-        if (!readFloatArray(is, f.transferred_mass)) return false;
+        if (!readFloatArray(is, f.temperature, version)) return false;
+        if (!readFloatArray(is, f.fuel, version))        return false;
+        if (!readFloatArray(is, f.charred, version))     return false;
+        if (!readFloatArray(is, f.moisture, version))    return false;
+        if (!readFloatArray(is, f.melt, version))        return false;
+        if (!readFloatArray(is, f.mass_loss, version))   return false;
+        if (!readFloatArray(is, f.transferred_mass, version)) return false;
         // A truncated/inconsistent entry is dropped rather than returning false:
         // losing one object's burn marks is recoverable, refusing the whole frame
         // would drop a perfectly good fluid/gas bake with it.

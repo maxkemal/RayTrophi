@@ -48,7 +48,7 @@ rt.fluid.create_domain(FLUID, domain_min=(-1, 0, -1), domain_max=(1, 2, 1),
                        voxel_size=0.1)
 rt.fluid.seed(FLUID, seed_min=(-0.5, 0.9, -0.5), seed_max=(0.5, 1.7, 0.5),
               particles_per_cell=4)
-rt.fluid.set_param(FLUID, backend="gpu", preset="water", boundary="closed")
+rt.fluid.set_param(FLUID, backend="gpu", default_substance="Water", boundary="closed")
 for _ in range(8):
     rt.fluid.step(0.0166)
 log("   %s: %d partikül" % (FLUID, rt.fluid.get(FLUID)["particle_count"]))
@@ -87,7 +87,7 @@ solver = rt.sim_graph.add_node("domain", FLUID, "sim.solver")
 rt.sim_graph.connect("domain", FLUID, owner, solver)
 # ★ Alanlar OPT-IN: sadece dokunduğun yazılır. Aşağıda ikisine dokunuyoruz,
 # geri kalanı authored değerinde kalır ve panelde tiksiz görünür.
-rt.sim_graph.set_node_value("domain", FLUID, solver, "kinematic_viscosity", 0.4)
+rt.sim_graph.set_node_value("domain", FLUID, solver, "viscosity_wall_slip", 0.4)
 rt.sim_graph.set_node_value("domain", FLUID, solver, "viscosity_sweeps", 12)
 
 settings = rt.sim_graph.add_node("domain", FLUID, "sim.domain_settings")
@@ -156,7 +156,7 @@ log("     kelvin_per_unit, convection_coefficient, oxygen_availability.")
 log("  4. Sahip node'unu seç: sağda isim SABİT yazılı, seçici YOK.")
 log("     (Yeniden hedeflenemez; kapsamı değiştirmek için Scope çubuğu.)")
 log("  5. Solver node'unu seç: tik kutulu kadranlar.")
-log("     kinematic_viscosity ve viscosity_sweeps TİKLİ, gerisi TİKSİZ.")
+log("     viscosity_wall_slip ve viscosity_sweeps TİKLİ, gerisi TİKSİZ.")
 log("     ** Tiksiz = bu graph o parametre hakkinda fikri yok, YAZMAZ.")
 log("        'value=0' ile ayni sey DEGIL.")
 log("  6. voxel_size'i tikle -> 'requires a restart' uyarisi cikar.")

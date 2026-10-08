@@ -9,6 +9,7 @@ import json
 import math
 from pathlib import Path
 from rt_ipc import RtIpc
+from rt_domain_material import domain_material  # noqa: E402
 
 DOMAIN = "C5_WaterSand_Acceptance"
 LOG = Path(__file__).resolve().parents[2] / "docs/dev/matter_c5_acceptance_live_2026-10-05.json"
@@ -67,11 +68,11 @@ def main():
             if DOMAIN not in [d["name"] for d in before["domains"]["domains"]]:
                 call("fluid.create_domain", name=DOMAIN, type="matter",
                      domain_min=[-1.6, 0, -1.6], domain_max=[1.6, 3.2, 1.6], voxel_size=0.1)
+            material = domain_material(call, 'T: c5_acceptance_scene', 'Sand',
+                granular_cohesion=0.0, granular_young_modulus=50000.0, granular_tensile_cutoff=0.0, granular_damage_rate=0.0)
             call("fluid.set_param", domain=DOMAIN, enabled=True, visible=True,
                  voxel_size=args.voxel,
-                 backend="vulkan", boundary="closed", preset="sand", granular_enabled=True,
-                 granular_cohesion=0.0, granular_young_modulus=50000.0,
-                 granular_tensile_cutoff=0.0, granular_damage_rate=0.0,
+                 backend="vulkan", boundary="closed", default_substance=material,
                  solid_phase=False, thermal_liquid_enabled=False, render_mode="particles")
             materials = {m["name"] for m in call("material.list")}
             for substance, model, color, roughness in [
@@ -113,7 +114,7 @@ def main():
                 limit = round(limit * parcel_scale)
                 call("flow_source.update" if name in existing else "flow_source.create",
                      name=name, domain=DOMAIN, enabled=limit > 0, phase="liquid", source_mode="point",
-                     fluid_substance=substance, initial_constitutive_model=model, position=position,
+                     fluid_substance=substance, position=position,
                      radius=radius, velocity=[0, 0, 0], fluid_velocity_spread=0.0,
                      fluid_particles_per_second=rate, fluid_temperature_override=True,
                      fluid_temperature_kelvin=293.15, use_time_limit=True,

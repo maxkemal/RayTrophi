@@ -1488,7 +1488,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["render_mode"] = info.render_mode;
         d["backend"] = info.backend;
         d["boundary"] = info.boundary;
-        d["preset"] = info.preset;
+        d["default_substance"] = info.default_substance;
         d["kinematic_viscosity"] = info.kinematic_viscosity;
         d["viscosity_sweeps"] = info.viscosity_sweeps;
         d["viscosity_wall_slip"] = info.viscosity_wall_slip;
@@ -1641,7 +1641,6 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                 e["miscibility"] = b.miscibility;
                 // State of matter, a separate axis from representation.
                 e["phase"] = b.phase;
-                e["constitutive_model"] = b.constitutive_model;
                 binds.append(e);
             }
             d["substance_materials"] = binds;
@@ -1734,7 +1733,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["render_mode"] = info.render_mode;
             d["backend"] = info.backend;
             d["boundary"] = info.boundary;
-            d["preset"] = info.preset;
+            d["default_substance"] = info.default_substance;
             d["kinematic_viscosity"] = info.kinematic_viscosity;
             d["viscosity_sweeps"] = info.viscosity_sweeps;
             d["viscosity_wall_slip"] = info.viscosity_wall_slip;
@@ -1884,7 +1883,6 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                     e["miscibility"] = b.miscibility;
                     // State of matter, a separate axis from representation.
                     e["phase"] = b.phase;
-                    e["constitutive_model"] = b.constitutive_model;
                     binds.append(e);
                 }
                 d["substance_materials"] = binds;
@@ -1962,7 +1960,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["render_mode"] = info.render_mode;
         d["backend"] = info.backend;
         d["boundary"] = info.boundary;
-        d["preset"] = info.preset;
+        d["default_substance"] = info.default_substance;
         d["kinematic_viscosity"] = info.kinematic_viscosity;
         d["viscosity_sweeps"] = info.viscosity_sweeps;
         d["viscosity_wall_slip"] = info.viscosity_wall_slip;
@@ -2115,7 +2113,6 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                 e["miscibility"] = b.miscibility;
                 // State of matter, a separate axis from representation.
                 e["phase"] = b.phase;
-                e["constitutive_model"] = b.constitutive_model;
                 binds.append(e);
             }
             d["substance_materials"] = binds;
@@ -2300,7 +2297,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
               [](const std::string& domain, const std::string& substance,
                  const std::string& material, const py::object& representation,
                  const py::object& kinematic_viscosity, const py::object& miscibility,
-                 const py::object& phase, const py::object& constitutive_model) {
+                 const py::object& phase) {
         std::string rep;
         const std::string* p_rep = nullptr;
         if (!representation.is_none()) { rep = py::cast<std::string>(representation); p_rep = &rep; }
@@ -2314,20 +2311,13 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         }
         std::string phase_val; const std::string* p_phase = nullptr;
         if (!phase.is_none()) { phase_val = py::cast<std::string>(phase); p_phase = &phase_val; }
-        std::string model_val; const std::string* p_model = nullptr;
-        if (!constitutive_model.is_none()) {
-            model_val = py::cast<std::string>(constitutive_model);
-            p_model = &model_val;
-        }
         requireResult(rtapi::setFluidSubstanceMaterial(domain, substance, material,
-                                                       p_rep, p_visc, p_misc,
-                                                       p_phase, p_model));
+                                                       p_rep, p_visc, p_misc, p_phase));
     }, py::arg("domain"), py::arg("substance"), py::arg("material") = std::string(),
        py::arg("representation") = py::none(),
        py::arg("kinematic_viscosity") = py::none(),
        py::arg("miscibility") = py::none(),
-       py::arg("phase") = py::none(),
-       py::arg("constitutive_model") = py::none());
+       py::arg("phase") = py::none());
 
     fluid.def("set_param", [](const std::string& domain, const py::kwargs& kwargs) {
         Vec3 dmin_val; const Vec3* p_dmin = nullptr;
@@ -2351,20 +2341,57 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         std::string bound_val; const std::string* p_bound = nullptr;
         if (kwargs.contains("boundary")) { bound_val = py::cast<std::string>(kwargs["boundary"]); p_bound = &bound_val; }
 
-        std::string preset_val; const std::string* p_preset = nullptr;
-        if (kwargs.contains("preset")) { preset_val = py::cast<std::string>(kwargs["preset"]); p_preset = &preset_val; }
+        std::string substance_val; const std::string* p_substance = nullptr;
+        if (kwargs.contains("default_substance")) {
+            substance_val = py::cast<std::string>(kwargs["default_substance"]);
+            p_substance = &substance_val;
+        }
+        // The domain's physics moved to its default substance. Refused, not
+        // ignored, so a script cannot keep running against values it no
+        // longer controls (same list as the IPC fluid.set_param).
+        static const char* kMovedToSubstance[][2] = {
+            {"preset", "default_substance (a substance name; rt.substance.list())"},
+            {"chemistry_preset", "default_substance"},
+            {"kinematic_viscosity", "liquid_kinematic_viscosity"},
+            {"granular_enabled", "default_constitutive_model (granular|fluid)"},
+            {"granular_friction_angle", "granular_friction_degrees"},
+            {"granular_cohesion", "granular_cohesion"},
+            {"granular_dilatancy", "granular_dilatancy_degrees"},
+            {"granular_young_modulus", "granular_young_modulus"},
+            {"granular_poisson_ratio", "granular_poisson_ratio"},
+            {"granular_tensile_cutoff", "granular_tensile_cutoff"},
+            {"granular_hardening", "granular_hardening"},
+            {"granular_fracture_strain", "granular_fracture_strain"},
+            {"granular_damage_rate", "granular_damage_rate"},
+            {"granular_healing_rate", "granular_healing_rate"},
+            {"granular_rebonding", "granular_rebonding"},
+            {"granular_softening_temperature", "granular_softening_kelvin"},
+            {"granular_softening_range", "granular_softening_range"},
+            {"granular_residual_strength", "granular_residual_strength"},
+            {"granular_tack_peak", "granular_tack_peak"},
+            {"granular_thermal_conductivity", "parcel_conduction"},
+            {"thermal_freeze_kelvin", "melt_kelvin"},
+            {"thermal_viscosity_range", "liquid_freeze_viscosity_range"},
+            {"thermal_cold_viscosity", "liquid_cold_viscosity"},
+        };
+        for (const auto& moved : kMovedToSubstance) {
+            if (kwargs.contains(moved[0])) {
+                throw std::runtime_error(std::string("'") + moved[0] +
+                    "' is a property of the domain's substance now: rt.substance.derive(...), "
+                    "rt.substance.set(name, {'" + moved[1] + "': ...}), then "
+                    "set_param(domain, default_substance=name)");
+            }
+        }
 
         // No `viscosity` alias on purpose: it used to be a unitless 0..200 dial
         // and is now m^2/s, so silently accepting the old keyword would turn a
         // script's honey into lava. Reject it with the conversion spelled out.
         if (kwargs.contains("viscosity")) {
             throw std::runtime_error(
-                "'viscosity' was replaced by 'kinematic_viscosity' in m^2/s "
-                "(water 1e-6, oil 1e-4, chocolate 4e-3, honey 7e-3, lava 0.5). "
+                "'viscosity' was removed: derive a substance and use substance.set "
+                "liquid_kinematic_viscosity in m^2/s, then select default_substance. "
                 "The old value was unitless and is not convertible.");
         }
-        float visc_val = 0.0f; const float* p_visc = nullptr;
-        if (kwargs.contains("kinematic_viscosity")) { visc_val = py::cast<float>(kwargs["kinematic_viscosity"]); p_visc = &visc_val; }
 
         int sweeps_val = 0; const int* p_sweeps = nullptr;
         if (kwargs.contains("viscosity_sweeps")) { sweeps_val = py::cast<int>(kwargs["viscosity_sweeps"]); p_sweeps = &sweeps_val; }
@@ -2430,41 +2457,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             p_solid_fill = &solid_fill_val;
         }
 
-        bool granular_enabled_val=false; const bool* p_granular_enabled=nullptr;
-        float granular_friction=0, granular_cohesion=0, granular_dilatancy=0;
-        float granular_young=0, granular_poisson=0, granular_tensile=0, granular_hardening=0;
-        float granular_fracture=0, granular_damage=0, granular_healing=0;
-        bool granular_rebonding=false; const bool* p_granular_rebonding=nullptr;
         int granular_max_solver_substeps=0; const int* p_granular_max_solver_substeps=nullptr;
-        const float *p_granular_friction=nullptr,*p_granular_cohesion=nullptr,*p_granular_dilatancy=nullptr;
-        const float *p_granular_young=nullptr,*p_granular_poisson=nullptr,*p_granular_tensile=nullptr,*p_granular_hardening=nullptr;
-        const float *p_granular_fracture=nullptr,*p_granular_damage=nullptr,*p_granular_healing=nullptr;
-        if(kwargs.contains("granular_enabled")){granular_enabled_val=py::cast<bool>(kwargs["granular_enabled"]);p_granular_enabled=&granular_enabled_val;}
-        if(kwargs.contains("granular_friction_angle")){granular_friction=py::cast<float>(kwargs["granular_friction_angle"]);p_granular_friction=&granular_friction;}
-        if(kwargs.contains("granular_cohesion")){granular_cohesion=py::cast<float>(kwargs["granular_cohesion"]);p_granular_cohesion=&granular_cohesion;}
-        if(kwargs.contains("granular_dilatancy")){granular_dilatancy=py::cast<float>(kwargs["granular_dilatancy"]);p_granular_dilatancy=&granular_dilatancy;}
-        if(kwargs.contains("granular_young_modulus")){granular_young=py::cast<float>(kwargs["granular_young_modulus"]);p_granular_young=&granular_young;}
-        if(kwargs.contains("granular_poisson_ratio")){granular_poisson=py::cast<float>(kwargs["granular_poisson_ratio"]);p_granular_poisson=&granular_poisson;}
-        if(kwargs.contains("granular_tensile_cutoff")){granular_tensile=py::cast<float>(kwargs["granular_tensile_cutoff"]);p_granular_tensile=&granular_tensile;}
-        if(kwargs.contains("granular_hardening")){granular_hardening=py::cast<float>(kwargs["granular_hardening"]);p_granular_hardening=&granular_hardening;}
-        if(kwargs.contains("granular_fracture_strain")){granular_fracture=py::cast<float>(kwargs["granular_fracture_strain"]);p_granular_fracture=&granular_fracture;}
-        if(kwargs.contains("granular_damage_rate")){granular_damage=py::cast<float>(kwargs["granular_damage_rate"]);p_granular_damage=&granular_damage;}
-        if(kwargs.contains("granular_healing_rate")){granular_healing=py::cast<float>(kwargs["granular_healing_rate"]);p_granular_healing=&granular_healing;}
-        if(kwargs.contains("granular_rebonding")){granular_rebonding=py::cast<bool>(kwargs["granular_rebonding"]);p_granular_rebonding=&granular_rebonding;}
         if(kwargs.contains("granular_max_solver_substeps")){granular_max_solver_substeps=py::cast<int>(kwargs["granular_max_solver_substeps"]);p_granular_max_solver_substeps=&granular_max_solver_substeps;}
-        float granular_soft_temp=0,granular_soft_range=0,granular_residual=0;
-        const float *p_granular_soft_temp=nullptr,*p_granular_soft_range=nullptr,*p_granular_residual=nullptr;
-        if(kwargs.contains("granular_softening_temperature")){granular_soft_temp=py::cast<float>(kwargs["granular_softening_temperature"]);p_granular_soft_temp=&granular_soft_temp;}
-        if(kwargs.contains("granular_softening_range")){granular_soft_range=py::cast<float>(kwargs["granular_softening_range"]);p_granular_soft_range=&granular_soft_range;}
-        if(kwargs.contains("granular_residual_strength")){granular_residual=py::cast<float>(kwargs["granular_residual_strength"]);p_granular_residual=&granular_residual;}
-        float granular_tack=0.0f;const float* p_granular_tack=nullptr;
-        if(kwargs.contains("granular_tack_peak")){granular_tack=py::cast<float>(kwargs["granular_tack_peak"]);p_granular_tack=&granular_tack;}
-        float granular_cond=0.0f;const float* p_granular_cond=nullptr;
-        if(kwargs.contains("granular_thermal_conductivity")){granular_cond=py::cast<float>(kwargs["granular_thermal_conductivity"]);p_granular_cond=&granular_cond;}
 
         // Same split as the IPC fluid.set_param: surface + thermal keys go to
-        // their own API calls, applied after the main update (a preset in the
-        // same call must not undo explicit thermal keys).
+        // their own API calls, applied after the main update (a default
+        // substance's hints in the same call must not undo explicit thermal keys).
         rtapi::FluidSurfaceDetailPatch surface_patch;
         bool has_surface_patch = false;
         if(kwargs.contains("surface_resolution_multiplier")){surface_patch.surface_resolution_multiplier=py::cast<int>(kwargs["surface_resolution_multiplier"]);has_surface_patch=true;}
@@ -2482,24 +2480,13 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         if(kwargs.contains("thermal_liquid_enabled")){thermal_patch.enabled=py::cast<bool>(kwargs["thermal_liquid_enabled"]);has_thermal_patch=true;}
         if(kwargs.contains("thermal_air_cooling_rate")){thermal_patch.air_cooling_rate=py::cast<float>(kwargs["thermal_air_cooling_rate"]);has_thermal_patch=true;}
         if(kwargs.contains("thermal_contact_cooling_rate")){thermal_patch.contact_cooling_rate=py::cast<float>(kwargs["thermal_contact_cooling_rate"]);has_thermal_patch=true;}
-        if(kwargs.contains("thermal_freeze_kelvin")){thermal_patch.freeze_kelvin=py::cast<float>(kwargs["thermal_freeze_kelvin"]);has_thermal_patch=true;}
-        if(kwargs.contains("thermal_viscosity_range")){thermal_patch.viscosity_range=py::cast<float>(kwargs["thermal_viscosity_range"]);has_thermal_patch=true;}
-        if(kwargs.contains("thermal_cold_viscosity")){thermal_patch.cold_viscosity=py::cast<float>(kwargs["thermal_cold_viscosity"]);has_thermal_patch=true;}
 
-        requireResult(rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_vs, p_rm, p_dev, p_bound, p_preset, p_visc, p_sweeps, p_slip, p_surf_mat,
+        requireResult(rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_vs, p_rm, p_dev, p_bound, p_substance, p_sweeps, p_slip, p_surf_mat,
                                                p_surface_offset,
                                                p_pore_amt, p_pore_scl, p_pore_det, p_coord,
                                                p_uvw_period, p_solid_phase, p_solid_fill,
                                                p_enabled, p_visible,
-                                               p_granular_enabled,p_granular_friction,p_granular_cohesion,
-                                               p_granular_dilatancy,p_granular_young,p_granular_poisson,
-                                               p_granular_tensile,p_granular_hardening,
-                                               p_granular_fracture,p_granular_damage,
-                                               p_granular_healing,p_granular_rebonding,
-                                               p_granular_max_solver_substeps,
-                                               p_granular_soft_temp,p_granular_soft_range,
-                                               p_granular_residual,
-                                               p_granular_tack, p_granular_cond));
+                                               p_granular_max_solver_substeps));
         if (has_thermal_patch) requireResult(rtapi::setFluidThermal(domain, thermal_patch));
         if (kwargs.contains("max_particles"))
             requireResult(rtapi::setFluidMaxParticles(domain, py::cast<uint64_t>(kwargs["max_particles"])));
@@ -3042,7 +3029,6 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         rtapi::CombustibleFluidSettings s;
         requireResult(rtapi::getCombustibleFluidSettings(domain,s));
         py::dict d;
-        d["chemistry_preset"] = s.chemistry_preset;
         d["enabled"]=s.enabled;
         d["auto_ignite"]=s.auto_ignite;
         d["ignition_temperature"]=s.ignition_temperature;
@@ -3060,7 +3046,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 #define RT_FLUID_FIRE_KW(name,type) \
         if(kwargs.contains(#name)) s.name=py::cast<type>(kwargs[#name])
         RT_FLUID_FIRE_KW(enabled,bool);
-        if(kwargs.contains("chemistry_preset")) s.chemistry_preset=py::cast<std::string>(kwargs["chemistry_preset"]);
+        if(kwargs.contains("chemistry_preset"))
+            throw std::runtime_error("chemistry_preset was removed: the chemistry is the domain's "
+                                     "default_substance (fluid set_param)");
         RT_FLUID_FIRE_KW(auto_ignite,bool);
         RT_FLUID_FIRE_KW(ignition_temperature,float);
         RT_FLUID_FIRE_KW(evaporation_rate,float);
@@ -3091,7 +3079,6 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["fluid_velocity_spread"] = s.fluid_velocity_spread;
         d["fluid_emit_along_normal"] = s.fluid_emit_along_normal;
         d["fluid_substance"] = s.fluid_substance;
-        d["initial_constitutive_model"] = s.initial_constitutive_model;
         d["fluid_temperature_override"] = s.fluid_temperature_override;
         d["fluid_temperature_kelvin"] = s.fluid_temperature_kelvin;
         d["use_time_limit"] = s.use_time_limit;
@@ -3116,7 +3103,6 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_FLOW_KW(fluid_velocity_spread, float);
         RT_FLOW_KW(fluid_emit_along_normal, bool);
         RT_FLOW_KW(fluid_substance, std::string);
-        RT_FLOW_KW(initial_constitutive_model, std::string);
         RT_FLOW_KW(fluid_temperature_override, bool);
         RT_FLOW_KW(fluid_temperature_kelvin, float);
         RT_FLOW_KW(use_time_limit, bool);
@@ -3307,42 +3293,41 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     // by the collider's source object.
     py::module_ msf = module.def_submodule(
         "msf", "Material State Field: substances, ignition and charring");
-    msf.def("substances", [] {
-        std::vector<std::string> names;
-        requireResult(rtapi::listMaterialSubstances(names));
-        py::list out; for (const auto& n : names) out.append(n);
+    // Substance library: rt.substance (built-ins read-only; derive to edit).
+    py::module_ substance = module.def_submodule(
+        "substance", "Substance library: built-ins and project substances derived from them");
+    substance.def("list", [] {
+        std::vector<rtapi::SubstanceSummary> rows;
+        requireResult(rtapi::listSubstances(rows));
+        py::list out;
+        for (const auto& row : rows) {
+            py::dict d;
+            d["name"] = row.name;
+            d["based_on"] = row.based_on;
+            d["category"] = row.category;
+            d["builtin"] = row.builtin;
+            out.append(d);
+        }
         return out;
-    }, "Names accepted by collider(msf_substance=...)");
-    msf.def("substance", [](const std::string& name) {
-        rtapi::SubstanceProfileInfo p;
-        requireResult(rtapi::getMaterialSubstance(name, p));
-        py::dict d;
-        d["name"] = p.name;
-        d["default_constitutive_model"] = p.default_constitutive_model;
-        d["density"] = p.density;
-        d["liquid_density"] = p.liquid_density;
-        d["specific_heat"] = p.specific_heat;
-        d["conductivity"] = p.conductivity;
-        d["liquid_kinematic_viscosity"] = p.liquid_kinematic_viscosity;
-        d["combustible"] = p.combustible;
-        d["fluid_flammable"] = p.fluid_flammable;
-        d["fluid_extinguishing"] = p.fluid_extinguishing;
-        d["meltable"] = p.meltable;
-        d["ignition_kelvin"] = p.ignition_kelvin;
-        d["flash_kelvin"] = p.flash_kelvin;
-        d["autoignition_kelvin"] = p.autoignition_kelvin;
-        d["melt_kelvin"] = p.melt_kelvin;
-        d["boiling_kelvin"] = p.boiling_kelvin;
-        d["latent_heat_fusion"] = p.latent_heat_fusion;
-        d["latent_heat_vaporization"] = p.latent_heat_vaporization;
-        d["vaporization_rate"] = p.vaporization_rate;
-        d["cooling_power"] = p.cooling_power;
-        d["oxygen_dilution"] = p.oxygen_dilution;
-        d["flame_persistence"] = p.flame_persistence;
-        d["granular_friction_degrees"] = p.granular_friction_degrees;
-        d["granular_cohesion"] = p.granular_cohesion;
-        return d;
-    }, py::arg("name"), "Physical properties for one canonical substance");
+    }, "Every substance: name, based_on, category, builtin");
+    substance.def("get", [](const std::string& name) {
+        std::string text;
+        requireResult(rtapi::getSubstance(name, text));
+        return py::module_::import("json").attr("loads")(text);
+    }, py::arg("name"), "Resolved fields of one substance and which ones it overrides");
+    substance.def("derive", [](const std::string& name, const std::string& based_on) {
+        requireResult(rtapi::deriveSubstance(name, based_on));
+    }, py::arg("name"), py::arg("based_on"),
+       "Create a project substance identical to based_on (built-ins are edited this way)");
+    substance.def("set", [](const std::string& name, const py::dict& fields) {
+        const std::string text =
+            py::cast<std::string>(py::module_::import("json").attr("dumps")(fields));
+        requireResult(rtapi::setSubstanceFields(name, text));
+    }, py::arg("name"), py::arg("fields"),
+       "Set fields of a project substance; None drops an override");
+    substance.def("remove", [](const std::string& name) {
+        requireResult(rtapi::removeSubstance(name));
+    }, py::arg("name"), "Remove a project substance nothing references");
     msf.def("fields", [] {
         std::vector<rtapi::MaterialFieldInfo> fields;
         requireResult(rtapi::listMaterialFields(fields));

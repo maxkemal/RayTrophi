@@ -476,6 +476,8 @@
     <ClInclude Include="source\include\MaterialProceduralMath.h" />
     <ClInclude Include="source\include\MaterialProgram.h" />
     <ClInclude Include="source\include\MaterialStateField.h" />
+    <ClInclude Include="source\include\SubstanceLibrary.h" />
+    <ClInclude Include="source\include\Fluid\FluidDomainSubstance.h" />
     <ClInclude Include="source\include\MatterExchangeLedger.h" />
     <ClInclude Include="source\include\MaterialDamagePattern.h" />
     <ClInclude Include="source\include\MeltSurfaceFlow.h" />
@@ -493,6 +495,7 @@
     <ClInclude Include="source\include\UI\ParticleEmitterGizmo.h" />
     <ClInclude Include="source\include\UI\ParticleSystemAuthoringUI.h" />
     <ClInclude Include="source\include\SimCache.h" />
+    <ClInclude Include="source\include\ProjectSimulationCache.h" />
     <ClInclude Include="source\include\SimFrameCompress.h" />
     <ClInclude Include="source\include\SimFrameCacheMemory.h" />
     <ClInclude Include="source\include\UI\ParticleAppearanceUI.h" />
@@ -1899,6 +1902,8 @@
     <ClCompile Include="source\src\Physics\FractureGenerator.cpp" />
     <ClCompile Include="source\src\Physics\GridFluidSolver.cpp" />
     <ClCompile Include="source\src\Physics\MaterialStateField.cpp" />
+    <ClCompile Include="source\src\Physics\SubstanceLibrary.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\FluidDomainSubstance.cpp" />
     <ClCompile Include="source\src\Physics\MatterExchangeLedger.cpp" />
     <ClCompile Include="source\src\Physics\MaterialDamagePattern.cpp" />
     <ClCompile Include="source\src\Physics\MeltSurfaceFlow.cpp" />

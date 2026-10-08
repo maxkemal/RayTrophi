@@ -177,13 +177,13 @@ MatterGrainParams matterGrainParamsFromJson(const nlohmann::json& stored) {
 }
 
 float matterGrainRestMassKg(const MatterGrainParams& params, uint32_t substance_tag,
-                            FluidChemistryPreset chemistry_preset,
+                            const SubstanceProfile* domain_substance,
                             MatterConstitutiveModel model, bool legacy_granular) {
     // fluidParticleRestMassKg(h, ppc=1) is bulk density * h^3, so h is the
     // cube root of the bulk volume one grain stands for.
     const float sphere = 4.18879020f * params.radius_m * params.radius_m * params.radius_m;
     const float bulk_volume = sphere / std::clamp(params.packing_fraction, .3f, .74f);
-    return fluidParticleRestMassKg(substance_tag, chemistry_preset, std::cbrt(bulk_volume), 1,
+    return fluidParticleRestMassKg(substance_tag, domain_substance, std::cbrt(bulk_volume), 1,
         model, legacy_granular);
 }
 
@@ -207,7 +207,7 @@ void initMatterGrainBirthWater(FluidParticles& particles, std::size_t index,
 
 std::size_t ensureMatterGrainRestMasses(FluidParticles& particles,
                                         const MatterGrainParams& params,
-                                        FluidChemistryPreset chemistry_preset,
+                                        const SubstanceProfile* domain_substance,
                                         bool legacy_granular) {
     std::size_t initialized = 0;
     const auto count = particles.size();
@@ -225,7 +225,7 @@ std::size_t ensureMatterGrainRestMasses(FluidParticles& particles,
         }
         const uint32_t tag = i < particles.substance_tag.size()
             ? particles.substance_tag[i] : kSubstanceUntagged;
-        rest_mass = matterGrainRestMassKg(params, tag, chemistry_preset, model, legacy_granular);
+        rest_mass = matterGrainRestMassKg(params, tag, domain_substance, model, legacy_granular);
         ++initialized;
     }
     return initialized;

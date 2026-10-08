@@ -8,6 +8,22 @@
             if (i < grid_domain_compute_buffers_.size()) {
                 FluidGpuParticleUpload::invalidate(grid_domain_compute_buffers_[i]);
             }
+            // The domain's physics come from its Default Substance, every step,
+            // so an edit to the substance reaches the solver without a second
+            // copy anywhere. Written on the descriptor itself: panel and IPC
+            // reads see what the solver runs.
+            if (i < grid_domains_.size()) {
+                static std::string s_last_substance_error;
+                std::string substance_error;
+                if (!Fluid::resolveDomainSubstancePhysics(grid_domains_[i].fluid_params,
+                        state.voxel_size, world_thermal_.scale(), substance_error)) {
+                    if (substance_error != s_last_substance_error) {
+                        SCENE_LOG_WARN("[Fluid] " + grid_domains_[i].name + ": " + substance_error +
+                                       "; the domain keeps its last resolved physics");
+                    }
+                }
+                s_last_substance_error = substance_error;
+            }
             auto fluid_params = (i < grid_domains_.size())
                 ? grid_domains_[i].fluid_params
                 : Fluid::APICSolverParams{};
@@ -48,11 +64,11 @@
             // birth path that left it unset gets the same value as the emitter.
             if (fluid_params.grain.enabled) {
                 Fluid::ensureMatterGrainRestMasses(state.particles, fluid_params.grain,
-                    fluid_params.chemistry_preset, mixed_legacy_granular);
+                    Fluid::domainSubstance(fluid_params), mixed_legacy_granular);
             }
             Fluid::ensureFluidParticleRestMasses(
                 state.particles,
-                fluid_params.chemistry_preset,
+                Fluid::domainSubstance(fluid_params),
                 state.voxel_size,
                 fluid_params.particles_per_cell, mixed_legacy_granular);
             // Mirror the domain wall mode onto the particle solver so "Open

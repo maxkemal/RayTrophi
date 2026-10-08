@@ -256,9 +256,10 @@ log("== Solver node: every field is OPT-IN ==")
 # the user never ticked must NOT be written. A node that wrote all of its fields
 # on every apply would flatten authored values with numbers nobody chose, and
 # the override layer would then faithfully "restore" the graph's inventions.
-authored_visc = read_param(domain_name, "kinematic_viscosity")
-authored_slip = read_param(domain_name, "viscosity_wall_slip")
-log("   authored viscosity=%.4f wall_slip=%.4f" % (authored_visc, authored_slip))
+authored_wall_slip = read_param(domain_name, "viscosity_wall_slip")
+authored_surface_offset = read_param(domain_name, "surface_offset_voxels")
+target_wall_slip = 0.25 if abs(authored_wall_slip - 0.25) > 1e-4 else 0.75
+log("   authored wall_slip=%.4f surface_offset=%.4f" % (authored_wall_slip, authored_surface_offset))
 
 dom = rt_testlog.fresh_graph(rt, SCOPE, OWNER)
 solver = rt.sim_graph.add_node(SCOPE, OWNER, "sim.solver")
@@ -273,7 +274,7 @@ if fields:
     # Discoverability: a script must be able to LEARN which dials exist instead
     # of reading the solver source.
     keys = [f["key"] for f in fields]
-    check("kinematic_viscosity is offered", "kinematic_viscosity" in keys, "%s" % (keys,))
+    check("viscosity_wall_slip is offered", "viscosity_wall_slip" in keys, "%s" % (keys,))
     check("no field starts out in use",
           not any(f["in_use"] for f in fields), "%s" % (fields,))
     check("voxel_size declares that it needs a restart",
@@ -281,29 +282,29 @@ if fields:
           "%s" % (fields,))
 
 # Touch exactly ONE field.
-rt.sim_graph.set_node_value(SCOPE, OWNER, solver, "kinematic_viscosity",
-                            authored_visc + 0.5)
+rt.sim_graph.set_node_value(SCOPE, OWNER, solver, "viscosity_wall_slip",
+                            target_wall_slip)
 applied = rt.sim_graph.apply(SCOPE, OWNER)
 log("   apply -> %s" % (applied,))
 check("only the touched field was written", applied["applied"] == 1, "%s" % (applied,))
 check("the touched field actually changed",
-      abs(read_param(domain_name, "kinematic_viscosity") - (authored_visc + 0.5)) < 1e-4,
-      "%.4f" % read_param(domain_name, "kinematic_viscosity"))
+      abs(read_param(domain_name, "viscosity_wall_slip") - (target_wall_slip)) < 1e-4,
+      "%.4f" % read_param(domain_name, "viscosity_wall_slip"))
 # ★★★ THE ONE THAT MATTERS: an untouched field must be untouched. If this fails,
 # every unticked dial is silently overwriting an authored value with a default
 # and nothing in the app would report it.
 check("an UNTOUCHED field was not written",
-      abs(read_param(domain_name, "viscosity_wall_slip") - authored_slip) < 1e-6,
-      "%.6f != %.6f" % (read_param(domain_name, "viscosity_wall_slip"), authored_slip))
+      abs(read_param(domain_name, "surface_offset_voxels") - authored_surface_offset) < 1e-6,
+      "%.6f != %.6f" % (read_param(domain_name, "surface_offset_voxels"), authored_surface_offset))
 
 log("   -- switching a field off stops it being written --")
 rt.sim_graph.clear_overrides()
-rt.sim_graph.set_node_value(SCOPE, OWNER, solver, "kinematic_viscosity.use", 0.0)
+rt.sim_graph.set_node_value(SCOPE, OWNER, solver, "viscosity_wall_slip.use", 0.0)
 off = rt.sim_graph.apply(SCOPE, OWNER)
 check("a field switched off writes nothing", off["applied"] == 0, "%s" % (off,))
 check("the authored value is back",
-      abs(read_param(domain_name, "kinematic_viscosity") - authored_visc) < 1e-6,
-      "%.6f != %.6f" % (read_param(domain_name, "kinematic_viscosity"), authored_visc))
+      abs(read_param(domain_name, "viscosity_wall_slip") - authored_wall_slip) < 1e-6,
+      "%.6f != %.6f" % (read_param(domain_name, "viscosity_wall_slip"), authored_wall_slip))
 
 log("== an integer parameter must round-trip, not drift ==")
 # ★★ viscosity_sweeps is an int carried through a float. A truncating write

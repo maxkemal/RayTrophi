@@ -52,6 +52,7 @@ void SceneData::syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
                                     const RayTrophiSim::Fluid::FluidViewPlan& plan,
                                     VDBVolumeManager& mgr, int frame, bool force_sync,
                                     bool render_enabled) {
+    RTPERF_FRAME_SCOPE("sim.render.fog_volume");
     using RayTrophiSim::Fluid::FluidView;
     if (d >= system.domain_fog_vdb_ids.size() || d >= system.domain_fog_volumes.size()) return;
     const bool matter_gas =

@@ -5,6 +5,7 @@
 #include "Fluid/FluidFogDensity.h"
 #include "PostProcess/PostService.h"
 #include "ProjectManager.h"
+#include "ProjectSimulationCache.h"
 #include "globals.h"
 #include "Renderer.h"
 #include "OptixWrapper.h"
@@ -30,6 +31,8 @@
 #include "Paint/PaintLayerStack.h"
 #include "AshDebrisSerialization.h"
 #include "KinematicColliderSerialization.h"
+#include "SubstanceLibrary.h"
+#include "Fluid/FluidDomainSubstance.h"
 #include "UI/TemplateHubUI.h"
 #include "json.hpp"
 #include "simdjson.h"
@@ -1146,6 +1149,11 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer, bool defer
     g_project.clear();
     m_package_files.clear();
     clearEmbeddedTextureCache();
+    {
+        // A new project starts from the built-ins only.
+        std::string substance_error;
+        RayTrophiSim::replaceProjectSubstances({}, substance_error);
+    }
     
     // 2. Reset Globals
     bool was_optix = render_settings.use_optix;
@@ -1340,6 +1348,9 @@ bool ProjectManager::saveProjectImpl(const std::string& filepath, SceneData& sce
     // a first "Save As" writes to a different file and would otherwise
     // re-encode all of them.
     const std::string source_project_path = g_project.current_file_path;
+    if (!ProjectSimulationCache::canSaveAs(scene, source_project_path, filepath, as_copy)) {
+        return false;
+    }
     // Also store the current path (a copy leaves the project's identity alone)
     if (!as_copy) g_project.current_file_path = filepath;
 
@@ -1813,6 +1824,16 @@ bool ProjectManager::saveProjectImpl(const std::string& filepath, SceneData& sce
         root["gas_volumes"] = serializeGasVolumes(scene.gas_volumes);
         SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.gas_volumes.size()) + " Gas volumes.");
 
+        // Project substances (derived from built-ins; only overrides stored).
+        {
+            json substances = json::array();
+            for (const auto& item : RayTrophiSim::projectSubstances()) {
+                substances.push_back({{"name", item.name}, {"based_on", item.based_on},
+                                      {"overrides", item.overrides}});
+            }
+            root["substances"] = std::move(substances);
+        }
+
         // Force Fields
         if (progress_callback) progress_callback(84, "Saving Force Fields...");
         root["force_fields"] = serializeForceFields(scene.force_field_manager);
@@ -1986,6 +2007,7 @@ bool ProjectManager::saveProjectImpl(const std::string& filepath, SceneData& sce
         raytrophi::templates::TemplateHubUI::instance().addRecentProject(filepath);
     }
     
+    ProjectSimulationCache::afterSuccessfulSave(scene, source_project_path, filepath, as_copy);
     if (progress_callback) progress_callback(100, "Done.");
     SCENE_LOG_INFO(std::string(as_copy ? "Project copy saved: " : "Project saved successfully: ") + filepath);
     return true;
@@ -2590,6 +2612,36 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                     scene.mesh_paint_layer_stacks[it.key()] = std::move(stack);
                 }
                 SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.mesh_paint_layer_stacks.size()) + " paint layer stacks.");
+            }
+
+            // Project substances BEFORE anything that names one. Always
+            // replaced, also with an empty set: the previous project's
+            // substances must not leak into this one.
+            {
+                std::vector<RayTrophiSim::ProjectSubstance> substances;
+                simdjson::dom::element substances_el;
+                if (!root["substances"].get(substances_el)) {
+                    const json list = sjsonToNlohmann(substances_el);
+                    for (const auto& item : list) {
+                        RayTrophiSim::ProjectSubstance substance;
+                        substance.name = item.value("name", std::string());
+                        substance.based_on = item.value("based_on", std::string());
+                        substance.overrides = item.value("overrides", json::object());
+                        substances.push_back(std::move(substance));
+                    }
+                }
+                std::string substance_error;
+                if (!RayTrophiSim::replaceProjectSubstances(substances, substance_error)) {
+                    // Nothing is half-loaded: the library keeps built-ins only,
+                    // and every reference to a project substance now fails its
+                    // strict lookup by name instead of borrowing another one.
+                    const std::string load_error = substance_error;
+                    RayTrophiSim::replaceProjectSubstances({}, substance_error);
+                    SCENE_LOG_ERROR("[ProjectManager] Project substances not loaded: " + load_error);
+                } else if (!substances.empty()) {
+                    SCENE_LOG_INFO("[ProjectManager] Loaded " +
+                                   std::to_string(substances.size()) + " project substances.");
+                }
             }
 
             // VDB / Gas / Force Fields / Particle Simulation
@@ -5721,9 +5773,6 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         f["fluid_emit_along_normal"] = source.fluid_emit_along_normal;
         f["fluid_substance"] = source.fluid_substance;
         f["particle_pool_weight"] = source.particle_pool_weight;
-        f["initial_constitutive_model"] =
-            RayTrophiSim::Fluid::matterConstitutiveModelName(
-                source.initial_constitutive_model);
         f["fluid_temperature_override"] = source.fluid_temperature_override;
         f["fluid_temperature_kelvin"] = source.fluid_temperature_kelvin;
         f["use_time_limit"] = source.use_time_limit;
@@ -5818,7 +5867,6 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             // Renamed keys, deliberately not aliased to the old ones: the old
             // `viscosity` was a unitless 0..200 dial, and reading 20.0 back as
             // 20 m²/s would load lava where honey was authored.
-            {"kinematic_viscosity", domain.fluid_params.kinematic_viscosity},
             {"viscosity_sweeps", domain.fluid_params.viscosity_sweeps},
             {"viscosity_wall_slip", domain.fluid_params.viscosity_wall_slip},
             {"affine_damping", domain.fluid_params.affine_damping},
@@ -5838,53 +5886,18 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"air_drag", domain.fluid_params.air_drag},
             {"inherit_atmosphere", domain.fluid_params.inherit_atmosphere},
             {"density_correction", domain.fluid_params.density_correction},
-            // ★ Granular rheology. These were absent here while SceneSerializer
-            // wrote all of them, so a domain authored as Wet Sand saved to .rtp
-            // and reopened as the DEFAULTS — granular_enabled back to false,
-            // which also hides the whole panel section. current_preset survived
-            // on its own, so the label still read "Wet Sand" over default sand
-            // numbers: the loss was silent and looked like a UI bug.
-            // Keep this list in sync with SceneSerializer.cpp and with
-            // hashFluidDomainSolverConfig — a field missing from any one of the
-            // three fails differently and none of them fail loudly.
-            {"granular_enabled", domain.fluid_params.granular_enabled},
-            {"granular_friction_angle_degrees", domain.fluid_params.granular_friction_angle_degrees},
-            {"granular_cohesion", domain.fluid_params.granular_cohesion},
-            {"granular_dilatancy_degrees", domain.fluid_params.granular_dilatancy_degrees},
-            {"granular_young_modulus", domain.fluid_params.granular_young_modulus},
-            {"granular_poisson_ratio", domain.fluid_params.granular_poisson_ratio},
-            {"granular_tensile_cutoff", domain.fluid_params.granular_tensile_cutoff},
-            {"granular_hardening", domain.fluid_params.granular_hardening},
-            {"granular_fracture_strain", domain.fluid_params.granular_fracture_strain},
-            {"granular_damage_rate", domain.fluid_params.granular_damage_rate},
-            {"granular_healing_rate", domain.fluid_params.granular_healing_rate},
-            {"granular_rebonding", domain.fluid_params.granular_rebonding},
+            // ★ The domain's material is its Default Substance. Viscosity, the
+            // granular skeleton, the freeze point, conduction and the fuel
+            // profile are resolved from it every step and are NOT stored here:
+            // a stored copy is exactly the second definition that drifted from
+            // the substance table (docs/dev/MADDE_TIPLERI_TASARIMI.md). Only
+            // numerical settings (the substance's solver hints, editable here)
+            // are domain data.
+            {"default_substance", domain.fluid_params.default_substance},
             {"granular_max_solver_substeps", domain.fluid_params.granular_max_solver_substeps},
-            {"granular_softening_temperature", domain.fluid_params.granular_softening_temperature},
-            {"granular_softening_range", domain.fluid_params.granular_softening_range},
-            {"granular_residual_strength", domain.fluid_params.granular_residual_strength},
-            {"granular_tack_peak", domain.fluid_params.granular_tack_peak},
-            {"granular_thermal_conductivity", domain.fluid_params.granular_thermal_conductivity},
             {"thermal_liquid_enabled", domain.fluid_params.thermal_liquid_enabled},
             {"thermal_air_cooling_rate", domain.fluid_params.thermal_air_cooling_rate},
             {"thermal_contact_cooling_rate", domain.fluid_params.thermal_contact_cooling_rate},
-            {"thermal_freeze_kelvin", domain.fluid_params.thermal_freeze_kelvin},
-            {"thermal_viscosity_range", domain.fluid_params.thermal_viscosity_range},
-            {"thermal_cold_viscosity", domain.fluid_params.thermal_cold_viscosity},
-            {"current_preset", static_cast<int>(domain.fluid_params.current_preset)},
-            {"chemistry_preset", static_cast<int>(domain.fluid_params.chemistry_preset)},
-            {"fuel_profile", {
-                {"flammable", domain.fluid_params.fuel_profile.flammable},
-                {"extinguishing", domain.fluid_params.fuel_profile.extinguishing},
-                {"flash_temperature", domain.fluid_params.fuel_profile.flash_temperature},
-                {"autoignition_temperature", domain.fluid_params.fuel_profile.autoignition_temperature},
-                {"vaporization_rate", domain.fluid_params.fuel_profile.vaporization_rate},
-                {"heat_capacity", domain.fluid_params.fuel_profile.heat_capacity},
-                {"latent_heat", domain.fluid_params.fuel_profile.latent_heat},
-                {"cooling_power", domain.fluid_params.fuel_profile.cooling_power},
-                {"oxygen_dilution", domain.fluid_params.fuel_profile.oxygen_dilution},
-                {"flame_persistence", domain.fluid_params.fuel_profile.flame_persistence}
-            }},
             {"flammable", domain.fluid_flammable},
             {"extinguishing", domain.fluid_extinguishing},
             {"auto_ignite", domain.fluid_auto_ignite},
@@ -5966,9 +5979,6 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
                                  // half a definition.
                                  {"kinematic_viscosity", b.kinematic_viscosity},
                                  {"miscibility", b.miscibility},
-                                 {"constitutive_model",
-                                  RayTrophiSim::Fluid::matterConstitutiveModelName(
-                                      b.constitutive_model)},
                                  // ★ Written as a STRING, unlike representation
                                  // next to it. Phase decides whether matter
                                  // blocks flow, and a bare 0/1 in a project file
@@ -6306,12 +6316,6 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         // exactly how the scene rendered before substances existed.
         source.fluid_substance = item.value("fluid_substance", source.fluid_substance);
         source.particle_pool_weight = item.value("particle_pool_weight", 1.0f);
-        {
-            const std::string model = item.value(
-                "initial_constitutive_model", std::string("auto"));
-            RayTrophiSim::Fluid::parseMatterConstitutiveModel(
-                model, source.initial_constitutive_model);
-        }
         source.fluid_temperature_override = item.value("fluid_temperature_override", source.fluid_temperature_override);
         source.fluid_temperature_kelvin = std::max(1.0f, item.value("fluid_temperature_kelvin", source.fluid_temperature_kelvin));
         source.use_time_limit = item.value("use_time_limit", source.use_time_limit);
@@ -6430,7 +6434,6 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.velocity_damping = f.value("velocity_damping", domain.fluid_params.velocity_damping);
             domain.fluid_params.wall_damping = f.value("wall_damping", domain.fluid_params.wall_damping);
             domain.fluid_params.domain_motion_coupling = f.value("domain_motion_coupling", domain.fluid_params.domain_motion_coupling);
-            domain.fluid_params.kinematic_viscosity = f.value("kinematic_viscosity", domain.fluid_params.kinematic_viscosity);
             domain.fluid_params.viscosity_sweeps = f.value("viscosity_sweeps", domain.fluid_params.viscosity_sweeps);
             domain.fluid_params.viscosity_wall_slip = f.value("viscosity_wall_slip", domain.fluid_params.viscosity_wall_slip);
             domain.fluid_params.affine_damping = f.value("affine_damping", domain.fluid_params.affine_damping);
@@ -6454,101 +6457,45 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.air_drag = f.value("air_drag", domain.fluid_params.air_drag);
             domain.fluid_params.inherit_atmosphere = f.value("inherit_atmosphere", true);
             domain.fluid_params.density_correction = f.value("density_correction", domain.fluid_params.density_correction);
-            // ★ Read BEFORE current_preset, not after. A project written before
-            // the rheology rework has no granular keys at all, so these are
-            // no-ops there and the applyPreset() below legitimately supplies the
-            // material's granular numbers. Reading them afterwards would let that
-            // same applyPreset overwrite a modern file's authored values.
-            domain.fluid_params.granular_enabled = f.value("granular_enabled", domain.fluid_params.granular_enabled);
-            domain.fluid_params.granular_friction_angle_degrees = f.value("granular_friction_angle_degrees", domain.fluid_params.granular_friction_angle_degrees);
-            domain.fluid_params.granular_cohesion = f.value("granular_cohesion", domain.fluid_params.granular_cohesion);
-            domain.fluid_params.granular_dilatancy_degrees = f.value("granular_dilatancy_degrees", domain.fluid_params.granular_dilatancy_degrees);
-            domain.fluid_params.granular_young_modulus = f.value("granular_young_modulus", domain.fluid_params.granular_young_modulus);
-            domain.fluid_params.granular_poisson_ratio = f.value("granular_poisson_ratio", domain.fluid_params.granular_poisson_ratio);
-            domain.fluid_params.granular_tensile_cutoff = f.value("granular_tensile_cutoff", domain.fluid_params.granular_tensile_cutoff);
-            domain.fluid_params.granular_hardening = f.value("granular_hardening", domain.fluid_params.granular_hardening);
-            domain.fluid_params.granular_fracture_strain = f.value("granular_fracture_strain", domain.fluid_params.granular_fracture_strain);
-            domain.fluid_params.granular_damage_rate = f.value("granular_damage_rate", domain.fluid_params.granular_damage_rate);
-            domain.fluid_params.granular_healing_rate = f.value("granular_healing_rate", domain.fluid_params.granular_healing_rate);
-            domain.fluid_params.granular_rebonding = f.value("granular_rebonding", domain.fluid_params.granular_rebonding);
+            // Numerical settings (the substance's solver hints, editable on the
+            // domain).
             domain.fluid_params.granular_max_solver_substeps = f.value("granular_max_solver_substeps", domain.fluid_params.granular_max_solver_substeps);
-            domain.fluid_params.granular_softening_temperature = f.value("granular_softening_temperature", domain.fluid_params.granular_softening_temperature);
-            domain.fluid_params.granular_softening_range = f.value("granular_softening_range", domain.fluid_params.granular_softening_range);
-            domain.fluid_params.granular_residual_strength = f.value("granular_residual_strength", domain.fluid_params.granular_residual_strength);
-            domain.fluid_params.granular_tack_peak = f.value("granular_tack_peak", domain.fluid_params.granular_tack_peak);
-            domain.fluid_params.granular_thermal_conductivity = f.value("granular_thermal_conductivity", domain.fluid_params.granular_thermal_conductivity);
             domain.fluid_params.thermal_liquid_enabled = f.value("thermal_liquid_enabled", domain.fluid_params.thermal_liquid_enabled);
             domain.fluid_params.thermal_air_cooling_rate = f.value("thermal_air_cooling_rate", domain.fluid_params.thermal_air_cooling_rate);
             domain.fluid_params.thermal_contact_cooling_rate = f.value("thermal_contact_cooling_rate", domain.fluid_params.thermal_contact_cooling_rate);
-            domain.fluid_params.thermal_freeze_kelvin = f.value("thermal_freeze_kelvin", domain.fluid_params.thermal_freeze_kelvin);
-            domain.fluid_params.thermal_viscosity_range = f.value("thermal_viscosity_range", domain.fluid_params.thermal_viscosity_range);
-            domain.fluid_params.thermal_cold_viscosity = f.value("thermal_cold_viscosity", domain.fluid_params.thermal_cold_viscosity);
             domain.fluid_params.sanitizeThermalLiquid();
-            domain.fluid_params.sanitizeGranularMaterial();
-            // ★ TRIPWIRE — remove once the .rtp fluid_params loss is closed.
-            //
-            // Measured 2026-08-16 over IPC: save writes every fluid key
-            // correctly (verified in the JSON, both the legacy `domains[]` and
-            // `systems[]/domains[]` copies), the domain NAME and its siblings
-            // (voxel_size) load, but every fluid_params field read here comes
-            // back as the STRUCT DEFAULT afterwards — kinematic_viscosity 0.0313
-            // -> 0.0, viscosity_sweeps 7 -> 8 (8 is the default, not any
-            // preset's value), granular_young_modulus 123456 -> 200000.
-            // Polling right through the open found no window where the loaded
-            // values were ever present, so this is NOT a later pass clobbering
-            // them. It is pre-existing and NOT granular-specific; the granular
-            // keys were simply the first ones anyone checked.
-            //
-            // This line settles the remaining question in one build: if it
-            // prints the authored numbers, parseDomain works and the descriptor
-            // is being dropped downstream (adoptSystem / the system the API
-            // resolves). If it prints defaults, the guard above never saw the
-            // `fluid` object and the fault is in this function.
-            SCENE_LOG_INFO("[ProjectManager] parseDomain '" + domain.name +
-                           "' fluid block: visc=" +
-                           std::to_string(domain.fluid_params.kinematic_viscosity) +
-                           " sweeps=" +
-                           std::to_string(domain.fluid_params.viscosity_sweeps) +
-                           " granular_E=" +
-                           std::to_string(domain.fluid_params.granular_young_modulus) +
-                           " granular_on=" +
-                           (domain.fluid_params.granular_enabled ? "1" : "0"));
-            if (f.contains("current_preset")) {
-                domain.fluid_params.current_preset =
-                    static_cast<RayTrophiSim::Fluid::APICSolverParams::FluidPreset>(
-                        f.value("current_preset", static_cast<int>(domain.fluid_params.current_preset)));
-                // A project written before the rheology rework carries the old
-                // unitless `viscosity` (which we deliberately do not read) and no
-                // `kinematic_viscosity`. Loading it as-is would give a domain
-                // labelled "Honey" that is inviscid — the label right, the physics
-                // silently gone. Re-apply the preset instead: named materials come
-                // back as the material, and only hand-tuned (Custom) domains are
-                // left alone, which is exactly where re-applying would be wrong.
-                if (!f.contains("kinematic_viscosity") &&
-                    domain.fluid_params.current_preset !=
-                        RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom) {
-                    domain.fluid_params.applyPreset(domain.fluid_params.current_preset);
+            // ★ The material. A file written before 2026-10-07 has no
+            // default_substance; it stored a FluidPreset/FluidChemistryPreset
+            // pair plus a copy of the physics. The migration picks the substance
+            // and, where the stored physics differ from it (a hand-tuned
+            // domain), derives "<domain> material" so nothing is lost silently.
+            if (f.contains("default_substance") && f["default_substance"].is_string()) {
+                domain.fluid_params.default_substance = f["default_substance"].get<std::string>();
+            } else {
+                std::string migrated, migration_error;
+                if (RayTrophiSim::Fluid::migrateLegacyDomainMaterial(f, domain.name,
+                        domain.voxel_size, migrated, migration_error)) {
+                    domain.fluid_params.default_substance = migrated;
+                    SCENE_LOG_INFO("[ProjectManager] Domain '" + domain.name +
+                                   "' material migrated to substance '" + migrated + "'");
+                } else {
+                    SCENE_LOG_ERROR("[ProjectManager] Domain '" + domain.name +
+                                    "' material could not be migrated (" + migration_error +
+                                    "); it keeps '" + domain.fluid_params.default_substance + "'");
                 }
             }
-            if (f.contains("chemistry_preset")) {
-                domain.fluid_params.chemistry_preset =
-                    static_cast<RayTrophiSim::Fluid::FluidChemistryPreset>(
-                        f.value("chemistry_preset", static_cast<int>(domain.fluid_params.chemistry_preset)));
+            {
+                std::string resolve_error;
+                if (!RayTrophiSim::Fluid::resolveDomainSubstancePhysics(domain.fluid_params,
+                        domain.voxel_size, RayTrophiSim::MaterialTemperatureScale{}, resolve_error)) {
+                    SCENE_LOG_ERROR("[ProjectManager] Domain '" + domain.name + "': " + resolve_error);
+                }
             }
-            if (f.contains("fuel_profile")) {
-                const auto& fuel = f["fuel_profile"];
-                auto& profile = domain.fluid_params.fuel_profile;
-                profile.flammable = fuel.value("flammable", profile.flammable);
-                profile.extinguishing = fuel.value("extinguishing", profile.extinguishing);
-                profile.flash_temperature = fuel.value("flash_temperature", profile.flash_temperature);
-                profile.autoignition_temperature = fuel.value("autoignition_temperature", profile.autoignition_temperature);
-                profile.vaporization_rate = fuel.value("vaporization_rate", profile.vaporization_rate);
-                profile.heat_capacity = fuel.value("heat_capacity", profile.heat_capacity);
-                profile.latent_heat = fuel.value("latent_heat", profile.latent_heat);
-                profile.cooling_power = fuel.value("cooling_power", profile.cooling_power);
-                profile.oxygen_dilution = fuel.value("oxygen_dilution", profile.oxygen_dilution);
-                profile.flame_persistence = fuel.value("flame_persistence", profile.flame_persistence);
-            }
+            SCENE_LOG_INFO("[ProjectManager] parseDomain '" + domain.name +
+                           "' material=" + domain.fluid_params.default_substance +
+                           " visc=" + std::to_string(domain.fluid_params.kinematic_viscosity) +
+                           " sweeps=" + std::to_string(domain.fluid_params.viscosity_sweeps) +
+                           " granular_on=" + (domain.fluid_params.granular_enabled ? "1" : "0"));
             domain.fluid_flammable = f.value("flammable", domain.fluid_flammable);
             domain.fluid_extinguishing = f.value("extinguishing", domain.fluid_extinguishing);
             domain.fluid_auto_ignite = f.value("auto_ignite", domain.fluid_auto_ignite);
@@ -6670,12 +6617,6 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
                 // opens thinner than it was saved, with nothing to point at.
                 entry.kinematic_viscosity = b.value("kinematic_viscosity", -1.0f);
                 entry.miscibility = std::clamp(b.value("miscibility", 1.0f), 0.0f, 1.0f);
-                {
-                    const std::string model = b.value(
-                        "constitutive_model", std::string("auto"));
-                    RayTrophiSim::Fluid::parseMatterConstitutiveModel(
-                        model, entry.constitutive_model);
-                }
                 // ★ Missing key = LIQUID, and that is the only safe default: a
                 // project saved before phases existed described liquid, so
                 // reading anything else would freeze scenes that never asked to

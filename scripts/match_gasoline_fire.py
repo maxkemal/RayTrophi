@@ -164,11 +164,11 @@ rt.fluid.create_domain(
     domain_max=(4.0, 0.9, 3.0),
     voxel_size=0.05,
 )
-rt.fluid.set_param("Petrol", boundary="closed", preset="oil", viscosity=0.14)
+# Petrol IS gasoline: physics and chemistry are one substance (2026-10-07).
+rt.fluid.set_param("Petrol", boundary="closed", default_substance="Gasoline")
 rt.fluid.set_combustion(
     "Petrol",
     enabled=True,
-    chemistry_preset="gasoline",
     auto_ignite=False,            # the match is the ignition source, not a cheat
     # Petrol flashes off a spark, so the threshold is low and the evaporation
     # rate high: vapour has to be sitting above the surface BEFORE the flame
@@ -330,7 +330,7 @@ rt.collider.create(
 )
 
 rt.timeline.set_frame(0)
-print("Scene built. Substances available:", rt.msf.substances())
+print("Scene built. Substances available:", [s["name"] for s in rt.substance.list()])
 
 # ★ PLAY THIS ON THE TIMELINE, NOT IN LIVE UPDATE.
 # Every key below is authored in TIMELINE frames. Live Update free-runs the

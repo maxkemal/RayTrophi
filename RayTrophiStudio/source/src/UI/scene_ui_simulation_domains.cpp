@@ -1484,29 +1484,8 @@ void drawSimulationDomainControls(
 
                         // ── Substance ────────────────────────────────────────
                         {
-                            std::vector<std::string> substance_names;
-                            if (rtapi::listMaterialSubstances(substance_names).ok) {
-                                const char* preview = source.fluid_substance.empty()
-                                    ? "Untagged / Domain Default"
-                                    : source.fluid_substance.c_str();
-                                ImGui::SetNextItemWidth(-FLT_MIN);
-                                if (ImGui::BeginCombo("Substance Profile", preview)) {
-                                    if (ImGui::Selectable(
-                                            "Untagged / Domain Default",
-                                            source.fluid_substance.empty())) {
-                                        source.fluid_substance.clear();
-                                    }
-                                    for (const std::string& name : substance_names) {
-                                        const bool selected =
-                                            source.fluid_substance == name;
-                                        if (ImGui::Selectable(name.c_str(), selected)) {
-                                            source.fluid_substance = name;
-                                        }
-                                        if (selected) ImGui::SetItemDefaultFocus();
-                                    }
-                                    ImGui::EndCombo();
-                                }
-                            }
+                            SubstanceEditorUI::drawPicker("Substance Profile",
+                                source.fluid_substance, "Untagged / Domain Default");
                             // Fixed buffer rather than an ImGui string callback:
                             // a substance name is an identifier, and 63 chars is
                             // past any sane one. Truncation is silent but the
@@ -1520,6 +1499,11 @@ void drawSimulationDomainControls(
                                     "Custom Substance ID", subs_buf,
                                     sizeof(subs_buf))) {
                                 source.fluid_substance = subs_buf;
+                            }
+                            if (SubstanceEditorUI::draw("##FlowSubstanceEditor",
+                                                        source.fluid_substance)) {
+                                scene.requestSimulationTimelineRenderResync();
+                                ui_ctx.start_render = true;
                             }
                             if (ImGui::IsItemHovered()) {
                                 ImGui::SetTooltip(
@@ -1538,35 +1522,19 @@ void drawSimulationDomainControls(
                         }
 
                         {
-                            int model = static_cast<int>(
-                                source.initial_constitutive_model);
-                            const char* models[] = {
-                                "From Substance", "Fluid", "Granular", "Elastic"
-                            };
-                            ImGui::SetNextItemWidth(-FLT_MIN);
-                            if (ImGui::Combo(
-                                    "Initial Model", &model, models, 4)) {
-                                source.initial_constitutive_model =
-                                    static_cast<RayTrophiSim::Fluid::MatterConstitutiveModel>(
-                                        model);
-                            }
-                            if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip(
-                                    "How newly emitted parcels respond to deformation.\n"
-                                    "From Substance is the normal choice: the central Substance\n"
-                                    "definition decides. Granular is a constitutive regime, not\n"
-                                    "a render mode or thermodynamic phase.");
-                            }
-                            rtapi::SubstanceProfileInfo chemistry;
-                            if (!source.fluid_substance.empty() &&
-                                rtapi::getMaterialSubstance(
-                                    source.fluid_substance, chemistry).ok) {
+                            // Birth model is the substance's own: the emitter has no
+                            // model override, so there is nothing to choose here.
+                            const RayTrophiSim::SubstanceProfile* chemistry =
+                                source.fluid_substance.empty() ? nullptr
+                                : RayTrophiSim::tryFindSubstance(source.fluid_substance);
+                            if (chemistry) {
                                 ImGui::TextDisabled(
                                     "Chemistry: %s | rho %.1f kg/m3 | melt %.1f K | boil %.1f K%s",
-                                    chemistry.default_constitutive_model.c_str(),
-                                    chemistry.density, chemistry.melt_kelvin,
-                                    chemistry.boiling_kelvin,
-                                    chemistry.fluid_flammable ? " | flammable" : "");
+                                    RayTrophiSim::Fluid::matterConstitutiveModelName(
+                                        chemistry->default_constitutive_model),
+                                    chemistry->density, chemistry->melt_kelvin,
+                                    chemistry->boiling_kelvin,
+                                    chemistry->fluid_flammable ? " | flammable" : "");
                                 if (ImGui::IsItemHovered()) {
                                     ImGui::SetTooltip(
                                         "Read from the central Substance profile. Reaction constants\n"
@@ -1903,64 +1871,58 @@ void drawSimulationDomainControls(
                     auto& fp = domain.fluid_params;
                     if (UIWidgets::CollapsingHeader("Liquid Material", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
-                    ImGui::TextDisabled("Material Preset");
-                    if (drawFluidPresetCombo("##GridFluidSolverPreset", fp)) {
+                    // ★ The domain's material is ONE substance from the library.
+                    // Its physics (viscosity, granular skeleton, freeze point,
+                    // conduction, chemistry) resolve from it every step and are
+                    // edited on the substance, below; choosing it also writes its
+                    // solver hints, which stay editable here. Replaces the Material
+                    // Preset and Chemistry Preset lists (docs/dev/MADDE_TIPLERI_TASARIMI.md).
+                    std::string material_error;
+                    const auto set_default_substance = [&](const std::string& name) {
+                        const auto r = rtapi::updateFluidDomain(domain.name, nullptr, nullptr,
+                            nullptr, nullptr, nullptr, nullptr, &name);
+                        if (!r.ok) material_error = r.error;
+                        scene.requestSimulationTimelineRenderResync();
                         ui_ctx.start_render = true;
-                    }
-                    // Manual edits to any preset-driven rheology field demote the
-                    // dropdown to "Custom" so it stops claiming a stale material.
-                    bool fp_edited = false;
-                    // ★★★ THE ONE ROW THAT SETS THICKNESS, and it was the ninth
-                    // row down in a block where four of the eight above it are
-                    // also called viscous / friction / damping. "Internal Viscous
-                    // Friction", "Velocity Damping", "Air Drag" and "Wall Friction
-                    // Damping" all read like viscosity and none of them are one:
-                    // they drag the whole body instead of resisting SHEAR. A user
-                    // hunting for viscosity finds four plausible knobs before this
-                    // one and reasonably concludes the real control is gone.
-                    ImGui::SeparatorText("Rheology (how thick it is)");
-
-                    // Logarithmic: the useful range spans six decades (water 1e-6
-                    // to lava 1e2), so a linear drag bar would put every liquid
-                    // anyone actually pours inside its first pixel.
-                    fp_edited |= ImGui::DragFloat("Kinematic Viscosity (m^2/s)", &fp.kinematic_viscosity,
-                                                  0.0001f, 0.0f, 100.0f, "%.6f",
-                                                  ImGuiSliderFlags_Logarithmic);
-                    // ★★★ AND IT DOES NOT APPLY TO EVERY PARTICLE. A substance
-                    // binding that is not inheriting carries its OWN ν, captured
-                    // when its "Inherit Domain Viscosity" box was unticked, and
-                    // from that moment this row — and every material preset
-                    // written through it — is a no-op for that liquid. The domain
-                    // knob still moved, still read back, still changed the preset
-                    // name, and nothing on screen got thicker. That reads exactly
-                    // as "all the thick presets use one fixed high viscosity".
+                    };
+                    ImGui::TextDisabled("Default Substance");
                     {
-                        std::string pinned;
-                        for (const auto& b : domain.fluid_substance_materials) {
-                            if (b.kinematic_viscosity < 0.0f) continue;   // inheriting
-                            if (!pinned.empty()) pinned += ", ";
-                            pinned += b.substance.empty() ? std::string("(unnamed)") : b.substance;
+                        std::string chosen = fp.default_substance;
+                        if (SubstanceEditorUI::drawPicker("##DomainDefaultSubstance", chosen)) {
+                            set_default_substance(chosen);
                         }
-                        if (!pinned.empty()) {
-                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.72f, 0.25f, 1.0f));
-                            ImGui::TextWrapped(
-                                "Not applied to: %s - these substances pin their own "
-                                "viscosity. Tick \"Inherit Domain Viscosity\" on them "
-                                "in Substance Overrides to let this row (and material "
-                                "presets) reach them.", pinned.c_str());
-                            ImGui::PopStyleColor();
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "What this domain is made of. Untagged parcels ARE this substance,\n"
+                                "and the domain's viscosity, granular skeleton, freeze point and\n"
+                                "chemistry come from it every step. Picking one also applies its\n"
+                                "solver hints (FLIP blend, damping, sweeps...), editable below.");
+                        }
+                        std::string edited = fp.default_substance;
+                        if (SubstanceEditorUI::draw("##DomainSubstanceEditor", edited)) {
+                            if (!edited.empty() && edited != fp.default_substance) {
+                                set_default_substance(edited);   // derived: assign it
+                            } else {
+                                scene.requestSimulationTimelineRenderResync();
+                                ui_ctx.start_render = true;
+                            }
                         }
                     }
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Physical kinematic viscosity in m^2/s, solved implicitly\n"
-                                          "as nu*dt/h^2 - so the same value behaves the same at any\n"
-                                          "voxel size.\n"
-                                          "  water 1e-6 | olive oil 8e-5 | chocolate 4e-3\n"
-                                          "  honey 7e-3 | molten plastic 0.3 | lava 0.5+\n"
-                                          "0 skips the solve entirely.");
-                    }
+                    if (!material_error.empty()) ImGui::TextWrapped("%s", material_error.c_str());
+                    ImGui::TextDisabled("Resolved: nu %.3g m^2/s%s | %s | freeze %.1f K | %s",
+                        fp.kinematic_viscosity,
+                        fp.kinematic_viscosity == 0.0f && !fp.granular_enabled
+                            ? " (below voxel resolution: solve skipped)" : "",
+                        fp.granular_enabled ? "granular skeleton" : "liquid",
+                        fp.thermal_freeze_kelvin,
+                        fp.fuel_profile.flammable ? "flammable"
+                            : fp.fuel_profile.extinguishing ? "extinguishes fire" : "inert");
+
+                    ImGui::SeparatorText("Solver tuning (numerical, per domain)");
+                    // Written from the substance's solver hints when it was
+                    // chosen; edits here stay on this domain.
                     ImGui::SetNextItemWidth(120.0f);
-                    fp_edited |= ImGui::DragInt("Viscosity Sweeps", &fp.viscosity_sweeps, 1.0f, 1, 64);
+                    ImGui::DragInt("Viscosity Sweeps", &fp.viscosity_sweeps, 1.0f, 1, 64);
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Red-black Gauss-Seidel sweeps for the implicit solve.\n"
                                           "Too few never explodes - it UNDER-applies the viscosity,\n"
@@ -1969,12 +1931,35 @@ void drawSimulationDomainControls(
                     }
                     ImGui::SameLine();
                     ImGui::SetNextItemWidth(140.0f);
-                    fp_edited |= ImGui::SliderFloat("Wall Slip", &fp.viscosity_wall_slip, 0.0f, 1.0f, "%.2f");
+                    ImGui::SliderFloat("Wall Slip", &fp.viscosity_wall_slip, 0.0f, 1.0f, "%.2f");
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Tangential condition at colliders for the viscous solve.\n"
                                           "0 = no-slip: the liquid sticks to surfaces and is dragged\n"
                                           "    by moving ones. Honey, chocolate, mud, lava.\n"
                                           "1 = free-slip: slides freely. Water.");
+                    }
+                    if (ImGui::Button("Re-apply substance solver hints")) {
+                        set_default_substance(fp.default_substance);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Overwrites this domain's FLIP/APIC blend, damping, drag,\n"
+                                          "sweeps, wall slip, substep ceiling and thermal-chain switch\n"
+                                          "with the values the substance was tuned with.");
+                    }
+                    // Substances binding their own viscosity still override the
+                    // domain material for their parcels: say which.
+                    {
+                        std::string pinned;
+                        for (const auto& b : domain.fluid_substance_materials) {
+                            if (b.kinematic_viscosity < 0.0f) continue;   // inheriting
+                            if (!pinned.empty()) pinned += ", ";
+                            pinned += b.substance.empty() ? std::string("(unnamed)") : b.substance;
+                        }
+                        if (!pinned.empty()) {
+                            ImGui::TextWrapped(
+                                "Own viscosity pinned in Substance Overrides: %s - the default "
+                                "substance's viscosity does not reach those parcels.", pinned.c_str());
+                        }
                     }
 
                     // ── Thermal liquid (wax) ─────────────────────────────────
@@ -1993,121 +1978,36 @@ void drawSimulationDomainControls(
                         RayTrophiSim::fluidDomainAmbientKelvin(
                             domain,
                             particles->worldThermal());
-                    fp_edited |= FluidThermalUI::drawDomainControls(
+                    FluidThermalUI::drawDomainControls(
                         fp,
                         thermal_stats,
                         thermal_ambient_kelvin,
                         particles->flowSources(),
                         selected_domain_index);
-                    if (fp_edited) {
-                        fp.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
-                    }
                     }
 
-                    // The grain solver owns granular carriers: the legacy MPM granular
-                    // material is not read, so it is not offered (one line says why).
+                    // The grain solver owns granular carriers.
                     RayTrophiSim::Fluid::drawMatterGrainMaterial(domain);
                     if (fp.grain.enabled) {
                         ImGui::TextDisabled("Legacy MPM granular material is not used while the grain solver is on.");
-                    } else if (UIWidgets::CollapsingHeader("Granular Material", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        bool granular_edited = false;
-                        granular_edited |= ImGui::Checkbox("Enable Granular MPM", &fp.granular_enabled);
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Switches this domain from incompressible liquid physics to compressible\n"
-                                              "Drucker-Prager granular MPM on Vulkan. Liquid pressure projection,\n"
-                                              "viscosity and particle reseeding are disabled. Use for sand, gravel,\n"
-                                              "soil, powder, snow and other frictional bulk materials.");
-                        ImGui::BeginDisabled(!fp.granular_enabled);
-                        granular_edited |= ImGui::SliderFloat("Friction Angle (deg)", &fp.granular_friction_angle_degrees, 0.0f, 55.0f, "%.1f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Internal grain friction controlling the shear-yield surface and repose angle.\n"
-                                              "Low values spread easily; high values form steeper, more stable piles.\n"
-                                              "Typical guides: powder 15-25, dry sand 30-38, angular gravel 38-48 deg.");
-                        granular_edited |= ImGui::DragFloat("Cohesion (Pa)", &fp.granular_cohesion, 1.0f, 0.0f, 100000.0f, "%.1f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Shear strength that remains even with no confining pressure.\n"
-                                              "0 Pa gives dry, non-sticky grains. Raise it for damp sand, soil, clay\n"
-                                              "or compacted snow. Excessive cohesion makes one rubber-like lump.");
-                        granular_edited |= ImGui::SliderFloat("Dilatancy (deg)", &fp.granular_dilatancy_degrees, 0.0f, 30.0f, "%.1f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Volume expansion produced by plastic shear as grains climb over neighbours.\n"
-                                              "0 keeps volume during shear; higher values make dense material swell\n"
-                                              "and loosen while flowing. Usually below the friction angle; sand 0-12 deg.");
-                        granular_edited |= ImGui::DragFloat("Young Modulus (Pa)", &fp.granular_young_modulus, 100.0f, 10.0f, 10000000.0f, "%.0f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Elastic stiffness before plastic yield. Higher values reduce the soft/rubber\n"
-                                              "compression seen on impact but require more granular solver substeps.\n"
-                                              "Adaptive substeps preserve the requested stiffness for elastic CFL stability.");
+                    } else if (fp.granular_enabled &&
+                               UIWidgets::CollapsingHeader("Granular Skeleton (from substance)",
+                                                           ImGuiTreeNodeFlags_DefaultOpen)) {
+                        // Read-only: these are the default substance's granular
+                        // fields (edit them in the Substance tree above).
+                        ImGui::TextDisabled("Friction %.1f deg | cohesion %.0f Pa | dilatancy %.1f deg",
+                            fp.granular_friction_angle_degrees, fp.granular_cohesion,
+                            fp.granular_dilatancy_degrees);
+                        ImGui::TextDisabled("E %.3g Pa | Poisson %.3f | tensile %.0f Pa | hardening %.2f",
+                            fp.granular_young_modulus, fp.granular_poisson_ratio,
+                            fp.granular_tensile_cutoff, fp.granular_hardening);
+                        ImGui::TextDisabled("Fracture %.3f | damage %.2f 1/s | rebond %s (heal %.2f 1/s)",
+                            fp.granular_fracture_strain, fp.granular_damage_rate,
+                            fp.granular_rebonding ? "on" : "off", fp.granular_healing_rate);
+                        ImGui::TextDisabled("Softening %.0f K over %.0f K, residual %.3f, tack peak %.2f",
+                            fp.granular_softening_temperature, fp.granular_softening_range,
+                            fp.granular_residual_strength, fp.granular_tack_peak);
                         ImGui::TextDisabled("Granular substeps: adaptive (stiffness preserved)");
-                        granular_edited |= ImGui::SliderFloat("Poisson Ratio", &fp.granular_poisson_ratio, 0.0f, 0.49f, "%.3f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Couples axial compression to sideways expansion in the elastic response.\n"
-                                              "0 is independently compressible; values near 0.5 resist volume change.\n"
-                                              "Loose grains are commonly 0.15-0.30. Avoid 0.49 at coarse timesteps.");
-                        granular_edited |= ImGui::DragFloat("Tensile Cutoff (Pa)", &fp.granular_tensile_cutoff, 1.0f, 0.0f, 100000.0f, "%.1f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Maximum tensile stress before material points detach.\n"
-                                              "0 means dry grains cannot carry tension and separate immediately.\n"
-                                              "Raise it for wet sand, clay, packed snow or weak bonded aggregates.");
-                        granular_edited |= ImGui::DragFloat("Hardening", &fp.granular_hardening, 0.01f, 0.0f, 100.0f, "%.2f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Changes resistance after plastic deformation. 0 keeps constant strength;\n"
-                                              "higher values make compressed/sheared material progressively harder.\n"
-                                              "Useful for compacting soil and snow; keep near 0 for dry sand.");
-                        ImGui::SeparatorText("Damage & Rebonding");
-                        granular_edited |= ImGui::DragFloat("Fracture Strain", &fp.granular_fracture_strain, 0.001f, 0.001f, 1.0f, "%.3f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Maximum irreversible Rankine bond-opening strain where damage begins.\n"
-                                              "It is not summed once per solver substep. Frictional compression/shear\n"
-                                              "may still flow and harden without\n"
-                                              "spending this fracture budget. Low values give brittle snowballs\n"
-                                              "or soil clods; it is inactive when cohesion and tension are zero.");
-                        granular_edited |= ImGui::DragFloat("Damage Rate", &fp.granular_damage_rate, 0.05f, 0.0f, 100.0f, "%.2f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Post-threshold softening slope per unit strain. Damage follows\n"
-                                              "1-exp(-rate * excess strain), so it grows progressively instead\n"
-                                              "of deleting every bond on the first yielded frame. 0 disables it.");
-                        granular_edited |= ImGui::Checkbox("Allow Rebonding", &fp.granular_rebonding);
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Lets damaged grains rebuild bonds while compressed and below yield.\n"
-                                              "Off for dry sand/gravel; on for wet sand, clay and compacting snow.");
-                        ImGui::BeginDisabled(!fp.granular_rebonding);
-                        granular_edited |= ImGui::DragFloat("Healing Rate", &fp.granular_healing_rate, 0.01f, 0.0f, 20.0f, "%.2f");
-                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                            ImGui::SetTooltip("Fractional bond-damage recovery per second under compression.\n"
-                                              "Higher values let compressed fragments clump and rebuild bonds faster.\n"
-                                              "Airborne or freely separated fragments do not heal.");
-                        ImGui::EndDisabled();
-                        ImGui::SeparatorText("Thermal / Burn Softening");
-                        granular_edited |= ImGui::DragFloat("Softening Temperature (K)",
-                                                           &fp.granular_softening_temperature,
-                                                           1.0f, 0.0f, 4000.0f, "%.0f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Temperature at which the granular skeleton has lost half\n"
-                                              "its strength. 0 DISABLES softening entirely (sand does not\n"
-                                              "melt). Bond strength falls faster than stiffness, so the body\n"
-                                              "stops holding its shape before it goes soft.\n"
-                                              "Remaining mass_fraction multiplies this, so a charring body\n"
-                                              "weakens as it burns off without a second dial.");
-                        granular_edited |= ImGui::DragFloat("Softening Range (K)",
-                                                           &fp.granular_softening_range,
-                                                           1.0f, 1.0f, 2000.0f, "%.0f");
-                        granular_edited |= ImGui::SliderFloat("Residual Strength",
-                                                             &fp.granular_residual_strength,
-                                                             0.0f, 1.0f, "%.3f");
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Fraction of strength kept once fully softened.\n"
-                                              "0 = a true melt; a small value leaves a molten residue.");
-                        ImGui::EndDisabled();
-                        if (granular_edited) {
-                            fp.sanitizeGranularMaterial();
-                            fp.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
-                        }
-                        // These parameters are in the fluid coupling signature,
-                        // so committing an edit drops the bake and snaps the
-                        // playhead to frame 0 by itself. Telling the user to
-                        // Reset + Seed by hand described the old behaviour and
-                        // would now just be a second, redundant round trip.
                         ImGui::TextDisabled(
                             "Material edits rewind to frame 0 and drop the bake automatically.");
                     }
@@ -2115,38 +2015,8 @@ void drawSimulationDomainControls(
                     if (UIWidgets::CollapsingHeader(
                             "Combustible Liquid / Gas Coupling",
                             ImGuiTreeNodeFlags_DefaultOpen)) {
-                        using ChemistryPreset = RayTrophiSim::Fluid::FluidChemistryPreset;
-                        static const char* chemistry_labels[] = {
-                            "Inert", "Water", "Gasoline", "Alcohol", "Oil", "Custom", "Plastic", "Wax"
-                        };
-                        int chemistry_index = static_cast<int>(
-                            domain.fluid_params.chemistry_preset);
-                        chemistry_index = std::clamp(chemistry_index, 0, 7);
-                        ImGui::SetNextItemWidth(DomainUi::itemWidth());
-                        if (ImGui::Combo("Chemistry Preset##FluidChemistry",
-                                         &chemistry_index, chemistry_labels, 8)) {
-                            const auto chosen = static_cast<ChemistryPreset>(chemistry_index);
-                            domain.fluid_params.applyChemistryProfile(
-                                chosen, particles->worldThermal().scale());
-                            const auto& chemistry = domain.fluid_params.fuel_profile;
-                            domain.fluid_flammable = chemistry.flammable;
-                            domain.fluid_extinguishing = chemistry.extinguishing;
-                            domain.fluid_ignition_temperature = chemistry.flash_temperature;
-                            domain.fluid_evaporation_rate = chemistry.vaporization_rate;
-                            domain.fluid_cooling_power = chemistry.cooling_power;
-                            domain.fluid_oxygen_dilution = chemistry.oxygen_dilution;
-                            if (chemistry.extinguishing) {
-                                domain.fluid_surface_cooling = std::max(
-                                    domain.fluid_surface_cooling,
-                                    chemistry.cooling_power);
-                            }
-                        }
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip(
-                                "Chemical behavior is independent from the physical fluid preset.\n"
-                                "Use Oil physics + Gasoline chemistry for a fast fuel jet,\n"
-                                "or Water chemistry to cool and extinguish overlapping gas fire.");
-                        }
+                        ImGui::TextDisabled("Chemistry: from the default substance (%s)",
+                                            fp.default_substance.c_str());
                         ImGui::Checkbox(
                             "Enable Flammable Surface##FluidFire",
                             &domain.fluid_flammable);
@@ -2344,10 +2214,13 @@ void drawSimulationDomainControls(
                                 // matter is, and representation below only says
                                 // how to draw it. Putting the render routing
                                 // first is what made the two read as one knob.
+                                // Only a STATIC block is authored here. Liquid parcels
+                                // melt and freeze by temperature, so their phase is
+                                // derived, not chosen.
                                 int phase_idx = static_cast<int>(binding.phase);
-                                const char* phases[] = { "Liquid", "Solid (blocks flow)" };
+                                const char* phases[] = { "Fluid (derived by temperature)", "Static solid block (blocks flow)" };
                                 ImGui::SetNextItemWidth(-FLT_MIN);
-                                if (ImGui::Combo("Phase", &phase_idx, phases, 2)) {
+                                if (ImGui::Combo("Static block", &phase_idx, phases, 2)) {
                                     binding.phase =
                                         static_cast<RayTrophiSim::Fluid::SubstancePhase>(phase_idx);
                                     // Physics: the baked frames were solved with
@@ -2373,34 +2246,6 @@ void drawSimulationDomainControls(
                                         "cells separately so the two cases can be told apart.");
                                 }
 
-                                int model_idx = static_cast<int>(
-                                    binding.constitutive_model);
-                                const char* constitutive_models[] = {
-                                    "Auto / Legacy", "Fluid", "Granular", "Elastic"
-                                };
-                                ImGui::SetNextItemWidth(-FLT_MIN);
-                                if (ImGui::Combo(
-                                        "Constitutive Model", &model_idx,
-                                        constitutive_models, 4)) {
-                                    const std::string model_name =
-                                        RayTrophiSim::Fluid::matterConstitutiveModelName(
-                                            static_cast<RayTrophiSim::Fluid::MatterConstitutiveModel>(
-                                                model_idx));
-                                    const auto result = rtapi::setFluidSubstanceMaterial(
-                                        domain.name, binding.substance, "",
-                                        nullptr, nullptr, nullptr, nullptr,
-                                        &model_name);
-                                    if (result.ok) {
-                                        scene.requestSimulationTimelineRenderResync();
-                                        ui_ctx.start_render = true;
-                                    }
-                                }
-                                if (ImGui::IsItemHovered()) {
-                                    ImGui::SetTooltip(
-                                        "Solver regime for parcels carrying this Substance.\n"
-                                        "Fluid uses the incompressible APIC path; Granular selects\n"
-                                        "the frictional MPM path. Phase and Drawn As remain separate.");
-                                }
 
                                 bool inherit_visc = binding.kinematic_viscosity < 0.0f;
                                 if (ImGui::Checkbox("Inherit Domain Viscosity", &inherit_visc)) {
@@ -2950,9 +2795,7 @@ void drawSimulationDomainControls(
                         ImGui::SetTooltip("Experimental CUDA MGPCG multigrid preconditioner.\n"
                                           "Can cut iteration count on large grids, but adds extra dispatch work per iteration.");
                     }
-                    if (fp_edited) {
-                        fp.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
-                    }
+                    (void)fp_edited;   // numerical settings: no material label to demote
                     }
 
                     // Redistribution / Reseed settings

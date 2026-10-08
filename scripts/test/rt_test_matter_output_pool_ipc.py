@@ -30,7 +30,7 @@ def main():
                     domain_min=[0, 0, 0], domain_max=[2, 2, 2], voxel_size=0.125)
         created = True
         client.call("fluid.set_param", domain=domain, backend="vulkan", boundary="closed",
-                    preset="water", max_particles=1000)
+                    default_substance="Water", max_particles=1000)
         client.call("fluid.set_whitewater", domain=domain, enabled=False)
         for substance, material, representation in [("Water", water, "sdf"),
                                                     ("Sand", sand, "splat")]:
@@ -46,8 +46,7 @@ def main():
                 ("Water", "fluid", 1.0), ("Sand", "granular", 3.0)]):
             name = domain + "_" + substance
             client.call("flow_source.create", name=name, domain=domain, phase="liquid",
-                        fluid_substance=substance, initial_constitutive_model=model,
-                        position=[0.7 + i * 0.6, 1.2, 1], radius=0.15,
+                        fluid_substance=substance, position=[0.7 + i * 0.6, 1.2, 1], radius=0.15,
                         fluid_particles_per_second=240000, particle_pool_weight=weight)
             sources.append(name)
         original = client.call("flow_source.get", name=sources[0])

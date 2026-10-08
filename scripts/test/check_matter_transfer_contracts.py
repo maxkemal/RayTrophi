@@ -26,8 +26,11 @@ def main():
     cache = read("src/Physics/SimCache.cpp")
     assert "writePod(os, d.particles.next_particle_id)" in cache
     assert "readPod(is, d.particles.next_particle_id)" in cache
-    assert "identity >= d.particles.next_particle_id" in cache
-    assert "kVersion = 11u" in read("include/SimCache.h")
+    assert "sorted.back() >= next_identity" in cache
+    assert "sorted.front() == 0" in cache
+    assert "std::adjacent_find(sorted.begin(), sorted.end())" in cache
+    assert "readParticleIdentities(is, d.particles.particle_id," in cache
+    assert "kVersion = 12u" in read("include/SimCache.h")
     frame_cache = read("include/scene_data.h")
     assert "c.meta = st;" in frame_cache
     assert "particles.particle_id.clear" not in frame_cache
@@ -68,7 +71,7 @@ def main():
     assert "fluid.matter_models" in descriptor
     assert '"fluid.matter_models", "fluid"' in read("src/Api/RtIpcMethodDescriptors.cpp")
     ast.parse((repo / "scripts/test/rt_test_matter_models_ipc.py").read_text())
-    print("PASS: identities, cache v11, separate transfer/contact, UI/API/IPC, project XML")
+    print("PASS: identities, cache v11/v12, separate transfer/contact, UI/API/IPC, project XML")
 
 
 if __name__ == "__main__":

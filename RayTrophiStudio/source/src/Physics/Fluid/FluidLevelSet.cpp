@@ -25,6 +25,7 @@
 
 #include "Fluid/FluidLevelSet.h"
 #include "Fluid/SubstanceTag.h"
+#include "PerfProfile.h"
 
 #include <algorithm>
 #include <chrono>
@@ -228,6 +229,7 @@ bool buildLevelSet(const FluidParticles& particles,
                    const FluidViewSelection* selection)
 {
     using clock = std::chrono::steady_clock;
+    RTPERF_FRAME_SCOPE("sim.render.surface.level_set");
     const auto t_start = clock::now();
 
     // The surface grid may be refined relative to the simulation grid: the SDF
@@ -681,6 +683,7 @@ bool buildMaterialCoordinateGrid(const FluidParticles& particles,
                                  std::vector<float>& uvw_out,
                                  const FluidViewSelection* selection)
 {
+    RTPERF_FRAME_SCOPE("sim.render.surface.material_coordinates");
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
     const float voxel = grid.voxel_size;
     const std::size_t cell_count = static_cast<std::size_t>(nx) *
@@ -1036,6 +1039,7 @@ bool buildCompositionGrid(const FluidParticles& particles,
                           std::vector<float>& composition_out,
                           const FluidViewSelection* selection)
 {
+    RTPERF_FRAME_SCOPE("sim.render.surface.composition");
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
     const float voxel = grid.voxel_size;
     const std::size_t cell_count = static_cast<std::size_t>(nx) *

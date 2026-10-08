@@ -31,7 +31,7 @@ def main():
         call("fluid.create_domain", name=name, type="matter", domain_min=[20, 0, 20],
              domain_max=[26, 6, 26], voxel_size=0.1)
         call("fluid.set_param", domain=name, backend="vulkan", boundary="closed",
-             preset="water", visible=False)
+             default_substance="Water", visible=False)
         call("fluid.set_whitewater", domain=name, enabled=False)
         phase(name, "gas", bounds_min=[20, 0, 20], bounds_max=[26, 6, 26], voxel=0.3)
         phase(name, "liquid", bounds_min=[21, 0, 21], bounds_max=[23, 2, 23], voxel=0.1)

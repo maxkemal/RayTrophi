@@ -129,7 +129,7 @@ double matterGrainDragCoefficient(double diameter, double relative_speed, double
 }
 
 bool buildMatterGrainLiquidField(const FluidParticles& liquid, const FluidParticles& grains,
-    float grain_radius, FluidChemistryPreset chemistry_preset, const Vec3& origin,
+    float grain_radius, const SubstanceProfile* domain_substance, const Vec3& origin,
     int nx, int ny, int nz, float h, MatterGrainLiquidField& f, std::string& error) {
     if (nx <= 0 || ny <= 0 || nz <= 0 || !(h > 0.0f) || !finite(origin)) {
         error = "grain liquid coupling needs a valid domain grid";
@@ -186,7 +186,7 @@ bool buildMatterGrainLiquidField(const FluidParticles& liquid, const FluidPartic
         auto found = density_by_tag.find(tag);
         if (found == density_by_tag.end()) {
             // fluidParticleRestMassKg(h = 1 m, ppc = 1) is the liquid density.
-            const double density = fluidParticleRestMassKg(tag, chemistry_preset, 1.0f, 1,
+            const double density = fluidParticleRestMassKg(tag, domain_substance, 1.0f, 1,
                 MatterConstitutiveModel::Fluid, false);
             found = density_by_tag.emplace(tag, density > 0.0 ? density : 1000.0).first;
         }
@@ -194,7 +194,7 @@ bool buildMatterGrainLiquidField(const FluidParticles& liquid, const FluidPartic
         // when the tag names no profile, as density falls back to 1000).
         auto viscous = viscosity_by_tag.find(tag);
         if (viscous == viscosity_by_tag.end()) {
-            const auto* profile = resolveFluidSubstanceProfile(tag, chemistry_preset);
+            const auto* profile = resolveFluidSubstanceProfile(tag, domain_substance);
             const double mu = profile ? double(profile->liquid_kinematic_viscosity) *
                 profile->liquid_density : 1.0e-3;
             viscous = viscosity_by_tag.emplace(tag,

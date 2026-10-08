@@ -120,7 +120,7 @@ void drawMatterOutputControls(const SimulationGridDomainDesc& domain) {
         if (ImGui::Combo("Output", &selected, choices, 4)) {
             const std::string route = names[selected];
             const auto result = rtapi::setFluidSubstanceMaterial(
-                domain.name, substance, "", &route, nullptr, nullptr, nullptr, nullptr);
+                domain.name, substance, "", &route, nullptr, nullptr, nullptr);
             error = result.ok ? "" : result.error;
         }
         DomainUi::tooltip("How this substance is drawn: the domain's view, splat spheres, SDF\n"
@@ -139,7 +139,7 @@ void drawMatterOutputControls(const SimulationGridDomainDesc& domain) {
             if (ImGui::Selectable("Domain material", material_id < 0)) {
                 const auto result = rtapi::setFluidSubstanceMaterial(
                     domain.name, substance, "dielectric",
-                    nullptr, nullptr, nullptr, nullptr, nullptr);
+                    nullptr, nullptr, nullptr, nullptr);
                 error = result.ok ? "" : result.error;
             }
             for (const auto& material : materials) {
@@ -147,7 +147,7 @@ void drawMatterOutputControls(const SimulationGridDomainDesc& domain) {
                                       static_cast<int>(material.id) == material_id)) {
                     const auto result = rtapi::setFluidSubstanceMaterial(
                         domain.name, substance, material.name,
-                        nullptr, nullptr, nullptr, nullptr, nullptr);
+                        nullptr, nullptr, nullptr, nullptr);
                     error = result.ok ? "" : result.error;
                 }
             }
@@ -160,7 +160,7 @@ void drawMatterOutputControls(const SimulationGridDomainDesc& domain) {
             if (result.ok) {
                 result = rtapi::setFluidSubstanceMaterial(
                     domain.name, substance, created,
-                    nullptr, nullptr, nullptr, nullptr, nullptr);
+                    nullptr, nullptr, nullptr, nullptr);
             }
             error = result.ok ? "" : result.error;
         }
@@ -172,7 +172,7 @@ void drawMatterOutputControls(const SimulationGridDomainDesc& domain) {
         if (has_binding && ImGui::Button("Remove output binding")) {
             const auto result = rtapi::setFluidSubstanceMaterial(
                 domain.name, substance, "",
-                nullptr, nullptr, nullptr, nullptr, nullptr);
+                nullptr, nullptr, nullptr, nullptr);
             error = result.ok ? "" : result.error;
         }
         if (has_binding && ImGui::IsItemHovered()) {
@@ -185,8 +185,7 @@ void drawMatterOutputControls(const SimulationGridDomainDesc& domain) {
         for (const auto& source : sources) {
             if (source.domain == domain.name && source.phase == "liquid" &&
                 source.fluid_substance == substance) {
-                ImGui::TextDisabled("Emitter: %s / initial model: %s",
-                    source.name.c_str(), source.initial_constitutive_model.c_str());
+                ImGui::TextDisabled("Emitter: %s", source.name.c_str());
             }
         }
         ImGui::PopID();

@@ -817,7 +817,8 @@ void SceneUI::drawSimulationNodeProperties(NodeSystem::Sim::SimulationNodeGraph&
     else if (auto* sub = dynamic_cast<SubstanceNode*>(selected)) {
         ImGui::TextUnformatted("Substance");
         std::vector<std::string> substances;
-        rtapi::listMaterialSubstances(substances);
+        for (const auto* profile : RayTrophiSim::substanceProfiles())
+            substances.push_back(profile->name);
         std::string choice;
         if (namePicker("##substance", sub->substanceName, substances, false, choice))
             setText("substance", choice);

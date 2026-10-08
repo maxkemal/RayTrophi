@@ -10,6 +10,7 @@
 #define OPENEXR_DLL
 
 #include "VDBVolumeManager.h"
+#include "PerfProfile.h"
 #include "Transform.h"
 #include "globals.h"
 
@@ -478,6 +479,7 @@ bool VDBVolumeManager::updateVolume(int volume_id, const std::string& filepath, 
 int VDBVolumeManager::registerOrUpdateLiveVolume(int existing_id, const std::string& name, 
                                                int res_x, int res_y, int res_z, float voxel_size,
                                                const float* density_ptr, const float* temp_ptr, void* stream) {
+    RTPERF_FRAME_SCOPE("sim.render.volume.publish");
     if (!initialized) initialize();
     if (!initialized) return -1;
 

@@ -428,9 +428,6 @@ uint32_t requiredCapabilities(const std::string& method) {
         // Raw imported-clip counters. Read-only, and neither name matches the
         // .get/.list/.status substring heuristics below.
         method == "anim.source_clips" || method == "anim.source_channels" ||
-        // Substance library enumeration: read-only, and its name matches none
-        // of the ".get"/".list" substring heuristics below.
-        method == "msf.substances" || method == "msf.substance" ||
         method == "matter.exchanges" ||
         method == "msf.fields" ||
         method == "templates.refresh" || method == "templates.validate" ||
@@ -459,6 +456,9 @@ uint32_t requiredCapabilities(const std::string& method) {
         "scene.", "select.", "material.", "lights.", "timeline.", "camera.", "spline.", "geometry_cache.", "mesh.profile.",
         "world.", "post.", "anim.", "rig.", "nodes.", "modifiers.",
         "scatter.", "physics.", "forcefield.", "particle.", "fluid.", "gas.", "msf.", "terrain.", "water.",
+        // Substance library: list/get are Read by the heuristics above;
+        // derive/set/remove edit project substances (SceneWrite).
+        "substance.",
         // Shared simulation colliders (rt.collider parity). `collider.list` and
         // `collider.get` fall through to Read above; create/update/remove/
         // rebuild_sdf land here as SceneWrite.

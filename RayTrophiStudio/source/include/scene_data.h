@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -2795,11 +2795,10 @@ struct SceneData {
                 const bool renderable =
                     domain_render_enabled && system.visible && state.valid &&
                     render_grid.nx > 0 && !fluid_skip_volume &&
-                    // Volume mode needs density splatted; SurfaceSDF rebuilds
-                    // its own density-proxy from particles, so it only needs
-                    // particles to be present.
+                    // Resource intent is stable across empty frames, but only
+                    // parcels resolved to Surface can produce a live surface.
                     (fluid_surface_route
-                        ? !state.particles.empty()
+                        ? view_plan.anyLiveIn(RayTrophiSim::Fluid::FluidView::Surface)
                         : (has_density && state.active_density_cells > 0));
 
                 // ★ GATE 0 — the domain producer. This is the decision that
@@ -2858,7 +2857,7 @@ struct SceneData {
                     // POSITIONS, so a fluid that is parked (paused, or sitting on a
                     // restored cache frame) produces the identical signature forever.
                     // If a single frame skips publication — and the surface route
-                    // uniquely can, because `renderable` demands !particles.empty()
+                    // uniquely can, because `renderable` demands live surface parcels
                     // where the gas route only needs active_density_cells — then on
                     // the next frame upload_changed is FALSE, registerOrUpdateLiveVolume
                     // is never called again, the volume stays out of the volume packet
@@ -3983,7 +3982,10 @@ struct SceneData {
         h = mix(h, fb(fp.affine_damping));
         h = mix(h, fb(fp.max_affine));
         h = mix(h, static_cast<uint64_t>(fp.boundary));
-        h = mix(h, static_cast<uint64_t>(fp.chemistry_preset));
+        // The material by NAME: the physics it resolves to are hashed above and
+        // below, but two substances can share every hashed number and still
+        // differ in what an untagged parcel weighs or how it burns.
+        h = mix(h, static_cast<uint64_t>(std::hash<std::string>{}(fp.default_substance)));
         h = mix(h, fp.free_surface ? 1ull : 0ull);
         h = mix(h, fp.variational_solids ? 1ull : 0ull);
         h = mix(h, fp.ghost_fluid_surface ? 1ull : 0ull);
@@ -4095,7 +4097,6 @@ struct SceneData {
             h = mix(h, fb(b.kinematic_viscosity));
             h = mix(h, fb(b.miscibility));
             h = mix(h, static_cast<uint64_t>(b.phase));
-            h = mix(h, static_cast<uint64_t>(b.constitutive_model));
         }
         return h;
     }
@@ -4242,8 +4243,6 @@ struct SceneData {
                 // sequence baked under the old name no longer describes it.
                 h = mix(h, static_cast<uint64_t>(
                     RayTrophiSim::Fluid::substanceTag(f.fluid_substance)));
-                h = mix(h, static_cast<uint64_t>(
-                    f.initial_constitutive_model));
                 h = mix(h, f.use_time_limit ? 1ull : 0ull);
                 h = mix(h, qf(f.start_time)); h = mix(h, qf(f.end_time));
                 h = mix(h, f.use_particle_limit ? 1ull : 0ull);
@@ -4610,8 +4609,6 @@ struct SceneData {
                 h = mix(h, qf(f.fluid_temperature_kelvin));
                 h = mix(h, static_cast<uint64_t>(
                     RayTrophiSim::Fluid::substanceTag(f.fluid_substance)));
-                h = mix(h, static_cast<uint64_t>(
-                    f.initial_constitutive_model));
                 h = mix(h, f.use_time_limit ? 1ull : 0ull);
                 h = mix(h, qf(f.start_time)); h = mix(h, qf(f.end_time));
                 h = mix(h, f.use_particle_limit ? 1ull : 0ull);
@@ -6162,7 +6159,7 @@ struct SceneData {
                 std::vector<RayTrophiSim::MaterialStateFieldSnapshot> loaded_msf;
                 if (RayTrophiSim::SimCache::readSystemFrame(
                         sim_cache_dir_, particle_systems[i].id, frame, loaded, loaded_msf)) {
-                    particle_systems[i].runtime->setGridDomainStates(loaded);
+                    particle_systems[i].runtime->setGridDomainStates(std::move(loaded));
                     // Burn/heat damage rides alongside the grid states; without
                     // this a disk-replayed frame shows pristine geometry inside a
                     // fully simulated fire.
@@ -7359,7 +7356,7 @@ public:
             SCENE_LOG_WARN("[SimDiskCache] Failed to read manifest.json from: " + cache_dir);
             return false;
         }
-        if (m.version != RayTrophiSim::SimCache::kVersion) {
+        if (!RayTrophiSim::SimCache::supportsVersion(m.version)) {
             SCENE_LOG_WARN("[SimDiskCache] Manifest version mismatch (cache: " + 
                            std::to_string(m.version) + ", expected: " + 
                            std::to_string(RayTrophiSim::SimCache::kVersion) + ")");

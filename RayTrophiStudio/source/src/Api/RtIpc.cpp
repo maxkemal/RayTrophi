@@ -334,8 +334,7 @@ json substanceBindingsToJson(
                            {"miscibility", e.miscibility},
                            // State of matter, separate from `representation`:
                            // a solid still has to be drawn somehow.
-                           {"phase", e.phase},
-                           {"constitutive_model", e.constitutive_model}});
+                           {"phase", e.phase}});
     }
     return out;
 }
@@ -369,7 +368,6 @@ json flowSourceToJson(const rtapi::SimulationFlowSourceInfo& s) {
         // anything meaningful, and comparing hashes across a rename would give a
         // difference nobody could interpret.
         {"fluid_substance", s.fluid_substance},
-        {"initial_constitutive_model", s.initial_constitutive_model},
         {"fluid_temperature_override", s.fluid_temperature_override},
         {"fluid_temperature_kelvin", s.fluid_temperature_kelvin},
         {"use_time_limit", s.use_time_limit},
@@ -404,7 +402,6 @@ void applyFlowSourceJson(rtapi::SimulationFlowSourceInfo& s, const json& p) {
     RT_FS_FIELD("fluid_velocity_spread", fluid_velocity_spread);
     RT_FS_FIELD("fluid_emit_along_normal", fluid_emit_along_normal);
     RT_FS_FIELD("fluid_substance", fluid_substance);
-    RT_FS_FIELD("initial_constitutive_model", initial_constitutive_model);
     RT_FS_FIELD("fluid_temperature_override", fluid_temperature_override);
     RT_FS_FIELD("fluid_temperature_kelvin", fluid_temperature_kelvin);
     RT_FS_FIELD("use_time_limit", use_time_limit);
@@ -2811,7 +2808,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                             info.gas_phase_mass_centroid.z})},
                         {"live_state", info.live_state},
                         {"render_mode", info.render_mode}, {"backend", info.backend},
-                        {"boundary", info.boundary}, {"preset", info.preset},
+                        {"boundary", info.boundary}, {"default_substance", info.default_substance},
                         {"kinematic_viscosity", info.kinematic_viscosity},
                         {"viscosity_sweeps", info.viscosity_sweeps},
                         {"viscosity_wall_slip", info.viscosity_wall_slip},
@@ -2990,7 +2987,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                         info.gas_phase_mass_centroid.z})},
                     {"live_state", info.live_state},
                     {"render_mode", info.render_mode}, {"backend", info.backend},
-                    {"boundary", info.boundary}, {"preset", info.preset},
+                    {"boundary", info.boundary}, {"default_substance", info.default_substance},
                     {"kinematic_viscosity", info.kinematic_viscosity},
                     {"viscosity_sweeps", info.viscosity_sweeps},
                     {"viscosity_wall_slip", info.viscosity_wall_slip},
@@ -3176,15 +3173,15 @@ json dispatchMethod(const std::string& method, const json& params) {
         std::string domain = requireString(params, "domain");
         return enqueueResult([domain, params](UIContext&) {
             Vec3 dmin, dmax;
-            float voxel_size = 0.0f, kinematic_viscosity = 0.0f, wall_slip = 0.0f;
+            float voxel_size = 0.0f, wall_slip = 0.0f;
             int   sweeps = 0;
-            std::string render_mode, backend, boundary, preset;
+            std::string render_mode, backend, boundary, default_substance;
             bool enabled = false, visible = false;
             const Vec3* p_dmin = nullptr; const Vec3* p_dmax = nullptr;
-            const float* p_voxel = nullptr; const float* p_viscosity = nullptr;
+            const float* p_voxel = nullptr;
             const int* p_sweeps = nullptr; const float* p_wall_slip = nullptr;
             const std::string* p_render = nullptr; const std::string* p_backend = nullptr;
-            const std::string* p_boundary = nullptr; const std::string* p_preset = nullptr;
+            const std::string* p_boundary = nullptr; const std::string* p_substance = nullptr;
             const bool* p_enabled = nullptr; const bool* p_visible = nullptr;
             if (params.contains("domain_min")) { dmin = requireVec3(params, "domain_min"); p_dmin = &dmin; }
             if (params.contains("domain_max")) { dmax = requireVec3(params, "domain_max"); p_dmax = &dmax; }
@@ -3193,20 +3190,56 @@ json dispatchMethod(const std::string& method, const json& params) {
             if (params.contains("backend")) { backend = params.at("backend").get<std::string>(); p_backend = &backend; }
             else if (params.contains("device")) { backend = params.at("device").get<std::string>(); p_backend = &backend; }
             if (params.contains("boundary")) { boundary = params.at("boundary").get<std::string>(); p_boundary = &boundary; }
-            if (params.contains("preset")) { preset = params.at("preset").get<std::string>(); p_preset = &preset; }
+            if (params.contains("default_substance")) {
+                default_substance = params.at("default_substance").get<std::string>();
+                p_substance = &default_substance;
+            }
             // `viscosity` is intentionally NOT accepted as an alias: the old key
             // carried a unitless 0..200 dial and the new one is m²/s, so a script
             // still sending viscosity=20 for honey must fail visibly rather than
             // silently request lava.
             if (params.contains("viscosity")) {
                 return rtapi::Result::fail(
-                    "'viscosity' was replaced by 'kinematic_viscosity' in m^2/s "
-                    "(water 1e-6, oil 1e-4, chocolate 4e-3, honey 7e-3, lava 0.5). "
+                    "'viscosity' was removed: derive a substance and use substance.set "
+                    "liquid_kinematic_viscosity in m^2/s, then select default_substance. "
                     "The old value was unitless and is not convertible.");
             }
-            if (params.contains("kinematic_viscosity")) {
-                kinematic_viscosity = params.at("kinematic_viscosity").get<float>();
-                p_viscosity = &kinematic_viscosity;
+            // ★ The domain's physics moved to its default substance
+            // (docs/dev/MADDE_TIPLERI_TASARIMI.md). These keys are REFUSED, not
+            // ignored: a script still setting granular_young_modulus here would
+            // otherwise run with the substance's value and never know.
+            static const char* kMovedToSubstance[][2] = {
+                {"preset", "default_substance (a substance name; substance.list)"},
+                {"chemistry_preset", "default_substance"},
+                {"kinematic_viscosity", "liquid_kinematic_viscosity"},
+                {"granular_enabled", "default_constitutive_model (granular|fluid)"},
+                {"granular_friction_angle", "granular_friction_degrees"},
+                {"granular_cohesion", "granular_cohesion"},
+                {"granular_dilatancy", "granular_dilatancy_degrees"},
+                {"granular_young_modulus", "granular_young_modulus"},
+                {"granular_poisson_ratio", "granular_poisson_ratio"},
+                {"granular_tensile_cutoff", "granular_tensile_cutoff"},
+                {"granular_hardening", "granular_hardening"},
+                {"granular_fracture_strain", "granular_fracture_strain"},
+                {"granular_damage_rate", "granular_damage_rate"},
+                {"granular_healing_rate", "granular_healing_rate"},
+                {"granular_rebonding", "granular_rebonding"},
+                {"granular_softening_temperature", "granular_softening_kelvin"},
+                {"granular_softening_range", "granular_softening_range"},
+                {"granular_residual_strength", "granular_residual_strength"},
+                {"granular_tack_peak", "granular_tack_peak"},
+                {"granular_thermal_conductivity", "parcel_conduction"},
+                {"thermal_freeze_kelvin", "melt_kelvin"},
+                {"thermal_viscosity_range", "liquid_freeze_viscosity_range"},
+                {"thermal_cold_viscosity", "liquid_cold_viscosity"},
+            };
+            for (const auto& moved : kMovedToSubstance) {
+                if (params.contains(moved[0])) {
+                    return rtapi::Result::fail(std::string("'") + moved[0] +
+                        "' is a property of the domain's substance now: derive one "
+                        "(substance.derive) and set '" + moved[1] +
+                        "' with substance.set, then fluid.set_param default_substance=...");
+                }
             }
             if (params.contains("viscosity_sweeps")) {
                 sweeps = params.at("viscosity_sweeps").get<int>(); p_sweeps = &sweeps;
@@ -3271,42 +3304,13 @@ json dispatchMethod(const std::string& method, const json& params) {
             }
             if (params.contains("enabled")) { enabled = params.at("enabled").get<bool>(); p_enabled = &enabled; }
             if (params.contains("visible")) { visible = params.at("visible").get<bool>(); p_visible = &visible; }
-            bool granular_enabled=false; const bool* p_granular_enabled=nullptr;
-            float granular_friction=0,granular_cohesion=0,granular_dilatancy=0,granular_young=0;
-            float granular_poisson=0,granular_tensile=0,granular_hardening=0;
-            float granular_fracture=0,granular_damage=0,granular_healing=0;
-            bool granular_rebonding=false; const bool* p_granular_rebonding=nullptr;
             int granular_max_solver_substeps=0; const int* p_granular_max_solver_substeps=nullptr;
-            const float *p_granular_friction=nullptr,*p_granular_cohesion=nullptr,*p_granular_dilatancy=nullptr;
-            const float *p_granular_young=nullptr,*p_granular_poisson=nullptr,*p_granular_tensile=nullptr,*p_granular_hardening=nullptr;
-            const float *p_granular_fracture=nullptr,*p_granular_damage=nullptr,*p_granular_healing=nullptr;
-            if(params.contains("granular_enabled")){granular_enabled=params.at("granular_enabled").get<bool>();p_granular_enabled=&granular_enabled;}
-            if(params.contains("granular_friction_angle")){granular_friction=params.at("granular_friction_angle").get<float>();p_granular_friction=&granular_friction;}
-            if(params.contains("granular_cohesion")){granular_cohesion=params.at("granular_cohesion").get<float>();p_granular_cohesion=&granular_cohesion;}
-            if(params.contains("granular_dilatancy")){granular_dilatancy=params.at("granular_dilatancy").get<float>();p_granular_dilatancy=&granular_dilatancy;}
-            if(params.contains("granular_young_modulus")){granular_young=params.at("granular_young_modulus").get<float>();p_granular_young=&granular_young;}
-            if(params.contains("granular_poisson_ratio")){granular_poisson=params.at("granular_poisson_ratio").get<float>();p_granular_poisson=&granular_poisson;}
-            if(params.contains("granular_tensile_cutoff")){granular_tensile=params.at("granular_tensile_cutoff").get<float>();p_granular_tensile=&granular_tensile;}
-            if(params.contains("granular_hardening")){granular_hardening=params.at("granular_hardening").get<float>();p_granular_hardening=&granular_hardening;}
-            if(params.contains("granular_fracture_strain")){granular_fracture=params.at("granular_fracture_strain").get<float>();p_granular_fracture=&granular_fracture;}
-            if(params.contains("granular_damage_rate")){granular_damage=params.at("granular_damage_rate").get<float>();p_granular_damage=&granular_damage;}
-            if(params.contains("granular_healing_rate")){granular_healing=params.at("granular_healing_rate").get<float>();p_granular_healing=&granular_healing;}
-            if(params.contains("granular_rebonding")){granular_rebonding=params.at("granular_rebonding").get<bool>();p_granular_rebonding=&granular_rebonding;}
             if(params.contains("granular_max_solver_substeps")){granular_max_solver_substeps=params.at("granular_max_solver_substeps").get<int>();p_granular_max_solver_substeps=&granular_max_solver_substeps;}
-            float granular_soft_temp=0,granular_soft_range=0,granular_residual=0;
-            const float *p_granular_soft_temp=nullptr,*p_granular_soft_range=nullptr,*p_granular_residual=nullptr;
-            if(params.contains("granular_softening_temperature")){granular_soft_temp=params.at("granular_softening_temperature").get<float>();p_granular_soft_temp=&granular_soft_temp;}
-            if(params.contains("granular_softening_range")){granular_soft_range=params.at("granular_softening_range").get<float>();p_granular_soft_range=&granular_soft_range;}
-            if(params.contains("granular_residual_strength")){granular_residual=params.at("granular_residual_strength").get<float>();p_granular_residual=&granular_residual;}
-            float granular_tack=0.0f;const float* p_granular_tack=nullptr;
-            if(params.contains("granular_tack_peak")){granular_tack=params.at("granular_tack_peak").get<float>();p_granular_tack=&granular_tack;}
-            float granular_cond=0.0f;const float* p_granular_cond=nullptr;
-            if(params.contains("granular_thermal_conductivity")){granular_cond=params.at("granular_thermal_conductivity").get<float>();p_granular_cond=&granular_cond;}
             // Surface reconstruction + thermal liquid: separate API calls
             // (setFluidSurfaceDetail / setFluidThermal), same method on the
-            // wire. Parsed here, applied AFTER the main update so a `preset`
-            // in the same call (which switches the thermal chain off for every
-            // preset but wax) cannot undo explicit thermal keys.
+            // wire. Parsed here, applied AFTER the main update so a
+            // default_substance in the same call (whose solver hints switch the
+            // thermal chain) cannot undo explicit thermal keys.
             rtapi::FluidSurfaceDetailPatch surface_patch;
             bool has_surface_patch = false;
             if(params.contains("surface_resolution_multiplier")){surface_patch.surface_resolution_multiplier=params.at("surface_resolution_multiplier").get<int>();has_surface_patch=true;}
@@ -3324,26 +3328,15 @@ json dispatchMethod(const std::string& method, const json& params) {
             if(params.contains("thermal_liquid_enabled")){thermal_patch.enabled=params.at("thermal_liquid_enabled").get<bool>();has_thermal_patch=true;}
             if(params.contains("thermal_air_cooling_rate")){thermal_patch.air_cooling_rate=params.at("thermal_air_cooling_rate").get<float>();has_thermal_patch=true;}
             if(params.contains("thermal_contact_cooling_rate")){thermal_patch.contact_cooling_rate=params.at("thermal_contact_cooling_rate").get<float>();has_thermal_patch=true;}
-            if(params.contains("thermal_freeze_kelvin")){thermal_patch.freeze_kelvin=params.at("thermal_freeze_kelvin").get<float>();has_thermal_patch=true;}
-            if(params.contains("thermal_viscosity_range")){thermal_patch.viscosity_range=params.at("thermal_viscosity_range").get<float>();has_thermal_patch=true;}
-            if(params.contains("thermal_cold_viscosity")){thermal_patch.cold_viscosity=params.at("thermal_cold_viscosity").get<float>();has_thermal_patch=true;}
             rtapi::Result main_result = rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_voxel, p_render,
-                                            p_backend, p_boundary, p_preset, p_viscosity,
+                                            p_backend, p_boundary, p_substance,
                                             p_sweeps, p_wall_slip, p_surf_mat,
                                             p_surface_offset,
                                             p_pore_amt, p_pore_scl, p_pore_det,
                                             p_coord, p_uvw_period,
                                             p_solid_phase, p_solid_fill,
                                             p_enabled, p_visible,
-                                            p_granular_enabled,p_granular_friction,p_granular_cohesion,
-                                            p_granular_dilatancy,p_granular_young,p_granular_poisson,
-                                            p_granular_tensile,p_granular_hardening,
-                                            p_granular_fracture,p_granular_damage,
-                                            p_granular_healing,p_granular_rebonding,
-                                            p_granular_max_solver_substeps,
-                                            p_granular_soft_temp,p_granular_soft_range,
-                                            p_granular_residual,
-                                            p_granular_tack, p_granular_cond);
+                                            p_granular_max_solver_substeps);
             if (!main_result.ok) return main_result;
             if (has_thermal_patch) {
                 rtapi::Result tr = rtapi::setFluidThermal(domain, thermal_patch);
@@ -3820,47 +3813,51 @@ json dispatchMethod(const std::string& method, const json& params) {
             return rtapi::updateFluidFogShaderSettings(domain, s);
         });
     }
-    if (method == "msf.substances") {
+    // Substance library (docs/dev/MADDE_TIPLERI_TASARIMI.md): built-ins are
+    // read-only, project substances derive from them and store only overrides.
+    if (method == "substance.list") {
         return enqueueQuery([](UIContext&) {
-            std::vector<std::string> names;
-            auto r = rtapi::listMaterialSubstances(names);
-            if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
-            return nlohmann::json{{"ok", true}, {"substances", names}};
+            std::vector<rtapi::SubstanceSummary> rows;
+            auto r = rtapi::listSubstances(rows);
+            if (!r.ok) return nlohmann::json{{"__error", r.error}};
+            nlohmann::json out = nlohmann::json::array();
+            for (const auto& row : rows) {
+                out.push_back({{"name", row.name}, {"based_on", row.based_on},
+                               {"category", row.category}, {"builtin", row.builtin}});
+            }
+            return nlohmann::json{{"ok", true}, {"substances", out}};
         });
     }
-    if (method == "msf.substance") {
+    if (method == "substance.get") {
         const std::string name = requireString(params, "name");
         return enqueueQuery([name](UIContext&) {
-            rtapi::SubstanceProfileInfo p;
-            auto r = rtapi::getMaterialSubstance(name, p);
+            std::string text;
+            auto r = rtapi::getSubstance(name, text);
             if (!r.ok) return nlohmann::json{{"__error", r.error}};
-            return nlohmann::json{{"ok", true}, {"substance", {
-                {"name", p.name},
-                {"default_constitutive_model", p.default_constitutive_model},
-                {"density", p.density},
-                {"liquid_density", p.liquid_density},
-                {"specific_heat", p.specific_heat},
-                {"conductivity", p.conductivity},
-                {"liquid_kinematic_viscosity", p.liquid_kinematic_viscosity},
-                {"combustible", p.combustible},
-                {"fluid_flammable", p.fluid_flammable},
-                {"fluid_extinguishing", p.fluid_extinguishing},
-                {"meltable", p.meltable},
-                {"ignition_kelvin", p.ignition_kelvin},
-                {"flash_kelvin", p.flash_kelvin},
-                {"autoignition_kelvin", p.autoignition_kelvin},
-                {"melt_kelvin", p.melt_kelvin},
-                {"boiling_kelvin", p.boiling_kelvin},
-                {"latent_heat_fusion", p.latent_heat_fusion},
-                {"latent_heat_vaporization", p.latent_heat_vaporization},
-                {"vaporization_rate", p.vaporization_rate},
-                {"cooling_power", p.cooling_power},
-                {"oxygen_dilution", p.oxygen_dilution},
-                {"flame_persistence", p.flame_persistence},
-                {"granular_friction_degrees", p.granular_friction_degrees},
-                {"granular_cohesion", p.granular_cohesion}
-            }}};
+            nlohmann::json out = nlohmann::json::parse(text);
+            out["ok"] = true;
+            return out;
         });
+    }
+    if (method == "substance.derive") {
+        const std::string name = requireString(params, "name");
+        const std::string based_on = requireString(params, "based_on");
+        return enqueueResult([name, based_on](UIContext&) {
+            return rtapi::deriveSubstance(name, based_on);
+        });
+    }
+    if (method == "substance.set") {
+        const std::string name = requireString(params, "name");
+        if (!params.contains("fields") || !params["fields"].is_object())
+            throw std::runtime_error("substance.set: 'fields' must be an object");
+        const std::string fields = params["fields"].dump();
+        return enqueueResult([name, fields](UIContext&) {
+            return rtapi::setSubstanceFields(name, fields);
+        });
+    }
+    if (method == "substance.remove") {
+        const std::string name = requireString(params, "name");
+        return enqueueResult([name](UIContext&) { return rtapi::removeSubstance(name); });
     }
     if (method == "msf.fields") {
         return enqueueQuery([](UIContext&) {
@@ -3902,7 +3899,7 @@ json dispatchMethod(const std::string& method, const json& params) {
             rtapi::CombustibleFluidSettings s;
             auto r=rtapi::getCombustibleFluidSettings(domain,s);
             if(!r.ok) return json{{"__error",r.error}};
-            return json{{"chemistry_preset",s.chemistry_preset},
+            return json{
                         {"enabled",s.enabled},
                         {"auto_ignite",s.auto_ignite},
                         {"ignition_temperature",s.ignition_temperature},
@@ -3922,7 +3919,9 @@ json dispatchMethod(const std::string& method, const json& params) {
 #define RT_FLUID_FIRE_JSON(name,type) \
             if(params.contains(#name)) s.name=params.at(#name).get<type>()
             RT_FLUID_FIRE_JSON(enabled,bool);
-            if(params.contains("chemistry_preset")) s.chemistry_preset=params.at("chemistry_preset").get<std::string>();
+            if(params.contains("chemistry_preset"))
+                return rtapi::Result::fail("chemistry_preset was removed: the chemistry is "
+                                           "the domain's default_substance (fluid.set_param)");
             RT_FLUID_FIRE_JSON(auto_ignite,bool);
             RT_FLUID_FIRE_JSON(ignition_temperature,float);
             RT_FLUID_FIRE_JSON(evaporation_rate,float);
@@ -6414,21 +6413,13 @@ json dispatchMethod(const std::string& method, const json& params) {
         // here would change whether matter blocks flow.
         std::optional<std::string> phase;
         if (params.contains("phase")) phase = requireString(params, "phase");
-        std::optional<std::string> constitutive_model;
-        if (params.contains("constitutive_model")) {
-            constitutive_model = requireString(params, "constitutive_model");
-        }
         return enqueueResult([domain, substance, material, representation,
-                              viscosity, miscibility, phase,
-                              constitutive_model](UIContext&) {
+                              viscosity, miscibility, phase](UIContext&) {
             return rtapi::setFluidSubstanceMaterial(domain, substance, material,
                                                      representation ? &*representation : nullptr,
                                                      viscosity ? &*viscosity : nullptr,
                                                      miscibility ? &*miscibility : nullptr,
-                                                     phase ? &*phase : nullptr,
-                                                     constitutive_model
-                                                         ? &*constitutive_model
-                                                         : nullptr);
+                                                     phase ? &*phase : nullptr);
         });
     }
     if (method == "flow_source.list") {

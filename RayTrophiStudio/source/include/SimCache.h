@@ -81,7 +81,12 @@ constexpr uint32_t kMagic   = 0x43465452u; // 'RTFC'
 // 9: particle constitutive model survives playback.
 // 10: domain-local particle identities and their allocator survive playback.
 // 11: C5 pore mass, capacity, porosity and stored water energy survive playback.
-constexpr uint32_t kVersion = 11u;
+// 12: positive-zero scalar arrays store their count without a float payload.
+// The reader retains v11 compatibility; other versions remain unsupported.
+constexpr uint32_t kVersion = 12u;
+constexpr bool supportsVersion(uint32_t version) {
+    return version == 11u || version == kVersion;
+}
 
 // Absolute path of the per-system, per-frame binary file inside cache_dir.
 std::string frameFilePath(const std::string& cache_dir, uint32_t system_id, int frame);

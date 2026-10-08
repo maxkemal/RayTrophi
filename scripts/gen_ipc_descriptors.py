@@ -349,6 +349,14 @@ def extract_params(body, root="params", macros=None, helpers=None, seen=None):
     found = {}
     esc = re.escape(root)
 
+    # A key checked only to return an error is a retired input, not an
+    # available parameter. Advertising it in discovery sends callers straight
+    # into the migration error (for example fluid.set_param viscosity).
+    rejection = re.compile(
+        r'if\s*\(\s*' + esc + r'\.contains\(\s*"[^"]+"\s*\)\s*\)\s*\{'
+        r'\s*return\s+(?:rtapi::)?Result::fail\([^;]*;\s*\}', re.S)
+    body = rejection.sub('', body)
+
     def note(name, ptype, requiredness, default=None):
         entry = found.setdefault(name, {"type": None, "required": False,
                                         "default": None})

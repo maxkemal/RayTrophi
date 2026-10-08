@@ -53,7 +53,7 @@ print("collider %s: substance=%r ignite=%s burn_rate_scale=%.3f" % (
     c["msf_burn_rate_scale"]))
 attrs = rt.attr.list("object", COLLIDER)
 print("surface attributes: %s" % (attrs,))
-print("known substances: %s" % (rt.msf.substances(),))
+print("known substances: %s" % ([s["name"] for s in rt.substance.list()],))
 # ★ Say which of the two states this is. An empty attribute list means the field
 # never formed, and that is a SETUP failure, not a passing test.
 print("SETUP OK" if attrs else

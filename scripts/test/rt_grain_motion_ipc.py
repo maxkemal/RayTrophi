@@ -14,6 +14,12 @@ Arms (each from fluid.reset, same pour, 24 fps):
   sweep  sphere (r .15) driven through the pile at 1 m/s -> pile pushed +x,
          collider_speed_max ~ 1 m/s, no held step
 
+The sphere is a scene object with an object-bound mesh_bvh collider, moved by
+scene.set_transform: that is how an animated object reaches the solver.
+collider.update is an authoring edit and invalidates the simulation (frame
+cache + timeline resync), so driving the sphere with it restarted the pour
+every frame (first live run: 78 grains -> 17 frozen until the sphere stopped).
+
     python scripts/test/rt_grain_motion_ipc.py
 """
 import json
@@ -54,7 +60,7 @@ def main():
             call('fluid.create_domain', name=DOMAIN, type='matter', domain_min=[-.6, 0, -.6],
                  domain_max=[.6, 1.2, .6], voxel_size=.1)
         call('fluid.set_param', domain=DOMAIN, enabled=True, visible=True, backend='vulkan',
-             boundary='closed', preset='sand', granular_enabled=True, solid_phase=False,
+             boundary='closed', default_substance='Sand', solid_phase=False,
              thermal_liquid_enabled=False)
         call('fluid.set_pore_exchange', domain=DOMAIN, enabled=False, wet_response_enabled=False)
         call('fluid.reset')
@@ -64,7 +70,7 @@ def main():
         exists = SOURCE in {s['name'] for s in call('flow_source.list')}
         call('flow_source.update' if exists else 'flow_source.create', name=SOURCE, domain=DOMAIN,
              enabled=True, phase='liquid', source_mode='point', fluid_substance='Sand',
-             initial_constitutive_model='granular', position=[0, .4, 0], radius=.08,
+             position=[0, .4, 0], radius=.08,
              velocity=[0, 0, 0], fluid_velocity_spread=0., use_particle_limit=True,
              max_emitted_particles=300, use_time_limit=True, start_time=0., end_time=.5,
              fluid_particles_per_second=600.)
@@ -75,9 +81,12 @@ def main():
              linear_drag=0., quadratic_drag=0.,
              affects_fluid=True, affects_gas=False, affects_particles=False,
              affects_cloth=False, affects_rigidbody=False)
+        sphere_object = call('scene.add_primitive', type='sphere', name=SPHERE + 'Mesh', size=.15)
+        data['sphere_object'] = sphere_object
+        call('scene.set_transform', name=sphere_object, translation=[-.5, .15, 0.])
         colliders = {c['name'] for c in call('collider.list')['colliders']}
         call('collider.update' if SPHERE in colliders else 'collider.create', name=SPHERE,
-             source_mode='sphere', sphere_center=[-.5, .15, 0.], sphere_radius=.15,
+             source_mode='mesh_bvh', source_object=sphere_object,
              enabled=True, fluid_collision_enabled=True)
 
         def sample():
@@ -94,15 +103,16 @@ def main():
                     'motion_ms': (runtime.get('host_ms') or {}).get('motion')}
 
         def run(arm, wind, sweep):
-            call('fluid.reset')
             call('forcefield.set_param', field=FIELD, enabled=wind)
-            call('collider.update', name=SPHERE, sphere_center=[-.5, .15, 0.])
+            call('scene.set_transform', name=sphere_object, translation=[-.5, .15, 0.])
+            call('fluid.reset')
             rows = []
             for frame in range(1, 73):
                 if sweep and frame > 24:
                     # 1 m/s along +x, through the pile centre line (z = 0).
                     x = -.5 + (frame - 24) / FPS
-                    call('collider.update', name=SPHERE, sphere_center=[min(x, .4), .15, 0.])
+                    call('scene.set_transform', name=sphere_object,
+                         translation=[min(x, .4), .15, 0.])
                 call('fluid.step', dt=1/FPS)
                 row = sample()
                 row['frame'] = frame
@@ -137,6 +147,8 @@ def main():
     finally:
         call('forcefield.set_param', field=FIELD, enabled=False)
         call('collider.update', name=SPHERE, enabled=False)
+        if data.get('sphere_object'):
+            call('scene.delete', name=data['sphere_object'])
         call('flow_source.update', name=SOURCE, enabled=False)
         call('fluid.set_param', domain=DOMAIN, enabled=False, visible=False)
         for s in original['sources']:

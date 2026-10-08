@@ -16,6 +16,7 @@
 #include "Fluid/SubstanceTag.h"
 #include "Fluid/FluidViewResolver.h"
 #include "Fluid/APICFluidSolver.h"
+#include "Fluid/FluidDomainSubstance.h"
 #include "Fluid/FluidSplatMaterialAuthoring.h"
 #include "Fluid/FluidRenderProxy.h"
 #include "ParticleSimulation.h"
@@ -32,30 +33,6 @@
 namespace rtapi {
 
 namespace {
-
-// Preset enum -> the string scripts use. One definition, because this ternary
-// chain was copy-pasted at three call sites and adding Chocolate to two of them
-// would have produced a domain that reports "custom" from fluid.list and
-// "chocolate" from fluid.get.
-const char* fluidPresetName(RayTrophiSim::Fluid::APICSolverParams::FluidPreset p) {
-    using FluidPreset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset;
-    switch (p) {
-        case FluidPreset::Water:     return "water";
-        case FluidPreset::Oil:       return "oil";
-        case FluidPreset::Mud:       return "mud";
-        case FluidPreset::Honey:     return "honey";
-        case FluidPreset::Lava:      return "lava";
-        case FluidPreset::Sand:      return "sand";
-        case FluidPreset::Chocolate: return "chocolate";
-        case FluidPreset::WetSand:      return "wet_sand";
-        case FluidPreset::Gravel:       return "gravel";
-        case FluidPreset::CohesiveSoil: return "cohesive_soil";
-        case FluidPreset::MoltenPlastic: return "molten_plastic";
-        case FluidPreset::Wax:           return "wax";
-        case FluidPreset::Custom:
-        default:                     return "custom";
-    }
-}
 
 const char* fluidRenderModeName(RayTrophiSim::Fluid::FluidRenderMode mode) {
     using Mode = RayTrophiSim::Fluid::FluidRenderMode;
@@ -96,7 +73,7 @@ void fillDomainPhases(const RayTrophiSim::SimulationGridDomainDesc& domain,
 // rheology field cannot reach one reporting path and miss another.
 void fillFluidRheology(const RayTrophiSim::Fluid::APICSolverParams& params,
                        FluidDomainInfo& info) {
-    info.preset              = fluidPresetName(params.current_preset);
+    info.default_substance   = params.default_substance;
     info.kinematic_viscosity = params.kinematic_viscosity;
     info.viscosity_sweeps    = params.viscosity_sweeps;
     info.viscosity_wall_slip = params.viscosity_wall_slip;
@@ -316,9 +293,6 @@ void fillFluidSurfaceMaterial(const RayTrophiSim::SimulationGridDomainDesc& d,
             out_b.miscibility = b.miscibility;
             out_b.phase =
                 b.phase == RayTrophiSim::Fluid::SubstancePhase::Solid ? "solid" : "liquid";
-            out_b.constitutive_model =
-                RayTrophiSim::Fluid::matterConstitutiveModelName(
-                    b.constitutive_model);
             info.substance_materials.push_back(out_b);
         }
     }
@@ -860,21 +834,11 @@ Result setFluidThermal(const std::string& domain_id_or_name,
     auto finiteIn = [](const std::optional<float>& v, float lo, float hi) {
         return !v || (std::isfinite(*v) && *v >= lo && *v <= hi);
     };
-    // Rejected, not clamped — same reasoning as setFluidSurfaceDetail. A freeze
-    // point of 0 K silently raised to 1 K would still never freeze anything,
-    // and the script would believe it had configured wax.
+    // Rejected, not clamped — same reasoning as setFluidSurfaceDetail.
     if (!finiteIn(patch.air_cooling_rate, 0.0f, 100.0f))
         return Result::fail("air_cooling_rate must be in [0, 100] 1/s");
     if (!finiteIn(patch.contact_cooling_rate, 0.0f, 100.0f))
         return Result::fail("contact_cooling_rate must be in [0, 100] 1/s");
-    if (!finiteIn(patch.freeze_kelvin, 1.0f, 5000.0f))
-        return Result::fail("freeze_kelvin must be in [1, 5000] K");
-    if (!finiteIn(patch.viscosity_range, 1.0f, 2000.0f))
-        return Result::fail("viscosity_range must be in [1, 2000] K");
-    if (!finiteIn(patch.cold_viscosity, 0.0f, 1000.0f))
-        return Result::fail("cold_viscosity must be in [0, 1000] m^2/s");
-    if (!finiteIn(patch.conductivity, 0.0f, 200.0f))
-        return Result::fail("conductivity must be in [0, 200] 1/s");
 
     Result found;
     auto* dom = findLiquidDomainDesc(domain_id_or_name, found);
@@ -886,13 +850,9 @@ Result setFluidThermal(const std::string& domain_id_or_name,
     if (patch.enabled) p.thermal_liquid_enabled = *patch.enabled;
     if (patch.air_cooling_rate) p.thermal_air_cooling_rate = *patch.air_cooling_rate;
     if (patch.contact_cooling_rate) p.thermal_contact_cooling_rate = *patch.contact_cooling_rate;
-    if (patch.freeze_kelvin) p.thermal_freeze_kelvin = *patch.freeze_kelvin;
-    if (patch.viscosity_range) p.thermal_viscosity_range = *patch.viscosity_range;
-    if (patch.cold_viscosity) p.thermal_cold_viscosity = *patch.cold_viscosity;
-    if (patch.conductivity) p.granular_thermal_conductivity = *patch.conductivity;
+    // The freeze point, the near-freeze viscosity curve and conduction are the
+    // substance's (substance.set); this switches the chain and sets its rates.
     p.sanitizeThermalLiquid();
-    // Rheology edit: the preset no longer describes this liquid.
-    p.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
     // Mirror onto the legacy editor object, as setFluidDomainParams does for
     // every rheology field, so the two authoring copies cannot drift.
     for (auto& fo : g_ctx->scene.fluid_objects) {
@@ -900,11 +860,6 @@ Result setFluidThermal(const std::string& domain_id_or_name,
         fo.params.thermal_liquid_enabled = p.thermal_liquid_enabled;
         fo.params.thermal_air_cooling_rate = p.thermal_air_cooling_rate;
         fo.params.thermal_contact_cooling_rate = p.thermal_contact_cooling_rate;
-        fo.params.thermal_freeze_kelvin = p.thermal_freeze_kelvin;
-        fo.params.thermal_viscosity_range = p.thermal_viscosity_range;
-        fo.params.thermal_cold_viscosity = p.thermal_cold_viscosity;
-        fo.params.granular_thermal_conductivity = p.granular_thermal_conductivity;
-        fo.params.current_preset = p.current_preset;
     }
     return Result::success();
 }
@@ -912,14 +867,6 @@ Result setFluidThermal(const std::string& domain_id_or_name,
 Result setFluidSplatMaterial(const std::string& domain_id_or_name,
                              const std::string& material_name) {
     return setFluidSplatMaterialImpl(domain_id_or_name, material_name);
-}
-
-Result listMaterialSubstances(std::vector<std::string>& out_names) {
-    out_names.clear();
-    for (const auto& profile : RayTrophiSim::substanceLibrary()) {
-        out_names.push_back(profile.name);
-    }
-    return Result::success();
 }
 
 Result listMaterialFields(std::vector<MaterialFieldInfo>& out_fields) {
@@ -1556,7 +1503,7 @@ Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_m
         out_info.boundary =
             (grid_dom->boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Open) ? "open" :
             (grid_dom->boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic) ? "periodic" : "closed";
-        out_info.preset = "custom";
+        out_info.default_substance.clear();
         out_info.backend =
             (grid_dom->backend == RayTrophiSim::SimulationDomainBackend::GPU_Compute) ? "gpu" :
             (grid_dom->backend == RayTrophiSim::SimulationDomainBackend::GPU_Vulkan) ? "vulkan" :
@@ -1855,7 +1802,7 @@ Result listFluidDomains(std::vector<rtapi::FluidDomainInfo>& out_domains) {
             info.enabled = d.enabled;
             info.visible = true;
             info.render_mode = "volume";
-            info.preset = "custom";
+            info.default_substance.clear();
             info.particle_count = 0;
             fillFluidSurfaceMaterial(d, info);
             // Liquid domains additionally carry a legacy FluidObject; take the
@@ -2125,8 +2072,7 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
                          const Vec3* domain_min, const Vec3* domain_max,
                          const float* voxel_size, const std::string* render_mode,
                          const std::string* backend, const std::string* boundary,
-                         const std::string* preset,
-                         const float* kinematic_viscosity,
+                         const std::string* default_substance,
                          const int* viscosity_sweeps,
                          const float* viscosity_wall_slip,
                          const std::string* surface_material,
@@ -2139,24 +2085,7 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
                          const bool* solid_phase,
                          const float* solid_phase_fill,
                          const bool* enabled, const bool* visible,
-                         const bool* granular_enabled,
-                         const float* granular_friction_angle_degrees,
-                         const float* granular_cohesion,
-                         const float* granular_dilatancy_degrees,
-                         const float* granular_young_modulus,
-                         const float* granular_poisson_ratio,
-                         const float* granular_tensile_cutoff,
-                         const float* granular_hardening,
-                         const float* granular_fracture_strain,
-                         const float* granular_damage_rate,
-                         const float* granular_healing_rate,
-                         const bool* granular_rebonding,
-                         const int* granular_max_solver_substeps,
-                         const float* granular_softening_temperature,
-                         const float* granular_softening_range,
-                         const float* granular_residual_strength,
-                         const float* granular_tack_peak,
-                         const float* granular_thermal_conductivity) {
+                         const int* granular_max_solver_substeps) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     if (surface_offset_voxels &&
@@ -2181,6 +2110,14 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         if (d.name == info.name) { grid_dom = &d; break; }
     }
     if (!obj && !grid_dom) return Result::fail("fluid domain not found");
+    const RayTrophiSim::SubstanceProfile* chosen_substance = nullptr;
+    if (default_substance) {
+        chosen_substance = RayTrophiSim::tryFindSubstance(*default_substance);
+        if (!chosen_substance) {
+            return Result::fail("unknown substance: " + *default_substance +
+                                " (substance.list names every one; derive to customize)");
+        }
+    }
     // A grain domain cannot be moved off what the grain solver needs; checked
     // before any field is written so a rejected call changes nothing.
     if (grid_dom && grid_dom->fluid_params.grain.enabled && (backend || boundary || solid_phase)) {
@@ -2263,45 +2200,39 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         g_ctx->start_render = true;
     }
 
-    // ★ Rheology writes go to BOTH representations. The grid domain descriptor is
-    // what the solver actually steps; the FluidObject is the authoring-side copy.
-    // Writing only the FluidObject — which is what this did — meant a script
-    // asking for "honey" on a grid-domain fluid got success() and no honey. A
-    // silent no-op is worse than a rejection: nothing distinguishes it from a
-    // preset that simply does not look like much, which is precisely how the
-    // broken viscosity dial survived this long.
-    if (preset) {
-        std::string p = *preset;
-        std::transform(p.begin(), p.end(), p.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-        using FluidPreset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset;
-        bool known = true;
-        FluidPreset chosen = FluidPreset::Custom;
-        if      (p == "water")     chosen = FluidPreset::Water;
-        else if (p == "oil")       chosen = FluidPreset::Oil;
-        else if (p == "mud")       chosen = FluidPreset::Mud;
-        else if (p == "honey")     chosen = FluidPreset::Honey;
-        else if (p == "lava")      chosen = FluidPreset::Lava;
-        else if (p == "sand")      chosen = FluidPreset::Sand;
-        else if (p == "chocolate") chosen = FluidPreset::Chocolate;
-        else if (p == "wet_sand" || p == "wetsand")           chosen = FluidPreset::WetSand;
-        else if (p == "gravel")                               chosen = FluidPreset::Gravel;
-        else if (p == "cohesive_soil" || p == "cohesivesoil") chosen = FluidPreset::CohesiveSoil;
-        else if (p == "molten_plastic" || p == "moltenplastic" || p == "plastic") chosen = FluidPreset::MoltenPlastic;
-        else if (p == "wax" || p == "candle_wax" || p == "paraffin") chosen = FluidPreset::Wax;
-        // ★ "custom" is what fluid.get REPORTS for a hand-tuned domain, so
-        // rejecting it here broke the obvious round trip: read a domain, write
-        // it back, get an error on a value this very API produced. It applies
-        // nothing (applyPreset(Custom) returns early) and is accepted as the
-        // explicit "leave the material alone" request it reads as.
-        else if (p == "custom")                               chosen = FluidPreset::Custom;
-        else known = false;
-        if (!known) {
-            return Result::fail("unknown fluid preset: " + *preset +
-                                " (water, oil, mud, honey, lava, sand, chocolate,"
-                                " wet_sand, gravel, cohesive_soil, molten_plastic, wax, custom)");
+    // ★ The material goes to BOTH representations. The grid domain descriptor
+    // is what the solver steps; the FluidObject is the authoring-side copy.
+    // Writing only one meant a script got success() and no change.
+    // Choosing a substance writes its solver hints once (editable afterwards)
+    // and resolves its physics now, so a read straight after this call already
+    // shows what the next step will run.
+    if (chosen_substance) {
+        const auto choose = [&](RayTrophiSim::Fluid::APICSolverParams& p, float voxel) {
+            p.default_substance = chosen_substance->name;
+            RayTrophiSim::Fluid::applySubstanceSolverHints(p, *chosen_substance);
+            std::string error;
+            RayTrophiSim::Fluid::resolveDomainSubstancePhysics(p, voxel,
+                scriptSimulationRuntime().worldThermal().scale(), error);
+        };
+        if (obj) choose(obj->params, obj->voxel_size);
+        if (grid_dom) {
+            choose(grid_dom->fluid_params, grid_dom->voxel_size);
+            // The descriptor's combustion switches follow the chemistry, as the
+            // removed Chemistry Preset combo did: water must enter the
+            // extinguishing path, a fuel must expose a flammable surface.
+            const auto& chemistry = grid_dom->fluid_params.fuel_profile;
+            grid_dom->fluid_flammable = chemistry.flammable;
+            grid_dom->fluid_extinguishing = chemistry.extinguishing;
+            grid_dom->fluid_ignition_temperature = chemistry.flash_temperature;
+            grid_dom->fluid_evaporation_rate = chemistry.vaporization_rate;
+            grid_dom->fluid_cooling_power = chemistry.cooling_power;
+            grid_dom->fluid_oxygen_dilution = chemistry.oxygen_dilution;
+            if (chemistry.extinguishing) {
+                grid_dom->fluid_surface_cooling =
+                    std::max(grid_dom->fluid_surface_cooling, chemistry.cooling_power);
+            }
         }
-        if (obj)      obj->params.applyPreset(chosen);
-        if (grid_dom) grid_dom->fluid_params.applyPreset(chosen);
+        invalidateScriptSimulation();
     }
 
     if (boundary) {
@@ -2315,65 +2246,22 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         }
     }
 
-    // Hand-setting any rheology field means the domain is no longer the named
-    // material — mirror the UI's rule so a script and a slider leave the same
-    // state behind.
-    auto markCustom = [&]() {
-        using FluidPreset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset;
-        if (obj)      obj->params.current_preset      = FluidPreset::Custom;
-        if (grid_dom) grid_dom->fluid_params.current_preset = FluidPreset::Custom;
-    };
-    if (kinematic_viscosity) {
-        const float v = std::max(0.0f, *kinematic_viscosity);
-        if (obj)      obj->params.kinematic_viscosity = v;
-        if (grid_dom) grid_dom->fluid_params.kinematic_viscosity = v;
-        markCustom();
-    }
+    // Numerical settings only. Viscosity and the granular skeleton belong to
+    // the substance (substance.set); the domain resolves them every step.
     if (viscosity_sweeps) {
-        const int s = std::clamp(*viscosity_sweeps, 1, 64);
-        if (obj)      obj->params.viscosity_sweeps = s;
-        if (grid_dom) grid_dom->fluid_params.viscosity_sweeps = s;
-        markCustom();
+        const int sweeps = std::clamp(*viscosity_sweeps, 1, 64);
+        if (obj)      obj->params.viscosity_sweeps = sweeps;
+        if (grid_dom) grid_dom->fluid_params.viscosity_sweeps = sweeps;
     }
     if (viscosity_wall_slip) {
         const float w = std::clamp(*viscosity_wall_slip, 0.0f, 1.0f);
         if (obj)      obj->params.viscosity_wall_slip = w;
         if (grid_dom) grid_dom->fluid_params.viscosity_wall_slip = w;
-        markCustom();
     }
-    auto applyGranularPatch = [&](RayTrophiSim::Fluid::APICSolverParams& p) {
-        if (granular_enabled) p.granular_enabled = *granular_enabled;
-        if (granular_friction_angle_degrees) p.granular_friction_angle_degrees = *granular_friction_angle_degrees;
-        if (granular_cohesion) p.granular_cohesion = *granular_cohesion;
-        if (granular_dilatancy_degrees) p.granular_dilatancy_degrees = *granular_dilatancy_degrees;
-        if (granular_young_modulus) p.granular_young_modulus = *granular_young_modulus;
-        if (granular_poisson_ratio) p.granular_poisson_ratio = *granular_poisson_ratio;
-        if (granular_tensile_cutoff) p.granular_tensile_cutoff = *granular_tensile_cutoff;
-        if (granular_hardening) p.granular_hardening = *granular_hardening;
-        if (granular_fracture_strain) p.granular_fracture_strain = *granular_fracture_strain;
-        if (granular_damage_rate) p.granular_damage_rate = *granular_damage_rate;
-        if (granular_healing_rate) p.granular_healing_rate = *granular_healing_rate;
-        if (granular_rebonding) p.granular_rebonding = *granular_rebonding;
-        if (granular_max_solver_substeps) p.granular_max_solver_substeps = *granular_max_solver_substeps;
-        if (granular_softening_temperature) p.granular_softening_temperature = *granular_softening_temperature;
-        if (granular_softening_range) p.granular_softening_range = *granular_softening_range;
-        if (granular_residual_strength) p.granular_residual_strength = *granular_residual_strength;
-        if (granular_tack_peak) p.granular_tack_peak = *granular_tack_peak;
-        if (granular_thermal_conductivity) p.granular_thermal_conductivity = *granular_thermal_conductivity;
-        p.sanitizeGranularMaterial();
-    };
-    const bool granular_patch = granular_enabled || granular_friction_angle_degrees ||
-        granular_cohesion || granular_dilatancy_degrees || granular_young_modulus ||
-        granular_poisson_ratio || granular_tensile_cutoff || granular_hardening ||
-        granular_fracture_strain || granular_damage_rate || granular_healing_rate ||
-        granular_rebonding || granular_max_solver_substeps ||
-        granular_softening_temperature || granular_softening_range ||
-        granular_residual_strength || granular_tack_peak ||
-        granular_thermal_conductivity;
-    if (granular_patch) {
-        if (obj) applyGranularPatch(obj->params);
-        if (grid_dom) applyGranularPatch(grid_dom->fluid_params);
-        markCustom();
+    if (granular_max_solver_substeps) {
+        const int substeps = std::clamp(*granular_max_solver_substeps, 1, 64);
+        if (obj)      obj->params.granular_max_solver_substeps = substeps;
+        if (grid_dom) grid_dom->fluid_params.granular_max_solver_substeps = substeps;
     }
 
     if (backend) {
@@ -2497,8 +2385,7 @@ Result setFluidSubstanceMaterial(const std::string& domain_id_or_name,
                                  const std::string* representation,
                                  const float* kinematic_viscosity,
                                  const float* miscibility,
-                                 const std::string* phase,
-                                 const std::string* constitutive_model) {
+                                 const std::string* phase) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     if (substance.empty())
@@ -2575,14 +2462,6 @@ Result setFluidSubstanceMaterial(const std::string& domain_id_or_name,
         else if (p != "liquid" && p != "fluid")
             return Result::fail("phase must be liquid or solid");
     }
-    RayTrophiSim::Fluid::MatterConstitutiveModel model_value =
-        RayTrophiSim::Fluid::MatterConstitutiveModel::Auto;
-    if (constitutive_model &&
-        !RayTrophiSim::Fluid::parseMatterConstitutiveModel(
-            *constitutive_model, model_value)) {
-        return Result::fail(
-            "constitutive_model must be auto, fluid, granular, or elastic");
-    }
 
     // ★ A physics-only call must NOT delete the binding. `clear` means "no
     // material name given"; combined with a viscosity, miscibility or phase
@@ -2590,8 +2469,7 @@ Result setFluidSubstanceMaterial(const std::string& domain_id_or_name,
     // and erasing the row would throw away the material binding the caller
     // never mentioned.
     const bool physics_only = clear && !representation &&
-                              (kinematic_viscosity || miscibility || phase ||
-                               constitutive_model);
+                              (kinematic_viscosity || miscibility || phase);
     if (clear && !representation && !physics_only) {
         if (it != table.end()) table.erase(it);
     } else if (it != table.end()) {
@@ -2605,7 +2483,6 @@ Result setFluidSubstanceMaterial(const std::string& domain_id_or_name,
         if (kinematic_viscosity) it->kinematic_viscosity = *kinematic_viscosity;
         if (miscibility)         it->miscibility = *miscibility;
         if (phase)               it->phase = phase_value;
-        if (constitutive_model)  it->constitutive_model = model_value;
     } else {
         if (table.size() >= RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials) {
             return Result::fail(
@@ -2621,7 +2498,6 @@ Result setFluidSubstanceMaterial(const std::string& domain_id_or_name,
         if (kinematic_viscosity) entry.kinematic_viscosity = *kinematic_viscosity;
         if (miscibility)         entry.miscibility = *miscibility;
         if (phase)               entry.phase = phase_value;
-        if (constitutive_model)  entry.constitutive_model = model_value;
         table.push_back(entry);
     }
 
@@ -2965,16 +2841,6 @@ Result getCombustibleFluidSettings(
        !RayTrophiSim::simulationDomainHasLiquid(it->type))
         return Result::fail("fluid domain not found: "+domain_id_or_name);
     out.enabled=it->fluid_flammable;
-    switch (it->fluid_params.chemistry_preset) {
-        case RayTrophiSim::Fluid::FluidChemistryPreset::Water: out.chemistry_preset="water"; break;
-        case RayTrophiSim::Fluid::FluidChemistryPreset::Gasoline: out.chemistry_preset="gasoline"; break;
-        case RayTrophiSim::Fluid::FluidChemistryPreset::Alcohol: out.chemistry_preset="alcohol"; break;
-        case RayTrophiSim::Fluid::FluidChemistryPreset::Oil: out.chemistry_preset="oil"; break;
-        case RayTrophiSim::Fluid::FluidChemistryPreset::Plastic: out.chemistry_preset="plastic"; break;
-        case RayTrophiSim::Fluid::FluidChemistryPreset::Wax: out.chemistry_preset="wax"; break;
-        case RayTrophiSim::Fluid::FluidChemistryPreset::Custom: out.chemistry_preset="custom"; break;
-        default: out.chemistry_preset="inert"; break;
-    }
     out.auto_ignite=it->fluid_auto_ignite;
     out.ignition_temperature=it->fluid_ignition_temperature;
     out.evaporation_rate=it->fluid_evaporation_rate;
@@ -3001,31 +2867,17 @@ Result updateCombustibleFluidSettings(
     if(it==domains.end() ||
        !RayTrophiSim::simulationDomainHasLiquid(it->type))
         return Result::fail("fluid domain not found: "+domain_id_or_name);
-    std::string chemistry = s.chemistry_preset;
-    std::transform(chemistry.begin(), chemistry.end(), chemistry.begin(),
-                   [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-    const auto scale = simulation.worldThermal().scale();
-    using Chemistry = RayTrophiSim::Fluid::FluidChemistryPreset;
-    if (chemistry == "water") {
-        it->fluid_params.applyChemistryProfile(Chemistry::Water, scale);
-    } else if (chemistry == "gasoline") {
-        it->fluid_params.applyChemistryProfile(Chemistry::Gasoline, scale);
-    } else if (chemistry == "alcohol") {
-        it->fluid_params.applyChemistryProfile(Chemistry::Alcohol, scale);
-    } else if (chemistry == "oil") {
-        it->fluid_params.applyChemistryProfile(Chemistry::Oil, scale);
-    } else if (chemistry == "plastic") {
-        it->fluid_params.applyChemistryProfile(Chemistry::Plastic, scale);
-    } else if (chemistry == "wax") {
-        it->fluid_params.applyChemistryProfile(Chemistry::Wax, scale);
-    } else if (chemistry == "custom") {
-        it->fluid_params.chemistry_preset = Chemistry::Custom;
-    } else {
-        it->fluid_params.applyChemistryProfile(Chemistry::Inert, scale);
+    // The chemistry is the domain's default substance (fuel_profile is
+    // resolved from it every step); refresh it now so this call reads it.
+    {
+        std::string error;
+        if (!RayTrophiSim::Fluid::resolveDomainSubstancePhysics(it->fluid_params,
+                it->voxel_size, simulation.worldThermal().scale(), error))
+            return Result::fail(error);
     }
-    // The chemistry profile owns the physical interaction mode.  In particular,
-    // water must enter the extinguishing path even when the legacy `enabled`
-    // flag is used by an older script.
+    // The substance's chemistry owns the physical interaction mode. In
+    // particular, water must enter the extinguishing path even when the
+    // `enabled` flag is used by an older script.
     const auto& profile = it->fluid_params.fuel_profile;
     it->fluid_extinguishing = profile.extinguishing;
     it->fluid_flammable = s.enabled && !profile.extinguishing;
@@ -3167,9 +3019,6 @@ SimulationFlowSourceInfo flowInfoFromDesc(
     out.fluid_velocity_spread = source.fluid_velocity_spread;
     out.fluid_emit_along_normal = source.fluid_emit_along_normal;
     out.fluid_substance = source.fluid_substance;
-    out.initial_constitutive_model =
-        RayTrophiSim::Fluid::matterConstitutiveModelName(
-            source.initial_constitutive_model);
     out.fluid_temperature_override = source.fluid_temperature_override;
     out.fluid_temperature_kelvin = source.fluid_temperature_kelvin;
     out.use_time_limit = source.use_time_limit;
@@ -3227,12 +3076,6 @@ Result flowDescFromInfo(const SimulationFlowSourceInfo& info,
     out.particle_pool_weight = info.particle_pool_weight;
     out.fluid_velocity_spread = std::max(0.0f, info.fluid_velocity_spread);
     out.fluid_emit_along_normal = info.fluid_emit_along_normal;
-    if (!RayTrophiSim::Fluid::parseMatterConstitutiveModel(
-            info.initial_constitutive_model,
-            out.initial_constitutive_model)) {
-        return Result::fail(
-            "initial_constitutive_model must be auto, fluid, granular, or elastic");
-    }
     out.fluid_substance = info.fluid_substance;
     if (!std::isfinite(info.fluid_temperature_kelvin) || info.fluid_temperature_kelvin < 1.0f ||
         info.fluid_temperature_kelvin > 5000.0f)
@@ -3356,11 +3199,7 @@ Result colliderDescFromInfo(const SimulationColliderInfo& info,
     if (!info.msf_substance.empty()) {
         // Validate against the library rather than storing an unknown name that
         // would silently degrade to the "Custom" profile at simulation time.
-        bool known = false;
-        for (const auto& profile : RayTrophiSim::substanceLibrary()) {
-            if (profile.name == info.msf_substance) { known = true; break; }
-        }
-        if (!known) return Result::fail("unknown msf_substance: " + info.msf_substance);
+        if (!RayTrophiSim::tryFindSubstance(info.msf_substance)) return Result::fail("unknown msf_substance: " + info.msf_substance);
         out.msf_substance = info.msf_substance;
     }
     out.msf_override.override_ignition = info.msf_override_ignition;

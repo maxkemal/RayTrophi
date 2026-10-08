@@ -783,9 +783,6 @@ struct SimulationGridDomainDesc {
         // body: parcels have no cohesion, so a pile spreads. See
         // Fluid::SubstancePhase for why that boundary is deliberate.
         Fluid::SubstancePhase phase = Fluid::SubstancePhase::Liquid;
-        // Solver regime, separate from thermodynamic phase and render routing.
-        Fluid::MatterConstitutiveModel constitutive_model =
-            Fluid::MatterConstitutiveModel::Auto;
     };
     std::vector<SubstanceMaterial> fluid_substance_materials;
 
@@ -1627,10 +1624,9 @@ struct SimulationFlowSourceDesc {
     // rides advection, compaction and reseed inheritance — the identity is a
     // property of the material, not of where it was born.
     std::string fluid_substance;
-    // Optional birth-state override. Auto resolves through the substance row,
-    // then falls back to the legacy domain granular switch for old scenes.
-    Fluid::MatterConstitutiveModel initial_constitutive_model =
-        Fluid::MatterConstitutiveModel::Auto;
+    // The birth model is NOT authored here: emitted parcels take the model of
+    // their substance (MatterDomainSources.inl), falling back to the domain's
+    // granular switch when the substance has no row.
     // Per-source accumulator for fractional emit counts (kept in the desc so
     // it survives step boundaries; reset on disable).
     // Kelvin the emitted LIQUID is born at (a hot wax pour). Separate from
@@ -2358,7 +2354,7 @@ public:
                                   const SimulationComputeContext& compute,
                                   std::vector<float>& pressure_out) const;
     const SimulationGpuFoamRenderBuffer* gridDomainFoamRenderBuffer(std::size_t domain_index) const;
-    void setGridDomainStates(const std::vector<SimulationGridDomainState>& states); // timeline cache restore
+    void setGridDomainStates(std::vector<SimulationGridDomainState> states); // timeline cache restore
     SimulationGridDomainDesc& addGridDomain(const SimulationGridDomainDesc& desc);
     bool removeGridDomain(
         std::size_t index,

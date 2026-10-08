@@ -199,41 +199,12 @@ bool drawDomainControls(
 
     ImGui::TextDisabled("Effective Ambient: %.1f K", ambient_kelvin);
     ImGui::BeginDisabled(!params.thermal_liquid_enabled);
-    edited |= ImGui::DragFloat(
-        "Freeze Temperature (K)",
-        &params.thermal_freeze_kelvin,
-        0.5f,
-        1.0f,
-        5000.0f,
-        "%.1f");
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "A supported parcel sets when its temperature is strictly below this value.");
-    }
-    edited |= ImGui::DragFloat(
-        "Thickening Range (K)",
-        &params.thermal_viscosity_range,
-        0.5f,
-        1.0f,
-        2000.0f,
-        "%.1f");
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Kelvin above the freeze point over which viscosity changes from\n"
-            "the hot value to Cold Viscosity using a logarithmic ramp.");
-    }
-    edited |= ImGui::DragFloat(
-        "Cold Viscosity (m^2/s)",
-        &params.thermal_cold_viscosity,
-        0.0001f,
-        0.0f,
-        1000.0f,
-        "%.5f",
-        ImGuiSliderFlags_Logarithmic);
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Viscosity at the freeze point. The hot end is the domain or substance value.");
-    }
+    // The freeze point, the thickening curve and conduction are the domain's
+    // substance (edit them in the Substance tree above); shown here so the
+    // cooling rates can be read against them.
+    ImGui::TextDisabled("Freeze %.1f K | thickens over %.1f K to %.5f m^2/s (from substance)",
+                        params.thermal_freeze_kelvin, params.thermal_viscosity_range,
+                        params.thermal_cold_viscosity);
 
     edited |= ImGui::DragFloat(
         "Air Cooling (1/s)",
@@ -266,20 +237,8 @@ bool drawDomainControls(
     }
     ImGui::EndDisabled();
 
-    edited |= ImGui::DragFloat(
-        "Heat Conduction (1/s)",
-        &params.granular_thermal_conductivity,
-        0.01f,
-        0.0f,
-        200.0f,
-        "%.2f");
-    const bool conduction_hovered = ImGui::IsItemHovered();
-    drawTimeConstant(params.granular_thermal_conductivity);
-    if (conduction_hovered) {
-        ImGui::SetTooltip(
-            "Particle-to-particle heat exchange. With 0, the interior of a pour\n"
-            "does not cool through neighboring liquid.");
-    }
+    ImGui::TextDisabled("Heat conduction %.2f 1/s (substance parcel_conduction)",
+                        params.granular_thermal_conductivity);
 
     if (edited) {
         params.sanitizeThermalLiquid();
