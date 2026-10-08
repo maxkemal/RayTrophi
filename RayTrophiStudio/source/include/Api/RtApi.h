@@ -4180,15 +4180,13 @@ struct FluidDomainInfo {
     std::string render_mode; // "fog" (liquid), "volume" (gas), "surface", "particles"
     std::string backend;     // "cpu", "gpu", "vulkan", "cpu_sparse"
     std::string boundary;    // "closed", "open", "periodic"
-    // "water","oil","mud","honey","lava","chocolate" (liquid) |
-    // "sand","wet_sand","gravel","cohesive_soil" (granular) | "custom".
-    // Accepted on write as well as reported on read, "custom" included, so a
-    // get -> set round trip cannot fail on a value this API produced.
-    std::string preset;
-    // Kinematic viscosity in m²/s. Renamed from the old unitless `viscosity`
-    // together with the solver field it mirrors, so a script written against the
-    // old 0..200 dial fails loudly on the missing key instead of quietly asking
-    // for lava when it meant honey.
+    // The domain's material: a substance name (substance.list). Replaces the
+    // `preset` key (a FluidPreset name). Accepted on write by fluid.set_param.
+    // Empty for a gas-only domain, which has no liquid material.
+    std::string default_substance;
+    // ★ Everything from here to the granular block is RESOLVED from the
+    // substance each step (read-only here; edit it with substance.set).
+    // Kinematic viscosity in m²/s; 0 when below what the voxel resolves.
     float kinematic_viscosity = 0.0f;
     int   viscosity_sweeps = 8;
     float viscosity_wall_slip = 1.0f;  // 0 = no-slip, 1 = free-slip
@@ -4325,7 +4323,6 @@ struct FluidDomainInfo {
         // `representation` above because they are separate axes: a solid can be
         // drawn as splat spheres or reconstructed into the isosurface.
         std::string phase;
-        std::string constitutive_model;
     };
     std::vector<SubstanceMaterialBinding> substance_materials;
     // What the view resolver decided, one entry per view this domain holds a
@@ -4550,12 +4547,8 @@ struct FluidThermalPatch {
     std::optional<bool>  enabled;
     std::optional<float> air_cooling_rate;       // 1/s
     std::optional<float> contact_cooling_rate;   // 1/s
-    std::optional<float> freeze_kelvin;          // K
-    std::optional<float> viscosity_range;        // K
-    std::optional<float> cold_viscosity;         // m²/s
-    // Shared with the granular melt path (fluid_params.granular_thermal_
-    // conductivity); exposed here too because a wax pour needs it.
-    std::optional<float> conductivity;           // 1/s
+    // The freeze point (melt_kelvin), the near-freeze viscosity curve and parcel
+    // conduction are the default substance's: edit them with substance.set.
 };
 
 struct GasDomainSettings {
@@ -4633,8 +4626,9 @@ struct GasDomainSettings {
     int turbulence_octaves_effective = 3;
 };
 
+// The chemistry itself (flammable, flash point, extinguishing) is the domain's
+// default substance; these are the combustion controls layered on top.
 struct CombustibleFluidSettings {
-    std::string chemistry_preset = "inert";
     bool enabled = false;
     bool auto_ignite = false;
     float ignition_temperature = 0.8f;
@@ -4692,7 +4686,6 @@ struct SimulationFlowSourceInfo {
     bool fluid_emit_along_normal = false;
     // Substance this source pours; empty = untagged (domain material).
     std::string fluid_substance;
-    std::string initial_constitutive_model = "auto";
     // Kelvin the emitted liquid is born at. Off = the domain ambient. NOT the
     // `temperature` above, which is the gas solver's normalised unit.
     bool  fluid_temperature_override = false;
@@ -4931,38 +4924,27 @@ Result setFluidSurfaceInterior(const std::string& domain_id_or_name,
                                std::optional<Vec3> absorption_color,
                                std::optional<float> absorption_coefficient,
                                std::optional<Vec3> refraction_tint);
-// Names in the built-in substance library, for scripts and UI pickers.
-Result listMaterialSubstances(std::vector<std::string>& out_names);
-
-// Physical, read-only view of one canonical substance. Temperatures are Kelvin,
-// energy values are J/kg and viscosity is m^2/s.
-struct SubstanceProfileInfo {
+// Substance library: built-ins (read-only) followed by project substances
+// derived from them (docs/dev/MADDE_TIPLERI_TASARIMI.md). Temperatures are
+// Kelvin, energy J/kg, viscosity m^2/s; every field is keyed as in
+// RayTrophiSim::substanceFieldSpecs().
+struct SubstanceSummary {
     std::string name;
-    std::string default_constitutive_model;
-    float density = 0.0f;
-    float liquid_density = 0.0f;
-    float specific_heat = 0.0f;
-    float conductivity = 0.0f;
-    float liquid_kinematic_viscosity = 0.0f;
-    bool combustible = false;
-    bool fluid_flammable = false;
-    bool fluid_extinguishing = false;
-    bool meltable = false;
-    float ignition_kelvin = 0.0f;
-    float flash_kelvin = 0.0f;
-    float autoignition_kelvin = 0.0f;
-    float melt_kelvin = 0.0f;
-    float boiling_kelvin = 0.0f;
-    float latent_heat_fusion = 0.0f;
-    float latent_heat_vaporization = 0.0f;
-    float vaporization_rate = 0.0f;
-    float cooling_power = 0.0f;
-    float oxygen_dilution = 0.0f;
-    float flame_persistence = 0.0f;
-    float granular_friction_degrees = 0.0f;
-    float granular_cohesion = 0.0f;
+    std::string based_on;   // empty for a built-in
+    std::string category;   // liquid | granular | solid | fuel
+    bool builtin = false;
 };
-Result getMaterialSubstance(const std::string& name, SubstanceProfileInfo& out_info);
+Result listSubstances(std::vector<SubstanceSummary>& out);
+// {name, based_on, builtin, fields:{...every field...}, overridden:[keys]}
+Result getSubstance(const std::string& name, std::string& out_json);
+// A new project substance identical to `based_on`. Built-ins are edited this way.
+Result deriveSubstance(const std::string& name, const std::string& based_on);
+// Patch fields of a project substance; null drops an override. Transactional.
+// Invalidates the simulation: the frames were solved with the old values.
+Result setSubstanceFields(const std::string& name, const std::string& fields_json);
+// Refuses while a flow source, collider, domain binding or another substance
+// still names it ("missing" must never read as "deleted").
+Result removeSubstance(const std::string& name);
 
 struct MaterialFieldInfo {
     std::string object_key;
@@ -5054,8 +5036,11 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
                          const Vec3* domain_min = nullptr, const Vec3* domain_max = nullptr,
                          const float* voxel_size = nullptr, const std::string* render_mode = nullptr,
                          const std::string* backend = nullptr, const std::string* boundary = nullptr,
-                         const std::string* preset = nullptr,
-                         const float* kinematic_viscosity = nullptr,
+                         // The domain's material, by substance NAME (substance.list).
+                         // Writes the substance's solver hints once and resolves
+                         // its physics; viscosity and the granular skeleton are
+                         // edited on the substance, not here.
+                         const std::string* default_substance = nullptr,
                          const int* viscosity_sweeps = nullptr,
                          const float* viscosity_wall_slip = nullptr,
                          // Scene material shading the SurfaceSDF isosurface, BY NAME.
@@ -5104,24 +5089,7 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
                          const bool* solid_phase = nullptr,
                          const float* solid_phase_fill = nullptr,
                          const bool* enabled = nullptr, const bool* visible = nullptr,
-                         const bool* granular_enabled = nullptr,
-                         const float* granular_friction_angle_degrees = nullptr,
-                         const float* granular_cohesion = nullptr,
-                         const float* granular_dilatancy_degrees = nullptr,
-                         const float* granular_young_modulus = nullptr,
-                         const float* granular_poisson_ratio = nullptr,
-                         const float* granular_tensile_cutoff = nullptr,
-                         const float* granular_hardening = nullptr,
-                         const float* granular_fracture_strain = nullptr,
-                         const float* granular_damage_rate = nullptr,
-                         const float* granular_healing_rate = nullptr,
-                         const bool* granular_rebonding = nullptr,
-                         const int* granular_max_solver_substeps = nullptr,
-                         const float* granular_softening_temperature = nullptr,
-                         const float* granular_softening_range = nullptr,
-                         const float* granular_residual_strength = nullptr,
-                         const float* granular_tack_peak = nullptr,
-                         const float* granular_thermal_conductivity = nullptr);
+                         const int* granular_max_solver_substeps = nullptr);
 // Surface reconstruction controls of a fluid domain (see FluidDomainInfo's
 // surface_* block). Out-of-range values are REJECTED, not clamped: these decide
 // cost as much as look (the multiplier is cubic), and a silently snapped 8 -> 4
@@ -5185,8 +5153,7 @@ Result setFluidSubstanceMaterial(const std::string& domain_id_or_name,
                                  const std::string* representation = nullptr,
                                  const float* kinematic_viscosity = nullptr,
                                  const float* miscibility = nullptr,
-                                 const std::string* phase = nullptr,
-                                 const std::string* constitutive_model = nullptr);
+                                 const std::string* phase = nullptr);
 
 Result getGasDomainSettings(const std::string& domain_id_or_name, GasDomainSettings& out_settings);
 Result updateGasDomainSettings(const std::string& domain_id_or_name, const GasDomainSettings& settings);

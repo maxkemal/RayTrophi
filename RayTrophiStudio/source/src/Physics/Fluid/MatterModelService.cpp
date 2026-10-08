@@ -1,4 +1,5 @@
 #include "Fluid/MatterModelService.h"
+#include "Fluid/FluidDomainSubstance.h"
 #include "Fluid/MatterPhaseGrid.h"
 #include "Fluid/FluidPhysicalMass.h"
 
@@ -27,7 +28,7 @@ bool inspectMatterModels(const SimulationGridDomainDesc& domain,
     // Existing parcels' physical rest masses remain authoritative. Only old
     // zero/unwritten mass sidecars use the established domain mass policy.
     const double fallback_mass = fluidParticleRestMassKg(
-        0u, domain.fluid_params.chemistry_preset, grid.voxel_size,
+        0u, Fluid::domainSubstance(domain.fluid_params), grid.voxel_size,
         domain.fluid_params.particles_per_cell, legacy_model);
     return buildMatterTransfer(state->particles, grid.origin, grid.voxel_size,
         {grid.nx, grid.ny, grid.nz}, legacy_model, fallback_mass,

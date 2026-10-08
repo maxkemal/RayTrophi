@@ -49,7 +49,45 @@ CHANGES = {
     # 2026-10-06 H1-G0: XPBD failed the 16k accuracy/cost gate, DEM is the only solver.
     'Solver (comparison)': 'removed: XPBD removed (H1-G0), DEM is the only grain solver',
     'XPBD substeps per frame': 'removed: XPBD removed (H1-G0)',
+    'Chemistry Preset': 'removed: T3 chemistry belongs to the default substance',
 }
+
+# T3 physically moves these widgets to the shared schema-driven substance
+# editor. Check the destination schema and its editor consumer instead of
+# pretending that a missing per-domain widget means the operation vanished.
+SUBSTANCE_MIGRATIONS = {
+    'Enable Granular MPM': 'default_constitutive_model',
+    'Friction Angle (deg)': 'granular_friction_degrees',
+    'Cohesion (Pa)': 'granular_cohesion',
+    'Dilatancy (deg)': 'granular_dilatancy_degrees',
+    'Young Modulus (Pa)': 'granular_young_modulus',
+    'Poisson Ratio': 'granular_poisson_ratio',
+    'Tensile Cutoff (Pa)': 'granular_tensile_cutoff',
+    'Hardening': 'granular_hardening',
+    'Fracture Strain': 'granular_fracture_strain',
+    'Damage Rate': 'granular_damage_rate',
+    'Allow Rebonding': 'granular_rebonding',
+    'Healing Rate': 'granular_healing_rate',
+    'Softening Temperature (K)': 'granular_softening_kelvin',
+    'Softening Range (K)': 'granular_softening_range',
+    'Residual Strength': 'granular_residual_strength',
+    'Kinematic Viscosity (m^2/s)': 'liquid_kinematic_viscosity',
+    'Freeze Temperature (K)': 'melt_kelvin',
+    'Thickening Range (K)': 'liquid_freeze_viscosity_range',
+    'Cold Viscosity (m^2/s)': 'liquid_cold_viscosity',
+    'Heat Conduction (1/s)': 'parcel_conduction',
+}
+
+
+def substance_migration_targets():
+    schema = (ROOT / 'RayTrophiStudio/source/src/Physics/SubstanceLibrary.cpp').read_text(
+        encoding='utf-8')
+    editor = (UI / 'scene_ui_substance_editor.hpp').read_text(encoding='utf-8')
+    panel = (UI / 'scene_ui_simulation_domains.cpp').read_text(encoding='utf-8')
+    assert 'substanceFieldSpecs()' in editor and 'setSubstanceFields(' in editor
+    assert 'SubstanceEditorUI::draw(' in panel and 'default_substance' in panel
+    return set(re.findall(r'RT_(?:FLOAT|BOOL)\(\s*(\w+)', schema)) | set(
+        re.findall(r'\{\{"(\w+)", Kind::', schema))
 
 
 def label_of(literal):
@@ -134,6 +172,7 @@ def main():
         print(f'baseline: {len(current)} widgets, {len({key(w) for w in current})} labels -> {BASELINE.name}')
         return 0
     baseline = json.loads(BASELINE.read_text(encoding='utf-8'))
+    substance_targets = substance_migration_targets()
     now = {}
     for w in current:
         now.setdefault(key(w), []).append(w)
@@ -142,6 +181,10 @@ def main():
     lost, moved = [], []
     for w in baseline:
         k = key(w)
+        if k in SUBSTANCE_MIGRATIONS:
+            if SUBSTANCE_MIGRATIONS[k] not in substance_targets:
+                lost.append(w)
+            continue
         change = CHANGES.get(k)
         if change and change.startswith('removed:'):
             continue

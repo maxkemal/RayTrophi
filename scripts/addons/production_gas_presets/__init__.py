@@ -42,7 +42,7 @@ def add_burning_fuel_spill():
     )
     rt.fluid.set_param(
         domain_name, backend="vulkan", boundary="closed",
-        preset="oil", render_mode="surface",
+        default_substance="Oil", render_mode="surface",
     )
     rt.fluid.seed(
         domain_name,
@@ -104,7 +104,7 @@ def add_api_routing_test():
     )
     rt.fluid.set_param(
         fluid_name, backend="vulkan", boundary="open",
-        preset="oil", render_mode="surface",
+        default_substance="Oil", render_mode="surface",
     )
     rt.gas.create_domain(
         gas_name, domain_min=(-2.0, -0.3, -1.5),

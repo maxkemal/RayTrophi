@@ -41,12 +41,17 @@ if DOMAIN not in [d["name"] for d in rt.fluid.list_domains()]:
     rt.fluid.create_domain(DOMAIN, domain_min=(-1, 0, -1), domain_max=(1, 3, 1),
                            voxel_size=0.05)
 
-rt.fluid.set_param(DOMAIN, backend="vulkan", boundary="closed", preset="sand",
-                   enabled=True, granular_enabled=True,
-                   granular_friction_angle=35.0, granular_cohesion=0.0,
-                   granular_dilatancy=5.0, granular_young_modulus=800.0,
-                   granular_poisson_ratio=0.25, granular_tensile_cutoff=0.0,
-                   granular_hardening=0.0, granular_rebonding=False,
+# The skeleton is a substance property (2026-10-07): a deliberately soft sand.
+MATERIAL = "T: overburden soft sand"
+if MATERIAL not in [s["name"] for s in rt.substance.list()]:
+    rt.substance.derive(MATERIAL, "Sand")
+rt.substance.set(MATERIAL, {
+    "granular_friction_degrees": 35.0, "granular_cohesion": 0.0,
+    "granular_dilatancy_degrees": 5.0, "granular_young_modulus": 800.0,
+    "granular_poisson_ratio": 0.25, "granular_tensile_cutoff": 0.0,
+    "granular_hardening": 0.0, "granular_rebonding": False})
+rt.fluid.set_param(DOMAIN, backend="vulkan", boundary="closed",
+                   default_substance=MATERIAL, enabled=True,
                    granular_max_solver_substeps=16)
 rt.fluid.clear(DOMAIN, clear_seed=True)
 rt.fluid.reset()

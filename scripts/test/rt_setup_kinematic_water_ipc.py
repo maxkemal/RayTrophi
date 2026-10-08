@@ -79,7 +79,7 @@ def main() -> None:
             domain=domain_name,
             backend="vulkan",
             boundary="closed",
-            preset="water",
+            default_substance="Water",
             enabled=True,
         )
         water_top = minimum[1] + 0.38 * height

@@ -1,14 +1,27 @@
 # Birleşik madde domain'i — gaz/sıvı ayrımı olmayan simülasyon ve render
 
-> **Durum: 2026-10-05.** C5 kontrollü su bilançosu canlıda korundu. C6 ilk
-> kaynak partisi kullanıcı derlemesiyle canlı probları geçti; tam C6/C7 kabulü açık.
-> Hedef tek Matter domaininde madde durumundan türeyen gaz/sıvı/granül çözümü
-> ve fiziksel alanlarla tutarlı görünüm. Ampirik local-head modeli tam basınç
-> çözümü olarak sunulmaz.
+> **Durum:** AKTİF — 2026-10-08. Madde T1/T3 kullanıcı build'i ve hızlı
+> dış IPC kabulü PASS; legacy/save-open/görsel kabul ve T2 hal/model birleşmesi açık.
+> C5/C6/C7 fiziksel yakınsama ve H1 maliyet kapıları bu testlerle kapanmaz.
+> Uzman Gas/Liquid domain'leri T0 eşitlik ölçümü olmadan kaldırılmaz.
+
+## Güncel kısa devir — 2026-10-08
+
+| Konu | Güncel durum |
+|---|---|
+| Son kaynak partisi | T1 madde kalıtımı + T3 Varsayılan Madde, fizik/hints ayrımı, preset/chemistry sökümü; kullanıcı derledi. |
+| Hızlı canlı kabul | Madde library testi (21 yerleşik) ve domain substance sözleşmesi PASS; test nesneleri temizlendi. Simülasyon adımı/görsel kabul yapılmadı. |
+| Kaldığımız kaynak noktası | T2: Initial Model ve binding Phase/Constitutive sökümü, madde+sıcaklıktan model/hal, Frozen↔solid mask tek yolu, Ice→Water göçü. |
+| Açık T1/T3 kabulü | Save/open, legacy domain göçü, numerical tuning korunumu, Wax/MSF viskozite görseli ve node geri alma. |
+| Kanonik madde planı | [MADDE_TIPLERI_TASARIMI.md](MADDE_TIPLERI_TASARIMI.md) §6a–§6d; T4/H1 B11 ve T5/T6 sonraki kapılar. |
+| Ayrıntılı devam/devir | [MADDE_T2_T3_HANDOFF.md](MADDE_T2_T3_HANDOFF.md), [NEXT_BUILD_CHECKS.md](NEXT_BUILD_CHECKS.md), [canlı kanıt](madde_t1_t3_live_2026-10-08.json). |
+
+Önceki kısa devir ve aşağıdaki tarihli kaynak checkpoint'leri tarihsel kayıttır;
+güncel madde partisinin durumunu bu tablo ve bağlantılı devir belirler.
 
 ---
 
-## Güncel kısa devir — 2026-10-05
+## Önceki kısa devir — 2026-10-05 (tarihsel)
 
 | Konu | Durum |
 |---|---|

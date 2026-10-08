@@ -67,7 +67,7 @@ def main():
                     domain_min=[5.0, 0.0, -1.0], domain_max=[8.0, 2.0, 1.0], voxel_size=0.08)
         created = True
         client.call("fluid.set_param", domain=name, backend=args.backend, boundary="closed",
-                    preset="water", render_mode="surface", visible=False)
+                    default_substance="Water", render_mode="surface", visible=False)
         client.call("fluid.seed", domain=name, seed_min=[5.05, 0.05, -0.95],
                     seed_max=[6.0, 1.6, 0.95], particles_per_cell=4,
                     replace=True, persistent=True)

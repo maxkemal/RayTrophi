@@ -4,6 +4,8 @@
 #include "SurfaceMeshCache.h"
 #include "ParticleSimulation.h"
 
+#include <cmath>
+
 namespace RayTrophiSim::Fluid {
 
 bool collectFlatGrainCollider(const std::vector<std::shared_ptr<Hittable>>& objects,
@@ -31,6 +33,14 @@ bool collectFlatGrainCollider(const std::vector<std::shared_ptr<Hittable>>& obje
                 }
                 *vertices[corner] = local && mesh->transform
                     ? matrix.transform_point(local[index]) : points[index];
+            }
+            // A zero-area face has no surface to touch: a UV sphere's pole
+            // rows are exactly that, and the BVH rejects them (the whole step
+            // was held for a plain sphere primitive). Same threshold as the BVH;
+            // nonfinite corners still reach it and fail there.
+            const float area = (t.p1 - t.p0).cross(t.p2 - t.p0).length();
+            if (std::isfinite(area) && area < 1e-10f) {
+                continue;
             }
             result.push_back(t);
             if (result.size() > 4096) {

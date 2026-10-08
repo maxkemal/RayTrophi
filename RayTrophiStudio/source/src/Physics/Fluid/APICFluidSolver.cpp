@@ -41,22 +41,6 @@
 namespace RayTrophiSim {
 namespace Fluid {
 
-namespace {
-
-const char* chemistrySubstanceName(FluidChemistryPreset preset) {
-    switch (preset) {
-        case FluidChemistryPreset::Water: return "Water";
-        case FluidChemistryPreset::Gasoline: return "Gasoline";
-        case FluidChemistryPreset::Alcohol: return "Alcohol";
-        case FluidChemistryPreset::Oil: return "Oil";
-        case FluidChemistryPreset::Plastic: return "Plastic (PE)";
-        case FluidChemistryPreset::Wax: return "Wax";
-        default: return nullptr;
-    }
-}
-
-} // namespace
-
 void APICSolverParams::applySubstanceProfile(
     const SubstanceProfile& profile,
     const MaterialTemperatureScale& scale) {
@@ -73,24 +57,6 @@ void APICSolverParams::applySubstanceProfile(
     fuel_profile.cooling_power = profile.cooling_power;
     fuel_profile.oxygen_dilution = profile.oxygen_dilution;
     fuel_profile.flame_persistence = profile.flame_persistence;
-}
-
-void APICSolverParams::applyChemistryProfile(FluidChemistryPreset preset) {
-    applyChemistryProfile(preset, MaterialTemperatureScale{});
-}
-
-void APICSolverParams::applyChemistryProfile(
-    FluidChemistryPreset preset,
-    const MaterialTemperatureScale& scale) {
-    chemistry_preset = preset;
-    const char* substance_name = chemistrySubstanceName(preset);
-    const SubstanceProfile* profile = substance_name
-        ? tryFindSubstance(substance_name) : nullptr;
-    if (!profile) {
-        fuel_profile = {};
-        return;
-    }
-    applySubstanceProfile(*profile, scale);
 }
 
 // Shared static storage exposed by getLastFlipPreSnapshot*().

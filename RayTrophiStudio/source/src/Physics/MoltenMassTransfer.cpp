@@ -22,7 +22,6 @@ bool contains(const SimulationGridDomainState& d, const Vec3& p) {
 void applyMoltenChemistry(SimulationGridDomainDesc& desc,
                           const SubstanceProfile& substance,
                           const MaterialTemperatureScale& scale) {
-    desc.fluid_params.chemistry_preset = Fluid::FluidChemistryPreset::Custom;
     desc.fluid_params.applySubstanceProfile(substance, scale);
     const auto& chemistry = desc.fluid_params.fuel_profile;
     desc.fluid_flammable = chemistry.flammable;
@@ -216,18 +215,17 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
             // the authored copy BEFORE the first write, so a reset can undo it.
             backupMoltenDomainDescriptor(desc);
             if (state.particles.empty()) {
-                if (desc.fluid_params.kinematic_viscosity <= 0.0f)
-                    desc.fluid_params.kinematic_viscosity =
-                        profile.liquid_kinematic_viscosity;
+                // The domain only ever holds this one tag (checked above), so
+                // its material IS the melting substance: viscosity and the rest
+                // of the physics resolve from it every step.
+                desc.fluid_params.default_substance = profile.name;
+                const float nu = std::max(profile.liquid_kinematic_viscosity, 0.0f);
                 // Sweeps track how stiff the implicit system is: ν·dt/h² grows
                 // with viscosity, and an under-converged solve under-applies it.
                 desc.fluid_params.viscosity_sweeps =
-                    desc.fluid_params.kinematic_viscosity >= 0.1f  ? 24 :
-                    desc.fluid_params.kinematic_viscosity >= 1.0e-3f ? 16 : 6;
+                    nu >= 0.1f ? 24 : nu >= 1.0e-3f ? 16 : 6;
                 // A melt wets what it runs over — no-slip, not free-slip.
                 desc.fluid_params.viscosity_wall_slip = 0.0f;
-                desc.fluid_params.current_preset =
-                    Fluid::APICSolverParams::FluidPreset::Custom;
                 desc.fluid_render_mode = Fluid::FluidRenderMode::SurfaceSDF;
             }
             applyMoltenChemistry(desc, profile, world_thermal_.scale());

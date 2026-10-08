@@ -3,6 +3,7 @@
 import uuid
 
 from rt_ipc import RtIpc
+from rt_domain_material import domain_material  # noqa: E402
 
 
 DT = 1.0 / 60.0
@@ -37,9 +38,11 @@ def main():
             velocity=[0.0, 0.0, 0.0], velocity_coupling=0.0)
         source_created = True
 
+        material = domain_material(client.call, 'T: test_fluid_phase3_boundary_freeze', 'Wax',
+            thermal_freeze_kelvin=400.0)
         client.call(
-            "fluid.set_param", domain=fluid, preset="wax",
-            thermal_liquid_enabled=True, thermal_freeze_kelvin=400.0,
+            "fluid.set_param", domain=fluid, default_substance=material,
+            thermal_liquid_enabled=True,
             thermal_air_cooling_rate=0.0,
             thermal_contact_cooling_rate=0.0)
         client.call(

@@ -51,6 +51,7 @@ import json
 import os
 import sys
 import time
+from rt_domain_material import PRESET_SUBSTANCE
 
 PIPE_NAME = r"\\.\pipe\RayTrophiStudio"
 
@@ -169,19 +170,20 @@ def run_material(rt, out_dir, preset, note):
     print("\n=== {} :: {} ===".format(preset, note))
     rt.call("fluid.reset")
     rt.call("fluid.clear", {"domain": DOMAIN})
-    rt.call("fluid.set_param", {"domain": DOMAIN, "preset": preset})
+    substance = PRESET_SUBSTANCE[preset]
+    rt.call("fluid.set_param", {"domain": DOMAIN, "default_substance": substance})
 
     info = rt.call("fluid.get", {"domain": DOMAIN})
     # Echo what the solver actually holds, not what we asked for. A preset that
     # failed to reach the grid domain descriptor used to return success and
     # change nothing; printing the read-back is what makes that visible.
-    print("    preset={} nu={:.2e} m^2/s sweeps={} wall_slip={:.2f}".format(
-        info["preset"], info["kinematic_viscosity"],
+    print("    substance={} nu={:.2e} m^2/s sweeps={} wall_slip={:.2f}".format(
+        info["default_substance"], info["kinematic_viscosity"],
         info["viscosity_sweeps"], info["viscosity_wall_slip"]))
-    if info["preset"] != preset:
+    if info["default_substance"] != substance:
         raise RuntimeError(
             "asked for '{}' but the domain reports '{}' - the preset did not "
-            "reach the grid domain descriptor".format(preset, info["preset"]))
+            "reach the grid domain descriptor".format(substance, info["default_substance"]))
 
     rt.call("fluid.seed", {"domain": DOMAIN, "seed_min": SEED_MIN,
                            "seed_max": SEED_MAX, "particles_per_cell": 8,

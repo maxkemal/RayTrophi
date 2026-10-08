@@ -167,8 +167,23 @@ struct WorldThermalState {
 // char_color and molten emission, Phase 6 reads melt_kelvin and melt_viscosity,
 // Phase 7 reads ash_yield. They live here so the presets are written once with
 // real values instead of being retrofitted per phase.
+// Picker grouping only (UI sections, emitter filter). It never changes how a
+// substance behaves: behaviour is read from the physical fields below.
+enum class SubstanceCategory : uint8_t {
+    Liquid = 0,
+    Granular = 1,
+    Solid = 2,
+    Fuel = 3
+};
+const char* substanceCategoryName(SubstanceCategory category);
+bool parseSubstanceCategory(const std::string& text, SubstanceCategory& out);
+
 struct SubstanceProfile {
     std::string name;
+    // Empty for a built-in. A project substance names the profile it inherits
+    // from; only the fields it overrides are stored (see deriveSubstance).
+    std::string based_on;
+    SubstanceCategory category = SubstanceCategory::Solid;
     Fluid::MatterConstitutiveModel default_constitutive_model =
         Fluid::MatterConstitutiveModel::Fluid;
 
@@ -240,7 +255,56 @@ struct SubstanceProfile {
     // Granular phase defaults. They are inert for non-granular substances but
     // live in the same table so a future phase transition has no second source.
     float granular_friction_degrees = 35.0f;
-    float granular_cohesion = 0.0f;
+    float granular_cohesion = 0.0f;              // Pa
+
+    // ── Granular skeleton (Drucker-Prager MPM) ───────────────────────────────
+    // What the domain's granular solver runs when this substance is a domain's
+    // Default Substance (resolveDomainSubstancePhysics). Calibrated against
+    // pile depth, not feel: the corotational predictor needs E >= 10*rho*g*h.
+    float granular_dilatancy_degrees = 5.0f;
+    float granular_young_modulus = 2.0e5f;       // Pa
+    float granular_poisson_ratio = 0.25f;
+    float granular_tensile_cutoff = 0.0f;        // Pa
+    float granular_hardening = 0.0f;
+    float granular_fracture_strain = 0.04f;
+    float granular_damage_rate = 6.0f;           // 1/s
+    float granular_healing_rate = 0.0f;          // 1/s
+    bool  granular_rebonding = false;
+    // Thermal/burn softening of the skeleton; 0 K disables it (sand does not soften).
+    float granular_softening_kelvin = 0.0f;      // K, midpoint
+    float granular_softening_range = 40.0f;      // K, width
+    float granular_residual_strength = 0.05f;    // 0..1 kept once fully soft
+    float granular_tack_peak = 1.0f;             // cohesion multiplier at peak tack
+    // Parcel<->parcel and parcel<->gas conduction rate, 1/s (solver rate, not W/mK).
+    float parcel_conduction = 0.0f;
+
+    // ── Liquid near its freezing point (thermal-liquid chain) ────────────────
+    // ν ramps (log space) from liquid_kinematic_viscosity to liquid_cold_viscosity
+    // over this many K above melt_kelvin, where the parcel sets.
+    float liquid_freeze_viscosity_range = 25.0f; // K
+    float liquid_cold_viscosity = 0.05f;         // m^2/s at the freeze point
+
+    // ── Solver hints ─────────────────────────────────────────────────────────
+    // NOT physics: the numerical settings this substance was tuned with. They
+    // are written to a domain ONCE, when the substance becomes that domain's
+    // Default Substance (applySubstanceSolverHints), and stay editable on the
+    // domain. A granular substance needs flip 0 (the elastic stress enters the
+    // grid before the FLIP snapshot); a viscous one fewer FLIP and no wall slip.
+    float solver_flip_blend = 0.97f;
+    float solver_apic_blend = 0.95f;
+    float solver_velocity_damping = 0.999f;
+    float solver_density_correction = 1.0f;
+    float solver_air_drag = 0.15f;               // 1/m, detached droplets
+    float solver_wall_damping = 0.15f;
+    float solver_affine_damping = 0.98f;
+    float solver_max_velocity = 50.0f;           // m/s
+    float solver_viscosity_sweeps = 1.0f;        // integer
+    float solver_viscosity_wall_slip = 1.0f;     // 0 no-slip .. 1 free-slip
+    float solver_internal_friction = 0.0f;       // 1/s body drag (stylised only)
+    float solver_granular_max_substeps = 32.0f;  // integer
+    bool  solver_thermal_chain = false;          // cooling + freezing on by default
+    float solver_air_cooling_rate = 0.15f;       // 1/s
+    float solver_contact_cooling_rate = 2.0f;    // 1/s
 
     // ── Optical (Phase 3) ────────────────────────────────────────────────────
     float char_color[3]      = {0.05f, 0.04f, 0.035f};
@@ -282,12 +346,26 @@ struct MaterialStateFieldBridgeStats {
 };
 MaterialStateFieldBridgeStats& materialStateFieldBridgeStats();
 
-// Built-in substance library. Strict callers use tryFindSubstance; legacy scene
-// loading uses findSubstance and falls back to the first/default profile.
-const std::vector<SubstanceProfile>& substanceLibrary();
+// The substance library: built-ins (read-only, in their authored order) followed
+// by project substances derived from them (SubstanceLibrary.cpp).
+//
+// Every returned pointer stays valid for the life of the process. An edit
+// publishes a NEW profile and a new lookup snapshot; a consumer that resolved a
+// pointer before the edit keeps reading the old values until it looks up again.
+// Edits invalidate the simulation, so the next step re-resolves. This is what
+// lets per-particle lookups (tryFindSubstanceByTag) run lock-free on solver
+// threads while the UI/IPC thread edits the table.
+//
+// Strict callers use tryFindSubstance; legacy scene loading uses findSubstance
+// and falls back to the first/default profile.
+std::vector<const SubstanceProfile*> substanceProfiles();
 const SubstanceProfile* tryFindSubstance(const std::string& name);
 const SubstanceProfile* tryFindSubstanceByTag(uint32_t tag);
 const SubstanceProfile& findSubstance(const std::string& name);
+// Bumped by every publish. Caches keyed on substance values compare this.
+uint64_t substanceLibraryRevision();
+// The authored built-ins, in order. Only the library itself reads this.
+const std::vector<SubstanceProfile>& builtinSubstanceProfiles();
 
 // Per-object deviation from the library profile.
 //

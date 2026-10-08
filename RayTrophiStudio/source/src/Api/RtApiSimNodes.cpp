@@ -290,14 +290,12 @@ bool readParameter(const std::string& domain, const std::string& key, float& out
     if (!listFluidDomains(domains).ok) return false;
     for (const auto& d : domains) {
         if (d.name != domain) continue;
-        if (key == "kinematic_viscosity")   { out = d.kinematic_viscosity;   return true; }
         if (key == "viscosity_wall_slip")   { out = d.viscosity_wall_slip;   return true; }
         if (key == "surface_offset_voxels") { out = d.surface_offset_voxels; return true; }
         if (key == "pore_amount")           { out = d.pore_amount;           return true; }
         if (key == "pore_scale")            { out = d.pore_scale;            return true; }
         if (key == "pore_detail")           { out = d.pore_detail;           return true; }
         if (key == "solid_phase_fill")      { out = d.solid_phase_fill;      return true; }
-        if (key == "granular_cohesion")     { out = d.granular_cohesion;     return true; }
         if (key == "voxel_size")            { out = d.voxel_size;            return true; }
         // ★★ Integer and boolean parameters travel as floats because SimCommand
         // carries one numeric type. They are rounded back on the WRITE side, in
@@ -305,27 +303,27 @@ bool readParameter(const std::string& domain, const std::string& key, float& out
         // truncated somewhere else would drift by one and nobody would look.
         if (key == "viscosity_sweeps")      { out = static_cast<float>(d.viscosity_sweeps);    return true; }
         if (key == "uvw_refresh_period")    { out = static_cast<float>(d.uvw_refresh_period);  return true; }
-        if (key == "granular_friction_angle_degrees")
-                                            { out = d.granular_friction_angle_degrees;        return true; }
         if (key == "solid_phase")           { out = d.solid_phase_enabled ? 1.0f : 0.0f;       return true; }
         if (key == "enabled")               { out = d.enabled ? 1.0f : 0.0f;                   return true; }
         if (key == "visible")               { out = d.visible ? 1.0f : 0.0f;                   return true; }
+        // ★ kinematic_viscosity, granular_cohesion and
+        // granular_friction_angle_degrees were targets here until 2026-10-07.
+        // They are the domain's SUBSTANCE now (resolved every step); a per-frame
+        // node write would have to patch the library each frame, which
+        // invalidates the bake each frame. Unknown here = refused, visibly.
         return false;                       // unknown key: say so, do not guess
     }
     return false;                           // unknown domain
 }
 
 bool writeParameter(const std::string& domain, const std::string& key, float value) {
-    const float* kinematic_viscosity = nullptr;
     const float* viscosity_wall_slip = nullptr;
     const float* surface_offset_voxels = nullptr;
     const float* pore_amount = nullptr;
     const float* pore_scale = nullptr;
     const float* pore_detail = nullptr;
     const float* solid_phase_fill = nullptr;
-    const float* granular_cohesion = nullptr;
     const float* voxel_size = nullptr;
-    const float* granular_friction_angle = nullptr;
     // ★ Non-float targets need their own storage: updateFluidDomain takes an
     // int/bool pointer, and handing it the address of `value` would reinterpret
     // a float's bits as an integer.
@@ -344,16 +342,13 @@ bool writeParameter(const std::string& domain, const std::string& key, float val
     // Anything above zero means on. There is no in-between to interpolate.
     auto as_bool = [&value]() { return value > 0.5f; };
 
-    if (key == "kinematic_viscosity")        kinematic_viscosity = &value;
-    else if (key == "viscosity_wall_slip")   viscosity_wall_slip = &value;
+    if (key == "viscosity_wall_slip")        viscosity_wall_slip = &value;
     else if (key == "surface_offset_voxels") surface_offset_voxels = &value;
     else if (key == "pore_amount")           pore_amount = &value;
     else if (key == "pore_scale")            pore_scale = &value;
     else if (key == "pore_detail")           pore_detail = &value;
     else if (key == "solid_phase_fill")      solid_phase_fill = &value;
-    else if (key == "granular_cohesion")     granular_cohesion = &value;
     else if (key == "voxel_size")            voxel_size = &value;
-    else if (key == "granular_friction_angle_degrees") granular_friction_angle = &value;
     else if (key == "viscosity_sweeps")   { sweeps_store  = as_int();  viscosity_sweeps   = &sweeps_store; }
     else if (key == "uvw_refresh_period") { refresh_store = as_int();  uvw_refresh_period = &refresh_store; }
     else if (key == "solid_phase")        { solid_store   = as_bool(); solid_phase        = &solid_store; }
@@ -379,8 +374,7 @@ bool writeParameter(const std::string& domain, const std::string& key, float val
         /* render_mode                    */ nullptr,
         /* backend                        */ nullptr,
         /* boundary                       */ nullptr,
-        /* preset                         */ nullptr,
-        /* kinematic_viscosity            */ kinematic_viscosity,
+        /* default_substance              */ nullptr,
         /* viscosity_sweeps               */ viscosity_sweeps,
         /* viscosity_wall_slip            */ viscosity_wall_slip,
         /* surface_material               */ nullptr,
@@ -393,10 +387,7 @@ bool writeParameter(const std::string& domain, const std::string& key, float val
         /* solid_phase                    */ solid_phase,
         /* solid_phase_fill               */ solid_phase_fill,
         /* enabled                        */ enabled,
-        /* visible                        */ visible,
-        /* granular_enabled               */ nullptr,
-        /* granular_friction_angle_degrees*/ granular_friction_angle,
-        /* granular_cohesion              */ granular_cohesion).ok;
+        /* visible                        */ visible).ok;
 }
 
 // ── World thermal ambient (section 7 item 1, section 8 step 4) ─────────────
@@ -746,8 +737,7 @@ bool writeRenderText(const std::string& domain, const std::string& key,
             /* render_mode                    */ nullptr,
             /* backend                        */ nullptr,
             /* boundary                       */ nullptr,
-            /* preset                         */ nullptr,
-            /* kinematic_viscosity            */ nullptr,
+            /* default_substance              */ nullptr,
             /* viscosity_sweeps               */ nullptr,
             /* viscosity_wall_slip            */ nullptr,
             /* surface_material               */ surface).ok;

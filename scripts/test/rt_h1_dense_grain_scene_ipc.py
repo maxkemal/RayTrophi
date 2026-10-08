@@ -82,8 +82,7 @@ def main():
                  domain_min=[-1.7, 0, -1.7], domain_max=[1.7, 3.2, 1.7], voxel_size=.1)
         domain_ready = True
         call('fluid.set_param', domain=DOMAIN, enabled=True, visible=False,
-             backend='vulkan', boundary='closed', preset='sand', render_mode='particles',
-             granular_enabled=True, solid_phase=False, thermal_liquid_enabled=False,
+             backend='vulkan', boundary='closed', default_substance='Sand', render_mode='particles', solid_phase=False, thermal_liquid_enabled=False,
              max_particles=40000, voxel_size=.1,
              domain_min=[-1.7, 0, -1.7], domain_max=[1.7, 3.2, 1.7])
         call('fluid.set_pore_exchange', domain=DOMAIN, enabled=False,
@@ -96,8 +95,7 @@ def main():
         exists = SOURCE in {s['name'] for s in call('flow_source.list')}
         call('flow_source.update' if exists else 'flow_source.create', name=SOURCE,
              domain=DOMAIN, enabled=False, phase='liquid', source_mode='point',
-             fluid_substance='Sand', initial_constitutive_model='granular',
-             position=[0, 1.5, 0], radius=1.1, velocity=[0, 0, 0], fluid_velocity_spread=0.,
+             fluid_substance='Sand', position=[0, 1.5, 0], radius=1.1, velocity=[0, 0, 0], fluid_velocity_spread=0.,
              use_time_limit=True, start_time=0., end_time=1/30, use_particle_limit=True,
              max_emitted_particles=16384, fluid_particles_per_second=16384*1.01*60,
              fluid_temperature_override=True, fluid_temperature_kelvin=293.15)

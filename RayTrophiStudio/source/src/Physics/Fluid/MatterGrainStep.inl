@@ -414,7 +414,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         }
         if (coupled) {
             if (!Fluid::buildMatterGrainLiquidField(liquid, grains, params.grain.radius_m,
-                    params.chemistry_preset, state.grid.origin, state.grid.nx, state.grid.ny,
+                    Fluid::domainSubstance(params), state.grid.origin, state.grid.nx, state.grid.ny,
                     state.grid.nz, state.grid.voxel_size, frame.field, error)) {
                 return false;
             }

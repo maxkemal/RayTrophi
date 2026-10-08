@@ -22,7 +22,7 @@ def main():
                      domain_min=[20, 0, 20], domain_max=[23.2, 3.2, 23.2], voxel_size=0.1)
         created = True
         checked_call(client, "fluid.set_param", domain=name, backend="vulkan",
-                     boundary="closed", preset="water", visible=False)
+                     boundary="closed", default_substance="Water", visible=False)
         checked_call(client, "fluid.set_whitewater", domain=name, enabled=False)
         checked_call(client, "fluid.seed", domain=name, seed_min=[21.2, 1.2, 21.2],
                      seed_max=[21.6, 1.6, 21.6], particles_per_cell=8,

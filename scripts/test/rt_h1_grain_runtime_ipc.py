@@ -89,7 +89,7 @@ def main():
                  domain_max=[.6, 3, .6], voxel_size=.1)
         domain_ready = True
         call('fluid.set_param', domain=DOMAIN, enabled=True, visible=False, backend='vulkan',
-             boundary='closed', preset='sand', granular_enabled=True, solid_phase=False,
+             boundary='closed', default_substance='Sand', solid_phase=False,
              thermal_liquid_enabled=False)
         call('fluid.set_pore_exchange', domain=DOMAIN, enabled=False,
              wet_response_enabled=False, wet_appearance_enabled=False)
@@ -114,8 +114,7 @@ def main():
         exists = SOURCE in {s['name'] for s in call('flow_source.list')}
         call('flow_source.update' if exists else 'flow_source.create', name=SOURCE,
              domain=DOMAIN, enabled=False, phase='liquid', source_mode='point',
-             fluid_substance='Sand', initial_constitutive_model='granular',
-             position=[0, 1.5, 0], radius=.0001, velocity=[0, 0, 0],
+             fluid_substance='Sand', position=[0, 1.5, 0], radius=.0001, velocity=[0, 0, 0],
              fluid_velocity_spread=0., use_particle_limit=True, max_emitted_particles=1,
              use_time_limit=True, start_time=0., end_time=.05,
              fluid_particles_per_second=200., fluid_temperature_override=True,
@@ -222,14 +221,14 @@ def main():
                      domain_max=[.4, .8, .4], voxel_size=.05)
             call('fluid.set_param', domain=DOMAIN, enabled=False, visible=False)
             call('fluid.set_param', domain=COEXIST, enabled=True, visible=False, backend='vulkan',
-                 boundary='closed', preset='sand', granular_enabled=True, solid_phase=False,
+                 boundary='closed', default_substance='Sand', solid_phase=False,
                  thermal_liquid_enabled=False, max_particles=40000)
             call('fluid.set_pore_exchange', domain=COEXIST, enabled=False,
                  wet_response_enabled=False, wet_appearance_enabled=False)
             names = {x['name'] for x in call('flow_source.list')}
             call('flow_source.update' if WATER in names else 'flow_source.create', name=WATER,
                  domain=COEXIST, enabled=False, phase='liquid', source_mode='point',
-                 fluid_substance='Water', initial_constitutive_model='fluid', position=[0, .2, 0],
+                 fluid_substance='Water', position=[0, .2, 0],
                  radius=.2, velocity=[0, 0, 0], fluid_velocity_spread=0.,
                  fluid_particles_per_second=24000., fluid_temperature_override=True,
                  fluid_temperature_kelvin=293.15, use_time_limit=True, start_time=0., end_time=.5,
@@ -634,7 +633,7 @@ def main():
             repose_ready = True
             call('fluid.set_param', domain=DOMAIN, enabled=False, visible=False)
             call('fluid.set_param', domain=REPOSE, enabled=True, visible=False, backend='vulkan',
-                 boundary='closed', preset='sand', granular_enabled=True, solid_phase=False,
+                 boundary='closed', default_substance='Sand', solid_phase=False,
                  thermal_liquid_enabled=False, max_particles=40000)
             call('fluid.set_pore_exchange', domain=REPOSE, enabled=False,
                  wet_response_enabled=False, wet_appearance_enabled=False)

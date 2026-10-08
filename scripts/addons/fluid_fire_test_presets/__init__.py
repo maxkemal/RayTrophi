@@ -53,9 +53,12 @@ def _make_pair(fluid, gas, chemistry, fluid_min=(-2.5, 0.0, -2.5),
         fluid, domain_min=fluid_min, domain_max=fluid_max,
         voxel_size=0.10, type="fluid",
     )
+    # The liquid IS the chemistry under test: Gasoline/Alcohol/Oil/Water carry
+    # their own physics and fuel profile (the old "Oil physics + X chemistry"
+    # pair was two partial copies of one substance).
     rt.fluid.set_param(
         fluid, backend="vulkan", boundary="closed",
-        preset="oil", render_mode="surface",
+        default_substance=chemistry.capitalize(), render_mode="surface",
     )
     rt.fluid.seed(
         fluid, seed_min=(-1.8, 0.15, -1.8),
@@ -64,7 +67,6 @@ def _make_pair(fluid, gas, chemistry, fluid_min=(-2.5, 0.0, -2.5),
     )
     rt.fluid.set_combustion(
         fluid,
-        chemistry_preset=chemistry,
         enabled=True,
         auto_ignite=False,
         surface_fuel_capacity=5.0,

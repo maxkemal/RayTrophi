@@ -88,19 +88,19 @@ def phase_surface_detail(rt):
 def phase_preset_switch(rt):
     print("\n=== phase 2: wax preset switches the chain on, others off ===")
     f = []
-    rt.call("fluid.set_param", domain=DOMAIN, preset="wax")
+    rt.call("fluid.set_param", domain=DOMAIN, default_substance="Wax")
     g = get(rt)
     print("  wax  : preset={} thermal={} freeze={}".format(
         g.get("preset"), g.get("thermal_liquid_enabled"), g.get("thermal_freeze_kelvin")))
     if g.get("preset") != "wax" or not g.get("thermal_liquid_enabled"):
         f.append("preset wax did not enable the thermal chain")
-    rt.call("fluid.set_param", domain=DOMAIN, preset="water")
+    rt.call("fluid.set_param", domain=DOMAIN, default_substance="Water")
     g = get(rt)
     print("  water: preset={} thermal={}".format(g.get("preset"), g.get("thermal_liquid_enabled")))
     if g.get("thermal_liquid_enabled"):
         f.append("switching to WATER left the thermal chain ON - water at 293 K "
                  "would freeze below wax's 330 K point on the first contact")
-    rt.call("fluid.set_param", domain=DOMAIN, preset="wax")
+    rt.call("fluid.set_param", domain=DOMAIN, default_substance="Wax")
     return f
 
 

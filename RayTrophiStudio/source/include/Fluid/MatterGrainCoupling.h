@@ -10,9 +10,11 @@
 #include <utility>
 #include <vector>
 
+namespace RayTrophiSim {
+struct SubstanceProfile;
+}
 namespace RayTrophiSim::Fluid {
 class FluidParticles;
-enum class FluidChemistryPreset : int;
 
 // One frame of the grain <-> liquid exchange in a shared Matter domain.
 //
@@ -72,7 +74,7 @@ struct MatterGrainCouplingFrame {
 // Bins the liquid and the grains. `liquid` and `grains` are the two
 // transport-owner subsets of one domain.
 bool buildMatterGrainLiquidField(const FluidParticles& liquid, const FluidParticles& grains,
-    float grain_radius, FluidChemistryPreset chemistry_preset, const Vec3& origin,
+    float grain_radius, const SubstanceProfile* domain_substance, const Vec3& origin,
     int nx, int ny, int nz, float h, MatterGrainLiquidField& field, std::string& error);
 
 // Per-grain drag coefficient (Di Felice 1994 with voidage), Archimedes

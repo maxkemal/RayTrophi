@@ -12,7 +12,7 @@ COLLIDER = "Phase00_FieldCube_SDF"
 GAS = "Phase00_FieldGas"
 SUBSTANCE = "Plastic (PE)"
 
-available_substances = rt.msf.substances()
+available_substances = [s["name"] for s in rt.substance.list()]
 assert SUBSTANCE in available_substances, (
     "Required substance is unavailable: %s; available=%r"
     % (SUBSTANCE, available_substances)

@@ -33,6 +33,7 @@
 #include "scene_ui_debris.hpp"
 #include "scene_ui_material_mass.hpp"
 #include "scene_ui_molten_transfer.hpp"
+#include "scene_ui_substance_editor.hpp"
 #include "scene_ui_particle_usage.hpp"
 #include "UI/ParticleSystemAuthoringUI.h"
 #include "UI/KinematicColliderAuthoringUI.h"
@@ -136,69 +137,6 @@ inline float progress = 0.0f;
 inline std::unique_ptr<std::thread> bake_thread = nullptr;
 inline bool cancel_bake = false;
 
-/**
- * @brief Draw the fluid material-preset combo. Applies physically-motivated
- *        rheology to @p params when a non-Custom preset is picked. Returns true
- *        only when a preset was actually applied (so the caller can re-render).
- *        Label/enum order is kept in sync with APICSolverParams::FluidPreset.
- */
-inline bool drawFluidPresetCombo(const char* id, RayTrophiSim::Fluid::APICSolverParams& params) {
-    using FluidPreset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset;
-    // Order MUST match APICSolverParams::FluidPreset — the combo index is cast
-    // straight to the enum. The granular family is appended for the same reason
-    // the enum appends: SceneSerializer stores the raw int.
-    static const char* names[] = {
-        "Custom (Manual)", "Water", "Oil", "Mud", "Honey", "Lava", "Sand",
-        "Chocolate", "Wet Sand", "Gravel", "Cohesive Soil",
-        // ★ Molten Plastic was missing: a domain on that preset showed as
-        // "Custom (Manual)" here — the index fell off the end of this list.
-        "Molten Plastic", "Wax"
-    };
-    bool applied = false;
-    int idx = static_cast<int>(params.current_preset);
-    if (idx < 0 || idx >= IM_ARRAYSIZE(names)) idx = 0;
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::Combo(id, &idx, names, IM_ARRAYSIZE(names))) {
-        FluidPreset chosen = static_cast<FluidPreset>(idx);
-        if (chosen == FluidPreset::Custom) {
-            params.current_preset = FluidPreset::Custom;
-        } else {
-            params.applyPreset(chosen);
-            applied = true;
-        }
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Rheology presets carrying a PHYSICAL kinematic viscosity (m^2/s).\n"
-            "Overwrites viscosity, wall slip, friction, FLIP/APIC blend, damping\n"
-            "and packing only - domain, gravity, reseed and performance settings\n"
-            "are kept.\n\n"
-            "Water     : nu=0, thin and splashy. Free-slip walls.\n"
-            "Oil       : nu=1e-4, mildly viscous.\n"
-            "Mud       : nu=2e-3, heavy slurry (no yield stress yet - it creeps\n"
-            "            to a stop instead of stopping).\n"
-            "Honey     : nu=7e-3, slow sticky threads. No-slip walls.\n"
-            "Chocolate : nu=4e-3, molten couverture. No-slip, coats surfaces.\n"
-            "Lava      : nu=0.5, extreme (renderer adds the glow).\n\n"
-            "GRANULAR (Drucker-Prager plasticity, no viscous solve). These do\n"
-            "have an angle of repose. Young modulus is calibrated against PILE\n"
-            "DEPTH: past the stated depth the stats panel reports TOO SOFT FOR\n"
-            "LOAD instead of the pile quietly sinking.\n\n"
-            "Sand          : dry, cohesionless. 35 deg friction, honest to ~1.3 m.\n"
-            "Wet Sand      : capillary cohesion - holds a shape and re-clumps\n"
-            "                when squeezed. 37 deg, honest to ~1.6 m.\n"
-            "Gravel        : coarse and interlocking, strongly dilatant.\n"
-            "                43 deg, honest to ~1.9 m.\n"
-            "Cohesive Soil : clay-like - strength is cohesion, not friction.\n"
-            "                Blocky cracks. 20 deg, honest to ~0.76 m.\n"
-            "Molten Plastic: granular skeleton that softens with heat.\n\n"
-            "THERMAL LIQUID\n"
-            "Wax           : thin when hot (nu=5e-6), thickens as it cools and\n"
-            "                SETS below 330 K where it touches something. Pour\n"
-            "                it hot: set the flow source's pour temperature.");
-    }
-    return applied;
-}
 
 /**
  * @brief Draw the Force Field panel content
@@ -1546,11 +1484,16 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
 
         ImGui::Separator();
         ImGui::Text("Solver");
-        if (drawFluidPresetCombo("Material Preset##FluidSolverPreset", fluid->params)) {
-            ui_ctx.start_render = true;
+        {
+            // The object's material: one substance, physics resolved from it
+            // every step (same contract as grid domains).
+            std::string chosen = fluid->params.default_substance;
+            if (SubstanceEditorUI::drawPicker("Default Substance##FluidSolverSubstance", chosen)) {
+                rtapi::updateFluidDomain(fluid->name, nullptr, nullptr, nullptr, nullptr,
+                                         nullptr, nullptr, &chosen);
+                ui_ctx.start_render = true;
+            }
         }
-        // Manual edits to any preset-driven rheology field demote the dropdown
-        // back to "Custom" so it no longer claims a material it no longer matches.
         bool solver_edited = false;
         ImGui::DragFloat3("Gravity", &fluid->params.gravity.x, 0.05f, -100.0f, 100.0f, "%.2f");
         ImGui::SliderInt("Pressure Iterations", &fluid->params.pressure_iterations, 1, 120);
@@ -1570,9 +1513,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         solver_edited |= ImGui::DragFloat("Wall Damping", &fluid->params.wall_damping, 0.01f, 0.0f, 1.0f, "%.2f");
         solver_edited |= ImGui::DragFloat("Affine Damping", &fluid->params.affine_damping, 0.001f, 0.0f, 1.0f, "%.3f");
         ImGui::DragFloat("Max Affine", &fluid->params.max_affine, 1.0f, 0.0f, 1000.0f, "%.0f");
-        if (solver_edited) {
-            fluid->params.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
-        }
+        (void)solver_edited;
         ImGui::Checkbox("Free Surface", &fluid->params.free_surface);
         ImGui::Checkbox("Ghost Fluid Method (GFM) Surface", &fluid->params.ghost_fluid_surface);
         if (ImGui::IsItemHovered()) {
@@ -3118,9 +3059,10 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 {
                     // Every burning/thermal number is derived from this choice;
                     // there are no free-float overrides any more.
-                    const auto& library = RayTrophiSim::substanceLibrary();
+                    const auto library = RayTrophiSim::substanceProfiles();
                     if (ImGui::BeginCombo("Substance##CollTabMsf", c.msf_substance.c_str())) {
-                        for (const auto& profile : library) {
+                        for (const auto* entry : library) {
+                            const auto& profile = *entry;
                             const bool selected = (c.msf_substance == profile.name);
                             if (ImGui::Selectable(profile.name.c_str(), selected)) {
                                 if (c.msf_substance != profile.name) {
@@ -3137,6 +3079,18 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                             if (selected) ImGui::SetItemDefaultFocus();
                         }
                         ImGui::EndCombo();
+                    }
+                    {
+                        const std::string before = c.msf_substance;
+                        if (SubstanceEditorUI::draw("##CollTabMsfEditor", c.msf_substance)) {
+                            if (c.msf_substance != before && !c.source_name.empty()) {
+                                runtime.clearMaterialStateField(c.source_name);
+                                scene.clearMaterialDamageHistory(c.source_name);
+                            }
+                            ui_ctx.renderer.resetCPUAccumulation();
+                            if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
+                            ui_ctx.start_render = true;
+                        }
                     }
                     // By value: the authoring numbers live on WorldThermalState
                     // (below) and this is the derived mapping, so there is only

@@ -39,8 +39,9 @@ def main():
                     heat_release=1.0, smoke_generation=0.2,
                     buoyancy_heat=0.0, buoyancy_density=0.0,
                     turbulence_strength=0.0, vorticity=0.0)
-        client.call("fluid.set_combustion", domain=fluid,
-                    chemistry_preset="gasoline", enabled=True,
+        # The chemistry is the domain's substance (2026-10-07).
+        client.call("fluid.set_param", domain=fluid, default_substance="Gasoline")
+        client.call("fluid.set_combustion", domain=fluid, enabled=True,
                     auto_ignite=True, ignition_temperature=0.05,
                     evaporation_rate=6.0, surface_fuel_capacity=4.0,
                     heat_release=1.0, smoke_yield=0.2,

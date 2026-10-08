@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from rt_ipc import RtIpc
+from rt_domain_material import domain_material  # noqa: E402
 
 
 DOMAIN = 'G2_Free_Fall'
@@ -52,17 +53,17 @@ def main():
             call('fluid.create_domain', name=DOMAIN, type='matter',
                  domain_min=[-.6, -2, -.6], domain_max=[.6, 4, .6], voxel_size=.1)
         domain_ready = True
+        material = domain_material(call, 'T: g2_free_fall', 'Sand',
+            granular_young_modulus=200000., granular_friction_angle=35., granular_cohesion=0., granular_tensile_cutoff=0., granular_rebonding=False)
         call('fluid.set_param', domain=DOMAIN, enabled=True, visible=False,
-             backend='vulkan', boundary='closed', preset='sand', granular_enabled=True,
-             granular_young_modulus=200000., granular_friction_angle=35.,
-             granular_cohesion=0., granular_tensile_cutoff=0., granular_rebonding=False,
+             backend='vulkan', boundary='closed', default_substance=material,
              solid_phase=False, thermal_liquid_enabled=False)
         call('fluid.set_pore_exchange', domain=DOMAIN, enabled=True,
              wet_response_enabled=False, wet_appearance_enabled=False)
         existing = {s['name'] for s in call('flow_source.list')}
         call('flow_source.update' if SOURCE in existing else 'flow_source.create',
              name=SOURCE, domain=DOMAIN, enabled=False, phase='liquid', source_mode='point',
-             fluid_substance='Sand', initial_constitutive_model='granular', position=[0, 2, 0],
+             fluid_substance='Sand', position=[0, 2, 0],
              radius=.0001, velocity=[0, 0, 0], fluid_velocity_spread=0.,
              fluid_temperature_override=True, fluid_temperature_kelvin=293.15,
              use_time_limit=True, use_particle_limit=True, max_emitted_particles=1,

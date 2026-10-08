@@ -10,6 +10,7 @@ import json
 import uuid
 
 from rt_ipc import RtIpc
+from rt_domain_material import domain_material  # noqa: E402
 
 
 DT = 1.0 / 24.0
@@ -68,9 +69,11 @@ def main():
             domain_min=[0.0, -0.64, 0.0], domain_max=[0.32, 0.64, 0.32],
             voxel_size=0.02)
         created = True
+        material = domain_material(client.call, 'T: test_granular_stiffness_residency', 'Sand',
+            granular_young_modulus=YOUNG)
         client.call(
-            "fluid.set_param", domain=domain, preset="sand", visible=False,
-            granular_young_modulus=YOUNG, uvw_refresh_period=4,
+            "fluid.set_param", domain=domain, default_substance=material, visible=False,
+            uvw_refresh_period=4,
             max_particles=4096)
         client.call(
             "fluid.seed", domain=domain, seed_min=[0.10, 0.10, 0.10],

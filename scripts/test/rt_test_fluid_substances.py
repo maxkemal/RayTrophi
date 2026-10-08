@@ -111,8 +111,7 @@ def build_rig(rt):
                    "velocity": [0.0, -1.2, 0.0],
                    "radius": 0.16,
                    "fluid_particles_per_second": 4000.0,
-                   "fluid_substance": substance,
-                   "initial_constitutive_model": "auto"}
+                   "fluid_substance": substance}
         if name in existing:
             rt.call("flow_source.update", payload)
         else:
@@ -141,10 +140,6 @@ def phase_readback(rt):
                 "carrying what was set, so every particle it spawns is tagged "
                 "wrong (or untagged) and the mixture below is meaningless."
                 .format(s["name"], got, want[s["name"]]))
-        if s.get("initial_constitutive_model") != "auto":
-            failures.append(
-                "{} reports initial_constitutive_model {!r}, expected 'auto'."
-                .format(s["name"], s.get("initial_constitutive_model")))
     if not failures:
         # A partial write is worse than a rejected one: it looks configured.
         seen = {s["name"] for s in (rt.call("flow_source.list") or [])}

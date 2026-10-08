@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from rt_ipc import RtIpc
+from rt_domain_material import domain_material
 
 
 def main() -> None:
@@ -15,10 +16,19 @@ def main() -> None:
         if not fluid_domains:
             raise RuntimeError("no fluid domain is visible")
         name = fluid_domains[0]["name"]
+        # Wet sand is sand plus capillary cohesion: a derived substance with the
+        # removed Wet Sand preset's values (2026-10-07).
+        material = domain_material(
+            client.call, "T: wet sand baseline", "Sand",
+            granular_friction_angle=37.0, granular_cohesion=1500.0,
+            granular_dilatancy=6.0, granular_young_modulus=2.5e5,
+            granular_tensile_cutoff=400.0, granular_fracture_strain=0.010,
+            granular_damage_rate=14.0, granular_healing_rate=0.5,
+            granular_rebonding=True)
         client.call(
             "fluid.set_param",
             domain=name,
-            preset="wet_sand",
+            default_substance=material,
             render_mode="particles",
         )
         client.call(
@@ -33,7 +43,7 @@ def main() -> None:
             json.dumps(
                 {
                     "name": name,
-                    "preset": state.get("preset"),
+                    "default_substance": state.get("default_substance"),
                     "granular_enabled": state.get("granular_enabled"),
                     "render_mode": state.get("render_mode"),
                     "backend": state.get("backend"),

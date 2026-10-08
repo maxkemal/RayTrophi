@@ -22,7 +22,7 @@ rt.fluid.seed(NAME,
               seed_min=(-0.5, 0.8, -0.5),
               seed_max=(0.5, 1.6, 0.5),
               particles_per_cell=4)
-rt.fluid.set_param(NAME, backend="gpu", preset="water", boundary="closed")
+rt.fluid.set_param(NAME, backend="gpu", default_substance="Water", boundary="closed")
 
 for _ in range(8):
     rt.fluid.step(0.0166)

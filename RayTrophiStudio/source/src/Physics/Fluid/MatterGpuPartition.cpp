@@ -1,4 +1,5 @@
 #include "Fluid/MatterGpuPartition.h"
+#include "PerfProfile.h"
 
 #include <limits>
 
@@ -90,8 +91,15 @@ bool dispatchMatterGpuPartition(SimulationComputeContext& compute,
     const uint32_t zero[4] = {};
     // Only compact model metadata crosses the boundary. No particle download,
     // host partition, per-model SoA upload, or synchronous counter readback.
-    if (!compute.uploadBuffer(buffers.models, models.data(), models.size() * sizeof(uint32_t)) ||
-        !compute.uploadBuffer(buffers.counters, zero, sizeof(zero))) {
+    // Timed per dispatch: the model upload is 4 B per parcel every frame, and
+    // this is the number that tells us when it becomes a bottleneck.
+    bool uploaded;
+    {
+        RTPERF_FRAME_SCOPE("sim.matter.gpu_partition_upload");
+        uploaded = compute.uploadBuffer(buffers.models, models.data(), models.size() * sizeof(uint32_t)) &&
+                   compute.uploadBuffer(buffers.counters, zero, sizeof(zero));
+    }
+    if (!uploaded) {
         error = "Matter GPU partition metadata upload failed";
         return false;
     }

@@ -1,6 +1,8 @@
 // Thermal liquid: cooling, temperature-dependent viscosity, freezing.
 // See include/Fluid/FluidThermalLiquid.h for the model and the call order.
 #include "Fluid/FluidThermalLiquid.h"
+#include "Fluid/SubstanceTag.h"
+#include "MaterialStateField.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -181,9 +183,24 @@ void updateThermalFreeze(FluidParticles& particles,
     const bool closed_walls =
         params.boundary == APICSolverParams::BoundaryMode::Closed;
     const bool has_solid = grid.solid.size() == cells;
-    const float freeze_k = params.thermal_freeze_kelvin;
-    // Melt band: a parcel must warm clearly past the freeze point to let go.
-    const float melt_k = freeze_k + std::max(1.0f, 0.1f * params.thermal_viscosity_range);
+    // Melt band: a parcel must warm clearly past its freeze point to let go.
+    const float melt_band = std::max(1.0f, 0.1f * params.thermal_viscosity_range);
+
+    // ★ Freeze point is the PARCEL's substance, not the domain's. A domain can
+    // hold Water and Wax parcels at once; one shared threshold froze both at the
+    // same temperature. Meltable substances freeze at their melt_kelvin, a
+    // non-meltable one never freezes (the same rule FluidDomainSubstance applies
+    // to the domain default). Untagged parcels, or a tag with no profile, keep the
+    // domain value.
+    auto freezeKelvinFor = [&](std::size_t p) -> float {
+        const uint32_t tag = p < particles.substance_tag.size()
+            ? particles.substance_tag[p] : kSubstanceUntagged;
+        const SubstanceProfile* profile =
+            tag == kSubstanceUntagged ? nullptr : tryFindSubstanceByTag(tag);
+        if (!profile) return params.thermal_freeze_kelvin;
+        return profile->meltable ? profile->melt_kelvin
+                                 : -std::numeric_limits<float>::infinity();
+    };
 
     auto supported = [&](int i, int j, int k) -> bool {
         if (s_frozen_cell[grid.cellIndex(i, j, k)]) return true;
@@ -213,7 +230,17 @@ void updateThermalFreeze(FluidParticles& particles,
             continue;
         }
         const float t = particles.temperature[p];
+        const float freeze_k = freezeKelvinFor(p);
         uint32_t& f = particles.flags[p];
+        // A non-meltable parcel has no freeze point (-inf). It must never carry
+        // the frozen flag: with melt_k = -inf the melt test below would clear it
+        // on the first step, so the flag would flicker for nothing. Clear it here
+        // and leave the parcel to the particle solver untouched.
+        if (!std::isfinite(freeze_k)) {
+            f &= ~kParticleFlagFrozen;
+            continue;
+        }
+        const float melt_k = freeze_k + melt_band;
         if (f & kParticleFlagFrozen) {
             if (std::isfinite(t) && t > melt_k) {
                 f &= ~kParticleFlagFrozen;

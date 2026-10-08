@@ -1,4 +1,6 @@
 #include "scene_data.h"
+#include "Fluid/FluidDomainSubstance.h"
+#include "MaterialStateField.h"
 #include "Fluid/MatterPhaseConfig.h"
 
 // Embedded production presets stay out of SceneData's foundational header.
@@ -549,8 +551,9 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 liquid.bounds_min=Vec3(-2.5f,0.0f,-2.5f);
                 liquid.bounds_max=Vec3(2.5f,1.8f,2.5f);
                 liquid.voxel_size=0.10f;
-                liquid.fluid_params.applyPreset(
-                    RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Oil);
+                liquid.fluid_params.default_substance = "Oil";
+                if (const auto* oil = RayTrophiSim::tryFindSubstance("Oil"))
+                    RayTrophiSim::Fluid::applySubstanceSolverHints(liquid.fluid_params, *oil);
                 liquid.fluid_render_mode=
                     RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;
                 liquid.fluid_seed_min=Vec3(-1.8f,0.15f,-1.8f);
@@ -641,13 +644,14 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 liquid.bounds_max = Vec3(7.0f, 2.0f, 2.0f);
                 liquid.voxel_size = 0.10f;
                 liquid.resource_budget_mb = 768;
-                liquid.fluid_params.applyPreset(
-                    RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Oil);
-                // Thinner than the Oil preset: a spilled fuel puddle spreads. The
-                // old 0.16 was on the unitless dial (Oil sat at 3.0 there), i.e.
-                // "much thinner than oil" — restated in m²/s against the new
-                // Oil ν of 1e-4.
-                liquid.fluid_params.kinematic_viscosity = 5.0e-6f;
+                liquid.fluid_params.default_substance = "Oil";
+                if (const auto* oil = RayTrophiSim::tryFindSubstance("Oil"))
+                    RayTrophiSim::Fluid::applySubstanceSolverHints(liquid.fluid_params, *oil);
+                // This used to write nu = 5e-6 ("thinner than oil, a spilled
+                // puddle spreads"). Viscosity is the substance's now. At this
+                // 0.10 m voxel Oil's 1e-4 gives nu*dt/h^2 = 4e-4, below
+                // kUnresolvedViscosityDiffusion, so the viscous solve is skipped
+                // exactly as it was for 5e-6: same motion.
                 liquid.fluid_max_particles = 80000;
                 liquid.fluid_render_mode =
                     RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;

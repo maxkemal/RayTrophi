@@ -18,6 +18,9 @@
 #endif
 
 #include "Fluid/FluidSimulationSystem.h"
+#include "Fluid/FluidDomainSubstance.h"
+#include "MaterialStateField.h"
+#include "globals.h"
 #include "Fluid/APICFluidSolver.h"
 #include "Fluid/FluidObject.h"
 #include <fstream>
@@ -290,6 +293,18 @@ void FluidSimulationSystem::step(const SimulationContext& context) {
             continue;
         }
 
+        // Same material contract as the grid domains: physics from the
+        // object's default substance, every step.
+        {
+            static std::string s_last_substance_error;
+            std::string substance_error;
+            if (!Fluid::resolveDomainSubstancePhysics(obj.params, obj.voxel_size,
+                    MaterialTemperatureScale{}, substance_error) &&
+                substance_error != s_last_substance_error) {
+                SCENE_LOG_WARN("[Fluid] " + substance_error);
+            }
+            s_last_substance_error = substance_error;
+        }
         Fluid::step(obj.particles,
                     obj.grid,
                     obj.params,

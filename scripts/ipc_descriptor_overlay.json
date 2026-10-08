@@ -1547,8 +1547,8 @@
     "tags": "simulation|advance"
   },
   "fluid.set_param": {
-    "summary": "Update any field of a fluid or gas domain: bounds, voxel size, solver backend, viscosity, granular constitutive settings, thermal liquid (cooling/freezing), surface reconstruction detail, render mode and surface material",
-    "notes": "Overlay semantics - fields you do not send keep their value. render_mode accepts particles/splat, surface/sdf and fog (aliases volume_fog, volume); on a liquid 'fog' raymarches the splatted density with the domain VolumeShader, on a gas domain 'volume' is the plain gas route. Reads return the canonical name ('fog' for a liquid). A SurfaceSDF substance override claims the single domain volume, so a fog domain with one draws that surface, not fog (substance_materials effective_representation says which). fluid.get reports active_density_cells / max_density, the fog mode's input. The retired virtual_particles/virtual/adaptive names are refused with an error. Changing voxel_size or the bounds invalidates the bake for that domain. Surface keys (surface_resolution_multiplier 1..4, kernel/particle radius, smoothing, anisotropy_*) refine the RENDERED surface without touching the simulation and are rejected out of range, not clamped. thermal_* keys drive the wax chain (preset 'wax' sets them all); read the result back as fluid.get thermal_frozen_particles / thermal_min_kelvin, and thermal_cold_unsupported > 0 with nothing frozen means the liquid is cold but touches no collider or closed wall. Thermal and surface keys are applied after preset, so a preset in the same call cannot undo them. Granular substeps are adaptive: wave/strain CFL requests are fully granted on CPU and GPU, preserving the authored Young modulus. granular_max_solver_substeps is a legacy compatibility field (stored/clamped to 1..64); it no longer limits physical substeps. Closed, inviscid Vulkan granular domains without solid/frozen parcels keep particle velocity/affine on device between substeps. Positions remain available to the host for occupancy and material coordinates. Compare total_ms and upload/download_bytes; deferred GPU execution can be charged to advect_ms instead of g2p_ms.",
+    "summary": "Update domain numerical, rendering and thermal settings; select its default substance",
+    "notes": "default_substance names a library substance and applies its solver hints once. Physics is resolved from that substance each step. Derive a project substance and use substance.set to edit viscosity, granular material, freezing and fuel properties. Legacy preset, chemistry_preset and material physics setters are rejected. Other fields retain overlay semantics. render_mode accepts particles/splat, surface/sdf and fog (aliases volume_fog, volume); on a liquid 'fog' raymarches the splatted density with the domain VolumeShader, on a gas domain 'volume' is the plain gas route. Reads return the canonical name ('fog' for a liquid). A SurfaceSDF substance override claims the single domain volume, so a fog domain with one draws that surface, not fog (substance_materials effective_representation says which). fluid.get reports active_density_cells / max_density, the fog mode's input. The retired virtual_particles/virtual/adaptive names are refused with an error. Changing voxel_size or the bounds invalidates the bake for that domain. Surface keys (surface_resolution_multiplier 1..4, kernel/particle radius, smoothing, anisotropy_*) refine the RENDERED surface without touching the simulation and are rejected out of range, not clamped. Numerical thermal_* keys control cooling; selecting Wax applies its thermal hints; read the result back as fluid.get thermal_frozen_particles / thermal_min_kelvin, and thermal_cold_unsupported > 0 with nothing frozen means the liquid is cold but touches no collider or closed wall. Explicit numerical and surface settings are applied after substance solver hints. Granular substeps are adaptive: wave/strain CFL requests are fully granted on CPU and GPU, preserving the authored Young modulus. granular_max_solver_substeps is a legacy compatibility field (stored/clamped to 1..64); it no longer limits physical substeps. Closed, inviscid Vulkan granular domains without solid/frozen parcels keep particle velocity/affine on device between substeps. Positions remain available to the host for occupancy and material coordinates. Compare total_ms and upload/download_bytes; deferred GPU execution can be charged to advect_ms instead of g2p_ms.",
     "requires": [
       "fluid.create_domain"
     ],
@@ -1563,13 +1563,13 @@
       "simulation_cache"
     ],
     "tags": "simulation|configure|viscosity|granular|render-mode|backend",
-    "related": "fluid.get|fluid.set_substance_material"
+    "related": "fluid.get|fluid.set_substance_material|substance.get|substance.derive|substance.set"
   },
   "fluid.set_substance_material": {
     "summary": "Bind a substance (its physical identity, phase and representation) to a fluid domain",
-    "notes": "Phase, constitutive model and representation are separate axes: phase is thermodynamic state, constitutive_model selects fluid/granular/elastic stress response, and representation selects inherit|splat|sdf|fog drawing.",
+    "notes": "Phase is the static solid block flag (liquid parcels melt and freeze by temperature, so their phase is derived). The parcel's constitutive model comes from its Substance alone. representation selects inherit|splat|sdf|fog drawing.",
     "tags": "simulation|substance|material|phase|msf",
-    "related": "msf.substances|fluid.set_splat_material|fluid.set_param",
+    "related": "substance.list|fluid.set_splat_material|fluid.set_param",
     "params": {
       "domain": {
         "description": "Fluid domain name"
@@ -1578,15 +1578,11 @@
         "description": "Substance id from msf.substances"
       },
       "phase": {
-        "description": "Physical phase",
+        "description": "Static solid block flag: solid blocks the flow as a fixed obstacle. Liquid parcels melt and freeze by temperature, so their phase is derived, not set here",
         "enum": "liquid|solid"
       },
       "representation": {
         "description": "How the substance is rendered"
-      },
-      "constitutive_model": {
-        "description": "Solver regime carried by parcels of this Substance",
-        "enum": "auto|fluid|granular|elastic"
       }
     }
   },
@@ -1776,11 +1772,6 @@
         "description": "Substance id emitted into a liquid domain",
         "type": "string"
       },
-      "initial_constitutive_model": {
-        "description": "Optional birth-state override; auto resolves through the Substance",
-        "type": "string",
-        "enum": "auto|fluid|granular|elastic"
-      },
       "fluid_particles_per_second": {
         "description": "Liquid particle emission rate",
         "type": "float"
@@ -1823,29 +1814,17 @@
     "summary": "Delete an emitter",
     "tags": "simulation|emitter|remove"
   },
-  "msf.substances": {
-    "summary": "List the material substance library: every substance an object or fluid can be made of",
-    "notes": "Substance ids from here are what fluid.set_substance_material and the combustion path expect.",
-    "tags": "substance|material|library|wood|water|metal|thermochemistry",
-    "related": "fluid.set_substance_material|msf.fields"
-  },
-  "msf.substance": {
-    "summary": "Read one substance's canonical physical properties",
-    "notes": "Temperatures use Kelvin, energy values use J/kg and kinematic viscosity uses m^2/s.",
-    "tags": "substance|physical|properties|density|viscosity|temperature|combustion",
-    "related": "msf.substances|fluid.set_substance_material"
-  },
   "msf.fields": {
     "summary": "Report the live material state fields (temperature, moisture, char, mass) per object",
     "notes": "This is the measurement side of burning and melting: mass loss, integrity and mass-conservation error are reported here.",
     "tags": "substance|thermal|burn|melt|measure|verify|temperature|moisture",
-    "related": "msf.substances"
+    "related": "substance.list"
   },
   "matter.exchanges": {
     "summary": "Report physical matter transfers that ran in the latest simulation step",
     "notes": "Mass uses kg, energy uses joules and momentum uses kg*m/s. Empty with traced=true means the solver stepped without a transfer.",
     "tags": "matter|exchange|mass|energy|momentum|conservation|phase|melting|mist",
-    "related": "sim_graph.couplings|msf.fields|msf.substances"
+    "related": "sim_graph.couplings|msf.fields|substance.list"
   },
   "physics.add_body": {
     "summary": "Give an object a rigid-body with a mass, motion type and collision shape",
@@ -6543,5 +6522,42 @@
       }
     },
     "related": "fluid.grain_settings|fluid.reset|fluid.matter_models"
+  },
+  "substance.list": {
+    "summary": "List the substance library: built-ins and project substances derived from them, with category",
+    "notes": "Built-ins are read-only (based_on empty). category (liquid|granular|solid|fuel) groups pickers only; behaviour comes from the fields. Names are what flow_source fluid_substance, collider msf_substance and fluid.set_substance_material take.",
+    "tags": "substance|material|library|list|category|derive",
+    "related": "substance.get|substance.derive|fluid.set_substance_material"
+  },
+  "substance.get": {
+    "summary": "Every physical field of one substance, its base, and which fields it overrides",
+    "notes": "Kelvin, J/kg, m^2/s, kg/m^3. A project substance stores only overridden fields; the rest follow based_on, so a change to the base reaches it.",
+    "tags": "substance|material|get|fields|thermal|combustion|viscosity",
+    "related": "substance.list|substance.set"
+  },
+  "substance.derive": {
+    "summary": "Create a project substance identical to based_on (how a built-in is edited)",
+    "notes": "Saved with the project. The name is the identity (particle substance tag); renaming means deriving a new one. Rejected if the name or its tag collides.",
+    "tags": "substance|derive|copy|custom|material",
+    "related": "substance.set|substance.remove"
+  },
+  "substance.set": {
+    "summary": "Set fields of a project substance; null drops an override",
+    "notes": "fields is an object keyed as in substance.get fields. Transactional: one out-of-range or unknown field rejects the patch. Built-ins are refused. Invalidates the simulation bake.",
+    "tags": "substance|set|edit|override|material",
+    "related": "substance.get|substance.derive",
+    "params": {
+      "fields": {
+        "type": "object",
+        "required": true,
+        "description": "Field name -> value, as in substance.get fields; null drops the override"
+      }
+    }
+  },
+  "substance.remove": {
+    "summary": "Remove a project substance that nothing references",
+    "notes": "Refused while a flow source, collider, domain binding or another derived substance names it; the error lists them. Built-ins cannot be removed.",
+    "tags": "substance|remove|delete",
+    "related": "substance.list"
   }
 }

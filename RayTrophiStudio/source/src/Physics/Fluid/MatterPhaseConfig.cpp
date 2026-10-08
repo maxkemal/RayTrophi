@@ -6,6 +6,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace RayTrophiSim::Fluid {
 namespace {
@@ -70,13 +71,34 @@ bool syncGrid(FluidSim::FluidGrid& grid, const PhaseLayout& layout,
         }
         return false;
     }
-    const bool changed = force || grid.nx != layout.nx || grid.ny != layout.ny ||
+    const bool layout_changed = force || grid.nx != layout.nx || grid.ny != layout.ny ||
         grid.nz != layout.nz || grid.voxel_size != layout.voxel ||
         grid.allocate_gas_channels != gas;
+    const bool changed = layout_changed || grid.pressure.size() != layout.cells();
     grid.sparse_mode_enabled = sparse;
     grid.allocate_gas_channels = gas;
     if (changed) {
+        // A disk replay has scalar fields but no solver scratch. Hydrating the
+        // same layout must keep those fields; a real layout change resets them.
+        auto density = !layout_changed ? std::move(grid.density) : std::vector<float>{};
+        auto temperature = !layout_changed
+            ? std::move(grid.temperature) : std::vector<float>{};
+        auto fuel = !layout_changed ? std::move(grid.fuel) : std::vector<float>{};
+        auto interaction = !layout_changed
+            ? std::move(grid.interaction) : std::vector<float>{};
         grid.resize(layout.nx, layout.ny, layout.nz, layout.voxel, layout.origin);
+        if (density.size() == layout.cells()) {
+            grid.density = std::move(density);
+        }
+        if (gas && temperature.size() == layout.cells()) {
+            grid.temperature = std::move(temperature);
+        }
+        if (gas && fuel.size() == layout.cells()) {
+            grid.fuel = std::move(fuel);
+        }
+        if (gas && interaction.size() == layout.cells()) {
+            grid.interaction = std::move(interaction);
+        }
     } else {
         grid.origin = layout.origin;
     }
@@ -215,13 +237,21 @@ void synchronizePhaseStorage(SimulationGridDomainState& state,
     const bool sparse = domain.use_sparse_tiles ||
         domain.backend == SimulationDomainBackend::CPU_SparseVDB;
     const bool gas = simulationDomainHasGas(domain.type);
+    const auto& primary_layout = gas ? layouts.gas : layouts.liquid;
+    const bool hydrate_primary = state.valid && state.channels == domain.channels &&
+        state.type == domain.type && state.grid.nx == primary_layout.nx &&
+        state.grid.ny == primary_layout.ny && state.grid.nz == primary_layout.nz &&
+        state.grid.voxel_size == primary_layout.voxel &&
+        state.grid.allocate_gas_channels == gas &&
+        state.grid.pressure.size() != primary_layout.cells();
     const bool primary_changed = syncGrid(state.grid,
         gas ? layouts.gas : layouts.liquid, gas, sparse,
         !state.valid || state.channels != domain.channels || state.type != domain.type);
     const bool secondary_changed = syncGrid(state.matter_liquid_grid,
         domain.type == SimulationDomainType::Matter ? layouts.liquid : PhaseLayout{},
         false, sparse);
-    if (primary_changed || state.channels != domain.channels || state.type != domain.type) {
+    if ((primary_changed && !hydrate_primary) || state.channels != domain.channels ||
+        state.type != domain.type) {
         state.gas_phase_mass_kg.clear();
         state.gas_phase_energy_j.clear();
     }
@@ -239,7 +269,8 @@ bool phaseStorageMatches(const SimulationGridDomainState& state,
     const auto layouts = previewPhaseLayouts(domain);
     const auto matches = [](const FluidSim::FluidGrid& grid, const PhaseLayout& layout) {
         return grid.nx == layout.nx && grid.ny == layout.ny && grid.nz == layout.nz &&
-            std::abs(grid.voxel_size - layout.voxel) <= 1e-6f;
+            std::abs(grid.voxel_size - layout.voxel) <= 1e-6f &&
+            grid.pressure.size() == layout.cells();
     };
     if (!matches(state.grid, simulationDomainHasGas(domain.type) ? layouts.gas : layouts.liquid)) {
         return false;

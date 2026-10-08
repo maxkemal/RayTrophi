@@ -196,8 +196,7 @@ def required(method, namespaces):
                   "rig.preview_bind", "rig.preview_fit", "rig.preflight",
                   "rig.weight_stats", "rig.suggest_joint_profile",
                   "rig.preview_envelope_weights",
-                  "anim.source_clips", "anim.source_channels", "msf.substances",
-                  "msf.substance", "msf.fields", "matter.exchanges",
+                  "anim.source_clips", "anim.source_channels", "msf.fields", "matter.exchanges",
                   "templates.refresh", "templates.validate",
                   "templates.prepare",
                   "world.atmosphere_stats", "world.sample_climate",
@@ -250,8 +249,20 @@ def main():
     # exist" and is exactly the drift this script was written to catch.
     import gen_ipc_descriptors
     descriptors_stale = gen_ipc_descriptors.main(["--check"]) != 0
+    # Pin the domain material contract as well as file freshness. A descriptor
+    # can be freshly generated and still advertise an input that only errors.
+    import json
+    overlay = json.loads(read(gen_ipc_descriptors.OVERLAY))
+    records = gen_ipc_descriptors.build(overlay, namespaces)
+    domain_record = next(r for r in records if r["method"] == "fluid.set_param")
+    keys = {p["name"] for p in domain_record["params"]}
+    material_drift = "default_substance" not in keys or bool(
+        keys & {"preset", "chemistry_preset", "viscosity", "kinematic_viscosity"})
+    if material_drift:
+        print("DOMAIN MATERIAL DRIFT - fluid.set_param must expose default_substance "
+              "and omit retired material setters")
 
-    if not unreachable and not dead and not drift and not descriptors_stale:
+    if not unreachable and not dead and not drift and not descriptors_stale and not material_drift:
         print("OK - every dispatched method is classified, mirror agrees with "
               "RtIpcSecurity.cpp, no dead prefixes, descriptors current.")
         return 0

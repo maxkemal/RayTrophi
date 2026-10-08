@@ -36,7 +36,7 @@ rt.fluid.set_param(
     DOMAIN,
     backend="vulkan",
     boundary="closed",
-    preset="oil",
+    default_substance="Oil",
     render_mode="surface",
 )
 rt.fluid.seed(

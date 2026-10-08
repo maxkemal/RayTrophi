@@ -1,4 +1,5 @@
 #include "Fluid/FluidThermalPhaseExchange.h"
+#include "Fluid/FluidDomainSubstance.h"
 
 #include "Fluid/FluidPhysicalMass.h"
 #include "Fluid/SubstanceTag.h"
@@ -50,7 +51,7 @@ FluidThermalPhaseExchangeStats updateThermalFreezeAndRecord(
     const std::size_t count = particles.size();
 
     ensureFluidParticleRestMasses(
-        particles, params.chemistry_preset, liquidGrid(state).voxel_size,
+        particles, Fluid::domainSubstance(params), liquidGrid(state).voxel_size,
         params.particles_per_cell, params.granular_enabled);
 
     std::vector<uint8_t> was_frozen(count, 0u);
@@ -84,7 +85,7 @@ FluidThermalPhaseExchangeStats updateThermalFreezeAndRecord(
         const uint32_t tag = particle < particles.substance_tag.size()
             ? particles.substance_tag[particle] : kSubstanceUntagged;
         const SubstanceProfile* profile = resolveFluidSubstanceProfile(
-            tag, params.chemistry_preset);
+            tag, Fluid::domainSubstance(params));
         const float specific_heat = profile && profile->specific_heat > 0.0f
             ? profile->specific_heat : 1000.0f;
         const float latent_heat = profile

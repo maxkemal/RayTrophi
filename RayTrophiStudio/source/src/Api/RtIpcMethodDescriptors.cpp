@@ -1334,7 +1334,6 @@ static const MethodParam params_flow_source_create[] = {
     {"fuel", "float", false, "Injected fuel density", nullptr, nullptr},
     {"density", "float", false, "Injected smoke or liquid density", nullptr, nullptr},
     {"fluid_substance", "string", false, "Substance id emitted into a liquid domain", nullptr, nullptr},
-    {"initial_constitutive_model", "string", false, "Optional birth-state override; auto resolves through the Substance", nullptr, "auto|fluid|granular|elastic"},
     {"fluid_particles_per_second", "float", false, "Liquid particle emission rate", nullptr, nullptr},
     {"enabled", "bool", false, "Emitter active", nullptr, nullptr},
     {"particle_pool_weight", "float", false, "Relative share of free live particle capacity, finite in [0.001, 1000], default 1. Unused shares return to the common pool. Not a live-particle reservation or lifetime emission limit.", nullptr, nullptr},
@@ -1359,7 +1358,7 @@ static const MethodDescriptor desc_flow_source_create = {
     "flow_source|flow|source|create|simulation|emitter|inject|pour|jet|flame|inflow",
     "flow_source.update|flow_source.list|fluid.create_domain|gas.set_settings",
     nullptr, nullptr, nullptr, nullptr,
-    params_flow_source_create, 30,
+    params_flow_source_create, 29,
     true
 };
 static const MethodRegistration reg_flow_source_create(desc_flow_source_create);
@@ -1425,7 +1424,6 @@ static const MethodParam params_flow_source_update[] = {
     {"fluid_velocity_spread", "any", false, "", nullptr, nullptr},
     {"fuel", "any", false, "", nullptr, nullptr},
     {"inherit_velocity", "any", false, "", nullptr, nullptr},
-    {"initial_constitutive_model", "any", false, "", nullptr, nullptr},
     {"max_emitted_particles", "any", false, "", nullptr, nullptr},
     {"parent_object", "any", false, "", nullptr, nullptr},
     {"phase", "any", false, "", nullptr, nullptr},
@@ -1449,7 +1447,7 @@ static const MethodDescriptor desc_flow_source_update = {
     "flow_source|flow|source|update|simulation|emitter|configure",
     "flow_source.create|flow_source.get",
     nullptr, nullptr, nullptr, nullptr,
-    params_flow_source_update, 30,
+    params_flow_source_update, 29,
     true
 };
 static const MethodRegistration reg_flow_source_update(desc_flow_source_update);
@@ -1887,30 +1885,13 @@ static const MethodParam params_fluid_set_param[] = {
     {"backend", "any", false, "", nullptr, nullptr},
     {"boundary", "any", false, "", nullptr, nullptr},
     {"coord_space", "any", false, "", nullptr, nullptr},
+    {"default_substance", "any", false, "", nullptr, nullptr},
     {"device", "any", false, "", nullptr, nullptr},
     {"domain_max", "vec3", false, "", nullptr, nullptr},
     {"domain_min", "vec3", false, "", nullptr, nullptr},
     {"enabled", "any", false, "", nullptr, nullptr},
-    {"granular_cohesion", "any", false, "", nullptr, nullptr},
-    {"granular_damage_rate", "any", false, "", nullptr, nullptr},
-    {"granular_dilatancy", "any", false, "", nullptr, nullptr},
-    {"granular_enabled", "any", false, "", nullptr, nullptr},
-    {"granular_fracture_strain", "any", false, "", nullptr, nullptr},
-    {"granular_friction_angle", "any", false, "", nullptr, nullptr},
-    {"granular_hardening", "any", false, "", nullptr, nullptr},
-    {"granular_healing_rate", "any", false, "", nullptr, nullptr},
     {"granular_max_solver_substeps", "any", false, "", nullptr, nullptr},
-    {"granular_poisson_ratio", "any", false, "", nullptr, nullptr},
-    {"granular_rebonding", "any", false, "", nullptr, nullptr},
-    {"granular_residual_strength", "any", false, "", nullptr, nullptr},
-    {"granular_softening_range", "any", false, "", nullptr, nullptr},
-    {"granular_softening_temperature", "any", false, "", nullptr, nullptr},
-    {"granular_tack_peak", "any", false, "", nullptr, nullptr},
-    {"granular_tensile_cutoff", "any", false, "", nullptr, nullptr},
-    {"granular_thermal_conductivity", "any", false, "", nullptr, nullptr},
-    {"granular_young_modulus", "any", false, "", nullptr, nullptr},
     {"kernel_radius_voxels", "any", false, "", nullptr, nullptr},
-    {"kinematic_viscosity", "any", false, "", nullptr, nullptr},
     {"max_particles", "any", false, "", nullptr, nullptr},
     {"narrow_band_voxels", "any", false, "", nullptr, nullptr},
     {"particle_radius_voxels", "any", false, "", nullptr, nullptr},
@@ -1918,7 +1899,6 @@ static const MethodParam params_fluid_set_param[] = {
     {"pore_detail", "any", false, "", nullptr, nullptr},
     {"pore_scale", "any", false, "", nullptr, nullptr},
     {"position_smoothing", "any", false, "", nullptr, nullptr},
-    {"preset", "any", false, "", nullptr, nullptr},
     {"render_mode", "any", false, "", nullptr, nullptr},
     {"smoothing_iterations", "any", false, "", nullptr, nullptr},
     {"solid_phase", "any", false, "", nullptr, nullptr},
@@ -1927,13 +1907,9 @@ static const MethodParam params_fluid_set_param[] = {
     {"surface_offset_voxels", "any", false, "", nullptr, nullptr},
     {"surface_resolution_multiplier", "any", false, "", nullptr, nullptr},
     {"thermal_air_cooling_rate", "any", false, "", nullptr, nullptr},
-    {"thermal_cold_viscosity", "any", false, "", nullptr, nullptr},
     {"thermal_contact_cooling_rate", "any", false, "", nullptr, nullptr},
-    {"thermal_freeze_kelvin", "any", false, "", nullptr, nullptr},
     {"thermal_liquid_enabled", "any", false, "", nullptr, nullptr},
-    {"thermal_viscosity_range", "any", false, "", nullptr, nullptr},
     {"uvw_refresh_period", "any", false, "", nullptr, nullptr},
-    {"viscosity", "any", false, "", nullptr, nullptr},
     {"viscosity_sweeps", "any", false, "", nullptr, nullptr},
     {"viscosity_wall_slip", "any", false, "", nullptr, nullptr},
     {"visible", "any", false, "", nullptr, nullptr},
@@ -1941,13 +1917,13 @@ static const MethodParam params_fluid_set_param[] = {
 };
 static const MethodDescriptor desc_fluid_set_param = {
     "fluid.set_param", "fluid",
-    "Update any field of a fluid or gas domain: bounds, voxel size, solver backend, viscosity, granular constitutive settings, thermal liquid (cooling/freezing), surface reconstruction detail, render mode and surface material",
-    "Overlay semantics - fields you do not send keep their value. render_mode accepts particles/splat, surface/sdf and fog (aliases volume_fog, volume); on a liquid 'fog' raymarches the splatted density with the domain VolumeShader, on a gas domain 'volume' is the plain gas route. Reads return the canonical name ('fog' for a liquid). A SurfaceSDF substance override claims the single domain volume, so a fog domain with one draws that surface, not fog (substance_materials effective_representation says which). fluid.get reports active_density_cells / max_density, the fog mode's input. The retired virtual_particles/virtual/adaptive names are refused with an error. Changing voxel_size or the bounds invalidates the bake for that domain. Surface keys (surface_resolution_multiplier 1..4, kernel/particle radius, smoothing, anisotropy_*) refine the RENDERED surface without touching the simulation and are rejected out of range, not clamped. thermal_* keys drive the wax chain (preset 'wax' sets them all); read the result back as fluid.get thermal_frozen_particles / thermal_min_kelvin, and thermal_cold_unsupported > 0 with nothing frozen means the liquid is cold but touches no collider or closed wall. Thermal and surface keys are applied after preset, so a preset in the same call cannot undo them. Granular substeps are adaptive: wave/strain CFL requests are fully granted on CPU and GPU, preserving the authored Young modulus. granular_max_solver_substeps is a legacy compatibility field (stored/clamped to 1..64); it no longer limits physical substeps. Closed, inviscid Vulkan granular domains without solid/frozen parcels keep particle velocity/affine on device between substeps. Positions remain available to the host for occupancy and material coordinates. Compare total_ms and upload/download_bytes; deferred GPU execution can be charged to advect_ms instead of g2p_ms.",
+    "Update domain numerical, rendering and thermal settings; select its default substance",
+    "default_substance names a library substance and applies its solver hints once. Physics is resolved from that substance each step. Derive a project substance and use substance.set to edit viscosity, granular material, freezing and fuel properties. Legacy preset, chemistry_preset and material physics setters are rejected. Other fields retain overlay semantics. render_mode accepts particles/splat, surface/sdf and fog (aliases volume_fog, volume); on a liquid 'fog' raymarches the splatted density with the domain VolumeShader, on a gas domain 'volume' is the plain gas route. Reads return the canonical name ('fog' for a liquid). A SurfaceSDF substance override claims the single domain volume, so a fog domain with one draws that surface, not fog (substance_materials effective_representation says which). fluid.get reports active_density_cells / max_density, the fog mode's input. The retired virtual_particles/virtual/adaptive names are refused with an error. Changing voxel_size or the bounds invalidates the bake for that domain. Surface keys (surface_resolution_multiplier 1..4, kernel/particle radius, smoothing, anisotropy_*) refine the RENDERED surface without touching the simulation and are rejected out of range, not clamped. Numerical thermal_* keys control cooling; selecting Wax applies its thermal hints; read the result back as fluid.get thermal_frozen_particles / thermal_min_kelvin, and thermal_cold_unsupported > 0 with nothing frozen means the liquid is cold but touches no collider or closed wall. Explicit numerical and surface settings are applied after substance solver hints. Granular substeps are adaptive: wave/strain CFL requests are fully granted on CPU and GPU, preserving the authored Young modulus. granular_max_solver_substeps is a legacy compatibility field (stored/clamped to 1..64); it no longer limits physical substeps. Closed, inviscid Vulkan granular domains without solid/frozen parcels keep particle velocity/affine on device between substeps. Positions remain available to the host for occupancy and material coordinates. Compare total_ms and upload/download_bytes; deferred GPU execution can be charged to advect_ms instead of g2p_ms.",
     "write", "SceneWrite", false, "any",
     "fluid|set|param|simulation|configure|viscosity|granular|render-mode|backend",
-    "fluid.get|fluid.set_substance_material",
+    "fluid.get|fluid.set_substance_material|substance.get|substance.derive|substance.set",
     "fluid.create_domain", "timeline.set_frame", "fluid.get|render.probe", "simulation_cache",
-    params_fluid_set_param, 59,
+    params_fluid_set_param, 37,
     true
 };
 static const MethodRegistration reg_fluid_set_param(desc_fluid_set_param);
@@ -2034,9 +2010,8 @@ static const MethodRegistration reg_fluid_set_splat_material(desc_fluid_set_spla
 static const MethodParam params_fluid_set_substance_material[] = {
     {"domain", "string", true, "Fluid domain name", nullptr, nullptr},
     {"substance", "string", true, "Substance id from msf.substances", nullptr, nullptr},
-    {"phase", "string", false, "Physical phase", nullptr, "liquid|solid"},
+    {"phase", "string", false, "Static solid block flag: solid blocks the flow as a fixed obstacle. Liquid parcels melt and freeze by temperature, so their phase is derived, not set here", nullptr, "liquid|solid"},
     {"representation", "string", false, "How the substance is rendered", nullptr, nullptr},
-    {"constitutive_model", "string", false, "Solver regime carried by parcels of this Substance", nullptr, "auto|fluid|granular|elastic"},
     {"kinematic_viscosity", "any", false, "", nullptr, nullptr},
     {"material", "string", false, "", "", nullptr},
     {"miscibility", "any", false, "", nullptr, nullptr},
@@ -2044,12 +2019,12 @@ static const MethodParam params_fluid_set_substance_material[] = {
 static const MethodDescriptor desc_fluid_set_substance_material = {
     "fluid.set_substance_material", "fluid",
     "Bind a substance (its physical identity, phase and representation) to a fluid domain",
-    "Phase, constitutive model and representation are separate axes: phase is thermodynamic state, constitutive_model selects fluid/granular/elastic stress response, and representation selects inherit|splat|sdf|fog drawing.",
+    "Phase is the static solid block flag (liquid parcels melt and freeze by temperature, so their phase is derived). The parcel's constitutive model comes from its Substance alone. representation selects inherit|splat|sdf|fog drawing.",
     "write", "SceneWrite", false, "any",
     "fluid|set|substance|material|simulation|phase|msf",
-    "msf.substances|fluid.set_splat_material|fluid.set_param",
+    "substance.list|fluid.set_splat_material|fluid.set_param",
     nullptr, nullptr, nullptr, nullptr,
-    params_fluid_set_substance_material, 8,
+    params_fluid_set_substance_material, 7,
     true
 };
 static const MethodRegistration reg_fluid_set_substance_material(desc_fluid_set_substance_material);
@@ -2484,30 +2459,13 @@ static const MethodParam params_gas_set_param[] = {
     {"backend", "any", false, "", nullptr, nullptr},
     {"boundary", "any", false, "", nullptr, nullptr},
     {"coord_space", "any", false, "", nullptr, nullptr},
+    {"default_substance", "any", false, "", nullptr, nullptr},
     {"device", "any", false, "", nullptr, nullptr},
     {"domain_max", "vec3", false, "", nullptr, nullptr},
     {"domain_min", "vec3", false, "", nullptr, nullptr},
     {"enabled", "any", false, "", nullptr, nullptr},
-    {"granular_cohesion", "any", false, "", nullptr, nullptr},
-    {"granular_damage_rate", "any", false, "", nullptr, nullptr},
-    {"granular_dilatancy", "any", false, "", nullptr, nullptr},
-    {"granular_enabled", "any", false, "", nullptr, nullptr},
-    {"granular_fracture_strain", "any", false, "", nullptr, nullptr},
-    {"granular_friction_angle", "any", false, "", nullptr, nullptr},
-    {"granular_hardening", "any", false, "", nullptr, nullptr},
-    {"granular_healing_rate", "any", false, "", nullptr, nullptr},
     {"granular_max_solver_substeps", "any", false, "", nullptr, nullptr},
-    {"granular_poisson_ratio", "any", false, "", nullptr, nullptr},
-    {"granular_rebonding", "any", false, "", nullptr, nullptr},
-    {"granular_residual_strength", "any", false, "", nullptr, nullptr},
-    {"granular_softening_range", "any", false, "", nullptr, nullptr},
-    {"granular_softening_temperature", "any", false, "", nullptr, nullptr},
-    {"granular_tack_peak", "any", false, "", nullptr, nullptr},
-    {"granular_tensile_cutoff", "any", false, "", nullptr, nullptr},
-    {"granular_thermal_conductivity", "any", false, "", nullptr, nullptr},
-    {"granular_young_modulus", "any", false, "", nullptr, nullptr},
     {"kernel_radius_voxels", "any", false, "", nullptr, nullptr},
-    {"kinematic_viscosity", "any", false, "", nullptr, nullptr},
     {"max_particles", "any", false, "", nullptr, nullptr},
     {"narrow_band_voxels", "any", false, "", nullptr, nullptr},
     {"particle_radius_voxels", "any", false, "", nullptr, nullptr},
@@ -2515,7 +2473,6 @@ static const MethodParam params_gas_set_param[] = {
     {"pore_detail", "any", false, "", nullptr, nullptr},
     {"pore_scale", "any", false, "", nullptr, nullptr},
     {"position_smoothing", "any", false, "", nullptr, nullptr},
-    {"preset", "any", false, "", nullptr, nullptr},
     {"render_mode", "any", false, "", nullptr, nullptr},
     {"smoothing_iterations", "any", false, "", nullptr, nullptr},
     {"solid_phase", "any", false, "", nullptr, nullptr},
@@ -2524,13 +2481,9 @@ static const MethodParam params_gas_set_param[] = {
     {"surface_offset_voxels", "any", false, "", nullptr, nullptr},
     {"surface_resolution_multiplier", "any", false, "", nullptr, nullptr},
     {"thermal_air_cooling_rate", "any", false, "", nullptr, nullptr},
-    {"thermal_cold_viscosity", "any", false, "", nullptr, nullptr},
     {"thermal_contact_cooling_rate", "any", false, "", nullptr, nullptr},
-    {"thermal_freeze_kelvin", "any", false, "", nullptr, nullptr},
     {"thermal_liquid_enabled", "any", false, "", nullptr, nullptr},
-    {"thermal_viscosity_range", "any", false, "", nullptr, nullptr},
     {"uvw_refresh_period", "any", false, "", nullptr, nullptr},
-    {"viscosity", "any", false, "", nullptr, nullptr},
     {"viscosity_sweeps", "any", false, "", nullptr, nullptr},
     {"viscosity_wall_slip", "any", false, "", nullptr, nullptr},
     {"visible", "any", false, "", nullptr, nullptr},
@@ -2544,7 +2497,7 @@ static const MethodDescriptor desc_gas_set_param = {
     "gas|set|param|simulation|configure",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_gas_set_param, 59,
+    params_gas_set_param, 37,
     true
 };
 static const MethodRegistration reg_gas_set_param(desc_gas_set_param);
@@ -3629,7 +3582,7 @@ static const MethodDescriptor desc_matter_exchanges = {
     "Mass uses kg, energy uses joules and momentum uses kg*m/s. Empty with traced=true means the solver stepped without a transfer.",
     "read", "Read", false, "any",
     "matter|exchanges|exchange|mass|energy|momentum|conservation|phase|melting|mist",
-    "sim_graph.couplings|msf.fields|msf.substances",
+    "sim_graph.couplings|msf.fields|substance.list",
     nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
@@ -4214,41 +4167,12 @@ static const MethodDescriptor desc_msf_fields = {
     "This is the measurement side of burning and melting: mass loss, integrity and mass-conservation error are reported here.",
     "read", "Read", false, "any",
     "msf|fields|substance|thermal|burn|melt|measure|verify|temperature|moisture",
-    "msf.substances",
+    "substance.list",
     nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
 static const MethodRegistration reg_msf_fields(desc_msf_fields);
-
-static const MethodParam params_msf_substance[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-};
-static const MethodDescriptor desc_msf_substance = {
-    "msf.substance", "msf",
-    "Read one substance's canonical physical properties",
-    "Temperatures use Kelvin, energy values use J/kg and kinematic viscosity uses m^2/s.",
-    "read", "Read", false, "any",
-    "msf|substance|physical|properties|density|viscosity|temperature|combustion",
-    "msf.substances|fluid.set_substance_material",
-    nullptr, nullptr, nullptr, nullptr,
-    params_msf_substance, 1,
-    true
-};
-static const MethodRegistration reg_msf_substance(desc_msf_substance);
-
-static const MethodDescriptor desc_msf_substances = {
-    "msf.substances", "msf",
-    "List the material substance library: every substance an object or fluid can be made of",
-    "Substance ids from here are what fluid.set_substance_material and the combustion path expect.",
-    "read", "Read", false, "any",
-    "msf|substances|substance|material|library|wood|water|metal|thermochemistry",
-    "fluid.set_substance_material|msf.fields",
-    nullptr, nullptr, nullptr, nullptr,
-    nullptr, 0,
-    true
-};
-static const MethodRegistration reg_msf_substances(desc_msf_substances);
 
 static const MethodParam params_nodes_add[] = {
     {"graph_name", "string", true, "", nullptr, nullptr},
@@ -9756,6 +9680,85 @@ static const MethodDescriptor desc_spline_subdivide = {
     true
 };
 static const MethodRegistration reg_spline_subdivide(desc_spline_subdivide);
+
+static const MethodParam params_substance_derive[] = {
+    {"based_on", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_substance_derive = {
+    "substance.derive", "substance",
+    "Create a project substance identical to based_on (how a built-in is edited)",
+    "Saved with the project. The name is the identity (particle substance tag); renaming means deriving a new one. Rejected if the name or its tag collides.",
+    "write", "SceneWrite", false, "any",
+    "substance|derive|copy|custom|material",
+    "substance.set|substance.remove",
+    nullptr, nullptr, nullptr, nullptr,
+    params_substance_derive, 2,
+    true
+};
+static const MethodRegistration reg_substance_derive(desc_substance_derive);
+
+static const MethodParam params_substance_get[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_substance_get = {
+    "substance.get", "substance",
+    "Every physical field of one substance, its base, and which fields it overrides",
+    "Kelvin, J/kg, m^2/s, kg/m^3. A project substance stores only overridden fields; the rest follow based_on, so a change to the base reaches it.",
+    "read", "Read", false, "any",
+    "substance|get|material|fields|thermal|combustion|viscosity",
+    "substance.list|substance.set",
+    nullptr, nullptr, nullptr, nullptr,
+    params_substance_get, 1,
+    true
+};
+static const MethodRegistration reg_substance_get(desc_substance_get);
+
+static const MethodDescriptor desc_substance_list = {
+    "substance.list", "substance",
+    "List the substance library: built-ins and project substances derived from them, with category",
+    "Built-ins are read-only (based_on empty). category (liquid|granular|solid|fuel) groups pickers only; behaviour comes from the fields. Names are what flow_source fluid_substance, collider msf_substance and fluid.set_substance_material take.",
+    "read", "Read", false, "any",
+    "substance|list|material|library|category|derive",
+    "substance.get|substance.derive|fluid.set_substance_material",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_substance_list(desc_substance_list);
+
+static const MethodParam params_substance_remove[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_substance_remove = {
+    "substance.remove", "substance",
+    "Remove a project substance that nothing references",
+    "Refused while a flow source, collider, domain binding or another derived substance names it; the error lists them. Built-ins cannot be removed.",
+    "write", "SceneWrite", false, "any",
+    "substance|remove|delete",
+    "substance.list",
+    nullptr, nullptr, nullptr, nullptr,
+    params_substance_remove, 1,
+    true
+};
+static const MethodRegistration reg_substance_remove(desc_substance_remove);
+
+static const MethodParam params_substance_set[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+    {"fields", "object", true, "Field name -> value, as in substance.get fields; null drops the override", nullptr, nullptr},
+};
+static const MethodDescriptor desc_substance_set = {
+    "substance.set", "substance",
+    "Set fields of a project substance; null drops an override",
+    "fields is an object keyed as in substance.get fields. Transactional: one out-of-range or unknown field rejects the patch. Built-ins are refused. Invalidates the simulation bake.",
+    "write", "SceneWrite", false, "any",
+    "substance|set|edit|override|material",
+    "substance.get|substance.derive",
+    nullptr, nullptr, nullptr, nullptr,
+    params_substance_set, 2,
+    true
+};
+static const MethodRegistration reg_substance_set(desc_substance_set);
 
 static const MethodParam params_templates_delete_user[] = {
     {"id", "string", false, "", "", nullptr},

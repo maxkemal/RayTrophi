@@ -16,9 +16,9 @@ struct SimulationGridDomainState;
 struct SimulationGridDomainComputeBuffers;
 struct ParticleColliderDesc;
 struct SurfaceMeshTriangle;
+struct SubstanceProfile;
 namespace Fluid {
 class FluidParticles;
-enum class FluidChemistryPreset : int;
 
 // Opt-in dry DEM candidate. Physical radius is independent of render detail.
 struct MatterGrainParams {
@@ -104,7 +104,7 @@ bool validateMatterGrainDomain(const SimulationGridDomainDesc& domain,
                               const MatterGrainParams& params, std::string& error);
 // Birth mass of one physical grain; the emitter is the only writer.
 float matterGrainRestMassKg(const MatterGrainParams& params, uint32_t substance_tag,
-                            FluidChemistryPreset chemistry_preset,
+                            const SubstanceProfile* domain_substance,
                             MatterConstitutiveModel model, bool legacy_granular);
 // Water one grain can hold, kg: water_capacity_fraction of its sphere volume.
 float matterGrainWaterCapacityKg(const MatterGrainParams& params);
@@ -114,7 +114,7 @@ void initMatterGrainBirthWater(FluidParticles& particles, std::size_t index,
 // Fills missing (<= 0) rest masses of granular carriers with the grain mass.
 std::size_t ensureMatterGrainRestMasses(FluidParticles& particles,
                                         const MatterGrainParams& params,
-                                        FluidChemistryPreset chemistry_preset,
+                                        const SubstanceProfile* domain_substance,
                                         bool legacy_granular);
 
 struct MatterGrainStepReport {

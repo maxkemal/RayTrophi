@@ -1,5 +1,7 @@
 #include "ParticleSimulation.h"
 #include "Fluid/MatterPhaseConfig.h"
+#include "Fluid/FluidCacheRestore.h"
+#include "Fluid/FluidDomainSubstance.h"
 #include "Fluid/MatterGpuRuntime.h"
 #include "Fluid/MatterGrainBirth.h"
 #include "Fluid/MatterGrainCoupling.h"
@@ -6928,13 +6930,15 @@ void ParticleSimulationSystem::resetGridDomainStates() {
     }
 }
 
-void ParticleSimulationSystem::setGridDomainStates(const std::vector<SimulationGridDomainState>& states) {
+void ParticleSimulationSystem::setGridDomainStates(std::vector<SimulationGridDomainState> states) {
     // Same contract as resetGridDomainStates: a cached-frame restore rewinds the
     // particle SoA and (alongside it) the MSF snapshot, so any transfer request
     // still in flight belongs to a future that has just been undone.
     discardMoltenMassTransferState();
     kinematic_collider_discontinuity_ = true;
-    grid_domain_states_ = states;
+    Fluid::prepareFluidCacheRestore(states, grid_domain_states_, grid_domains_,
+                                   grid_domain_compute_buffers_, matter_liquid_compute_buffers_);
+    grid_domain_states_ = std::move(states);
     // A cached frame remembers where the domain WAS. The descriptor is where it
     // IS. Re-seat the frame before anyone reads it (see the header note).
     rebaseRestoredGridDomainStates();

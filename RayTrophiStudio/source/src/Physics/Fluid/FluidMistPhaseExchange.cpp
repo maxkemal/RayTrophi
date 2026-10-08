@@ -1,4 +1,5 @@
 #include "Fluid/FluidMistPhaseExchange.h"
+#include "Fluid/FluidDomainSubstance.h"
 
 #include "Fluid/FluidParticleLabels.h"
 #include "Fluid/FluidPhysicalMass.h"
@@ -49,7 +50,7 @@ FluidMistPhaseExchangeStats transferMistToGas(
     FluidParticles& particles = fluid_state.particles;
     const float liquid_voxel = liquidGrid(fluid_state).voxel_size;
     ensureFluidParticleRestMasses(
-        particles, fluid_domain.fluid_params.chemistry_preset,
+        particles, Fluid::domainSubstance(fluid_domain.fluid_params),
         liquid_voxel, fluid_domain.fluid_params.particles_per_cell,
         fluid_domain.fluid_params.granular_enabled);
 
@@ -99,7 +100,7 @@ FluidMistPhaseExchangeStats transferMistToGas(
         const uint32_t tag = particle < particles.substance_tag.size()
             ? particles.substance_tag[particle] : kSubstanceUntagged;
         const SubstanceProfile* profile = resolveFluidSubstanceProfile(
-            tag, fluid_domain.fluid_params.chemistry_preset);
+            tag, Fluid::domainSubstance(fluid_domain.fluid_params));
         const float density = profile && profile->liquid_density > 0.0f
             ? profile->liquid_density : 1000.0f;
         const float specific_heat = profile && profile->specific_heat > 0.0f

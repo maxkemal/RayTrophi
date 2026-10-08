@@ -1,5 +1,7 @@
 # Matter — kısa devir, 2026-10-06
 
+> **Güncel genel devam — 2026-10-08:** Madde T1/T3 build + hızlı IPC PASS; T2 kaynak devamı [MADDE_T2_T3_HANDOFF.md](MADDE_T2_T3_HANDOFF.md). Bu dosyadaki C5/C6 fizik kabulü ayrı kapıdır.
+
 - Build/shader kullanıcıda; Codex app launch/build yapmaz. Canlı test dış IPC.
 - Hedef: tek Matter domain, ortak kanonik GPU SoA/kimlik/local state,
   alt adımda tek transport owner. UI düzeni temel çözücüden sonra.

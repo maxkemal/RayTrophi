@@ -263,12 +263,14 @@ MaterialStateFieldBridgeStats& materialStateFieldBridgeStats() {
     return stats;
 }
 
-const std::vector<SubstanceProfile>& substanceLibrary() {
+const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
     static const std::vector<SubstanceProfile> library = [] {
         std::vector<SubstanceProfile> out;
 
         auto add = [&out](SubstanceProfile p) { out.push_back(std::move(p)); };
 
+        // category defaults to Solid; only liquids, granular media and fuels
+        // say otherwise.
         // Wood is first, so it is the default: it is the substance that exercises
         // every channel (heats, ignites, chars, leaves ash) and therefore the one
         // a new collider should start as.
@@ -408,7 +410,18 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
             p.melt_kelvin = 330.0f; p.boiling_kelvin = 643.0f;
             p.latent_heat_fusion = 2.1e5f; p.melt_viscosity = 0.15f;
             p.liquid_density = 760.0f;
-            p.liquid_kinematic_viscosity = 5.0e-3f;
+            // Molten paraffin near 80 C: mu ~3-4 mPa s over rho ~770 kg/m3, so
+            // nu ~5e-6 m2/s. Was 5e-3 here while the Wax fluid preset carried
+            // 5e-6; the two definitions disagreed by 1000x. The solver-calibrated
+            // one wins. The wax LOOK comes from the thermal chain, not from nu.
+            p.liquid_kinematic_viscosity = 5.0e-6f;
+            p.parcel_conduction = 1.0f;  // a hot pour re-melts the layer under it
+            p.solver_viscosity_sweeps = 16.0f; p.solver_viscosity_wall_slip = 0.0f;
+            p.solver_flip_blend = 0.90f; p.solver_apic_blend = 0.92f;
+            p.solver_wall_damping = 0.40f; p.solver_affine_damping = 0.95f;
+            // Paraffin sets as it cools: cooling + freezing on whenever wax is a
+            // domain's material. Rates are art-directed (seconds, not a minute).
+            p.solver_thermal_chain = true;
             p.fluid_flammable = true;
             p.flash_kelvin = 524.0f; p.autoignition_kelvin = 601.0f;
             p.latent_heat_vaporization = 1.45e6f;
@@ -418,6 +431,7 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
         {
             SubstanceProfile p;
             p.name = "Water";
+            p.category = SubstanceCategory::Liquid;
             p.density = 997.0f; p.liquid_density = 997.0f;
             p.specific_heat = 4180.0f; p.conductivity = 0.60f;
             p.liquid_kinematic_viscosity = 1.0e-6f;
@@ -428,11 +442,64 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
             p.fluid_extinguishing = true;
             p.cooling_power = 1.0f; p.oxygen_dilution = 0.35f;
             p.molten_emission = 0.0f;
+            // Solver hints are the field defaults (the Water fluid preset), and
+            // nu 1e-6 is below any renderable voxel: the domain resolver skips
+            // the viscous solve for it (FluidDomainSubstance.cpp).
+            add(p);
+        }
+        // Thick liquids. They were domain-wide fluid presets only; as substances
+        // a domain can carry honey AND water, and a derived "my syrup" inherits.
+        {
+            SubstanceProfile p;
+            p.name = "Honey";
+            p.category = SubstanceCategory::Liquid;
+            p.density = 1420.0f; p.liquid_density = 1420.0f;
+            p.specific_heat = 2500.0f; p.conductivity = 0.5f;
+            p.liquid_kinematic_viscosity = 7.0e-3f;
+            p.solver_viscosity_sweeps = 16.0f; p.solver_viscosity_wall_slip = 0.0f;
+            p.solver_internal_friction = 0.2f;
+            p.solver_flip_blend = 0.90f; p.solver_apic_blend = 0.90f;
+            p.solver_air_drag = 0.8f; p.solver_wall_damping = 0.35f;
+            p.solver_affine_damping = 0.95f;
+            add(p);
+        }
+        {
+            SubstanceProfile p;
+            p.name = "Chocolate";
+            p.category = SubstanceCategory::Liquid;
+            // Molten couverture at ~40 C: about half honey's nu, wets everything.
+            p.density = 1270.0f; p.liquid_density = 1270.0f;
+            p.specific_heat = 1600.0f; p.conductivity = 0.2f;
+            p.liquid_kinematic_viscosity = 4.0e-3f;
+            p.solver_viscosity_sweeps = 16.0f; p.solver_viscosity_wall_slip = 0.0f;
+            p.solver_internal_friction = 0.2f;
+            p.solver_flip_blend = 0.90f; p.solver_apic_blend = 0.92f;
+            p.solver_air_drag = 0.7f; p.solver_wall_damping = 0.40f;
+            p.solver_affine_damping = 0.95f;
+            add(p);
+        }
+        {
+            SubstanceProfile p;
+            p.name = "Mud";
+            p.category = SubstanceCategory::Liquid;
+            // A heavy slurry. Really a yield-stress (Bingham) material; until the
+            // solver has a plastic return mapping, solver_internal_friction stands
+            // in for the yield surface. Marked so it is not mistaken for physics.
+            p.density = 1700.0f; p.liquid_density = 1700.0f;
+            p.specific_heat = 1500.0f; p.conductivity = 1.0f;
+            p.liquid_kinematic_viscosity = 2.0e-3f;
+            p.solver_viscosity_sweeps = 12.0f; p.solver_viscosity_wall_slip = 0.2f;
+            p.solver_internal_friction = 0.35f;
+            p.solver_flip_blend = 0.90f; p.solver_apic_blend = 0.90f;
+            p.solver_density_correction = 1.2f;
+            p.solver_air_drag = 0.8f; p.solver_wall_damping = 0.30f;
+            p.solver_affine_damping = 0.95f;
             add(p);
         }
         {
             SubstanceProfile p;
             p.name = "Sand";
+            p.category = SubstanceCategory::Granular;
             p.default_constitutive_model =
                 Fluid::MatterConstitutiveModel::Granular;
             p.density = 1600.0f;
@@ -440,13 +507,21 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
             p.conductivity = 0.27f;
             p.absorbency = 0.35f;
             p.dry_rate = 0.015f;
-            p.granular_friction_degrees = 34.0f;
+            // Skeleton = the Sand fluid preset's solver-calibrated set (the table
+            // carried 34 deg while the preset ran 35; one value now).
+            p.granular_friction_degrees = 35.0f;
             p.granular_cohesion = 0.0f;
+            p.granular_fracture_strain = 0.02f; p.granular_damage_rate = 8.0f;
+            // FLIP must be 0 for granular: the elastic stress enters the grid in
+            // P2G, before the FLIP snapshot, so any blend subtracts it back out.
+            p.solver_flip_blend = 0.0f; p.solver_viscosity_wall_slip = 0.0f;
+            p.solver_wall_damping = 0.40f;
             add(p);
         }
         {
             SubstanceProfile p;
             p.name = "Gravel";
+            p.category = SubstanceCategory::Granular;
             p.default_constitutive_model =
                 Fluid::MatterConstitutiveModel::Granular;
             p.density = 1750.0f;
@@ -454,13 +529,26 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
             p.conductivity = 0.35f;
             p.absorbency = 0.12f;
             p.dry_rate = 0.03f;
-            p.granular_friction_degrees = 40.0f;
+            // Coarse angular grains interlock: high friction, strong dilatancy,
+            // no cohesion (the Gravel preset's set; the table said 40 deg).
+            p.granular_friction_degrees = 43.0f;
             p.granular_cohesion = 0.0f;
+            p.granular_dilatancy_degrees = 12.0f;
+            p.granular_young_modulus = 3.0e5f;  // honest to ~1.9 m of pile
+            p.granular_poisson_ratio = 0.22f;
+            p.granular_fracture_strain = 0.02f; p.granular_damage_rate = 8.0f;
+            p.solver_flip_blend = 0.0f; p.solver_apic_blend = 0.90f;
+            p.solver_viscosity_wall_slip = 0.0f;
+            p.solver_air_drag = 0.08f; p.solver_wall_damping = 0.50f;
+            p.solver_affine_damping = 0.96f;
+            // 40, not 32: at 5 cm / 24 fps this E needs 33 substeps.
+            p.solver_granular_max_substeps = 40.0f;
             add(p);
         }
         {
             SubstanceProfile p;
             p.name = "Soil";
+            p.category = SubstanceCategory::Granular;
             p.default_constitutive_model =
                 Fluid::MatterConstitutiveModel::Granular;
             p.density = 1450.0f;
@@ -470,11 +558,16 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
             p.dry_rate = 0.01f;
             p.granular_friction_degrees = 30.0f;
             p.granular_cohesion = 800.0f;
+            // No fluid preset ever carried soil; Sand's skeleton and hints.
+            p.granular_fracture_strain = 0.02f; p.granular_damage_rate = 8.0f;
+            p.solver_flip_blend = 0.0f; p.solver_viscosity_wall_slip = 0.0f;
+            p.solver_wall_damping = 0.40f;
             add(p);
         }
         {
             SubstanceProfile p;
             p.name = "Gasoline";
+            p.category = SubstanceCategory::Fuel;
             p.density = 740.0f; p.liquid_density = 740.0f;
             p.specific_heat = 1700.0f; p.conductivity = 0.13f;
             p.liquid_kinematic_viscosity = 6.0e-7f;
@@ -488,6 +581,7 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
         {
             SubstanceProfile p;
             p.name = "Alcohol";
+            p.category = SubstanceCategory::Fuel;
             p.density = 789.0f; p.liquid_density = 789.0f;
             p.specific_heat = 2400.0f; p.conductivity = 0.17f;
             p.liquid_kinematic_viscosity = 1.5e-6f;
@@ -501,9 +595,16 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
         {
             SubstanceProfile p;
             p.name = "Oil";
+            p.category = SubstanceCategory::Fuel;
             p.density = 850.0f; p.liquid_density = 850.0f;
             p.specific_heat = 1700.0f; p.conductivity = 0.15f;
-            p.liquid_kinematic_viscosity = 5.0e-5f;
+            // The Oil preset's 1e-4 (the table said 5e-5; olive oil is ~9e-5).
+            p.liquid_kinematic_viscosity = 1.0e-4f;
+            p.solver_viscosity_sweeps = 6.0f; p.solver_viscosity_wall_slip = 0.6f;
+            p.solver_internal_friction = 0.15f;
+            p.solver_flip_blend = 0.95f;
+            p.solver_air_drag = 0.6f; p.solver_wall_damping = 0.20f;
+            p.solver_affine_damping = 0.97f;
             p.fluid_flammable = true;
             p.flash_kelvin = 520.5f; p.autoignition_kelvin = 678.0f;
             p.boiling_kelvin = 650.0f;
@@ -560,36 +661,6 @@ const std::vector<SubstanceProfile>& substanceLibrary() {
         return out;
     }();
     return library;
-}
-
-const SubstanceProfile* tryFindSubstance(const std::string& name) {
-    const auto& library = substanceLibrary();
-    for (const SubstanceProfile& p : library) {
-        if (p.name == name) return &p;
-    }
-    return nullptr;
-}
-
-const SubstanceProfile* tryFindSubstanceByTag(uint32_t tag) {
-    if (tag == Fluid::kSubstanceUntagged) return nullptr;
-    static const std::unordered_map<uint32_t, const SubstanceProfile*> by_tag = [] {
-        std::unordered_map<uint32_t, const SubstanceProfile*> result;
-        for (const SubstanceProfile& profile : substanceLibrary()) {
-            result.emplace(Fluid::substanceTag(profile.name), &profile);
-        }
-        return result;
-    }();
-    const auto it = by_tag.find(tag);
-    return it != by_tag.end() ? it->second : nullptr;
-}
-
-const SubstanceProfile& findSubstance(const std::string& name) {
-    if (const SubstanceProfile* profile = tryFindSubstance(name)) return *profile;
-    const auto& library = substanceLibrary();
-    // Unknown name (project authored against a newer build, or an empty string
-    // from a collider that predates substances): fall back to the default rather
-    // than refusing to load.
-    return library.front();
 }
 
 MaterialSubstance MaterialSubstance::fromProfile(const SubstanceProfile& profile,

@@ -81,8 +81,8 @@ assert transfer["last_domain"] == LIQUID, transfer
 assert transfer["last_substance"] == "Plastic (PE)", transfer
 assert domain["particle_count"] > 0, domain
 assert domain["render_mode"] == "surface", domain
-assert domain["viscosity"] >= 30.0, domain
-assert chemistry["chemistry_preset"] == "plastic", chemistry
+assert domain["kinematic_viscosity"] >= 0.30 - 1e-6, domain
+assert domain["default_substance"] == "Plastic (PE)", domain
 assert chemistry["enabled"], chemistry
 assert chemistry["auto_ignite"], chemistry
 assert collider["msf_auto_transfer"], collider
