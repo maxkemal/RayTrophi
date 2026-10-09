@@ -16,7 +16,10 @@ def main():
     assert len(pairs) == 17
     for full, window in pairs:
         assert window == full + "_window"
-        source = (shaders / (full + ".comp")).read_text(encoding="utf-8")
+        # A kernel whose body moved to a shared .glsl (dense + compact MAC
+        # entries, MATTER_SPARSE_S1_SIVI_GPU.md) is checked through that body.
+        body = shaders / (full + ".glsl")
+        source = (body if body.exists() else shaders / (full + ".comp")).read_text(encoding="utf-8")
         assert '#include "fluid_pressure_window.glsl"' in source, full
         assert "#ifdef RT_FLUID_WINDOW" in source, full
         assert "fluidPressureCellIndex()" in source, full

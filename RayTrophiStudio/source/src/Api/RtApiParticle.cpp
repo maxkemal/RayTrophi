@@ -1199,7 +1199,32 @@ Result getFluidStepStats(const std::string& domain_id_or_name, FluidStepStats& o
     out.full_grid_cells = fluid.grid_cell_count;
     out.pressure_window_used = fluid.pressure_on_gpu && fluid.pressure_window_used;
     out.pressure_window_cells = out.pressure_window_used ? fluid.pressure_window_cells : 0;
+    out.transfer_sparse_used = fluid.p2g_on_gpu && fluid.transfer_sparse_used;
+    out.flip_sparse_used = out.transfer_sparse_used && fluid.flip_sparse_used;
+    out.transfer_sparse_active_tiles = out.transfer_sparse_used
+        ? fluid.transfer_sparse_active_tiles : 0;
+    out.transfer_sparse_allocated_tiles = out.transfer_sparse_used
+        ? fluid.transfer_sparse_allocated_tiles : 0;
+    out.transfer_sparse_resident_bytes = out.transfer_sparse_used
+        ? fluid.transfer_sparse_resident_bytes : 0;
+    out.transfer_sparse_status = fluid.transfer_sparse_status;
+    out.transfer_sparse_canonical = out.transfer_sparse_used && fluid.transfer_sparse_canonical;
+    out.transfer_sparse_blocked = fluid.transfer_sparse_blocked;
+    out.pressure_sparse_used = fluid.pressure_on_gpu && fluid.pressure_sparse_used;
+    out.pressure_sparse_active_tiles = out.pressure_sparse_used
+        ? fluid.pressure_sparse_active_tiles : 0;
+    out.pressure_sparse_allocated_tiles = out.pressure_sparse_used
+        ? fluid.pressure_sparse_allocated_tiles : 0;
+    out.pressure_sparse_resident_bytes = out.pressure_sparse_used
+        ? fluid.pressure_sparse_resident_bytes : 0;
     out.occupancy_on_gpu = fluid.occupancy_on_gpu;
+    out.viscosity_sparse_used = fluid.viscosity_on_gpu && fluid.viscosity_sparse_used;
+    out.viscosity_sparse_active_tiles = out.viscosity_sparse_used
+        ? fluid.viscosity_sparse_active_tiles : 0;
+    out.viscosity_sparse_allocated_tiles = out.viscosity_sparse_used
+        ? fluid.viscosity_sparse_allocated_tiles : 0;
+    out.viscosity_sparse_resident_bytes = out.viscosity_sparse_used
+        ? fluid.viscosity_sparse_resident_bytes : 0;
     out.resolution[0] = RayTrophiSim::Fluid::liquidGrid(state).nx;
     out.resolution[1] = RayTrophiSim::Fluid::liquidGrid(state).ny;
     out.resolution[2] = RayTrophiSim::Fluid::liquidGrid(state).nz;

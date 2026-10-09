@@ -317,3 +317,19 @@ durumudur; güncel durum bu bölüm ve sıra tablosudur. T1 save/open ve T3 eski
 proje göçü/Wax görsel kabulü açık; T2 kalan yarısı başlanacak kaynak partisidir.
 Devam noktası ve dosyalar: [MADDE_T2_T3_HANDOFF.md](MADDE_T2_T3_HANDOFF.md).
 Kanıt: [madde_t1_t3_live_2026-10-08.json](madde_t1_t3_live_2026-10-08.json).
+
+## 6e. Ortak state ve sahiplik koruması — 2026-10-08 kaynak checkpoint
+
+Kullanıcı kalan ana planı topluca onayladı; küçük kaynak adımları için tekrar
+onay gerekmez. `MatterSubstanceState` doğum/seed/model ve obstacle çözümünü
+merkezileştirir; ν(T) ve erime bandı parçacık maddesinden gelir.
+`granular_transport` kütüphane/UI/IPC/Python/proje sözleşmesinde tüketicisiyle
+birlikte vardır. Sand/Gravel/Ice DEM, Soil MPM; grain açıkken MPM taşıyıcı
+DEM'e dönüştürülmez. MPM+grain iki yönlü Vulkan contact devam kaynağı eklendi;
+önceki partinin kullanıcı build'i PASS, yeni shader/C++ canlı kabulü açık.
+Continuum frame'i ardından her DEM alt adımında temas; ortak scheduler hâlâ açık.
+
+**T2/T4/T5/T6 tamamlanmadı.** Water soğuk hareketli katı doğumu, latent/mekanik
+enerji geçişi, B11 ortak zamanlayıcı/temas yakınsaması, karma elastik MPM/gaz bağlama ve son ölçüm
+kapıları açıktır. Ice→Water tek kimliğe göç önerisini ayrı Ice kararının son
+kaydı geçersiz kılar. Güncel ayrıntı: [devir](MADDE_T2_T3_HANDOFF.md).

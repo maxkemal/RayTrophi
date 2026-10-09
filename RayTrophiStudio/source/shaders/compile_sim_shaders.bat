@@ -13,14 +13,28 @@ if errorlevel 1 (
 set SHADER_DIR=%~dp0
 echo Compiling simulation compute shaders...
 
+for %%k in (clear mark capture sweep) do (
+    glslc "%SHADER_DIR%sim_sparse_viscosity_%%k.comp" -o "%SHADER_DIR%sim_sparse_viscosity_%%k.spv" --target-env=vulkan1.2
+    if errorlevel 1 exit /b 1
+)
+glslc "%SHADER_DIR%sim_fluid_viscosity_rbgs.comp" -o "%SHADER_DIR%sim_fluid_viscosity_rbgs.spv" --target-env=vulkan1.2
+if errorlevel 1 exit /b 1
+
+for %%k in (clear mark init jacobi copy spmv axpy zpby scatter dense_clear) do (
+    glslc "%SHADER_DIR%sim_sparse_pressure_%%k.comp" -o "%SHADER_DIR%sim_sparse_pressure_%%k.spv" --target-env=vulkan1.2
+    if errorlevel 1 exit /b 1
+)
+
 glslc "%SHADER_DIR%sim_matter_partition.comp" -o "%SHADER_DIR%sim_matter_partition.spv" --target-env=vulkan1.2
-for %%k in (sim_matter_grain_clear sim_matter_grain_hash sim_matter_grain_step sim_matter_grain_permute sim_matter_grain_permute_copy sim_fluid_divergence_porous) do (
+for %%k in (sim_grain_mpm_count sim_grain_fluid_clear sim_grain_fluid_hash sim_grain_fluid_solid sim_grain_fluid_cells sim_grain_fluid_refresh sim_grain_fluid_delta sim_grain_fluid_reaction sim_grain_fluid_apply sim_grain_mpm_init sim_grain_mpm_clear sim_grain_mpm_hash sim_grain_mpm_gather sim_grain_mpm_apply sim_matter_grain_list_clear sim_matter_grain_hash sim_matter_grain_list_build sim_matter_grain_step sim_fluid_divergence_porous) do (
     glslc "%SHADER_DIR%%%k.comp" -o "%SHADER_DIR%%%k.spv" --target-env=vulkan1.2
     if errorlevel 1 exit /b 1
 )
 if errorlevel 1 exit /b 1
 
 for %%k in (
+    sim_sparse_grid_map_clear sim_sparse_grid_map_seed sim_sparse_grid_retire sim_sparse_grid_remap
+    sim_sparse_mac_clear sim_sparse_mac_mark sim_sparse_mac_reset sim_sparse_mac_normalize sim_sparse_mac_publish sim_sparse_mac_capture sim_sparse_mac_gather sim_sparse_mac_p2g sim_sparse_mac_matter_p2g sim_sparse_mac_g2p sim_sparse_mac_matter_g2p sim_sparse_mac_zero_faces sim_sparse_mac_matter_zero_faces sim_sparse_mac_divergence sim_sparse_mac_divergence_var sim_sparse_mac_divergence_porous sim_sparse_mac_subtract_gradient sim_sparse_mac_subtract_gradient_var sim_sparse_mac_capture_compact sim_sparse_mac_advect sim_sparse_mac_matter_advect sim_sparse_mac_matter_contact sim_sparse_mac_viscosity_capture sim_sparse_mac_viscosity_sweep
     sim_matter_p2g sim_matter_g2p sim_matter_stress_update sim_matter_stress_p2g sim_matter_settle sim_matter_advect sim_matter_occupancy sim_matter_contact sim_matter_copy sim_matter_clear sim_matter_zero_faces sim_matter_pores
 ) do (
     glslc "%SHADER_DIR%%%k.comp" -o "%SHADER_DIR%%%k.spv" --target-env=vulkan1.2

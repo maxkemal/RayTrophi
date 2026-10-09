@@ -1,6 +1,8 @@
 #include "Fluid/MatterGrain.h"
 #include "Fluid/APICFluidSolver.h"
 #include "Fluid/FluidParticles.h"
+#include "Fluid/SubstanceTag.h"
+#include "MaterialStateField.h"
 
 #include <cassert>
 #include <cmath>
@@ -41,14 +43,14 @@ int main() {
         MatterGrainParams a, b;
         a.radius_m = .02f;
         b.radius_m = .04f;
-        const float ma = matterGrainRestMassKg(a, 0u, FluidChemistryPreset::Water,
+        const float ma = matterGrainRestMassKg(a, 0u, RayTrophiSim::tryFindSubstance("Sand"),
             MatterConstitutiveModel::Granular, true);
-        const float mb = matterGrainRestMassKg(b, 0u, FluidChemistryPreset::Water,
+        const float mb = matterGrainRestMassKg(b, 0u, RayTrophiSim::tryFindSubstance("Sand"),
             MatterConstitutiveModel::Granular, true);
         assert(ma > 0.0f && std::abs(mb / ma - 8.0f) < 1e-3f);
         b = a;
         b.packing_fraction = .3f;
-        assert(std::abs(matterGrainRestMassKg(b, 0u, FluidChemistryPreset::Water,
+        assert(std::abs(matterGrainRestMassKg(b, 0u, RayTrophiSim::tryFindSubstance("Sand"),
             MatterConstitutiveModel::Granular, true) / ma - 2.0f) < 1e-3f);
     }
     assert(matterGrainParamsToJson(matterGrainParamsFromJson(matterGrainParamsToJson(p))) ==
@@ -62,6 +64,13 @@ int main() {
     particles.affine[0].col0 = Vec3(0, 3, 0);
     particles.affine[0].col1 = Vec3(-3, 0, 0);
     particles.affine[0].col2 = Vec3(0);
+    particles.constitutive_model[0] = static_cast<uint8_t>(MatterConstitutiveModel::Granular);
+    particles.substance_tag[0] = substanceTag("Sand");
+    // A colocated MPM skeleton is not part of the grain spin/pile diagnostic.
+    particles.emit(Vec3(0.0f), Vec3(0.0f), 293.15f, 0.0f, substanceTag("Soil"),
+        nullptr, nullptr, 2.0f, MatterConstitutiveModel::Granular);
+    particles.affine[1].col0 = Vec3(0, 100, 0);
+    particles.affine[1].col1 = Vec3(-100, 0, 0);
     // Pile profile on a synthetic 30 degree cone of stacked grains.
     for (double degrees : {20.0, 30.0, 38.0}) {
         const float r = .02f;

@@ -1,6 +1,7 @@
 // Thermal liquid: cooling, temperature-dependent viscosity, freezing.
 // See include/Fluid/FluidThermalLiquid.h for the model and the call order.
 #include "Fluid/FluidThermalLiquid.h"
+#include "Fluid/MatterSubstanceState.h"
 #include "Fluid/SubstanceTag.h"
 #include "MaterialStateField.h"
 #include <algorithm>
@@ -183,23 +184,10 @@ void updateThermalFreeze(FluidParticles& particles,
     const bool closed_walls =
         params.boundary == APICSolverParams::BoundaryMode::Closed;
     const bool has_solid = grid.solid.size() == cells;
-    // Melt band: a parcel must warm clearly past its freeze point to let go.
-    const float melt_band = std::max(1.0f, 0.1f * params.thermal_viscosity_range);
-
-    // ★ Freeze point is the PARCEL's substance, not the domain's. A domain can
-    // hold Water and Wax parcels at once; one shared threshold froze both at the
-    // same temperature. Meltable substances freeze at their melt_kelvin, a
-    // non-meltable one never freezes (the same rule FluidDomainSubstance applies
-    // to the domain default). Untagged parcels, or a tag with no profile, keep the
-    // domain value.
-    auto freezeKelvinFor = [&](std::size_t p) -> float {
+    const auto freezeKelvinFor = [&](std::size_t p) {
         const uint32_t tag = p < particles.substance_tag.size()
             ? particles.substance_tag[p] : kSubstanceUntagged;
-        const SubstanceProfile* profile =
-            tag == kSubstanceUntagged ? nullptr : tryFindSubstanceByTag(tag);
-        if (!profile) return params.thermal_freeze_kelvin;
-        return profile->meltable ? profile->melt_kelvin
-                                 : -std::numeric_limits<float>::infinity();
+        return substanceFreezeKelvin(tag, params);
     };
 
     auto supported = [&](int i, int j, int k) -> bool {
@@ -225,7 +213,11 @@ void updateThermalFreeze(FluidParticles& particles,
 #endif
     for (int64_t raw = 0; raw < count; ++raw) {
         const std::size_t p = static_cast<std::size_t>(raw);
-        if (!liveParcel(particles, p)) {
+        const auto model = p < particles.constitutive_model.size()
+            ? static_cast<MatterConstitutiveModel>(particles.constitutive_model[p])
+            : MatterConstitutiveModel::Auto;
+        if (!liveParcel(particles, p) || model == MatterConstitutiveModel::Granular ||
+            model == MatterConstitutiveModel::Elastic) {
             particles.flags[p] &= ~kParticleFlagFrozen;
             continue;
         }
@@ -240,7 +232,9 @@ void updateThermalFreeze(FluidParticles& particles,
             f &= ~kParticleFlagFrozen;
             continue;
         }
-        const float melt_k = freeze_k + melt_band;
+        const uint32_t tag = p < particles.substance_tag.size()
+            ? particles.substance_tag[p] : kSubstanceUntagged;
+        const float melt_k = substanceMeltReleaseKelvin(tag, params);
         if (f & kParticleFlagFrozen) {
             if (std::isfinite(t) && t > melt_k) {
                 f &= ~kParticleFlagFrozen;
@@ -293,20 +287,28 @@ bool buildThermalViscosityField(const FluidParticles& particles,
     const bool have_base = base != nullptr && base->size() == cells;
     const float hot_scalar = std::max(0.0f, params.kinematic_viscosity);
 
-    // Temperature gathered onto cell centres with the transfer's trilinear
-    // weights — the same support the substance viscosity gather uses, so a cell
-    // the fluid mask calls fluid is a cell this field has an answer for.
-    static std::vector<float> s_t_sum;
+    // Parcel viscosity gathered onto cell centres with the transfer's
+    // trilinear support. Each parcel uses its own temperature and substance.
+    static std::vector<float> s_nu_sum;
     static std::vector<float> s_weight;
-    s_t_sum.assign(cells, 0.0f);
+    s_nu_sum.assign(cells, 0.0f);
     s_weight.assign(cells, 0.0f);
     const float inv_h = 1.0f / grid.voxel_size;
     for (std::size_t p = 0; p < n; ++p) {
         if (!liveParcel(particles, p)) continue;
+        const auto model = p < particles.constitutive_model.size()
+            ? static_cast<MatterConstitutiveModel>(particles.constitutive_model[p])
+            : MatterConstitutiveModel::Auto;
+        if (model == MatterConstitutiveModel::Granular || model == MatterConstitutiveModel::Elastic) {
+            continue;
+        }
         const float t = particles.temperature[p];
         const Vec3& wp = particles.position[p];
         if (!std::isfinite(t) || !std::isfinite(wp.x) || !std::isfinite(wp.y) ||
             !std::isfinite(wp.z)) continue;
+        const uint32_t tag = p < particles.substance_tag.size()
+            ? particles.substance_tag[p] : kSubstanceUntagged;
+        const float nu = substanceThermalViscosity(tag, t, params);
         const Vec3 c = (wp - grid.origin) * inv_h - Vec3(0.5f, 0.5f, 0.5f);
         const int i0 = static_cast<int>(std::floor(c.x));
         const int j0 = static_cast<int>(std::floor(c.y));
@@ -323,23 +325,14 @@ bool buildThermalViscosityField(const FluidParticles& particles,
                             (dk ? fz : 1.0f - fz);
             if (w <= 0.0f) continue;
             const std::size_t ci = grid.cellIndex(i, j, k);
-            s_t_sum[ci] += w * t;
+            s_nu_sum[ci] += w * nu;
             s_weight[ci] += w;
         }
     }
 
-    // ν(T) = exp( s·ln ν_hot + (1-s)·ln ν_cold ),  s = clamp((T - T_f)/range).
-    // ★ LOG space, because the ramp spans orders of magnitude (5e-6 -> 5e-2 for
-    // wax). Linear interpolation would sit within 10% of the cold value for
-    // nine tenths of the range and read as a liquid that jams all at once.
-    // ★ ν_hot is floored at 1e-7 only INSIDE the log: an inviscid hot value is
-    // legitimate, it just has no logarithm.
-    constexpr float kMinLogViscosity = 1.0e-7f;
-    const float cold = std::max(kMinLogViscosity, params.thermal_cold_viscosity);
-    const float ln_cold = std::log(cold);
-    const float freeze_k = params.thermal_freeze_kelvin;
-    const float inv_range = 1.0f / std::max(1.0f, params.thermal_viscosity_range);
-
+    // Evaluate each parcel's own material curve BEFORE gathering. Averaging
+    // temperatures first and applying the domain curve freezes Water and Wax
+    // at the same threshold, even when the per-cell base viscosity is correct.
     viscosity_out.resize(cells);
     const int64_t cell_count = static_cast<int64_t>(cells);
     // No min/max reduction clause: MSVC's OpenMP 2.0 has none. The readout is
@@ -357,13 +350,7 @@ bool buildThermalViscosityField(const FluidParticles& particles,
             viscosity_out[ci] = hot;
             continue;
         }
-        const float t = s_t_sum[ci] / s_weight[ci];
-        const float s = std::clamp((t - freeze_k) * inv_range, 0.0f, 1.0f);
-        const float nu = std::exp(s * std::log(std::max(kMinLogViscosity, hot)) +
-                                  (1.0f - s) * ln_cold);
-        // At the hot end, hand back the authored value itself (possibly 0),
-        // not its floored logarithm.
-        viscosity_out[ci] = (s >= 1.0f) ? hot : nu;
+        viscosity_out[ci] = s_nu_sum[ci] / s_weight[ci];
     }
     float lo = std::numeric_limits<float>::max();
     float hi = 0.0f;

@@ -7,13 +7,15 @@
 #include <vector>
 
 namespace RayTrophiSim::Fluid {
+struct APICSolverParams;
 
 // Host authoring/birth boundary only. Existing simulation state stays unchanged;
 // accepted new centers occupy the hash immediately, before subsequent births.
 class MatterGrainBirthFilter {
 public:
     MatterGrainBirthFilter(const FluidParticles& particles,
-                          const FluidSim::FluidGrid& grid, float radius);
+                          const FluidSim::FluidGrid& grid, float radius,
+                          const APICSolverParams* params = nullptr);
     bool accept(const Vec3& position);
 
 private:

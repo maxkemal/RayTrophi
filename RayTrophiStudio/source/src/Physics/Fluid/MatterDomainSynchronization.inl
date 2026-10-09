@@ -87,7 +87,9 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
         const Vec3 extent = mx - mn;
         const float max_extent = std::max({ extent.x, extent.y, extent.z, 0.001f });
 
-        const int max_auto_res = std::clamp(domain.max_auto_resolution, 32, 512);
+        // No upper clamp: the knob is the user's. Memory is the resource
+        // budget's job (resolvePhaseLayouts); index width is guarded below.
+        const int max_auto_res = std::max(domain.max_auto_resolution, 32);
         int res_x, res_y, res_z;
         float voxel_size;
 
@@ -104,9 +106,9 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
             // thin Y axis loses cells disproportionately because max_extent/max_auto_res
             // gives a coarse voxel for the short dimension.
             voxel_size = max_extent / static_cast<float>(max_auto_res);
-            res_x = std::clamp(static_cast<int>(std::ceil(std::max(extent.x, 0.001f) / voxel_size)), 8, 1024);
-            res_y = std::clamp(static_cast<int>(std::ceil(std::max(extent.y, 0.001f) / voxel_size)), 8, 1024);
-            res_z = std::clamp(static_cast<int>(std::ceil(std::max(extent.z, 0.001f) / voxel_size)), 8, 1024);
+            res_x = std::max(static_cast<int>(std::ceil(std::max(extent.x, 0.001f) / voxel_size)), 8);
+            res_y = std::max(static_cast<int>(std::ceil(std::max(extent.y, 0.001f) / voxel_size)), 8);
+            res_z = std::max(static_cast<int>(std::ceil(std::max(extent.z, 0.001f) / voxel_size)), 8);
             domain.voxel_size = voxel_size;
         }
 
@@ -119,15 +121,21 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
         // ~80^3 (= 25 mm voxels). The y-aspect term keeps the extra headroom for
         // flat domains (thin Y) where allocated cells are dominated by empty
         // space above the slab; it only ever raises an already-non-binding
-        // budget. A high absolute ceiling remains purely as an OOM guard — the
-        // UI's live cell-count + memory preview is the real guardrail for the
-        // user's explicit choice. (GPU backends can lift this further once the
-        // MGPCG path is live-wired.)
+        // budget. Memory has no hidden constant here: the resource budget
+        // (when enforced) and the UI's cell/memory preview are the guardrails.
+        // The one ceiling left is index width on the GPU, a correctness limit:
+        // the kernels address MAC faces with 32-bit indices scaled by 3
+        // (runMatterGpuStep), and faces <= cells * 9/8 at the 8-cell axis
+        // floor. That is ~1.27G cells (~1080^3); a CPU grid indexes with size_t.
         const std::size_t knob_budget =
             static_cast<std::size_t>(max_auto_res) *
             static_cast<std::size_t>(max_auto_res) *
             static_cast<std::size_t>(max_auto_res);
-        constexpr std::size_t MAX_GRID_DOMAIN_CELLS_HARD_CAP = 134217728; // 512^3 OOM guard
+        const bool gpu_indexed_grid = domain.backend == SimulationDomainBackend::GPU_Compute ||
+            domain.backend == SimulationDomainBackend::GPU_Vulkan;
+        const std::size_t MAX_GRID_DOMAIN_CELLS_HARD_CAP = gpu_indexed_grid
+            ? static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()) / 3u / 9u * 8u
+            : std::numeric_limits<std::size_t>::max();
         // Flat-domain headroom is capped at 4x knob^3. The old 0.01 floor let a
         // thin-Y domain inflate the budget up to 100x — with knob=512 that meant
         // sailing straight into the hard cap (134M cells), and the real memory
@@ -319,15 +327,8 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
                            /*seed=*/static_cast<uint32_t>(i + 1u) * 2654435761u,
                            seed_budget,
                            fluidDomainAmbientKelvin(domain, world_thermal_));
-            const auto seed_model = domain.fluid_params.granular_enabled
-                ? Fluid::MatterConstitutiveModel::Granular
-                : Fluid::MatterConstitutiveModel::Fluid;
-            for (std::size_t particle = seed_begin;
-                 particle < state.particles.constitutive_model.size();
-                 ++particle) {
-                state.particles.constitutive_model[particle] =
-                    static_cast<uint8_t>(seed_model);
-            }
+            Fluid::initializeMatterBirthModels(
+                state.particles, seed_begin, domain.fluid_params);
             domain.fluid_pending_seed = false;
         }
     }

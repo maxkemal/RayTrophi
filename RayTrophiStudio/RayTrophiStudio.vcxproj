@@ -478,6 +478,17 @@
     <ClInclude Include="source\include\MaterialStateField.h" />
     <ClInclude Include="source\include\SubstanceLibrary.h" />
     <ClInclude Include="source\include\Fluid\FluidDomainSubstance.h" />
+    <ClInclude Include="source\include\Fluid\MatterSubstanceState.h" />
+    <ClInclude Include="source\include\Fluid\MatterGrainMpmContact.h" />
+    <ClInclude Include="source\include\Fluid\MatterCommonClock.h" />
+    <ClInclude Include="source\include\Fluid\SparseTileGrid.h" />
+    <ClInclude Include="source\include\Fluid\SparsePressureGpu.h" />
+    <ClInclude Include="source\include\Fluid\SparseViscosityGpu.h" />
+    <ClInclude Include="source\include\Fluid\SparseMacTransferGpu.h" />
+    <ClInclude Include="source\include\Fluid\SparseGridGpu.h" />
+    <ClInclude Include="source\include\Fluid\SparseGridStorage.h" />
+    <ClInclude Include="source\include\Fluid\FluidGpuDispatch.h" />
+    <ClInclude Include="source\include\Fluid\MatterGrainFluidGpuCoupling.h" />
     <ClInclude Include="source\include\MatterExchangeLedger.h" />
     <ClInclude Include="source\include\MaterialDamagePattern.h" />
     <ClInclude Include="source\include\MeltSurfaceFlow.h" />
@@ -599,8 +610,6 @@
     <ClInclude Include="source\src\Physics\Fluid\FluidGpuOccupancy.inl" />
     <None Include="source\shaders\sim_matter_partition.comp" />
     <None Include="source\shaders\sim_fluid_divergence_porous.comp" />
-    <None Include="source\shaders\sim_matter_grain_permute.comp" />
-    <None Include="source\shaders\sim_matter_grain_permute_copy.comp" />
     <None Include="source\shaders\sim_fluid_occupancy.comp" />
     <ClInclude Include="source\include\Fluid\APICFluidSolver.h" />
     <ClInclude Include="source\include\Fluid\FluidParticleSeedPattern.h" />
@@ -1904,6 +1913,14 @@
     <ClCompile Include="source\src\Physics\MaterialStateField.cpp" />
     <ClCompile Include="source\src\Physics\SubstanceLibrary.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidDomainSubstance.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterSubstanceState.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\SparsePressureGpu.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\SparseViscosityGpu.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\SparseMacTransferGpu.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\SparseGridGpu.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\SparseGridStorage.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainMpmContact.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainFluidGpuCoupling.cpp" />
     <ClCompile Include="source\src\Physics\MatterExchangeLedger.cpp" />
     <ClCompile Include="source\src\Physics\MaterialDamagePattern.cpp" />
     <ClCompile Include="source\src\Physics\MeltSurfaceFlow.cpp" />
@@ -2233,7 +2250,8 @@
     <ClCompile Include="source\src\Api\RtApiMatterGrain.cpp" />
     <ClCompile Include="source\src\UI\MatterGrainControls.cpp" />
     <None Include="source\shaders\sim_matter_grain.glsl" />
-    <None Include="source\shaders\sim_matter_grain_clear.comp" />
+    <None Include="source\shaders\sim_matter_grain_list_clear.comp" />
+    <None Include="source\shaders\sim_matter_grain_list_build.comp" />
     <None Include="source\shaders\sim_matter_grain_hash.comp" />
     <None Include="source\shaders\sim_matter_grain_step.comp" />
   </ItemGroup>

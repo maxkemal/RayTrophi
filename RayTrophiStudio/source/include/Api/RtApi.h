@@ -3830,6 +3830,25 @@ struct FluidStepStats {
     bool normalize_window_used = false;
     uint64_t pressure_window_cells = 0;
     bool pressure_window_used = false;
+    bool transfer_sparse_used = false;
+    bool flip_sparse_used = false;
+    uint64_t transfer_sparse_active_tiles = 0;
+    uint64_t transfer_sparse_allocated_tiles = 0;
+    uint64_t transfer_sparse_resident_bytes = 0;
+    std::string transfer_sparse_status;
+    // Compact pages were the canonical device MAC velocity: no dense velocity
+    // or FLIP bank existed (docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md). Blocked: a
+    // compact P2G failed, the lane runs dense until sparse is toggled.
+    bool transfer_sparse_canonical = false;
+    bool transfer_sparse_blocked = false;
+    bool pressure_sparse_used = false;
+    uint64_t pressure_sparse_active_tiles = 0;
+    uint64_t pressure_sparse_allocated_tiles = 0;
+    uint64_t pressure_sparse_resident_bytes = 0;
+    bool viscosity_sparse_used = false;
+    uint64_t viscosity_sparse_active_tiles = 0;
+    uint64_t viscosity_sparse_allocated_tiles = 0;
+    uint64_t viscosity_sparse_resident_bytes = 0;
     bool occupancy_on_gpu = false;
     int resolution[3] = {0, 0, 0};
     std::size_t particle_count = 0;
@@ -4349,6 +4368,8 @@ struct FluidDomainInfo {
     uint64_t hidden_particles = 0;
     // Particle budget: seeding and emitters stop here (fluid.set_param max_particles).
     uint64_t max_particles = 0;
+    // Per-axis grid density knob (fluid.set_param max_auto_resolution).
+    int max_auto_resolution = 0;
     // Where each state label is drawn: (label, route) with route one of
     // follow | sdf | splat | fog | hidden. fluid.set_label_views edits it.
     std::vector<std::pair<std::string, std::string>> label_routes;
@@ -4889,8 +4910,13 @@ struct FluidStateDigest {
 Result getFluidStateDigest(const std::string& domain_id_or_name, FluidStateDigest& out);
 
 // A liquid domain's particle budget (the panel's Max Particles). Seeding and
-// emitters stop at it. Clamped to [1000, 10,000,000] like the panel.
+// emitters stop at it. No ceiling (at least 1); the panel's 10M is a drag range.
 Result setFluidMaxParticles(const std::string& domain_id_or_name, uint64_t max_particles);
+// The grid's per-axis density knob (panel: Max Auto Resolution), gas or liquid.
+// No ceiling (at least 32). The resource budget, when enforced, may still
+// coarsen the grid, and a GPU grid stops at ~1080^3 cells (32-bit face
+// indices); read the result back as fluid.get resolution / voxel_size.
+Result setFluidMaxResolution(const std::string& domain_id_or_name, int max_auto_resolution);
 
 // Whitewater (Ihmsen spray / foam / bubbles): the secondary, massless particle
 // layer, a stand-in for what the solver cannot resolve. `params` is the

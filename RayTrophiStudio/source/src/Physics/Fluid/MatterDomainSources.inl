@@ -164,6 +164,45 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                     bounds_max = Vec3::max(resolved_min, resolved_max);
                 }
             }
+            // What this source is pouring. Empty name -> untagged, which the
+            // consumers read as "use the domain's single material" — the exact
+            // behaviour every existing scene has.
+            const uint32_t emit_substance =
+                RayTrophiSim::Fluid::substanceTag(source.fluid_substance);
+            // Birth temperature, Kelvin. ★ This used to be a literal 0.0f —
+            // every emitted parcel was born at absolute zero, contradicting the
+            // FluidParticles note that emit starts at ambient. Harmless while
+            // nothing read the field; the thermal-liquid chain would freeze such
+            // a parcel on its first contact.
+            const float emit_kelvin =
+                source.fluid_temperature_override
+                    ? std::max(1.0f, source.fluid_temperature_kelvin)
+                    : (static_cast<std::size_t>(source.domain_index) < grid_domains_.size()
+                           ? fluidDomainAmbientKelvin(
+                                 grid_domains_[static_cast<std::size_t>(source.domain_index)],
+                                 world_thermal_)
+                           : world_thermal_.ambientKelvin());
+
+            const auto emit_model = Fluid::substanceBirthModel(
+                emit_substance, fluid_domain.fluid_params, emit_kelvin);
+
+            // Per-source-per-particle hash seed so jitter is deterministic but
+            // not synchronized across sources.
+            const uint32_t source_seed_base =
+                static_cast<uint32_t>(reinterpret_cast<std::uintptr_t>(&source) >> 4) *
+                    2654435761u;
+            // Include the lifetime emission serial. Using only the per-step p
+            // index respawned the exact same sample positions every frame; APIC
+            // reseed then trimmed the stacked particles and a continuous hose
+            // looked like a one-shot SeedBox event.
+            const uint32_t emission_serial_base =
+                static_cast<uint32_t>(source.fluid_emit_sample_serial);
+            // Only granular carriers become grains; a liquid source in the same
+            // grain-enabled domain keeps the voxel/PPC parcel birth.
+            const bool grain_birth = Fluid::substanceTransportOwner(
+                emit_substance, emit_model, fluid_domain.fluid_params) ==
+                Fluid::MatterTransportOwner::Grain;
+
             // Over-pack guard: a high particles/sec dumped into a small spawn
             // volume in ONE step stacks dozens of particles into a single cell.
             // The density-correction term then sees a huge overshoot and blasts
@@ -172,7 +211,10 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             // hold at peak packing, and return the surplus to the accumulator so
             // it emits over the following steps instead of all at once. (Mesh
             // surface emission spreads over an area, so it is left uncapped.)
-            if (source.source_mode != SimulationFlowSourceMode::MeshSurface) {
+            // Grains skip it: MatterGrainBirthFilter rejects overlapping births
+            // itself, and the liquid PPC ceiling capped a grain burst at
+            // spawn_cells x 16 (329k for a 1.7 m sphere at 0.1 m voxels).
+            if (!grain_birth && source.source_mode != SimulationFlowSourceMode::MeshSurface) {
                 const float h = std::max(1e-4f, Fluid::liquidGrid(state).voxel_size);
                 float spawn_volume;
                 if (source.source_mode == SimulationFlowSourceMode::ObjectBounds) {
@@ -197,57 +239,6 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                     emit_count = cap;
                 }
             }
-
-            // What this source is pouring. Empty name -> untagged, which the
-            // consumers read as "use the domain's single material" — the exact
-            // behaviour every existing scene has.
-            const uint32_t emit_substance =
-                RayTrophiSim::Fluid::substanceTag(source.fluid_substance);
-            // Birth model comes from the substance alone: its row's default
-            // model, else the domain's granular switch for untagged/unknown
-            // substances. No per-emitter or per-binding override exists.
-            RayTrophiSim::Fluid::MatterConstitutiveModel emit_model =
-                RayTrophiSim::Fluid::MatterConstitutiveModel::Auto;
-            if (!source.fluid_substance.empty()) {
-                if (const SubstanceProfile* profile =
-                        tryFindSubstance(source.fluid_substance)) {
-                    emit_model = profile->default_constitutive_model;
-                }
-            }
-            if (emit_model == RayTrophiSim::Fluid::MatterConstitutiveModel::Auto) {
-                emit_model = fluid_domain.fluid_params.granular_enabled
-                    ? RayTrophiSim::Fluid::MatterConstitutiveModel::Granular
-                    : RayTrophiSim::Fluid::MatterConstitutiveModel::Fluid;
-            }
-            // Birth temperature, Kelvin. ★ This used to be a literal 0.0f —
-            // every emitted parcel was born at absolute zero, contradicting the
-            // FluidParticles note that emit starts at ambient. Harmless while
-            // nothing read the field; the thermal-liquid chain would freeze such
-            // a parcel on its first contact.
-            const float emit_kelvin =
-                source.fluid_temperature_override
-                    ? std::max(1.0f, source.fluid_temperature_kelvin)
-                    : (static_cast<std::size_t>(source.domain_index) < grid_domains_.size()
-                           ? fluidDomainAmbientKelvin(
-                                 grid_domains_[static_cast<std::size_t>(source.domain_index)],
-                                 world_thermal_)
-                           : world_thermal_.ambientKelvin());
-
-            // Per-source-per-particle hash seed so jitter is deterministic but
-            // not synchronized across sources.
-            const uint32_t source_seed_base =
-                static_cast<uint32_t>(reinterpret_cast<std::uintptr_t>(&source) >> 4) *
-                    2654435761u;
-            // Include the lifetime emission serial. Using only the per-step p
-            // index respawned the exact same sample positions every frame; APIC
-            // reseed then trimmed the stacked particles and a continuous hose
-            // looked like a one-shot SeedBox event.
-            const uint32_t emission_serial_base =
-                static_cast<uint32_t>(source.fluid_emit_sample_serial);
-            // Only granular carriers become grains; a liquid source in the same
-            // grain-enabled domain keeps the voxel/PPC parcel birth.
-            const bool grain_birth = fluid_domain.fluid_params.grain.enabled &&
-                emit_model == RayTrophiSim::Fluid::MatterConstitutiveModel::Granular;
             // A physical grain is born with its own sphere mass (bulk density /
             // packing fraction), not the voxel/particles-per-cell parcel mass,
             // so grain size and grid resolution stay independent.
@@ -263,9 +254,16 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             const std::size_t before_emission = state.particles.size();
             state.particles.reserve(state.particles.size() + static_cast<std::size_t>(emit_count));
             Fluid::MatterGrainBirthFilter grain_filter(state.particles, Fluid::liquidGrid(state),
-                grain_birth ? fluid_domain.fluid_params.grain.radius_m : 0.0f);
+                grain_birth ? fluid_domain.fluid_params.grain.radius_m : 0.0f,
+                &fluid_domain.fluid_params);
+            // Rejected attempts (overlap filter) bound the loop, so the bound
+            // scales with the request: up to 64x for small bursts, 4x for large
+            // ones. A fixed 262144 used to cap a frame's grain births at ~200k
+            // whatever the source asked for (the rest only carried over while
+            // the source's time window stayed open).
             const uint64_t attempt_limit = grain_birth
-                ? std::min<uint64_t>(static_cast<uint64_t>(emit_count) * 64u, 262144u)
+                ? std::max<uint64_t>(static_cast<uint64_t>(emit_count) * 4u,
+                      std::min<uint64_t>(static_cast<uint64_t>(emit_count) * 64u, 262144u))
                 : static_cast<uint64_t>(emit_count);
             uint64_t attempts = 0;
             for (; attempts < attempt_limit; ++attempts) {

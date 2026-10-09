@@ -263,6 +263,7 @@ void fillFluidSurfaceMaterial(const RayTrophiSim::SimulationGridDomainDesc& d,
     info.fog_erosion_depth = d.fluid_fog_erosion_depth;
     info.fog_resolution_multiplier = d.fluid_fog_resolution_multiplier;
     info.max_particles = d.fluid_max_particles;
+    info.max_auto_resolution = d.max_auto_resolution;
 
     // Substance -> material bindings, with the material NAME resolved. A script
     // that could only read the id would have to keep its own copy of the
@@ -1081,6 +1082,25 @@ RayTrophiSim::SimulationGridDomainDesc* findAnyDomainDesc(
 }
 } // namespace
 
+Result setFluidMaxResolution(const std::string& domain_id_or_name, int max_auto_resolution) {
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (max_auto_resolution < 32) return Result::fail("max_auto_resolution must be >= 32");
+    Result error;
+    auto* domain = findAnyDomainDesc(domain_id_or_name, error);
+    if (!domain) return error;
+    const int previous = domain->max_auto_resolution;
+    domain->max_auto_resolution = max_auto_resolution;
+    if (max_auto_resolution != previous) {
+        // Same rule as the panel: raising keeps the voxel and adds cells,
+        // lowering re-derives a coarser voxel, so the grid always spans the
+        // whole domain instead of a corner.
+        domain->quality_profile = RayTrophiSim::SimulationDomainQualityProfile::Custom;
+        domain->preserve_voxel_size_on_resize = max_auto_resolution > previous;
+    }
+    invalidateScriptSimulation();
+    return Result::success();
+}
+
 Result getDomainEnvironment(const std::string& domain_id_or_name, DomainEnvironmentInfo& out) {
     Result error;
     auto* domain = findAnyDomainDesc(domain_id_or_name, error);
@@ -1228,8 +1248,9 @@ Result setFluidMaxParticles(const std::string& domain_id_or_name, uint64_t max_p
     Result error;
     auto* domain = findLiquidDomainDesc(domain_id_or_name, error);
     if (!domain) return error;
-    domain->fluid_max_particles = static_cast<std::size_t>(
-        std::clamp<uint64_t>(max_particles, 1000u, 10000000u));
+    // No ceiling: the budget is the user's. Memory and the GPU paths report
+    // their own limits when a step cannot run.
+    domain->fluid_max_particles = static_cast<std::size_t>(std::max<uint64_t>(max_particles, 1u));
     invalidateScriptSimulation();
     return Result::success();
 }

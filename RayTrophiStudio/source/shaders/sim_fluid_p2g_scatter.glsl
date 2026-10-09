@@ -9,6 +9,12 @@
 // fixed-point variant was tried and produced no flow; don't re-attempt it
 // without also revisiting the scale factor that made it collapse.
 #extension GL_EXT_shader_atomic_float : require
+#include "sim_dispatch.glsl"
+#ifdef RT_SPARSE_MAC
+#include "sim_sparse_mac_address.glsl"
+layout(set = 0, binding = 5) readonly buffer TileMap { uint tile_map[]; };
+layout(set = 0, binding = 6) readonly buffer TileList { uint tile_list[]; };
+#endif
 layout(local_size_x = 256) in;
 
 layout(push_constant) uniform PC {
@@ -38,18 +44,40 @@ void quadratic_weights(float fx, out int base, out float w[3]) {
 
 
 #ifdef MATTER_INDEXED
+#ifdef RT_SPARSE_MAC
+layout(set = 0, binding = 7) readonly buffer MatterIndices { uint matter_index[]; };
+#else
 layout(set = 0, binding = 5) readonly buffer MatterIndices { uint matter_index[]; };
+#endif
+#ifdef RT_SPARSE_MAC
+layout(set = 0, binding = 8) readonly buffer MatterCounts { uint matter_count[]; };
+#else
 layout(set = 0, binding = 6) readonly buffer MatterCounts { uint matter_count[]; };
 #endif
+#endif
 #ifdef MATTER_INDEXED
+#ifdef RT_SPARSE_MAC
+layout(set = 0, binding = 9) readonly buffer MatterRestMass { float matter_rest[]; };
+#else
 layout(set = 0, binding = 7) readonly buffer MatterRestMass { float matter_rest[]; };
+#endif
+#ifdef RT_SPARSE_MAC
+layout(set = 0, binding = 10) readonly buffer MatterFraction { float matter_fraction[]; };
+#else
 layout(set = 0, binding = 8) readonly buffer MatterFraction { float matter_fraction[]; };
 #endif
+#endif
 #ifdef MATTER_INDEXED
+#ifdef RT_SPARSE_MAC
+layout(set = 0, binding = 11) buffer MatterGradient { float matter_gradient[]; };
+#else
 layout(set = 0, binding = 9) buffer MatterGradient { float matter_gradient[]; };
 #endif
+#endif
 void main() {
-    int id = int(gl_GlobalInvocationID.x);
+    uint lane = simLane256(uint(pc.particle_count));
+    if (lane >= uint(pc.particle_count)) return;
+    int id = int(lane);
 #ifdef MATTER_INDEXED
     if (uint(id) >= matter_count[pc.matter_lane]) return;
     id = int(matter_index[id]);
@@ -70,6 +98,11 @@ void main() {
     if (pc.component == 0) { gy -= 0.5; gz -= 0.5; }
     else if (pc.component == 1) { gx -= 0.5; gz -= 0.5; }
     else                        { gx -= 0.5; gy -= 0.5; }
+
+    if (isinf(gx) || isinf(gy) || isinf(gz) ||
+        gx < -2.0 || gy < -2.0 || gz < -2.0 ||
+        gx > float(pc.nx) + 2.0 || gy > float(pc.ny) + 2.0 ||
+        gz > float(pc.nz) + 2.0) return;
 
     int bx, by, bz;
     float wx[3], wy[3], wz[3];
@@ -116,12 +149,20 @@ void main() {
         else if (pc.component == 1) fi = gi + gj*pc.nx     + gk*pc.nx*(pc.ny+1);
         else                        fi = gi + gj*pc.nx     + gk*pc.nx*pc.ny;
 
+        int dense_fi = fi;
+#ifdef RT_SPARSE_MAC
+        ivec3 face = ivec3(gi, gj, gk);
+        ivec3 cells = ivec3(pc.nx, pc.ny, pc.nz);
+        uint slot = tile_map[sparseMacTileKey(face, pc.component, cells)];
+        if (slot == 0u) continue;
+        fi = int((slot - 1u) * 576u + sparseMacLocal(face, pc.component, cells));
+#endif
         atomicAdd(vel_field[fi], w * (vp + apic));
         atomicAdd(wt_field[fi],  w);
 #ifdef MATTER_INDEXED
-        atomicAdd(matter_gradient[fi * 3], parcel_mass * derivative.x * invH);
-        atomicAdd(matter_gradient[fi * 3 + 1], parcel_mass * derivative.y * invH);
-        atomicAdd(matter_gradient[fi * 3 + 2], parcel_mass * derivative.z * invH);
+        atomicAdd(matter_gradient[dense_fi * 3], parcel_mass * derivative.x * invH);
+        atomicAdd(matter_gradient[dense_fi * 3 + 1], parcel_mass * derivative.y * invH);
+        atomicAdd(matter_gradient[dense_fi * 3 + 2], parcel_mass * derivative.z * invH);
 #endif
     }
 }

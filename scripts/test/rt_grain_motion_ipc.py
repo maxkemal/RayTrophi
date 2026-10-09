@@ -31,6 +31,10 @@ from rt_ipc import RtIpc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 LOG = ROOT / 'docs/dev/grain_motion_live.json'
+# The sphere primitive's size is its DIAMETER (radius .075). The pile settles to
+# about one grain layer (top ~.05 m); at y .15 the sphere passed 2.5 cm above it
+# and the sweep arm measured nothing (2026-10-08). Centre at .07: it cuts the layer.
+SPHERE_Y = .07
 DOMAIN, SOURCE, FIELD, SPHERE = 'GrainMotion', 'GrainMotionSand', 'GrainMotionWind', 'GrainMotionSphere'
 FPS = 24.
 
@@ -83,7 +87,7 @@ def main():
              affects_cloth=False, affects_rigidbody=False)
         sphere_object = call('scene.add_primitive', type='sphere', name=SPHERE + 'Mesh', size=.15)
         data['sphere_object'] = sphere_object
-        call('scene.set_transform', name=sphere_object, translation=[-.5, .15, 0.])
+        call('scene.set_transform', name=sphere_object, translation=[-.5, SPHERE_Y, 0.])
         colliders = {c['name'] for c in call('collider.list')['colliders']}
         call('collider.update' if SPHERE in colliders else 'collider.create', name=SPHERE,
              source_mode='mesh_bvh', source_object=sphere_object,
@@ -104,7 +108,7 @@ def main():
 
         def run(arm, wind, sweep):
             call('forcefield.set_param', field=FIELD, enabled=wind)
-            call('scene.set_transform', name=sphere_object, translation=[-.5, .15, 0.])
+            call('scene.set_transform', name=sphere_object, translation=[-.5, SPHERE_Y, 0.])
             call('fluid.reset')
             rows = []
             for frame in range(1, 73):
@@ -112,7 +116,7 @@ def main():
                     # 1 m/s along +x, through the pile centre line (z = 0).
                     x = -.5 + (frame - 24) / FPS
                     call('scene.set_transform', name=sphere_object,
-                         translation=[min(x, .4), .15, 0.])
+                         translation=[min(x, .4), SPHERE_Y, 0.])
                 call('fluid.step', dt=1/FPS)
                 row = sample()
                 row['frame'] = frame

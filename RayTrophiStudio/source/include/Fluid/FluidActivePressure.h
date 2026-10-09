@@ -107,6 +107,10 @@ public:
         }
         const char* variant = bounds_.bounded ? pressureVariant(command.kernel) : nullptr;
         if (!variant) {
+            if (pressureVariant(command.kernel) ||
+                std::string_view(command.kernel) == "sim_fluid_divergence_porous") {
+                foldGroups(command);
+            }
             return compute.dispatch(command);
         }
         const PressureConstants<ProjectionConstants> constants = {
@@ -118,10 +122,18 @@ public:
         command.constants = &constants;
         command.constants_size = sizeof(constants);
         command.groups.groups_x = groups(command.groups.groups_x);
+        foldGroups(command);
         return compute.dispatch(command);
     }
 
 private:
+    static void foldGroups(ComputeDispatch& command) {
+        const uint64_t groups = std::max<uint64_t>(command.groups.groups_x, 1u);
+        command.groups.groups_y = static_cast<uint32_t>((groups + 65534u) / 65535u);
+        command.groups.groups_x = static_cast<uint32_t>(
+            (groups + command.groups.groups_y - 1u) / command.groups.groups_y);
+    }
+
     Bounds bounds_;
 };
 

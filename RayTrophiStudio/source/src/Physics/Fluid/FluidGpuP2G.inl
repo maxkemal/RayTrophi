@@ -6,11 +6,21 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
                     bool upload_granular_state = true,
                     bool reuse_particle_inputs = false,
                     bool download_grid_velocity = true) {
+    gpu_buffers.sparse_mac_transfer.used = false;
+    gpu_buffers.sparse_mac_transfer.canonical = false;
+    gpu_buffers.sparse_mac_transfer.snapshot_valid = false;
+    gpu_buffers.sparse_mac_transfer.flip_gather_used = false;
+    gpu_buffers.sparse_mac_transfer.status = "dense/reference transfer";
     auto& grid = state.grid;
     const std::size_t particle_count = state.particles.size();
     if (!compute || !compute->supportsDispatch() || particle_count == 0 ||
         grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 || grid.voxel_size <= 0.0f ||
         grid.vel_x.empty() || grid.vel_y.empty() || grid.vel_z.empty()) {
+        return false;
+    }
+    if (particle_count > std::size_t(std::numeric_limits<int32_t>::max()) ||
+        std::max({grid.vel_x.size(), grid.vel_y.size(), grid.vel_z.size()}) >
+            std::size_t(std::numeric_limits<int32_t>::max())) {
         return false;
     }
     const auto p2g_phase0 = SimulationClock::now();
@@ -35,24 +45,23 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
         gpu_buffers.fuel,
         gpu_buffers.scratch_scalar
     };
-    for (int comp = 0; comp < 3; ++comp) {
-        if (!velocity_fields[comp].valid() || !weight_fields[comp].valid()) {
-            return false;
-        }
-    }
-
     FluidP2GGpuConstants constants;
     constants.nx = grid.nx;
     constants.ny = grid.ny;
     constants.nz = grid.nz;
-    constants.particle_count = static_cast<int>(std::min<std::size_t>(
-        particle_count, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    constants.particle_count = static_cast<int>(particle_count);
     constants.origin_x = grid.origin.x;
     constants.origin_y = grid.origin.y;
     constants.origin_z = grid.origin.z;
     constants.voxel_size = grid.voxel_size;
 
     constexpr uint32_t threads = 256;
+    const auto groupsFor = [&](uint32_t count) {
+        if (compute->backendType() == ComputeBackendType::VulkanCompute) {
+            return FluidGpuDispatch::groups256(count);
+        }
+        return ComputeDispatchSize{(count + threads - 1u) / threads, 1u, 1u};
+    };
     const auto active_window = Fluid::ActiveWindow::plan(
         state.particles.position, state.particles.velocity, grid.origin,
         grid.voxel_size, dt, grid.nx, grid.ny, grid.nz,
@@ -63,8 +72,29 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
         compute->backendType() == ComputeBackendType::VulkanCompute;
     gpu_buffers.fluid_normalize_window_cells = active_window.cells();
     gpu_buffers.fluid_normalize_window_used = window_normalize;
+    bool sparse_transfer = false;
+    if (grid.sparse_mode_enabled && !grid.allocate_gas_channels && !granular &&
+        compute->backendType() == ComputeBackendType::VulkanCompute &&
+        fluid_params.boundary != Fluid::APICSolverParams::BoundaryMode::Periodic) {
+        Fluid::SparseMacTransferConstants sparse_constants;
+        static_assert(sizeof(sparse_constants) == sizeof(constants));
+        std::memcpy(&sparse_constants, &constants, sizeof(constants));
+        std::string sparse_error;
+        // A compact owner keeps the field on the pages: no dense publication.
+        const bool canonical = gpu_buffers.sparse_mac_transfer.compact_owner &&
+            !download_grid_velocity;
+        sparse_transfer = Fluid::runSparseMacP2G(
+            *compute, gpu_buffers, fluid_params, sparse_constants, canonical, sparse_error);
+    }
+    // The dense path (or a failed compact one) needs the dense bank. A compact
+    // owner whose P2G failed has had its pages released and must reallocate it.
+    for (int comp = 0; comp < 3 && !sparse_transfer; ++comp) {
+        if (!velocity_fields[comp].valid() || !weight_fields[comp].valid()) {
+            return false;
+        }
+    }
     bool ok = true;
-    for (int comp = 0; comp < 3 && ok; ++comp) {
+    for (int comp = 0; comp < 3 && ok && !sparse_transfer; ++comp) {
         constants.component = comp;
         const uint32_t field_count = static_cast<uint32_t>(
             comp == 0 ? grid.vel_x.size() : (comp == 1 ? grid.vel_y.size() : grid.vel_z.size()));
@@ -76,7 +106,7 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
         cmd.buffer_count = 1;
         cmd.constants = &constants;
         cmd.constants_size = sizeof(constants);
-        cmd.groups.groups_x = (field_count + threads - 1u) / threads;
+        cmd.groups = groupsFor(field_count);
         ok = Fluid::dispatchMatterGpuModel(*compute, cmd, gpu_buffers.matter_model);
 
         ComputeBufferHandle clear_weight[1] = { weight_fields[comp] };
@@ -93,7 +123,7 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
         cmd.kernel = "sim_fluid_p2g_scatter";
         cmd.buffers = scatter_buffers;
         cmd.buffer_count = 5;
-        cmd.groups.groups_x = (static_cast<uint32_t>(constants.particle_count) + threads - 1u) / threads;
+        cmd.groups = groupsFor(static_cast<uint32_t>(constants.particle_count));
         ok = ok && Fluid::dispatchMatterGpuModel(*compute, cmd, gpu_buffers.matter_model);
 
         if (granular) {
@@ -104,12 +134,15 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
         }
 
         cmd.kernel = "sim_fluid_p2g_normalize";
-        cmd.groups.groups_x = (field_count + threads - 1u) / threads;
+        cmd.groups = groupsFor(field_count);
         ok = ok && (window_normalize
             ? Fluid::ActiveWindow::normalize(*compute, active_window, grid.nx, grid.ny,
                                             grid.nz, comp, velocity_fields[comp],
                                             weight_fields[comp])
             : Fluid::dispatchMatterGpuModel(*compute, cmd, gpu_buffers.matter_model));
+    }
+    if (sparse_transfer) {
+        gpu_buffers.fluid_normalize_window_used = false;
     }
     const auto p2g_phase2 = SimulationClock::now(); // dispatches recorded
 

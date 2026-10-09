@@ -16,6 +16,28 @@ enum class MatterConstitutiveModel : uint8_t {
     Elastic = 3
 };
 
+enum class MatterGranularTransport : uint8_t {
+    Mpm = 0,
+    Dem = 1
+};
+
+inline const char* matterGranularTransportName(MatterGranularTransport transport) {
+    return transport == MatterGranularTransport::Dem ? "dem" : "mpm";
+}
+
+inline bool parseMatterGranularTransport(const std::string& text,
+                                        MatterGranularTransport& out) {
+    if (text == "dem") {
+        out = MatterGranularTransport::Dem;
+        return true;
+    }
+    if (text == "mpm") {
+        out = MatterGranularTransport::Mpm;
+        return true;
+    }
+    return false;
+}
+
 inline const char* matterConstitutiveModelName(MatterConstitutiveModel model) {
     switch (model) {
         case MatterConstitutiveModel::Fluid: return "fluid";

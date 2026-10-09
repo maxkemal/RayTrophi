@@ -11,6 +11,8 @@
 // positions and sprayed the velocity field (particles scattering outward
 // instead of falling; the long-standing Vulkan "no proper flow" symptom).
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "sim_dispatch.glsl"
 layout(local_size_x = 256) in;
 
 // push constant layout matches FluidP2GGpuConstants exactly.
@@ -29,13 +31,13 @@ layout(set = 0, binding = 3) buffer VelField            { float vel_field[]; };
 layout(set = 0, binding = 4) buffer WeightField         { float wt_field[];  };
 
 void main() {
-    uint id = gl_GlobalInvocationID.x;
     // face_count derived from grid dims and component (matches CUDA path)
     int face_count;
     if      (pc.component == 0) face_count = (pc.nx+1)*pc.ny*pc.nz;
     else if (pc.component == 1) face_count = pc.nx*(pc.ny+1)*pc.nz;
     else                        face_count = pc.nx*pc.ny*(pc.nz+1);
-    if (int(id) >= face_count) return;
+    uint id = simLane256(uint(face_count));
+    if (id >= uint(face_count)) return;
     float w = wt_field[id];
     vel_field[id] = (w > 1e-8) ? (vel_field[id] / w) : 0.0;
 }

@@ -1,0 +1,4 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define GRAIN_LIST_BUILD
+#include "sim_matter_grain.glsl"

@@ -1670,6 +1670,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             }
             d["hidden_particles"] = info.hidden_particles;
             d["max_particles"] = info.max_particles;
+            d["max_auto_resolution"] = info.max_auto_resolution;
             d["particle_labels"] = fluidLabelsToPython(info.particle_labels);
         }
         d["uvw_drift"] = info.uvw_drift;
@@ -1912,6 +1913,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                 }
                 d["hidden_particles"] = info.hidden_particles;
                 d["max_particles"] = info.max_particles;
+                d["max_auto_resolution"] = info.max_auto_resolution;
                 d["particle_labels"] = fluidLabelsToPython(info.particle_labels);
             }
             d["uvw_drift"] = info.uvw_drift;
@@ -2142,6 +2144,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             }
             d["hidden_particles"] = info.hidden_particles;
             d["max_particles"] = info.max_particles;
+            d["max_auto_resolution"] = info.max_auto_resolution;
             d["particle_labels"] = fluidLabelsToPython(info.particle_labels);
         }
         d["uvw_drift"] = info.uvw_drift;
@@ -2490,6 +2493,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         if (has_thermal_patch) requireResult(rtapi::setFluidThermal(domain, thermal_patch));
         if (kwargs.contains("max_particles"))
             requireResult(rtapi::setFluidMaxParticles(domain, py::cast<uint64_t>(kwargs["max_particles"])));
+        if (kwargs.contains("max_auto_resolution"))
+            requireResult(rtapi::setFluidMaxResolution(domain, py::cast<int>(kwargs["max_auto_resolution"])));
         if (has_surface_patch) requireResult(rtapi::setFluidSurfaceDetail(domain, surface_patch));
     }, py::arg("domain"),
        "Update canonical fluid parameters. Granular CFL substeps preserve authored stiffness; "
@@ -2515,6 +2520,22 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["full_grid_cells"] = s.full_grid_cells;
         d["pressure_window_used"] = s.pressure_window_used;
         d["pressure_window_cells"] = s.pressure_window_cells;
+        d["transfer_sparse_used"] = s.transfer_sparse_used;
+        d["flip_sparse_used"] = s.flip_sparse_used;
+        d["transfer_sparse_active_tiles"] = s.transfer_sparse_active_tiles;
+        d["transfer_sparse_allocated_tiles"] = s.transfer_sparse_allocated_tiles;
+        d["transfer_sparse_resident_bytes"] = s.transfer_sparse_resident_bytes;
+        d["transfer_sparse_status"] = s.transfer_sparse_status;
+        d["transfer_sparse_canonical"] = s.transfer_sparse_canonical;
+        d["transfer_sparse_blocked"] = s.transfer_sparse_blocked;
+        d["pressure_sparse_used"] = s.pressure_sparse_used;
+        d["pressure_sparse_active_tiles"] = s.pressure_sparse_active_tiles;
+        d["pressure_sparse_allocated_tiles"] = s.pressure_sparse_allocated_tiles;
+        d["pressure_sparse_resident_bytes"] = s.pressure_sparse_resident_bytes;
+        d["viscosity_sparse_used"] = s.viscosity_sparse_used;
+        d["viscosity_sparse_active_tiles"] = s.viscosity_sparse_active_tiles;
+        d["viscosity_sparse_allocated_tiles"] = s.viscosity_sparse_allocated_tiles;
+        d["viscosity_sparse_resident_bytes"] = s.viscosity_sparse_resident_bytes;
         d["occupancy_on_gpu"] = s.occupancy_on_gpu;
         d["particle_count"] = s.particle_count;
         d["gpu_status"] = s.gpu_status;

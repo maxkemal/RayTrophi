@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SimulationCompute.h"
+#include "FluidGpuDispatch.h"
 
 #include <array>
 #include <cstdint>
@@ -53,8 +54,7 @@ inline bool copyFaceFields(
         command.buffer_count = 2;
         command.constants = &constants;
         command.constants_size = sizeof(constants);
-        command.groups.groups_x =
-            (static_cast<uint32_t>(constants.count) + 255u) / 256u;
+        command.groups = FluidGpuDispatch::groups256(static_cast<uint32_t>(constants.count));
         if (!compute.dispatch(command)) {
             // A previous component may already be queued. Drain it before the
             // caller's host-upload fallback replaces all scratch fields.

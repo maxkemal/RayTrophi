@@ -15,6 +15,7 @@ struct SubstanceProfile;
 }
 namespace RayTrophiSim::Fluid {
 class FluidParticles;
+struct APICSolverParams;
 
 // One frame of the grain <-> liquid exchange in a shared Matter domain.
 //
@@ -145,20 +146,24 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
     const MatterGrainCouplingFrame& frame, const MatterGrainParams& params, float dt,
     MatterGrainStepReport& report);
 
-// Order of the grain-owned carriers: granular model, sorted by stable
-// identity. Liquid parcels keep their order. Fails on carriers that neither
-// owner accepts (elastic, frozen; wet grains unless wet_grains) or on Auto in
-// a legacy-granular domain.
-bool partitionMatterGrainOwners(const FluidParticles& particles, bool legacy_granular,
+// DEM owners are selected from each substance's granular_transport, then
+// sorted by identity. `liquid` is the continuum lane (fluid and, without DEM
+// carriers, MPM). MPM + DEM is held until their contact stage exists. Missing
+// sidecars, frozen/elastic carriers and invalid wet ownership reject the step.
+bool partitionMatterGrainOwners(const FluidParticles& particles, const APICSolverParams& params,
+    bool legacy_granular,
     bool wet_grains, std::vector<std::size_t>& liquid, std::vector<std::size_t>& grains,
     std::string& error);
 
 // B8: orders grain indices by the Morton code of their contact cell (size
 // `cell`, from `origin`), ties by identity. Neighbours then sit close in the
-// device arrays, so the step's neighbour reads hit nearby memory; the
-// runtime gathers contact history to the new order by identity.
-void orderMatterGrainsByCell(const FluidParticles& particles, const Vec3& origin, float cell,
-    std::vector<std::size_t>& grains);
+// device arrays, so the step's neighbour reads hit nearby memory; contact
+// history follows the grains by identity. Returns the fraction of adjacent
+// pairs that were out of that order. Unless `force`, an order at most
+// `tolerance` out is kept as it is (no re-sort, so the state can stay
+// resident on the device).
+float orderMatterGrainsByCell(const FluidParticles& particles, const Vec3& origin, float cell,
+    std::vector<std::size_t>& grains, bool force, float tolerance, bool& sorted);
 
 // Exact snapshot copies of `order` (identity, every sidecar).
 FluidParticles selectMatterParticles(const FluidParticles& particles,

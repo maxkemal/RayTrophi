@@ -24,6 +24,8 @@
 #include "../Vec3.h"
 #include "MatterConstitutive.h"
 #include "MatterParticleIdentity.h"
+#include <algorithm>
+#include <stdexcept>
 #include <vector>
 #include <cstdint>
 #include <cmath>
@@ -466,45 +468,86 @@ public:
         if (dst >= size() || src >= other.size()) {
             throw std::out_of_range("particle snapshot copy index");
         }
-        auto copy = [&](auto& target, const auto& values) {
+        forEachColumnPair(*this, other, [&](auto& target, const auto& values) {
             if (dst < target.size() && src < values.size()) {
                 target[dst] = values[src];
             }
-        };
-        copy(particle_id, other.particle_id);
-        copy(position, other.position);
-        copy(velocity, other.velocity);
-        copy(affine, other.affine);
-        copy(flags, other.flags);
-        copy(mass_fraction, other.mass_fraction);
-        copy(rest_mass_kg, other.rest_mass_kg);
-        copy(pore_water_mass_kg, other.pore_water_mass_kg);
-        copy(pore_capacity_kg, other.pore_capacity_kg);
-        copy(pore_porosity, other.pore_porosity);
-        copy(pore_water_energy_j, other.pore_water_energy_j);
-        copy(temperature, other.temperature);
-        copy(combustible_fraction, other.combustible_fraction);
-        copy(substance_tag, other.substance_tag);
-        copy(constitutive_model, other.constitutive_model);
-        copy(uvw, other.uvw);
-        copy(uvw_b, other.uvw_b);
-        copy(granular_deformation_col0, other.granular_deformation_col0);
-        copy(granular_deformation_col1, other.granular_deformation_col1);
-        copy(granular_deformation_col2, other.granular_deformation_col2);
-        copy(granular_plastic_volume, other.granular_plastic_volume);
-        copy(granular_softening, other.granular_softening);
-        copy(granular_bond_scale, other.granular_bond_scale);
-        copy(granular_hardening, other.granular_hardening);
-        copy(granular_material_flags, other.granular_material_flags);
-        copy(granular_stress_diag, other.granular_stress_diag);
-        copy(granular_stress_shear, other.granular_stress_shear);
-        copy(granular_yield_value, other.granular_yield_value);
-        copy(granular_plastic_increment, other.granular_plastic_increment);
-        copy(granular_damage, other.granular_damage);
-        copy(granular_fracture_history, other.granular_fracture_history);
+        });
+    }
+
+    // Column-wise copyParticleFrom of every particle of `other` onto slots
+    // [dst, dst + other.size()), same per-sidecar guards. One sequential pass
+    // per array instead of one 31-array visit per particle (1.3M grains).
+    void copyRangeFrom(std::size_t dst, const FluidParticles& other) {
+        if (dst + other.size() > size()) {
+            throw std::out_of_range("particle range copy");
+        }
+        forEachColumnPair(*this, other, [&](auto& target, const auto& values) {
+            const std::size_t room = target.size() > dst ? target.size() - dst : 0;
+            const std::size_t n = std::min({other.size(), values.size(), room});
+            std::copy_n(values.begin(), n, target.begin() + static_cast<std::ptrdiff_t>(dst));
+        });
+    }
+
+    // This = `other` restricted to `order` (other's indices, in that order):
+    // identity, every sidecar and the scalar schedule. An array `other` does
+    // not carry stays empty; a lagging one is gathered where it reaches and
+    // value-initialised past its end.
+    void gatherFrom(const FluidParticles& other, const std::vector<std::size_t>& order) {
+        next_particle_id = other.next_particle_id;
+        uvw_step = other.uvw_step;
+        uvw_refresh_period = other.uvw_refresh_period;
+        forEachColumnPair(*this, other, [&](auto& target, const auto& values) {
+            target.clear();
+            if (values.empty()) {
+                return;
+            }
+            target.resize(order.size());
+            for (std::size_t k = 0; k < order.size(); ++k) {
+                if (order[k] < values.size()) {
+                    target[k] = values[order[k]];
+                }
+            }
+        });
     }
 
 private:
+    // The one list of per-particle arrays the copy paths visit (see compact).
+    template <class Self, class Other, class Fn>
+    static void forEachColumnPair(Self& a, Other& b, Fn&& fn) {
+        fn(a.particle_id, b.particle_id);
+        fn(a.position, b.position);
+        fn(a.velocity, b.velocity);
+        fn(a.affine, b.affine);
+        fn(a.flags, b.flags);
+        fn(a.mass_fraction, b.mass_fraction);
+        fn(a.rest_mass_kg, b.rest_mass_kg);
+        fn(a.pore_water_mass_kg, b.pore_water_mass_kg);
+        fn(a.pore_capacity_kg, b.pore_capacity_kg);
+        fn(a.pore_porosity, b.pore_porosity);
+        fn(a.pore_water_energy_j, b.pore_water_energy_j);
+        fn(a.temperature, b.temperature);
+        fn(a.combustible_fraction, b.combustible_fraction);
+        fn(a.substance_tag, b.substance_tag);
+        fn(a.constitutive_model, b.constitutive_model);
+        fn(a.uvw, b.uvw);
+        fn(a.uvw_b, b.uvw_b);
+        fn(a.granular_deformation_col0, b.granular_deformation_col0);
+        fn(a.granular_deformation_col1, b.granular_deformation_col1);
+        fn(a.granular_deformation_col2, b.granular_deformation_col2);
+        fn(a.granular_plastic_volume, b.granular_plastic_volume);
+        fn(a.granular_softening, b.granular_softening);
+        fn(a.granular_bond_scale, b.granular_bond_scale);
+        fn(a.granular_hardening, b.granular_hardening);
+        fn(a.granular_material_flags, b.granular_material_flags);
+        fn(a.granular_stress_diag, b.granular_stress_diag);
+        fn(a.granular_stress_shear, b.granular_stress_shear);
+        fn(a.granular_yield_value, b.granular_yield_value);
+        fn(a.granular_plastic_increment, b.granular_plastic_increment);
+        fn(a.granular_damage, b.granular_damage);
+        fn(a.granular_fracture_history, b.granular_fracture_history);
+    }
+
     // Copy particle `src` onto slot `dst`. Every optional sidecar is guarded by
     // its own length: granular arrays are empty on a pure liquid domain, and
     // uvw_b can lag by a step.

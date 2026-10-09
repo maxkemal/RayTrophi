@@ -1454,9 +1454,12 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
             fluid->seed_min,
             fluid->seed_max,
             fluid->seed_particles_per_cell);
-        int max_particles_ui = static_cast<int>(std::min<size_t>(fluid->max_particles, 10000000));
-        if (ImGui::DragInt("Max Particles", &max_particles_ui, 1000.0f, 1000, 10000000)) {
-            fluid->max_particles = static_cast<size_t>(std::max(1000, max_particles_ui));
+        // Unclamped like the domain panel: drag range only, Ctrl+click types past it.
+        uint64_t max_particles_ui = static_cast<uint64_t>(fluid->max_particles);
+        const uint64_t max_particles_drag_min = 1000u, max_particles_drag_max = 10000000u;
+        if (ImGui::DragScalar("Max Particles", ImGuiDataType_U64, &max_particles_ui, 1000.0f,
+                              &max_particles_drag_min, &max_particles_drag_max)) {
+            fluid->max_particles = static_cast<size_t>(std::max<uint64_t>(max_particles_ui, 1u));
         }
         ImGui::TextDisabled("Seed estimate: %zu particles", estimated_seed_particles);
         if (estimated_seed_voxel > preview_voxel + 1e-6f) {

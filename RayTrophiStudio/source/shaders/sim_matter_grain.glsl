@@ -2,15 +2,17 @@
 // Bank 0 is the grain runtime's own device copy of the grain-owned carriers
 // (identity order); liquid parcels of the same domain never enter it.
 //
-// One dispatch per contact substep. State ping-pongs between bank 0 (the
+// One step dispatch per contact substep. State ping-pongs between bank 0 (the
 // canonical position/velocity/affine buffers) and bank 1 (grain scratch), so a
 // substep reads only the previous substep's complete state and writes only its
-// own grain: contact, integration and the next hash insert fuse safely.
-// Neighbours live in fixed-capacity hash buckets (count + BUCKET slots), not
-// linked lists: a lookup is a few independent loads instead of a chain of
-// dependent ones. Three bucket tables rotate per substep k: read k%3, insert
-// (k+1)%3, clear (k+2)%3 -- the cleared table was last read in substep k-1 and
-// is next written in k+1, so the backend barrier orders both.
+// own grain.
+// Neighbours: a per-grain Verlet list (docs/dev/DEM_VERLET_LISTESI.md) of the
+// grains within the hash cell size (2r + bridge rupture cap + skin). It is
+// rebuilt from one fixed-capacity bucket table only when a grain has moved
+// skin/2 since the last build: substep k runs list_clear, hash, list_build
+// (each a no-op unless flag k is set) and then the step, which raises flag
+// k+1. Flags rotate over three diagnostics words: list_clear of substep k
+// zeroes word k+2 (last read in k-1, next written in k+1).
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) buffer Positions { float positions[]; };
 layout(std430, binding = 1) buffer Velocities { float velocities[]; };
@@ -20,8 +22,14 @@ layout(std430, binding = 4) readonly buffer Ids { uint ids[]; };
 layout(std430, binding = 5) buffer BucketCounts { uint bucket_counts[]; };
 layout(std430, binding = 6) buffer BucketSlots { uint bucket_slots[]; };
 layout(std430, binding = 7) buffer Scratch { float scratch[]; };
-layout(std430, binding = 8) buffer History { uvec4 history[]; };
-layout(std430, binding = 9) buffer HistoryOwner { uint history_owner[]; };
+// Contact history, one block of SLOTS records per grain (7 words each:
+// key, tangential spring xyz, rolling spring xyz), updated in place.
+layout(std430, binding = 8) buffer History { uint history[]; };
+// [0, capacity): grain -> history block (FRESH bit: ignore the block's old
+// records this frame). [capacity + 3b]: owner id of block b, [+1]: mask of
+// its occupied slots, [+2]: rest counter (still substeps, WAKE bit set by a
+// faster neighbour). The host keeps each grain on its block across frames.
+layout(std430, binding = 9) buffer HistoryBlocks { uint history_blocks[]; };
 layout(std430, binding = 10) buffer Diagnostics { uint diagnostics[]; };
 layout(std430, binding = 11) readonly buffer Triangles { float triangles[]; };
 struct ColliderNode { vec3 low; uint first; vec3 high; uint second; };
@@ -32,18 +40,24 @@ layout(std430, binding = 13) readonly buffer SurfacePatches { uint patches[]; };
 // lump mass}, {accumulated drag impulse, bridge water volume m^3}.
 // beta == 0: uncoupled; water 0: dry (no liquid bridge).
 layout(std430, binding = 14) buffer Coupling { vec4 coupling[]; };
+// Per grain {count, LIST neighbour indices}, and the positions it was built from.
+layout(std430, binding = 15) buffer NeighbourList { uint neighbour_list[]; };
+layout(std430, binding = 16) buffer BuildPositions { float build_positions[]; };
 layout(push_constant) uniform Constants {
     uvec4 meta; // count, buckets per table, twisting-friction float bits, BVH nodes
     vec4 low_radius;
     vec4 high_stiffness;
     vec4 step_contact; // dt, normal damping, sliding damping, friction
     vec4 rolling; // rolling coefficient, gravity xyz
-    uvec4 substep; // index, reset history, tangential stiffness bits, last index
-    // Hash cell size (2r + bridge rupture cap), capillary prefactor
+    uvec4 substep; // index, history blocks (capacity), tangential stiffness bits, last index
+    // Hash cell size = list cutoff (2r + bridge rupture cap + skin), capillary prefactor
     // 2 pi gamma cos(theta) x cohesion scale, rupture cap (m), and the float
     // offset of the collider vertex velocities in `triangles` (uint bits;
     // 0 = static colliders).
     vec4 wet;
+    // Sleeping grains: still substeps before sleep (uint bits), sleep speed
+    // m/s (0 = off for this frame), wake all this frame (uint bits), -.
+    vec4 sleep;
 } pc;
 
 // Contact budget shared with the host CFL (kMatterGrainContactBudget). Every
@@ -55,7 +69,16 @@ const uint BUCKET = 16u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 16u;
+const uint REVISION = 21u;
+const uint WAKE = 0x80000000u;
+const uint SLOT_WORDS = 7u;
+const uint FRESH = 0x80000000u;
+// Shared with the host (kMatterGrainListCapacity).
+const uint LIST = 32u;
+// diagnostics words: 12..14 rebuild flags (k%3), 15 builds this frame,
+// 16 sleeping grains on the last substep.
+uint flagWord(uint k) { return 12u + k % 3u; }
+bool rebuildNow() { return diagnostics[flagWord(pc.substep.x)] != 0u; }
 
 uint readBank() { return pc.substep.x & 1u; }
 uint writeBank() { return readBank() ^ 1u; }
@@ -133,37 +156,64 @@ vec3 closestTriangle(vec3 p, vec3 a, vec3 b, vec3 c) {
     return a+(ab*vb+ac*vc)/(va+vb+vc);
 }
 
-// Per-grain contact history: own slots only, read from one bank and written to
-// the other, so no other invocation touches them. A key absent from the
-// previous substep starts fresh springs; a vanished contact is dropped.
-// Slot = two uvec4: {key, tangential spring xyz}, {rolling spring xyz, -}.
-uint g_written = 0u;
+// Per-grain contact history: the grain's own block only, so no other
+// invocation touches it. A key absent from the block starts fresh springs; a
+// contact not seen this substep drops out of the occupied mask. In place: a
+// found record is rewritten in its own slot after it was read, and a new
+// contact takes a slot that was free at the start of the substep, so no
+// record is overwritten before every lookup of it is done.
 uint g_contacts = 0u;
+// Cost counters, summed on the last substep only (diagnostics[7..11]):
+// list entries read, grain-grain contacts, history slots read, BVH nodes.
+uint g_scanned = 0u;
+uint g_pairs = 0u;
+uint g_history_probes = 0u;
+uint g_nodes = 0u;
 uint g_sticking = 0u;
-bool g_history_valid = false;
+uint g_block = 0u;
+uint g_old_mask = 0u;
+uint g_touched = 0u;
+uint g_allocated = 0u;
 
-uint slotBase(uint bank, uint i) { return (bank*pc.meta.x+i)*SLOTS*2u; }
+uint slotWord(uint s) { return (g_block*SLOTS+s)*SLOT_WORDS; }
+uint ownerWord() { return pc.substep.y+3u*g_block; }
+// Rest counter word of grain j's block (j's map entry may still carry FRESH).
+uint restWordOf(uint j) { return pc.substep.y+3u*(history_blocks[j] & ~FRESH)+2u; }
+uint sleepSubsteps() { return floatBitsToUint(pc.sleep.x); }
+bool sleepOn() { return pc.sleep.y > 0.0; }
+// This grain is moving: touching a sleeping grain wakes it.
+bool g_fast = false;
 
-void previousSprings(uint i, uint key, out vec3 tangential, out vec3 rolling) {
+uint previousSprings(uint key, out vec3 tangential, out vec3 rolling) {
     tangential = vec3(0.0);
     rolling = vec3(0.0);
-    if (!g_history_valid) return;
-    uint base = slotBase(readBank(), i);
-    for (uint s=0u; s<SLOTS; ++s) {
-        uvec4 head = history[base+2u*s];
-        if (head.x == EMPTY) return;
-        if (head.x == key) {
-            tangential = uintBitsToFloat(head.yzw);
-            rolling = uintBitsToFloat(history[base+2u*s+1u].xyz);
-            return;
-        }
+    for (uint m=g_old_mask; m != 0u; m &= m-1u) {
+        uint s = uint(findLSB(m));
+        uint b = slotWord(s);
+        ++g_history_probes;
+        if (history[b] != key) continue;
+        tangential = uintBitsToFloat(uvec3(history[b+1u],history[b+2u],history[b+3u]));
+        rolling = uintBitsToFloat(uvec3(history[b+4u],history[b+5u],history[b+6u]));
+        return s;
     }
+    return EMPTY;
 }
-void keepSprings(uint i, uint key, vec3 tangential, vec3 rolling) {
-    if (g_written == SLOTS) return;
-    uint slot = slotBase(writeBank(), i)+2u*g_written++;
-    history[slot] = uvec4(key, floatBitsToUint(tangential));
-    history[slot+1u] = uvec4(floatBitsToUint(rolling), 0u);
+// More records in flight than SLOTS (old ones still held this substep plus
+// new ones) refuses publication like the contact budget itself.
+void keepSprings(uint slot, uint key, vec3 tangential, vec3 rolling) {
+    if (slot == EMPTY) {
+        uint open_slots = ~(g_old_mask|g_allocated) & ((1u<<SLOTS)-1u);
+        if (open_slots == 0u) { atomicOr(diagnostics[0],1u); return; }
+        slot = uint(findLSB(open_slots));
+        g_allocated |= 1u<<slot;
+    } else {
+        g_touched |= 1u<<slot;
+    }
+    uint b = slotWord(slot);
+    uvec3 t = floatBitsToUint(tangential), r = floatBitsToUint(rolling);
+    history[b] = key;
+    history[b+1u] = t.x; history[b+2u] = t.y; history[b+3u] = t.z;
+    history[b+4u] = r.x; history[b+5u] = r.y; history[b+6u] = r.z;
 }
 // A stored displacement is carried onto the current tangent plane with its
 // magnitude kept (the contact frame rotates between substeps).
@@ -203,7 +253,7 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     float cn = 2.0*pc.step_contact.y*sqrt(k/inverse_normal_mass);
     float fn = max(0.0, k*overlap-cn*normal_speed);
     vec3 tangential, rolling;
-    previousSprings(i, key, tangential, rolling);
+    uint slot = previousSprings(key, tangential, rolling);
 
     // Sliding: Cundall-Strack spring + viscous part on the Coulomb cone. The
     // aggregate cap keeps a full contact budget from reversing the slip
@@ -250,7 +300,7 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     } else {
         rolling = vec3(0.0);
     }
-    keepSprings(i, key, tangential, rolling);
+    keepSprings(slot, key, tangential, rolling);
     force += n*fn+ft;
     // Finite contact-patch twist resistance. Equal/opposite pair torque;
     // no uniform angular damping, and aggregate impulses cannot reverse spin.
@@ -262,69 +312,100 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
 }
 
 void main() {
-    uint i = gl_GlobalInvocationID.x;
-#if defined(GRAIN_CLEAR)
-    // Frame start: all three bucket tables empty; history owners invalidated
-    // when the history buffers were (re)allocated.
-    if (i < 3u*pc.meta.y) bucket_counts[i] = 0u;
-    if (pc.substep.y != 0u && i < 2u*pc.meta.x) history_owner[i] = EMPTY;
-#elif defined(GRAIN_PERMUTE)
-    // Frame start, before the clear, only when the grain order changed
-    // (cell sort, births, removals elsewhere in the array). bucket_slots holds
-    // new index -> previous index (EMPTY = new grain). Bank 0 holds the last
-    // frame's final history (its bank stride is irrelevant: offset 0).
-    if (i >= pc.meta.x) return;
-    uint previous = bucket_slots[i];
-    uint dst = slotBase(1u,i);
-    if (previous == EMPTY) {
-        history_owner[pc.meta.x+i] = EMPTY;
-        return;
-    }
-    uint src = slotBase(0u,previous);
-    for (uint s=0u; s<2u*SLOTS; ++s) history[dst+s] = history[src+s];
-    history_owner[pc.meta.x+i] = history_owner[previous];
-#elif defined(GRAIN_PERMUTE_COPY)
-    // Second half: the gathered bank 1 becomes bank 0 at the new indices.
-    if (i >= pc.meta.x) return;
-    uint dst = slotBase(0u,i), src = slotBase(1u,i);
-    for (uint s=0u; s<2u*SLOTS; ++s) history[dst+s] = history[src+s];
-    history_owner[i] = history_owner[pc.meta.x+i];
+    // 2-D dispatch folded to one index: Vulkan guarantees only 65535 groups
+    // per axis, the host spills the rest into y (setLinearGroups).
+    uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 256u;
+#if defined(GRAIN_LIST_CLEAR)
+    // Word k+2 was last read in substep k-1 and is next written in k+1.
+    if (i == 0u) diagnostics[flagWord(pc.substep.x+2u)] = 0u;
+    if (!rebuildNow()) return;
+    if (i < pc.meta.y) bucket_counts[i] = 0u;
 #elif defined(GRAIN_HASH)
-    if (i < pc.meta.x) insert(i, position(i,0u), 0u);
+    if (i < pc.meta.x && rebuildNow()) insert(i, position(i,readBank()), 0u);
+#elif defined(GRAIN_LIST_BUILD)
+    // Every grain within the cutoff, from its own cell's bucket only (two
+    // cells sharing a bucket would otherwise list a neighbour twice).
+    if (!rebuildNow()) return;
+    if (i == 0u) atomicAdd(diagnostics[15],1u);
+    if (i >= pc.meta.x) return;
+    uint bank = readBank();
+    vec3 p = position(i,bank);
+    float cutoff2 = pc.wet.x*pc.wet.x;
+    ivec3 own = cell(p);
+    uint base = i*(LIST+1u);
+    uint listed = 0u;
+    for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
+        ivec3 wanted = own+ivec3(x,y,z);
+        uint b = bucket(wanted);
+        uint stored = min(bucket_counts[b],BUCKET);
+        for (uint s=0u; s<stored; ++s) {
+            uint j = bucket_slots[b*BUCKET+s];
+            if (j == i) continue;
+            vec3 pj = position(j,bank);
+            if (!all(equal(cell(pj),wanted))) continue;
+            vec3 separation = p-pj;
+            if (dot(separation,separation) >= cutoff2) continue;
+            if (listed == LIST) { atomicOr(diagnostics[0],8u); continue; }
+            neighbour_list[base+1u+listed++] = j;
+        }
+    }
+    neighbour_list[base] = listed;
+    for (uint k=0u; k<3u; ++k) build_positions[3u*i+k] = p[k];
 #elif defined(GRAIN_STEP)
-    // The dispatch covers max(count, buckets): every invocation clears one
-    // bucket of the table the NEXT substep writes, grains do the rest.
-    uint table = pc.substep.x % 3u;
-    if (i < pc.meta.y) bucket_counts[((pc.substep.x+2u)%3u)*pc.meta.y+i] = 0u;
     if (i >= pc.meta.x) return;
     // Proves the fused-step SPIR-V ran; the host refuses publication otherwise.
     if (i == 0u) diagnostics[1] = REVISION;
     uint bank = readBank();
-    g_history_valid = history_owner[bank*pc.meta.x+i] == ids[i];
+    bool valid_block = false;
+    // The FRESH bit holds for substep 0 of the frame the host assigned it.
+    uint entry = history_blocks[i];
+    g_block = entry & ~FRESH;
+    if ((entry & FRESH) != 0u) {
+        if (pc.substep.x == 0u) history_blocks[i] = g_block;
+    } else if (history_blocks[ownerWord()] == ids[i]) {
+        g_old_mask = history_blocks[ownerWord()+1u];
+        valid_block = true;
+    }
     vec3 p = position(i,bank), v = velocity(i,bank), w = omega(i,bank);
     float r = pc.low_radius.w, im = 1.0/masses[i], ii = 2.5*im/(r*r);
+    uint dst = writeBank();
+    // Sleeping (docs/dev/DEM_UYUYAN_TANELER.md): a grain still for
+    // sleepSubsteps() substeps holds its place and computes nothing; awake
+    // neighbours see it as a static body. A faster grain touching it sets WAKE.
+    uint rest = 0u;
+    uint rest_word = ownerWord()+2u;
+    if (sleepOn() && valid_block) {
+        uint raw = atomicAnd(history_blocks[rest_word], ~WAKE);
+        bool woken = (raw & WAKE) != 0u || floatBitsToUint(pc.sleep.z) != 0u;
+        rest = woken ? 0u : raw;
+        if (rest >= sleepSubsteps()) {
+            store(i,dst,p,vec3(0.0),vec3(0.0));
+            if (pc.substep.x == pc.substep.w) atomicAdd(diagnostics[16],1u);
+            return;
+        }
+    }
+    g_fast = sleepOn() && (dot(v,v) >= pc.sleep.y*pc.sleep.y || length(w)*r >= pc.sleep.y);
     vec3 f = vec3(0.0), t = vec3(0.0);
-    ivec3 own = cell(p);
-    for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
-        ivec3 wanted = own+ivec3(x,y,z);
-        uint b = table*pc.meta.y+bucket(wanted);
-        uint stored = min(bucket_counts[b],BUCKET);
-        for (uint s=0u; s<stored; ++s) {
-            uint j = bucket_slots[b*BUCKET+s];
-            vec3 pj = position(j,bank);
-            if (j != i && all(equal(cell(pj),wanted))) {
-                vec3 separation = p-pj;
-                float d = length(separation);
-                if (d < 2.0*r+pc.wet.z && d > 1e-9) bridge(i,j,d,separation/d,r,f);
-                if (d < 2.0*r) {
-                    vec3 n = d > 1e-9 ? separation/d : vec3(i<j ? -1.0 : 1.0,0,0);
-                    vec3 arm = -n*(.5*d);
-                    vec3 wj = omega(j,bank);
-                    float jm = 1.0/masses[j], ji = 2.5*jm/(r*r);
-                    vec3 relative = v+cross(w,arm)-velocity(j,bank)-cross(wj,-arm);
-                    contact(i,ids[j],n,2.0*r-d,arm,relative,w-wj,ii,ji,.5*r,
-                        im+jm+dot(arm,arm)*(ii+ji),im+jm,f,t);
-                }
+    uint list_base = i*(LIST+1u);
+    uint listed = neighbour_list[list_base];
+    g_scanned += listed;
+    for (uint s=0u; s<listed; ++s) {
+        uint j = neighbour_list[list_base+1u+s];
+        vec3 separation = p-position(j,bank);
+        float d = length(separation);
+        if (d < 2.0*r+pc.wet.z && d > 1e-9) bridge(i,j,d,separation/d,r,f);
+        if (d < 2.0*r) {
+            ++g_pairs;
+            vec3 n = d > 1e-9 ? separation/d : vec3(i<j ? -1.0 : 1.0,0,0);
+            vec3 arm = -n*(.5*d);
+            vec3 wj = omega(j,bank);
+            float jm = 1.0/masses[j], ji = 2.5*jm/(r*r);
+            vec3 relative = v+cross(w,arm)-velocity(j,bank)-cross(wj,-arm);
+            contact(i,ids[j],n,2.0*r-d,arm,relative,w-wj,ii,ji,.5*r,
+                im+jm+dot(arm,arm)*(ii+ji),im+jm,f,t);
+            if (g_fast) {
+                uint jw = restWordOf(j);
+                if ((history_blocks[jw] & ~WAKE) >= sleepSubsteps()) atomicOr(history_blocks[jw],WAKE);
             }
         }
     }
@@ -359,6 +440,7 @@ void main() {
     if (pc.meta.w > 0u) stack[size++] = 0u;
     while (size > 0u) {
         ColliderNode node = nodes[stack[--size]];
+        ++g_nodes;
         vec3 gap = max(max(node.low-p,p-node.high),vec3(0.0));
         if (dot(gap,gap) >= r*r) continue;
         if ((node.first & 0x80000000u) == 0u) {
@@ -468,14 +550,18 @@ void main() {
             im+r*r*ii,im,f,t);
     }
     if (g_contacts > SLOTS) atomicOr(diagnostics[0],1u);
-    uint dst = writeBank();
-    if (g_written < SLOTS) history[slotBase(dst,i)+2u*g_written] = uvec4(EMPTY);
-    history_owner[dst*pc.meta.x+i] = ids[i];
+    history_blocks[ownerWord()] = ids[i];
+    history_blocks[ownerWord()+1u] = g_touched|g_allocated;
     atomicMax(diagnostics[2],g_contacts);
     if (pc.substep.x == pc.substep.w) {
         atomicAdd(diagnostics[3],g_sticking);
         atomicAdd(diagnostics[4],g_contacts);
         atomicAdd(diagnostics[5],g_bridges);
+        atomicAdd(diagnostics[7],g_scanned);
+        atomicAdd(diagnostics[8],g_pairs);
+        atomicAdd(diagnostics[9],g_history_probes);
+        atomicAdd(diagnostics[10],g_contacts == 0u ? 1u : 0u);
+        atomicAdd(diagnostics[11],g_nodes);
     }
     // Symplectic Euler from the complete previous-substep state.
     float dt = pc.step_contact.x;
@@ -496,7 +582,21 @@ void main() {
     p += dt*v;
     w += dt*t*ii;
     store(i,dst,p,v,w);
-    // Next substep's table; other invocations still read `table`.
-    insert(i,p,(pc.substep.x+1u)%3u);
+    // Still this substep: count toward sleep. Liquid drag and force fields
+    // (lift row) keep a grain awake: they change between frames. A WAKE set by
+    // a neighbour since the read above survives the rewrite.
+    bool still = sleepOn() && drag.w == 0.0 && lift == vec4(0.0) &&
+        dot(v,v) < pc.sleep.y*pc.sleep.y && length(w)*r < pc.sleep.y;
+    uint next_rest = still ? min(rest+1u, sleepSubsteps()) : 0u;
+    atomicAnd(history_blocks[rest_word], WAKE);
+    atomicOr(history_blocks[rest_word], next_rest);
+    // Rebuild the lists before substep k+1 once this grain has moved half the
+    // skin since the build: two grains then closed at most the whole skin, so
+    // every pair inside 2r + rupture cap was inside the cutoff at the build.
+    float half_skin = .5*(pc.wet.x-2.0*r-pc.wet.z);
+    vec3 moved = p-vec3(build_positions[3u*i],build_positions[3u*i+1u],build_positions[3u*i+2u]);
+    uint next_flag = flagWord(pc.substep.x+1u);
+    if (dot(moved,moved) > half_skin*half_skin && diagnostics[next_flag] == 0u)
+        atomicOr(diagnostics[next_flag],1u);
 #endif
 }

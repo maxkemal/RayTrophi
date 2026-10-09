@@ -1,6 +1,7 @@
     if (buffers.matter_runtime) {
         auto runtime = std::move(buffers.matter_runtime);
         Fluid::releaseMatterGrainGpu(compute, runtime->grain);
+        Fluid::releaseMatterGrainFluidGpuStorage(compute, runtime->liquid_coupling);
         releaseGridDomainComputeBuffers(compute, runtime->granular);
         Fluid::destroyMatterGpuPartition(compute, runtime->partition);
         compute.destroyBuffer(runtime->rest_mass);

@@ -78,8 +78,8 @@ def main():
         assert f"sim_matter_{name}" in read("shaders/compile_sim_shaders.bat")
     driver = read("src/Physics/Fluid/MatterGpuStep.inl")
     assert driver.index("working_set >") < driver.index("if (!ensure(primary))")
-    assert driver.index("runGpuFluidMGPCGPressure(") < driver.index('contact.kernel = "sim_matter_contact"')
-    assert driver.index('contact.kernel = "sim_matter_contact"') < driver.index("runGpuFluidG2P(")
+    assert driver.index("runGpuFluidMGPCGPressure(") < driver.index('contact.kernel = Fluid::macKernel(liquid_mac, "sim_matter_contact"')
+    assert driver.index('contact.kernel = Fluid::macKernel(liquid_mac, "sim_matter_contact"') < driver.index("runGpuFluidG2P(")
     assert driver.index("runGpuFluidG2P(") < driver.index("auto liquid_result = particles;")
     assert driver.index("mixed GPU produced nonfinite") < driver.index("particles = std::move(liquid_result)")
     assert "copyParticleFrom(i, granular_result, i)" in driver
@@ -116,7 +116,9 @@ def main():
     assert "Fluid::resolveSingleMatterModel(particles, legacy_granular)" in driver
     assert "if (has_fluid && !runGpuFluidMGPCGPressure(" in driver
     assert "if (has_fluid && !compute->dispatch(contact))" in driver
-    assert driver.count("if (lane == 0 && !has_fluid)") == 2
+    # Separate transfer, gather and advection loops each skip the empty lane.
+    assert driver.count("if (lane == 0 && !has_fluid)") == 3
+    assert driver.index("clock->contact(substep") < driver.index("runGpuFluidAdvectTail(")
     assert "mixed GPU empty fluid field clear failed" in driver
     assert driver.index("mixed GPU empty fluid field clear failed") < driver.index(
         "for (int substep = 0; substep < substeps;")

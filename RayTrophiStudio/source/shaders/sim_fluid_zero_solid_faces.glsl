@@ -26,6 +26,12 @@ layout(set = 0, binding = 0) buffer VelX { float vel_x[]; };
 layout(set = 0, binding = 1) buffer VelY { float vel_y[]; };
 layout(set = 0, binding = 2) buffer VelZ { float vel_z[]; };
 layout(set = 0, binding = 3) readonly buffer Mask { float fluid_mask[]; };
+#ifdef RT_SPARSE_MAC
+// Compact pages are bound at 0..2; the lanes cover the resident tiles only.
+layout(set = 0, binding = 4) readonly buffer MacTileMap { uint mac_tile_map[]; };
+layout(set = 0, binding = 5) readonly buffer MacTileList { uint mac_tile_list[]; };
+#endif
+#include "sim_mac_lane.glsl"
 
 bool isSolid(int i, int j, int k) {
     if (i < 0 || i >= pc.nx || j < 0 || j >= pc.ny || k < 0 || k >= pc.nz) {
@@ -39,28 +45,24 @@ bool isSolid(int i, int j, int k) {
 }
 
 void main() {
-    int t = int(gl_GlobalInvocationID.x);
-    int nx = pc.nx, ny = pc.ny, nz = pc.nz;
-
-    // x-faces: (nx+1) * ny * nz, index = i + (nx+1)*(j + ny*k)
-    if (t < (nx + 1) * ny * nz) {
-        int i = t % (nx + 1);
-        int j = (t / (nx + 1)) % ny;
-        int k = t / ((nx + 1) * ny);
-        if (isSolid(i - 1, j, k) || isSolid(i, j, k)) vel_x[t] = 0.0;
+#ifdef RT_SPARSE_MAC
+    uint lane = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 256u;
+#else
+    uint lane = gl_GlobalInvocationID.x;
+#endif
+    ivec3 f;
+    uint a;
+    // x-faces: either neighbour along x solid.
+    if (macLaneFace(lane, 0, f, a) &&
+        (isSolid(f.x - 1, f.y, f.z) || isSolid(f.x, f.y, f.z))) {
+        vel_x[a] = 0.0;
     }
-    // y-faces: nx * (ny+1) * nz, index = i + nx*(j + (ny+1)*k)
-    if (t < nx * (ny + 1) * nz) {
-        int i = t % nx;
-        int j = (t / nx) % (ny + 1);
-        int k = t / (nx * (ny + 1));
-        if (isSolid(i, j - 1, k) || isSolid(i, j, k)) vel_y[t] = 0.0;
+    if (macLaneFace(lane, 1, f, a) &&
+        (isSolid(f.x, f.y - 1, f.z) || isSolid(f.x, f.y, f.z))) {
+        vel_y[a] = 0.0;
     }
-    // z-faces: nx * ny * (nz+1), index = i + nx*(j + ny*k)
-    if (t < nx * ny * (nz + 1)) {
-        int i = t % nx;
-        int j = (t / nx) % ny;
-        int k = t / (nx * ny);
-        if (isSolid(i, j, k - 1) || isSolid(i, j, k)) vel_z[t] = 0.0;
+    if (macLaneFace(lane, 2, f, a) &&
+        (isSolid(f.x, f.y, f.z - 1) || isSolid(f.x, f.y, f.z))) {
+        vel_z[a] = 0.0;
     }
 }

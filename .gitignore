@@ -107,3 +107,7 @@ RayTrophiAgent/agent_scripts/
 # Measurement output from measure_horizon.py
 RayTrophiAgent/horizon_result.json
 docs/dev/grain_suite/
+
+# Generated granular regression captures at the repository root
+/granular_g2_radius_ab.png
+/granular_g2_visual_check.png

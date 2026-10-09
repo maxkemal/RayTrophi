@@ -12,7 +12,8 @@ bool dispatchMatterGpuModel(SimulationComputeContext& compute,
         return compute.dispatch(command);
     }
     const std::string_view name = command.kernel ? command.kernel : "";
-    if (name == "sim_fluid_zero_solid_faces") {
+    // The compact twin takes the same boundary word and the same rule.
+    if (name == "sim_fluid_zero_solid_faces" || name == "sim_sparse_mac_zero_faces") {
         if (command.constants_size != 36) {
             return false;
         }
@@ -20,12 +21,19 @@ bool dispatchMatterGpuModel(SimulationComputeContext& compute,
         std::memcpy(constants.data(), command.constants, command.constants_size);
         std::memcpy(constants.data() + 16, &model.boundary, sizeof(model.boundary));
         auto boundary = command;
-        boundary.kernel = "sim_matter_zero_faces";
+        boundary.kernel = name == "sim_fluid_zero_solid_faces"
+            ? "sim_matter_zero_faces" : "sim_sparse_mac_matter_zero_faces";
         boundary.constants = constants.data();
         return compute.dispatch(boundary);
     }
     const char* variant = nullptr;
-    if (name == "sim_fluid_p2g_scatter") {
+    if (name == "sim_sparse_mac_p2g") {
+        variant = "sim_sparse_mac_matter_p2g";
+    }
+    else if (name == "sim_sparse_mac_g2p") {
+        variant = "sim_sparse_mac_matter_g2p";
+    }
+    else if (name == "sim_fluid_p2g_scatter") {
         variant = "sim_matter_p2g";
     }
     else if (name == "sim_fluid_g2p") {
@@ -42,6 +50,9 @@ bool dispatchMatterGpuModel(SimulationComputeContext& compute,
     }
     else if (name == "sim_fluid_advect_tail") {
         variant = "sim_matter_advect";
+    }
+    else if (name == "sim_sparse_mac_advect") {
+        variant = "sim_sparse_mac_matter_advect";
     }
     else if (name == "sim_fluid_occupancy") {
         int component = 0;
@@ -69,7 +80,8 @@ bool dispatchMatterGpuModel(SimulationComputeContext& compute,
         }
         buffers.push_back(model.wet_response);
     }
-    if (name == "sim_fluid_p2g_scatter" || name == "sim_fluid_granular_stress_p2g") {
+    if (name == "sim_fluid_p2g_scatter" || name == "sim_sparse_mac_p2g" ||
+        name == "sim_fluid_granular_stress_p2g") {
         if (!model.rest_mass.valid() || !model.mass_fraction.valid()) {
             return false;
         }
@@ -82,7 +94,7 @@ bool dispatchMatterGpuModel(SimulationComputeContext& compute,
         }
         buffers.push_back(model.dry_volume);
     }
-    if (name == "sim_fluid_p2g_scatter") {
+    if (name == "sim_fluid_p2g_scatter" || name == "sim_sparse_mac_p2g") {
         int component = 0;
         std::memcpy(&component, static_cast<const char*>(command.constants) + 16, 4);
         if (component < 0 || component > 2 || !model.mass_gradient[component].valid()) {

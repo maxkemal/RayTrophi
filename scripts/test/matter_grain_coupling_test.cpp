@@ -2,6 +2,8 @@
 // Mirrors the shader's implicit pair update to check the frame budget.
 #include "Fluid/MatterGrainCoupling.h"
 #include "Fluid/FluidParticles.h"
+#include "Fluid/APICFluidSolver.h"
+#include "MaterialStateField.h"
 
 #include <cassert>
 #include <cmath>
@@ -62,11 +64,51 @@ int main() {
     MatterGrainCouplingFrame frame;
     std::string error;
     // Grid 8 x 16 x 8: the upper half is dry.
-    bool ok = buildMatterGrainLiquidField(liquid, grains, r, static_cast<FluidChemistryPreset>(0),
+    bool ok = buildMatterGrainLiquidField(liquid, grains, r, RayTrophiSim::tryFindSubstance("Water"),
         Vec3(0.0f, 0.0f, 0.0f), n, 2 * n, n, h, frame.field, error);
     assert(ok);
+    // An MPM skeleton sharing the liquid cells must contribute neither fluid
+    // mass/viscosity nor drag/water exchange, even with a much larger mass.
+    {
+        auto continuum = liquid;
+        emit(continuum, Vec3(.2f, .2f, .2f), Vec3(100.0f), 1000.0f,
+            MatterConstitutiveModel::Granular);
+        MatterGrainLiquidField isolated;
+        assert(buildMatterGrainLiquidField(continuum, grains, r,
+            RayTrophiSim::tryFindSubstance("Water"), Vec3(0.0f), n, 2 * n, n, h,
+            isolated, error));
+        assert(isolated.parcel_cell.back() == -1);
+        assert(isolated.mass == frame.field.mass);
+        assert(isolated.volume == frame.field.volume);
+        for (int axis = 0; axis < 3; ++axis) {
+            assert(isolated.momentum[axis] == frame.field.momentum[axis]);
+        }
+    }
     MatterGrainParams params;
     params.radius_m = r;
+    // Reference for device rebin: material-point motion must change the
+    // interaction support, and a returning parcel must reacquire that support.
+    {
+        FluidParticles moving;
+        emit(moving, Vec3(.2f), Vec3(0.0f), .125f, MatterConstitutiveModel::Fluid);
+        MatterGrainCouplingFrame current;
+        MatterGrainStepReport observed;
+        const auto rebuild = [&]() {
+            assert(buildMatterGrainLiquidField(moving, grains, r,
+                RayTrophiSim::tryFindSubstance("Water"), Vec3(0.0f), n, 2 * n, n,
+                h, current.field, error));
+            prepareMatterGrainCoupling(grains, params, Vec3(0.0f, -9.81f, 0.0f),
+                1.0f / 60.0f, current, observed);
+        };
+        rebuild();
+        assert(observed.coupled_grains == 1);
+        moving.position[0].x = .36f;
+        rebuild();
+        assert(observed.coupled_grains == 0);
+        moving.position[0].x = .2f;
+        rebuild();
+        assert(observed.coupled_grains == 1);
+    }
     MatterGrainStepReport report;
     const float dt = 1.0f / 60.0f;
     prepareMatterGrainCoupling(grains, params, Vec3(0.0f, -9.81f, 0.0f), dt, frame, report);
@@ -119,7 +161,10 @@ int main() {
     mixed.removeSwap(0);  // grain id 3 now precedes nothing; order: [grain3, fluid2]
     emit(mixed, Vec3(3.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 0.0f), 1.0f, MatterConstitutiveModel::Fluid);
     std::vector<std::size_t> lo, go;
-    ok = partitionMatterGrainOwners(mixed, true, false, lo, go, error);
+    APICSolverParams owner_params;
+    owner_params.default_substance = "Sand";
+    owner_params.grain.enabled = true;
+    ok = partitionMatterGrainOwners(mixed, owner_params, true, false, lo, go, error);
     assert(ok && lo.size() == 2 && go.size() == 1);
     auto l = selectMatterParticles(mixed, lo);
     auto g = selectMatterParticles(mixed, go);
@@ -186,7 +231,7 @@ int main() {
                                 liquid.rest_mass_kg[p], MatterConstitutiveModel::Fluid);
         }
         MatterGrainCouplingFrame pool;
-        assert(buildMatterGrainLiquidField(sparse, grains, r, static_cast<FluidChemistryPreset>(0),
+        assert(buildMatterGrainLiquidField(sparse, grains, r, RayTrophiSim::tryFindSubstance("Water"),
             Vec3(0.0f, 0.0f, 0.0f), n, 2 * n, n, h, pool.field, error));
         MatterGrainStepReport pool_report;
         prepareMatterGrainCoupling(grains, params, Vec3(0.0f, -9.81f, 0.0f), dt, pool, pool_report);
@@ -198,7 +243,7 @@ int main() {
              MatterConstitutiveModel::Granular);
         MatterGrainCouplingFrame edge;
         assert(buildMatterGrainLiquidField(liquid, surface_grain, r,
-            static_cast<FluidChemistryPreset>(0), Vec3(0.0f, 0.0f, 0.0f), n, 2 * n, n, h,
+            RayTrophiSim::tryFindSubstance("Water"), Vec3(0.0f, 0.0f, 0.0f), n, 2 * n, n, h,
             edge.field, error));
         prepareMatterGrainCoupling(surface_grain, params, Vec3(0.0f, -9.81f, 0.0f), dt, edge,
             pool_report);
@@ -211,7 +256,7 @@ int main() {
     // population is rejected instead of guessed.
     {
         MatterGrainCouplingFrame tank;
-        assert(buildMatterGrainLiquidField(liquid, grains, r, static_cast<FluidChemistryPreset>(0),
+        assert(buildMatterGrainLiquidField(liquid, grains, r, RayTrophiSim::tryFindSubstance("Water"),
             Vec3(0.0f, 0.0f, 0.0f), n, 2 * n, n, h, tank.field, error));
         MatterGrainStepReport tank_report;
         const Vec3 gravity(0.0f, -9.81f, 0.0f);
@@ -248,7 +293,7 @@ int main() {
         for (auto& v : pool.velocity) v = Vec3(1.0f, 0.0f, 0.0f);
         for (auto& v : wet.velocity) v = Vec3(0.0f, 0.0f, 0.0f);
         MatterGrainCouplingFrame frame2;
-        assert(buildMatterGrainLiquidField(pool, wet, r, static_cast<FluidChemistryPreset>(0),
+        assert(buildMatterGrainLiquidField(pool, wet, r, RayTrophiSim::tryFindSubstance("Water"),
             Vec3(0.0f, 0.0f, 0.0f), n, 2 * n, n, h, frame2.field, error));
         MatterGrainParams wet_params = params;
         wet_params.wet_grains = true;

@@ -86,14 +86,11 @@ void updateThermalFreeze(FluidParticles& particles,
                          const APICSolverParams& params,
                          ThermalLiquidStats& stats);
 
-// Cell-centred ν(T): the parcels' temperature gathered with the transfer's
-// trilinear weights (the same support as buildSubstanceViscosityField), then
-// log-interpolated from the hot value (the `base` field when non-null — the
-// per-substance field — else params.kinematic_viscosity) down to
-// thermal_cold_viscosity at the freeze point. Cells no parcel supports keep
-// the hot value. Returns false (and clears) when the chain is off, granular,
-// or there are no particles; the caller then keeps whatever field it had.
-// `base` may alias neither `viscosity_out` nor be resized by this call.
+// Cell-centred ν(T): evaluate each parcel's substance curve using its own
+// melt point, hot/cold viscosity and temperature, then gather with trilinear
+// weights. Empty cells retain the base field (or domain hot viscosity).
+// Returns false when disabled, granular, or without valid particle storage.
+// `base` must not alias `viscosity_out`.
 bool buildThermalViscosityField(const FluidParticles& particles,
                                 const FluidSim::FluidGrid& grid,
                                 const APICSolverParams& params,

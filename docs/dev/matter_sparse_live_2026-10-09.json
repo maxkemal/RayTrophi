@@ -1,0 +1,52 @@
+{
+  "date_local": "2026-10-09",
+  "timezone": "Europe/Istanbul",
+  "scope": "External IPC, fresh temporary fixture, dense/sparse reset comparison; no build or application launch",
+  "pressure": {
+    "passed": true,
+    "particles": 129,
+    "grid_cells": 64000,
+    "centroid_error_m": 1.3861546355187215e-09,
+    "mean_speed_error_m_s": 2.772309048992838e-09,
+    "mass_momentum_assertions_passed": true,
+    "active_pressure_tiles": 1,
+    "allocated_pressure_tiles": 1,
+    "pressure_pool_capacity_bytes": 13364,
+    "dense_host_step_ms": 17.257699966430664,
+    "sparse_host_step_ms": 35.948699951171875,
+    "dense_dispatch_calls": 1701,
+    "sparse_dispatch_calls": 1734,
+    "dense_download_bytes": 1065608,
+    "sparse_download_bytes": 1065652
+  },
+  "viscosity": {
+    "passed": true,
+    "particles": 251,
+    "grid_cells": 64000,
+    "kinematic_viscosity_m2_s": 0.02,
+    "centroid_error_m": 5.936717784038592e-10,
+    "mean_speed_error_m_s": 2.422180778172134e-08,
+    "mass_momentum_assertions_passed": true,
+    "active_pressure_tiles": 8,
+    "pressure_pool_capacity_bytes": 99492,
+    "active_viscosity_tiles": 8,
+    "allocated_viscosity_tiles": 8,
+    "viscosity_rhs_pool_capacity_bytes": 56300,
+    "dense_host_step_ms": 22.667800903320312,
+    "sparse_host_step_ms": 19.952800750732422,
+    "dense_dispatch_calls": 2140,
+    "sparse_dispatch_calls": 2173,
+    "dense_download_bytes": 1086064,
+    "sparse_download_bytes": 1086152
+  },
+  "native_gpu_kernel_timing_measured": false,
+  "production_performance_accepted": false,
+  "full_sparse_storage_complete": false,
+  "remaining": [
+    "canonical MAC/P2G/FLIP sparse storage",
+    "gas sparse storage/pressure",
+    "large-case 2D GPU dispatch acceptance",
+    "native GPU timing and cinematic scale",
+    "moving-wall and high-viscosity timestep convergence"
+  ]
+}

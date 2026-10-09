@@ -21,9 +21,10 @@
         "backend": "vulkan",
         "boundary": "closed",
         "coord_space": "material",
+        "default_substance": "Sand",
         "domain_max": [
           0.6000000238418579,
-          1.2000000476837158,
+          3.0,
           0.6000000238418579
         ],
         "domain_min": [
@@ -116,284 +117,7 @@
           "unknown": "follow"
         },
         "live_state": false,
-        "max_density": 0.0,
-        "max_particles": 100000,
-        "name": "GrainMotion",
-        "narrow_band_voxels": 3.0,
-        "particle_count": 0,
-        "particle_kelvin_measured": false,
-        "particle_labels": {
-          "available": false,
-          "classifier": "mass+neighborhood_v2",
-          "detach_max_neighbors": 2,
-          "last_step": {
-            "bin_milliseconds": 0.0,
-            "center_resolved": 0,
-            "changed": 0,
-            "classify_milliseconds": 0.0,
-            "milliseconds": 0.0,
-            "occupied_bins": 0,
-            "on_gpu": false,
-            "particles": 0
-          },
-          "mist_generation": true,
-          "mist_mass_fraction_max": 0.15000000596046448,
-          "primary": {
-            "body": 0,
-            "bubble": 0,
-            "foam": 0,
-            "frozen": 0,
-            "mist": 0,
-            "spray": 0,
-            "unknown": 0
-          },
-          "primary_complete": false,
-          "primary_particles": 0,
-          "radius_voxels": 1.5,
-          "rejoin_min_neighbors": 6,
-          "render_routing": "substance+label",
-          "secondary": {
-            "body": 0,
-            "bubble": 0,
-            "foam": 0,
-            "frozen": 0,
-            "mist": 0,
-            "spray": 0,
-            "unknown": 0
-          },
-          "secondary_affects_mass": false,
-          "secondary_particles": 0
-        },
-        "particle_max_kelvin": 0.0,
-        "particle_min_kelvin": 0.0,
-        "particle_radius_voxels": 0.550000011920929,
-        "phases": [
-          "gas",
-          "granular"
-        ],
-        "pore_amount": 0.0,
-        "pore_detail": 0.5,
-        "pore_scale": 0.05000000074505806,
-        "position_smoothing": 0.8999999761581421,
-        "preset": "custom",
-        "primary_visual_children": 1,
-        "render_mode": "surface",
-        "reseed_added_particles": 0,
-        "reseed_removed_particles": 0,
-        "sealed_pocket_cells": 0,
-        "sealed_pockets": 0,
-        "sealed_pockets_measured": false,
-        "smoothing_iterations": 2,
-        "solid_phase": false,
-        "solid_phase_cells": 0,
-        "solid_phase_fill": 0.25,
-        "solid_phase_particles": 0,
-        "splat_geometry": "icosphere",
-        "splat_geometry_source": "",
-        "splat_material": "",
-        "splat_radius_factor": 0.44999998807907104,
-        "splat_size_multiplier": 1.0,
-        "splat_subdivisions": 0,
-        "splat_triangles": 0,
-        "substance_materials": [],
-        "substances": [],
-        "surface_active_cells": 518,
-        "surface_build_ms": 0.14319999516010284,
-        "surface_grid_dim": [
-          12,
-          12,
-          12
-        ],
-        "surface_material": "",
-        "surface_measured": true,
-        "surface_offset_voxels": 0.6499999761581421,
-        "surface_resolution_multiplier": 1,
-        "surface_voxel": 0.10000000149011612,
-        "thermal_air_cooled_particles": 0,
-        "thermal_air_cooling_rate": 0.15000000596046448,
-        "thermal_ambient_kelvin": 293.0,
-        "thermal_cold_unsupported": 0,
-        "thermal_cold_viscosity": 0.05000000074505806,
-        "thermal_contact_cooled_particles": 0,
-        "thermal_contact_cooling_rate": 2.0,
-        "thermal_freeze_kelvin": 330.0,
-        "thermal_froze_this_frame": 0,
-        "thermal_frozen_particles": 0,
-        "thermal_liquid_enabled": false,
-        "thermal_max_kelvin": 0.0,
-        "thermal_max_viscosity": 0.0,
-        "thermal_mean_kelvin": 0.0,
-        "thermal_measured": false,
-        "thermal_melted_this_frame": 0,
-        "thermal_min_kelvin": 0.0,
-        "thermal_min_viscosity": 0.0,
-        "thermal_viscosity_field": false,
-        "thermal_viscosity_range": 25.0,
-        "type": "matter",
-        "unresolved_model_particles": 0,
-        "uvw_available": false,
-        "uvw_dim": [
-          0,
-          0,
-          0
-        ],
-        "uvw_drift": 0.0,
-        "uvw_origin": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "uvw_particles": 0,
-        "uvw_refresh_period": 240,
-        "uvw_voxel": 0.0,
-        "views": [
-          {
-            "labels": [],
-            "live": false,
-            "particles": 0,
-            "substances": [],
-            "untagged": true,
-            "vdb_id": -1,
-            "view": "sdf",
-            "whitewater": 0
-          },
-          {
-            "labels": [],
-            "live": false,
-            "particles": 0,
-            "substances": [],
-            "untagged": false,
-            "vdb_id": -1,
-            "view": "splat",
-            "whitewater": 0
-          },
-          {
-            "labels": [],
-            "live": false,
-            "particles": 0,
-            "substances": [],
-            "untagged": false,
-            "vdb_id": -1,
-            "view": "fog",
-            "whitewater": 0
-          }
-        ],
-        "views_measured": false,
-        "virtual_grain_budget": 8000000,
-        "virtual_grain_count": 0,
-        "virtual_grain_rt_estimated_bytes": 0,
-        "virtual_grains_effective": 8,
-        "virtual_grains_requested": 8,
-        "viscosity_sweeps": 1,
-        "viscosity_wall_slip": 0.0,
-        "visible": false,
-        "voxel_size": 0.10000000149011612,
-        "whitewater_visual_children": 1
-      },
-      {
-        "active_density_cells": 0,
-        "anisotropy_enabled": false,
-        "anisotropy_max_stretch": 4.0,
-        "anisotropy_neighbor_min": 6,
-        "anisotropy_radius_voxels": 2.5,
-        "backend": "vulkan",
-        "boundary": "closed",
-        "coord_space": "material",
-        "domain_max": [
-          0.6000000238418579,
-          3.0,
-          0.6000000238418579
-        ],
-        "domain_min": [
-          -0.6000000238418579,
-          0.0,
-          -0.6000000238418579
-        ],
-        "elastic_model_particles": 0,
-        "enabled": false,
-        "fluid_model_particles": 0,
-        "fog_erosion_depth": 0.0,
-        "fog_erosion_detail": 3,
-        "fog_erosion_seed": 0,
-        "fog_erosion_size": 0.20000000298023224,
-        "fog_erosion_strength": 0.0,
-        "fog_resolution_multiplier": 1,
-        "fog_spread_voxels": 1.5,
-        "gas_phase_active_cells": 0,
-        "gas_phase_energy_j": 0.0,
-        "gas_phase_mass_centroid": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "gas_phase_mass_kg": 0.0,
-        "grain_size_variation": 0.2199999988079071,
-        "granular_cohesion": 0.0,
-        "granular_compaction_capped": 0,
-        "granular_damage_over_10": 0,
-        "granular_damage_over_50": 0,
-        "granular_damage_over_90": 0,
-        "granular_damage_rate": 8.0,
-        "granular_damaged": 0,
-        "granular_detached": 0,
-        "granular_dilatancy": 5.0,
-        "granular_effective_young_modulus": 0.0,
-        "granular_enabled": true,
-        "granular_fracture_strain": 0.019999999552965164,
-        "granular_friction_angle": 35.0,
-        "granular_hardening": 0.0,
-        "granular_healing_rate": 0.0,
-        "granular_invalid": 0,
-        "granular_max_accumulated_plastic": 0.0,
-        "granular_max_damage": 0.0,
-        "granular_max_fracture_history": 0.0,
-        "granular_max_plastic": 0.0,
-        "granular_max_solver_substeps": 32,
-        "granular_max_yield": 0.0,
-        "granular_mean_accumulated_plastic": 0.0,
-        "granular_mean_damage": 0.0,
-        "granular_mean_fracture_history": 0.0,
-        "granular_min_softening": 1.0,
-        "granular_model_particles": 0,
-        "granular_overburden_pressure": 0.0,
-        "granular_physical_carriers": true,
-        "granular_poisson_ratio": 0.25,
-        "granular_rebonding": false,
-        "granular_requested_young_modulus": 0.0,
-        "granular_required_substeps": 1,
-        "granular_residual_strength": 0.05000000074505806,
-        "granular_sleeping": 0,
-        "granular_softened": 0,
-        "granular_softening_range": 40.0,
-        "granular_softening_temperature": 0.0,
-        "granular_solver_substeps": 1,
-        "granular_stiffness_below_load": false,
-        "granular_stiffness_capped": false,
-        "granular_strain_limited": 0,
-        "granular_strain_rate": 0.0,
-        "granular_strain_substeps": 1,
-        "granular_tack_peak": 1.0,
-        "granular_tensile_cutoff": 0.0,
-        "granular_thermal_conductivity": 0.0,
-        "granular_wave_substeps": 1,
-        "granular_yielded": 0,
-        "granular_young_modulus": 200000.0,
-        "granular_young_modulus_for_load": 0.0,
-        "hidden_particles": 0,
-        "id": 2,
-        "interior_fluid_cells": 0,
-        "kernel_radius_voxels": 2.0,
-        "kinematic_viscosity": 0.0,
-        "label_routes": {
-          "body": "follow",
-          "bubble": "splat",
-          "foam": "splat",
-          "frozen": "follow",
-          "mist": "fog",
-          "spray": "splat",
-          "unknown": "follow"
-        },
-        "live_state": false,
+        "max_auto_resolution": 128,
         "max_density": 0.0,
         "max_particles": 100000,
         "name": "H1_Grain_Runtime",
@@ -453,7 +177,6 @@
         "pore_detail": 0.5,
         "pore_scale": 0.05000000074505806,
         "position_smoothing": 0.8999999761581421,
-        "preset": "custom",
         "primary_visual_children": 1,
         "render_mode": "surface",
         "reseed_added_particles": 0,
@@ -475,18 +198,18 @@
         "splat_triangles": 0,
         "substance_materials": [],
         "substances": [],
-        "surface_active_cells": 807,
-        "surface_build_ms": 0.34700000286102295,
+        "surface_active_cells": 0,
+        "surface_build_ms": 0.0,
         "surface_grid_dim": [
-          12,
-          30,
-          12
+          0,
+          0,
+          0
         ],
         "surface_material": "",
-        "surface_measured": true,
+        "surface_measured": false,
         "surface_offset_voxels": 0.6499999761581421,
         "surface_resolution_multiplier": 1,
-        "surface_voxel": 0.10000000149011612,
+        "surface_voxel": 0.0,
         "thermal_air_cooled_particles": 0,
         "thermal_air_cooling_rate": 0.15000000596046448,
         "thermal_ambient_kelvin": 293.0,
@@ -494,7 +217,7 @@
         "thermal_cold_viscosity": 0.05000000074505806,
         "thermal_contact_cooled_particles": 0,
         "thermal_contact_cooling_rate": 2.0,
-        "thermal_freeze_kelvin": 330.0,
+        "thermal_freeze_kelvin": 1.0,
         "thermal_froze_this_frame": 0,
         "thermal_frozen_particles": 0,
         "thermal_liquid_enabled": false,
@@ -567,345 +290,24 @@
         "visible": false,
         "voxel_size": 0.10000000149011612,
         "whitewater_visual_children": 1
-      },
-      {
-        "active_density_cells": 0,
-        "anisotropy_enabled": false,
-        "anisotropy_max_stretch": 4.0,
-        "anisotropy_neighbor_min": 6,
-        "anisotropy_radius_voxels": 2.5,
-        "backend": "vulkan",
-        "boundary": "closed",
-        "coord_space": "material",
-        "domain_max": [
-          0.4000000059604645,
-          0.800000011920929,
-          0.4000000059604645
-        ],
-        "domain_min": [
-          -0.4000000059604645,
-          0.0,
-          -0.4000000059604645
-        ],
-        "elastic_model_particles": 0,
-        "enabled": false,
-        "fluid_model_particles": 0,
-        "fog_erosion_depth": 0.0,
-        "fog_erosion_detail": 3,
-        "fog_erosion_seed": 0,
-        "fog_erosion_size": 0.20000000298023224,
-        "fog_erosion_strength": 0.0,
-        "fog_resolution_multiplier": 1,
-        "fog_spread_voxels": 1.5,
-        "gas_phase_active_cells": 0,
-        "gas_phase_energy_j": 0.0,
-        "gas_phase_mass_centroid": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "gas_phase_mass_kg": 0.0,
-        "grain_size_variation": 0.2199999988079071,
-        "granular_cohesion": 0.0,
-        "granular_compaction_capped": 0,
-        "granular_damage_over_10": 0,
-        "granular_damage_over_50": 0,
-        "granular_damage_over_90": 0,
-        "granular_damage_rate": 8.0,
-        "granular_damaged": 0,
-        "granular_detached": 0,
-        "granular_dilatancy": 5.0,
-        "granular_effective_young_modulus": 0.0,
-        "granular_enabled": true,
-        "granular_fracture_strain": 0.019999999552965164,
-        "granular_friction_angle": 35.0,
-        "granular_hardening": 0.0,
-        "granular_healing_rate": 0.0,
-        "granular_invalid": 0,
-        "granular_max_accumulated_plastic": 0.0,
-        "granular_max_damage": 0.0,
-        "granular_max_fracture_history": 0.0,
-        "granular_max_plastic": 0.0,
-        "granular_max_solver_substeps": 32,
-        "granular_max_yield": 0.0,
-        "granular_mean_accumulated_plastic": 0.0,
-        "granular_mean_damage": 0.0,
-        "granular_mean_fracture_history": 0.0,
-        "granular_min_softening": 1.0,
-        "granular_model_particles": 0,
-        "granular_overburden_pressure": 0.0,
-        "granular_physical_carriers": true,
-        "granular_poisson_ratio": 0.25,
-        "granular_rebonding": false,
-        "granular_requested_young_modulus": 0.0,
-        "granular_required_substeps": 1,
-        "granular_residual_strength": 0.05000000074505806,
-        "granular_sleeping": 0,
-        "granular_softened": 0,
-        "granular_softening_range": 40.0,
-        "granular_softening_temperature": 0.0,
-        "granular_solver_substeps": 1,
-        "granular_stiffness_below_load": false,
-        "granular_stiffness_capped": false,
-        "granular_strain_limited": 0,
-        "granular_strain_rate": 0.0,
-        "granular_strain_substeps": 1,
-        "granular_tack_peak": 1.0,
-        "granular_tensile_cutoff": 0.0,
-        "granular_thermal_conductivity": 0.0,
-        "granular_wave_substeps": 1,
-        "granular_yielded": 0,
-        "granular_young_modulus": 200000.0,
-        "granular_young_modulus_for_load": 0.0,
-        "hidden_particles": 0,
-        "id": 3,
-        "interior_fluid_cells": 0,
-        "kernel_radius_voxels": 2.0,
-        "kinematic_viscosity": 0.0,
-        "label_routes": {
-          "body": "follow",
-          "bubble": "splat",
-          "foam": "splat",
-          "frozen": "follow",
-          "mist": "fog",
-          "spray": "splat",
-          "unknown": "follow"
-        },
-        "live_state": false,
-        "max_density": 0.0,
-        "max_particles": 40000,
-        "name": "H1_Grain_Coexist",
-        "narrow_band_voxels": 3.0,
-        "particle_count": 0,
-        "particle_kelvin_measured": false,
-        "particle_labels": {
-          "available": false,
-          "classifier": "mass+neighborhood_v2",
-          "detach_max_neighbors": 2,
-          "last_step": {
-            "bin_milliseconds": 0.0,
-            "center_resolved": 0,
-            "changed": 0,
-            "classify_milliseconds": 0.0,
-            "milliseconds": 0.0,
-            "occupied_bins": 0,
-            "on_gpu": false,
-            "particles": 0
-          },
-          "mist_generation": true,
-          "mist_mass_fraction_max": 0.15000000596046448,
-          "primary": {
-            "body": 0,
-            "bubble": 0,
-            "foam": 0,
-            "frozen": 0,
-            "mist": 0,
-            "spray": 0,
-            "unknown": 0
-          },
-          "primary_complete": false,
-          "primary_particles": 0,
-          "radius_voxels": 1.5,
-          "rejoin_min_neighbors": 6,
-          "render_routing": "substance+label",
-          "secondary": {
-            "body": 0,
-            "bubble": 0,
-            "foam": 0,
-            "frozen": 0,
-            "mist": 0,
-            "spray": 0,
-            "unknown": 0
-          },
-          "secondary_affects_mass": false,
-          "secondary_particles": 0
-        },
-        "particle_max_kelvin": 0.0,
-        "particle_min_kelvin": 0.0,
-        "particle_radius_voxels": 0.550000011920929,
-        "phases": [
-          "gas",
-          "granular"
-        ],
-        "pore_amount": 0.0,
-        "pore_detail": 0.5,
-        "pore_scale": 0.05000000074505806,
-        "position_smoothing": 0.8999999761581421,
-        "preset": "custom",
-        "primary_visual_children": 1,
-        "render_mode": "surface",
-        "reseed_added_particles": 0,
-        "reseed_removed_particles": 0,
-        "sealed_pocket_cells": 0,
-        "sealed_pockets": 0,
-        "sealed_pockets_measured": false,
-        "smoothing_iterations": 2,
-        "solid_phase": false,
-        "solid_phase_cells": 0,
-        "solid_phase_fill": 0.25,
-        "solid_phase_particles": 0,
-        "splat_geometry": "icosphere",
-        "splat_geometry_source": "",
-        "splat_material": "",
-        "splat_radius_factor": 0.44999998807907104,
-        "splat_size_multiplier": 1.0,
-        "splat_subdivisions": 0,
-        "splat_triangles": 0,
-        "substance_materials": [],
-        "substances": [],
-        "surface_active_cells": 0,
-        "surface_build_ms": 0.0,
-        "surface_grid_dim": [
-          0,
-          0,
-          0
-        ],
-        "surface_material": "",
-        "surface_measured": false,
-        "surface_offset_voxels": 0.6499999761581421,
-        "surface_resolution_multiplier": 1,
-        "surface_voxel": 0.0,
-        "thermal_air_cooled_particles": 0,
-        "thermal_air_cooling_rate": 0.15000000596046448,
-        "thermal_ambient_kelvin": 293.0,
-        "thermal_cold_unsupported": 0,
-        "thermal_cold_viscosity": 0.05000000074505806,
-        "thermal_contact_cooled_particles": 0,
-        "thermal_contact_cooling_rate": 2.0,
-        "thermal_freeze_kelvin": 330.0,
-        "thermal_froze_this_frame": 0,
-        "thermal_frozen_particles": 0,
-        "thermal_liquid_enabled": false,
-        "thermal_max_kelvin": 0.0,
-        "thermal_max_viscosity": 0.0,
-        "thermal_mean_kelvin": 0.0,
-        "thermal_measured": false,
-        "thermal_melted_this_frame": 0,
-        "thermal_min_kelvin": 0.0,
-        "thermal_min_viscosity": 0.0,
-        "thermal_viscosity_field": false,
-        "thermal_viscosity_range": 25.0,
-        "type": "matter",
-        "unresolved_model_particles": 0,
-        "uvw_available": false,
-        "uvw_dim": [
-          0,
-          0,
-          0
-        ],
-        "uvw_drift": 0.0,
-        "uvw_origin": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "uvw_particles": 0,
-        "uvw_refresh_period": 240,
-        "uvw_voxel": 0.0,
-        "views": [
-          {
-            "labels": [],
-            "live": false,
-            "particles": 0,
-            "substances": [],
-            "untagged": true,
-            "vdb_id": -1,
-            "view": "sdf",
-            "whitewater": 0
-          },
-          {
-            "labels": [],
-            "live": false,
-            "particles": 0,
-            "substances": [],
-            "untagged": false,
-            "vdb_id": -1,
-            "view": "splat",
-            "whitewater": 0
-          },
-          {
-            "labels": [],
-            "live": false,
-            "particles": 0,
-            "substances": [],
-            "untagged": false,
-            "vdb_id": -1,
-            "view": "fog",
-            "whitewater": 0
-          }
-        ],
-        "views_measured": false,
-        "virtual_grain_budget": 8000000,
-        "virtual_grain_count": 0,
-        "virtual_grain_rt_estimated_bytes": 0,
-        "virtual_grains_effective": 8,
-        "virtual_grains_requested": 8,
-        "viscosity_sweeps": 1,
-        "viscosity_wall_slip": 0.0,
-        "visible": false,
-        "voxel_size": 0.05000000074505806,
-        "whitewater_visual_children": 1
       }
     ],
     "sources": [
       {
         "density": 1.0,
-        "domain": "GrainMotion",
-        "enabled": false,
-        "end_time": 0.5,
-        "falloff": 1.0,
-        "fluid_emit_along_normal": false,
-        "fluid_particles_per_second": 600.0,
-        "fluid_substance": "Sand",
-        "fluid_temperature_kelvin": 353.0,
-        "fluid_temperature_override": false,
-        "fluid_velocity_spread": 0.0,
-        "fuel": 0.0,
-        "inherit_velocity": 1.0,
-        "initial_constitutive_model": "granular",
-        "max_emitted_particles": 300,
-        "name": "GrainMotionSand",
-        "parent_object": "",
-        "particle_pool_weight": 1.0,
-        "phase": "liquid",
-        "pool_granted_particles": 0,
-        "pool_requested_particles": 0,
-        "position": [
-          0.0,
-          0.4000000059604645,
-          0.0
-        ],
-        "radius": 0.07999999821186066,
-        "source_mode": "point",
-        "source_object": "",
-        "start_time": 0.0,
-        "temperature": 0.0,
-        "use_particle_limit": true,
-        "use_time_limit": true,
-        "velocity": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "velocity_coupling": 8.0,
-        "velocity_space": "local"
-      },
-      {
-        "density": 1.0,
         "domain": "H1_Grain_Runtime",
         "enabled": false,
-        "end_time": 2.5,
+        "end_time": 0.03333333507180214,
         "falloff": 1.0,
         "fluid_emit_along_normal": false,
-        "fluid_particles_per_second": 2000.0,
+        "fluid_particles_per_second": 15513.599609375,
         "fluid_substance": "Sand",
         "fluid_temperature_kelvin": 293.1499938964844,
         "fluid_temperature_override": true,
         "fluid_velocity_spread": 0.0,
         "fuel": 0.0,
         "inherit_velocity": 1.0,
-        "initial_constitutive_model": "granular",
-        "max_emitted_particles": 1000,
+        "max_emitted_particles": 256,
         "name": "H1_Grain_Runtime_Source",
         "parent_object": "",
         "particle_pool_weight": 1.0,
@@ -914,52 +316,10 @@
         "pool_requested_particles": 0,
         "position": [
           0.0,
-          0.6000000238418579,
+          0.6499999761581421,
           0.0
         ],
-        "radius": 0.25,
-        "source_mode": "point",
-        "source_object": "",
-        "start_time": 1.5,
-        "temperature": 0.0,
-        "use_particle_limit": true,
-        "use_time_limit": true,
-        "velocity": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "velocity_coupling": 8.0,
-        "velocity_space": "local"
-      },
-      {
-        "density": 1.0,
-        "domain": "H1_Grain_Coexist",
-        "enabled": false,
-        "end_time": 0.5,
-        "falloff": 1.0,
-        "fluid_emit_along_normal": false,
-        "fluid_particles_per_second": 24000.0,
-        "fluid_substance": "Water",
-        "fluid_temperature_kelvin": 293.1499938964844,
-        "fluid_temperature_override": true,
-        "fluid_velocity_spread": 0.0,
-        "fuel": 0.0,
-        "inherit_velocity": 1.0,
-        "initial_constitutive_model": "fluid",
-        "max_emitted_particles": 12000,
-        "name": "H1_Grain_Coexist_Water",
-        "parent_object": "",
-        "particle_pool_weight": 1.0,
-        "phase": "liquid",
-        "pool_granted_particles": 0,
-        "pool_requested_particles": 0,
-        "position": [
-          0.0,
-          0.20000000298023224,
-          0.0
-        ],
-        "radius": 0.20000000298023224,
+        "radius": 0.4300000071525574,
         "source_mode": "point",
         "source_object": "",
         "start_time": 0.0,
@@ -1031,77 +391,6 @@
           -0.10000000149011612,
           0.0
         ],
-        "name": "GrainMotionSphere",
-        "plane_y": 0.0,
-        "restitution": 0.3499999940395355,
-        "sdf_ready": false,
-        "sdf_resolution": 0,
-        "sdf_resolution_mode": 1,
-        "source_mode": "mesh_bvh",
-        "source_object": "GrainMotionSphereMesh",
-        "sphere_center": [
-          0.4000000059604645,
-          0.15000000596046448,
-          0.0
-        ],
-        "sphere_radius": 0.15000000596046448,
-        "thickness": 0.0
-      },
-      {
-        "bounds_max": [
-          1.0,
-          1.0,
-          1.0
-        ],
-        "bounds_min": [
-          -1.0,
-          -1.0,
-          -1.0
-        ],
-        "capsule_end": [
-          0.0,
-          2.0,
-          0.0
-        ],
-        "capsule_radius": 0.5,
-        "capsule_start": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "enabled": false,
-        "fluid_collision_enabled": true,
-        "friction": 0.0,
-        "gas_density_rate": 0.0,
-        "gas_flame_rate": 0.0,
-        "gas_fuel_rate": 0.0,
-        "gas_ignite_on_contact": false,
-        "gas_interaction_enabled": false,
-        "gas_temperature_rate": 0.0,
-        "msf_auto_transfer": false,
-        "msf_burn_rate_scale": 1.0,
-        "msf_fuel_capacity_scale": 1.0,
-        "msf_generate_char_mask": true,
-        "msf_ignition_kelvin": 573.0,
-        "msf_mask_resolution": 128,
-        "msf_melt_flow_enabled": true,
-        "msf_melt_height_loss": 0.8500000238418579,
-        "msf_melt_sdf_change_threshold": 0.02500000037252903,
-        "msf_melt_sdf_refresh": false,
-        "msf_melt_sdf_revision_interval": 4,
-        "msf_melt_spread": 1.5,
-        "msf_override_ignition": false,
-        "msf_substance": "Wood (Oak)",
-        "msf_transfer_domain": "",
-        "msf_transfer_max_batch_particles": 256,
-        "msf_transfer_min_mass_kg": 0.009999999776482582,
-        "msf_transfer_particles_per_kg": 2048.0,
-        "msf_transfer_rate_kg_s": 0.10000000149011612,
-        "msf_transfer_velocity": [
-          0.0,
-          -0.10000000149011612,
-          0.0
-        ],
         "name": "H1_Grain_Static_Ramp_Collider",
         "plane_y": 0.0,
         "restitution": 0.3499999940395355,
@@ -1110,219 +399,6 @@
         "sdf_resolution_mode": 1,
         "source_mode": "mesh_bvh",
         "source_object": "H1_Grain_Static_Ramp",
-        "sphere_center": [
-          0.0,
-          1.0,
-          0.0
-        ],
-        "sphere_radius": 1.0,
-        "thickness": 0.0
-      },
-      {
-        "bounds_max": [
-          1.0,
-          1.0,
-          1.0
-        ],
-        "bounds_min": [
-          -1.0,
-          -1.0,
-          -1.0
-        ],
-        "capsule_end": [
-          0.0,
-          2.0,
-          0.0
-        ],
-        "capsule_radius": 0.5,
-        "capsule_start": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "enabled": false,
-        "fluid_collision_enabled": true,
-        "friction": 0.0,
-        "gas_density_rate": 0.0,
-        "gas_flame_rate": 0.0,
-        "gas_fuel_rate": 0.0,
-        "gas_ignite_on_contact": false,
-        "gas_interaction_enabled": false,
-        "gas_temperature_rate": 0.0,
-        "msf_auto_transfer": false,
-        "msf_burn_rate_scale": 1.0,
-        "msf_fuel_capacity_scale": 1.0,
-        "msf_generate_char_mask": true,
-        "msf_ignition_kelvin": 573.0,
-        "msf_mask_resolution": 128,
-        "msf_melt_flow_enabled": true,
-        "msf_melt_height_loss": 0.8500000238418579,
-        "msf_melt_sdf_change_threshold": 0.02500000037252903,
-        "msf_melt_sdf_refresh": false,
-        "msf_melt_sdf_revision_interval": 4,
-        "msf_melt_spread": 1.5,
-        "msf_override_ignition": false,
-        "msf_substance": "Wood (Oak)",
-        "msf_transfer_domain": "",
-        "msf_transfer_max_batch_particles": 256,
-        "msf_transfer_min_mass_kg": 0.009999999776482582,
-        "msf_transfer_particles_per_kg": 2048.0,
-        "msf_transfer_rate_kg_s": 0.10000000149011612,
-        "msf_transfer_velocity": [
-          0.0,
-          -0.10000000149011612,
-          0.0
-        ],
-        "name": "H1_Grain_Flat_Ramp_Collider",
-        "plane_y": 0.0,
-        "restitution": 0.3499999940395355,
-        "sdf_ready": false,
-        "sdf_resolution": 0,
-        "sdf_resolution_mode": 1,
-        "source_mode": "mesh_bvh",
-        "source_object": "H1_Grain_Flat_Ramp",
-        "sphere_center": [
-          0.0,
-          1.0,
-          0.0
-        ],
-        "sphere_radius": 1.0,
-        "thickness": 0.0
-      },
-      {
-        "bounds_max": [
-          1.0,
-          1.0,
-          1.0
-        ],
-        "bounds_min": [
-          -1.0,
-          -1.0,
-          -1.0
-        ],
-        "capsule_end": [
-          0.0,
-          2.0,
-          0.0
-        ],
-        "capsule_radius": 0.5,
-        "capsule_start": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "enabled": false,
-        "fluid_collision_enabled": true,
-        "friction": 0.0,
-        "gas_density_rate": 0.0,
-        "gas_flame_rate": 0.0,
-        "gas_fuel_rate": 0.0,
-        "gas_ignite_on_contact": false,
-        "gas_interaction_enabled": false,
-        "gas_temperature_rate": 0.0,
-        "msf_auto_transfer": false,
-        "msf_burn_rate_scale": 1.0,
-        "msf_fuel_capacity_scale": 1.0,
-        "msf_generate_char_mask": true,
-        "msf_ignition_kelvin": 573.0,
-        "msf_mask_resolution": 128,
-        "msf_melt_flow_enabled": true,
-        "msf_melt_height_loss": 0.8500000238418579,
-        "msf_melt_sdf_change_threshold": 0.02500000037252903,
-        "msf_melt_sdf_refresh": false,
-        "msf_melt_sdf_revision_interval": 4,
-        "msf_melt_spread": 1.5,
-        "msf_override_ignition": false,
-        "msf_substance": "Wood (Oak)",
-        "msf_transfer_domain": "",
-        "msf_transfer_max_batch_particles": 256,
-        "msf_transfer_min_mass_kg": 0.009999999776482582,
-        "msf_transfer_particles_per_kg": 2048.0,
-        "msf_transfer_rate_kg_s": 0.10000000149011612,
-        "msf_transfer_velocity": [
-          0.0,
-          -0.10000000149011612,
-          0.0
-        ],
-        "name": "H1_Grain_Corner_Floor_Collider",
-        "plane_y": 0.0,
-        "restitution": 0.3499999940395355,
-        "sdf_ready": false,
-        "sdf_resolution": 0,
-        "sdf_resolution_mode": 1,
-        "source_mode": "mesh_bvh",
-        "source_object": "H1_Grain_Corner_Floor",
-        "sphere_center": [
-          0.0,
-          1.0,
-          0.0
-        ],
-        "sphere_radius": 1.0,
-        "thickness": 0.0
-      },
-      {
-        "bounds_max": [
-          1.0,
-          1.0,
-          1.0
-        ],
-        "bounds_min": [
-          -1.0,
-          -1.0,
-          -1.0
-        ],
-        "capsule_end": [
-          0.0,
-          2.0,
-          0.0
-        ],
-        "capsule_radius": 0.5,
-        "capsule_start": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "enabled": false,
-        "fluid_collision_enabled": true,
-        "friction": 0.0,
-        "gas_density_rate": 0.0,
-        "gas_flame_rate": 0.0,
-        "gas_fuel_rate": 0.0,
-        "gas_ignite_on_contact": false,
-        "gas_interaction_enabled": false,
-        "gas_temperature_rate": 0.0,
-        "msf_auto_transfer": false,
-        "msf_burn_rate_scale": 1.0,
-        "msf_fuel_capacity_scale": 1.0,
-        "msf_generate_char_mask": true,
-        "msf_ignition_kelvin": 573.0,
-        "msf_mask_resolution": 128,
-        "msf_melt_flow_enabled": true,
-        "msf_melt_height_loss": 0.8500000238418579,
-        "msf_melt_sdf_change_threshold": 0.02500000037252903,
-        "msf_melt_sdf_refresh": false,
-        "msf_melt_sdf_revision_interval": 4,
-        "msf_melt_spread": 1.5,
-        "msf_override_ignition": false,
-        "msf_substance": "Wood (Oak)",
-        "msf_transfer_domain": "",
-        "msf_transfer_max_batch_particles": 256,
-        "msf_transfer_min_mass_kg": 0.009999999776482582,
-        "msf_transfer_particles_per_kg": 2048.0,
-        "msf_transfer_rate_kg_s": 0.10000000149011612,
-        "msf_transfer_velocity": [
-          0.0,
-          -0.10000000149011612,
-          0.0
-        ],
-        "name": "H1_Grain_Corner_Wall_Collider",
-        "plane_y": 0.0,
-        "restitution": 0.3499999940395355,
-        "sdf_ready": false,
-        "sdf_resolution": 0,
-        "sdf_resolution_mode": 1,
-        "source_mode": "mesh_bvh",
-        "source_object": "H1_Grain_Corner_Wall",
         "sphere_center": [
           0.0,
           1.0,
@@ -1342,24 +418,24 @@
             "step": 75,
             "granular": {
               "bounds_max": [
-                0.3750503361225128,
-                0.11165425181388855,
-                0.37504124641418457
+                0.37504786252975464,
+                0.12134900689125061,
+                0.3750470280647278
               ],
               "bounds_min": [
-                -0.3751107156276703,
-                0.02485988289117813,
-                -0.37505602836608887
+                -0.37506213784217834,
+                0.0248740091919899,
+                -0.3750377893447876
               ],
               "capacity_kg": 0.0,
               "dry_center_of_mass": [
-                -0.005556924583061145,
-                0.051922455040767104,
-                -0.005901002155042215
+                0.004481442249925751,
+                0.05130256105621817,
+                -0.0006281444651676824
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.3256338202068967,
-              "kinetic_energy_j": 0.07353838106743334,
+              "horizontal_rms_radius_m": 0.3236827276466965,
+              "kinetic_energy_j": 0.24944898739726215,
               "mean_saturation": 0.0,
               "particles": 512,
               "pore_water_kg": 0.0
@@ -1376,58 +452,83 @@
               "wet_grains": 0
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 12,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 1711,
-              "dispatches": 166,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 138
+              },
+              "contacts_last_substep": 1612,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 16,
+                "grain_pairs": 1344,
+                "history_probes": 3934,
+                "neighbour_candidates": 3480
+              },
+              "dispatches": 140,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
               "history_remapped": true,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.000699999975040555,
-                "gpu_wait": 12.99429988861084,
-                "merge": 0.08500000089406967,
-                "motion": 0.0008999999845400453,
-                "order": 0.12250000238418579,
-                "prepare": 0.1624000072479248,
-                "publish": 0.025699999183416367
+                "coupling": 0.0009000000427477062,
+                "gpu_wait": 12.526700019836426,
+                "merge": 0.08320000022649765,
+                "motion": 0.0006000000284984708,
+                "order": 0.1388999968767166,
+                "prepare": 0.14990000426769257,
+                "publish": 0.02459999918937683
               },
-              "max_contacts_per_grain": 8,
+              "max_contacts_per_grain": 7,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 3,
               "state_resident": false,
-              "sticking_contacts_last_substep": 1344,
-              "substep_dt_s": 0.00010162602120544761,
-              "substep_limit": "damping",
-              "substeps": 164,
+              "sticking_contacts_last_substep": 1263,
+              "substep_dt_s": 0.00012077295104973018,
+              "substep_limit": "accuracy",
+              "substeps": 138,
               "transfer_batches": 3,
-              "upload_bytes": 61472,
-              "working_set_bytes": 3884908
+              "upload_bytes": 61504,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 90,
             "granular": {
               "bounds_max": [
-                0.37503358721733093,
-                0.11168985813856125,
-                0.37503352761268616
+                0.3750345706939697,
+                0.10915868729352951,
+                0.3750518560409546
               ],
               "bounds_min": [
-                -0.37507176399230957,
-                0.024636076763272285,
-                -0.3750498294830322
+                -0.37503528594970703,
+                0.024916835129261017,
+                -0.37503260374069214
               ],
               "capacity_kg": 0.0,
               "dry_center_of_mass": [
-                -0.005491589290244293,
-                0.051584355798695435,
-                -0.005901008199543795
+                0.0044249375420122505,
+                0.05074831269666901,
+                -0.0007853663622085399
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.3257454831523368,
-              "kinetic_energy_j": 0.015642912321689035,
+              "horizontal_rms_radius_m": 0.3235980871160809,
+              "kinetic_energy_j": 0.051873000009715384,
               "mean_saturation": 0.0,
               "particles": 512,
               "pore_water_kg": 0.0
@@ -1444,58 +545,83 @@
               "wet_grains": 0
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 12,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2011,
-              "dispatches": 166,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 138
+              },
+              "contacts_last_substep": 1952,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 4,
+                "grain_pairs": 1678,
+                "history_probes": 5173,
+                "neighbour_candidates": 3532
+              },
+              "dispatches": 140,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
               "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.000699999975040555,
-                "gpu_wait": 13.755599975585938,
-                "merge": 0.07829999923706055,
+                "coupling": 0.00029999998514540493,
+                "gpu_wait": 12.134400367736816,
+                "merge": 0.06960000097751617,
                 "motion": 0.0005000000237487257,
-                "order": 0.12060000002384186,
-                "prepare": 0.15360000729560852,
-                "publish": 0.02459999918937683
+                "order": 0.11020000278949738,
+                "prepare": 0.12929999828338623,
+                "publish": 0.021800000220537186
               },
-              "max_contacts_per_grain": 8,
+              "max_contacts_per_grain": 7,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
               "state_resident": true,
-              "sticking_contacts_last_substep": 1931,
-              "substep_dt_s": 0.00010162602120544761,
-              "substep_limit": "damping",
-              "substeps": 164,
+              "sticking_contacts_last_substep": 1816,
+              "substep_dt_s": 0.00012077295104973018,
+              "substep_limit": "accuracy",
+              "substeps": 138,
               "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 105,
             "granular": {
               "bounds_max": [
-                0.37503790855407715,
-                0.11169059574604034,
-                0.3750342130661011
+                0.37503132224082947,
+                0.1089235469698906,
+                0.37504786252975464
               ],
               "bounds_min": [
-                -0.3750684857368469,
-                0.024897919967770576,
-                -0.3750477433204651
+                -0.37504300475120544,
+                0.024923494085669518,
+                -0.37503179907798767
               ],
               "capacity_kg": 0.0,
               "dry_center_of_mass": [
-                -0.005485518581224377,
-                0.05154238698014522,
-                -0.005850040984114404
+                0.0045675199675088065,
+                0.050608372566784965,
+                -0.0008311473868615601
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.32574472191275194,
-              "kinetic_energy_j": 0.0020527496369974647,
+              "horizontal_rms_radius_m": 0.3236021600044128,
+              "kinetic_energy_j": 0.0006282883361096194,
               "mean_saturation": 0.0,
               "particles": 512,
               "pore_water_kg": 0.0
@@ -1512,58 +638,83 @@
               "wet_grains": 0
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 12,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2085,
-              "dispatches": 166,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 138
+              },
+              "contacts_last_substep": 2016,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 1,
+                "grain_pairs": 1738,
+                "history_probes": 5417,
+                "neighbour_candidates": 3566
+              },
+              "dispatches": 140,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
-              "history_remapped": false,
+              "history_remapped": true,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.0005999999702908099,
-                "gpu_wait": 14.151100158691406,
-                "merge": 0.08269999921321869,
-                "motion": 0.00039999998989515007,
-                "order": 0.18369999527931213,
-                "prepare": 0.13930000364780426,
-                "publish": 0.025299999862909317
+                "coupling": 0.0007000000332482159,
+                "gpu_wait": 13.388799667358398,
+                "merge": 0.08150000125169754,
+                "motion": 0.0005000000237487257,
+                "order": 0.13750000298023224,
+                "prepare": 0.13910000026226044,
+                "publish": 0.02419999986886978
               },
-              "max_contacts_per_grain": 8,
-              "state_resident": true,
-              "sticking_contacts_last_substep": 2077,
-              "substep_dt_s": 0.00010162602120544761,
-              "substep_limit": "damping",
-              "substeps": 164,
-              "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "max_contacts_per_grain": 7,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
+              "state_resident": false,
+              "sticking_contacts_last_substep": 1972,
+              "substep_dt_s": 0.00012077295104973018,
+              "substep_limit": "accuracy",
+              "substeps": 138,
+              "transfer_batches": 3,
+              "upload_bytes": 61504,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 120,
             "granular": {
               "bounds_max": [
-                0.37503671646118164,
-                0.11169224977493286,
-                0.3750342130661011
+                0.37503117322921753,
+                0.10892560333013535,
+                0.37504804134368896
               ],
               "bounds_min": [
-                -0.37506812810897827,
-                0.024897487834095955,
-                -0.37504762411117554
+                -0.3750421106815338,
+                0.024922488257288933,
+                -0.3750353753566742
               ],
               "capacity_kg": 0.0,
               "dry_center_of_mass": [
-                -0.005506142867744697,
-                0.051508961711078875,
-                -0.005820165600198409
+                0.004559941598017713,
+                0.0506022789813869,
+                -0.0008321855079885063
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.32571503749677594,
-              "kinetic_energy_j": 0.0003651467976139642,
+              "horizontal_rms_radius_m": 0.32361767289869403,
+              "kinetic_energy_j": 7.329058415150513e-05,
               "mean_saturation": 0.0,
               "particles": 512,
               "pore_water_kg": 0.0
@@ -1580,58 +731,83 @@
               "wet_grains": 0
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 12,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2077,
-              "dispatches": 166,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 138
+              },
+              "contacts_last_substep": 2062,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 1780,
+                "history_probes": 5599,
+                "neighbour_candidates": 3566
+              },
+              "dispatches": 140,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
               "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.0009000000427477062,
-                "gpu_wait": 14.361700057983398,
-                "merge": 0.08749999850988388,
-                "motion": 0.0010000000474974513,
-                "order": 0.14329999685287476,
-                "prepare": 0.17350000143051147,
-                "publish": 0.024800000712275505
+                "coupling": 0.00029999998514540493,
+                "gpu_wait": 12.546500205993652,
+                "merge": 0.07010000199079514,
+                "motion": 0.0003000000142492354,
+                "order": 0.11219999939203262,
+                "prepare": 0.12680000066757202,
+                "publish": 0.022099999710917473
               },
-              "max_contacts_per_grain": 8,
+              "max_contacts_per_grain": 7,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
               "state_resident": true,
-              "sticking_contacts_last_substep": 2056,
-              "substep_dt_s": 0.00010162602120544761,
-              "substep_limit": "damping",
-              "substeps": 164,
+              "sticking_contacts_last_substep": 2058,
+              "substep_dt_s": 0.00012077295104973018,
+              "substep_limit": "accuracy",
+              "substeps": 138,
               "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 135,
             "granular": {
               "bounds_max": [
-                0.3750366270542145,
-                0.11169224232435226,
-                0.3750342130661011
+                0.37503159046173096,
+                0.10892666131258011,
+                0.375047892332077
               ],
               "bounds_min": [
-                -0.3750680983066559,
-                0.0248978640884161,
-                -0.37504738569259644
+                -0.37504181265830994,
+                0.024923723191022873,
+                -0.3750353753566742
               ],
               "capacity_kg": 0.0,
               "dry_center_of_mass": [
-                -0.0054921181485099065,
-                0.05150464783218927,
-                -0.0058256682132197275
+                0.004575711201937333,
+                0.05059813379557458,
+                -0.0008392643195519702
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.32573166417822325,
-              "kinetic_energy_j": 6.281913266710249e-05,
+              "horizontal_rms_radius_m": 0.3236338173071682,
+              "kinetic_energy_j": 3.4511897059561354e-06,
               "mean_saturation": 0.0,
               "particles": 512,
               "pore_water_kg": 0.0
@@ -1648,58 +824,83 @@
               "wet_grains": 0
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 12,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2094,
-              "dispatches": 166,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 138
+              },
+              "contacts_last_substep": 2062,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 1780,
+                "history_probes": 5600,
+                "neighbour_candidates": 3564
+              },
+              "dispatches": 140,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
               "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.0004000000189989805,
-                "gpu_wait": 14.159199714660645,
-                "merge": 0.0885000005364418,
-                "motion": 0.0003000000142492354,
-                "order": 0.1096000000834465,
-                "prepare": 0.1647000014781952,
-                "publish": 0.025800000876188278
+                "coupling": 0.0009999999310821295,
+                "gpu_wait": 11.587699890136719,
+                "merge": 0.0731000006198883,
+                "motion": 0.0006000000284984708,
+                "order": 0.13259999454021454,
+                "prepare": 0.1500999927520752,
+                "publish": 0.023099999874830246
               },
-              "max_contacts_per_grain": 8,
+              "max_contacts_per_grain": 7,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
               "state_resident": true,
-              "sticking_contacts_last_substep": 2090,
-              "substep_dt_s": 0.00010162602120544761,
-              "substep_limit": "damping",
-              "substeps": 164,
+              "sticking_contacts_last_substep": 2058,
+              "substep_dt_s": 0.00012077295104973018,
+              "substep_limit": "accuracy",
+              "substeps": 138,
               "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 150,
             "granular": {
               "bounds_max": [
-                0.3750366270542145,
-                0.11169224232435226,
-                0.3750342130661011
+                0.37503159046173096,
+                0.108925461769104,
+                0.3750481903553009
               ],
               "bounds_min": [
-                -0.3750680983066559,
-                0.02489783801138401,
-                -0.37504738569259644
+                -0.37504181265830994,
+                0.02492375671863556,
+                -0.3750351071357727
               ],
               "capacity_kg": 0.0,
               "dry_center_of_mass": [
-                -0.005497639317809459,
-                0.0515041258877318,
-                -0.005825550985719127
+                0.004575561381443557,
+                0.05059803902258861,
+                -0.0008386168799461971
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.3257252837065457,
-              "kinetic_energy_j": 6.852028461755632e-08,
+              "horizontal_rms_radius_m": 0.32363351971574983,
+              "kinetic_energy_j": 2.3292451971163546e-09,
               "mean_saturation": 0.0,
               "particles": 512,
               "pore_water_kg": 0.0
@@ -1716,58 +917,83 @@
               "wet_grains": 0
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 12,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2092,
-              "dispatches": 166,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 138
+              },
+              "contacts_last_substep": 2066,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 1784,
+                "history_probes": 5615,
+                "neighbour_candidates": 3564
+              },
+              "dispatches": 140,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
               "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.000699999975040555,
-                "gpu_wait": 14.14680004119873,
-                "merge": 0.0860000029206276,
-                "motion": 0.0010999999940395355,
-                "order": 0.11900000274181366,
-                "prepare": 0.1703999936580658,
-                "publish": 0.023399999365210533
+                "coupling": 0.0008999999845400453,
+                "gpu_wait": 20.654199600219727,
+                "merge": 0.06369999796152115,
+                "motion": 0.0007999999797903001,
+                "order": 0.12870000302791595,
+                "prepare": 0.14749999344348907,
+                "publish": 0.02199999988079071
               },
-              "max_contacts_per_grain": 8,
+              "max_contacts_per_grain": 7,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
               "state_resident": true,
-              "sticking_contacts_last_substep": 2090,
-              "substep_dt_s": 0.00010162602120544761,
-              "substep_limit": "damping",
-              "substeps": 164,
+              "sticking_contacts_last_substep": 2066,
+              "substep_dt_s": 0.00012077295104973018,
+              "substep_limit": "accuracy",
+              "substeps": 138,
               "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 165,
             "granular": {
               "bounds_max": [
-                0.3750366270542145,
-                0.11169224232435226,
-                0.3750342130661011
+                0.37503159046173096,
+                0.108925461769104,
+                0.3750481903553009
               ],
               "bounds_min": [
-                -0.3750680983066559,
-                0.024897847324609756,
-                -0.37504738569259644
+                -0.37504181265830994,
+                0.02492375671863556,
+                -0.3750351071357727
               ],
               "capacity_kg": 0.0,
               "dry_center_of_mass": [
-                -0.0054976481648338895,
-                0.05150412538932873,
-                -0.005825549313158307
+                0.004575561397700805,
+                0.05059803901895063,
+                -0.0008386168630636816
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.32572528084858415,
-              "kinetic_energy_j": 2.3640690412000314e-09,
+              "horizontal_rms_radius_m": 0.32363351971710086,
+              "kinetic_energy_j": 5.30013430607458e-11,
               "mean_saturation": 0.0,
               "particles": 512,
               "pore_water_kg": 0.0
@@ -1784,58 +1010,83 @@
               "wet_grains": 0
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 12,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2094,
-              "dispatches": 166,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 138
+              },
+              "contacts_last_substep": 2066,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 1784,
+                "history_probes": 5615,
+                "neighbour_candidates": 3564
+              },
+              "dispatches": 140,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
               "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.000699999975040555,
-                "gpu_wait": 14.49120044708252,
-                "merge": 0.15539999306201935,
-                "motion": 0.00039999998989515007,
-                "order": 0.12330000102519989,
-                "prepare": 0.17409999668598175,
-                "publish": 0.024399999529123306
+                "coupling": 0.0010999999940395355,
+                "gpu_wait": 4.875500202178955,
+                "merge": 0.05469999834895134,
+                "motion": 0.0010000000474974513,
+                "order": 0.15809999406337738,
+                "prepare": 0.1729000061750412,
+                "publish": 0.020600000396370888
               },
-              "max_contacts_per_grain": 8,
+              "max_contacts_per_grain": 7,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
               "state_resident": true,
-              "sticking_contacts_last_substep": 2094,
-              "substep_dt_s": 0.00010162602120544761,
-              "substep_limit": "damping",
-              "substeps": 164,
+              "sticking_contacts_last_substep": 2066,
+              "substep_dt_s": 0.00012077295104973018,
+              "substep_limit": "accuracy",
+              "substeps": 138,
               "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 180,
             "granular": {
               "bounds_max": [
-                0.3750366270542145,
-                0.11169224232435226,
-                0.3750342130661011
+                0.37503159046173096,
+                0.108925461769104,
+                0.3750481903553009
               ],
               "bounds_min": [
-                -0.3750680983066559,
-                0.024897847324609756,
-                -0.37504738569259644
+                -0.37504181265830994,
+                0.02492375671863556,
+                -0.3750351071357727
               ],
               "capacity_kg": 0.0,
               "dry_center_of_mass": [
-                -0.005497648355714085,
-                0.0515041264734464,
-                -0.005825549313158307
+                0.004575561397246055,
+                0.05059803902258861,
+                -0.0008386168620973396
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.32572528071581275,
-              "kinetic_energy_j": 2.2310261284380016e-09,
+              "horizontal_rms_radius_m": 0.323633519717124,
+              "kinetic_energy_j": 1.5371390153086518e-11,
               "mean_saturation": 0.0,
               "particles": 512,
               "pore_water_kg": 0.0
@@ -1852,262 +1103,83 @@
               "wet_grains": 0
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 12,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2094,
-              "dispatches": 166,
-              "download_bytes": 30752,
-              "field_acceleration_max_m_s2": 0.0,
-              "history_remapped": false,
-              "history_reset_reason": "",
-              "history_reset_this_step": false,
-              "host_ms": {
-                "coupling": 0.0007000000332482159,
-                "gpu_wait": 14.029199600219727,
-                "merge": 0.08380000293254852,
-                "motion": 0.0007999999797903001,
-                "order": 0.13040000200271606,
-                "prepare": 0.16249999403953552,
-                "publish": 0.023499999195337296
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 138
               },
-              "max_contacts_per_grain": 8,
-              "state_resident": true,
-              "sticking_contacts_last_substep": 2094,
-              "substep_dt_s": 0.00010162602120544761,
-              "substep_limit": "damping",
-              "substeps": 164,
-              "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
-            }
-          },
-          {
-            "step": 195,
-            "granular": {
-              "bounds_max": [
-                0.3750366270542145,
-                0.11169224232435226,
-                0.3750342130661011
-              ],
-              "bounds_min": [
-                -0.3750680983066559,
-                0.024897847324609756,
-                -0.37504738569259644
-              ],
-              "capacity_kg": 0.0,
-              "dry_center_of_mass": [
-                -0.005497648552392314,
-                0.05150412751390835,
-                -0.005825549312703566
-              ],
-              "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.3257252805815213,
-              "kinetic_energy_j": 4.287886771410893e-09,
-              "mean_saturation": 0.0,
-              "particles": 512,
-              "pore_water_kg": 0.0
-            },
-            "wet": {
-              "absorbed_kg": 0.0,
-              "bridge_model": "willett_2000_pendular",
-              "enabled": false,
-              "evaporated_kg": 0.0,
-              "grain_water_kg": 0.0,
-              "liquid_bridges_last_substep": 0,
-              "max_saturation": 0.0,
-              "water_balance_error_kg": 0.0,
-              "wet_grains": 0
-            },
-            "runtime": {
-              "collider_faces": 0,
-              "collider_manifold_truncated": 0,
-              "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2094,
-              "dispatches": 166,
-              "download_bytes": 30752,
-              "field_acceleration_max_m_s2": 0.0,
-              "history_remapped": false,
-              "history_reset_reason": "",
-              "history_reset_this_step": false,
-              "host_ms": {
-                "coupling": 0.0006000000284984708,
-                "gpu_wait": 14.320699691772461,
-                "merge": 0.07440000027418137,
-                "motion": 0.0005000000237487257,
-                "order": 0.11840000003576279,
-                "prepare": 0.14730000495910645,
-                "publish": 0.02410000003874302
+              "contacts_last_substep": 2066,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 1784,
+                "history_probes": 5615,
+                "neighbour_candidates": 3564
               },
-              "max_contacts_per_grain": 8,
-              "state_resident": true,
-              "sticking_contacts_last_substep": 2094,
-              "substep_dt_s": 0.00010162602120544761,
-              "substep_limit": "damping",
-              "substeps": 164,
-              "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
-            }
-          },
-          {
-            "step": 210,
-            "granular": {
-              "bounds_max": [
-                0.3750366270542145,
-                0.11169224232435226,
-                0.3750342130661011
-              ],
-              "bounds_min": [
-                -0.3750680983066559,
-                0.024897847324609756,
-                -0.37504738569259644
-              ],
-              "capacity_kg": 0.0,
-              "dry_center_of_mass": [
-                -0.005497648507429145,
-                0.05150412678267459,
-                -0.005825549313158307
-              ],
-              "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.3257252806182356,
-              "kinetic_energy_j": 2.7498578098272146e-09,
-              "mean_saturation": 0.0,
-              "particles": 512,
-              "pore_water_kg": 0.0
-            },
-            "wet": {
-              "absorbed_kg": 0.0,
-              "bridge_model": "willett_2000_pendular",
-              "enabled": false,
-              "evaporated_kg": 0.0,
-              "grain_water_kg": 0.0,
-              "liquid_bridges_last_substep": 0,
-              "max_saturation": 0.0,
-              "water_balance_error_kg": 0.0,
-              "wet_grains": 0
-            },
-            "runtime": {
-              "collider_faces": 0,
-              "collider_manifold_truncated": 0,
-              "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2094,
-              "dispatches": 166,
-              "download_bytes": 30752,
-              "field_acceleration_max_m_s2": 0.0,
-              "history_remapped": false,
-              "history_reset_reason": "",
-              "history_reset_this_step": false,
-              "host_ms": {
-                "coupling": 0.00039999998989515007,
-                "gpu_wait": 14.096400260925293,
-                "merge": 0.06960000097751617,
-                "motion": 0.0003000000142492354,
-                "order": 0.14149999618530273,
-                "prepare": 0.16850000619888306,
-                "publish": 0.022199999541044235
-              },
-              "max_contacts_per_grain": 8,
-              "state_resident": true,
-              "sticking_contacts_last_substep": 2094,
-              "substep_dt_s": 0.00010162602120544761,
-              "substep_limit": "damping",
-              "substeps": 164,
-              "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
-            }
-          },
-          {
-            "step": 225,
-            "granular": {
-              "bounds_max": [
-                0.3750366270542145,
-                0.11169224232435226,
-                0.3750342130661011
-              ],
-              "bounds_min": [
-                -0.3750680983066559,
-                0.024897847324609756,
-                -0.37504738569259644
-              ],
-              "capacity_kg": 0.0,
-              "dry_center_of_mass": [
-                -0.005497648564841026,
-                0.05150412673901885,
-                -0.005825549312703566
-              ],
-              "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.3257252805806159,
-              "kinetic_energy_j": 2.824973744546807e-09,
-              "mean_saturation": 0.0,
-              "particles": 512,
-              "pore_water_kg": 0.0
-            },
-            "wet": {
-              "absorbed_kg": 0.0,
-              "bridge_model": "willett_2000_pendular",
-              "enabled": false,
-              "evaporated_kg": 0.0,
-              "grain_water_kg": 0.0,
-              "liquid_bridges_last_substep": 0,
-              "max_saturation": 0.0,
-              "water_balance_error_kg": 0.0,
-              "wet_grains": 0
-            },
-            "runtime": {
-              "collider_faces": 0,
-              "collider_manifold_truncated": 0,
-              "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2094,
-              "dispatches": 166,
-              "download_bytes": 30752,
+              "dispatches": 140,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
               "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
                 "coupling": 0.000699999975040555,
-                "gpu_wait": 14.40530014038086,
-                "merge": 0.08079999685287476,
-                "motion": 0.000699999975040555,
-                "order": 0.12520000338554382,
-                "prepare": 0.16179999709129333,
-                "publish": 0.024299999698996544
+                "gpu_wait": 4.8907999992370605,
+                "merge": 0.065700002014637,
+                "motion": 0.0008999999845400453,
+                "order": 0.12780000269412994,
+                "prepare": 0.148499995470047,
+                "publish": 0.022099999710917473
               },
-              "max_contacts_per_grain": 8,
+              "max_contacts_per_grain": 7,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
               "state_resident": true,
-              "sticking_contacts_last_substep": 2094,
-              "substep_dt_s": 0.00010162602120544761,
-              "substep_limit": "damping",
-              "substeps": 164,
+              "sticking_contacts_last_substep": 2066,
+              "substep_dt_s": 0.00012077295104973018,
+              "substep_limit": "accuracy",
+              "substeps": 138,
               "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           },
           {
-            "step": 240,
+            "step": 195,
             "granular": {
               "bounds_max": [
-                0.3750366270542145,
-                0.11169224232435226,
-                0.3750342130661011
+                0.37503159046173096,
+                0.108925461769104,
+                0.3750481903553009
               ],
               "bounds_min": [
-                -0.3750680983066559,
-                0.024897847324609756,
-                -0.37504738569259644
+                -0.37504181265830994,
+                0.02492375671863556,
+                -0.3750351071357727
               ],
               "capacity_kg": 0.0,
               "dry_center_of_mass": [
-                -0.005497648466871363,
-                0.05150412618968406,
-                -0.005825549312703566
+                0.004575561397700805,
+                0.05059803902258861,
+                -0.0008386168630636816
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.32572528065048484,
-              "kinetic_energy_j": 1.6428328710276914e-09,
+              "horizontal_rms_radius_m": 0.32363351971710086,
+              "kinetic_energy_j": 1.5746996697253087e-11,
               "mean_saturation": 0.0,
               "particles": 512,
               "pore_water_kg": 0.0
@@ -2124,34 +1196,338 @@
               "wet_grains": 0
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 12,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2094,
-              "dispatches": 166,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 138
+              },
+              "contacts_last_substep": 2066,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 1784,
+                "history_probes": 5615,
+                "neighbour_candidates": 3564
+              },
+              "dispatches": 140,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
               "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.0004000000189989805,
-                "gpu_wait": 14.032299995422363,
-                "merge": 0.07729999721050262,
-                "motion": 0.00039999998989515007,
-                "order": 0.11309999972581863,
-                "prepare": 0.14399999380111694,
-                "publish": 0.023399999365210533
+                "coupling": 0.0007999999797903001,
+                "gpu_wait": 32.5098991394043,
+                "merge": 0.06069999933242798,
+                "motion": 0.0010000000474974513,
+                "order": 0.11680000275373459,
+                "prepare": 0.13609999418258667,
+                "publish": 0.019300000742077827
               },
-              "max_contacts_per_grain": 8,
+              "max_contacts_per_grain": 7,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
               "state_resident": true,
-              "sticking_contacts_last_substep": 2094,
-              "substep_dt_s": 0.00010162602120544761,
-              "substep_limit": "damping",
-              "substeps": 164,
+              "sticking_contacts_last_substep": 2066,
+              "substep_dt_s": 0.00012077295104973018,
+              "substep_limit": "accuracy",
+              "substeps": 138,
               "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
+            }
+          },
+          {
+            "step": 210,
+            "granular": {
+              "bounds_max": [
+                0.37503159046173096,
+                0.108925461769104,
+                0.3750481903553009
+              ],
+              "bounds_min": [
+                -0.37504181265830994,
+                0.02492375671863556,
+                -0.3750351071357727
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                0.004575561397700805,
+                0.05059803902258861,
+                -0.0008386168628931542
+              ],
+              "dry_mass_kg": 89.36084747314453,
+              "horizontal_rms_radius_m": 0.3236335197171015,
+              "kinetic_energy_j": 9.208475616827405e-12,
+              "mean_saturation": 0.0,
+              "particles": 512,
+              "pore_water_kg": 0.0
+            },
+            "wet": {
+              "absorbed_kg": 0.0,
+              "bridge_model": "willett_2000_pendular",
+              "enabled": false,
+              "evaporated_kg": 0.0,
+              "grain_water_kg": 0.0,
+              "liquid_bridges_last_substep": 0,
+              "max_saturation": 0.0,
+              "water_balance_error_kg": 0.0,
+              "wet_grains": 0
+            },
+            "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 12,
+              "collider_faces": 0,
+              "collider_manifold_truncated": 0,
+              "collider_speed_max_m_s": 0.0,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 138
+              },
+              "contacts_last_substep": 2066,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 1784,
+                "history_probes": 5615,
+                "neighbour_candidates": 3564
+              },
+              "dispatches": 140,
+              "download_bytes": 30784,
+              "field_acceleration_max_m_s2": 0.0,
+              "history_remapped": false,
+              "history_reset_reason": "",
+              "history_reset_this_step": false,
+              "host_ms": {
+                "coupling": 0.000800000037997961,
+                "gpu_wait": 29.798900604248047,
+                "merge": 0.06840000301599503,
+                "motion": 0.0012000000569969416,
+                "order": 0.13449999690055847,
+                "prepare": 0.14090000092983246,
+                "publish": 0.02290000021457672
+              },
+              "max_contacts_per_grain": 7,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
+              "state_resident": true,
+              "sticking_contacts_last_substep": 2066,
+              "substep_dt_s": 0.00012077295104973018,
+              "substep_limit": "accuracy",
+              "substeps": 138,
+              "transfer_batches": 2,
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
+            }
+          },
+          {
+            "step": 225,
+            "granular": {
+              "bounds_max": [
+                0.37503159046173096,
+                0.108925461769104,
+                0.3750481903553009
+              ],
+              "bounds_min": [
+                -0.37504181265830994,
+                0.02492375671863556,
+                -0.3750351071357727
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                0.004575561397700805,
+                0.05059803902258861,
+                -0.0008386168619836546
+              ],
+              "dry_mass_kg": 89.36084747314453,
+              "horizontal_rms_radius_m": 0.3236335197171228,
+              "kinetic_energy_j": 7.873628274794493e-12,
+              "mean_saturation": 0.0,
+              "particles": 512,
+              "pore_water_kg": 0.0
+            },
+            "wet": {
+              "absorbed_kg": 0.0,
+              "bridge_model": "willett_2000_pendular",
+              "enabled": false,
+              "evaporated_kg": 0.0,
+              "grain_water_kg": 0.0,
+              "liquid_bridges_last_substep": 0,
+              "max_saturation": 0.0,
+              "water_balance_error_kg": 0.0,
+              "wet_grains": 0
+            },
+            "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 12,
+              "collider_faces": 0,
+              "collider_manifold_truncated": 0,
+              "collider_speed_max_m_s": 0.0,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 138
+              },
+              "contacts_last_substep": 2066,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 1784,
+                "history_probes": 5615,
+                "neighbour_candidates": 3564
+              },
+              "dispatches": 140,
+              "download_bytes": 30784,
+              "field_acceleration_max_m_s2": 0.0,
+              "history_remapped": false,
+              "history_reset_reason": "",
+              "history_reset_this_step": false,
+              "host_ms": {
+                "coupling": 0.0013000000035390258,
+                "gpu_wait": 26.105199813842773,
+                "merge": 0.0544000007212162,
+                "motion": 0.0007999999797903001,
+                "order": 0.12939999997615814,
+                "prepare": 0.1525000035762787,
+                "publish": 0.01640000008046627
+              },
+              "max_contacts_per_grain": 7,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
+              "state_resident": true,
+              "sticking_contacts_last_substep": 2066,
+              "substep_dt_s": 0.00012077295104973018,
+              "substep_limit": "accuracy",
+              "substeps": 138,
+              "transfer_batches": 2,
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
+            }
+          },
+          {
+            "step": 240,
+            "granular": {
+              "bounds_max": [
+                0.37503159046173096,
+                0.108925461769104,
+                0.3750481903553009
+              ],
+              "bounds_min": [
+                -0.37504181265830994,
+                0.02492375671863556,
+                -0.3750351071357727
+              ],
+              "capacity_kg": 0.0,
+              "dry_center_of_mass": [
+                0.004575561397700805,
+                0.05059803902258861,
+                -0.0008386168639731714
+              ],
+              "dry_mass_kg": 89.36084747314453,
+              "horizontal_rms_radius_m": 0.3236335197170796,
+              "kinetic_energy_j": 7.499518186284893e-12,
+              "mean_saturation": 0.0,
+              "particles": 512,
+              "pore_water_kg": 0.0
+            },
+            "wet": {
+              "absorbed_kg": 0.0,
+              "bridge_model": "willett_2000_pendular",
+              "enabled": false,
+              "evaporated_kg": 0.0,
+              "grain_water_kg": 0.0,
+              "liquid_bridges_last_substep": 0,
+              "max_saturation": 0.0,
+              "water_balance_error_kg": 0.0,
+              "wet_grains": 0
+            },
+            "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 12,
+              "collider_faces": 0,
+              "collider_manifold_truncated": 0,
+              "collider_speed_max_m_s": 0.0,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 138
+              },
+              "contacts_last_substep": 2066,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 1784,
+                "history_probes": 5615,
+                "neighbour_candidates": 3564
+              },
+              "dispatches": 140,
+              "download_bytes": 30784,
+              "field_acceleration_max_m_s2": 0.0,
+              "history_remapped": false,
+              "history_reset_reason": "",
+              "history_reset_this_step": false,
+              "host_ms": {
+                "coupling": 0.0010999999940395355,
+                "gpu_wait": 34.02389907836914,
+                "merge": 0.08229999989271164,
+                "motion": 0.0012000000569969416,
+                "order": 0.15189999341964722,
+                "prepare": 0.15189999341964722,
+                "publish": 0.03400000184774399
+              },
+              "max_contacts_per_grain": 7,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
+              "state_resident": true,
+              "sticking_contacts_last_substep": 2066,
+              "substep_dt_s": 0.00012077295104973018,
+              "substep_limit": "accuracy",
+              "substeps": 138,
+              "transfer_batches": 2,
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           }
         ]
@@ -2163,24 +1539,24 @@
             "step": 75,
             "granular": {
               "bounds_max": [
-                0.29798850417137146,
-                0.36728864908218384,
-                0.34417030215263367
+                0.36864420771598816,
+                0.34579160809516907,
+                0.35636579990386963
               ],
               "bounds_min": [
-                -0.34240734577178955,
-                0.024362212046980858,
-                -0.2728354036808014
+                -0.3709225058555603,
+                0.024218695238232613,
+                -0.3476378917694092
               ],
               "capacity_kg": 1.6755162477493286,
               "dry_center_of_mass": [
-                -0.004888064939223101,
-                0.13649843889288604,
-                0.006542536142148905
+                -0.00134633975613951,
+                0.13575571909314013,
+                -0.0006513192047634982
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.19821852828240843,
-              "kinetic_energy_j": 0.00039125592402007976,
+              "horizontal_rms_radius_m": 0.20575160738275675,
+              "kinetic_energy_j": 0.05516669676108248,
               "mean_saturation": 0.5,
               "particles": 512,
               "pore_water_kg": 0.8377581238746643
@@ -2191,64 +1567,89 @@
               "enabled": true,
               "evaporated_kg": 0.0,
               "grain_water_kg": 0.8377581238746643,
-              "liquid_bridges_last_substep": 2750,
+              "liquid_bridges_last_substep": 2648,
               "max_saturation": 0.5,
               "water_balance_error_kg": 0.0,
               "wet_grains": 512
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 13,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2469,
-              "dispatches": 164,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 136
+              },
+              "contacts_last_substep": 2408,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 1,
+                "grain_pairs": 2354,
+                "history_probes": 7370,
+                "neighbour_candidates": 4692
+              },
+              "dispatches": 138,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
-              "history_remapped": false,
+              "history_remapped": true,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.00839999970048666,
-                "gpu_wait": 19.28059959411621,
-                "merge": 0.10199999809265137,
-                "motion": 0.0015999999595806003,
-                "order": 0.12240000069141388,
-                "prepare": 0.16459999978542328,
-                "publish": 0.029400000348687172
+                "coupling": 0.0072999997064471245,
+                "gpu_wait": 12.292799949645996,
+                "merge": 0.08060000091791153,
+                "motion": 0.0019000000320374966,
+                "order": 0.15850000083446503,
+                "prepare": 0.17309999465942383,
+                "publish": 0.024800000712275505
               },
-              "max_contacts_per_grain": 8,
-              "state_resident": true,
-              "sticking_contacts_last_substep": 2468,
-              "substep_dt_s": 0.00010288066550856456,
-              "substep_limit": "damping",
-              "substeps": 162,
-              "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "max_contacts_per_grain": 9,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 2,
+              "state_resident": false,
+              "sticking_contacts_last_substep": 2405,
+              "substep_dt_s": 0.00012254902685526758,
+              "substep_limit": "accuracy",
+              "substeps": 136,
+              "transfer_batches": 3,
+              "upload_bytes": 61504,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 90,
             "granular": {
               "bounds_max": [
-                0.2979864478111267,
-                0.36727607250213623,
-                0.34417006373405457
+                0.36861106753349304,
+                0.3457948565483093,
+                0.35118627548217773
               ],
               "bounds_min": [
-                -0.34240734577178955,
-                0.024362480267882347,
-                -0.2728412449359894
+                -0.370890349149704,
+                0.024234386160969734,
+                -0.3480018675327301
               ],
               "capacity_kg": 1.6755162477493286,
               "dry_center_of_mass": [
-                -0.004894493716392392,
-                0.1364956254583374,
-                0.00653350477813324
+                -0.0017548525236179685,
+                0.1357120652537559,
+                -0.0006754500764429996
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.19821933196380032,
-              "kinetic_energy_j": 6.488211620913018e-05,
+              "horizontal_rms_radius_m": 0.206110727331247,
+              "kinetic_energy_j": 0.051015220461427944,
               "mean_saturation": 0.5,
               "particles": 512,
               "pore_water_kg": 0.8377581238746643
@@ -2259,64 +1660,89 @@
               "enabled": true,
               "evaporated_kg": 0.0,
               "grain_water_kg": 0.8377581238746643,
-              "liquid_bridges_last_substep": 2748,
+              "liquid_bridges_last_substep": 2650,
               "max_saturation": 0.5,
               "water_balance_error_kg": 0.0,
               "wet_grains": 512
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 13,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2469,
-              "dispatches": 164,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 136
+              },
+              "contacts_last_substep": 2408,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 1,
+                "grain_pairs": 2354,
+                "history_probes": 7370,
+                "neighbour_candidates": 4690
+              },
+              "dispatches": 138,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
-              "history_remapped": true,
+              "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.008700000122189522,
-                "gpu_wait": 19.419700622558594,
-                "merge": 0.10400000214576721,
-                "motion": 0.0007999999797903001,
-                "order": 0.22380000352859497,
-                "prepare": 0.17030000686645508,
-                "publish": 0.028699999675154686
+                "coupling": 0.005200000014156103,
+                "gpu_wait": 12.066699981689453,
+                "merge": 0.06710000336170197,
+                "motion": 0.00039999998989515007,
+                "order": 0.1143999993801117,
+                "prepare": 0.12520000338554382,
+                "publish": 0.02239999920129776
               },
-              "max_contacts_per_grain": 8,
-              "state_resident": false,
-              "sticking_contacts_last_substep": 2469,
-              "substep_dt_s": 0.00010288066550856456,
-              "substep_limit": "damping",
-              "substeps": 162,
-              "transfer_batches": 3,
-              "upload_bytes": 61472,
-              "working_set_bytes": 3884908
+              "max_contacts_per_grain": 9,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 3,
+              "state_resident": true,
+              "sticking_contacts_last_substep": 2408,
+              "substep_dt_s": 0.00012254902685526758,
+              "substep_limit": "accuracy",
+              "substeps": 136,
+              "transfer_batches": 2,
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 105,
             "granular": {
               "bounds_max": [
-                0.2979864478111267,
-                0.36726829409599304,
-                0.34417006373405457
+                0.36861342191696167,
+                0.3457791805267334,
+                0.31419405341148376
               ],
               "bounds_min": [
-                -0.34240734577178955,
-                0.02436027303338051,
-                -0.2728489339351654
+                -0.370890349149704,
+                0.02423199638724327,
+                -0.3480018675327301
               ],
               "capacity_kg": 1.6755162477493286,
               "dry_center_of_mass": [
-                -0.004897087178619566,
-                0.13649283204722448,
-                0.0065274948277646815
+                -0.0017167685117555774,
+                0.13569879080750977,
+                -0.0007104074594241996
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.19822072892893836,
-              "kinetic_energy_j": 2.2121811083130062e-05,
+              "horizontal_rms_radius_m": 0.20592265606385401,
+              "kinetic_energy_j": 0.028131289787576657,
               "mean_saturation": 0.5,
               "particles": 512,
               "pore_water_kg": 0.8377581238746643
@@ -2327,64 +1753,89 @@
               "enabled": true,
               "evaporated_kg": 0.0,
               "grain_water_kg": 0.8377581238746643,
-              "liquid_bridges_last_substep": 2748,
+              "liquid_bridges_last_substep": 2650,
               "max_saturation": 0.5,
               "water_balance_error_kg": 0.0,
               "wet_grains": 512
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 13,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2469,
-              "dispatches": 164,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 136
+              },
+              "contacts_last_substep": 2408,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 1,
+                "grain_pairs": 2354,
+                "history_probes": 7370,
+                "neighbour_candidates": 4690
+              },
+              "dispatches": 138,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
-              "history_remapped": true,
+              "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.007599999662488699,
-                "gpu_wait": 19.210800170898438,
-                "merge": 0.07989999651908875,
-                "motion": 0.00039999998989515007,
-                "order": 0.1128000020980835,
-                "prepare": 0.17090000212192535,
-                "publish": 0.025800000876188278
+                "coupling": 0.004699999932199717,
+                "gpu_wait": 14.416099548339844,
+                "merge": 0.06589999794960022,
+                "motion": 0.00019999999494757503,
+                "order": 0.11330000311136246,
+                "prepare": 0.12380000203847885,
+                "publish": 0.02239999920129776
               },
-              "max_contacts_per_grain": 8,
-              "state_resident": false,
-              "sticking_contacts_last_substep": 2469,
-              "substep_dt_s": 0.00010288066550856456,
-              "substep_limit": "damping",
-              "substeps": 162,
-              "transfer_batches": 3,
-              "upload_bytes": 61472,
-              "working_set_bytes": 3884908
+              "max_contacts_per_grain": 9,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 2,
+              "state_resident": true,
+              "sticking_contacts_last_substep": 2408,
+              "substep_dt_s": 0.00012254902685526758,
+              "substep_limit": "accuracy",
+              "substeps": 136,
+              "transfer_batches": 2,
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 120,
             "granular": {
               "bounds_max": [
-                0.29798415303230286,
-                0.3672640919685364,
-                0.34417006373405457
+                0.36862215399742126,
+                0.34578192234039307,
+                0.2832551896572113
               ],
               "bounds_min": [
-                -0.34240734577178955,
-                0.024359939619898796,
-                -0.2728516161441803
+                -0.370890349149704,
+                0.024228084832429886,
+                -0.3480018675327301
               ],
               "capacity_kg": 1.6755162477493286,
               "dry_center_of_mass": [
-                -0.004899412327972666,
-                0.13649210141738868,
-                0.006523185985201943
+                -0.0015020323424437038,
+                0.13569593942156638,
+                -0.0007894936739117164
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.19822114668861365,
-              "kinetic_energy_j": 7.581685606403728e-06,
+              "horizontal_rms_radius_m": 0.20555312775599607,
+              "kinetic_energy_j": 0.01572485019982836,
               "mean_saturation": 0.5,
               "particles": 512,
               "pore_water_kg": 0.8377581238746643
@@ -2395,64 +1846,89 @@
               "enabled": true,
               "evaporated_kg": 0.0,
               "grain_water_kg": 0.8377581238746643,
-              "liquid_bridges_last_substep": 2748,
+              "liquid_bridges_last_substep": 2650,
               "max_saturation": 0.5,
               "water_balance_error_kg": 0.0,
               "wet_grains": 512
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 13,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2469,
-              "dispatches": 164,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 136
+              },
+              "contacts_last_substep": 2408,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 1,
+                "grain_pairs": 2354,
+                "history_probes": 7370,
+                "neighbour_candidates": 4696
+              },
+              "dispatches": 138,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
-              "history_remapped": true,
+              "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.006800000090152025,
-                "gpu_wait": 19.102399826049805,
-                "merge": 0.07720000296831131,
-                "motion": 0.0006000000284984708,
-                "order": 0.1200999990105629,
-                "prepare": 0.15639999508857727,
-                "publish": 0.024700000882148743
+                "coupling": 0.006899999920278788,
+                "gpu_wait": 11.421600341796875,
+                "merge": 0.08470000326633453,
+                "motion": 0.000699999975040555,
+                "order": 0.13590000569820404,
+                "prepare": 0.15629999339580536,
+                "publish": 0.024800000712275505
               },
-              "max_contacts_per_grain": 8,
-              "state_resident": false,
-              "sticking_contacts_last_substep": 2469,
-              "substep_dt_s": 0.00010288066550856456,
-              "substep_limit": "damping",
-              "substeps": 162,
-              "transfer_batches": 3,
-              "upload_bytes": 61472,
-              "working_set_bytes": 3884908
+              "max_contacts_per_grain": 9,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 2,
+              "state_resident": true,
+              "sticking_contacts_last_substep": 2408,
+              "substep_dt_s": 0.00012254902685526758,
+              "substep_limit": "accuracy",
+              "substeps": 136,
+              "transfer_batches": 2,
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 135,
             "granular": {
               "bounds_max": [
-                0.29798415303230286,
-                0.3672662675380707,
-                0.34417006373405457
+                0.3686254918575287,
+                0.34578976035118103,
+                0.2832409143447876
               ],
               "bounds_min": [
-                -0.34240734577178955,
-                0.024359814822673798,
-                -0.2728545069694519
+                -0.370890349149704,
+                0.02422913908958435,
+                -0.3480018675327301
               ],
               "capacity_kg": 1.6755162477493286,
               "dry_center_of_mass": [
-                -0.004900032285092964,
-                0.13649214896213385,
-                0.006518352361069915
+                -0.0014573862521274521,
+                0.13568443905751346,
+                -0.0008452420846652319
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.19822114621389825,
-              "kinetic_energy_j": 3.624538995400634e-06,
+              "horizontal_rms_radius_m": 0.20549440307452274,
+              "kinetic_energy_j": 0.0003351124127295342,
               "mean_saturation": 0.5,
               "particles": 512,
               "pore_water_kg": 0.8377581238746643
@@ -2463,64 +1939,89 @@
               "enabled": true,
               "evaporated_kg": 0.0,
               "grain_water_kg": 0.8377581238746643,
-              "liquid_bridges_last_substep": 2748,
+              "liquid_bridges_last_substep": 2652,
               "max_saturation": 0.5,
               "water_balance_error_kg": 0.0,
               "wet_grains": 512
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 13,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2469,
-              "dispatches": 164,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 136
+              },
+              "contacts_last_substep": 2410,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 2356,
+                "history_probes": 7375,
+                "neighbour_candidates": 4698
+              },
+              "dispatches": 138,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
-              "history_remapped": false,
+              "history_remapped": true,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.009000000543892384,
-                "gpu_wait": 19.19379997253418,
-                "merge": 0.10779999941587448,
-                "motion": 0.00039999998989515007,
-                "order": 0.12919999659061432,
-                "prepare": 0.19140000641345978,
-                "publish": 0.032999999821186066
+                "coupling": 0.007199999876320362,
+                "gpu_wait": 12.246700286865234,
+                "merge": 0.0812000036239624,
+                "motion": 0.000699999975040555,
+                "order": 0.13230000436306,
+                "prepare": 0.1559000015258789,
+                "publish": 0.023900000378489494
               },
-              "max_contacts_per_grain": 8,
-              "state_resident": true,
-              "sticking_contacts_last_substep": 2469,
-              "substep_dt_s": 0.00010288066550856456,
-              "substep_limit": "damping",
-              "substeps": 162,
-              "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "max_contacts_per_grain": 9,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
+              "state_resident": false,
+              "sticking_contacts_last_substep": 2409,
+              "substep_dt_s": 0.00012254902685526758,
+              "substep_limit": "accuracy",
+              "substeps": 136,
+              "transfer_batches": 3,
+              "upload_bytes": 61504,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 150,
             "granular": {
               "bounds_max": [
-                0.29798415303230286,
-                0.36726754903793335,
-                0.34417006373405457
+                0.3686201870441437,
+                0.3457915484905243,
+                0.2832399010658264
               ],
               "bounds_min": [
-                -0.34240734577178955,
-                0.024359486997127533,
-                -0.27285730838775635
+                -0.370890349149704,
+                0.024230271577835083,
+                -0.3480018675327301
               ],
               "capacity_kg": 1.6755162477493286,
               "dry_center_of_mass": [
-                -0.004900748148600064,
-                0.13649217550846515,
-                0.006514890565142634
+                -0.0014652327780595475,
+                0.13568421568925249,
+                -0.0008486907391826979
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.1982212510909381,
-              "kinetic_energy_j": 2.354205250924665e-06,
+              "horizontal_rms_radius_m": 0.2054943754525002,
+              "kinetic_energy_j": 1.2041162934904413e-05,
               "mean_saturation": 0.5,
               "particles": 512,
               "pore_water_kg": 0.8377581238746643
@@ -2531,64 +2032,89 @@
               "enabled": true,
               "evaporated_kg": 0.0,
               "grain_water_kg": 0.8377581238746643,
-              "liquid_bridges_last_substep": 2748,
+              "liquid_bridges_last_substep": 2652,
               "max_saturation": 0.5,
               "water_balance_error_kg": 0.0,
               "wet_grains": 512
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 13,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2469,
-              "dispatches": 164,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 136
+              },
+              "contacts_last_substep": 2411,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 2356,
+                "history_probes": 7377,
+                "neighbour_candidates": 4698
+              },
+              "dispatches": 138,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
               "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.008500000461935997,
-                "gpu_wait": 19.100400924682617,
-                "merge": 0.09669999778270721,
+                "coupling": 0.005499999970197678,
+                "gpu_wait": 15.838700294494629,
+                "merge": 0.07259999960660934,
                 "motion": 0.0005000000237487257,
-                "order": 0.1152999997138977,
-                "prepare": 0.1534000039100647,
-                "publish": 0.02850000001490116
+                "order": 0.1151999980211258,
+                "prepare": 0.12960000336170197,
+                "publish": 0.02329999953508377
               },
-              "max_contacts_per_grain": 8,
+              "max_contacts_per_grain": 9,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
               "state_resident": true,
-              "sticking_contacts_last_substep": 2469,
-              "substep_dt_s": 0.00010288066550856456,
-              "substep_limit": "damping",
-              "substeps": 162,
+              "sticking_contacts_last_substep": 2410,
+              "substep_dt_s": 0.00012254902685526758,
+              "substep_limit": "accuracy",
+              "substeps": 136,
               "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 165,
             "granular": {
               "bounds_max": [
-                0.29798415303230286,
-                0.3672679364681244,
-                0.34417006373405457
+                0.3686217963695526,
+                0.34578678011894226,
+                0.2832545042037964
               ],
               "bounds_min": [
-                -0.34240734577178955,
-                0.024359507486224174,
-                -0.2728574872016907
+                -0.370890349149704,
+                0.02422918938100338,
+                -0.3480018675327301
               ],
               "capacity_kg": 1.6755162477493286,
               "dry_center_of_mass": [
-                -0.004901688283268848,
-                0.13649219635408347,
-                0.006512333838372712
+                -0.001469470965162097,
+                0.13568326830863955,
+                -0.0008273343489726414
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.19822125630852971,
-              "kinetic_energy_j": 1.1614888360310573e-06,
+              "horizontal_rms_radius_m": 0.20549518797758437,
+              "kinetic_energy_j": 1.9883431628752297e-05,
               "mean_saturation": 0.5,
               "particles": 512,
               "pore_water_kg": 0.8377581238746643
@@ -2599,64 +2125,89 @@
               "enabled": true,
               "evaporated_kg": 0.0,
               "grain_water_kg": 0.8377581238746643,
-              "liquid_bridges_last_substep": 2748,
+              "liquid_bridges_last_substep": 2652,
               "max_saturation": 0.5,
               "water_balance_error_kg": 0.0,
               "wet_grains": 512
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 13,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2469,
-              "dispatches": 164,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 136
+              },
+              "contacts_last_substep": 2411,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 2356,
+                "history_probes": 7377,
+                "neighbour_candidates": 4698
+              },
+              "dispatches": 138,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
               "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.010499999858438969,
-                "gpu_wait": 19.537399291992188,
-                "merge": 0.10719999670982361,
-                "motion": 0.0006000000284984708,
-                "order": 0.11550000309944153,
-                "prepare": 0.1518000066280365,
-                "publish": 0.032999999821186066
+                "coupling": 0.007400000002235174,
+                "gpu_wait": 17.797700881958008,
+                "merge": 0.07970000058412552,
+                "motion": 0.0005000000237487257,
+                "order": 0.1266999989748001,
+                "prepare": 0.1354999989271164,
+                "publish": 0.023800000548362732
               },
-              "max_contacts_per_grain": 8,
+              "max_contacts_per_grain": 9,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
               "state_resident": true,
-              "sticking_contacts_last_substep": 2469,
-              "substep_dt_s": 0.00010288066550856456,
-              "substep_limit": "damping",
-              "substeps": 162,
+              "sticking_contacts_last_substep": 2411,
+              "substep_dt_s": 0.00012254902685526758,
+              "substep_limit": "accuracy",
+              "substeps": 136,
               "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 180,
             "granular": {
               "bounds_max": [
-                0.29798415303230286,
-                0.36726778745651245,
-                0.34417006373405457
+                0.3686208724975586,
+                0.3457833230495453,
+                0.2832564115524292
               ],
               "bounds_min": [
-                -0.34240734577178955,
-                0.024359405040740967,
-                -0.2728574872016907
+                -0.370890349149704,
+                0.024229928851127625,
+                -0.3480018675327301
               ],
               "capacity_kg": 1.6755162477493286,
               "dry_center_of_mass": [
-                -0.004901511223351912,
-                0.1364922011271118,
-                0.006511674808280052
+                -0.0014752938690776232,
+                0.13568248673254854,
+                -0.000824833310669891
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.19822114206756175,
-              "kinetic_energy_j": 1.9212216401046278e-07,
+              "horizontal_rms_radius_m": 0.20549543994877453,
+              "kinetic_energy_j": 2.7876359863570728e-06,
               "mean_saturation": 0.5,
               "particles": 512,
               "pore_water_kg": 0.8377581238746643
@@ -2667,64 +2218,89 @@
               "enabled": true,
               "evaporated_kg": 0.0,
               "grain_water_kg": 0.8377581238746643,
-              "liquid_bridges_last_substep": 2748,
+              "liquid_bridges_last_substep": 2652,
               "max_saturation": 0.5,
               "water_balance_error_kg": 0.0,
               "wet_grains": 512
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 13,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2469,
-              "dispatches": 164,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 136
+              },
+              "contacts_last_substep": 2411,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 2356,
+                "history_probes": 7377,
+                "neighbour_candidates": 4698
+              },
+              "dispatches": 138,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
               "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.00699999975040555,
-                "gpu_wait": 19.257999420166016,
-                "merge": 0.09929999709129333,
-                "motion": 0.0006000000284984708,
-                "order": 0.11379999667406082,
-                "prepare": 0.16439999639987946,
-                "publish": 0.02710000053048134
+                "coupling": 0.007500000298023224,
+                "gpu_wait": 13.020999908447266,
+                "merge": 0.09629999846220016,
+                "motion": 0.0008999999845400453,
+                "order": 0.15119999647140503,
+                "prepare": 0.179299995303154,
+                "publish": 0.027699999511241913
               },
-              "max_contacts_per_grain": 8,
+              "max_contacts_per_grain": 9,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
               "state_resident": true,
-              "sticking_contacts_last_substep": 2469,
-              "substep_dt_s": 0.00010288066550856456,
-              "substep_limit": "damping",
-              "substeps": 162,
+              "sticking_contacts_last_substep": 2411,
+              "substep_dt_s": 0.00012254902685526758,
+              "substep_limit": "accuracy",
+              "substeps": 136,
               "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 195,
             "granular": {
               "bounds_max": [
-                0.29798415303230286,
-                0.36726781725883484,
-                0.34417006373405457
+                0.36862054467201233,
+                0.3457835912704468,
+                0.283252477645874
               ],
               "bounds_min": [
-                -0.34240734577178955,
-                0.024359602481126785,
-                -0.2728574872016907
+                -0.370890349149704,
+                0.02423044852912426,
+                -0.3480018675327301
               ],
               "capacity_kg": 1.6755162477493286,
               "dry_center_of_mass": [
-                -0.004901163865270077,
-                0.13649225654808106,
-                0.00651214409418802
+                -0.00147607771020832,
+                0.1356825385228149,
+                -0.0008313958545898091
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.19822109324650478,
-              "kinetic_energy_j": 2.1186970809211354e-07,
+              "horizontal_rms_radius_m": 0.20549533182493696,
+              "kinetic_energy_j": 1.6731688489702252e-06,
               "mean_saturation": 0.5,
               "particles": 512,
               "pore_water_kg": 0.8377581238746643
@@ -2735,64 +2311,89 @@
               "enabled": true,
               "evaporated_kg": 0.0,
               "grain_water_kg": 0.8377581238746643,
-              "liquid_bridges_last_substep": 2748,
+              "liquid_bridges_last_substep": 2652,
               "max_saturation": 0.5,
               "water_balance_error_kg": 0.0,
               "wet_grains": 512
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 13,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2469,
-              "dispatches": 164,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 136
+              },
+              "contacts_last_substep": 2411,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 2356,
+                "history_probes": 7377,
+                "neighbour_candidates": 4698
+              },
+              "dispatches": 138,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
               "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.008700000122189522,
-                "gpu_wait": 19.45840072631836,
-                "merge": 0.09030000120401382,
-                "motion": 0.0003000000142492354,
-                "order": 0.17679999768733978,
-                "prepare": 0.1451999992132187,
-                "publish": 0.026399999856948853
+                "coupling": 0.00699999975040555,
+                "gpu_wait": 14.330900192260742,
+                "merge": 0.0851999968290329,
+                "motion": 0.0008999999845400453,
+                "order": 0.1451999992132187,
+                "prepare": 0.16920000314712524,
+                "publish": 0.02459999918937683
               },
-              "max_contacts_per_grain": 8,
+              "max_contacts_per_grain": 9,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
               "state_resident": true,
-              "sticking_contacts_last_substep": 2469,
-              "substep_dt_s": 0.00010288066550856456,
-              "substep_limit": "damping",
-              "substeps": 162,
+              "sticking_contacts_last_substep": 2411,
+              "substep_dt_s": 0.00012254902685526758,
+              "substep_limit": "accuracy",
+              "substeps": 136,
               "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 210,
             "granular": {
               "bounds_max": [
-                0.29798415303230286,
-                0.3672676682472229,
-                0.34417006373405457
+                0.3686201870441437,
+                0.345784455537796,
+                0.2832510471343994
               ],
               "bounds_min": [
-                -0.34240734577178955,
-                0.024359621107578278,
-                -0.2728574872016907
+                -0.370890349149704,
+                0.02423013560473919,
+                -0.3480018675327301
               ],
               "capacity_kg": 1.6755162477493286,
               "dry_center_of_mass": [
-                -0.00490093793092686,
-                0.13649225519111485,
-                0.006512129911186598
+                -0.001472571999272562,
+                0.13568299918188134,
+                -0.0008325558518151659
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.1982210091643549,
-              "kinetic_energy_j": 1.7357790331719045e-07,
+              "horizontal_rms_radius_m": 0.20549508186072157,
+              "kinetic_energy_j": 1.4352800229059905e-06,
               "mean_saturation": 0.5,
               "particles": 512,
               "pore_water_kg": 0.8377581238746643
@@ -2803,64 +2404,89 @@
               "enabled": true,
               "evaporated_kg": 0.0,
               "grain_water_kg": 0.8377581238746643,
-              "liquid_bridges_last_substep": 2748,
+              "liquid_bridges_last_substep": 2652,
               "max_saturation": 0.5,
               "water_balance_error_kg": 0.0,
               "wet_grains": 512
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 13,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2469,
-              "dispatches": 164,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 136
+              },
+              "contacts_last_substep": 2411,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 2356,
+                "history_probes": 7377,
+                "neighbour_candidates": 4698
+              },
+              "dispatches": 138,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
               "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.008100000210106373,
-                "gpu_wait": 19.33049964904785,
-                "merge": 0.09359999746084213,
-                "motion": 0.0006000000284984708,
-                "order": 0.11420000344514847,
-                "prepare": 0.26460000872612,
-                "publish": 0.025599999353289604
+                "coupling": 0.0064999996684491634,
+                "gpu_wait": 12.455499649047852,
+                "merge": 0.08020000159740448,
+                "motion": 0.000699999975040555,
+                "order": 0.12770000100135803,
+                "prepare": 0.14820000529289246,
+                "publish": 0.02280000038444996
               },
-              "max_contacts_per_grain": 8,
+              "max_contacts_per_grain": 9,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
               "state_resident": true,
-              "sticking_contacts_last_substep": 2469,
-              "substep_dt_s": 0.00010288066550856456,
-              "substep_limit": "damping",
-              "substeps": 162,
+              "sticking_contacts_last_substep": 2411,
+              "substep_dt_s": 0.00012254902685526758,
+              "substep_limit": "accuracy",
+              "substeps": 136,
               "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 225,
             "granular": {
               "bounds_max": [
-                0.29798415303230286,
-                0.3672677278518677,
-                0.34417006373405457
+                0.36862021684646606,
+                0.3457838296890259,
+                0.28325095772743225
               ],
               "bounds_min": [
-                -0.34240734577178955,
-                0.02435966394841671,
-                -0.2728574872016907
+                -0.370890349149704,
+                0.024229709059000015,
+                -0.3480018675327301
               ],
               "capacity_kg": 1.6755162477493286,
               "dry_center_of_mass": [
-                -0.0049008916274147175,
-                0.13649228940994357,
-                0.0065120808137067105
+                -0.0014710230646528388,
+                0.13568308395406342,
+                -0.0008322099716195853
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.19822103007208777,
-              "kinetic_energy_j": 1.722805221912769e-07,
+              "horizontal_rms_radius_m": 0.20549515678759842,
+              "kinetic_energy_j": 2.607867801855841e-07,
               "mean_saturation": 0.5,
               "particles": 512,
               "pore_water_kg": 0.8377581238746643
@@ -2871,64 +2497,89 @@
               "enabled": true,
               "evaporated_kg": 0.0,
               "grain_water_kg": 0.8377581238746643,
-              "liquid_bridges_last_substep": 2748,
+              "liquid_bridges_last_substep": 2652,
               "max_saturation": 0.5,
               "water_balance_error_kg": 0.0,
               "wet_grains": 512
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 13,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2469,
-              "dispatches": 164,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 136
+              },
+              "contacts_last_substep": 2411,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 2356,
+                "history_probes": 7377,
+                "neighbour_candidates": 4698
+              },
+              "dispatches": 138,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
               "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.007900000549852848,
-                "gpu_wait": 19.269699096679688,
-                "merge": 0.08780000358819962,
-                "motion": 0.0005000000237487257,
-                "order": 0.14720000326633453,
-                "prepare": 0.2946000099182129,
-                "publish": 0.026799999177455902
+                "coupling": 0.005200000014156103,
+                "gpu_wait": 14.732600212097168,
+                "merge": 0.06539999693632126,
+                "motion": 0.0003000000142492354,
+                "order": 0.10589999705553055,
+                "prepare": 0.12200000137090683,
+                "publish": 0.021199999377131462
               },
-              "max_contacts_per_grain": 8,
+              "max_contacts_per_grain": 9,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
               "state_resident": true,
-              "sticking_contacts_last_substep": 2469,
-              "substep_dt_s": 0.00010288066550856456,
-              "substep_limit": "damping",
-              "substeps": 162,
+              "sticking_contacts_last_substep": 2411,
+              "substep_dt_s": 0.00012254902685526758,
+              "substep_limit": "accuracy",
+              "substeps": 136,
               "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           },
           {
             "step": 240,
             "granular": {
               "bounds_max": [
-                0.29798415303230286,
-                0.3672676384449005,
-                0.34417006373405457
+                0.36862021684646606,
+                0.3457830548286438,
+                0.2832508087158203
               ],
               "bounds_min": [
-                -0.34240734577178955,
-                0.024359723553061485,
-                -0.2728574872016907
+                -0.370890349149704,
+                0.02423001453280449,
+                -0.3480018675327301
               ],
               "capacity_kg": 1.6755162477493286,
               "dry_center_of_mass": [
-                -0.004900917988322847,
-                0.136492248489958,
-                0.0065121907136927335
+                -0.0014721041882239498,
+                0.13568301030318258,
+                -0.0008325780287564344
               ],
               "dry_mass_kg": 89.36084747314453,
-              "horizontal_rms_radius_m": 0.19822102408684808,
-              "kinetic_energy_j": 1.3634885074936567e-07,
+              "horizontal_rms_radius_m": 0.20549496587332527,
+              "kinetic_energy_j": 1.7631360447387443e-07,
               "mean_saturation": 0.5,
               "particles": 512,
               "pore_water_kg": 0.8377581238746643
@@ -2939,48 +2590,73 @@
               "enabled": true,
               "evaporated_kg": 0.0,
               "grain_water_kg": 0.8377581238746643,
-              "liquid_bridges_last_substep": 2748,
+              "liquid_bridges_last_substep": 2652,
               "max_saturation": 0.5,
               "water_balance_error_kg": 0.0,
               "wet_grains": 512
             },
             "runtime": {
+              "cfl_contact_budget_retry": false,
+              "cfl_contacts_per_grain": 13,
               "collider_faces": 0,
               "collider_manifold_truncated": 0,
               "collider_speed_max_m_s": 0.0,
-              "contacts_last_substep": 2469,
-              "dispatches": 164,
-              "download_bytes": 30752,
+              "common_clock": {
+                "continuum_grid_steps": 0,
+                "enabled": false,
+                "liquid_reaction_on_gpu": false,
+                "liquid_support": "frame_sparse_cfd_dem",
+                "transport_steps": 136
+              },
+              "contacts_last_substep": 2411,
+              "cost_last_substep": {
+                "collider_nodes_visited": 0,
+                "contactless_grains": 0,
+                "grain_pairs": 2356,
+                "history_probes": 7377,
+                "neighbour_candidates": 4698
+              },
+              "dispatches": 138,
+              "download_bytes": 30784,
               "field_acceleration_max_m_s2": 0.0,
               "history_remapped": false,
               "history_reset_reason": "",
               "history_reset_this_step": false,
               "host_ms": {
-                "coupling": 0.00930000003427267,
-                "gpu_wait": 19.538400650024414,
-                "merge": 0.10540000349283218,
-                "motion": 0.0008999999845400453,
-                "order": 0.13019999861717224,
-                "prepare": 0.20029999315738678,
-                "publish": 0.03009999915957451
+                "coupling": 0.005400000140070915,
+                "gpu_wait": 13.202500343322754,
+                "merge": 0.06939999759197235,
+                "motion": 0.00039999998989515007,
+                "order": 0.1088000014424324,
+                "prepare": 0.12219999730587006,
+                "publish": 0.021800000220537186
               },
-              "max_contacts_per_grain": 8,
+              "max_contacts_per_grain": 9,
+              "mpm_contact": {
+                "events": 0,
+                "grain_impulse_magnitude_n_s": 0.0,
+                "max_neighbours": 0,
+                "momentum_residual_n_s": 0.0,
+                "parcels": 0,
+                "schedule": "continuum_frame_then_dem_substep_contact"
+              },
+              "neighbour_list_builds": 1,
               "state_resident": true,
-              "sticking_contacts_last_substep": 2469,
-              "substep_dt_s": 0.00010288066550856456,
-              "substep_limit": "damping",
-              "substeps": 162,
+              "sticking_contacts_last_substep": 2411,
+              "substep_dt_s": 0.00012254902685526758,
+              "substep_limit": "accuracy",
+              "substeps": 136,
               "transfer_batches": 2,
-              "upload_bytes": 24608,
-              "working_set_bytes": 3884908
+              "upload_bytes": 24640,
+              "working_set_bytes": 1345484
             }
           }
         ]
       }
     },
     "cohesion_rms": {
-      "False": 0.32572528065048484,
-      "True": 0.19822102408684808
+      "False": 0.3236335197170796,
+      "True": 0.20549496587332527
     },
     "absorption": [
       {
@@ -3033,152 +2709,152 @@
       },
       {
         "step": 80,
-        "grain_water_kg": 0.10067305494083101,
-        "liquid_kg": 186.83683414509892,
+        "grain_water_kg": 0.10266923408346429,
+        "liquid_kg": 186.83483797193713,
         "wet": {
-          "absorbed_kg": 0.011063309498117591,
+          "absorbed_kg": 0.010568044989668419,
           "bridge_model": "willett_2000_pendular",
           "enabled": true,
           "evaporated_kg": 0.0,
-          "grain_water_kg": 0.10067305494083101,
-          "liquid_bridges_last_substep": 44,
-          "max_saturation": 0.6576350331306458,
-          "water_balance_error_kg": -9.638483788876329e-09,
-          "wet_grains": 106
+          "grain_water_kg": 0.10266923408346429,
+          "liquid_bridges_last_substep": 68,
+          "max_saturation": 0.6618291139602661,
+          "water_balance_error_kg": 1.6733764596210676e-08,
+          "wet_grains": 110
         }
       },
       {
         "step": 100,
-        "grain_water_kg": 0.38794272676545916,
-        "liquid_kg": 186.54956445121022,
+        "grain_water_kg": 0.3856915831927381,
+        "liquid_kg": 186.5518155277688,
         "wet": {
-          "absorbed_kg": 0.019529338377263516,
+          "absorbed_kg": 0.01994207012263199,
           "bridge_model": "willett_2000_pendular",
           "enabled": true,
           "evaporated_kg": 0.0,
-          "grain_water_kg": 0.38794272676545916,
-          "liquid_bridges_last_substep": 306,
-          "max_saturation": 0.9053648114204407,
-          "water_balance_error_kg": 1.6927771184782614e-08,
-          "wet_grains": 223
+          "grain_water_kg": 0.3856915831927381,
+          "liquid_bridges_last_substep": 296,
+          "max_saturation": 0.9073119163513184,
+          "water_balance_error_kg": 6.094438731452101e-09,
+          "wet_grains": 225
         }
       },
       {
         "step": 120,
-        "grain_water_kg": 0.7031001640716568,
-        "liquid_kg": 186.23440705321747,
+        "grain_water_kg": 0.7018737765029073,
+        "liquid_kg": 186.2356333925658,
         "wet": {
-          "absorbed_kg": 0.00891391336661504,
+          "absorbed_kg": 0.008881265509235712,
           "bridge_model": "willett_2000_pendular",
           "enabled": true,
           "evaporated_kg": 0.0,
-          "grain_water_kg": 0.7031001640716568,
-          "liquid_bridges_last_substep": 504,
-          "max_saturation": 0.9747518301010132,
-          "water_balance_error_kg": -2.019581302192819e-08,
+          "grain_water_kg": 0.7018737765029073,
+          "liquid_bridges_last_substep": 542,
+          "max_saturation": 0.9752292037010193,
+          "water_balance_error_kg": -1.2980393648831523e-08,
           "wet_grains": 256
         }
       },
       {
         "step": 140,
-        "grain_water_kg": 0.8004497569054365,
-        "liquid_kg": 186.13705742035245,
+        "grain_water_kg": 0.8000717144459486,
+        "liquid_kg": 186.13743534450845,
         "wet": {
-          "absorbed_kg": 0.0024482887822497744,
+          "absorbed_kg": 0.002483490947373379,
           "bridge_model": "willett_2000_pendular",
           "enabled": true,
           "evaporated_kg": 0.0,
-          "grain_water_kg": 0.8004497569054365,
-          "liquid_bridges_last_substep": 812,
-          "max_saturation": 0.9928117394447327,
-          "water_balance_error_kg": 1.265448190679308e-09,
+          "grain_water_kg": 0.8000717144459486,
+          "liquid_bridges_last_substep": 828,
+          "max_saturation": 0.9929943680763245,
+          "water_balance_error_kg": 1.5880544879109948e-08,
           "wet_grains": 256
         }
       },
       {
         "step": 160,
-        "grain_water_kg": 0.8273775766137987,
-        "liquid_kg": 186.1101296765138,
+        "grain_water_kg": 0.8272088428493589,
+        "liquid_kg": 186.1102982750301,
         "wet": {
-          "absorbed_kg": 0.0006848624100417275,
+          "absorbed_kg": 0.0006904414120257877,
           "bridge_model": "willett_2000_pendular",
           "enabled": true,
           "evaporated_kg": 0.0,
-          "grain_water_kg": 0.8273775766137987,
-          "liquid_bridges_last_substep": 906,
-          "max_saturation": 0.9980530142784119,
-          "water_balance_error_kg": -7.470219998140237e-09,
+          "grain_water_kg": 0.8272088428493589,
+          "liquid_bridges_last_substep": 968,
+          "max_saturation": 0.9980701208114624,
+          "water_balance_error_kg": -3.344644028402399e-08,
           "wet_grains": 256
         }
       },
       {
         "step": 180,
-        "grain_water_kg": 0.8348338974174112,
-        "liquid_kg": 186.10267352094382,
+        "grain_water_kg": 0.8347734871786088,
+        "liquid_kg": 186.10273373602524,
         "wet": {
-          "absorbed_kg": 0.00019276830398093218,
+          "absorbed_kg": 0.00019456255227769313,
           "bridge_model": "willett_2000_pendular",
           "enabled": true,
           "evaporated_kg": 0.0,
-          "grain_water_kg": 0.8348338974174112,
-          "liquid_bridges_last_substep": 934,
-          "max_saturation": 0.9994868040084839,
-          "water_balance_error_kg": 1.7930346984940115e-08,
+          "grain_water_kg": 0.8347734871786088,
+          "liquid_bridges_last_substep": 986,
+          "max_saturation": 0.9994481801986694,
+          "water_balance_error_kg": -1.6614933429082157e-08,
           "wet_grains": 256
         }
       },
       {
         "step": 200,
-        "grain_water_kg": 0.8369278137106448,
-        "liquid_kg": 186.10057961178637,
+        "grain_water_kg": 0.8369092266075313,
+        "liquid_kg": 186.10059816007342,
         "wet": {
-          "absorbed_kg": 5.319794188590619e-05,
+          "absorbed_kg": 5.4935037863275356e-05,
           "bridge_model": "willett_2000_pendular",
           "enabled": true,
           "evaporated_kg": 0.0,
-          "grain_water_kg": 0.8369278137106448,
-          "liquid_bridges_last_substep": 940,
-          "max_saturation": 0.9998549222946167,
-          "water_balance_error_kg": 1.613315703252738e-08,
+          "grain_water_kg": 0.8369092266075313,
+          "liquid_bridges_last_substep": 992,
+          "max_saturation": 0.999854564666748,
+          "water_balance_error_kg": 3.434584527894913e-08,
           "wet_grains": 256
         }
       },
       {
         "step": 220,
-        "grain_water_kg": 0.8375175129622221,
-        "liquid_kg": 186.0999901186641,
+        "grain_water_kg": 0.8375130165368319,
+        "liquid_kg": 186.09999442796433,
         "wet": {
-          "absorbed_kg": 1.548204053696721e-05,
+          "absorbed_kg": 1.5390232816536954e-05,
           "bridge_model": "willett_2000_pendular",
           "enabled": true,
           "evaporated_kg": 0.0,
-          "grain_water_kg": 0.8375175129622221,
-          "liquid_bridges_last_substep": 942,
-          "max_saturation": 0.9999617338180542,
-          "water_balance_error_kg": 2.1137338990229182e-08,
+          "grain_water_kg": 0.8375130165368319,
+          "liquid_bridges_last_substep": 996,
+          "max_saturation": 0.9999616742134094,
+          "water_balance_error_kg": 2.3015900296741165e-09,
           "wet_grains": 256
         }
       },
       {
         "step": 240,
-        "grain_water_kg": 0.8376875449903309,
-        "liquid_kg": 186.09982029170416,
+        "grain_water_kg": 0.8376869326457381,
+        "liquid_kg": 186.09982078010816,
         "wet": {
-          "absorbed_kg": 4.468426841742929e-06,
+          "absorbed_kg": 4.5469360151155365e-06,
           "bridge_model": "willett_2000_pendular",
           "enabled": true,
           "evaporated_kg": 0.0,
-          "grain_water_kg": 0.8376875449903309,
-          "liquid_bridges_last_substep": 950,
-          "max_saturation": 0.9999899864196777,
-          "water_balance_error_kg": 1.9442722987150773e-08,
+          "grain_water_kg": 0.8376869326457381,
+          "liquid_bridges_last_substep": 998,
+          "max_saturation": 0.999989926815033,
+          "water_balance_error_kg": 4.335271341915359e-08,
           "wet_grains": 256
         }
       }
     ],
     "absorption_gates": {
-      "grain_water_kg": 0.8376875449903309,
-      "total_water_drift_kg": 6.594366084300418e-07
+      "grain_water_kg": 0.8376869326457381,
+      "total_water_drift_kg": 6.537995034250343e-07
     }
   },
   "final_control": {

@@ -16,6 +16,9 @@
 #include "Fluid/MatterConstitutive.h"
 #include "Fluid/MatterGpuModelView.h"
 #include "Fluid/MatterPhaseSettings.h"
+#include "Fluid/SparsePressureGpu.h"
+#include "Fluid/SparseViscosityGpu.h"
+#include "Fluid/SparseMacTransferGpu.h"
 #include "GridFluidSolver.h"   // GridFluid::GasSolverStats (gas step telemetry)
 #include "VolumeShader.h"
 #include "SimulationWorld.h"
@@ -1470,6 +1473,9 @@ struct SimulationGridDomainComputeBuffers {
     // alpha/beta on the GPU collapses the per-dot submit+fence round-trips
     // (the dominant Vulkan MGPCG cost) into one tiny download every K iters.
     ComputeBufferHandle cg_scalars;    // double[7]
+    Fluid::SparsePressureGpuStorage sparse_pressure;
+    Fluid::SparseViscosityGpuStorage sparse_viscosity;
+    Fluid::SparseMacTransferGpuStorage sparse_mac_transfer;
     // Variational solid coupling (GPU Stage 1): MAC-face fractional open weights
     // (uint8_t->float conversion happens on upload) and per-cell solid velocity.
     ComputeBufferHandle var_u_weight;   // float[(nx+1)*ny*nz]

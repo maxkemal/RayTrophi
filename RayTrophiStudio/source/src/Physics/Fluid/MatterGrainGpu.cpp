@@ -1,6 +1,9 @@
 #include "Fluid/MatterGrain.h"
+#include "Fluid/MatterGrainMpmContact.h"
+#include "Fluid/MatterCommonClock.h"
 #include "Fluid/MatterGrainColliderBvh.h"
 #include "Fluid/MatterGrainStages.h"
+#include "Fluid/MatterParticleIdentity.h"
 #include "Fluid/FluidPhysicalMass.h"
 #include "Fluid/FluidThermalLiquid.h"
 #include "ParticleSimulation.h"
@@ -13,23 +16,35 @@
 #include <cstring>
 #include <initializer_list>
 #include <limits>
-#include <unordered_map>
 #include <utility>
 
 namespace RayTrophiSim::Fluid {
 namespace {
 
-// Two banks x budget slots x {key + tangential spring, rolling spring}.
+// One block per grain, updated in place: budget slots x {key, tangential
+// spring xyz, rolling spring xyz}. Was two banks of 32 B slots (1536 B), whose
+// gather on every reorder needed the second bank; the host now keeps each
+// grain on its block instead.
 constexpr std::size_t kHistoryBytesPerGrain =
-    2 * kMatterGrainContactBudget * 2 * 4 * sizeof(uint32_t);
-constexpr std::size_t kDiagnosticWords = 8;
+    kMatterGrainContactBudget * 7 * sizeof(uint32_t);
+// The occupied-slot mask is one 32-bit word.
+static_assert(kMatterGrainContactBudget <= 32);
+// Grain -> block map entry bit: the block's old records are ignored this frame
+// (a newborn grain, or every grain after a history reset).
+constexpr uint32_t kFreshHistoryBlock = 0x80000000u;
+// 0 overflow bits, 1 revision, 2 max contacts, 3-6 contact counts, 7-11 cost
+// counters, 12-14 neighbour-list rebuild flags (substep % 3), 15 list builds,
+// 16 sleeping grains (last substep).
+constexpr std::size_t kDiagnosticWords = 17;
+// Per grain {count, kMatterGrainListCapacity neighbour indices}.
+constexpr std::size_t kListBytesPerGrain = (1 + kMatterGrainListCapacity) * sizeof(uint32_t);
 
 bool finite(const Vec3& v) {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
 
-// Buckets per table: load factor <= 1/4 grain so hash collisions rarely
-// stack two occupied cells past kMatterGrainBucketCapacity.
+// Buckets: load factor <= 1/4 grain so hash collisions rarely stack two
+// occupied cells past kMatterGrainBucketCapacity.
 uint32_t bucketsFor(std::size_t capacity) {
     uint32_t buckets = 1;
     while (buckets < capacity * 4) {
@@ -37,6 +52,27 @@ uint32_t bucketsFor(std::size_t capacity) {
     }
     return buckets;
 }
+
+// Vulkan only guarantees 65535 groups per axis. The kernels fold a 2-D grid
+// back into one index (sim_matter_grain.glsl main), so the thread count is
+// unbounded by it; a 1-D dispatch used to cap the step at ~1M grains.
+constexpr uint32_t kMaxGrainGroupsX = 65535;
+constexpr uint32_t kGrainGroupWidth = 256;
+
+void setLinearGroups(ComputeDispatch& command, std::size_t threads) {
+    const auto groups = static_cast<uint32_t>((threads + kGrainGroupWidth - 1) / kGrainGroupWidth);
+    command.groups.groups_x = std::clamp(groups, 1u, kMaxGrainGroupsX);
+    command.groups.groups_y = (groups + command.groups.groups_x - 1) / command.groups.groups_x;
+}
+
+// The one ceiling left is 32-bit index width in the shader, a correctness
+// limit: the widest index is bucket_slots (tables * buckets * 16 slots), and
+// 2^24 grains give 2^26 buckets. Memory runs out first in practice;
+// the domain budget and the device storage-buffer limit report that below.
+constexpr std::size_t kMaxGrains = std::size_t{1} << 24;
+static_assert(std::size_t{kMatterGrainBucketTables} * (4 * kMaxGrains) *
+              kMatterGrainBucketCapacity <= 0xffffffffull,
+              "grain bucket_slots index exceeds 32 bits");
 
 std::size_t bucketBytes(uint32_t buckets) {
     return std::size_t{kMatterGrainBucketTables} * buckets *
@@ -51,7 +87,9 @@ std::size_t particleBytes(std::size_t capacity) {
         9 * capacity * sizeof(float) +             // scratch bank
         12 * capacity * sizeof(float) +            // liquid coupling
         capacity * kHistoryBytesPerGrain +
-        2 * capacity * sizeof(uint32_t) +          // history owners
+        capacity * kListBytesPerGrain +            // Verlet neighbour list
+        3 * capacity * sizeof(float) +             // list build positions
+        4 * capacity * sizeof(uint32_t) +          // history block map + owner/mask/rest
         kDiagnosticWords * sizeof(uint32_t);
 }
 
@@ -84,8 +122,8 @@ void destroy(SimulationComputeContext& compute, std::initializer_list<ComputeBuf
 bool particleBuffersValid(const MatterGrainGpuRuntime& r) {
     return r.positions.valid() && r.velocities.valid() && r.affines.valid() &&
         r.coupling.valid() && r.bucket_counts.valid() && r.bucket_slots.valid() && r.mass.valid() && r.ids.valid() &&
-        r.scratch.valid() && r.history.valid() && r.history_owner.valid() &&
-        r.diagnostics.valid();
+        r.scratch.valid() && r.history.valid() && r.history_blocks.valid() &&
+        r.diagnostics.valid() && r.neighbour_list.valid() && r.build_positions.valid();
 }
 
 bool colliderBuffersValid(const MatterGrainGpuRuntime& r) {
@@ -95,7 +133,10 @@ bool colliderBuffersValid(const MatterGrainGpuRuntime& r) {
 // Geometric growth: a streaming emitter adds grains every frame, and every
 // reallocation drops contact history (no device copy in the compute API).
 std::size_t grownCapacity(std::size_t current, std::size_t count) {
-    return std::max({count, current + current / 2, std::size_t{256}});
+    // Headroom never pushes the buffers past the dispatch cap (count is
+    // already checked against it).
+    return std::max(count, std::min(std::max(current + current / 2, std::size_t{256}),
+                                    kMaxGrains));
 }
 
 bool ensureParticles(SimulationComputeContext& compute, MatterGrainGpuRuntime& runtime,
@@ -117,22 +158,26 @@ bool ensureParticles(SimulationComputeContext& compute, MatterGrainGpuRuntime& r
     candidate.scratch = makeBuffer(compute, "grain_scratch_state", 9 * capacity * sizeof(float));
     candidate.history = makeBuffer(compute, "grain_contact_history",
         capacity * kHistoryBytesPerGrain);
-    candidate.history_owner = makeBuffer(compute, "grain_history_owner",
-        2 * capacity * sizeof(uint32_t));
+    candidate.history_blocks = makeBuffer(compute, "grain_history_blocks",
+        4 * capacity * sizeof(uint32_t));
     candidate.diagnostics = makeBuffer(compute, "grain_diagnostics",
         kDiagnosticWords * sizeof(uint32_t));
+    candidate.neighbour_list = makeBuffer(compute, "grain_neighbour_list",
+        capacity * kListBytesPerGrain);
+    candidate.build_positions = makeBuffer(compute, "grain_list_build_positions",
+        capacity * sizeof(Vec3));
     if (!particleBuffersValid(candidate)) {
         destroy(compute, {&candidate.positions, &candidate.velocities, &candidate.affines,
             &candidate.coupling, &candidate.bucket_counts, &candidate.bucket_slots, &candidate.mass, &candidate.ids,
-            &candidate.scratch, &candidate.history, &candidate.history_owner,
-            &candidate.diagnostics});
+            &candidate.scratch, &candidate.history, &candidate.history_blocks,
+            &candidate.diagnostics, &candidate.neighbour_list, &candidate.build_positions});
         error = "grain GPU allocation failed";
         return false;
     }
     destroy(compute, {&runtime.positions, &runtime.velocities, &runtime.affines,
         &runtime.coupling, &runtime.bucket_counts, &runtime.bucket_slots, &runtime.mass,
-        &runtime.ids, &runtime.scratch, &runtime.history, &runtime.history_owner,
-        &runtime.diagnostics});
+        &runtime.ids, &runtime.scratch, &runtime.history, &runtime.history_blocks,
+        &runtime.diagnostics, &runtime.neighbour_list, &runtime.build_positions});
     runtime.positions = candidate.positions;
     runtime.velocities = candidate.velocities;
     runtime.affines = candidate.affines;
@@ -143,11 +188,14 @@ bool ensureParticles(SimulationComputeContext& compute, MatterGrainGpuRuntime& r
     runtime.ids = candidate.ids;
     runtime.scratch = candidate.scratch;
     runtime.history = candidate.history;
-    runtime.history_owner = candidate.history_owner;
+    runtime.history_blocks = candidate.history_blocks;
     runtime.diagnostics = candidate.diagnostics;
+    runtime.neighbour_list = candidate.neighbour_list;
+    runtime.build_positions = candidate.build_positions;
     runtime.buckets = candidate.buckets;
     runtime.capacity = capacity;
     runtime.history_fresh = true;
+    runtime.coupling_zero = false;
     return true;
 }
 
@@ -180,8 +228,8 @@ bool ensureCollider(SimulationComputeContext& compute, MatterGrainGpuRuntime& ru
 void releaseMatterGrainGpu(SimulationComputeContext& compute, MatterGrainGpuRuntime& r) {
     destroy(compute, {&r.positions, &r.velocities, &r.affines, &r.coupling,
         &r.bucket_counts, &r.bucket_slots, &r.mass, &r.ids, &r.scratch, &r.history,
-        &r.history_owner, &r.diagnostics, &r.triangles, &r.collider_nodes,
-        &r.collider_patches});
+        &r.history_blocks, &r.diagnostics, &r.triangles, &r.collider_nodes,
+        &r.collider_patches, &r.neighbour_list, &r.build_positions});
     r = {};
 }
 
@@ -191,7 +239,8 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     MatterGrainGpuRuntime& runtime, const std::vector<SurfaceMeshTriangle>& triangles,
     const std::vector<MatterGrainCouplingInput>* coupling,
     std::vector<MatterGrainCouplingOutput>* drag_out,
-    MatterGrainStepReport& report, std::string& error, const MatterGrainMotion* motion) {
+    MatterGrainStepReport& report, std::string& error, const MatterGrainMotion* motion,
+    MatterGrainMpmContact* mpm_contact, const MatterGrainCommonDriver* common_driver) {
     error.clear();
     using Clock = std::chrono::steady_clock;
     const auto ms_since = [](Clock::time_point t) {
@@ -203,7 +252,15 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     if (!patchMatterGrainParams(matterGrainParamsToJson(params), checked, error)) {
         return false;
     }
-    if (!count || count > 100000 || triangles.size() > 4096 ||
+    if (count > kMaxGrains) {
+        // Its own message: the shared one below never said which bound was hit,
+        // and a held step with a valid-looking scene read as a frozen solver.
+        error = "dry grain step holds at " + std::to_string(count) + " grains: the GPU "
+            "kernels index at most " + std::to_string(kMaxGrains) + " (32-bit bucket "
+            "slots). Lower Max Particles on the domain or emit fewer grains.";
+        return false;
+    }
+    if (!count || triangles.size() > kMatterGrainMaxColliderFaces ||
         !std::isfinite(dt) || dt <= 0.0f || !finite(gravity) || !finite(low) || !finite(high) ||
         compute.backendType() != ComputeBackendType::VulkanCompute ||
         !compute.supportsDispatch() ||
@@ -215,13 +272,17 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
          motion->external_acceleration.size() != count) ||
         (motion && !motion->triangle_velocity.empty() &&
          motion->triangle_velocity.size() != 3 * triangles.size())) {
-        error = "dry grain requires Vulkan compute, 1..100000 grains, <=4096 faces";
+        error = "dry grain requires Vulkan compute, at least 1 grain and consistent "
+            "per-grain/per-face arrays";
         return false;
     }
     std::vector<float> masses(count);
     std::vector<uint32_t> ids(count);
     float minimum_mass = std::numeric_limits<float>::max();
     float maximum_speed = 0.0f;
+    if (mpm_contact) {
+        maximum_speed = mpm_contact->maximumSpeed();
+    }
     // Wet grains carry their held water (B6): it moves with the grain.
     double minimum_bridge_volume = std::numeric_limits<double>::infinity();
     for (std::size_t i = 0; i < count; ++i) {
@@ -248,8 +309,15 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         maximum_speed = std::max(maximum_speed, p.velocity[i].length());
     }
     // Liquid coupling rows: {lump velocity, beta}, {buoyancy accel, lump mass},
-    // {drag impulse accumulator}. Zero rows are an exact no-op in the shader.
-    std::vector<float> coupling_rows(count * 12, 0.0f);
+    // {drag impulse accumulator}. Zero rows are an exact no-op in the shader,
+    // and the shader writes a row only when it is coupled (beta and lump mass
+    // > 0), so zeros already on the device stay zero: a dry frame after a dry
+    // frame skips building and uploading 48 B per grain (62 MB at 1.3M). The
+    // shared-clock path lets the GPU liquid coupling write the rows itself.
+    const bool zero_rows = !params.wet_grains && !coupling && !common_driver &&
+        !(motion && !motion->external_acceleration.empty());
+    const bool rows_resident = zero_rows && runtime.coupling_zero;
+    std::vector<float> coupling_rows(rows_resident ? 0 : count * 12, 0.0f);
     if (params.wet_grains) {
         // Bridge water volume rides in the free fourth component of row 2.
         for (std::size_t i = 0; i < count; ++i) {
@@ -319,7 +387,23 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     // The tangential spring acts through 1/m + r^2/I = 3.5/m, hence 3.5 kt.
     // The rolling spring 2.25 mu_r^2 k R^2 on I = 0.4 m r^2 is stiffest
     // against a wall (R = r): 5.625 mu_r^2 k / m, hence 2.81 mu_r^2 k.
-    const double budget = kMatterGrainContactBudget;
+    // Contacts per grain the Gershgorin bound assumes. The normal dashpot is
+    // proportional to the contact springs, so the aggregate damping ratio
+    // grows with sqrt(contacts): assuming all 24 history slots full made the
+    // normal dashpot set the substep (712 at 1.3M grains where 3 contacts were
+    // measured). Equal spheres touch at most 12 neighbours (kissing number),
+    // the suite's densest piles measured 8-10, so the bound uses last frame's
+    // maximum + 4, never below 12. A frame that measures more is re-run below
+    // at the full budget; that re-run starts without contact history, which
+    // the +4 margin keeps rare. Coupled to the MPM/common clock the frame
+    // cannot be re-run (the MPM side has already advanced), so it keeps 24.
+    // The grain step always receives the MPM contact object; only an ACTIVE
+    // one (MPM parcels in reach) advances state a re-run would apply twice.
+    const bool adaptive_contacts = !(mpm_contact && mpm_contact->active()) && !common_driver;
+    const uint32_t cfl_contacts = adaptive_contacts
+        ? std::clamp(runtime.cfl_contact_hint, 12u, static_cast<uint32_t>(kMatterGrainContactBudget))
+        : static_cast<uint32_t>(kMatterGrainContactBudget);
+    const double budget = cfl_contacts;
     const double m = minimum_mass;
     const double k = params.stiffness_n_m;
     const double kt = params.tangential_stiffness_ratio * k;
@@ -341,8 +425,16 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         params.contact_resolution;
     const double zeta = matterGrainDampingRatio(params.restitution);
     const double normal_damping = 2.0 * zeta * std::sqrt(k * m);
-    const double damping_rate = budget *
-        (2.0 * normal_damping + 7.0 * params.sliding_damping_n_s_m) / m;
+    // Only the NORMAL dashpot is explicit. The sliding dashpot is capped in the
+    // shader so the whole contact budget cannot reverse a slip within one
+    // substep (sim_matter_grain.glsl contact(): min(c v, v / (BUDGET dt
+    // 1/m_t))) - unconditionally stable, so it sets no bound. Counting it here
+    // (7 c_t per contact) was the "damping" limit: an absolute 4 N s/m on an
+    // 8 mm grain read as zeta ~4.5 and cost 2622 substeps per frame where the
+    // normal dashpot alone needs ~710 (measured 2026-10-08, 1.3M grains).
+    // With fewer substeps the cap may engage: slip then decays in ~BUDGET
+    // substeps instead of one, still far below a frame.
+    const double damping_rate = budget * 2.0 * normal_damping / m;
     // Spring and dashpot together: symplectic Euler on x'' = -w^2 x - 2 z w x'
     // is stable for w^2 h^2 + 4 z w h < 4, i.e. h < (2/w)(sqrt(1+z^2) - z).
     // Half of that, as the undamped bound always had (z = 0 gives the old
@@ -388,8 +480,22 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     const bool grow_particles = !particleBuffersValid(runtime) || runtime.capacity < count;
     const bool grow_collider = !colliderBuffersValid(runtime) ||
         runtime.triangle_capacity < std::max(triangles.size(), std::size_t{1});
-    const std::size_t capacity = grow_particles
+    const auto largest_particle_buffer = [](std::size_t grains) {
+        return std::max({grains * kHistoryBytesPerGrain, grains * kListBytesPerGrain,
+            std::size_t{kMatterGrainBucketTables} * bucketsFor(grains) *
+                kMatterGrainBucketCapacity * sizeof(uint32_t)});
+    };
+    std::size_t capacity = grow_particles
         ? grownCapacity(runtime.capacity, count) : runtime.capacity;
+    // Growth headroom must not be what breaks the device limit: 1.09M grains
+    // fit a 2 GiB storage buffer, the 1.5x headroom on top of 1M did not, and
+    // the step was held with room to spare. Trim toward count; count itself
+    // is still checked below and reports the limit when it truly is hit.
+    const std::size_t storage_limit = compute.caps().max_storage_buffer_bytes;
+    while (grow_particles && storage_limit && capacity > count &&
+           largest_particle_buffer(capacity) > storage_limit) {
+        capacity = std::max(count, capacity - std::max<std::size_t>(capacity / 16, 1));
+    }
     const std::size_t triangle_capacity = grow_collider
         ? std::max(triangles.size(), std::size_t{1}) : runtime.triangle_capacity;
     std::size_t working = particleBytes(capacity) + colliderBytes(triangle_capacity);
@@ -399,9 +505,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             (grow_collider && runtime.triangle_capacity
                 ? colliderBytes(runtime.triangle_capacity) : 0);
     }
-    const auto largest_buffer = std::max({capacity * kHistoryBytesPerGrain,
-        std::size_t{kMatterGrainBucketTables} * bucketsFor(capacity) *
-            kMatterGrainBucketCapacity * sizeof(uint32_t),
+    const auto largest_buffer = std::max({largest_particle_buffer(capacity),
         triangle_capacity * 2 * sizeof(MatterGrainBvhNode),
         triangle_capacity * 6 * sizeof(Vec3)});
     // Say which limit and by how much: the two used to share one message, and
@@ -421,8 +525,10 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     if (compute.caps().max_storage_buffer_bytes &&
         largest_buffer > compute.caps().max_storage_buffer_bytes) {
         error = "grain buffer of " + std::to_string(largest_buffer / (1024 * 1024)) +
-            " MiB exceeds the device storage-buffer limit of " +
-            std::to_string(compute.caps().max_storage_buffer_bytes / (1024 * 1024)) + " MiB";
+            " MiB for " + std::to_string(count) + " grains exceeds the device storage-buffer "
+            "limit of " + std::to_string(compute.caps().max_storage_buffer_bytes / (1024 * 1024)) +
+            " MiB (contact history is " + std::to_string(kHistoryBytesPerGrain) +
+            " B per grain in one buffer)";
         return false;
     }
     const auto fingerprint = matterGrainColliderFingerprint(triangles, triangle_velocity);
@@ -465,10 +571,12 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         float high[4];
         float contact[4];
         float rolling[4];
-        uint32_t substep, reset_history, tangential_stiffness_bits, last_substep;
+        uint32_t substep, history_blocks, tangential_stiffness_bits, last_substep;
         float wet[4];  // hash cell size, capillary prefactor, rupture cap, velocity offset bits
+        float sleep[4];  // still substeps (uint bits), sleep speed (0 = off), wake all (uint bits), -
     } constants{};
-    static_assert(sizeof(Constants) == 112);
+    // 128 B: the push-constant size every Vulkan device guarantees.
+    static_assert(sizeof(Constants) == 128);
     constants.count = static_cast<uint32_t>(count);
     constants.buckets = runtime.buckets;
     constants.collider_nodes = runtime.collider_node_count;
@@ -492,33 +600,78 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     constants.rolling[3] = gravity.z;
     // Map the incoming order onto the published one by identity. A moved
     // survivor means a foreign state (reset/scrub/restore/edit): drop all
-    // history. Otherwise a new order is gathered on the device.
+    // history. Otherwise every survivor keeps its history block.
     std::string reset_reason = runtime.history_fresh
         ? (runtime.published_ids.empty() ? "first_step" : "allocation") : "";
     std::vector<uint32_t> previous_index;
     bool remap = false;
     if (!runtime.history_fresh) {
-        std::unordered_map<uint64_t, uint32_t> published;
-        published.reserve(runtime.published_ids.size());
-        for (std::size_t k = 0; k < runtime.published_ids.size(); ++k) {
-            published.emplace(runtime.published_ids[k], static_cast<uint32_t>(k));
-        }
+        // A grain that kept its index needs no lookup; the index is built
+        // only once one did not (cell re-sort, births, removals).
+        MatterParticleIdIndex published;
+        bool indexed = false;
         previous_index.assign(count, 0xffffffffu);
         for (std::size_t i = 0; i < count; ++i) {
-            const auto found = published.find(p.particle_id[i]);
-            if (found == published.end()) {
+            uint32_t found = i < runtime.published_ids.size() &&
+                runtime.published_ids[i] == p.particle_id[i]
+                ? static_cast<uint32_t>(i) : MatterParticleIdIndex::kMissing;
+            if (found == MatterParticleIdIndex::kMissing) {
+                if (!indexed) {
+                    // Published ids are an identity set: the step refused otherwise.
+                    published.build(runtime.published_ids);
+                    indexed = true;
+                }
+                found = published.find(p.particle_id[i]);
+            }
+            if (found == MatterParticleIdIndex::kMissing) {
                 continue;  // birth: starts without springs
             }
-            const Vec3& was = runtime.published_positions[found->second];
+            const Vec3& was = runtime.published_positions[found];
             if (std::memcmp(&was, &p.position[i], sizeof(Vec3)) != 0) {
                 runtime.history_fresh = true;
                 reset_reason = "host_state_changed";
                 break;
             }
-            previous_index[i] = found->second;
-            remap = remap || found->second != i;
+            previous_index[i] = found;
+            remap = remap || found != i;
         }
         remap = remap && !runtime.history_fresh;
+    }
+    // Grain -> history block. A reset puts grain i on block i; a newborn takes
+    // a block no survivor holds (count <= capacity blocks, so one is free).
+    // Either way the block starts FRESH: its old records belong to someone else.
+    std::vector<uint32_t> blocks(count);
+    bool blocks_changed = true;
+    std::size_t survivors = 0;
+    if (runtime.history_fresh) {
+        for (std::size_t i = 0; i < count; ++i) {
+            blocks[i] = static_cast<uint32_t>(i) | kFreshHistoryBlock;
+        }
+    } else {
+        std::vector<uint8_t> held(runtime.capacity, 0);
+        bool births = false;
+        for (std::size_t i = 0; i < count; ++i) {
+            if (previous_index[i] != 0xffffffffu) {
+                blocks[i] = runtime.history_block[previous_index[i]];
+                held[blocks[i]] = 1;
+            }
+        }
+        for (std::size_t i = 0; i < count; ++i) {
+            survivors += previous_index[i] != 0xffffffffu ? 1 : 0;
+        }
+        std::size_t next_free = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+            if (previous_index[i] == 0xffffffffu) {
+                while (held[next_free]) {
+                    ++next_free;
+                }
+                held[next_free] = 1;
+                blocks[i] = static_cast<uint32_t>(next_free) | kFreshHistoryBlock;
+                births = true;
+            }
+        }
+        // Same grains in the same order: the device map is already this one.
+        blocks_changed = remap || births || count != runtime.history_block.size();
     }
     // B4: when the incoming grains are exactly what this runtime published
     // (same order, bits, mass), bank 0 already holds them: upload only the
@@ -533,7 +686,13 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         std::memcmp(runtime.published_affines.data(), p.affine.data(), count * sizeof(AffineC)) == 0 &&
         runtime.published_masses == masses;
     std::size_t upload_bytes = sizeof(diagnostics) + coupling_rows.size() * sizeof(float);
+    // Unknown until this upload lands; set again below when it does.
+    runtime.coupling_zero = false;
+    const auto upload_start = Clock::now();
     compute.beginTransferBatch();
+    // Substep 0 always rebuilds the neighbour lists: the grains were re-ordered
+    // and born/absorbed on the host since the last frame.
+    diagnostics[12] = 1u;
     bool uploaded = compute.uploadBuffer(runtime.diagnostics, diagnostics.data(), sizeof(diagnostics));
     if (!resident) {
         uploaded = compute.uploadBuffer(runtime.mass, masses.data(), masses.size() * sizeof(float)) &&
@@ -548,80 +707,103 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             uploaded;
         upload_bytes += count * (sizeof(float) + sizeof(uint32_t) + 2 * sizeof(Vec3) + sizeof(AffineC));
     }
-    uploaded = compute.uploadBuffer(runtime.coupling, coupling_rows.data(),
-        coupling_rows.size() * sizeof(float)) && uploaded;
+    if (!rows_resident) {
+        uploaded = compute.uploadBuffer(runtime.coupling, coupling_rows.data(),
+            coupling_rows.size() * sizeof(float)) && uploaded;
+    }
+    if (blocks_changed) {
+        uploaded = compute.uploadBuffer(runtime.history_blocks, blocks.data(),
+            count * sizeof(uint32_t)) && uploaded;
+        upload_bytes += count * sizeof(uint32_t);
+    }
     uploaded = compute.endTransferBatch() && uploaded;
     if (!uploaded) {
-        error = "grain state/mass/identity/coupling upload failed";
+        error = "grain state/mass/identity/coupling/history-map upload failed";
         return false;
     }
+    runtime.coupling_zero = zero_rows;
+    report.upload_ms = ms_since(upload_start);
     // Bridges reach past contact up to the rupture distance; the hash cell
     // grows by that skin so the 27-cell search still finds every bridge.
     const float rupture_cap = params.wet_grains ? .5f * params.radius_m : 0.0f;
-    constants.wet[0] = 2.0f * params.radius_m + rupture_cap;
+    // Hash cell = Verlet list cutoff: contact (2r), bridge reach and the skin
+    // that lets the list stay valid until a grain has moved half of it.
+    constants.wet[0] = 2.0f * params.radius_m + rupture_cap +
+        kMatterGrainListSkinRadii * params.radius_m;
     constants.wet[1] = static_cast<float>(capillary);
     constants.wet[2] = rupture_cap;
     // Float slot carrying the uint offset of the collider vertex velocities.
     std::memcpy(&constants.wet[3], &runtime.collider_velocity_offset, sizeof(uint32_t));
-    constants.reset_history = runtime.history_fresh ? 1u : 0u;
+    // Owner/mask/rest words of the blocks follow the grain -> block map.
+    constants.history_blocks = static_cast<uint32_t>(runtime.capacity);
+    // Sleeping grains (docs/dev/DEM_UYUYAN_TANELER.md). Off whenever something
+    // can push a still grain that the step would not see: a moving collider
+    // face, MPM contact impulses written between steps, the shared clock. A
+    // removed grain may have been something's support: everyone wakes.
+    const bool sleep_on = params.sleep && params.sleep_speed_m_s > 0.0f &&
+        runtime.collider_velocity_offset == 0 && !common_driver &&
+        !(mpm_contact && mpm_contact->active());
+    const uint32_t still_substeps = static_cast<uint32_t>(std::clamp(
+        std::ceil(double(params.sleep_time_s) / (double(dt) / substeps)), 1.0, 1e9));
+    const uint32_t wake_all = !runtime.history_fresh &&
+        survivors < runtime.published_ids.size() ? 1u : 0u;
+    std::memcpy(&constants.sleep[0], &still_substeps, sizeof(uint32_t));
+    constants.sleep[1] = sleep_on ? params.sleep_speed_m_s : 0.0f;
+    std::memcpy(&constants.sleep[2], &wake_all, sizeof(uint32_t));
     constants.last_substep = substeps - 1;
     const bool history_reset = runtime.history_fresh;
     // Until this frame publishes, the device history may not match the host.
     runtime.history_fresh = true;
     const ComputeBufferHandle handles[] = {runtime.positions, runtime.velocities,
         runtime.affines, runtime.mass, runtime.ids, runtime.bucket_counts, runtime.bucket_slots,
-        runtime.scratch, runtime.history, runtime.history_owner, runtime.diagnostics,
-        runtime.triangles, runtime.collider_nodes, runtime.collider_patches, runtime.coupling};
-    static_assert(sizeof(handles) / sizeof(handles[0]) == 15);
+        runtime.scratch, runtime.history, runtime.history_blocks, runtime.diagnostics,
+        runtime.triangles, runtime.collider_nodes, runtime.collider_patches, runtime.coupling,
+        runtime.neighbour_list, runtime.build_positions};
+    constexpr std::size_t kGrainBindings = sizeof(handles) / sizeof(handles[0]);
+    static_assert(kGrainBindings == 17);
     report.host_prepare_ms = ms_since(prepare_start);
     const auto gpu_start = Clock::now();
-    if (remap) {
-        // bucket_slots is scratch until the clear/hash below: it carries the
-        // new -> previous index map for the two gather dispatches.
-        if (!compute.uploadBuffer(runtime.bucket_slots, previous_index.data(),
-                count * sizeof(uint32_t))) {
-            error = "grain history remap upload failed";
+    int dispatched = 0;
+    const auto dispatch_stage = [&](const char* kernel, uint32_t substep) {
+        if (mpm_contact && std::strcmp(kernel, "sim_matter_grain_step") == 0 &&
+            !mpm_contact->step(runtime, substep, error)) {
             return false;
         }
-        for (const char* kernel : {"sim_matter_grain_permute", "sim_matter_grain_permute_copy"}) {
-            ComputeDispatch command;
-            command.kernel = kernel;
-            command.buffers = handles;
-            command.buffer_count = 15;
-            constants.substep = 0;
-            command.constants = &constants;
-            command.constants_size = sizeof(constants);
-            command.groups.groups_x = (constants.count + 255u) / 256u;
-            if (!compute.dispatch(command)) {
-                error = std::string("grain stage failed: ") + kernel;
-                return false;
-            }
+        ComputeDispatch command;
+        command.kernel = kernel;
+        command.buffers = handles;
+        command.buffer_count = kGrainBindings;
+        constants.substep = substep;
+        command.constants = &constants;
+        command.constants_size = sizeof(constants);
+        // List clear: the bucket table. Hash, list build, step: one
+        // invocation per grain.
+        uint32_t threads = constants.count;
+        if (std::strcmp(kernel, "sim_matter_grain_list_clear") == 0) {
+            threads = kMatterGrainBucketTables * runtime.buckets;
         }
-    }
-    if (!dispatchMatterGrainStages(substeps, [&](const char* kernel, uint32_t substep) {
-            ComputeDispatch command;
-            command.kernel = kernel;
-            command.buffers = handles;
-            command.buffer_count = 15;
-            constants.substep = substep;
-            command.constants = &constants;
-            command.constants_size = sizeof(constants);
-            // Clear: all bucket tables (and both history-owner banks).
-            // Step: max(count, buckets) -- each invocation also clears one
-            // bucket of the table the next substep writes. Hash: grains.
-            uint32_t threads = constants.count;
-            if (std::strcmp(kernel, "sim_matter_grain_clear") == 0) {
-                threads = kMatterGrainBucketTables * runtime.buckets;
-            } else if (std::strcmp(kernel, "sim_matter_grain_step") == 0) {
-                threads = std::max(constants.count, runtime.buckets);
-            }
-            command.groups.groups_x = (threads + 255u) / 256u;
-            if (!compute.dispatch(command)) {
-                error = std::string("grain stage failed: ") + kernel;
-                return false;
-            }
-            return true;
-        })) {
+        setLinearGroups(command, threads);
+        if (!compute.dispatch(command)) {
+            error = std::string("grain stage failed: ") + kernel;
+            return false;
+        }
+        ++dispatched;
+        return true;
+    };
+    const uint32_t planned_grain_substeps = substeps;
+    if (common_driver) {
+        report.working_set_bytes = working;
+        if (!common_driver->run(substeps,
+                [&](uint32_t index, uint32_t total, float step_dt, std::string&) {
+                    substeps = total;
+                    constants.contact[0] = step_dt;
+                    constants.last_substep = total - 1;
+                    return dispatchMatterGrainSubstep(index, dispatch_stage);
+                }, error)) {
+            return false;
+        }
+        report.common_clock = true;
+    } else if (!dispatchMatterGrainStages(substeps, dispatch_stage)) {
         return false;
     }
     // Only the three device-owned arrays come back; the rest of the grain
@@ -629,6 +811,10 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     // frame was most of the publication cost).
     std::vector<Vec3> new_position(count), new_velocity(count);
     std::vector<AffineC> new_affine(count);
+    // The substeps are only recorded so far: submit and wait for them here, so
+    // download_ms is the readback alone (one extra fence per frame).
+    compute.synchronize();
+    const auto download_start = Clock::now();
     compute.beginTransferBatch();
     bool ok = compute.downloadBuffer(runtime.positions, new_position.data(),
         count * sizeof(Vec3));
@@ -643,6 +829,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     }
     ok = compute.endTransferBatch() && ok;
     report.gpu_wait_ms = ms_since(gpu_start);
+    report.download_ms = ms_since(download_start);
     const auto publish_start = Clock::now();
     for (std::size_t i = 0; i < count && ok; ++i) {
         ok = finite(new_position[i]) && finite(new_velocity[i]) &&
@@ -658,10 +845,28 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         error = (overflow & 4u) ? "grain neighbour bucket overflow (more than 16 grains hashed "
                 "to one bucket); grains overlap far beyond contact" :
             (overflow & 2u) ? "grain collider BVH traversal stack exceeded (64)" :
-            overflow ? "grain contact count exceeds the 24-contact history/CFL budget; "
+            (overflow & 8u) ? "grain neighbour list full (more than 32 grains within 2r + skin); "
+                "grains overlap far beyond contact" :
+            overflow ? "grain contact count exceeds the 24-contact history/CFL budget "
+                "(or 24 history records were held in one substep); "
                 "reduce emitter packing or stiffness overlap" :
             "grain publication rejected nonfinite/readback state";
         return false;
+    }
+    if (adaptive_contacts && diagnostics[2] > cfl_contacts) {
+        // More contacts than the bound assumed: those grains may have stepped
+        // past their stability limit. Nothing is published; the host state is
+        // untouched and history_fresh is already set, so the re-run uploads it
+        // again and runs at the full budget (once: the hint is then 24).
+        runtime.cfl_contact_hint = static_cast<uint32_t>(kMatterGrainContactBudget);
+        const bool rerun = stepMatterGrainGpu(p, low, high, params, dt, gravity, budget_bytes,
+            compute, runtime, triangles, coupling, drag_out, report, error, motion,
+            mpm_contact, common_driver);
+        report.cfl_budget_retry = true;
+        if (rerun) {
+            report.history_reset_reason = "cfl_contact_budget_retry";
+        }
+        return rerun;
     }
     if (coupling && drag_out) {
         drag_out->assign(count, {});
@@ -680,30 +885,47 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     p.advanceMaterialCoordinates();
     runtime.history_fresh = false;
     runtime.published_ids = p.particle_id;
+    // Parallel to published_ids: only a published frame may move the map the
+    // next frame's previous_index reads through.
+    runtime.history_block.resize(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        runtime.history_block[i] = blocks[i] & ~kFreshHistoryBlock;
+    }
     runtime.published_positions = p.position;
     runtime.published_velocities = p.velocity;
     runtime.published_affines = p.affine;
     runtime.published_masses = std::move(masses);
     report.substeps = static_cast<int>(substeps);
-    report.dispatches = static_cast<int>(substeps + 2);
+    report.dispatches = dispatched;
     report.substep_dt = dt / substeps;
-    report.limit = limiting.second;
+    report.limit = substeps > planned_grain_substeps ? "common CFL/travel" : limiting.second;
     report.max_contacts = diagnostics[2];
+    report.cfl_contacts = cfl_contacts;
+    report.cfl_budget_retry = false;
+    runtime.cfl_contact_hint = std::clamp(diagnostics[2] + 4u, 12u,
+        static_cast<uint32_t>(kMatterGrainContactBudget));
     report.sticking_contacts = diagnostics[3];
     report.contacts = diagnostics[4];
     report.liquid_bridges = diagnostics[5];
     report.collider_manifold_truncated = diagnostics[6];
+    report.neighbour_candidates = diagnostics[7];
+    report.grain_pairs = diagnostics[8];
+    report.history_probes = diagnostics[9];
+    report.contactless_grains = diagnostics[10];
+    report.collider_nodes_visited = diagnostics[11];
+    report.list_rebuilds = diagnostics[15];
+    report.sleeping_grains = diagnostics[16];
     report.history_reset = history_reset;
     report.history_reset_reason = reset_reason;
-    report.history_remapped = remap;  // +2 gather dispatches, outside `dispatches`
+    report.history_remapped = remap;  // grain -> block map re-uploaded, no history copy
     report.state_resident = resident;
-    report.upload_bytes = upload_bytes + (remap ? count * sizeof(uint32_t) : 0) +
+    report.upload_bytes = upload_bytes +
         (refresh_collider ? collider.vertices.size() * sizeof(Vec3) +
             collider.nodes.size() * sizeof(MatterGrainBvhNode) +
             collider.surface_patches.size() * sizeof(uint32_t) : 0);
     report.download_bytes = count * (2 * sizeof(Vec3) + sizeof(AffineC)) + sizeof(diagnostics) +
         (coupling && drag_out ? coupling_rows.size() * sizeof(float) : 0);
-    report.transfer_batches = 2 + (remap ? 1 : 0) + (refresh_collider ? 1 : 0);
+    report.transfer_batches = 2 + (refresh_collider ? 1 : 0);
     report.grains = count;
     report.working_set_bytes = working;
     report.host_publish_ms = ms_since(publish_start);

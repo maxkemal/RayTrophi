@@ -1,4 +1,6 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "sim_dispatch.glsl"
 layout(local_size_x = 256) in;
 
 layout(push_constant) uniform PC {
@@ -11,8 +13,8 @@ layout(set = 0, binding = 0) buffer Velocity { float velocity[]; };
 layout(set = 0, binding = 1) readonly buffer Weight { float weight[]; };
 
 void main() {
-    uint local = gl_GlobalInvocationID.x;
     uint count = uint(pc.extent_x) * uint(pc.extent_y) * uint(pc.extent_z);
+    uint local = simLane256(count);
     if (local >= count) {
         return;
     }

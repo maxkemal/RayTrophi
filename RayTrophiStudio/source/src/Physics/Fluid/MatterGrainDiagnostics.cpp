@@ -1,5 +1,7 @@
 #include "Fluid/MatterGrain.h"
 #include "Fluid/FluidParticles.h"
+#include "Fluid/MatterSubstanceState.h"
+#include "Fluid/APICFluidSolver.h"
 
 #include <algorithm>
 #include <cmath>
@@ -134,7 +136,12 @@ nlohmann::json matterGrainPileProfile(const std::vector<Vec3>& centres, float ra
 }
 
 nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrainParams& params,
-                                     const MatterGrainStepReport* report) {
+                                     const MatterGrainStepReport* report,
+                                     const APICSolverParams* owner_params) {
+    APICSolverParams fallback;
+    fallback.default_substance = "Sand";
+    fallback.grain = params;
+    const auto& transport = owner_params ? *owner_params : fallback;
     // Liquid parcels of the domain: count, centre height and the 95th
     // percentile height (the free surface, robust to a few splash parcels).
     std::vector<float> liquid_heights;
@@ -167,6 +174,11 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
                 static_cast<uint8_t>(MatterConstitutiveModel::Granular)) {
             continue;
         }
+        const uint32_t tag = i < p.substance_tag.size() ? p.substance_tag[i] : 0u;
+        if (substanceTransportOwner(tag, MatterConstitutiveModel::Granular, transport) !=
+            MatterTransportOwner::Grain) {
+            continue;
+        }
         centres.push_back(p.position[i]);
         const auto& a = p.affine[i];
         const Vec3 w = Vec3(a.col1.z - a.col2.y, a.col2.x - a.col0.z,
@@ -187,6 +199,15 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
         runtime = {{"substeps", report->substeps}, {"dispatches", report->dispatches},
             {"substep_dt_s", report->substep_dt}, {"substep_limit", report->limit},
             {"max_contacts_per_grain", report->max_contacts},
+            {"cfl_contacts_per_grain", report->cfl_contacts},
+            {"cfl_contact_budget_retry", report->cfl_budget_retry},
+            {"neighbour_list_builds", report->list_rebuilds},
+            {"sleeping_grains", report->sleeping_grains},
+            {"cost_last_substep", {{"neighbour_candidates", report->neighbour_candidates},
+                {"grain_pairs", report->grain_pairs},
+                {"history_probes", report->history_probes},
+                {"contactless_grains", report->contactless_grains},
+                {"collider_nodes_visited", report->collider_nodes_visited}}},
             {"contacts_last_substep", report->contacts},
             {"sticking_contacts_last_substep", report->sticking_contacts},
             {"history_reset_this_step", report->history_reset},
@@ -199,8 +220,24 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
             {"host_ms", {{"order", report->host_order_ms}, {"prepare", report->host_prepare_ms},
                 {"gpu_wait", report->gpu_wait_ms}, {"publish", report->host_publish_ms},
                 {"merge", report->host_merge_ms}, {"coupling", report->host_coupling_ms},
-                {"motion", report->host_motion_ms}}},
+                {"motion", report->host_motion_ms}, {"upload", report->upload_ms},
+                {"download", report->download_ms}, {"step_total", report->host_step_ms}}},
+            {"cell_order", {{"disorder", report->cell_order_disorder},
+                {"resorted", report->cell_resorted}}},
             {"working_set_bytes", report->working_set_bytes},
+            {"mpm_contact", {{"parcels", report->mpm_parcels},
+                {"events", report->mpm_contact_events},
+                {"grain_impulse_magnitude_n_s", report->mpm_contact_impulse},
+                {"max_neighbours", report->mpm_contact_max_neighbours},
+                {"momentum_residual_n_s", report->mpm_contact_momentum_residual},
+                {"schedule", report->common_clock
+                    ? "shared_transport_contact_advection" : "continuum_frame_then_dem_substep_contact"}}},
+            {"common_clock", {{"enabled", report->common_clock},
+                {"transport_steps", report->substeps},
+                {"continuum_grid_steps", report->liquid_substeps},
+                {"liquid_reaction_on_gpu", report->liquid_reaction_on_gpu},
+                {"liquid_support", report->liquid_support_dynamic
+                    ? "device_rebin_each_tick" : "frame_sparse_cfd_dem"}}},
             {"collider_faces", report->collider_faces},
             {"collider_speed_max_m_s", report->collider_speed_max},
             {"field_acceleration_max_m_s2", report->field_acceleration_max},
@@ -249,7 +286,7 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
         {"contact_budget", kMatterGrainContactBudget}, {"runtime", runtime},
         {"rolling_model", params.rolling_friction > 0.0f ? "epsd2_spring" : "none"},
         {"pile", matterGrainPileProfile(centres, params.radius_m)},
-        {"neighbour_structure", "rotating_fixed_buckets"},
+        {"neighbour_structure", "verlet_list_fixed_buckets"},
         {"radius_m", params.radius_m}, {"spin_energy_j", spin_energy},
         {"max_spin_rad_s", maximum_spin},
         {"angular_momentum_kg_m2_s", {angular[0], angular[1], angular[2]}},

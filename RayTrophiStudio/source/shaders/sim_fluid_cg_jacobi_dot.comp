@@ -56,5 +56,7 @@ void main() {
         if (tid < stride) sdata[tid] += sdata[tid + stride];
         barrier();
     }
-    if (tid == 0u) partials[gl_WorkGroupID.x] = sdata[0];
+    if (tid == 0u && fluidPressureReductionGroupValid()) {
+        partials[fluidPressureGroupIndex()] = sdata[0];
+    }
 }

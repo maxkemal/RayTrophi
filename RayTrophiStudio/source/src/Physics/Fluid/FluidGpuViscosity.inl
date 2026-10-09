@@ -4,9 +4,16 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
                           SimulationComputeContext* compute,
                           SimulationGridDomainComputeBuffers& gpu_buffers,
                           const std::vector<float>& fluid_mask_cpu,
-                          int* out_sweeps_run) {
+                          int* out_sweeps_run,
+                          Fluid::APICSolverStats* sparse_stats = nullptr) {
     if (out_sweeps_run) *out_sweeps_run = 0;
     auto& grid = state.grid;
+    if (sparse_stats) {
+        sparse_stats->viscosity_sparse_used = false;
+        sparse_stats->viscosity_sparse_active_tiles = 0;
+        sparse_stats->viscosity_sparse_allocated_tiles = 0;
+        sparse_stats->viscosity_sparse_resident_bytes = 0;
+    }
     if (!compute ||
         compute->backendType() != ComputeBackendType::VulkanCompute ||
         !compute->supportsDispatch() || dt <= 0.0f ||
@@ -26,9 +33,24 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
     if (alpha <= 1.0e-8f && !has_nu_field) {
         return false;   // nothing to diffuse; let the host no-op it
     }
+    const bool sparse = grid.sparse_mode_enabled &&
+        params.boundary != Fluid::APICSolverParams::BoundaryMode::Periodic;
+    if (grid.getCellCount() > std::size_t(std::numeric_limits<int32_t>::max()) ||
+        std::max({grid.vel_x.size(), grid.vel_y.size(), grid.vel_z.size()}) >
+            std::size_t(std::numeric_limits<int32_t>::max()) ||
+        !Fluid::ensureMacRhsScratch(*compute, gpu_buffers,
+            {grid.vel_x.size(), grid.vel_y.size(), grid.vel_z.size()}, sparse)) {
+        return false;
+    }
 
+    // Dense bank or compact pages (docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md); a
+    // compact field has no dense twin, so only the sparse RHS path can relax it.
+    const auto mac = Fluid::macVelocityBinding(gpu_buffers);
+    if (mac.compact && !sparse) {
+        return false;
+    }
     ComputeBufferHandle bufs[11] = {
-        gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z,
+        mac.velocity[0], mac.velocity[1], mac.velocity[2],
         gpu_buffers.fluid_mask,
         // scratch2_* is the MacCormack second-pass target, which only the GAS
         // solver uses; a domain is fluid or gas, never both in one step.
@@ -41,8 +63,11 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
         gpu_buffers.substance_viscosity.valid() ? gpu_buffers.substance_viscosity
                                                 : gpu_buffers.fluid_mask
     };
-    for (const auto& handle : bufs) {
-        if (!handle.valid()) return false;
+    for (std::size_t index = 0; index < 11; ++index) {
+        if (sparse && index >= 4 && index <= 6) {
+            continue;
+        }
+        if (!bufs[index].valid()) return false;
     }
 
     const uint32_t cell_count = static_cast<uint32_t>(grid.getCellCount());
@@ -88,18 +113,18 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
          compute->uploadBuffer(gpu_buffers.vel_z, grid.vel_z.data(), vz_bytes)) &&
         // The RHS is the same field: GS starts from the pre-diffusion state and
         // relaxes in place, so both copies begin identical.
-        (gpu_buffers.matter_model.enabled
+        (sparse || (gpu_buffers.matter_model.enabled
             ? Fluid::copyMatterGpuFloat(*compute, gpu_buffers.vel_x,
                 gpu_buffers.scratch2_vel_x, static_cast<uint32_t>(grid.vel_x.size()))
-            : compute->uploadBuffer(gpu_buffers.scratch2_vel_x, grid.vel_x.data(), vx_bytes)) &&
-        (gpu_buffers.matter_model.enabled
+            : compute->uploadBuffer(gpu_buffers.scratch2_vel_x, grid.vel_x.data(), vx_bytes))) &&
+        (sparse || (gpu_buffers.matter_model.enabled
             ? Fluid::copyMatterGpuFloat(*compute, gpu_buffers.vel_y,
                 gpu_buffers.scratch2_vel_y, static_cast<uint32_t>(grid.vel_y.size()))
-            : compute->uploadBuffer(gpu_buffers.scratch2_vel_y, grid.vel_y.data(), vy_bytes)) &&
-        (gpu_buffers.matter_model.enabled
+            : compute->uploadBuffer(gpu_buffers.scratch2_vel_y, grid.vel_y.data(), vy_bytes))) &&
+        (sparse || (gpu_buffers.matter_model.enabled
             ? Fluid::copyMatterGpuFloat(*compute, gpu_buffers.vel_z,
                 gpu_buffers.scratch2_vel_z, static_cast<uint32_t>(grid.vel_z.size()))
-            : compute->uploadBuffer(gpu_buffers.scratch2_vel_z, grid.vel_z.data(), vz_bytes)) &&
+            : compute->uploadBuffer(gpu_buffers.scratch2_vel_z, grid.vel_z.data(), vz_bytes))) &&
         // cell_count, NOT fluid_mask_cpu.size(): the caller's scratch is
         // function-static and grow-only, so a smaller domain later in the same
         // session would otherwise overflow its correctly-sized buffer.
@@ -149,10 +174,8 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
     // one.
     c.has_nu = nu_uploaded ? 1 : 0;
 
-    const uint32_t threads = 256;
     const uint32_t max_faces = static_cast<uint32_t>(
         std::max({grid.vel_x.size(), grid.vel_y.size(), grid.vel_z.size()}));
-    const uint32_t groups = (max_faces + threads - 1u) / threads;
     const int sweeps = std::clamp(params.viscosity_sweeps, 1, 64);
 
     ComputeDispatch cmd;
@@ -160,15 +183,28 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
     cmd.buffers = bufs;
     cmd.buffer_count = 11;
     cmd.constants_size = sizeof(c);
-    cmd.groups.groups_x = groups;
-    cmd.groups.groups_y = 1;
+    cmd.groups = FluidGpuDispatch::groups256(max_faces);
     cmd.groups.groups_z = 1;
 
-    for (int s = 0; s < sweeps && ok; ++s) {
-        for (int parity = 0; parity < 2 && ok; ++parity) {
-            c.parity = parity;
-            cmd.constants = &c;
-            ok = compute->dispatch(cmd);
+    if (sparse) {
+        std::string error;
+        ok = Fluid::runSparseViscosity(*compute, gpu_buffers, params, c, sweeps, error);
+        if (!ok) {
+            SCENE_LOG_WARN("[SimCompute] sparse viscosity failed: " + error);
+        } else if (sparse_stats) {
+            const auto& storage = gpu_buffers.sparse_viscosity;
+            sparse_stats->viscosity_sparse_used = true;
+            sparse_stats->viscosity_sparse_active_tiles = storage.active_tiles;
+            sparse_stats->viscosity_sparse_allocated_tiles = storage.allocated_tiles;
+            sparse_stats->viscosity_sparse_resident_bytes = storage.resident_bytes;
+        }
+    } else {
+        for (int s = 0; s < sweeps && ok; ++s) {
+            for (int parity = 0; parity < 2 && ok; ++parity) {
+                c.parity = parity;
+                cmd.constants = &c;
+                ok = compute->dispatch(cmd);
+            }
         }
     }
     if (!ok) return false;
