@@ -1911,6 +1911,12 @@ VolumeSlotsInfo volumeSlots() {
                 r.volume_type = d.volume_type;
                 r.has_density = d.has_density;
                 r.has_temperature = d.has_temperature;
+                r.emission_mode = d.emission_mode;
+                r.color_ramp_enabled = d.color_ramp_enabled;
+                r.blackbody_intensity = d.blackbody_intensity;
+                r.temperature_scale = d.temperature_scale;
+                r.temperature_min = d.temperature_min;
+                r.temperature_max = d.temperature_max;
                 r.aabb_min = Vec3(d.aabb_min[0], d.aabb_min[1], d.aabb_min[2]);
                 r.aabb_max = Vec3(d.aabb_max[0], d.aabb_max[1], d.aabb_max[2]);
                 table.slots.push_back(std::move(r));

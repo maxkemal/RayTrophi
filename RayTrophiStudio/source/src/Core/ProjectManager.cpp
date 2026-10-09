@@ -5775,6 +5775,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         f["particle_pool_weight"] = source.particle_pool_weight;
         f["fluid_temperature_override"] = source.fluid_temperature_override;
         f["fluid_temperature_kelvin"] = source.fluid_temperature_kelvin;
+        f["grain_birth_saturation"] = source.grain_birth_saturation;
         f["use_time_limit"] = source.use_time_limit;
         f["start_time"] = source.start_time;
         f["end_time"] = source.end_time;
@@ -6318,6 +6319,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         source.particle_pool_weight = item.value("particle_pool_weight", 1.0f);
         source.fluid_temperature_override = item.value("fluid_temperature_override", source.fluid_temperature_override);
         source.fluid_temperature_kelvin = std::max(1.0f, item.value("fluid_temperature_kelvin", source.fluid_temperature_kelvin));
+        source.grain_birth_saturation = std::clamp(item.value("grain_birth_saturation", 0.0f), 0.0f, 1.0f);
         source.use_time_limit = item.value("use_time_limit", source.use_time_limit);
         source.start_time = item.value("start_time", source.start_time);
         source.end_time = item.value("end_time", source.end_time);
@@ -6599,7 +6601,14 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.pore_exchange = RayTrophiSim::Fluid::matterPoreParamsFromJson(item.at("matter_pore_exchange"));
         }
         if (item.contains("matter_grain")) {
-            domain.fluid_params.grain = RayTrophiSim::Fluid::matterGrainParamsFromJson(item.at("matter_grain"));
+            std::string dropped;
+            domain.fluid_params.grain = RayTrophiSim::Fluid::matterGrainParamsFromJson(
+                item.at("matter_grain"), &dropped);
+            if (!dropped.empty()) {
+                SCENE_LOG_WARN("[ProjectManager] Domain '" + domain.name + "': saved grain material (" +
+                    dropped + ") ignored; the grain substance owns it now. Derive a substance "
+                    "to keep custom values.");
+            }
         }
         domain.fluid_substance_materials.clear();
         if (item.contains("fluid_substance_materials") &&

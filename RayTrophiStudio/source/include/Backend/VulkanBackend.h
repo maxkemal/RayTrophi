@@ -2243,6 +2243,12 @@ public:
         int  volume_type = -1;
         bool has_density = false;    // vdb_grid_address != 0
         bool has_temperature = false;// vdb_temp_address != 0 (SDF: foam rides this)
+        int emission_mode = 0;
+        bool color_ramp_enabled = false;
+        float blackbody_intensity = 0.0f;
+        float temperature_scale = 0.0f;
+        float temperature_min = 0.0f;
+        float temperature_max = 0.0f;
         float aabb_min[3] = {0, 0, 0};
         float aabb_max[3] = {0, 0, 0};
     };

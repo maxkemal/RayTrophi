@@ -95,10 +95,13 @@ Result setSubstanceFields(const std::string& name, const std::string& fields_jso
     nlohmann::json fields = nlohmann::json::parse(fields_json, nullptr, false);
     if (fields.is_discarded()) return Result::fail("substance fields: invalid JSON");
     std::string error;
-    if (fields.contains("granular_transport")) {
+    // Fixed when a grain is born: the owner (transport) and the grain mass
+    // (packing). Live particles of this substance must be reset first.
+    for (const char* key : {"granular_transport", "grain_packing_fraction"}) {
+        if (!fields.contains(key)) continue;
         auto& runtime = scriptSimulationRuntime();
         if (!RayTrophiSim::Fluid::validateMatterTransportEdit(name, runtime.gridDomains(),
-                runtime.gridDomainStates(), error)) {
+                runtime.gridDomainStates(), error, key)) {
             return Result::fail(error);
         }
     }

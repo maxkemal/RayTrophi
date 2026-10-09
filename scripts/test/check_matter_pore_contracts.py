@@ -17,7 +17,8 @@ def main():
                   "pore_water_energy_j"]:
         for operation in ["clear()", "reserve(n)", "resize(n)"]:
             assert f"{field}.{operation}" in particles, (field, operation)
-        assert f"copy({field}, other.{field})" in particles, field
+        # Copies go through the one column list (forEachColumnPair, DEM batch 9).
+        assert f"fn(a.{field}, b.{field})" in particles, field
         assert f"{field}[i] = {field}[last]" in particles, field
         assert f"allocationBytes(particles.{field})" in memory, field
         assert cache.count(field) >= 3, field

@@ -680,7 +680,13 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_particle_emission")) d.fluid_particle_emission = j["fluid_particle_emission"];
     if (j.contains("fluid_particle_material_id")) d.fluid_particle_material_id = j["fluid_particle_material_id"];
     if (j.contains("matter_grain")) {
-        d.fluid_params.grain = RayTrophiSim::Fluid::matterGrainParamsFromJson(j.at("matter_grain"));
+        std::string dropped;
+        d.fluid_params.grain = RayTrophiSim::Fluid::matterGrainParamsFromJson(
+            j.at("matter_grain"), &dropped);
+        if (!dropped.empty()) {
+            SCENE_LOG_WARN("[SceneSerializer] Domain '" + d.name + "': saved grain material (" +
+                dropped + ") ignored; the grain substance owns it now.");
+        }
     }
     if (j.contains("matter_pore_exchange")) {
         d.fluid_params.pore_exchange = RayTrophiSim::Fluid::matterPoreParamsFromJson(j.at("matter_pore_exchange"));
@@ -796,6 +802,7 @@ json flowSourceToJson(const RayTrophiSim::SimulationFlowSourceDesc& fs) {
     j["particle_pool_weight"] = fs.particle_pool_weight;
     j["fluid_temperature_override"] = fs.fluid_temperature_override;
     j["fluid_temperature_kelvin"] = fs.fluid_temperature_kelvin;
+    j["grain_birth_saturation"] = fs.grain_birth_saturation;
     j["use_time_limit"] = fs.use_time_limit;
     j["start_time"] = fs.start_time;
     j["end_time"] = fs.end_time;
@@ -829,6 +836,7 @@ RayTrophiSim::SimulationFlowSourceDesc jsonToFlowSource(const json& j) {
     fs.particle_pool_weight = j.value("particle_pool_weight", 1.0f);
     if (j.contains("fluid_temperature_override")) fs.fluid_temperature_override = j["fluid_temperature_override"];
     if (j.contains("fluid_temperature_kelvin")) fs.fluid_temperature_kelvin = j["fluid_temperature_kelvin"];
+    if (j.contains("grain_birth_saturation")) fs.grain_birth_saturation = j["grain_birth_saturation"];
     if (j.contains("use_time_limit")) fs.use_time_limit = j["use_time_limit"];
     if (j.contains("start_time")) fs.start_time = j["start_time"];
     if (j.contains("end_time")) fs.end_time = j["end_time"];

@@ -11,13 +11,17 @@ import json
 import argparse
 
 from rt_ipc import RtIpc, RtIpcError
+from rt_grain_material import install_grain_material  # noqa: E402
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel-timings", action="store_true")
+    parser.add_argument("--owners-only", action="store_true",
+                        help="Only DEM/MPM ownership, shared clock and balanced contact; no fluid arm")
     args = parser.parse_args()
     client = RtIpc()
+    install_grain_material(client)  # old grain keys -> grain substance
     suffix = uuid.uuid4().hex[:8]
     domain = "T4Owners_" + suffix
     soil = "T4Soil_" + suffix
@@ -37,7 +41,7 @@ def main():
         client.call("fluid.set_param", domain=domain, backend="vulkan", boundary="closed",
                     default_substance=soil, solid_phase=False, visible=False,
                     thermal_liquid_enabled=False)
-        client.call("fluid.set_grain_settings", domain=domain, enabled=True)
+        client.call("fluid.set_grain_settings", domain=domain)
         for material, x, vx in (("Sand", -0.025, 0.3), (soil, 0.025, -0.3)):
             name = "T4Source_" + material + "_" + suffix
             client.call("flow_source.create", name=name, domain=domain, phase="liquid",
@@ -84,6 +88,12 @@ def main():
         else:
             raise AssertionError("live transport ownership changed without reset")
         assert client.call("substance.get", name=soil) == before
+        if args.owners_only:
+            assert runtime["sleeping_grains"] == 0, runtime
+            print(json.dumps({"owners": owners, "contact": first_contact,
+                              "cost": first_cost, "common_clock": clock}))
+            print("PASS: DEM and MPM in one Matter domain, shared clock and balanced contact impulse")
+            return
         # Introduce the third owner. It must not consume the skeleton as water
         # or send fluid drag to MPM carriers. All three counts remain separate.
         water_source = "T4Water_" + suffix

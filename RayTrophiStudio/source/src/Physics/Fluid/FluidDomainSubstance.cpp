@@ -52,6 +52,8 @@ bool resolveDomainSubstancePhysics(APICSolverParams& params, float voxel_size,
     params.granular_poisson_ratio = s->granular_poisson_ratio;
     params.granular_tensile_cutoff = s->granular_tensile_cutoff;
     params.granular_hardening = s->granular_hardening;
+    params.granular_compaction_hardening = s->granular_compaction_hardening;
+    params.granular_compaction_limit = s->granular_compaction_limit;
     params.granular_fracture_strain = s->granular_fracture_strain;
     params.granular_damage_rate = s->granular_damage_rate;
     params.granular_healing_rate = s->granular_healing_rate;

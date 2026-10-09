@@ -1,10 +1,13 @@
 #include "Fluid/MatterGrain.h"
+#include "Fluid/MatterSubstanceState.h"
 #include "ParticleSimulation.h"
+#include "MaterialStateField.h"
 #include "../Api/RtMatterModels.h"
 #include "DomainPanelWidgets.h"
 #include "ui_modern.h"
 #include "imgui.h"
 
+#include <algorithm>
 #include <cmath>
 #include <map>
 #include <string>
@@ -36,104 +39,56 @@ void showError(const SimulationGridDomainDesc& domain) {
 
 } // namespace
 
-// Matter tab: what the grains are made of. Drawn only when the domain has a
-// granular phase (grains enabled in Solvers).
-void drawMatterGrainMaterial(const SimulationGridDomainDesc& domain) {
-    if (domain.type != SimulationDomainType::Matter || !domain.fluid_params.grain.enabled ||
+// Matter tab: what the grains are made of. The material is the DEM
+// substance's and is edited in its substance editor (Default Substance or the
+// source's); this block says which substance runs and what it gives the
+// grains, and never holds a value of its own (MADDE_UI_TEK_OTORITE U2/U4).
+void drawMatterGrainMaterial(const SimulationGridDomainDesc& domain,
+                             const MatterGrainOwnership& ownership) {
+    if (domain.type != SimulationDomainType::Matter || !ownership.wanted ||
         !UIWidgets::CollapsingHeader("Granular Material (grains)##MatterGrainMaterial",
             ImGuiTreeNodeFlags_DefaultOpen)) {
         return;
     }
+    const auto* s = tryFindSubstance(ownership.substance);
+    if (!s) {
+        DomainUi::Reason(("Substance '" + ownership.substance + "' is not in the library").c_str());
+        return;
+    }
     ImGui::PushID(domain.name.c_str());
-    auto p = domain.fluid_params.grain;
-    ImGui::TextWrapped("Transport is selected per substance: dem uses grains, mpm uses "
-        "the continuum skeleton. Both can share this domain with bidirectional contact.");
-    bool changed = false;
-    changed |= DomainUi::Float("Real grain radius (m, 0 = simulation)", &p.represented_grain_radius_m,
-        1e-5f, 0.0f, p.radius_m, "%.5f",
-        "Radius of the real grains one simulated grain stands for (0.0005 m = 1 mm sand).\n"
-        "Range 0..simulation radius; 0 = the simulated grain is the real grain.\n"
-        "Keeps the real Bond number: liquid bridge force x (simulation / real radius)^2.\n"
-        "Script: fluid.set_grain_settings(represented_grain_radius_m=...)");
-    changed |= DomainUi::Slider("Packing fraction", &p.packing_fraction, .3f, .74f, "%.2f",
-        "Solid fraction of a settled bed of these grains (random packing ~0.6).\n"
-        "Grain density = substance bulk density / packing fraction (sand 1600 / 0.6 = 2667 kg/m^3).\n"
-        "Changes grain mass, so reset particles after editing.\n"
-        "Script: fluid.set_grain_settings(packing_fraction=...)");
-    changed |= DomainUi::Slider("Sliding friction", &p.friction, 0.0f, 2.0f, "%.2f",
-        "Coulomb friction coefficient mu between grains and against walls/meshes.\n"
-        "Typical: glass beads 0.1-0.3, sand 0.5-0.7. Equivalent angle atan(mu).\n"
-        "Together with rolling friction sets the angle of repose.\n"
-        "Script: fluid.set_grain_settings(friction=...)");
-    changed |= DomainUi::Slider("Rolling friction", &p.rolling_friction, 0.0f, 1.0f, "%.3f",
-        "Rolling resistance mu_r (grain shape): round 0.02, angular sand 0.1-0.3.\n"
-        "A grain holds on a slope while tan(slope) <= mu_r.\n"
-        "Drives the EPSD2 rolling spring; raises the repose angle.\n"
-        "Script: fluid.set_grain_settings(rolling_friction=...)");
-    changed |= DomainUi::Slider("Restitution", &p.restitution, .01f, 1.0f, "%.2f",
-        "Coefficient of restitution of a normal impact: rebound speed / impact speed.\n"
-        "Typical: sand 0.4-0.6, glass beads 0.9; 0.01..1.\n"
-        "Every contact derives its damping from it and its own effective mass.\n"
-        "Script: fluid.set_grain_settings(restitution=...)");
-    if (ImGui::TreeNode("Advanced material##GrainMaterialAdvanced")) {
-        changed |= DomainUi::Slider("Twisting friction", &p.twisting_friction, 0.0f, 1.0f, "%.3f",
-            "Torsional resistance about the contact normal (fraction of mu_r torque).\n"
-            "0 = free spin about the normal; 0.1 damps spinning piles.\n"
-            "Script: fluid.set_grain_settings(twisting_friction=...)");
-        changed |= DomainUi::Slider("Static friction stiffness (x normal)",
-            &p.tangential_stiffness_ratio, 0.0f, 1.0f, "%.3f",
-            "Cundall-Strack tangential spring as a fraction of the normal stiffness.\n"
-            "2/7 (0.286) matches a solid sphere's contact periods; 0 = kinetic-only sliding.\n"
-            "Holds piles and slopes with static friction.\n"
-            "Script: fluid.set_grain_settings(tangential_stiffness_ratio=...)");
-        ImGui::TreePop();
+    ImGui::TextWrapped("Grain material: %s. Edit it in the substance editor under the source or "
+        "the Default Substance (Derive to customize a built-in).", ownership.substance.c_str());
+    ImGui::Text("Friction %.2f   Rolling %.3f   Restitution %.2f",
+                s->grain_friction, s->grain_rolling_friction, s->grain_restitution);
+    const float packing = std::clamp(s->grain_packing_fraction, .3f, .74f);
+    ImGui::Text("Packing %.2f   Grain density %.0f kg/m^3", packing, s->density / packing);
+    if (s->grain_real_radius_m > 0.0f) {
+        ImGui::Text("Real grain radius %.5f m (coarse graining)", s->grain_real_radius_m);
     }
-    ImGui::SeparatorText("Water");
-    changed |= DomainUi::Bool("Wet grains (absorb water, liquid bridges)", &p.wet_grains,
-        "Grains take water from the liquid around them and pull on each other through\n"
-        "pendular liquid bridges (Willett 2000). Water is held in the grain, counted once.\n"
-        "Needs liquid in the domain or birth saturation.\n"
-        "Script: fluid.set_grain_settings(wet_grains=true)");
-    ImGui::BeginDisabled(!p.wet_grains);
-    changed |= DomainUi::Slider("Water capacity (x grain volume)", &p.water_capacity_fraction,
-        0.0f, .5f, "%.3f",
-        "Water one grain can hold, as a fraction of its volume (0..0.5).\n"
-        "Sets saturation = held water / capacity.\n"
-        "Script: fluid.set_grain_settings(water_capacity_fraction=...)");
-    changed |= DomainUi::Float("Absorption rate (1/s)", &p.absorption_rate_per_s, .1f, 0.0f,
-        1000.0f, "%.2f",
-        "Fraction of the free capacity filled per second while submerged (0..1000).\n"
-        "At most half a cell's liquid per frame; momentum is exact.\n"
-        "Script: fluid.set_grain_settings(absorption_rate_per_s=...)");
-    changed |= DomainUi::Float("Drying rate (1/s)", &p.drying_rate_per_s, .01f, 0.0f, 100.0f,
-        "%.3f",
-        "Fraction of the held water lost per second (0..100). The water leaves the\n"
-        "domain and is reported as evaporated.\n"
-        "Script: fluid.set_grain_settings(drying_rate_per_s=...)");
-    changed |= DomainUi::Slider("Surface tension (N/m)", &p.surface_tension_n_m, 0.0f, 1.0f,
-        "%.4f",
-        "Liquid surface tension of the bridges (water 0.072 N/m).\n"
-        "Scales the bridge force F = 2 pi R gamma cos(theta) / (1 + 2.1 s + 10 s^2).\n"
-        "Script: fluid.set_grain_settings(surface_tension_n_m=...)");
-    changed |= DomainUi::Slider("Contact angle (deg)", &p.contact_angle_deg, 0.0f, 89.0f, "%.1f",
-        "Wetting angle of the liquid on the grain (water on quartz ~20 deg).\n"
-        "0 = perfect wetting, strongest bridges.\n"
-        "Script: fluid.set_grain_settings(contact_angle_deg=...)");
-    changed |= DomainUi::Slider("Birth saturation", &p.birth_saturation, 0.0f, 1.0f, "%.2f",
-        "Water a newly emitted grain already holds, as a fraction of capacity\n"
-        "(an emitter of damp sand).\n"
-        "Script: fluid.set_grain_settings(birth_saturation=...)");
-    ImGui::EndDisabled();
-    if (changed) {
-        apply(domain, p);
+    if (ownership.wet_grains) {
+        ImGui::Text("Wet grains: on (water capacity %.3f of the grain volume)",
+                    s->grain_water_capacity_fraction);
+    } else if (s->grain_water_capacity_fraction <= 0.0f) {
+        ImGui::TextDisabled("Wet grains: off - %s holds no water (grain_water_capacity_fraction = 0)",
+                            ownership.substance.c_str());
+    } else {
+        ImGui::TextDisabled("Wet grains: off - no liquid here and no source pours wet grains");
     }
-    showError(domain);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Wet grains follow the substances: on when the grain substance holds\n"
+                          "water and the domain has liquid (or a source pours wet grains).\n"
+                          "Script: fluid.matter_models(domain=...)['grain_ownership']");
+    }
+    for (const auto& note : ownership.notes) {
+        DomainUi::Reason(note.c_str());
+    }
     ImGui::PopID();
 }
 
 // Solvers tab: whether and how the granular phase is stepped.
 void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
-                           const SimulationGridDomainState* state) {
+                           const SimulationGridDomainState* state,
+                           const MatterGrainOwnership& ownership) {
     if (domain.type != SimulationDomainType::Matter ||
         !UIWidgets::CollapsingHeader("Granular Solver (grains)##MatterGrainSolver",
             ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -141,44 +96,47 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
     }
     ImGui::PushID(domain.name.c_str());
     auto p = domain.fluid_params.grain;
-    bool changed = DomainUi::Bool("Enable discrete grains", &p.enabled,
-        "Substances with granular_transport=dem use physical DEM grains;\n"
-        "granular_transport=mpm retains the MPM skeleton and exchanges contact impulses.\n"
-        "liquid emitters in the same domain stay liquid parcels (one owner each).\n"
-        "Needs Vulkan, a Closed boundary, and pore water / thermal liquid off.\n"
-        "Script: fluid.set_grain_settings(enabled=true)");
-    const auto blockers = matterGrainBlockers(domain);
-    if (p.enabled || !blockers.empty()) {
-        if (blockers.empty()) {
-            const bool held = state && state->fluid_stats.mixed_step_held;
-            if (held) {
-                // Not greyed: a held step freezes every grain where it was born,
-                // and this line is the only place that says why.
-                ImGui::TextWrapped("Step held - grains do not move: %s",
-                                   state->fluid_stats.gpu_status.c_str());
-            } else {
-                DomainUi::Reason("Ready.");
-            }
+    bool changed = false;
+    // No switch: grains follow the substances. This block only says which
+    // solver the granular material gets and, when it is not DEM, why.
+    if (!ownership.wanted) {
+        ImGui::TextWrapped("Solver: MPM continuum - no substance here uses DEM grains.");
+    } else if (ownership.reset_pending) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s", ownership.enabled
+            ? "Solver: DEM grains until particles are reset (no substance asks for them now)."
+            : "Reset particles to start DEM grains - live particles keep their solver.");
+    } else if (!ownership.blockers.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f),
+            "%s asks for DEM grains but runs as MPM:", ownership.substance.c_str());
+        for (const auto& blocker : ownership.blockers) {
+            DomainUi::Reason(blocker.c_str());
         }
-        for (const auto& blocker : blockers) {
-            DomainUi::Reason(blocker.message.c_str());
-        }
+    } else if (state && state->fluid_stats.mixed_step_held) {
+        // Not greyed: a held step freezes every grain where it was born,
+        // and this line is the only place that says why.
+        ImGui::TextWrapped("Step held - grains do not move: %s",
+                           state->fluid_stats.gpu_status.c_str());
+    } else {
+        ImGui::TextWrapped("Solver: DEM grains (%s).", ownership.substance.c_str());
     }
-    if (p.enabled) {
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Grains (DEM) run when a substance in this domain is granular with\n"
+            "granular_transport = dem: Sand, Gravel, Ice or a substance derived from them,\n"
+            "as the Default Substance or on a flow source. granular_transport = mpm keeps\n"
+            "the continuum skeleton (cheaper for large flows).\n"
+            "Script: fluid.matter_models(domain=...)['grain_ownership']");
+    }
+    if (ownership.wanted) {
         changed |= DomainUi::Float("Simulation grain radius (m)", &p.radius_m, .001f, .001f, 1.0f,
             "%.4f",
             "Radius of one simulated grain (0.001..1 m). Sets cost: grain count ~ 1/r^3.\n"
-            "Mass falls with r^3 while Contact stiffness stays in N/m, so a smaller\n"
-            "grain is a stiffer contact: the substep shrinks ~ r^1.5. Lower stiffness\n"
-            "with the radius (k ~ r keeps the same impact overlap fraction).\n"
-            "A real grain size below it is set in Matter (coarse graining).\n"
+            "Contact stiffness follows it (k ~ r keeps the impact overlap fraction).\n"
+            "The real grain size is the substance's (grain_real_radius_m).\n"
             "Reset particles after editing.\n"
             "Script: fluid.set_grain_settings(radius_m=...)");
-        changed |= DomainUi::Float("Contact stiffness (N/m)", &p.stiffness_n_m, 100.0f, 1.0f, 1e8f,
-            "%.0f",
-            "Normal contact spring (1..1e8 N/m). Softer = more overlap, fewer substeps\n"
-            "(substeps ~ sqrt(k)); keep overlap under ~1% of the radius.\n"
-            "Script: fluid.set_grain_settings(stiffness_n_m=...)");
+        ImGui::TextDisabled("Contact stiffness %.0f N/m (from the radius)",
+            p.stiffness_scale * kMatterGrainStiffnessPerRadius * p.radius_m);
         int accuracy = p.contact_resolution == 12 ? 0 : p.contact_resolution == 24 ? 1
             : p.contact_resolution == 48 ? 2 : 3;
         if (DomainUi::Choice("Accuracy", &accuracy, "Draft\0Production\0Reference\0Custom\0",
@@ -193,6 +151,12 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
             }
         }
         if (ImGui::TreeNode("Advanced solver##GrainSolverAdvanced")) {
+            changed |= DomainUi::Float("Stiffness scale", &p.stiffness_scale, .01f, .01f, 1000.0f,
+                "%.2f",
+                "Multiplies the contact stiffness the radius gives (k = scale x 8e5 N/m per m x r;\n"
+                "1 = 2e4 N/m at 25 mm). Softer = more overlap, fewer substeps (~ sqrt(k));\n"
+                "keep overlap under ~1% of the radius.\n"
+                "Script: fluid.set_grain_settings(stiffness_scale=...)");
             changed |= DomainUi::Int("Substeps per collision", &p.contact_resolution, 1.0f, 8, 200,
                 "Substeps per binary collision duration (8..200): accuracy, not stability.\n"
                 "Script: fluid.set_grain_settings(contact_resolution=...)");
@@ -204,8 +168,9 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
                 "Viscous part of the sliding force inside the Coulomb cone (0..1e5 Ns/m).\n"
                 "Script: fluid.set_grain_settings(sliding_damping_n_s_m=...)");
             changed |= DomainUi::Bool("Sleeping grains", &p.sleep,
-                "A grain that stays slower than the sleep speed for the sleep time stops\n"
-                "computing contacts and holds still until a faster grain touches it.\n"
+                "Grains sleep after staying slow and force/torque balanced for the sleep time.\n"
+                "Meaningful impacts or lost support trigger a local contact check.\n"
+                "A supported grain can stay asleep while a weak neighbour moves.\n"
                 "Saves GPU time on settled piles. Never with moving colliders, MPM contact,\n"
                 "liquid coupling or a force field on the grain. Off = A/B reference.\n"
                 "Script: fluid.set_grain_settings(sleep=...)");
@@ -213,11 +178,13 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
             changed |= DomainUi::Float("Sleep speed (m/s)", &p.sleep_speed_m_s, .0005f,
                 0.0f, 1.0f, "%.4f",
                 "Translation speed, and spin x radius, below which a grain counts as still\n"
-                "(0..1 m/s, absolute). A slope creeping slower than this freezes.\n"
+                "(0..1 m/s, absolute). Also sets the recipient's impulse-response deadband.\n"
+                "Low speed alone cannot freeze an unsupported grain.\n"
                 "Script: fluid.set_grain_settings(sleep_speed_m_s=...)");
             changed |= DomainUi::Float("Sleep time (s)", &p.sleep_time_s, .01f, .01f, 10.0f,
                 "%.2f",
-                "How long a grain must stay still before it sleeps (0.01..10 s).\n"
+                "Physical seconds of slow, balanced motion before sleep (0.01..10 s).\n"
+                "Adaptive substep changes do not restart this timer.\n"
                 "Script: fluid.set_grain_settings(sleep_time_s=...)");
             ImGui::EndDisabled();
             ImGui::TreePop();
@@ -239,11 +206,52 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
     if (changed) {
         apply(domain, p);
     }
-    // A rejected enable repeats the blocker lines above; show only other errors.
-    if (blockers.empty()) {
-        showError(domain);
-    }
+    showError(domain);
     ImGui::PopID();
+}
+
+void drawMatterGrainSourceLine(const ParticleSimulationSystem& system,
+                               SimulationFlowSourceDesc& source) {
+    const auto& domains = system.gridDomains();
+    if (source.domain_index < 0 || source.domain_index >= static_cast<int>(domains.size())) {
+        return;
+    }
+    const auto& domain = domains[static_cast<std::size_t>(source.domain_index)];
+    const std::string& name = source.fluid_substance.empty()
+        ? domain.fluid_params.default_substance : source.fluid_substance;
+    const auto* profile = name.empty() ? nullptr : tryFindSubstance(name);
+    if (domain.type != SimulationDomainType::Matter || !profile ||
+        profile->default_constitutive_model != MatterConstitutiveModel::Granular) {
+        return;
+    }
+    if (profile->granular_transport != MatterGranularTransport::Dem) {
+        ImGui::TextDisabled("Solver here: MPM continuum (%s: granular_transport = mpm).",
+                            name.c_str());
+        return;
+    }
+    const auto ownership = matterGrainOwnership(system,
+        static_cast<std::size_t>(source.domain_index));
+    if (!ownership.blockers.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f),
+            "Asks for DEM grains but runs as MPM: %s", ownership.blockers.front().c_str());
+    } else if (ownership.reset_pending && !ownership.enabled) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+            "Reset particles to start DEM grains.");
+    } else {
+        ImGui::TextDisabled("Solver here: DEM grains (settings in the domain's Solvers tab).");
+    }
+    // Wet at birth is a state of what this source pours (damp sand), so it is
+    // the source's; it needs a grain substance that holds water.
+    ImGui::BeginDisabled(profile->grain_water_capacity_fraction <= 0.0f);
+    float saturation = source.grain_birth_saturation;
+    if (DomainUi::Slider("Wet at birth", &saturation, 0.0f, 1.0f, "%.2f",
+            "Water each poured grain already holds, as a fraction of its\n"
+            "substance's water capacity (0..1). Needs a substance with\n"
+            "grain_water_capacity_fraction > 0.\n"
+            "Script: flow_source.update(grain_birth_saturation=...)")) {
+        source.grain_birth_saturation = std::clamp(saturation, 0.0f, 1.0f);
+    }
+    ImGui::EndDisabled();
 }
 
 // Measure tab: what the last grain step did.

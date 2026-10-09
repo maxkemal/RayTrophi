@@ -87,6 +87,7 @@ bool runSparseMacP2G(SimulationComputeContext& compute,
     storage.canonical = false;
     storage.snapshot_valid = false;
     storage.flip_gather_used = false;
+    storage.solid_weights_ready = false;
     const auto fail = [&](const char* reason) {
         // Queued compact work must complete before dense/host recovery writes.
         compute.synchronize();
@@ -122,6 +123,14 @@ bool runSparseMacP2G(SimulationComputeContext& compute,
     const uint64_t lookup_bytes = (tiles * 2u + 1u) * sizeof(uint32_t);
     const uint64_t budget = params.mixed_working_set_budget_bytes;
     const uint64_t particles = static_cast<uint64_t>(constants.particle_count);
+    const std::size_t pool_end = canonical && params.variational_solids ? 14u : 11u;
+    const uint64_t page_fields = pool_end - 2u;
+    for (std::size_t index = pool_end; index < storage.owned.size(); ++index) {
+        if (storage.owned[index].valid()) {
+            compute.destroyBuffer(storage.owned[index]);
+            storage.owned[index] = {};
+        }
+    }
     const std::array<ComputeBufferHandle, 3> particle_fields = {
         buffers.fluid_positions, buffers.fluid_velocities, buffers.fluid_affine};
     const std::array<ComputeBufferHandle, 3> dense_velocity = {
@@ -141,14 +150,14 @@ bool runSparseMacP2G(SimulationComputeContext& compute,
             return fail("sparse MAC publication buffer capacity mismatch");
         }
     }
-    if (budget != 0 && lookup_bytes + 9u * sizeof(float) > budget) {
+    if (budget != 0 && lookup_bytes + page_fields * sizeof(float) > budget) {
         return fail("sparse MAC lookup exceeds authored working budget");
     }
     if (!allocate(compute, storage.owned[0], tiles * sizeof(uint32_t), budget != 0) ||
         !allocate(compute, storage.owned[1], (tiles + 1u) * sizeof(uint32_t), budget != 0)) {
         return fail("sparse MAC lookup allocation failed");
     }
-    for (std::size_t index = 2; index < storage.owned.size(); ++index) {
+    for (std::size_t index = 2; index < pool_end; ++index) {
         if (!allocate(compute, storage.owned[index], sizeof(float), false)) {
             return fail("sparse MAC bootstrap allocation failed");
         }
@@ -170,15 +179,15 @@ bool runSparseMacP2G(SimulationComputeContext& compute,
     }
     const auto lanes = static_cast<uint32_t>(uint64_t(active) * 576u);
     const uint64_t bytes = std::max<uint64_t>(lanes, 1u) * sizeof(float);
-    if (budget != 0 && lookup_bytes + 9u * bytes > budget) {
+    if (budget != 0 && lookup_bytes + page_fields * bytes > budget) {
         return fail("sparse MAC pages exceed authored working budget");
     }
     uint64_t retained = lookup_bytes;
-    for (std::size_t index = 2; index < storage.owned.size(); ++index) {
+    for (std::size_t index = 2; index < pool_end; ++index) {
         retained += std::max<uint64_t>(bytes, compute.getBufferSize(storage.owned[index]));
     }
     const bool trim = budget != 0 && retained > budget;
-    for (std::size_t index = 2; index < storage.owned.size(); ++index) {
+    for (std::size_t index = 2; index < pool_end; ++index) {
         if (!allocate(compute, storage.owned[index], bytes, trim)) {
             return fail("sparse MAC page allocation failed");
         }
@@ -282,7 +291,10 @@ bool releaseDenseMacForCompactOwner(SimulationComputeContext& compute,
     }
     for (auto* handle : {&buffers.vel_x, &buffers.vel_y, &buffers.vel_z,
                          &buffers.scratch_vel_x, &buffers.scratch_vel_y,
-                         &buffers.scratch_vel_z}) {
+                         &buffers.scratch_vel_z, &buffers.temperature,
+                         &buffers.fuel, &buffers.scratch_scalar,
+                         &buffers.var_u_weight, &buffers.var_v_weight,
+                         &buffers.var_w_weight}) {
         if (handle->valid()) {
             compute.destroyBuffer(*handle);
         }
@@ -299,6 +311,7 @@ MacVelocityBinding macVelocityBinding(const SimulationGridDomainComputeBuffers& 
         binding.velocity = {pool[2], pool[3], pool[4]};
         binding.weight = {pool[5], pool[6], pool[7]};
         binding.flip = {pool[8], pool[9], pool[10]};
+        binding.solid_weight = {pool[11], pool[12], pool[13]};
         binding.map = pool[0];
         binding.list = pool[1];
         binding.compact = true;
@@ -308,6 +321,8 @@ MacVelocityBinding macVelocityBinding(const SimulationGridDomainComputeBuffers& 
     binding.velocity = {buffers.vel_x, buffers.vel_y, buffers.vel_z};
     binding.weight = {buffers.temperature, buffers.fuel, buffers.scratch_scalar};
     binding.flip = {buffers.scratch_vel_x, buffers.scratch_vel_y, buffers.scratch_vel_z};
+    binding.solid_weight = {buffers.var_u_weight, buffers.var_v_weight,
+                            buffers.var_w_weight};
     return binding;
 }
 

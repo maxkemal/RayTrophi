@@ -1,0 +1,90 @@
+{
+  "shader_revision": 23,
+  "source_changed_during_tests": false,
+  "on": {
+    "tail_steps": [
+      161,
+      180
+    ],
+    "tail_wall_median_s": 5.75,
+    "tail_gpu_wait_median_ms": 4662.2,
+    "tail_substeps_median": 440.0,
+    "sleeping": 490007,
+    "sleep_fraction": 0.37692846153846155,
+    "energy_j": 0.06464599022543147,
+    "mass_kg": 7434.82350371778,
+    "com_y": 0.18104864049208688,
+    "rms_translation_m_s": 0.004170138338637688,
+    "native_tail": [
+      {
+        "kernel": "sim_matter_grain_step",
+        "calls": 12320,
+        "ms": 127631.19820801681,
+        "ms_per_call": 10.359675179222144
+      },
+      {
+        "kernel": "sim_matter_grain_list_build",
+        "calls": 12320,
+        "ms": 2378.177535996183,
+        "ms_per_call": 0.1930338909087811
+      },
+      {
+        "kernel": "sim_matter_grain_hash",
+        "calls": 12320,
+        "ms": 231.56736000321416,
+        "ms_per_call": 0.01879605194831284
+      },
+      {
+        "kernel": "sim_matter_grain_list_clear",
+        "calls": 12320,
+        "ms": 586.859296000136,
+        "ms_per_call": 0.04763468311689416
+      }
+    ],
+    "scale_gates_pass": true
+  },
+  "off": {
+    "tail_steps": [
+      161,
+      180
+    ],
+    "tail_wall_median_s": 6.47,
+    "tail_gpu_wait_median_ms": 5388.549999999999,
+    "tail_substeps_median": 440.0,
+    "sleeping": 0,
+    "sleep_fraction": 0.0,
+    "energy_j": 0.0666871982183884,
+    "mass_kg": 7434.82350371778,
+    "com_y": 0.18104756555310073,
+    "rms_translation_m_s": 0.004235463095114785,
+    "native_tail": [
+      {
+        "kernel": "sim_matter_grain_step",
+        "calls": 12320,
+        "ms": 148883.98131194478,
+        "ms_per_call": 12.084738742852661
+      },
+      {
+        "kernel": "sim_matter_grain_list_build",
+        "calls": 12320,
+        "ms": 2321.759232084092,
+        "ms_per_call": 0.18845448312370877
+      },
+      {
+        "kernel": "sim_matter_grain_hash",
+        "calls": 12320,
+        "ms": 226.38694399523956,
+        "ms_per_call": 0.018375563635977237
+      },
+      {
+        "kernel": "sim_matter_grain_list_clear",
+        "calls": 12320,
+        "ms": 581.2405120000531,
+        "ms_per_call": 0.047178612987017296
+      }
+    ],
+    "scale_gates_pass": true
+  },
+  "tail_wall_speedup": 1.1252173913043477,
+  "physical_sleep_acceptance": false
+}

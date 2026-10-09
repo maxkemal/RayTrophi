@@ -74,6 +74,16 @@ def main():
         for name in ("Sand", "Gravel", "Ice"):
             assert rows[name]["granular_transport"] == "dem", (name, rows[name])
         assert rows["Soil"]["granular_transport"] == "mpm"
+        # Snow (MADDE_UI_TEK_OTORITE U5): a continuum that compacts; DEM
+        # material lives in grain_* fields, liquids carry surface tension.
+        assert by_name["Snow"]["category"] == "granular" and by_name["Snow"]["builtin"]
+        assert rows["Snow"]["granular_transport"] == "mpm"
+        assert rows["Snow"]["granular_compaction_hardening"] > 0.0
+        assert rows["Snow"]["granular_compaction_limit"] > 0.0
+        assert rows["Sand"]["granular_compaction_hardening"] == 0.0
+        assert math.isclose(rows["Sand"]["grain_friction"], 0.5, abs_tol=1e-6)
+        assert rows["Sand"]["grain_water_capacity_fraction"] == 0.0
+        assert math.isclose(rows["Water"]["liquid_surface_tension_n_m"], 0.072, abs_tol=1e-6)
         assert {"Honey", "Chocolate", "Mud"}.issubset(rows)
         assert rows["Water"]["fluid_extinguishing"] is True
         for name in ("Gasoline", "Alcohol", "Oil", "Plastic (PE)", "Wax"):

@@ -43,6 +43,7 @@ layout(set = 0, binding = 11) readonly buffer MacTileMap { uint mac_tile_map[]; 
 layout(set = 0, binding = 12) readonly buffer MacTileList { uint mac_tile_list[]; };
 #endif
 #include "sim_mac_lane.glsl"
+#include "sim_mac_solid_weight.glsl"
 
 int cell_id(int i, int j, int k) { return i + j*pc.nx + k*pc.nx*pc.ny; }
 int vx_idx(int i, int j, int k)  { return i + j*(pc.nx+1) + k*(pc.nx+1)*pc.ny; }
@@ -59,15 +60,15 @@ bool is_fluid(int i, int j, int k) { return mask_at(i, j, k) >  0.5; }
 
 float fw_x(int i, int j, int k) {
     if (i <= 0 || i >= pc.nx) return (pc.boundary == 0) ? 1.0 : 0.0;
-    return uw[vx_idx(i, j, k)];
+    return macSolidWeight(0, i, j, k);
 }
 float fw_y(int i, int j, int k) {
     if (j <= 0 || j >= pc.ny) return (pc.boundary == 0) ? 1.0 : 0.0;
-    return vw[vy_idx(i, j, k)];
+    return macSolidWeight(1, i, j, k);
 }
 float fw_z(int i, int j, int k) {
     if (k <= 0 || k >= pc.nz) return (pc.boundary == 0) ? 1.0 : 0.0;
-    return ww[vz_idx(i, j, k)];
+    return macSolidWeight(2, i, j, k);
 }
 
 float sv_x(int i, int j, int k) {

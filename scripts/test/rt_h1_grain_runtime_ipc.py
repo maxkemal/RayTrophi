@@ -8,8 +8,10 @@ import argparse
 import math
 import time
 import json
+import os
 from pathlib import Path
 from rt_ipc import RtIpc
+from rt_grain_material import install_grain_material
 from grain_units import restitution_of
 
 DOMAIN = 'H1_Grain_Runtime'
@@ -53,9 +55,17 @@ def main():
     args = parser.parse_args()
     args.extended_only = args.extended_only or args.corner_only
     client = RtIpc()
+    # Old grain keys -> grain substance / stiffness scale (MADDE_UI_TEK_OTORITE U2).
+    raw_call = client.call
+    install_grain_material(client)
     data = {'arms': [], 'completed': False}
 
+    # RT_GRAIN_SLEEP=0 runs every arm with sleeping grains off (A/B of DEM batch 10).
+    no_sleep = os.environ.get('RT_GRAIN_SLEEP') == '0'
+
     def call(method, **params):
+        if no_sleep and method == 'fluid.set_grain_settings':
+            params.setdefault('sleep', False)
         result = client.call(method, **params)
         if isinstance(result, dict) and (result.get('ok') is False or '__error' in result):
             raise RuntimeError((method, result))
@@ -99,22 +109,27 @@ def main():
         call('fluid.set_pore_exchange', domain=DOMAIN, enabled=False,
              wet_response_enabled=False, wet_appearance_enabled=False)
         call('fluid.reset')
-        call('fluid.set_grain_settings', domain=DOMAIN, enabled=True, radius_m=.025,
+        call('fluid.set_grain_settings', domain=DOMAIN, radius_m=.025,
              stiffness_n_m=20000., restitution=restitution_of(4., 20000.), sliding_damping_n_s_m=4.,
              friction=.5, rolling_friction=.02, twisting_friction=0., max_substeps=1024,
              tangential_stiffness_ratio=2/7, contact_resolution=24, packing_fraction=.6)
         settings = call('fluid.grain_settings', domain=DOMAIN)
-        assert settings['enabled'] and abs(settings['radius_m']-.025) < 1e-6
+        # No enabled switch: grains follow the substances (grain_ownership).
+        assert 'enabled' not in settings and abs(settings['radius_m']-.025) < 1e-6
         before = settings.copy()
+        # Sent raw (no translation): the server must refuse each one, moved
+        # material keys included (they name their new home).
         for patch in ({'radius_m': 0}, {'enabled': 1}, {'max_substeps': 1.5}, {'bogus': True},
-                      {'contact_resolution': 4}, {'tangential_stiffness_ratio': 2.},
-                      {'packing_fraction': .9}):
+                      {'contact_resolution': 4}, {'stiffness_scale': 0.},
+                      {'tangential_stiffness_ratio': .2}, {'packing_fraction': .6},
+                      {'stiffness_n_m': 2e4}, {'wet_grains': True}):
             try:
-                call('fluid.set_grain_settings', domain=DOMAIN, **patch)
+                result = raw_call('fluid.set_grain_settings', domain=DOMAIN, **patch)
             except Exception:
                 pass
             else:
-                raise AssertionError(('invalid patch accepted', patch))
+                if not (isinstance(result, dict) and '__error' in result):
+                    raise AssertionError(('invalid patch accepted', patch))
             assert call('fluid.grain_settings', domain=DOMAIN) == before
         exists = SOURCE in {s['name'] for s in call('flow_source.list')}
         call('flow_source.update' if exists else 'flow_source.create', name=SOURCE,
@@ -128,7 +143,9 @@ def main():
 
         def runtime_of(inventory):
             runtime = inventory['grain_diagnostics']['runtime']
-            assert runtime and runtime['dispatches'] == runtime['substeps'] + 2, runtime
+            # Four stages per substep (list clear, hash, list build, step);
+            # report.dispatches counts real dispatches since DEM batch 9.
+            assert runtime and runtime['dispatches'] == 4 * runtime['substeps'], runtime
             assert runtime['substeps'] % 2 == 0, runtime
             return runtime
 
@@ -152,9 +169,13 @@ def main():
             # One rule (matterGrainBlockers) behind validation, the panel locks and
             # matter_models: a grain domain cannot be moved off what the solver needs.
             call('fluid.reset')
-            readiness = call('fluid.matter_models', domain=DOMAIN)['grain_readiness']
-            data['readiness'] = {'before': readiness}
-            assert readiness['enabled'] and readiness['ready'], readiness
+            inventory = call('fluid.matter_models', domain=DOMAIN)
+            readiness = inventory['grain_readiness']
+            ownership = inventory['grain_ownership']
+            data['readiness'] = {'before': readiness, 'ownership': ownership}
+            # The Sand source asks for grains before any step decides it.
+            assert ownership['wanted'] and 'Sand' in ownership['substance'], ownership
+            assert readiness['ready'] and not ownership['blockers'], (readiness, ownership)
             rejected = {}
             for method, params in [('fluid.set_param', dict(domain=DOMAIN, backend='cpu')),
                                    ('fluid.set_param', dict(domain=DOMAIN, boundary='open')),
@@ -256,7 +277,7 @@ def main():
                 for wet in (False, True):
                     call('timeline.set_frame', frame=0)
                     call('fluid.reset')
-                    call('fluid.set_grain_settings', domain=COEXIST, enabled=True, radius_m=.025,
+                    call('fluid.set_grain_settings', domain=COEXIST, radius_m=.025,
                          stiffness_n_m=100000., restitution=restitution_of(8., 100000.), sliding_damping_n_s_m=4.,
                          friction=.5, rolling_friction=.1, twisting_friction=.1, max_substeps=2048,
                          tangential_stiffness_ratio=2/7, contact_resolution=24, packing_fraction=.6,
@@ -358,7 +379,7 @@ def main():
                 for exclude in (True, False):
                     call('timeline.set_frame', frame=0)
                     call('fluid.reset')
-                    call('fluid.set_grain_settings', domain=COEXIST, enabled=True, radius_m=.025,
+                    call('fluid.set_grain_settings', domain=COEXIST, radius_m=.025,
                          stiffness_n_m=100000., restitution=restitution_of(8., 100000.), sliding_damping_n_s_m=4.,
                          friction=.5, rolling_friction=.1, twisting_friction=.1, max_substeps=2048,
                          tangential_stiffness_ratio=2/7, contact_resolution=24, packing_fraction=.6,
@@ -434,7 +455,7 @@ def main():
             for coupled in (True, False):
                 call('timeline.set_frame', frame=0)
                 call('fluid.reset')
-                call('fluid.set_grain_settings', domain=COEXIST, enabled=True, radius_m=.025,
+                call('fluid.set_grain_settings', domain=COEXIST, radius_m=.025,
                      stiffness_n_m=20000., restitution=restitution_of(4., 20000.), sliding_damping_n_s_m=4.,
                      friction=.5, rolling_friction=.02, twisting_friction=0., max_substeps=1024,
                      tangential_stiffness_ratio=2/7, contact_resolution=24, packing_fraction=.6,
@@ -658,7 +679,7 @@ def main():
                 scale = radius/.025
                 call('timeline.set_frame', frame=0)
                 call('fluid.reset')
-                call('fluid.set_grain_settings', domain=REPOSE, enabled=True, radius_m=radius,
+                call('fluid.set_grain_settings', domain=REPOSE, radius_m=radius,
                      stiffness_n_m=100000.*scale,
                      restitution=.5,
                      sliding_damping_n_s_m=4.*scale**2, friction=.5, rolling_friction=mu_r,

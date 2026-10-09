@@ -370,6 +370,7 @@ json flowSourceToJson(const rtapi::SimulationFlowSourceInfo& s) {
         {"fluid_substance", s.fluid_substance},
         {"fluid_temperature_override", s.fluid_temperature_override},
         {"fluid_temperature_kelvin", s.fluid_temperature_kelvin},
+        {"grain_birth_saturation", s.grain_birth_saturation},
         {"use_time_limit", s.use_time_limit},
         {"start_time", s.start_time}, {"end_time", s.end_time},
         {"use_particle_limit", s.use_particle_limit},
@@ -404,6 +405,7 @@ void applyFlowSourceJson(rtapi::SimulationFlowSourceInfo& s, const json& p) {
     RT_FS_FIELD("fluid_substance", fluid_substance);
     RT_FS_FIELD("fluid_temperature_override", fluid_temperature_override);
     RT_FS_FIELD("fluid_temperature_kelvin", fluid_temperature_kelvin);
+    RT_FS_FIELD("grain_birth_saturation", grain_birth_saturation);
     RT_FS_FIELD("use_time_limit", use_time_limit);
     RT_FS_FIELD("start_time", start_time);
     RT_FS_FIELD("end_time", end_time);
@@ -2820,6 +2822,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"granular_poisson_ratio", info.granular_poisson_ratio},
                         {"granular_tensile_cutoff", info.granular_tensile_cutoff},
                         {"granular_hardening", info.granular_hardening},
+                        {"granular_compaction_hardening", info.granular_compaction_hardening},
+                        {"granular_compaction_limit", info.granular_compaction_limit},
                         {"granular_fracture_strain", info.granular_fracture_strain},
                         {"granular_damage_rate", info.granular_damage_rate},
                         {"granular_healing_rate", info.granular_healing_rate},
@@ -2999,6 +3003,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"granular_poisson_ratio", info.granular_poisson_ratio},
                     {"granular_tensile_cutoff", info.granular_tensile_cutoff},
                     {"granular_hardening", info.granular_hardening},
+                    {"granular_compaction_hardening", info.granular_compaction_hardening},
+                    {"granular_compaction_limit", info.granular_compaction_limit},
                     {"granular_fracture_strain", info.granular_fracture_strain},
                     {"granular_damage_rate", info.granular_damage_rate},
                     {"granular_healing_rate", info.granular_healing_rate},
@@ -3220,6 +3226,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"granular_poisson_ratio", "granular_poisson_ratio"},
                 {"granular_tensile_cutoff", "granular_tensile_cutoff"},
                 {"granular_hardening", "granular_hardening"},
+                {"granular_compaction_hardening", "granular_compaction_hardening"},
+                {"granular_compaction_limit", "granular_compaction_limit"},
                 {"granular_fracture_strain", "granular_fracture_strain"},
                 {"granular_damage_rate", "granular_damage_rate"},
                 {"granular_healing_rate", "granular_healing_rate"},
@@ -4797,6 +4805,12 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"volume_type", s.volume_type},
                         {"has_density", s.has_density},
                         {"has_temperature", s.has_temperature},
+                        {"emission_mode", s.emission_mode},
+                        {"color_ramp_enabled", s.color_ramp_enabled},
+                        {"blackbody_intensity", s.blackbody_intensity},
+                        {"temperature_scale", s.temperature_scale},
+                        {"temperature_min", s.temperature_min},
+                        {"temperature_max", s.temperature_max},
                         {"aabb_min", json::array({s.aabb_min.x, s.aabb_min.y, s.aabb_min.z})},
                         {"aabb_max", json::array({s.aabb_max.x, s.aabb_max.y, s.aabb_max.z})}});
                 }

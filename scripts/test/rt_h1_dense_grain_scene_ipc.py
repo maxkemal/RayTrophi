@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from rt_ipc import RtIpc
+from rt_grain_material import install_grain_material
 from grain_units import restitution_of
 
 DOMAIN = 'H1_Dense_Grain_Lab'
@@ -31,6 +32,7 @@ def main():
     assert args.steps >= 10
     assert all(1 <= n <= 40000 for n in args.counts)
     client = RtIpc()
+    install_grain_material(client)  # old grain keys -> grain substance
     data = {'arms': [], 'dt_s': 1/60, 'duration_s': .5, 'warmup_steps': 5,
             'completed': False, 'visual_ready': False}
 
@@ -88,7 +90,7 @@ def main():
         call('fluid.set_pore_exchange', domain=DOMAIN, enabled=False,
              wet_response_enabled=False, wet_appearance_enabled=False)
         call('fluid.reset')
-        call('fluid.set_grain_settings', domain=DOMAIN, enabled=True, radius_m=.025,
+        call('fluid.set_grain_settings', domain=DOMAIN, radius_m=.025,
              stiffness_n_m=200000., restitution=restitution_of(8., 200000.), sliding_damping_n_s_m=4.,
              friction=.5, rolling_friction=.02, twisting_friction=.1, max_substeps=4096)
         data['profile'] = call('fluid.grain_settings', domain=DOMAIN)

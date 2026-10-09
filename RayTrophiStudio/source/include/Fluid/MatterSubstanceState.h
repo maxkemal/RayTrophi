@@ -12,6 +12,8 @@ namespace RayTrophiSim {
 struct SubstanceProfile;
 struct SimulationGridDomainDesc;
 struct SimulationGridDomainState;
+struct SimulationFlowSourceDesc;
+class ParticleSimulationSystem;
 namespace Fluid {
 struct APICSolverParams;
 class FluidParticles;
@@ -24,6 +26,39 @@ struct MatterOwnerSummary {
     std::string reason;
 };
 
+// Whether a Matter domain runs DEM grains. Not an authored switch: it follows
+// the substances that can enter the domain (its Default Substance, its bound
+// substances and every flow source aimed at it). One that is granular with
+// granular_transport=dem asks for grains. The step writes `enabled` into
+// grain.enabled; panel and IPC show the same struct, so a substance that asks
+// for DEM but runs as MPM always says why.
+struct MatterGrainOwnership {
+    bool wanted = false;          // a DEM substance is in reach of the domain
+    bool enabled = false;         // what the step runs (grain.enabled)
+    bool reset_pending = false;   // live particles keep the old owner until reset
+    std::string substance;        // the DEM substance whose grain material runs
+    std::vector<std::string> blockers;  // why a wanted DEM runs as MPM instead
+    // Liquid in reach (its surface tension feeds the bridges); empty = none.
+    std::string liquid;
+    // Derived wet grains: the grain substance holds water (capacity > 0) and
+    // the domain has liquid or a source pours wet grains. Live grains keep
+    // wet on until a reset (they may hold water).
+    bool wet_grains = false;
+    // Informational: e.g. a second DEM substance whose material is not used
+    // (one grain material per domain).
+    std::vector<std::string> notes;
+};
+MatterGrainOwnership matterGrainOwnership(const SimulationGridDomainDesc& domain,
+                                          const std::vector<SimulationFlowSourceDesc>& sources,
+                                          int domain_index, bool has_particles);
+// The same for domain `index` of a running system (panel and IPC read this).
+MatterGrainOwnership matterGrainOwnership(const ParticleSimulationSystem& system,
+                                          std::size_t index);
+// Grains run in `domain` or a substance there asks for them. Authoring guards
+// use it, so a domain is not moved off what grains need before the first step.
+bool matterGrainsInUse(const ParticleSimulationSystem& system,
+                       const SimulationGridDomainDesc& domain);
+
 void configureBuiltinMatterTransport(std::vector<SubstanceProfile>& profiles);
 MatterTransportOwner substanceTransportOwner(uint32_t tag, MatterConstitutiveModel model,
                                             const APICSolverParams& params);
@@ -31,10 +66,12 @@ MatterOwnerSummary inspectMatterOwners(const FluidParticles& particles,
                                       const APICSolverParams& params);
 MatterOwnerSummary inspectMatterDomainOwners(const FluidParticles& particles,
                                             const SimulationGridDomainDesc& domain);
+// `key` names the birth-fixed field being edited (for the message).
 bool validateMatterTransportEdit(const std::string& substance,
                                 const std::vector<SimulationGridDomainDesc>& domains,
                                 const std::vector<SimulationGridDomainState>& states,
-                                std::string& error);
+                                std::string& error,
+                                const char* key = "granular_transport");
 
 // One substance lookup policy for birth, freezing and viscosity. Tag zero
 // means the domain default; an unknown nonzero tag retains that same fallback.

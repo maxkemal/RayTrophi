@@ -1500,6 +1500,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_poisson_ratio"] = info.granular_poisson_ratio;
         d["granular_tensile_cutoff"] = info.granular_tensile_cutoff;
         d["granular_hardening"] = info.granular_hardening;
+        d["granular_compaction_hardening"] = info.granular_compaction_hardening;
+        d["granular_compaction_limit"] = info.granular_compaction_limit;
         d["granular_fracture_strain"] = info.granular_fracture_strain;
         d["granular_damage_rate"] = info.granular_damage_rate;
         d["granular_healing_rate"] = info.granular_healing_rate;
@@ -1746,6 +1748,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["granular_poisson_ratio"] = info.granular_poisson_ratio;
             d["granular_tensile_cutoff"] = info.granular_tensile_cutoff;
             d["granular_hardening"] = info.granular_hardening;
+            d["granular_compaction_hardening"] = info.granular_compaction_hardening;
+            d["granular_compaction_limit"] = info.granular_compaction_limit;
             d["granular_fracture_strain"] = info.granular_fracture_strain;
             d["granular_damage_rate"] = info.granular_damage_rate;
             d["granular_healing_rate"] = info.granular_healing_rate;
@@ -1974,6 +1978,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_poisson_ratio"] = info.granular_poisson_ratio;
         d["granular_tensile_cutoff"] = info.granular_tensile_cutoff;
         d["granular_hardening"] = info.granular_hardening;
+        d["granular_compaction_hardening"] = info.granular_compaction_hardening;
+        d["granular_compaction_limit"] = info.granular_compaction_limit;
         d["granular_fracture_strain"] = info.granular_fracture_strain;
         d["granular_damage_rate"] = info.granular_damage_rate;
         d["granular_healing_rate"] = info.granular_healing_rate;
@@ -2364,6 +2370,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             {"granular_poisson_ratio", "granular_poisson_ratio"},
             {"granular_tensile_cutoff", "granular_tensile_cutoff"},
             {"granular_hardening", "granular_hardening"},
+            {"granular_compaction_hardening", "granular_compaction_hardening"},
+            {"granular_compaction_limit", "granular_compaction_limit"},
             {"granular_fracture_strain", "granular_fracture_strain"},
             {"granular_damage_rate", "granular_damage_rate"},
             {"granular_healing_rate", "granular_healing_rate"},
@@ -3102,6 +3110,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["fluid_substance"] = s.fluid_substance;
         d["fluid_temperature_override"] = s.fluid_temperature_override;
         d["fluid_temperature_kelvin"] = s.fluid_temperature_kelvin;
+        d["grain_birth_saturation"] = s.grain_birth_saturation;
         d["use_time_limit"] = s.use_time_limit;
         d["start_time"] = s.start_time; d["end_time"] = s.end_time;
         d["use_particle_limit"] = s.use_particle_limit;
@@ -3126,6 +3135,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_FLOW_KW(fluid_substance, std::string);
         RT_FLOW_KW(fluid_temperature_override, bool);
         RT_FLOW_KW(fluid_temperature_kelvin, float);
+        RT_FLOW_KW(grain_birth_saturation, float);
         RT_FLOW_KW(use_time_limit, bool);
         RT_FLOW_KW(start_time, float); RT_FLOW_KW(end_time, float);
         RT_FLOW_KW(use_particle_limit, bool); RT_FLOW_KW(max_emitted_particles, int);
@@ -5364,6 +5374,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                 e["volume_type"] = s.volume_type;
                 e["has_density"] = s.has_density;
                 e["has_temperature"] = s.has_temperature;
+                e["emission_mode"] = s.emission_mode;
+                e["color_ramp_enabled"] = s.color_ramp_enabled;
+                e["blackbody_intensity"] = s.blackbody_intensity;
+                e["temperature_scale"] = s.temperature_scale;
+                e["temperature_min"] = s.temperature_min;
+                e["temperature_max"] = s.temperature_max;
                 e["aabb_min"] = vec3(s.aabb_min);
                 e["aabb_max"] = vec3(s.aabb_max);
                 slots.append(e);

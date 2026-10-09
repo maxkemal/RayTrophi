@@ -361,6 +361,8 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
         gp.cohesion = fluid_params.granular_cohesion;
         gp.dilatancy = fluid_params.granular_dilatancy_degrees * deg_to_rad;
         gp.hardening = fluid_params.granular_hardening;
+        gp.compaction_hardening = fluid_params.granular_compaction_hardening;
+        gp.compaction_limit = fluid_params.granular_compaction_limit;
         gp.tensile_cutoff = fluid_params.granular_tensile_cutoff;
         const auto elastic_step = Fluid::Granular::elasticStepInfo(
             fluid_params.granular_young_modulus, state.grid.voxel_size, dt);

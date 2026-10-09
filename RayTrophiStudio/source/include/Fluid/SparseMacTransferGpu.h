@@ -14,12 +14,14 @@ struct APICSolverStats;
 struct APICSolverParams;
 
 // Sparse transfer storage. With `compact_owner` the pages are the canonical
-// device MAC velocity of the liquid lane and no dense velocity/FLIP bank exists
+// device MAC velocity of the liquid lane and no dense velocity/FLIP/P2G or
+// variational solid-face weight bank exists
 // (docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md); otherwise projection/contact consume
 // a dense publication and the pages are additional memory.
 struct SparseMacTransferGpuStorage {
-    // map, list/count, velocity XYZ, weight XYZ, FLIP baseline XYZ.
-    std::array<ComputeBufferHandle, 11> owned{};
+    // map, list/count, velocity XYZ, P2G weight XYZ, FLIP baseline XYZ,
+    // variational solid-face weight XYZ (canonical variational owners only).
+    std::array<ComputeBufferHandle, 14> owned{};
     uint64_t active_tiles = 0;
     uint64_t allocated_tiles = 0;
     uint64_t resident_bytes = 0;
@@ -30,8 +32,8 @@ struct SparseMacTransferGpuStorage {
     bool snapshot_valid = false;
     bool flip_gather_used = false;
     // Persistent: this domain's liquid lane runs on compact pages, so the
-    // buffer allocator skips the dense velocity and FLIP banks. Cleared by any
-    // path that needs them (pure-liquid step, compact failure, sparse off).
+    // buffer allocator skips dense velocity, FLIP and both face-weight banks.
+    // Cleared by paths that need them (pure-liquid step, compact failure, sparse off).
     bool compact_owner = false;
     // A compact P2G failed with the bank released: the lane stays dense until
     // sparse mode is switched off and on again. Survives a pool release, so a
@@ -39,6 +41,8 @@ struct SparseMacTransferGpuStorage {
     bool compact_blocked = false;
     // This substep's P2G left the canonical field on the pages (no publication).
     bool canonical = false;
+    // Reset on every P2G topology rebuild; pressure uploads the matching pages.
+    bool solid_weights_ready = false;
     std::string status;
 };
 
@@ -48,6 +52,7 @@ struct MacVelocityBinding {
     std::array<ComputeBufferHandle, 3> velocity{};
     std::array<ComputeBufferHandle, 3> weight{};
     std::array<ComputeBufferHandle, 3> flip{};
+    std::array<ComputeBufferHandle, 3> solid_weight{};
     ComputeBufferHandle map;
     ComputeBufferHandle list;
     bool compact = false;
@@ -57,8 +62,10 @@ struct MacVelocityBinding {
 
 MacVelocityBinding macVelocityBinding(const SimulationGridDomainComputeBuffers& buffers);
 
-// Allocator hook: true for a compact owner, after releasing any dense velocity
-// and FLIP bank left from an earlier dense step. The caller then skips them.
+// Allocator hook: true for a compact owner, after releasing any dense velocity,
+// FLIP, P2G and solid-face weight banks left from an earlier dense step. The caller skips
+// all twelve banks, including variational solid-face weights. Gas and pure-liquid
+// paths must clear compact_owner first.
 bool releaseDenseMacForCompactOwner(SimulationComputeContext& compute,
                                     SimulationGridDomainComputeBuffers& buffers);
 

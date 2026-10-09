@@ -3,6 +3,7 @@
 > **Durum:** AKTİF — 2026-10-08. Kullanıcı build başarılı; T1/T3 hızlı IPC kabulü PASS. T2 kısmi, tam T3 kabulü açık. Tane/MPM birleşmesi
 > (H1 B11) ve birleşik madde domain'i bu tablonun üstüne oturur; önce bu.
 
+Devamı (panel ve tane alanlarının tek otoritesi, kar): [MADDE_UI_TEK_OTORITE.md](MADDE_UI_TEK_OTORITE.md) (TASLAK).
 İlgili: [BIRLESIK_MADDE_DOMAIN_TASARIMI.md](BIRLESIK_MADDE_DOMAIN_TASARIMI.md) (domain),
 [MATTER_H1_GRAIN_ROADMAP.md](MATTER_H1_GRAIN_ROADMAP.md) (B11 üç sahip).
 

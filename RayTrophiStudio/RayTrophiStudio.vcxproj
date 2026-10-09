@@ -485,6 +485,7 @@
     <ClInclude Include="source\include\Fluid\SparsePressureGpu.h" />
     <ClInclude Include="source\include\Fluid\SparseViscosityGpu.h" />
     <ClInclude Include="source\include\Fluid\SparseMacTransferGpu.h" />
+    <ClInclude Include="source\include\Fluid\SparseMacSolidWeightsGpu.h" />
     <ClInclude Include="source\include\Fluid\SparseGridGpu.h" />
     <ClInclude Include="source\include\Fluid\SparseGridStorage.h" />
     <ClInclude Include="source\include\Fluid\FluidGpuDispatch.h" />
@@ -1917,6 +1918,8 @@
     <ClCompile Include="source\src\Physics\Fluid\SparsePressureGpu.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\SparseViscosityGpu.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\SparseMacTransferGpu.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\SparseMacSolidWeightsGpu.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\SparseMacSolidWeights.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\SparseGridGpu.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\SparseGridStorage.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainMpmContact.cpp" />

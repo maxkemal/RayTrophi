@@ -10,7 +10,8 @@ import random
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = next(parent for parent in Path(__file__).resolve().parents
+            if (parent / "RayTrophiStudio/source").is_dir())
 SOURCE = ROOT / "RayTrophiStudio/source"
 SHADERS = SOURCE / "shaders"
 
@@ -109,6 +110,8 @@ def check_abis():
         "sim_sparse_mac_capture_compact": (8, 36), "sim_sparse_mac_advect": (11, 80),
         "sim_sparse_mac_matter_advect": (13, 84), "sim_sparse_mac_matter_contact": (21, 16),
         "sim_sparse_mac_viscosity_capture": (15, 68), "sim_sparse_mac_viscosity_sweep": (15, 68),
+        "sim_sparse_pressure_init_mac_weights": (18, 80),
+        "sim_sparse_pressure_spmv_mac_weights": (18, 80),
     }
     # Dense twins: unchanged ABIs over the shared bodies.
     dense = {
@@ -119,6 +122,7 @@ def check_abis():
         "sim_matter_advect": (11, 84), "sim_matter_contact": (19, 16),
         "sim_sparse_viscosity_capture": (13, 68), "sim_sparse_viscosity_sweep": (13, 68),
         "sim_fluid_viscosity_rbgs": (11, 52), "sim_sparse_mac_capture": (8, 36),
+        "sim_sparse_pressure_init": (16, 80), "sim_sparse_pressure_spmv": (16, 80),
     }
     for table in (compact, dense):
         for kernel, (count, push) in table.items():
@@ -168,6 +172,45 @@ def check_host():
         text = read(path)
         assert "transfer_sparse_canonical" in text and "transfer_sparse_blocked" in text, path
     assert "transfer_sparse_blocked" in read("include/Fluid/FluidActiveWindow.h")
+
+
+def check_weight_ownership():
+    """Guard the allocator, descriptor aliases and compact-failure recovery.
+
+    GPU parity remains a live IPC gate. This rejects accidentally retaining a
+    dense weight bank or removing its allocation from the dense recovery path.
+    """
+    transfer = read("src/Physics/Fluid/SparseMacTransferGpu.cpp")
+    release = transfer.split("bool releaseDenseMacForCompactOwner(", 1)[1]
+    release = release.split("MacVelocityBinding macVelocityBinding(", 1)[0]
+    assert release.index("if (!buffers.sparse_mac_transfer.compact_owner)") < \
+        release.index("compute.destroyBuffer(*handle)")
+    banks = ("vel_x", "vel_y", "vel_z", "scratch_vel_x", "scratch_vel_y",
+             "scratch_vel_z", "temperature", "fuel", "scratch_scalar",
+             "var_u_weight", "var_v_weight", "var_w_weight")
+    assert set(re.findall(r"&buffers\.(\w+)", release)) == set(banks)
+    assert "*handle = {};" in release
+    allocator = read("src/Physics/ParticleSimulation.cpp")
+    for bank in ("temperature", "fuel", "scratch_scalar",
+                 "var_u_weight", "var_v_weight", "var_w_weight"):
+        assert re.search(
+            rf"if \(dense_mac\) \{{[^{{}}]*ensureComputeBuffer\(compute, "
+            rf"buffers\.{bank},[^{{}}]*\}}", allocator), bank
+    assert re.search(
+        r"\(!dense_mac \|\| \(buffers\.temperature\.valid\(\) && "
+        r"buffers\.fuel\.valid\(\) &&\s*buffers\.scratch_scalar\.valid\(\)\)\)",
+        allocator)
+    # Page-only dispatches still bind every descriptor; unused dense slots alias
+    # the matching pages. Noncanonical publication validates all dense capacities.
+    assert "dense(weights[axis], pool[5 + axis])" in transfer
+    assert "if (!canonical && (!dense_velocity[axis].valid()" in transfer
+    assert "storage.compact_blocked = storage.compact_blocked || canonical;" in transfer
+    mixed = read("src/Physics/Fluid/MatterGpuStep.inl")
+    recovery = mixed.split("if (!transferred && lane == 0 &&", 1)[1]
+    recovery = recovery.split("if (!transferred ||", 1)[0]
+    assert recovery.index("transferred = ensure(primary);") < \
+        recovery.index("runGpuFluidP2G(")
+    assert "!mac_storage.compact_owner" in recovery
 
 
 def dense_index(face, comp, cells):
@@ -254,9 +297,11 @@ def check_oracle():
 def main():
     check_abis()
     check_host()
+    check_weight_ownership()
     check_oracle()
-    print("PASS sparse S1: compact canonical MAC ABIs (13 entries + unchanged dense twins), "
-          "host ownership/fallback/publication wiring, dense address + compact coverage oracle")
+    print("PASS sparse S1/S1b: compact canonical MAC and solid-weight ABIs, "
+          "host ownership/fallback/publication wiring, S1b P2G weight allocation gate, "
+          "dense address + compact coverage oracle")
 
 
 if __name__ == "__main__":

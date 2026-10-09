@@ -89,7 +89,7 @@ std::size_t particleBytes(std::size_t capacity) {
         capacity * kHistoryBytesPerGrain +
         capacity * kListBytesPerGrain +            // Verlet neighbour list
         3 * capacity * sizeof(float) +             // list build positions
-        4 * capacity * sizeof(uint32_t) +          // history block map + owner/mask/rest
+        5 * capacity * sizeof(uint32_t) +          // map + owner/mask/rest/skipped time
         kDiagnosticWords * sizeof(uint32_t);
 }
 
@@ -159,7 +159,7 @@ bool ensureParticles(SimulationComputeContext& compute, MatterGrainGpuRuntime& r
     candidate.history = makeBuffer(compute, "grain_contact_history",
         capacity * kHistoryBytesPerGrain);
     candidate.history_blocks = makeBuffer(compute, "grain_history_blocks",
-        4 * capacity * sizeof(uint32_t));
+        5 * capacity * sizeof(uint32_t));
     candidate.diagnostics = makeBuffer(compute, "grain_diagnostics",
         kDiagnosticWords * sizeof(uint32_t));
     candidate.neighbour_list = makeBuffer(compute, "grain_neighbour_list",
@@ -573,10 +573,12 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         float rolling[4];
         uint32_t substep, history_blocks, tangential_stiffness_bits, last_substep;
         float wet[4];  // hash cell size, capillary prefactor, rupture cap, velocity offset bits
-        float sleep[4];  // still substeps (uint bits), sleep speed (0 = off), wake all (uint bits), -
+        float sleep[4];  // still substeps bits, speed (0 = off), wake-all bits, time s
     } constants{};
     // 128 B: the push-constant size every Vulkan device guarantees.
     static_assert(sizeof(Constants) == 128);
+    static_assert(offsetof(Constants, rolling) == offsetof(Constants, low) +
+                  12u * sizeof(uint32_t), "sleep context requires contiguous force vec4s");
     constants.count = static_cast<uint32_t>(count);
     constants.buckets = runtime.buckets;
     constants.collider_nodes = runtime.collider_node_count;
@@ -734,7 +736,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     constants.wet[2] = rupture_cap;
     // Float slot carrying the uint offset of the collider vertex velocities.
     std::memcpy(&constants.wet[3], &runtime.collider_velocity_offset, sizeof(uint32_t));
-    // Owner/mask/rest words of the blocks follow the grain -> block map.
+    // Owner/mask/rest-time/skipped-time words follow the grain -> block map.
     constants.history_blocks = static_cast<uint32_t>(runtime.capacity);
     // Sleeping grains (docs/dev/DEM_UYUYAN_TANELER.md). Off whenever something
     // can push a still grain that the step would not see: a moving collider
@@ -743,12 +745,28 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     const bool sleep_on = params.sleep && params.sleep_speed_m_s > 0.0f &&
         runtime.collider_velocity_offset == 0 && !common_driver &&
         !(mpm_contact && mpm_contact->active());
-    const uint32_t still_substeps = static_cast<uint32_t>(std::clamp(
-        std::ceil(double(params.sleep_time_s) / (double(dt) / substeps)), 1.0, 1e9));
-    const uint32_t wake_all = !runtime.history_fresh &&
-        survivors < runtime.published_ids.size() ? 1u : 0u;
-    std::memcpy(&constants.sleep[0], &still_substeps, sizeof(uint32_t));
+    constants.sleep[0] = 0.0f;  // Reserved; rest now accumulates physical seconds.
     constants.sleep[1] = sleep_on ? params.sleep_speed_m_s : 0.0f;
+    constants.sleep[3] = params.sleep_time_s;
+    // O(1) per domain: exactly compare the force law, domain
+    // and sleep settings. Changing any of these invalidates a frozen balance.
+    // low/high/contact/rolling are four contiguous vec4 in the push ABI.
+    std::array<uint32_t, 24> sleep_context{};
+    std::memcpy(sleep_context.data(), constants.low, 16u * sizeof(uint32_t));
+    // An adaptive CFL step changes neither the support nor the force law.
+    // Rest and skipped-history clocks both integrate the actual dt in seconds.
+    sleep_context[8] = 0u;
+    std::memcpy(sleep_context.data() + 16, constants.wet, 3u * sizeof(uint32_t));
+    sleep_context[19] = constants.twisting_friction_bits;
+    sleep_context[20] = constants.tangential_stiffness_bits;
+    std::memcpy(sleep_context.data() + 21, constants.sleep, 2u * sizeof(uint32_t));
+    std::memcpy(sleep_context.data() + 23, &constants.sleep[3], sizeof(uint32_t));
+    const bool context_changed = !runtime.sleep_context_valid ||
+        runtime.sleep_context != sleep_context ||
+        runtime.sleep_collider_fingerprint != runtime.collider_fingerprint;
+    const bool support_removed = !runtime.history_fresh &&
+        survivors < runtime.published_ids.size();
+    const uint32_t wake_all = context_changed || support_removed ? 1u : 0u;
     std::memcpy(&constants.sleep[2], &wake_all, sizeof(uint32_t));
     constants.last_substep = substeps - 1;
     const bool history_reset = runtime.history_fresh;
@@ -841,6 +859,10 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         return false;
     }
     const auto overflow = diagnostics[0];
+    if (overflow & 16u) {
+        error = "grain sleep metadata layout mismatch; restart with matching C++ and shaders";
+        return false;
+    }
     if (!ok || overflow) {
         error = (overflow & 4u) ? "grain neighbour bucket overflow (more than 16 grains hashed "
                 "to one bucket); grains overlap far beyond contact" :
@@ -895,6 +917,9 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     runtime.published_velocities = p.velocity;
     runtime.published_affines = p.affine;
     runtime.published_masses = std::move(masses);
+    runtime.sleep_context = sleep_context;
+    runtime.sleep_collider_fingerprint = runtime.collider_fingerprint;
+    runtime.sleep_context_valid = true;
     report.substeps = static_cast<int>(substeps);
     report.dispatches = dispatched;
     report.substep_dt = dt / substeps;

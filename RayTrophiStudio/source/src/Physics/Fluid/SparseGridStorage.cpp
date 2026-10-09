@@ -126,7 +126,7 @@ GridStorage::GridStorage(std::shared_ptr<const Topology> topology,
 }
 
 void GridStorage::ensureUniqueState() {
-    if (!state_.unique()) {
+    if (state_.use_count() != 1) {
         state_ = std::make_shared<State>(*state_);
     }
 }
@@ -224,7 +224,7 @@ void GridStorage::write(Channel channel, int x, int y, int z, float value) {
         page->values[address.second] = value;
         pages.emplace(address.first, std::move(page));
     } else {
-        if (!found->second.unique()) {
+        if (found->second.use_count() != 1) {
             auto page = makePage(found->second->values.size(), description.background);
             std::copy(found->second->values.begin(), found->second->values.end(),
                       page->values.begin());

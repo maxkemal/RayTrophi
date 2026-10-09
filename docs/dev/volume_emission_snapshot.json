@@ -1,0 +1,85 @@
+{
+  "available": true,
+  "backends": [
+    {
+      "instance_count": 1,
+      "is_vulkan": true,
+      "role": "render",
+      "slots": [
+        {
+          "aabb_max": [
+            5.0,
+            5.0,
+            5.0
+          ],
+          "aabb_min": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "has_contents": true,
+          "has_density": true,
+          "has_temperature": true,
+          "is_active": 1,
+          "name": "Particle System 1 Domain 0 [Matter Gas]",
+          "packet_order": false,
+          "published": true,
+          "slot": 0,
+          "source": "nanovdb",
+          "stable_key": 3,
+          "vdb_id": 651,
+          "volume_type": 2
+        }
+      ],
+      "upload_serial": 979
+    },
+    {
+      "instance_count": 1,
+      "is_vulkan": true,
+      "role": "viewport",
+      "slots": [
+        {
+          "aabb_max": [
+            5.0,
+            5.0,
+            5.0
+          ],
+          "aabb_min": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "has_contents": true,
+          "has_density": true,
+          "has_temperature": true,
+          "is_active": 1,
+          "name": "",
+          "packet_order": true,
+          "published": false,
+          "slot": 0,
+          "source": "nanovdb",
+          "stable_key": 0,
+          "vdb_id": 651,
+          "volume_type": 2
+        }
+      ],
+      "upload_serial": 3323
+    }
+  ],
+  "domains": [
+    {
+      "domain": "Physics Domain 1",
+      "domain_index": 0,
+      "fog_vdb_id": 651,
+      "fog_volume_name": "Particle System 1 Domain 0 [Matter Gas]",
+      "has_fog_volume": true,
+      "has_volume": false,
+      "render_mode": "particles",
+      "system": "Particle System 1",
+      "type": "matter",
+      "vdb_id": -1,
+      "volume_name": ""
+    }
+  ],
+  "capture_tag": "solid_after_rt"
+}

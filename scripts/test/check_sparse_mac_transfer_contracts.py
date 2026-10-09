@@ -4,7 +4,8 @@ import re
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = next(parent for parent in Path(__file__).resolve().parents
+            if (parent / "RayTrophiStudio/source").is_dir())
 SOURCE = ROOT / "RayTrophiStudio/source"
 
 
@@ -80,7 +81,8 @@ def main():
     assert "bool publishCompactMacToHost(" in host
     assert "max_storage_buffer_bytes" in host
     assert "mixed_working_set_budget_bytes" in host
-    assert "lookup_bytes + 9u * bytes > budget" in host
+    assert "lookup_bytes + page_fields * bytes > budget" in host
+    assert "canonical && params.variational_solids ? 14u : 11u" in host
     assert "compute.getBufferSize(handle)" in host
     assert "storage.flip_gather_used" in host
     assert "releaseSparseMacTransfer(compute, storage)" in host

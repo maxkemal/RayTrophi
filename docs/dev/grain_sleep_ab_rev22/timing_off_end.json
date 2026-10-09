@@ -1,0 +1,53 @@
+{
+  "enabled": true,
+  "kernels": [
+    {
+      "calls": 112086,
+      "kernel": "sim_matter_grain_step",
+      "ms": 1137696.9021439624
+    },
+    {
+      "calls": 112086,
+      "kernel": "sim_matter_grain_list_build",
+      "ms": 51458.61427205495
+    },
+    {
+      "calls": 112086,
+      "kernel": "sim_matter_grain_list_clear",
+      "ms": 32718.889823988
+    },
+    {
+      "calls": 112086,
+      "kernel": "sim_matter_grain_hash",
+      "ms": 9379.636223995672
+    },
+    {
+      "calls": 256,
+      "kernel": "sim_fluid_density_splat",
+      "ms": 289.2144639999998
+    },
+    {
+      "calls": 256,
+      "kernel": "sim_fluid_label_classify",
+      "ms": 115.71712000000002
+    },
+    {
+      "calls": 256,
+      "kernel": "sim_fluid_label_bin_scatter",
+      "ms": 36.91110400000008
+    },
+    {
+      "calls": 256,
+      "kernel": "sim_fluid_density_clear",
+      "ms": 0.7938559999999982
+    },
+    {
+      "calls": 256,
+      "kernel": "sim_fluid_label_bin_clear",
+      "ms": 0.7112959999999988
+    }
+  ],
+  "supported": true,
+  "total_ms": 1231697.390304001,
+  "benchmark_step": 180
+}

@@ -25,6 +25,8 @@
 #include "Fluid/FluidGridResourceBudget.h"
 #include "Fluid/FluidLevelSet.h"   // buildSubstanceViscosityField
 #include "Fluid/MatterSubstanceState.h"
+#include "Fluid/MatterGrain.h"
+#include "MaterialStateField.h"
 #include "Fluid/SubstanceTag.h"
 #include "Fluid/GranularGpuDispatch.h"
 #include "Fluid/GranularStepPolicy.h"
@@ -32,6 +34,7 @@
 #include "Fluid/FluidGpuFlipSnapshot.h"
 #include "Fluid/FluidActiveWindow.h"
 #include "Fluid/FluidActivePressure.h"
+#include "Fluid/SparseMacSolidWeightsGpu.h"
 #include "KinematicColliderVoxelizer.h"
 
 #include "GridFluidSolver.h"
@@ -7451,6 +7454,23 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         }
     }
 
+    // Grains follow the substances (Fluid::matterGrainOwnership), decided
+    // before the sources emit so the first grain is born with its owner.
+    for (std::size_t i = 0; i < grid_domains_.size() && i < grid_domain_states_.size(); ++i) {
+        const auto ownership = Fluid::matterGrainOwnership(grid_domains_[i], flow_sources_,
+            static_cast<int>(i), !grid_domain_states_[i].particles.empty());
+        auto& grain = grid_domains_[i].fluid_params.grain;
+        grain.enabled = ownership.enabled;
+        // The grain material is the DEM substance's, copied every step like the
+        // domain's other substance physics (MADDE_UI_TEK_OTORITE U2).
+        if (const auto* profile = ownership.wanted ? tryFindSubstance(ownership.substance)
+                                                   : nullptr) {
+            Fluid::applyMatterGrainSubstance(grain, *profile,
+                ownership.liquid.empty() ? nullptr : tryFindSubstance(ownership.liquid),
+                ownership.wet_grains);
+        }
+    }
+
     // Sources and particles deposit into the grid before it is advanced.
     injectFlowSourcesIntoGridDomains(
         // ★ timeline_frame, not frame: these resolve KEYFRAMES, and in Live
@@ -10178,7 +10198,7 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
     const std::size_t max_face_count =
         std::max({ grid.vel_x.size(), grid.vel_y.size(), grid.vel_z.size() });
     const std::size_t weight_bytes = max_face_count * sizeof(float);
-    // A compact MAC owner keeps its velocity and FLIP baseline on tile pages
+    // A compact MAC owner keeps velocity, FLIP and P2G weights on tile pages
     // only (docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md): no dense bank, and a bank
     // left from an earlier dense step is released.
     const bool dense_mac = !Fluid::releaseDenseMacForCompactOwner(compute, buffers);
@@ -10188,8 +10208,12 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
         ensureComputeBuffer(compute, buffers.vel_z, "GridDomainVelZ", grid.vel_z.size() * sizeof(float), usage);
     }
     ensureComputeBuffer(compute, buffers.density, "GridDomainDensity", cell_bytes, render_field_usage);
-    ensureComputeBuffer(compute, buffers.temperature, "GridDomainTemperature", weight_bytes, render_field_usage);
-    ensureComputeBuffer(compute, buffers.fuel, "GridDomainFuel", weight_bytes, render_field_usage);
+    if (dense_mac) {
+        ensureComputeBuffer(compute, buffers.temperature, "GridDomainTemperature",
+                            weight_bytes, render_field_usage);
+        ensureComputeBuffer(compute, buffers.fuel, "GridDomainFuel",
+                            weight_bytes, render_field_usage);
+    }
     ensureComputeBuffer(compute, buffers.interaction, "GridDomainInteraction", cell_bytes, render_field_usage);
     ensureComputeBuffer(compute, buffers.pressure, "GridDomainPressure", cell_bytes, usage);
     ensureComputeBuffer(compute, buffers.divergence, "GridDomainDivergence", cell_bytes, usage);
@@ -10251,7 +10275,10 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
         ensureComputeBuffer(compute, buffers.scratch_vel_y, "GridDomainScratchVelY", grid.vel_y.size() * sizeof(float), usage);
         ensureComputeBuffer(compute, buffers.scratch_vel_z, "GridDomainScratchVelZ", grid.vel_z.size() * sizeof(float), usage);
     }
-    ensureComputeBuffer(compute, buffers.scratch_scalar, "GridDomainScratchScalar", weight_bytes, usage);
+    if (dense_mac) {
+        ensureComputeBuffer(compute, buffers.scratch_scalar, "GridDomainScratchScalar",
+                            weight_bytes, usage);
+    }
     ensureComputeBuffer(compute, buffers.scratch_scalar2, "GridDomainScratchScalar2", weight_bytes, usage);
     ensureComputeBuffer(compute, buffers.substance_viscosity, "GridDomainSubstanceViscosity", weight_bytes, usage);
     if (grid.allocate_gas_channels && !Fluid::ensureMacRhsScratch(compute, buffers,
@@ -10320,9 +10347,14 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
 
     if (compute.backendType() == ComputeBackendType::CUDA ||
         compute.backendType() == ComputeBackendType::VulkanCompute) {
-        ensureComputeBuffer(compute, buffers.var_u_weight, "GridDomainVarUWeight", grid.vel_x.size() * sizeof(float), usage);
-        ensureComputeBuffer(compute, buffers.var_v_weight, "GridDomainVarVWeight", grid.vel_y.size() * sizeof(float), usage);
-        ensureComputeBuffer(compute, buffers.var_w_weight, "GridDomainVarWWeight", grid.vel_z.size() * sizeof(float), usage);
+        if (dense_mac) {
+            ensureComputeBuffer(compute, buffers.var_u_weight, "GridDomainVarUWeight",
+                                grid.vel_x.size() * sizeof(float), usage);
+            ensureComputeBuffer(compute, buffers.var_v_weight, "GridDomainVarVWeight",
+                                grid.vel_y.size() * sizeof(float), usage);
+            ensureComputeBuffer(compute, buffers.var_w_weight, "GridDomainVarWWeight",
+                                grid.vel_z.size() * sizeof(float), usage);
+        }
         ensureComputeBuffer(compute, buffers.var_svx,      "GridDomainVarSvx",      cell_bytes, usage);
         ensureComputeBuffer(compute, buffers.var_svy,      "GridDomainVarSvy",      cell_bytes, usage);
         ensureComputeBuffer(compute, buffers.var_svz,      "GridDomainVarSvz",      cell_bytes, usage);
@@ -10404,11 +10436,10 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
                         buffers.scratch_vel_y.valid() &&
                         buffers.scratch_vel_z.valid())) &&
         buffers.density.valid() &&
-        buffers.temperature.valid() &&
-        buffers.fuel.valid() &&
+        (!dense_mac || (buffers.temperature.valid() && buffers.fuel.valid() &&
+                        buffers.scratch_scalar.valid())) &&
         buffers.pressure.valid() &&
         buffers.divergence.valid() &&
-        buffers.scratch_scalar.valid() &&
         buffers.fluid_mask.valid() &&
         buffers.fluid_surface_columns.valid() &&
         buffers.gas_solid_mask.valid() &&

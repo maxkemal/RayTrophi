@@ -1,0 +1,39 @@
+{
+  "rows": [
+    {
+      "arm": "mu_r_.05",
+      "angle_on": 22.419236773820604,
+      "angle_off": 22.136413901291178,
+      "delta_deg": 0.28282287252942595,
+      "angle_gate_pass": true,
+      "scattered_on": 0.31733333333333336,
+      "scattered_off": 0.25533333333333336,
+      "sleeping_on": 1498,
+      "sleeping_off": 0,
+      "gpu_wait_median_on_ms": 8.389900207519531,
+      "gpu_wait_median_off_ms": 63.942100524902344,
+      "last_step_on": 740,
+      "last_step_off": 740
+    },
+    {
+      "arm": "mu_r_.3",
+      "angle_on": 30.03675332482743,
+      "angle_off": 32.83456146480401,
+      "delta_deg": 2.7978081399765813,
+      "angle_gate_pass": false,
+      "scattered_on": 0.118,
+      "scattered_off": 0.12266666666666666,
+      "sleeping_on": 1499,
+      "sleeping_off": 0,
+      "gpu_wait_median_on_ms": 5.367800235748291,
+      "gpu_wait_median_off_ms": 58.044898986816406,
+      "last_step_on": 730,
+      "last_step_off": 730
+    }
+  ],
+  "on_failures": [
+    "mu_r_.05: 0.31733333333333336 of the grains scattered outside the pile"
+  ],
+  "off_failures": [],
+  "fully_accepted": false
+}

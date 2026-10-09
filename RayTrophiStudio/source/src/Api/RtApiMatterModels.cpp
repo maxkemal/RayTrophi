@@ -162,6 +162,30 @@ nlohmann::json getMatterModels(const std::string& domain, bool include_transfer)
             }()},
             {"grain_settings", RayTrophiSim::Fluid::matterGrainParamsToJson(
                 domains[index].fluid_params.grain)},
+            {"grain_ownership", [&] {
+                // Same struct the Solvers panel draws: grains follow the substances.
+                const auto o = RayTrophiSim::Fluid::matterGrainOwnership(runtime, index);
+                const auto& g = domains[index].fluid_params.grain;
+                return nlohmann::json{{"wanted", o.wanted}, {"enabled", o.enabled},
+                    {"reset_pending", o.reset_pending}, {"substance", o.substance},
+                    {"blockers", o.blockers}, {"liquid", o.liquid},
+                    {"wet_grains", o.wet_grains}, {"notes", o.notes},
+                    // What the grain solver runs, copied from the substance
+                    // last step (stiffness from stiffness_scale x radius).
+                    {"material", {{"friction", g.friction},
+                        {"rolling_friction", g.rolling_friction},
+                        {"twisting_friction", g.twisting_friction},
+                        {"restitution", g.restitution},
+                        {"tangential_stiffness_ratio", g.tangential_stiffness_ratio},
+                        {"packing_fraction", g.packing_fraction},
+                        {"represented_grain_radius_m", g.represented_grain_radius_m},
+                        {"water_capacity_fraction", g.water_capacity_fraction},
+                        {"absorption_rate_per_s", g.absorption_rate_per_s},
+                        {"drying_rate_per_s", g.drying_rate_per_s},
+                        {"surface_tension_n_m", g.surface_tension_n_m},
+                        {"contact_angle_deg", g.contact_angle_deg},
+                        {"stiffness_n_m", g.stiffness_n_m}}}};
+            }()},
             {"grain_readiness", [&] {
                 // Same rule the panel locks and set_grain_settings use.
                 nlohmann::json blockers = nlohmann::json::array();

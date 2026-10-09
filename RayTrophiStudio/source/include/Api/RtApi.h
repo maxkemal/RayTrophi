@@ -1549,6 +1549,12 @@ struct VolumeSlotRow {
     int  volume_type = -1;
     bool has_density = false;
     bool has_temperature = false;
+    int emission_mode = 0;
+    bool color_ramp_enabled = false;
+    float blackbody_intensity = 0.0f;
+    float temperature_scale = 0.0f;
+    float temperature_min = 0.0f;
+    float temperature_max = 0.0f;
     Vec3 aabb_min = Vec3(0.0f, 0.0f, 0.0f);
     Vec3 aabb_max = Vec3(0.0f, 0.0f, 0.0f);
 };
@@ -4217,6 +4223,8 @@ struct FluidDomainInfo {
     float granular_poisson_ratio = 0.25f;
     float granular_tensile_cutoff = 0.0f;
     float granular_hardening = 0.0f;
+    float granular_compaction_hardening = 0.0f;
+    float granular_compaction_limit = 0.0f;
     float granular_fracture_strain = 0.04f;
     float granular_damage_rate = 6.0f;
     float granular_healing_rate = 0.0f;
@@ -4711,6 +4719,8 @@ struct SimulationFlowSourceInfo {
     // `temperature` above, which is the gas solver's normalised unit.
     bool  fluid_temperature_override = false;
     float fluid_temperature_kelvin = 353.0f;
+    // Wet-at-birth fraction of the grain substance's water capacity (0..1).
+    float grain_birth_saturation = 0.0f;
     bool use_time_limit = false;
     float start_time = 0.0f;
     float end_time = 5.0f;

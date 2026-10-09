@@ -5,6 +5,7 @@
 #include "MatterConstitutive.h"
 #include "FluidParticles.h"
 #include <json.hpp>
+#include <array>
 #include <cstddef>
 #include <map>
 #include <string>
@@ -17,6 +18,8 @@ struct SimulationGridDomainComputeBuffers;
 struct ParticleColliderDesc;
 struct SurfaceMeshTriangle;
 struct SubstanceProfile;
+struct SimulationFlowSourceDesc;
+class ParticleSimulationSystem;
 namespace Fluid {
 class FluidParticles;
 class MatterGrainMpmContact;
@@ -25,8 +28,18 @@ struct MatterGrainCommonDriver;
 
 // Opt-in dry DEM candidate. Physical radius is independent of render detail.
 struct MatterGrainParams {
+    // `enabled` and the material below (restitution, friction, rolling and
+    // twisting friction, tangential ratio, packing, wet grains, water capacity,
+    // absorption, drying, surface tension, contact angle, real radius) are
+    // DERIVED every step from the domain's DEM substance (matterGrainOwnership,
+    // applyMatterGrainSubstance). Authored here: radius, stiffness scale,
+    // numerics, coupling and sleep (docs/dev/MADDE_UI_TEK_OTORITE.md).
     bool enabled = false;
     float radius_m = 0.025f;
+    // Contact stiffness follows the radius (k ~ r keeps the impact overlap
+    // fraction): stiffness_n_m = stiffness_scale * kMatterGrainStiffnessPerRadius
+    // * radius_m, recomputed whenever either changes. Scale 1 = 2e4 N/m at 25 mm.
+    float stiffness_scale = 1.0f;
     float stiffness_n_m = 20000.0f;
     // Coefficient of restitution of a normal impact, 0.01..1 (a measurable
     // material property; sand ~.5, glass beads ~.9). The step derives the
@@ -73,13 +86,11 @@ struct MatterGrainParams {
     // Real grain radius one simulated grain stands for (0 = radius_m). A
     // coarse grain keeps the real Bond number: bridge force x (radius_m / it)^2.
     float represented_grain_radius_m = 0.0f;
-    // Water a newly emitted grain already holds, as a fraction of capacity
-    // (an emitter of wet sand). Needs wet_grains.
-    float birth_saturation = 0.0f;
     int max_substeps = 512;
     // Sleeping grains (docs/dev/DEM_UYUYAN_TANELER.md): a grain slower than
     // sleep_speed_m_s (translation, and spin x radius) for sleep_time_s stops
-    // computing contacts and holds still until a faster grain touches it.
+    // computing contacts between periodic audits. Sleep also requires balanced
+    // residual force/torque; contact/bridge disturbances wake connected grains.
     // Absolute units: the threshold is a property of the motion, not of the
     // solver settings. Never with moving colliders, MPM contact, the shared
     // clock, liquid coupling or a force field on the grain.
@@ -92,8 +103,9 @@ struct MatterGrainParams {
 inline constexpr int kMatterGrainContactBudget = 24;
 // 17: 2-D dispatch index, 18: cost counters, 19: Verlet neighbour list,
 // 20: single-bank in-place contact history in host-assigned blocks,
-// 21: sleeping grains (rest counter per block, 128 B push constants).
-inline constexpr uint32_t kMatterGrainShaderRevision = 21;
+// 21: sleeping grains (rest counter per block, 128 B push constants),
+// 22: sleep audits/force balance, bridge wake and atomic rest-word commit.
+inline constexpr uint32_t kMatterGrainShaderRevision = 24;
 // Neighbour hash: one table of fixed-capacity buckets, filled only when the
 // neighbour lists are rebuilt (docs/dev/DEM_VERLET_LISTESI.md).
 inline constexpr uint32_t kMatterGrainBucketCapacity = 16;
@@ -114,10 +126,18 @@ inline constexpr float kMatterGrainResortDisorder = 0.02f;
 // reports itself; there is no face decimation, so the mesh is used as given.
 inline constexpr std::size_t kMatterGrainMaxColliderFaces = std::size_t{1} << 30;
 
+inline constexpr float kMatterGrainStiffnessPerRadius = 8.0e5f;  // N/m per m of radius
 bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& params,
                            std::string& error);
+// Copies the DEM substance's grain material (and the liquid's surface tension)
+// into the domain's grain solver params; `wet` is the derived wet_grains.
+void applyMatterGrainSubstance(MatterGrainParams& params, const SubstanceProfile& grain,
+                               const SubstanceProfile* liquid, bool wet);
 nlohmann::json matterGrainParamsToJson(const MatterGrainParams& params);
-MatterGrainParams matterGrainParamsFromJson(const nlohmann::json& json);
+// `dropped_keys` (optional) lists saved grain-material keys that the substance
+// owns now; the loader logs them.
+MatterGrainParams matterGrainParamsFromJson(const nlohmann::json& json,
+                                            std::string* dropped_keys = nullptr);
 // Why the grain solver cannot run on this domain as configured; empty = ready.
 // The single rule: validation, the domain panel's locks and
 // fluid.matter_models grain_readiness all read it. `code` is stable
@@ -140,7 +160,8 @@ float matterGrainRestMassKg(const MatterGrainParams& params, uint32_t substance_
 // Water one grain can hold, kg: water_capacity_fraction of its sphere volume.
 float matterGrainWaterCapacityKg(const MatterGrainParams& params);
 // Gives a just-emitted grain its birth water, capacity and water energy.
-void initMatterGrainBirthWater(FluidParticles& particles, std::size_t index,
+// birth_saturation: the flow source's grain_birth_saturation (0..1 of capacity).
+void initMatterGrainBirthWater(FluidParticles& particles, std::size_t index, float birth_saturation,
                                const MatterGrainParams& params);
 // Fills missing (<= 0) rest masses of granular carriers with the grain mass.
 std::size_t ensureMatterGrainRestMasses(FluidParticles& particles,
@@ -204,7 +225,7 @@ struct MatterGrainStepReport {
     // whether they were re-sorted (a re-sort forces the full state upload).
     float cell_order_disorder = 0.0f;
     bool cell_resorted = false;
-    // Grains asleep on the last substep (skipped contacts and integration).
+    // Grains held asleep on the last substep (contacts audited, no integration).
     uint32_t sleeping_grains = 0;
     // Moving colliders and force fields seen by this step.
     std::size_t collider_faces = 0;
@@ -305,6 +326,12 @@ struct MatterGrainGpuRuntime {
     // The device liquid-coupling rows are known to be all zero (a dry frame's
     // upload landed and nothing coupled has written them since).
     bool coupling_zero = false;
+    // Exact bits of the last published sleep/force law and substep duration.
+    // An edit or collider change invalidates equilibrium, without changing the
+    // contact history or allocating another per-grain bank.
+    std::array<uint32_t, 24> sleep_context{};
+    uint64_t sleep_collider_fingerprint = 0;
+    bool sleep_context_valid = false;
     // Device contact history is valid only for the grain state it was
     // published with. Reset, timeline scrub, cache restore or a script edit
     // present a different state (ids restart at 1 after a reset, so identity
@@ -353,9 +380,17 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& particles,
 nlohmann::json matterGrainPileProfile(const std::vector<Vec3>& centres, float radius);
 // Domain panel: grain material (Matter tab), solver and coupling (Solvers
 // tab, with the readiness line) and the last step's report (Measure tab).
-void drawMatterGrainMaterial(const SimulationGridDomainDesc& domain);
+// `ownership` is matterGrainOwnership() for this domain (MatterSubstanceState.h).
+struct MatterGrainOwnership;
+void drawMatterGrainMaterial(const SimulationGridDomainDesc& domain,
+                             const MatterGrainOwnership& ownership);
 void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
-                           const SimulationGridDomainState* state);
+                           const SimulationGridDomainState* state,
+                           const MatterGrainOwnership& ownership);
+// Flow source panel: which solver this source's granular substance gets in
+// its target domain (DEM grains, or MPM and why). Nothing for other substances.
+void drawMatterGrainSourceLine(const ParticleSimulationSystem& system,
+                               SimulationFlowSourceDesc& source);
 void drawMatterGrainReport(const SimulationGridDomainDesc& domain,
                            const SimulationGridDomainState* state);
 

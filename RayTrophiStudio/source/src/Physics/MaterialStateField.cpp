@@ -567,6 +567,46 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
         }
         {
             SubstanceProfile p;
+            p.name = "Snow";
+            p.category = SubstanceCategory::Granular;
+            // Continuum (MPM): snow compacts, clumps and breaks as a body, which
+            // grains cannot do (docs/dev/MADDE_UI_TEK_OTORITE.md section 6).
+            p.default_constitutive_model = Fluid::MatterConstitutiveModel::Granular;
+            // Fresh-to-settled snow. Thermal: water ice in a porous pack.
+            p.density = 400.0f;
+            p.specific_heat = 2100.0f;
+            p.conductivity = 0.3f;
+            p.emissivity = 0.98f;
+            p.absorbency = 0.0f; p.dry_rate = 0.01f;
+            p.meltable = true;
+            p.melt_kelvin = 273.15f; p.boiling_kelvin = 373.15f;
+            p.latent_heat_fusion = 3.34e5f; p.melt_viscosity = 0.02f;
+            p.liquid_density = 997.0f;
+            p.liquid_kinematic_viscosity = 0.0f;
+            p.latent_heat_vaporization = 2.26e6f;
+            p.fluid_extinguishing = true;
+            p.cooling_power = 1.0f; p.oxygen_dilution = 0.35f;
+            // ★ PROVISIONAL until the three snow scenes are measured (compression,
+            // snowball, slope release). Stomakhin et al. 2013: E0 = 1.4e5 Pa,
+            // nu = 0.2, xi = 10, theta_c = 2.5e-2, theta_s = 7.5e-3. theta_s maps
+            // onto the bond fracture strain; small cohesion and tensile strength
+            // hold a snowball, rebonding sinters a compacted pack.
+            p.granular_young_modulus = 1.4e5f;
+            p.granular_poisson_ratio = 0.2f;
+            p.granular_compaction_hardening = 10.0f;
+            p.granular_compaction_limit = 0.025f;
+            p.granular_friction_degrees = 30.0f;
+            p.granular_dilatancy_degrees = 0.0f;
+            p.granular_cohesion = 500.0f;
+            p.granular_tensile_cutoff = 500.0f;
+            p.granular_fracture_strain = 0.0075f; p.granular_damage_rate = 8.0f;
+            p.granular_rebonding = true; p.granular_healing_rate = 0.5f;
+            p.solver_flip_blend = 0.0f; p.solver_viscosity_wall_slip = 0.0f;
+            p.solver_wall_damping = 0.40f;
+            add(p);
+        }
+        {
+            SubstanceProfile p;
             p.name = "Gasoline";
             p.category = SubstanceCategory::Fuel;
             p.density = 740.0f; p.liquid_density = 740.0f;

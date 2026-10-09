@@ -122,3 +122,74 @@ ayrı başlıklarda). **Yeni aşamaya S1 build + IPC testi geçmeden başlama** 
 
 Kurallar: build/glslc yok; yeni `.comp` → `compile_sim_shaders.bat` + `SimulationComputeVulkan.cpp`
 kaydı + `check_sparse_mac_canonical_contracts.py` tablosu; script'ler iki yere kopyalanır.
+
+## S1b ilk parti — P2G ağırlık bankaları (2026-10-09, kaynakta; derlenmedi)
+
+Kullanıcı S1/DEM testleri sürerken devir sırasına göre kod yazılmasına izin verdi.
+Bu izin kaynak çalışması içindir; S1'in canlı kabulü henüz bu notta kapanmış değildir.
+Yukarıdaki S1 envanteri ve "Hâlâ yoğun" muhasebesi test edilen S1 build'ini anlatır.
+
+- `releaseDenseMacForCompactOwner` artık hız ×3 + FLIP ×3 yanında P2G ağırlık
+  takma adlarını (`temperature/fuel/scratch_scalar`) da serbest bırakır.
+- Aynı `dense_mac` kapısı bu üç bankanın ayrılmasını ve zorunlu-handle kontrolünü
+  yönetir. Yoğun, granüler ve saf sıvı yollarının bankaları korunur. Compact P2G
+  başarısızlığı sahipliği düşürür; mevcut `ensure(primary)` → P2G yeniden denemesi
+  dokuz yoğun bankayı tekrar ayırır. Page-only descriptor'larda boş yoğun ağırlık
+  slotu ilgili compact ağırlık sayfasını bağlar; shader/ABI değişmedi.
+- Ek kaldırılan bellek: `3 * max(face_count) * sizeof(float)`; örneğin 40³ hücrede
+  787200 B. Compact ağırlık sayfaları zaten S1'de vardı; bu parti yeni havuz eklemez.
+- `var_*_weight` katı yüz ağırlıklarıdır, P2G ağırlıkları değildir. Basınç/diverjans/
+  gradyan tüketicileri taşınmadan kaldırılamaz. **S1b bütünü tamam değil:** bu üç
+  banka ve hücre alanları sıradaki parti; MAC haritası `slot+1/576`, hücre haritası
+  `slot/512` ayrımı korunacak. S1.5/S2/S3'e geçilmedi.
+- Kaynak doğrulaması: canonical, transfer, dispatch, window, Matter, viscosity ve
+  pressure kontratları PASS. Canonical kontratına ağırlık ayırıcı kapısı, descriptor
+  alias'ı ve başarısız compact aktarımın yoğun yeniden deneme kontrolleri eklendi.
+  Build veya canlı IPC çalıştırılmadı; kullanıcıdaki devam eden testler etkilenmedi.
+
+## S1b ikinci parti — katı yüz ağırlıkları (2026-10-09, kaynakta; derlenmedi)
+
+Kullanıcının "devam edelim, testler sürüyor" izniyle ilk partinin ardından yazıldı.
+İlk partideki "var_* hâlâ yoğun" durumu bu kaynak partisiyle değişti; çalışan eski
+S1 binary'si ve onun devam eden kabul testleri ayrı kalır.
+
+- Compact sahipte `var_u/v/w_weight` ayrılmaz; aynı ayırıcı artık toplam 12 yoğun
+  yüz bankasını bırakır. Yoğun/saf sıvı/gaz/granüler bankaları eski sözleşmesini
+  korur. P2G başarısızlığı mevcut yoğun yeniden deneme yolundan bu bankaları da kurar.
+- Compact MAC havuzunun 11–13 slotları katı yüz ağırlıklarıdır; yalnız canonical
+  + variational kolda ayrılır. Bütçe/trim hesabı 9 yerine bu kolda **12 sayfa alanı**
+  kullanır. `transfer_sparse_resident_bytes` bu üç alanı da sayar; UI/script/IPC
+  mevcut ortak sparse seçimi ve core istatistiğini kullanır, yeni yazarlık API'si yok.
+- `SparseMacSolidWeights.cpp` host uint8 açıklık değerlerini mevcut MAC tile
+  listesinin **slot sırasına** paketler. `SparseMacSolidWeightsGpu.cpp` listeyi okur
+  ve yalnız etkin 576-yüz sayfalarını yükler; yoğun cihaz geçici bankası yaratmaz.
+  Boyut/key/duplicate/kapasite hataları reddedilir; padding ve eksik sayfa açıklığı
+  1'dir. Domain duvar açıklığı önce mevcut açık/kapalı kuralıyla belirlenir.
+- Her P2G yeniden topolojilemesinde `solid_weights_ready=false`; basınçtan önce
+  güncel listeyle doldurulur. Collider verisi kare içinde sabit olsa da slot sırası
+  sabit varsayılmaz. Porozite açıklıkları da mevcut host grid'den aynı yoldan alınır.
+- Var/porous diverjans ve var gradyan aynı `macSolidWeight` yardımcısını kullanır.
+  Basıncın yalnız ağırlık okuyan iki aşamasının compact ikizleri eklendi:
+  `sim_sparse_pressure_init_mac_weights`, `sim_sparse_pressure_spmv_mac_weights`
+  (**18 buffer / 80 B**). Diğer basınç girişleri 16/80, CG hücre haritası `slot/512`
+  kalır; iki ikiz katı ağırlıkları ayrı MAC haritasından `slot+1/576` okur.
+- Maliyet sınırı: basınç öncesi **ek tile listesi indirme/senkronizasyonu ve CPU
+  paketleme** vardır. Bu parti cihaz belleğini azaltır; hızlanma iddiası yok.
+  Kare/alt-adım süresi sonraki build'de ölçülmeli. Host grid S2'ye kadar yoğun kalır.
+- 8 derlemesiz kaynak kontratı PASS. Yeni C++ test kaynakta, **derlenmedi/koşulmadı**:
+  `sparse_mac_solid_weights_test.cpp` + `SparseMacSolidWeights.cpp` ile paketleme
+  testi. `rt_test_sparse_pressure_ipc.py --transfer --solid-weights` kesirli AABB
+  çarpıştırıcı paritesini ve en az 12 compact sayfa alanı muhasebesini sınar;
+  bu seçenek **canlı koşulmadı**. Eski komutların varsayılan düzeneği değiştirilmedi.
+
+**Sıradaki parti:** hücre alanları (mask/divergence/pressure publication/solid
+velocity) ve onların bütün tüketicileri. S1b bütünü hâlâ tamam değil. Ortak storage
+çekirdeği bağlanmadı; saf sıvı sahiplik satırları korundu, `GasSimulator.cpp` değişmedi.
+
+### Öncelik değişimi — DEM uyku düzeltmesi
+
+2026-10-09: kullanıcı diğer ajanın S1 PASS ve DEM uyku açık static/wet FAIL
+sonuçlarını getirdi. Hücre alanları partisine geçmeden DEM uyku düzeltmesi yazıldı
+(revizyon 22, derlenmedi/canlı doğrulanmadı). Ayrıntı `DEM_UYUYAN_TANELER.md`,
+kabul `NEXT_BUILD_CHECKS.md` → "DEM uyku düzeltmesi — revizyon 22". S1b iki ağırlık
+partisi kaynakta korunuyor; bunların sonraki build kabulü de hâlâ bekliyor.

@@ -9,6 +9,7 @@
 
 #include "RtApiInternal.h"
 #include "Fluid/MatterGrain.h"
+#include "Fluid/MatterSubstanceState.h"
 #include "Fluid/MatterEmissionBudget.h"
 #include "Fluid/FluidObject.h"
 #include "Fluid/FluidFogDensity.h"
@@ -85,6 +86,8 @@ void fillFluidRheology(const RayTrophiSim::Fluid::APICSolverParams& params,
     info.granular_poisson_ratio = params.granular_poisson_ratio;
     info.granular_tensile_cutoff = params.granular_tensile_cutoff;
     info.granular_hardening = params.granular_hardening;
+    info.granular_compaction_hardening = params.granular_compaction_hardening;
+    info.granular_compaction_limit = params.granular_compaction_limit;
     info.granular_fracture_strain = params.granular_fracture_strain;
     info.granular_damage_rate = params.granular_damage_rate;
     info.granular_healing_rate = params.granular_healing_rate;
@@ -845,7 +848,8 @@ Result setFluidThermal(const std::string& domain_id_or_name,
     auto* dom = findLiquidDomainDesc(domain_id_or_name, found);
     if (!dom) return found;
     auto& p = dom->fluid_params;
-    if (patch.enabled && *patch.enabled && p.grain.enabled) {
+    if (patch.enabled && *patch.enabled &&
+        RayTrophiSim::Fluid::matterGrainsInUse(scriptSimulationRuntime(), *dom)) {
         return Result::fail("grains are enabled: Thermal liquid cannot run with grains yet.");
     }
     if (patch.enabled) p.thermal_liquid_enabled = *patch.enabled;
@@ -2141,7 +2145,8 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
     }
     // A grain domain cannot be moved off what the grain solver needs; checked
     // before any field is written so a rejected call changes nothing.
-    if (grid_dom && grid_dom->fluid_params.grain.enabled && (backend || boundary || solid_phase)) {
+    if (grid_dom && (backend || boundary || solid_phase) &&
+        RayTrophiSim::Fluid::matterGrainsInUse(scriptSimulationRuntime(), *grid_dom)) {
         auto candidate = *grid_dom;
         if (backend) candidate.backend = parseDomainBackend(*backend);
         if (boundary) candidate.boundary_mode = parseGridBoundary(*boundary);
@@ -3042,6 +3047,7 @@ SimulationFlowSourceInfo flowInfoFromDesc(
     out.fluid_substance = source.fluid_substance;
     out.fluid_temperature_override = source.fluid_temperature_override;
     out.fluid_temperature_kelvin = source.fluid_temperature_kelvin;
+    out.grain_birth_saturation = source.grain_birth_saturation;
     out.use_time_limit = source.use_time_limit;
     out.start_time = source.start_time;
     out.end_time = source.end_time;
@@ -3103,6 +3109,9 @@ Result flowDescFromInfo(const SimulationFlowSourceInfo& info,
         return Result::fail("fluid_temperature_kelvin must be in [1, 5000] K");
     out.fluid_temperature_override = info.fluid_temperature_override;
     out.fluid_temperature_kelvin = info.fluid_temperature_kelvin;
+    if (!(info.grain_birth_saturation >= 0.0f && info.grain_birth_saturation <= 1.0f))
+        return Result::fail("grain_birth_saturation must be in [0, 1] of the grain water capacity");
+    out.grain_birth_saturation = info.grain_birth_saturation;
     out.use_time_limit = info.use_time_limit;
     out.start_time = info.start_time;
     out.end_time = std::max(info.start_time, info.end_time);

@@ -1,5 +1,14 @@
 # Güncel kabul: MPM + grain GPU temas devamı
 
+> **DEM uyku güncellemesi:** canlı revision=23. Dört repose A/B paritesi PASS;
+> açık tane boyutu kapısı 4.04849° > 4° FAIL. 1.3M ölçek PASS, hızlanma 1.125x.
+> Tam kabul açık; [son rapor](grain_sleep_ab_rev23/REPORT.md) ve
+> [uyandırma incelemesi](grain_sleep_ab_rev23/WAKE_AUDIT.md). Eski checklist'ler tarihsel.
+> **Kaynak revision=24 hazır, canlı kabul bekliyor.** Yerel itki audit'i ve fiziksel
+> uyku saati: [uygulama/kabul planı](DEM_SLEEP_TRANSFER_IMPLEMENTATION.md).
+> Aşağıdaki ortak build bekletme kuralı korunuyor; rev24 testleri sonraki eşleşen
+> C++/shader build'inde koşulacak.
+
 > **2026-10-09 yeni kapsam: build bekletiliyor.** Kullanıcı sıvı ve gaz sparse
 > sisteminin tamamını kaynakta bitirip tek build/test istedi. Aşağıdaki eski
 > parti checklist'leri son build için saklıdır; consumer migration kapanmadan
@@ -572,3 +581,283 @@ aktarım + FLIP, sparse grid storage/GPU transaction) de bu build'de ilk kez der
 5. **Bellek (bilgi):** sparse kolda yoğun `GridDomainVelX/Y/Z` ve `ScratchVel*` tamponları
    yok. `perf.get_gpu_memory` ile iki kolu karşılaştır; kazanç yüz bankalarının
    yarısından azdır (hesap S1 notunda), sayfa havuzu ekstradır.
+
+**Canlı sonuç (2026-10-09, exe 11:50) — S1 PASS:** 8 kontrat PASS. `--transfer` ve
+`--transfer --viscosity` PASS: sparse kolda `canonical=true`, `blocked=false`, sayfa havuzu
+208 KB; dense/sparse centroid 4.7e-10, hız 8e-9 / 2.0e-8 (sınır 2e-5). Küçük sahnede
+sparse kol 40 ms, dense 21 ms (sabit ek yük; ölçek ölçümü yapılmadı). Madde 3 (yoğun
+regresyon) ve 5 (bellek) ayrıca koşulmadı.
+
+**Aynı build, DEM (Parti 8–10):** probun `dispatches == substeps+2` varsayımı Parti 9'un
+gerçek sayısına (`4 × substeps`) göre düzeltildi. Uyku AÇIK: base/history/settle/dense
+PASS; **static** (son alt adımda `sticking_contacts` 0, hold ratio 0.29) ve **wet**
+(`liquid_bridges` 0) FAIL; **repose** 590 sn'de ilk kolu bitirip kaldı. Uyku KAPALI
+(`RT_GRAIN_SLEEP=0`, probe anahtarı): static ve wet PASS, repose iki kolu bitirdi
+(mu_r .05 → 19–21°, .3 → 37.9°). Yani kırılma Parti 10 uykusundan: uyuyan tane temas
+ve köprü sayaçlarına girmiyor ve/veya uyandırma kuralı eksik. Düzeltilene kadar uyku
+varsayılanı kapatılmalı ya da sayaç/uyandırma düzeltilmeli (`DEM_UYUYAN_TANELER.md`).
+
+### Sparse S1b ilk parti: yoğun P2G ağırlık bankalarını kaldırma (yalnız C++)
+
+2026-10-09: kullanıcı S1/DEM testleri devam ederken kaynak çalışmasına izin verdi.
+Bu parti çalışan S1 binary'sinde yok; mevcut S1 testlerinin sonucu ayrı kaydedilir.
+S1b'nin katı yüz ağırlıkları ve hücre alanları henüz bu partide taşınmadı.
+
+1. Kullanıcı sonraki C++ build'ini alır; bu parti shader veya ABI değiştirmedi.
+2. Derlemesiz: `python scripts/test/check_sparse_mac_canonical_contracts.py`;
+   ağırlık bankalarının compact sahipte serbest bırakılması, ayrılmaması, yoğun
+   yolda ayrılması ve compact başarısızlık sonrası yeniden deneme PASS beklenir.
+3. Boş/durmuş sahnede, mevcut testler bittikten sonra dış process'ten sıralı:
+   `python scripts/test/rt_test_sparse_pressure_ipc.py --transfer` ve
+   `python scripts/test/rt_test_sparse_pressure_ipc.py --transfer --viscosity`.
+   S1'in canonical/blocked, fizik paritesi ve kütle/momentum kapıları aynen geçmeli.
+4. Sparse kapalı karışık Su/Toprak ve saf sıvı regresyonunu tekrarla. Aynı sahnede
+   sparse açık → kapalı → açık geçişlerinde sıvı hareketi sürmeli, canonical alanı
+   sparse seçimini izlemeli. Saf sıvı compact sahipliğe geçirilmedi.
+5. Bellek: aynı çözünürlükte eski S1 ile bu parti karşılaştırılırsa ek düşüş
+   `3 * max(face_count) * 4` B olmalı (40³ hücrede 787200 B); yalnız sıvı şeridi.
+   Toplam VRAM ölçümünde driver/havuz etkileri olabilir. `var_*_weight` ve hücre
+   bankaları hâlâ yoğun; bu sonucu tam sparse storage kabulü sayma.
+
+### Sparse S1b ikinci parti: compact katı yüz ağırlıkları (SHADER + C++)
+
+2026-10-09, kaynakta; mevcut canlı test binary'sine dahil değil. Hücre alanları
+henüz taşınmadı. İlk partide kalan `var_*_weight` artık compact sıvı sahibinde yok.
+
+1. Kullanıcı `compile_sim_shaders.bat` + `compile_fluid_window_shaders.bat`, ardından
+   C++ build alır. Yeni basınç girişleri `init_mac_weights` / `spmv_mac_weights`
+   18/80; var/porous divergence ve var gradient dense/compact gövdeleri de yeniden
+   derlenmeli. Header `SparseMacSolidWeightsGpu.h`; projeye
+   `SparseMacSolidWeights.cpp`, `SparseMacSolidWeightsGpu.cpp` ve bu header kaydedildi.
+2. Derlemesiz kontroller: `check_sparse_mac_solid_weight_contracts.py`, canonical,
+   transfer, pressure, dispatch, window, Matter ve viscosity kontratları PASS.
+3. Kullanıcı C++ test hedefinde `scripts/test/sparse_mac_solid_weights_test.cpp`
+   ile `source/src/Physics/Fluid/SparseMacSolidWeights.cpp` paketleme testini koşar
+   (source/include include yolu). `SparseMacSolidWeightsGpu.cpp` bu saf paketleme
+   testine gerekmez. Kesirli ağırlıklar, 8 sınırı/son yüz/clipped tile, slot sırası,
+   retired/boş topology, duplicate/bozuk layout ve atomik reddetme PASS beklenir.
+4. Devam eden testler bittikten sonra boş/durmuş sahnede dış process'ten sıralı:
+   `python scripts/test/rt_test_sparse_pressure_ipc.py --transfer --solid-weights`
+   ve `python scripts/test/rt_test_sparse_pressure_ipc.py --transfer --solid-weights --viscosity`.
+   Başka etkin collider olmamalı; prob kendi kesirli AABB collider'ını yaratır/siler.
+   Canonical true, blocked false; centroid/hız ≤2e-5 ve kütle/momentum PASS.
+   Resident muhasebesi ≥ `active_tiles * 576 * 12 * 4` B olmalı. Bu alt sınır yoğun
+   bankaların yokluğunu tek başına kanıtlamaz; ayırıcı kaynak kontratı da geçmeli.
+5. İlk partinin collider'sız `--transfer` / `--transfer --viscosity`, sparse kapalı
+   karışık + saf sıvı, açık/kapalı geçişleri ve DEM wet/coexist regresyonları korunmalı.
+   Porozite ağırlıkları da aynı paketleme yolundan gelir; ıslak DEM kollarını atlama.
+6. Maliyet: ek tile listesi indirme/senkronizasyonu + CPU paketleme var. Aynı sahnede
+   alt-adım/kare süresini önceki S1 ile karşılaştır. Ek kaldırılan yoğun katı ağırlık
+   bankası `sum(face_count) * 4` B (40³ hücrede 787200 B); karşılığında üç compact
+   sayfa alanı eklendi, net kazanç etkin/ayrılan tile sayısına bağlıdır.
+
+### DEM uyku düzeltmesi — revizyon 22 (SHADER + C++; kabul bekliyor)
+
+Uyku kapatılmadı. Revizyon 21'in static/wet kırılması yukarıdaki canlı sonuçta
+kayıtlıdır. Revizyon 22: uyuyan tane için gerçek son-substep contact/bridge audit'i,
+kuvvet/tork dengesi + float konum hassasiyeti toleransı, bridge/denge/context wake
+ve rest sayacına CAS yazımı. 17 descriptor / 128 B push / 4 dispatch-substep ve
+tane başı GPU bankası boyutları aynı. Ayrıntı: `DEM_UYUYAN_TANELER.md` son bölüm.
+
+1. **Kullanıcı build'i:** `compile_sim_shaders.bat` (dört grain girişi yeni
+   `sim_matter_grain_sleep.glsl`'i içerir), sonra C++ build. Shader revizyonu 22
+   olmalı; eski 21 SPIR-V ile host yayını revision mismatch nedeniyle reddeder.
+   Bu partinin build/GLSL derlemesi ajan tarafından çalıştırılmadı.
+2. **Derlemesiz:** `check_matter_grain_contracts.py` ve
+   `check_matter_grain_sleep_contracts.py` PASS. İkinci dosya kaynak/spec kontrolü;
+   shader'ı sayısal çalıştırmaz, GPU kabulünün yerine geçmez.
+3. **Önce hızlı canlı kapı**, boş/durmuş sahne, başka collider/force-field yok,
+   dış terminalden: `python scripts/test/rt_test_grain_sleep_ipc.py`.
+   Beklenen: gevşek `1 m/s + .01 s` uyku ayarı bile desteksiz taneyi donduramaz;
+   sleep açık/kapalı düşüş paritesi ≤2e-5. Yerleşmiş tek tane sleep açıkta gerçekten
+   uyur (`sleeping_grains=1`) ama contacts/sticking/max_contacts ≥1,
+   contactless=0; uyku kapalıda sleeping=0. Prob kendi kaynak/domain'ini siler.
+4. **Asıl fizik:** `python scripts/test/rt_h1_grain_suite.py --only base history static settle wet dense`.
+   Static tutan kolun sayaçları pozitif, kayan kol ≥1e-2 m; wet köprüleri pozitif,
+   su bilançosu ve cohesion RMS kapıları aynı. Eşikler gevşetilmedi. Hareket/coupling
+   regresyonu için `--only motion coexist` ayrıca PASS kalmalı.
+5. **Repose A/B:** önce `python scripts/test/rt_h1_grain_runtime_ipc.py --repose-only --repose-arms mu_r_.05 mu_r_.3`
+   uyku açık; sonra aynı komutu `RT_GRAIN_SLEEP=0` ile kapalı koş. Dört kola giden
+   tam repose kabulü daha sonra: `mu_r_.1`, `mu_r_.1_r_.0175` de koşulmalı. Açı farkı
+   ±2° içinde, kaynak sayısı tamamlanmış ve kuyruk fizik kapıları PASS olmalı.
+   Her kolun toplam süresini, GPU wait/substeps/list rebuild/history reset ve
+   sleeping fraction'ı kaydet. Önceki 590 s farkının nedeni henüz kanıtlanmadı.
+6. **1.3M maliyet A/B:** `python scripts/test/rt_test_scale_ceilings_ipc.py --skip-grid --grains 1300000 --grain-radius .008 --source-radius 1.7 --window-frames 2 --steps 30`
+   ve aynı komut `--no-sleep`. Yığın oturmuş son pencereleri karşılaştır;
+   sleeping fraction artarken `gpu_wait` düşmeli, toplam duvar/host aşamaları
+   ayrı okunmalı. Geçerli popülasyon/durum, destek kaybı/çarpıştırıcı hareketi
+   görülmeli; hızlanma iddiası ölçümden önce yapılmaz. Yeni kuvvet toleransı
+   bütün taneleri uyanık bırakıyorsa veya açı/creep'i bozuyorsa kabul kapanmaz.
+7. **Sparse partileriyle aynı build:** S1b'nin collider/viscosity dense-compact
+   kapılarını da sonraki build'de koş; bu uyku düzeltmesi sparse bankaları değiştirmedi.
+
+**Kullanıcı canlı sonucu (2026-10-09), revizyon 22: 4/4 PASS.**
+`--only sleep static wet settle`: sleep 33 s, static 250 s, settle 12 s, wet 64 s.
+Desteksiz düşüş ve gerçekten uyuyan tanenin contact/sticking/CFL muhasebesi PASS.
+Static kayan kol creep 0.146423115 m; settle mass/COM/RMS drift 0,
+enerji 6.690211889e-15 J/tane (resident tail 5). Wet köprü 2680,
+cohesion RMS 0.204118119 m, grain water 0.837685364 kg, su drift 5.488811610e-7 kg.
+Sonraki kapılar: madde 5 repose A/B ve madde 6 büyük-N maliyet; ayrıca bu build'de
+base/history/dense ve motion/coexist henüz bu kullanıcı çıktısında raporlanmadı.
+
+
+### Revizyon 23 — gereksiz komşu wake/atomik maliyeti (kaynak hazır; build bekliyor)
+
+Revizyon 22 canlı A/B kayıtları `docs/dev/grain_sleep_ab_rev22/` altında.
+Repose uyku açık `mu_r_.05` saçılma 0.317333 > 0.30: FAIL. `mu_r_.3` açıları
+30.03675° açık / 32.83456° kapalı, fark 2.79781° > 2°: FAIL. Kapalı iki kolun
+kendi fizik kapıları PASS. Bu yüzden dört hızlı PASS, tam uyku kabulü değildir.
+
+1.3M açık koşuda 90. kare sleeping=30, KE=155.0077 J; 180. kare sleeping=420072
+(%32.31), KE=0.0627299 J, mass=7434.8235 kg. Son enerji öteleme RMS hızını
+4.108 mm/s yapar; görünürde sabit olması 2 mm/s + yüzey dönme kapısını geçtiği
+anlamına gelmez. Eşik veya repose kabul sınırları gevşetilmedi.
+
+Kaynakta bulunan somut sorun: hızlı/dengesiz tane zaten uyanık her komşuya WAKE
+bırakıyor; bu adayın dinlenme sayacını tekrar başlatıyor ve aktif yoğun yığında
+çok fazla atomik yazı üretiyordu. Revizyon 23 coherent rest okumasından sonra
+sadece uyuyan komşuya atomik WAKE bırakır. Uyanık aday zaten her alt adımda gerçek
+relative motion/kuvvet/tork uygunluğunu hesaplar. Pozitif rest CAS yazımı WAKE'i
+korur; uyuyan sahibin sayacı geçici 0 göstermez. Sıfır rest yazımı zaten uyanık
+sahipte gereksiz atomik işlemi atlar. Wake okuması yalnız bit varsa atomicAnd
+kullanır; okumadan sonra gelen wake sonraki alt adıma korunur. Uyku kapalıyken
+rest atomikleri/denge hesabı atlanır; yeniden açılınca host context wake geçerlidir.
+Descriptor/banka/dispatch/push ABI değişmedi. Shader ve host revision=23.
+
+Kaynak/spec kontrolleri PASS; bu sonuç derleme veya GPU kabulü değildir. Çalışan
+uygulama revizyon 22 kalır; revizyon 23 için kullanıcı shader + C++ build'i gerekir.
+Sonrasında sleep/static/wet/settle, motion/coexist, dört kollu repose A/B ve aynı
+1.3M 180-kare maliyet/enerji/bounds A/B yeniden koşulmalı. Repose hatasının bu
+maliyet düzeltmesiyle giderildiği henüz iddia edilmiyor.
+
+DEM + granular MPM aynı Matter domain'de çalışıyor: Sand DEM + Soil MPM dış IPC
+`rt_test_matter_transport_ipc.py --owners-only` PASS; 17 temas, impulse=0.13090269
+Ns, residual=1.16415e-10 Ns, ortak saat 130 transport / 7 continuum grid adımı.
+Bu elastik MPM veya üç-sahipli sıvı kabulü değildir: varsayılan tam probda 12
+örnekte liquid support hiç aktif olmadı ve prob FAIL. Ayrı teşhis açık kalır.
+
+
+**Tamamlanan 1.3M revision 22 A/B:** 180 adım; iki koşuda ölçek kapıları PASS.
+Son 20 medyan duvar 5.225 / 6.530 s,
+GPU wait 4660.9 / 5451.4 ms (açık/kapalı).
+Açık sleeping 420072/1.3M; duvar hızlanması 1.250x.
+Repose FAIL nedeniyle tam uyku kabulü kapanmadı.
+Rapor: [grain_sleep_ab_rev22/REPORT.md](grain_sleep_ab_rev22/REPORT.md).
+
+
+**Revizyon 23 kısa canlı uyku kapısı — 2026-10-09: PASS.**
+`python scripts/test/rt_test_grain_sleep_ipc.py`, dış IPC; shader revision=23.
+Gevşek uyku ayarında desteksiz düşüş açık/kapalı paritesi PASS, sleeping=0.
+Yerleşmiş tek tane: kapalı sleeping=0, açık sleeping=1; her ikisinde son-substep
+contacts=1, sticking=1, max_contacts_per_grain=1 ve contactless=0. Prob kendi
+source/domain'ini temizledi. Wet/motion/repose/large-N revizyon 23 kapıları bu kısa
+koşuda çalıştırılmadı. Log: `grain_sleep_ab_rev22/sleep_rev23_quick.log`.
+
+
+**Revizyon 23 tam repose + 1.3M A/B (2026-10-09):** Dört açık/kapalı açı paritesi
+PASS; açık tam repose tane boyutu kapısı 4.048489° > 4° FAIL,
+kapalı 3.323032° PASS. İki koşunun kendi kol kapıları PASS.
+1.3M 180 adımlık ölçek kapıları iki koşuda PASS; son 20 medyan duvar
+5.750 / 6.470 s (açık/kapalı),
+hızlanma 1.125x; açık sleeping 490007/1.3M.
+Tam kabul kapanmadı. Kaynakta hareket veto'su `balanced` üzerinden kuvvet dengesizliği
+gibi wake yayıyor; enerji/itki/destek ayrımı henüz uygulanmadı. Bu tur core kaynak
+şartları değiştirilmedi. Rapor: [grain_sleep_ab_rev23/REPORT.md](grain_sleep_ab_rev23/REPORT.md).
+
+### Taneler maddeyi izler — "Enable discrete grains" söküldü (yalnız C++ + UI; shader yok)
+
+Kullanıcı bulgusu (2026-10-09): Sand kaynağı "DEM" görünüp bağlı MPM akışı üretiyordu;
+domain'deki gizli anahtar (varsayılan kapalı) sessizce MPM'e düşürüyordu. Artık anahtar yok:
+**bir domain'de granüler ve `granular_transport=dem` bir madde varsa (Default Substance,
+bağlı madde ya da o domain'e akan kaynak) DEM koşar.** Karar `Fluid::matterGrainOwnership`
+(MatterSubstanceState.cpp), her adımda kaynaklar emit etmeden önce `grain.enabled`'a yazılır;
+canlı parçacık varken değişmez (`reset_pending`, kütle/sahiplik doğumda sabit). DEM istenip
+bloker varsa MPM koşar ama **söyler**: Solvers'da kırmızı satır + kaynak panelinde tek satır.
+`fluid.set_grain_settings(enabled=…)` artık hata; eski kayıtlardaki `enabled` sessizce düşer.
+IPC: `fluid.matter_models` → `grain_ownership {wanted, enabled, reset_pending, substance, blockers}`.
+Ayrıca substance düzenleyicide sürükleme düzeltildi (değer her kare geri okunuyordu).
+
+1. **Kontrat (derlemesiz, PASS):** `check_matter_grain_contracts.py`, `check_domain_panel_fields.py`,
+   `audit_ipc_capabilities.py`. Birim: `matter_grain_params_test.cpp` (enabled reddi + eski kayıt).
+2. **Elle (asıl):** yeni Matter domain + Sand preset kaynak → Solvers: "Solver: DEM grains (Sand)",
+   kaynak panelinde "Solver here: DEM grains". Oynat → tek tek taneler (bağlı akış değil).
+   Sınırı Open yap → reddedilmeli (taneler istendiği için). Sand'den Derive + `granular_transport=mpm`
+   ata → reset → "MPM continuum" ve akış bağlı.
+   ★ Sinsi: yeni madde düzenleyicide sürüklenip bırakılınca değer kalmalı; geri dönüyorsa eski exe.
+3. **Süit:** `python scripts/test/rt_h1_grain_suite.py --only base history static settle dense wet`
+   — script'lerden `enabled=True` kaldırıldı; readiness kolu artık `grain_ownership.wanted` okur.
+   ★ Sinsi: bir kol FAIL değil ama `transport_owners.grain` 0 → madde DEM istemiyor (kaynak
+   maddesi/ faz Gas) ya da `reset_pending` — `grain_ownership`'e bak.
+4. Bilinen sınır: cache'ten ortadan devam eden sahnede (parçacık var, adım yok) `enabled`
+   kaydedilmediği için `reset_pending` görünür; reset gerekir.
+
+
+### DEM uyku aktarımı — revizyon 24 (kaynak; build/canlı kabul bekliyor)
+
+Hareket veto'su/gerçek kuvvet dengesi ayrıldı. Komşu bildirimi audit talebi;
+dengeli hedef yaşını korur. Post-damping/Coulomb reaksiyon değişimi + bounded
+forecast hedef kütle/ataletine göre süzülür. Rest fiziksel saniye, CFL dt context
+wake nedeni değil; skipped history süresi tutulur. Metadata +4 B/capacity;
+17/128 ve 4 dispatch/substep aynı. Aktif frontier E2 henüz yazılmadı.
+Sıra ve sınırlar: [DEM_SLEEP_TRANSFER_IMPLEMENTATION.md](DEM_SLEEP_TRANSFER_IMPLEMENTATION.md).
+İlk kullanıcı kapısı: `python scripts/test/rt_h1_grain_suite.py --only sleep sleep_transfer`.
+Rev23 canlı rakamları rev24 kabulü değildir. Bağımsız diğer ajan görevi:
+[HANDOFF_S1B_CELL_FIELDS.md](HANDOFF_S1B_CELL_FIELDS.md).
+
+### Madde UI tek otorite — U1–U5 (SHADER + C++ + UI + script) — `docs/dev/MADDE_UI_TEK_OTORITE.md`
+
+"Taneler maddeyi izler" (U0, yukarıda) ile **aynı build**. Diğer ajanın DEM uyku
+revizyonlarıyla da aynı build; grain shader'ına (`sim_matter_grain.glsl`) dokunulmadı.
+
+Ne değişti:
+- **U1 madde düzenleyici:** okunur etiketler ("Friction (deg)", "Melt temperature (K)"; üstüne
+  gelince script anahtarı), bölümler maddenin kullanabildiğine göre (anahtarı — `combustible`,
+  `meltable` — her zaman görünür), solver ayarları kapalı "Advanced: solver numerics",
+  "Show unused sections", seçicide arama. Sürükleme düzeltmesi (U0) burada.
+- **U2 tane malzemesi maddede:** `grain_friction/rolling/twisting/restitution/tangential_ratio/
+  packing_fraction/real_radius_m/water_capacity_fraction/absorption/drying/contact_angle_deg`
+  maddede; köprü yüzey gerilimi sıvının `liquid_surface_tension_n_m`'i. Adım her kare DEM
+  maddesinden kopyalar (`applyMatterGrainSubstance`). Sahiplik sırası: **kaynak > bağlı madde >
+  Default Substance** (dökülen kazanır). Bir domain'de bir tane malzemesi; ikinci DEM maddesi
+  not olarak söylenir. `wet_grains` türetilir (kapasite > 0 ve sıvı / ıslak doğum).
+  Doğum nemi kaynakta: `flow_source.grain_birth_saturation`. `set_grain_settings` eski
+  anahtarları **yeni yerini söyleyerek** reddeder; eski kayıtlar düşer ve log'a yazılır.
+  Matter sekmesi malzemeyi salt okunur gösterir.
+- **U3:** `stiffness_n_m` → `stiffness_scale` (k = scale × 8e5 × r; 1 = 2e4 N/m @ 25 mm).
+  Eski kayıt ölçeğe çevrilir. Panelde sertlik "from the radius" satırı, ölçek İleri'de.
+- **U5 kar:** MPM gerilmesine sıkışma sertleşmesi (`granular_compaction_hardening` ξ,
+  `granular_compaction_limit` θc; 0 = kapalı, diğer maddeler birebir aynı) — GPU shader +
+  CPU ikizi, push constant boşlukları kullanıldı (64 B değişmedi). Yeni yerleşik **Snow**
+  (MPM, geçici değerler: E 1.4e5, ν .2, ξ 10, θc .025). `attr.stats` artık
+  `granular_plastic_volume` okur.
+- **Testler:** `rt_grain_material.py` çevirici — eski grain anahtarlarını türetilmiş test
+  maddesine taşır; tüm grain script'lerine tek satır (`install_grain_material(client)`),
+  diğer ajanın iki uyku script'i dahil. Yeni `rt_test_snow_ipc.py`.
+
+Sıra:
+1. **Shader:** `compile_sim_shaders.bat` (`sim_fluid_granular_stress_update` +
+   `sim_matter_stress_update`). Push constant 64 B aynı; kayıt değişmedi.
+2. **Kontratlar (derlemesiz, 21/21 PASS):** `for s in scripts/test/check_*.py`. Birim:
+   `matter_grain_params_test.cpp` (taşınan anahtar reddi, eski kayıt ölçeği, madde uygulaması).
+3. **Madde kütüphanesi:** `python scripts/test/rt_test_substance_profiles_ipc.py` — Snow,
+   grain_* ve yüzey gerilimi alanları.
+4. **Grain süiti (asıl regresyon):** `python scripts/test/rt_h1_grain_suite.py --only base history static settle dense wet repose`
+   — sayılar önceki kabulle aynı mertebe olmalı (varsayılanlar birebir taşındı).
+   ★ Sinsi: süit PASS ama malzeme hiç uygulanmıyor → `fluid.matter_models(...)['grain_ownership']['material']`
+   test değerlerini (ör. friction .5, restitution) göstermeli; `substance` "T: <domain> Sand grains"
+   olmalı. Sand gösteriyorsa çevirici kaynağı yeniden hedeflememiş.
+   ★ İkinci sinsi: **wet** kolunda köprü 0 → `wet_grains` türetilmemiş (kapasite 0 ya da sıvı
+   görünmüyor); `grain_ownership.wet_grains` / `liquid` alanına bak.
+5. **Kar (U5, yeni):** `python scripts/test/rt_test_snow_ipc.py` — compaction (Snow pv_max > 1.005,
+   kapalı kol ≤ 1.005), cohesion (Snow RMS < 0.8 × gevşek), rest. Değerler geçici: FAIL bir
+   kalibrasyon bilgisidir, kodu geri alma sebebi değil. `plastic_volume_readable` FAIL ise
+   pv host'a indirilmiyor demektir (karma MPM yolu).
+6. **Elle (panel):** Sand kaynağı → Matter sekmesinde "Grain material: Sand" salt okunur;
+   Solvers'ta "Contact stiffness … (from the radius)". Sand'den Derive → `grain_friction` değiştir
+   → kaynağa ata → Matter sekmesi yeni değeri gösterir. Islak kum: türetilmiş maddede
+   `grain_water_capacity_fraction` > 0 + kaynakta "Wet at birth".
+7. Bilinen sınırlar: bir domain'de tek tane malzemesi (ikinci DEM maddesi not olarak);
+   MPM malzemesi (kar dahil) **Default Substance**'tan okunur — kar sahnesinde domain'in
+   Default Substance'ı Snow olmalı; `melt_product` (eriyen kar Water etiketi) yazılmadı.
+
+**Sonuç (2026-10-09, derlendi):** 1–5 PASS. Kontrat 21/21, kütüphane, grain süiti (base history static settle wet repose; dense fiziği tamam, yalnız görsel jpg yazılamadı — dosya kilitli), kar 4/4 (pv_max 1.89, kapalı kol 1.0). `grain_ownership.material` çevrilmiş test değerlerini gösteriyor. Düzeltme: çevirici artık yalnız değişen alanları yazıyor (canlı tane varken packing yeniden gönderilince reddediliyordu). 6 (elle panel) bekliyor; kar değerleri hâlâ geçici.

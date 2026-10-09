@@ -3,9 +3,11 @@
 import re
 from pathlib import Path
 import xml.etree.ElementTree as ET
+from check_sparse_mac_canonical_contracts import entry, bindings, push_bytes
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = next(parent for parent in Path(__file__).resolve().parents
+            if (parent / "RayTrophiStudio/source").is_dir())
 SOURCE = ROOT / "RayTrophiStudio" / "source"
 
 
@@ -20,7 +22,7 @@ def main():
     compile_script = read("shaders/compile_sim_shaders.bat")
     stages = ("clear", "mark", "init", "jacobi", "copy", "spmv", "axpy", "zpby",
               "scatter", "dense_clear")
-    assert sorted(map(int, re.findall(r"binding\s*=\s*(\d+)", shader))) == list(range(16))
+    assert bindings(entry("sim_sparse_pressure_init")) == 16
     push = shader.split("uniform PC {", 1)[1].split("} pc;", 1)[0]
     assert len(re.findall(r"\b(?:int|uint|float)\s+\w+\s*;", push)) * 4 == 80
     assert 'sizeof(Constants) == 80' in host
@@ -30,6 +32,17 @@ def main():
         assert f"#define SPARSE_{stage.upper()}" in wrapper
         assert f'"sim_sparse_pressure_{stage}.spv", 16, 80' in registry
         assert stage in compile_script
+    for stage in ("init", "spmv"):
+        kernel = f"sim_sparse_pressure_{stage}_mac_weights"
+        expanded = entry(kernel)
+        assert bindings(expanded) == 18
+        assert push_bytes(expanded) == 80
+        assert f'"{kernel}.spv", 18, 80' in registry
+        assert kernel in compile_script and kernel in host
+        assert "macSolidWeight(axis, face.x, face.y, face.z)" in expanded
+        assert "(slot - 1u) * 576u" in expanded
+    assert "compact_weights && !buffers.sparse_mac_transfer.solid_weights_ready" in host
+    assert "command.buffer_count = compact_init || compact_spmv ? 18 : 16;" in host
     assert 'kernel.rfind("sim_sparse_pressure_", 0) == 0' in registry
     assert 'return group * 256u + gl_LocalInvocationID.x;' in shader
     assert 'group >= (count + 255u) / 256u' in shader
@@ -49,7 +62,8 @@ def main():
             assert field in source, (path, field)
     driver = read("src/Physics/ParticleSimulation.cpp")
     assert "releaseSparsePressure(compute, buffers.sparse_pressure)" in driver
-    print("PASS sparse pressure 16/80 ABI, ten shader stages, 2D lanes/reductions, lifecycle and API/UI")
+    print("PASS sparse pressure dense-weight 16/80 + compact-weight 18/80 ABIs, "
+          "ten shared stages + two weight twins, 2D lanes/reductions, lifecycle and API/UI")
 
 
 if __name__ == "__main__":

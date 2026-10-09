@@ -37,6 +37,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rt_ipc import RtIpc  # noqa: E402
+from rt_grain_material import install_grain_material  # noqa: E402
 
 LOG = Path(__file__).resolve().parents[2] / 'docs/dev/grain_float_probe_live.json'
 
@@ -56,6 +57,7 @@ def main():
                         help='cost coupled vs uncoupled, each from fluid.reset (same frames)')
     args = parser.parse_args()
     client = RtIpc()
+    install_grain_material(client)  # old grain keys -> grain substance
 
     def call(method, **params):
         result = client.call(method, **params)

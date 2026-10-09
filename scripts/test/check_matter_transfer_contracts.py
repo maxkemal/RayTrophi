@@ -15,7 +15,7 @@ def main():
 
     particles = read("include/Fluid/FluidParticles.h")
     for text in ["particle_id.push_back(identity)", "particle_id[i] = particle_id[last]",
-                 "copy(particle_id, other.particle_id)", "particle_id.resize(n)",
+                 "fn(a.particle_id, b.particle_id)", "particle_id.resize(n)",
                  "particle_id.clear()", "particle_id.reserve(n)"]:
         assert text in particles, text
     clear = particles.split("void clear()", 1)[1].split("size_t size()", 1)[0]

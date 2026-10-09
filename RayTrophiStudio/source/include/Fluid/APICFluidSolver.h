@@ -178,6 +178,9 @@ struct APICSolverParams {
     float granular_poisson_ratio = 0.25f;
     float granular_tensile_cutoff = 0.0f;
     float granular_hardening = 0.0f;
+    // Snow compaction (from the Default Substance): xi, 0 = off, and theta_c.
+    float granular_compaction_hardening = 0.0f;
+    float granular_compaction_limit = 0.0f;
     float granular_fracture_strain = 0.04f;
     float granular_damage_rate = 6.0f;
     float granular_healing_rate = 0.0f;
@@ -268,6 +271,8 @@ struct APICSolverParams {
         granular_poisson_ratio = std::clamp(granular_poisson_ratio, 0.0f, 0.49f);
         granular_tensile_cutoff = std::max(granular_tensile_cutoff, 0.0f);
         granular_hardening = std::max(granular_hardening, 0.0f);
+        granular_compaction_hardening = std::clamp(granular_compaction_hardening, 0.0f, 30.0f);
+        granular_compaction_limit = std::clamp(granular_compaction_limit, 0.0f, 0.5f);
         granular_fracture_strain = std::clamp(granular_fracture_strain, 1.0e-4f, 1.0f);
         granular_damage_rate = std::clamp(granular_damage_rate, 0.0f, 100.0f);
         granular_healing_rate = std::clamp(granular_healing_rate, 0.0f, 20.0f);

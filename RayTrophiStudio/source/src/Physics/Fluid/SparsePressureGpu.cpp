@@ -1,10 +1,12 @@
 #include "Fluid/SparsePressureGpu.h"
 #include "Fluid/FluidGpuDispatch.h"
+#include "Fluid/SparseMacTransferGpu.h"
 #include "ParticleSimulation.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace RayTrophiSim::Fluid {
@@ -163,23 +165,39 @@ bool solveSparsePressure(SimulationComputeContext& compute,
             return fail("sparse pressure bootstrap allocation failed");
         }
     }
-    std::array<ComputeBufferHandle, 16> bindings{};
+    const auto mac = macVelocityBinding(buffers);
+    const bool compact_weights = variational && mac.compact;
+    if (compact_weights && !buffers.sparse_mac_transfer.solid_weights_ready) {
+        return fail("sparse pressure: compact solid weight pages are not ready");
+    }
+    std::array<ComputeBufferHandle, 18> bindings{};
     const auto bind = [&]() {
         std::copy(storage.owned.begin(), storage.owned.end(), bindings.begin());
         bindings[10] = buffers.fluid_mask;
         bindings[11] = buffers.divergence;
-        bindings[12] = variational ? buffers.var_u_weight : buffers.fluid_mask;
-        bindings[13] = variational ? buffers.var_v_weight : buffers.fluid_mask;
-        bindings[14] = variational ? buffers.var_w_weight : buffers.fluid_mask;
+        bindings[12] = variational ? mac.solid_weight[0] : buffers.fluid_mask;
+        bindings[13] = variational ? mac.solid_weight[1] : buffers.fluid_mask;
+        bindings[14] = variational ? mac.solid_weight[2] : buffers.fluid_mask;
         bindings[15] = buffers.pressure;
+        bindings[16] = mac.map;
+        bindings[17] = mac.list;
     };
     bind();
     const auto dispatch = [&](const char* name, uint64_t count) {
         ComputeDispatch command;
         command.kernel = name;
+        const bool compact_init = compact_weights &&
+            std::strcmp(name, "sim_sparse_pressure_init") == 0;
+        const bool compact_spmv = compact_weights &&
+            std::strcmp(name, "sim_sparse_pressure_spmv") == 0;
+        if (compact_init) {
+            command.kernel = "sim_sparse_pressure_init_mac_weights";
+        } else if (compact_spmv) {
+            command.kernel = "sim_sparse_pressure_spmv_mac_weights";
+        }
         command.groups = groups(count);
         command.buffers = bindings.data();
-        command.buffer_count = bindings.size();
+        command.buffer_count = compact_init || compact_spmv ? 18 : 16;
         command.constants = &constants;
         command.constants_size = sizeof(constants);
         if (!compute.dispatch(command)) {
