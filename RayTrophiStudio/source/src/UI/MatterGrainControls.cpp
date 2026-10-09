@@ -46,6 +46,8 @@ void drawMatterGrainMaterial(const SimulationGridDomainDesc& domain) {
     }
     ImGui::PushID(domain.name.c_str());
     auto p = domain.fluid_params.grain;
+    ImGui::TextWrapped("Transport is selected per substance: dem uses grains, mpm uses "
+        "the continuum skeleton. Both can share this domain with bidirectional contact.");
     bool changed = false;
     changed |= DomainUi::Float("Real grain radius (m, 0 = simulation)", &p.represented_grain_radius_m,
         1e-5f, 0.0f, p.radius_m, "%.5f",
@@ -140,7 +142,8 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
     ImGui::PushID(domain.name.c_str());
     auto p = domain.fluid_params.grain;
     bool changed = DomainUi::Bool("Enable discrete grains", &p.enabled,
-        "Granular emitters become physical grains stepped by the DEM grain solver;\n"
+        "Substances with granular_transport=dem use physical DEM grains;\n"
+        "granular_transport=mpm retains the MPM skeleton and exchanges contact impulses.\n"
         "liquid emitters in the same domain stay liquid parcels (one owner each).\n"
         "Needs Vulkan, a Closed boundary, and pore water / thermal liquid off.\n"
         "Script: fluid.set_grain_settings(enabled=true)");
@@ -200,6 +203,23 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
                 0.0f, 1e5f, "%.2f",
                 "Viscous part of the sliding force inside the Coulomb cone (0..1e5 Ns/m).\n"
                 "Script: fluid.set_grain_settings(sliding_damping_n_s_m=...)");
+            changed |= DomainUi::Bool("Sleeping grains", &p.sleep,
+                "A grain that stays slower than the sleep speed for the sleep time stops\n"
+                "computing contacts and holds still until a faster grain touches it.\n"
+                "Saves GPU time on settled piles. Never with moving colliders, MPM contact,\n"
+                "liquid coupling or a force field on the grain. Off = A/B reference.\n"
+                "Script: fluid.set_grain_settings(sleep=...)");
+            ImGui::BeginDisabled(!p.sleep);
+            changed |= DomainUi::Float("Sleep speed (m/s)", &p.sleep_speed_m_s, .0005f,
+                0.0f, 1.0f, "%.4f",
+                "Translation speed, and spin x radius, below which a grain counts as still\n"
+                "(0..1 m/s, absolute). A slope creeping slower than this freezes.\n"
+                "Script: fluid.set_grain_settings(sleep_speed_m_s=...)");
+            changed |= DomainUi::Float("Sleep time (s)", &p.sleep_time_s, .01f, .01f, 10.0f,
+                "%.2f",
+                "How long a grain must stay still before it sleeps (0.01..10 s).\n"
+                "Script: fluid.set_grain_settings(sleep_time_s=...)");
+            ImGui::EndDisabled();
             ImGui::TreePop();
         }
         ImGui::SeparatorText("Liquid coupling");
@@ -240,7 +260,28 @@ void drawMatterGrainReport(const SimulationGridDomainDesc& domain,
     const auto& r = state->fluid_stats.grain_report;
     ImGui::Text("DEM: %d substeps (%.2e s), limited by %s", r.substeps, r.substep_dt,
         r.limit.c_str());
-    ImGui::Text("Grains %zu, liquid parcels %zu", r.grains, r.liquid_parcels);
+    ImGui::Text("Grains %zu, liquid parcels %zu, MPM parcels %zu",
+        r.grains, r.liquid_parcels, r.mpm_parcels);
+    if (r.mpm_parcels > 0) {
+        ImGui::Text("MPM contact events %llu, max neighbours %u, residual %.3g N s",
+            static_cast<unsigned long long>(r.mpm_contact_events), r.mpm_contact_max_neighbours,
+            r.mpm_contact_momentum_residual);
+        if (r.common_clock) {
+            ImGui::Text("Shared clock: %d transport ticks, %d continuum grid updates",
+                r.substeps, r.liquid_substeps);
+        } else {
+            ImGui::TextDisabled("Continuum frame, then contact at each DEM substep.");
+        }
+        if (r.liquid_parcels > 0) {
+            ImGui::TextWrapped("Liquid uses drag and buoyancy while MPM is present; "
+                "porous projection awaits separate owner weights.");
+            if (r.liquid_reaction_on_gpu) {
+                ImGui::TextDisabled(r.liquid_support_dynamic
+                    ? "Liquid support and reaction rebuilt on GPU each tick."
+                    : "Liquid reaction on GPU each tick; support sampled per frame.");
+            }
+        }
+    }
     ImGui::Text("Contacts %u (sticking %u), max per grain %u", r.contacts, r.sticking_contacts,
         r.max_contacts);
     ImGui::Text("History: %s%s", r.history_reset ? r.history_reset_reason.c_str() : "carried",

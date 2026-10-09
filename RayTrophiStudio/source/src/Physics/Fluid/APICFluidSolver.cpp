@@ -11,6 +11,7 @@
 #include "Atmosphere/AtmosphereClimate.h"
 #include "Fluid/FluidParticleSeedPattern.h"
 #include "Fluid/FluidParticleRedistribution.h"
+#include "Fluid/MatterSubstanceState.h"
 #include "Fluid/SubstanceTag.h"   // kSubstanceUntagged (solid-phase resolution)
 #include "GridFluidSolver.h"
 #include "SimulationWorld.h"

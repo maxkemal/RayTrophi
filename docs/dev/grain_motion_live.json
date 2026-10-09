@@ -2,2289 +2,2289 @@
  "arms": {
   "rest": [
    {
-    "grains": 17,
-    "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.01979999989271164,
-    "frame": 1
-   },
-   {
     "grains": 18,
     "com": [
-     0.004169011967153185,
-     0.36794033646583557,
-     0.004913116468944483
+     0.005008291482226923,
+     0.3880418704615699,
+     -0.0015643168137305314
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.015300000086426735,
-    "frame": 2
-   },
-   {
-    "grains": 22,
-    "com": [
-     -7.892894262278622e-05,
-     0.3465679789131338,
-     0.002537136791612614
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.014800000004470348,
-    "frame": 3
-   },
-   {
-    "grains": 28,
-    "com": [
-     0.0004971736426731306,
-     0.3195948659309319,
-     -1.6406078689864704e-06
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.014700000174343586,
-    "frame": 4
-   },
-   {
-    "grains": 35,
-    "com": [
-     0.0013415622558178644,
-     0.2847235138927187,
-     -0.0004017533601394733
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.02070000022649765,
-    "frame": 5
-   },
-   {
-    "grains": 41,
-    "com": [
-     -0.0004881040942741608,
-     0.24603118274996919,
-     0.001119502411201231
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.022199999541044235,
-    "frame": 6
-   },
-   {
-    "grains": 45,
-    "com": [
-     -0.0007735018398509259,
-     0.2152733423229721,
-     0.0009771153072102208
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.025200000032782555,
-    "frame": 7
-   },
-   {
-    "grains": 52,
-    "com": [
-     -0.00033486711394149245,
-     0.20857228234840125,
-     -0.00018410215405031047
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.02019999921321869,
-    "frame": 8
-   },
-   {
-    "grains": 54,
-    "com": [
-     -0.0008198342079089747,
-     0.176801698282361,
-     0.0037090026744408533
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.020800000056624413,
-    "frame": 9
-   },
-   {
-    "grains": 62,
-    "com": [
-     -0.001765137530803199,
-     0.16647782200767147,
-     0.004022361960397255
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.02070000022649765,
-    "frame": 10
-   },
-   {
-    "grains": 67,
-    "com": [
-     -0.003711607593890112,
-     0.15980264917016032,
-     0.005227279998779071
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.020099999383091927,
-    "frame": 11
-   },
-   {
-    "grains": 74,
-    "com": [
-     -0.003873732173028779,
-     0.1553574228105513,
-     0.006612261415874542
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.022299999371170998,
-    "frame": 12
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.005044936408432052,
-     0.1425163836624378,
-     0.006937007955573978
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.02070000022649765,
-    "frame": 13
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.006850930933022676,
-     0.11639632630902222,
-     0.006844790927621381
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.0210999995470047,
-    "frame": 14
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.009207977152142945,
-     0.09055716976618917,
-     0.00749592440087536
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.0210999995470047,
-    "frame": 15
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.01173548259808181,
-     0.07277851456250899,
-     0.010098988712669765
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.020999999716877937,
-    "frame": 16
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.013794887112453611,
-     0.05120740164644444,
-     0.012693229003045215
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.12020000070333481,
-    "frame": 17
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.01579244428863511,
-     0.040879113241457,
-     0.014252703365248946
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.02199999988079071,
-    "frame": 18
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.018354355345647305,
-     0.03768569684754579,
-     0.014768535133416905
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.0860000029206276,
-    "frame": 19
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.019884422570705825,
-     0.03493253528498687,
-     0.01615632323918339
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.02160000056028366,
-    "frame": 20
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.019817121908999962,
-     0.03169082109935773,
-     0.01707843717378683
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.020800000056624413,
-    "frame": 21
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.01979366080829488,
-     0.03062931159272408,
-     0.017365432538402583
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.020899999886751175,
-    "frame": 22
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.01886111359971649,
-     0.030034114129077166,
-     0.01740077372867232
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.020800000056624413,
-    "frame": 23
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.017278636746013022,
-     0.028323937374620856,
-     0.017467290078713664
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021299999207258224,
-    "frame": 24
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.01549320749323576,
-     0.02698009587728826,
-     0.01778447391907088
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021900000050663948,
-    "frame": 25
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.014851926569229887,
-     0.025759360084357932,
-     0.017853896597024185
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.020800000056624413,
-    "frame": 26
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.015079782342908356,
-     0.02571108340261839,
-     0.01817342619492242
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021800000220537186,
-    "frame": 27
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.0147865583272412,
-     0.025274781080392678,
-     0.018238795577930518
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.02280000038444996,
-    "frame": 28
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.014089310099967788,
-     0.025094709000908415,
-     0.01795020776738129
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021800000220537186,
-    "frame": 29
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.013382060136884873,
-     0.02508230046488537,
-     0.017230659635224133
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.024700000882148743,
-    "frame": 30
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.012882912174040329,
-     0.02497777089667626,
-     0.01626698892915814
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.0215000007301569,
-    "frame": 31
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.013323750743905105,
-     0.02506739717836563,
-     0.015165419587178871
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021299999207258224,
-    "frame": 32
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.01363533197675281,
-     0.025005395954044968,
-     0.014249813284736883
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.019600000232458115,
-    "frame": 33
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.014360874461439944,
-     0.024969850690701074,
-     0.013559301237527924
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021900000050663948,
-    "frame": 34
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.015044543581704333,
-     0.024951709171709344,
-     0.013206320475243644
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021700000390410423,
-    "frame": 35
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.015396458908724469,
-     0.024919103019130535,
-     0.012841069388042118
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.0210999995470047,
-    "frame": 36
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.015700695737718776,
-     0.024917218452080718,
-     0.012141226830396703
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021700000390410423,
-    "frame": 37
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.01597671558220799,
-     0.024915232967871886,
-     0.011544584105603236
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021199999377131462,
-    "frame": 38
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.01629109484836076,
-     0.024920542581150156,
-     0.010943695401343042
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.022099999710917473,
-    "frame": 39
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.016504761527101387,
-     0.024916719573621567,
-     0.010565583521756954
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021199999377131462,
-    "frame": 40
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.016640216127061912,
-     0.02491561010575446,
-     0.01018592210125344
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.02250000089406967,
-    "frame": 41
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.016764151908528938,
-     0.024932777986694597,
-     0.009834144125656672
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.01979999989271164,
-    "frame": 42
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.016797874106440486,
-     0.024924164423002635,
-     0.009777495577089637
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021400000900030136,
-    "frame": 43
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.016514384203802353,
-     0.024926847634980303,
-     0.009849316345002445
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.020400000736117363,
-    "frame": 44
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.016213545918640757,
-     0.024918121070815966,
-     0.010383570886915612
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021800000220537186,
-    "frame": 45
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.01595090343527352,
-     0.024914360366379614,
-     0.010829103735979999
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.020899999886751175,
-    "frame": 46
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.015661860393802022,
-     0.024914337274355765,
-     0.011177807477696878
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.0215000007301569,
-    "frame": 47
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.015339356211300652,
-     0.024915003695358068,
-     0.01153350749145598
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.0210999995470047,
-    "frame": 48
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.015053307950998124,
-     0.024914993164248958,
-     0.011861456396171687
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021199999377131462,
-    "frame": 49
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.014804619686821294,
-     0.02492231548501131,
-     0.012181673082523017
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.0215000007301569,
-    "frame": 50
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.014528484125502216,
-     0.02491447050124407,
-     0.012293295973601457
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.0210999995470047,
-    "frame": 51
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.014244545872012761,
-     0.02491440724294919,
-     0.012392973638503908
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.09139999747276306,
-    "frame": 52
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.013960652429467195,
-     0.024914388544857512,
-     0.012482003053614455
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021400000900030136,
-    "frame": 53
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.013728301333359066,
-     0.02491460327441112,
-     0.012564509420488501
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.02250000089406967,
-    "frame": 54
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.013510085552787543,
-     0.024914567311031702,
-     0.012614419060693547
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021299999207258224,
-    "frame": 55
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.013297998585188982,
-     0.024914612611516933,
-     0.012655459862285917
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.020800000056624413,
-    "frame": 56
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.013065407094426296,
-     0.02491443749899284,
-     0.012666902555606473
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.0210999995470047,
-    "frame": 57
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.012824743980159778,
-     0.02491343238701424,
-     0.012751161703654862
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021299999207258224,
-    "frame": 58
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.012579704103513757,
-     0.02491438656281203,
-     0.012892150808907828
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.02370000071823597,
-    "frame": 59
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.012317852782778037,
-     0.02491439334475077,
-     0.013020377355412824
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.020400000736117363,
-    "frame": 60
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.012050611166976003,
-     0.02491440456838181,
-     0.013117558426575927
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.02199999988079071,
-    "frame": 61
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.011805380118461571,
-     0.024914388353816975,
-     0.013208806988610038
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.022600000724196434,
-    "frame": 62
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.011554065918645422,
-     0.02491425078075666,
-     0.013239322477229245
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.020899999886751175,
-    "frame": 63
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.011344194591331942,
-     0.024914372951174397,
-     0.013163320794074746
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.02319999970495701,
-    "frame": 64
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.011147064109070176,
-     0.024914396640199878,
-     0.013081569122359504
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.0215000007301569,
-    "frame": 65
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.01096150427698518,
-     0.02491439250894846,
-     0.012993314390769227
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.020600000396370888,
-    "frame": 66
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.01078940985294487,
-     0.02491439742824206,
-     0.01290304046601824
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.0215000007301569,
-    "frame": 67
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.01064437476750944,
-     0.024914382646481197,
-     0.012811048630213094
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.01940000057220459,
-    "frame": 68
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.010548040175285135,
-     0.024914352127756834,
-     0.012718422033895655
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.08919999748468399,
-    "frame": 69
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.010500162123487542,
-     0.02491437467053914,
-     0.012634260126222405
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.020899999886751175,
-    "frame": 70
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.010467085372417795,
-     0.02491438111815697,
-     0.01254649481509266
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.021800000220537186,
-    "frame": 71
-   },
-   {
-    "grains": 78,
-    "com": [
-     -0.010448201792314659,
-     0.024914365906554922,
-     0.012457803924544094
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 0.0,
-    "truncated": 0,
-    "motion_ms": 0.020800000056624413,
-    "frame": 72
-   }
-  ],
-  "wind": [
-   {
-    "grains": 17,
-    "com": [
-     0.010568288675345042,
-     0.39062829228008494,
-     0.0017917965648367124
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.050999999046325684,
+    "motion_ms": 0.045899998396635056,
     "frame": 1
    },
    {
     "grains": 19,
     "com": [
-     0.012633718648239187,
-     0.3692112706209484,
-     0.004876093179183571
+     0.006403833459204945,
+     0.3676976655658923,
+     -0.001792922836581343
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
+    "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.025499999523162842,
+    "motion_ms": 0.05570000037550926,
     "frame": 2
    },
    {
     "grains": 24,
     "com": [
-     0.02208924375978919,
-     0.3505994851390521,
-     2.7813230796406668e-05
+     -0.0002627425104340851,
+     0.3491188536087672,
+     -0.00016177284608905515
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
+    "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.03739999979734421,
+    "motion_ms": 0.03500000014901161,
     "frame": 3
    },
    {
-    "grains": 27,
+    "grains": 30,
     "com": [
-     0.038414409565221935,
-     0.31182901561260223,
-     -0.0034048297718443266
+     0.0017284621348759783,
+     0.3179429292678833,
+     -0.0020734554777542737
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
+    "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.039400000125169754,
+    "motion_ms": 0.02810000069439411,
     "frame": 4
    },
    {
     "grains": 37,
     "com": [
-     0.04939677342426384,
-     0.2864382416009903,
-     -0.0004961987441355317
+     0.0040012593648547454,
+     0.28064848240968343,
+     -0.0015703194107658943
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
+    "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.04270000010728836,
+    "motion_ms": 0.033900000154972076,
     "frame": 5
    },
    {
     "grains": 41,
     "com": [
-     0.0684813308095128,
-     0.23776678468396026,
-     -0.003363436001364325
+     0.0020626236289944043,
+     0.23505941446779707,
+     -0.002491169353583603
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03269999846816063,
+    "frame": 6
+   },
+   {
+    "grains": 48,
+    "com": [
+     0.0006221726653166115,
+     0.21660800600269187,
+     -0.0020661735567652313
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.0284000001847744,
+    "frame": 7
+   },
+   {
+    "grains": 55,
+    "com": [
+     -0.000296982966194099,
+     0.20737450217658826,
+     -0.00012256779538636893
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.02539999969303608,
+    "frame": 8
+   },
+   {
+    "grains": 60,
+    "com": [
+     -0.0008987229433841987,
+     0.18472481065740187,
+     0.000680386996828023
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.02710000053048134,
+    "frame": 9
+   },
+   {
+    "grains": 67,
+    "com": [
+     -0.0022582025722202633,
+     0.17573775812538703,
+     0.0023702901715079105
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.0272000003606081,
+    "frame": 10
+   },
+   {
+    "grains": 74,
+    "com": [
+     -0.001961488598435357,
+     0.17011869907681199,
+     0.0014541040849557361
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.02590000070631504,
+    "frame": 11
+   },
+   {
+    "grains": 78,
+    "com": [
+     -0.0009653414853323104,
+     0.14862201487024626,
+     0.002427514361886255
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.025599999353289604,
+    "frame": 12
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.0008567009847063347,
+     0.14358976641122034,
+     0.0032216623863753134
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.026499999687075615,
+    "frame": 13
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.0013310337473419133,
+     0.11892575203057597,
+     0.0036275870563900535
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.050700001418590546,
+    "frame": 14
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.0008696767679579965,
+     0.09364018332870566,
+     0.003930133765371629
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03240000084042549,
+    "frame": 15
+   },
+   {
+    "grains": 85,
+    "com": [
+     -0.00013800102203863308,
+     0.07282654406393271,
+     0.005314486306194925
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.0575999990105629,
+    "frame": 16
+   },
+   {
+    "grains": 85,
+    "com": [
+     -0.0007051214753814484,
+     0.05556197775637401,
+     0.007319176131311617
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03220000118017197,
+    "frame": 17
+   },
+   {
+    "grains": 85,
+    "com": [
+     -0.0017927010351901614,
+     0.043830713651636065,
+     0.00866877094376832
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.027799999341368675,
+    "frame": 18
+   },
+   {
+    "grains": 85,
+    "com": [
+     -0.0029913321972879496,
+     0.03707706422051962,
+     0.009930766127346195
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.05869999900460243,
+    "frame": 19
+   },
+   {
+    "grains": 85,
+    "com": [
+     -0.003561749101123407,
+     0.03459050995023814,
+     0.012060551152235885
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03220000118017197,
+    "frame": 20
+   },
+   {
+    "grains": 85,
+    "com": [
+     -0.004287389461772833,
+     0.03206772420774486,
+     0.014026355209267316
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.032600000500679016,
+    "frame": 21
+   },
+   {
+    "grains": 85,
+    "com": [
+     -0.004452791270416435,
+     0.030433505926938612,
+     0.0158316834227127
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.042500000447034836,
+    "frame": 22
+   },
+   {
+    "grains": 85,
+    "com": [
+     -0.003392293594558451,
+     0.028639502582304615,
+     0.0176349931697854
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.033399999141693115,
+    "frame": 23
+   },
+   {
+    "grains": 85,
+    "com": [
+     -0.0027304492863442897,
+     0.027087125729988615,
+     0.019627276802545095
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.032099999487400055,
+    "frame": 24
+   },
+   {
+    "grains": 85,
+    "com": [
+     -0.0014645394650014115,
+     0.02632755987784441,
+     0.021317272841492107
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.025699999183416367,
+    "frame": 25
+   },
+   {
+    "grains": 85,
+    "com": [
+     2.2187941324182816e-05,
+     0.02603672948830268,
+     0.022651249674313225
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.032600000500679016,
+    "frame": 26
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.0010974955032853444,
+     0.025421500929138245,
+     0.023563432572957326
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.032999999821186066,
+    "frame": 27
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.002286923411028339,
+     0.02526272500262542,
+     0.025011875946074704
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.04320000112056732,
+    "frame": 28
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.003332933068604155,
+     0.025072005500688284,
+     0.025817297536003234
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.051500000059604645,
+    "frame": 29
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.0042651197838816145,
+     0.024999450673075286,
+     0.02644776704666372
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03220000118017197,
+    "frame": 30
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.005653220329515851,
+     0.024954220301964713,
+     0.0270036338636761
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03280000016093254,
+    "frame": 31
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.006924854212111864,
+     0.02495514875387445,
+     0.027610512894085254
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03189999982714653,
+    "frame": 32
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.008305300820125795,
+     0.024969139936215738,
+     0.02824471924344405
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03290000185370445,
+    "frame": 33
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.009575061434332061,
+     0.024966817042406875,
+     0.02881278179805072
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.0340999998152256,
+    "frame": 34
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.010803641310399952,
+     0.02491946389131687,
+     0.029821583913529594
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03200000151991844,
+    "frame": 35
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.011617658846080304,
+     0.024945152945378257,
+     0.031037798425292248
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.043299999088048935,
+    "frame": 36
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.012384098723037706,
+     0.025013160201556542,
+     0.03168204982271963
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03229999914765358,
+    "frame": 37
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.013279785078895446,
+     0.02494384276078028,
+     0.03207443451837579
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03200000151991844,
+    "frame": 38
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.014299691790673773,
+     0.024920660082031698,
+     0.03195950375760302
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03220000118017197,
+    "frame": 39
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.015306054564472796,
+     0.024946047190357666,
+     0.03183674280915189
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03240000084042549,
+    "frame": 40
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.0162305303304867,
+     0.02491701179567505,
+     0.031748158287476076
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03720000013709068,
+    "frame": 41
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.0170753854970612,
+     0.024912117377800105,
+     0.03199753181680165
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.032499998807907104,
+    "frame": 42
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.017834632105522726,
+     0.02491396021317032,
+     0.03233185056596986
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03240000084042549,
+    "frame": 43
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.01852638448232457,
+     0.024914419957820105,
+     0.03271117360495468
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03400000184774399,
+    "frame": 44
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.019240955994053583,
+     0.02491464606102774,
+     0.033063184754813395
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03370000049471855,
+    "frame": 45
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.01988688032177059,
+     0.024914439877166468,
+     0.03332792001173773
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03229999914765358,
+    "frame": 46
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.020479703447713025,
+     0.0249134129680255,
+     0.033588342850699185
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03290000185370445,
+    "frame": 47
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.021018266372651424,
+     0.024916002614533188,
+     0.03383590939509517
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03220000118017197,
+    "frame": 48
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.021613879893009322,
+     0.024914186557426166,
+     0.03400355048258514
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03280000016093254,
+    "frame": 49
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.02218105411020054,
+     0.024914307695101293,
+     0.034075694903731336
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03319999948143959,
+    "frame": 50
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.02269045147729816,
+     0.024918976973961372,
+     0.034136879444122345
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.052299998700618744,
+    "frame": 51
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.023014184134765806,
+     0.02491389381534914,
+     0.034166169933536515
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.031700000166893005,
+    "frame": 52
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.02332454648909762,
+     0.024914395655779267,
+     0.034206808621392505
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03480000048875809,
+    "frame": 53
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.023596660622998186,
+     0.02491507076603524,
+     0.03425601843525383
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03530000150203705,
+    "frame": 54
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.023761016945012245,
+     0.024914378059260982,
+     0.034348505516262604
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.04410000145435333,
+    "frame": 55
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.02390496464281837,
+     0.024914244321339266,
+     0.034432364342843774
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03229999914765358,
+    "frame": 56
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.024043088636758244,
+     0.02491438638638048,
+     0.03452155020307096
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03269999846816063,
+    "frame": 57
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.024200610235600505,
+     0.024914406853563654,
+     0.03462611418217427
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03269999846816063,
+    "frame": 58
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.024360515186237865,
+     0.024914392456412318,
+     0.034708280784680516
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03280000016093254,
+    "frame": 59
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.02452616812010734,
+     0.024914247192004153,
+     0.03475015152464902
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03220000118017197,
+    "frame": 60
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.024699622797026477,
+     0.02491443967994522,
+     0.03474395096521164
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.032600000500679016,
+    "frame": 61
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.024865342305480098,
+     0.024914416364010646,
+     0.03475311273599374
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03319999948143959,
+    "frame": 62
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.025026391389409947,
+     0.024914394078009276,
+     0.03473413945997462
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.033399999141693115,
+    "frame": 63
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.025179385003524214,
+     0.024914391799008152,
+     0.0346910824889646
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03240000084042549,
+    "frame": 64
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.025301295025650795,
+     0.024914478576358624,
+     0.03462253523004409
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03229999914765358,
+    "frame": 65
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.025399353719651966,
+     0.024914361295454646,
+     0.034541213917819856
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.04340000078082085,
+    "frame": 66
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.025477140180266693,
+     0.02491449200931718,
+     0.034429507286233056
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03269999846816063,
+    "frame": 67
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.02553471350573304,
+     0.02491440315018683,
+     0.03428795832921481
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.02759999968111515,
+    "frame": 68
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.025575305241749002,
+     0.02491439201814287,
+     0.0341538927024778
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03180000185966492,
+    "frame": 69
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.025598493803237733,
+     0.02491439193048899,
+     0.034032165489214276
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.032499998807907104,
+    "frame": 70
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.025605064501424378,
+     0.02491439197431593,
+     0.03392690118840514
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03269999846816063,
+    "frame": 71
+   },
+   {
+    "grains": 85,
+    "com": [
+     0.025596431495197244,
+     0.02491439197431593,
+     0.033841090791803925
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 0.0,
+    "truncated": 0,
+    "motion_ms": 0.03579999879002571,
+    "frame": 72
+   }
+  ],
+  "wind": [
+   {
+    "grains": 18,
+    "com": [
+     0.008500467998803489,
+     0.3880193697081672,
+     -0.0015643168137305314
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.04410000145435333,
-    "frame": 6
+    "motion_ms": 0.06629999727010727,
+    "frame": 1
+   },
+   {
+    "grains": 19,
+    "com": [
+     0.019887009243431845,
+     0.36769666169819076,
+     -0.0013885804831883625
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.03849999979138374,
+    "frame": 2
+   },
+   {
+    "grains": 25,
+    "com": [
+     0.02408447036985308,
+     0.35135268688201904,
+     -0.003347999374382198
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.04309999942779541,
+    "frame": 3
+   },
+   {
+    "grains": 31,
+    "com": [
+     0.03515102330129593,
+     0.32206434876688067,
+     0.0008415708415991356
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.04500000178813934,
+    "frame": 4
+   },
+   {
+    "grains": 37,
+    "com": [
+     0.05067647796602468,
+     0.28034622967243195,
+     0.0008740535263928607
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.03929999843239784,
+    "frame": 5
    },
    {
     "grains": 46,
     "com": [
-     0.08897566709239745,
-     0.21350381203481683,
-     -0.0037184076221740765
+     0.06267115761748637,
+     0.25258647950123186,
+     0.001524425746933758
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.04129999876022339,
+    "motion_ms": 0.0406000018119812,
+    "frame": 6
+   },
+   {
+    "grains": 50,
+    "com": [
+     0.08243475764989854,
+     0.2217070550099015,
+     0.0015741492295637727
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.0405999980866909,
     "frame": 7
    },
    {
-    "grains": 54,
+    "grains": 57,
     "com": [
-     0.10169593018859073,
-     0.20920277890507818,
-     -0.0009693301248329628
+     0.09570909292731236,
+     0.21050566376039853,
+     0.0027479822624866886
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.05139999836683273,
+    "motion_ms": 0.04450000077486038,
     "frame": 8
    },
    {
-    "grains": 59,
+    "grains": 65,
     "com": [
-     0.11936381629518215,
-     0.18844949858168428,
-     0.0008162922032031447
+     0.11072782394476231,
+     0.1983106109385306,
+     0.0033790302946447204
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.05780000239610672,
+    "motion_ms": 0.044200003147125244,
     "frame": 9
    },
    {
-    "grains": 64,
+    "grains": 69,
     "com": [
-     0.14154756083371467,
-     0.17126786528388038,
-     0.0032490874946233803
+     0.1353912364920952,
+     0.17504322572030886,
+     0.0027859484780228877
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.05260000005364418,
+    "motion_ms": 0.05089999735355377,
     "frame": 10
    },
    {
-    "grains": 71,
+    "grains": 76,
     "com": [
-     0.15829929045047347,
-     0.1631034532902946,
-     0.002437986702409006
+     0.15258905515197274,
+     0.16663307025048296,
+     0.0049560724728507895
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.05719999969005585,
+    "motion_ms": 0.04639999940991402,
     "frame": 11
    },
    {
-    "grains": 75,
+    "grains": 83,
     "com": [
-     0.1794932380473862,
-     0.1503909061600765,
-     0.004235829638006789
+     0.16915912769422078,
+     0.1577053778546761,
+     0.004252078122261587
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.059199996292591095,
+    "motion_ms": 0.04729999974370003,
     "frame": 12
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.19959297865523096,
-     0.1363134421643954,
-     0.004482029369867207
+     0.18460723727217151,
+     0.1518423379295402,
+     0.006502427010693484
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.06199999898672104,
+    "motion_ms": 0.04959999769926071,
     "frame": 13
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.23273692353439954,
-     0.11075798311282564,
-     0.004049726212220388
+     0.21616534989896338,
+     0.12576072942465544,
+     0.00718228021869436
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.10050000250339508,
+    "motion_ms": 0.06019999831914902,
     "frame": 14
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.26552291923862753,
-     0.08980326470034788,
-     0.004772089085028857
+     0.24652490567208993,
+     0.10046385934369431,
+     0.007114533065921733
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.057500001043081284,
+    "frame": 15
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.2783583862461253,
+     0.0779925006959173,
+     0.008051556652774005
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
     "motion_ms": 0.060499999672174454,
-    "frame": 15
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.29860540415761594,
-     0.06937060847029658,
-     0.005982063654692306
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.05910000205039978,
     "frame": 16
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.32887327715112014,
-     0.0549437194779704,
-     0.006952348342047458
+     0.3104092193198286,
+     0.05955413526131049,
+     0.009649466732258177
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.058400001376867294,
+    "motion_ms": 0.06019999831914902,
     "frame": 17
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.35908448118922787,
-     0.04571410692945314,
-     0.007237308353621829
+     0.3412106467514402,
+     0.045489463603331,
+     0.011183167195930646
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.06030000001192093,
+    "motion_ms": 0.06220000237226486,
     "frame": 18
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.38850870195303183,
-     0.04367493550422824,
-     0.007307428263180873
+     0.3701172677075698,
+     0.03930262277523675,
+     0.012246485163147263
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.0681999996304512,
-    "frame": 19
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.41549560140606157,
-     0.04254036104377311,
-     0.007977229764072006
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.05910000205039978,
-    "frame": 20
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.437444466307665,
-     0.04014960916925082,
-     0.00844228441555856
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.05820000171661377,
-    "frame": 21
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.454267279728304,
-     0.040282991302164284,
-     0.009015224133898174
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
     "motion_ms": 0.06129999831318855,
+    "frame": 19
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.39410861517406176,
+     0.04019915763702657,
+     0.013853465199160078
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.050200000405311584,
+    "frame": 20
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.41403863428988397,
+     0.040066573458413274,
+     0.01587354200892147
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.062300000339746475,
+    "frame": 21
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.43396843750443725,
+     0.038200430137415704,
+     0.017379205166879564
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.0738999992609024,
     "frame": 22
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.4688843909792508,
-     0.03990837707644022,
-     0.009041548926527712
+     0.4532054700371291,
+     0.03569496284342474,
+     0.017990071473953633
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.05910000205039978,
+    "motion_ms": 0.05079999938607216,
     "frame": 23
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.4835553867624531,
-     0.03780256935595711,
-     0.008109885613659478
+     0.46738781312273603,
+     0.03448345365209711,
+     0.017435519411487275
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.05920000001788139,
+    "motion_ms": 0.06430000066757202,
     "frame": 24
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.4947754753918586,
-     0.03817846300669863,
-     0.008118106212718953
+     0.47699399102065293,
+     0.034994198754429814,
+     0.01590609133385849
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.05870000272989273,
+    "motion_ms": 0.07689999788999557,
     "frame": 25
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.5016254571419728,
-     0.038072749925187874,
-     0.00878503810926747
+     0.4849696017801761,
+     0.03451323080807923,
+     0.014305436342126788
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.06239999830722809,
+    "motion_ms": 0.06620000302791595,
     "frame": 26
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.5071227132708211,
-     0.03738012542075749,
-     0.009628727594449485
+     0.4912237547338009,
+     0.03326406071169508,
+     0.012822488749710224
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.06200000271201134,
-    "frame": 27
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.51238235529465,
-     0.037042254982869845,
-     0.010549020900426443
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.06540000438690186,
-    "frame": 28
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5171534304000154,
-     0.036234233740575716,
-     0.011947470422409722
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.06109999865293503,
-    "frame": 29
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5218254567324361,
-     0.03594420378721213,
-     0.01285901598490865
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.06199999898672104,
-    "frame": 30
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5253801594806622,
-     0.035625739140978344,
-     0.012972289625602417
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.05560000240802765,
-    "frame": 31
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5279367652874958,
-     0.03538358084197286,
-     0.013123826948996517
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.06059999763965607,
-    "frame": 32
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5293186748329597,
-     0.03546234069368507,
-     0.013748391189529955
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.05939999967813492,
-    "frame": 33
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5304615961599954,
-     0.035286659421988685,
-     0.014535650823123877
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.06400000303983688,
-    "frame": 34
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5310658058033715,
-     0.0348801327091229,
-     0.015112870219576182
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
     "motion_ms": 0.06340000033378601,
-    "frame": 35
+    "frame": 27
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.5319862290273739,
-     0.0348999328628371,
-     0.0155009518088655
+     0.4977035499281352,
+     0.03283334989100696,
+     0.011538122759924994
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.05090000107884407,
-    "frame": 36
+    "motion_ms": 0.07400000095367432,
+    "frame": 28
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.5329733487171463,
-     0.03476873466957218,
-     0.015799188203196077
+     0.5028621763818794,
+     0.03293805432816347,
+     0.0096317848708067
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.0689999982714653,
-    "frame": 37
+    "motion_ms": 0.07259999960660934,
+    "frame": 29
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.5333955182304865,
-     0.03477203893133357,
-     0.015941102667033746
+     0.5077158275577757,
+     0.03256164582239257,
+     0.007540299412276989
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.06159999966621399,
-    "frame": 38
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5339651586888712,
-     0.03467274624618549,
-     0.01613290170542867
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.042899999767541885,
-    "frame": 39
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5344232799886149,
-     0.03462279316839538,
-     0.01634321396004795
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.05090000107884407,
-    "frame": 40
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5349498972108092,
-     0.0345239969842796,
-     0.0163882248718115
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.04280000180006027,
-    "frame": 41
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5354998334299159,
-     0.03449495719109154,
-     0.016368491793400615
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.0429999977350235,
-    "frame": 42
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5361071444010433,
-     0.03448644777924953,
-     0.016291497278180474
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.0429999977350235,
-    "frame": 43
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5367678573614433,
-     0.034485249791907355,
-     0.016276596391078372
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.04270000010728836,
-    "frame": 44
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5371671141702916,
-     0.034555427258527734,
-     0.01647330045440718
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.05990000069141388,
-    "frame": 45
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5373762121683434,
-     0.03452969648981396,
-     0.016908136538312437
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.06120000034570694,
-    "frame": 46
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.537461562247216,
-     0.03451260167492341,
-     0.01732155341136306
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.06599999964237213,
-    "frame": 47
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5374951026862181,
-     0.034515703309185894,
-     0.01744841307378079
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.042399998754262924,
-    "frame": 48
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5376266799395598,
-     0.03451807235803787,
-     0.01746153878637498
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.06270000338554382,
-    "frame": 49
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5376972714556923,
-     0.034515790759196766,
-     0.017389458498056936
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.060999996960163116,
-    "frame": 50
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5377426094646696,
-     0.034516743702601785,
-     0.01730076476483591
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.05739999935030937,
-    "frame": 51
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5377756334558318,
-     0.03451434784580635,
-     0.01727307257183553
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.05829999968409538,
-    "frame": 52
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.537772295972969,
-     0.03451287762933893,
-     0.01728016692744212
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.05829999968409538,
-    "frame": 53
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5377775800379017,
-     0.03451382779056512,
-     0.017284006870622922
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.04339999705553055,
-    "frame": 54
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5377774902536899,
-     0.034513878600695456,
-     0.017281429747803296
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.045500002801418304,
-    "frame": 55
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.537777419708952,
-     0.034513358427565304,
-     0.017286415323850852
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.043299999088048935,
-    "frame": 56
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5377774336670018,
-     0.034513627072866954,
-     0.017285538754791403
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.04500000178813934,
-    "frame": 57
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5377775962594188,
-     0.03451361526039582,
-     0.01728533050399037
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.03739999979734421,
-    "frame": 58
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5377773684036884,
-     0.03451361794826351,
-     0.017284803074796358
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.03550000116229057,
-    "frame": 59
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5377775030800059,
-     0.034513658030500896,
-     0.01728453285567747
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.048100002110004425,
-    "frame": 60
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5377774887447117,
-     0.034513647231874583,
-     0.017285176146115286
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.04179999977350235,
-    "frame": 61
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5377774627148351,
-     0.03451367903830884,
-     0.017285176617671028
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.04500000178813934,
-    "frame": 62
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5377774612058567,
-     0.03451367609108551,
-     0.01728480038692871
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.042900003492832184,
-    "frame": 63
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.5377774249903763,
-     0.034513668947016136,
-     0.017284915039810937
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.047600001096725464,
-    "frame": 64
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.537777423481398,
-     0.034513659232968015,
-     0.017284871692050088
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.07119999825954437,
-    "frame": 65
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.537777423481398,
-     0.03451365708738941,
-     0.017284833177735534
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.03709999844431877,
-    "frame": 66
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.537777423481398,
-     0.03451365352714362,
-     0.017284849971014093
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
-    "field_acceleration_max": 4.0,
-    "truncated": 0,
-    "motion_ms": 0.04169999808073044,
-    "frame": 67
-   },
-   {
-    "grains": 79,
-    "com": [
-     0.537777423481398,
-     0.03451365748821179,
-     0.017284904647901483
-    ],
-    "held": false,
-    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
     "motion_ms": 0.05950000137090683,
+    "frame": 30
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5115976492563884,
+     0.032288180581397485,
+     0.005938974431612433
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.0877000018954277,
+    "frame": 31
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5141965880990027,
+     0.032366712184415926,
+     0.005329893876074088
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06260000169277191,
+    "frame": 32
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5168049275875091,
+     0.0322136342111561,
+     0.004885113353116677
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.07559999823570251,
+    "frame": 33
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5186022109455531,
+     0.0320929491892457,
+     0.004842354719423625
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06670000404119492,
+    "frame": 34
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5200913810067705,
+     0.0318997491358055,
+     0.005060561182391311
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.10459999740123749,
+    "frame": 35
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5209741344054538,
+     0.03187554426905182,
+     0.005489752627909161
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06830000132322311,
+    "frame": 36
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5219140460093817,
+     0.0317411831062701,
+     0.0058009647117513935
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06800000369548798,
+    "frame": 37
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5218733671638701,
+     0.03189149832146035,
+     0.006027226685546307
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06080000102519989,
+    "frame": 38
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5220687144332461,
+     0.03174611913661162,
+     0.0062657316157127664
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.05740000307559967,
+    "frame": 39
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5223696728547415,
+     0.03170969386895497,
+     0.0065964518962169745
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06790000200271606,
+    "frame": 40
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5226743112007777,
+     0.031679172586235725,
+     0.006890790369491004
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.060100000351667404,
+    "frame": 41
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5228193438715403,
+     0.03167907502502203,
+     0.007237186408989745
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.049300000071525574,
+    "frame": 42
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.523031214872996,
+     0.03166940266059505,
+     0.007557113269447399
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.061400000005960464,
+    "frame": 43
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5233230541149776,
+     0.03166854820317693,
+     0.007902085719009232
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.061900001019239426,
+    "frame": 44
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5234069708320831,
+     0.031678895134892734,
+     0.008206768420576663
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.08249999582767487,
+    "frame": 45
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5234082712067498,
+     0.0316747791858183,
+     0.008406487355629596
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.0608999989926815,
+    "frame": 46
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5234518498182297,
+     0.031668499650226695,
+     0.008419701446675578
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06309999525547028,
+    "frame": 47
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5234953665071064,
+     0.03166846233523554,
+     0.008476107576603333
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.057099997997283936,
+    "frame": 48
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235059198406008,
+     0.03166711856093672,
+     0.008470968391823834
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06140000373125076,
+    "frame": 49
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.523522308137682,
+     0.031666405085060315,
+     0.008439308086073906
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06040000170469284,
+    "frame": 50
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235308051109313,
+     0.031667261446515715,
+     0.008385882844837997
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06890000402927399,
+    "frame": 51
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235473851362865,
+     0.031667314449118224,
+     0.008333263764183767
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.05990000069141388,
+    "frame": 52
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235418127642736,
+     0.031667547072801325,
+     0.008297218020824264
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06210000067949295,
+    "frame": 53
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235398964749443,
+     0.03166738661626974,
+     0.008277520184249978
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.05079999938607216,
+    "frame": 54
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235448191563289,
+     0.031667407746944154,
+     0.008282575544823497
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06239999830722809,
+    "frame": 55
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235564056369993,
+     0.03166726931101746,
+     0.008305570475446654
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06040000170469284,
+    "frame": 56
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235509600904255,
+     0.03166741730852259,
+     0.008307687462850757
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.05139999836683273,
+    "frame": 57
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235562175512313,
+     0.03166720436678992,
+     0.008296433060119525
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.05999999865889549,
+    "frame": 58
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235557615756988,
+     0.03166724528289504,
+     0.008304963024824717
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06340000033378601,
+    "frame": 59
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.523555369178454,
+     0.031667157573004555,
+     0.008307400870964743
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06210000067949295,
+    "frame": 60
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235548281007342,
+     0.03166715312335226,
+     0.00831328139498104
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.059700001031160355,
+    "frame": 61
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235551287730533,
+     0.03166715473764473,
+     0.008319515405714309
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.0617000013589859,
+    "frame": 62
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235555811060799,
+     0.03166718365003665,
+     0.00832557592916096
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.0868000015616417,
+    "frame": 63
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235560215181774,
+     0.03166720747119851,
+     0.00833222488808034
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.054099999368190765,
+    "frame": 64
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235565582911174,
+     0.031667217384609904,
+     0.008339612471172566
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.050300002098083496,
+    "frame": 65
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235573069916832,
+     0.03166722444196544,
+     0.008347980100532127
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06080000102519989,
+    "frame": 66
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235583166281382,
+     0.03166721502525939,
+     0.008358033589967008
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06270000338554382,
+    "frame": 67
+   },
+   {
+    "grains": 90,
+    "com": [
+     0.5235598312483895,
+     0.03166721964048016,
+     0.008370513091277728
+    ],
+    "held": false,
+    "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
+    "collider_faces": 1216,
+    "collider_speed_max": 0.0,
+    "field_acceleration_max": 4.0,
+    "truncated": 0,
+    "motion_ms": 0.06159999966621399,
     "frame": 68
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.537777423481398,
-     0.034513660977724216,
-     0.01728496537838554
+     0.5235621664259169,
+     0.031667217777835016,
+     0.008386396130339945
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.05979999899864197,
+    "motion_ms": 0.04989999905228615,
     "frame": 69
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.537777423481398,
-     0.034513664302192146,
-     0.017284962224856582
+     0.5235658983389537,
+     0.031667216453287336,
+     0.008406892561793526
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.0674000009894371,
+    "motion_ms": 0.061400000005960464,
     "frame": 70
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.537777423481398,
-     0.03451366222734692,
-     0.017284916236383657
+     0.5235718849632474,
+     0.031667214383681606,
+     0.008433395895149753
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
@@ -2292,1175 +2292,1176 @@
     "frame": 71
    },
    {
-    "grains": 79,
+    "grains": 90,
     "com": [
-     0.537777423481398,
-     0.0345136564036336,
-     0.017284857038455698
+     0.5235816717147825,
+     0.031667212624516744,
+     0.008467571730984178
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 4.0,
     "truncated": 0,
-    "motion_ms": 0.05990000069141388,
+    "motion_ms": 0.051500000059604645,
     "frame": 72
    }
   ],
   "sweep": [
    {
-    "grains": 17,
+    "grains": 18,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     0.005008291482226923,
+     0.3880193697081672,
+     -0.0015643168137305314
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.021900000050663948,
+    "motion_ms": 0.04179999977350235,
     "frame": 1
    },
    {
-    "grains": 18,
+    "grains": 19,
     "com": [
-     0.004169011967153185,
-     0.36794033646583557,
-     0.004913116468944483
+     0.006403833459204945,
+     0.36767632082888957,
+     -0.001792922836581343
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.013500000350177288,
+    "motion_ms": 0.034299999475479126,
     "frame": 2
    },
    {
-    "grains": 22,
+    "grains": 24,
     "com": [
-     -7.892894262278622e-05,
-     0.3465679789131338,
-     0.002537136791612614
+     -0.00026274909760104514,
+     0.3491019569337368,
+     -0.00016177486395463347
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.023399999365210533,
+    "motion_ms": 0.03009999915957451,
     "frame": 3
    },
    {
-    "grains": 28,
+    "grains": 30,
     "com": [
-     0.0004971736426731306,
-     0.3195948659309319,
-     -1.6406078689864704e-06
+     0.0017284505476709458,
+     0.31792937715848285,
+     -0.002073467522859572
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02449999935925007,
+    "motion_ms": 0.037700001150369644,
     "frame": 4
    },
    {
-    "grains": 35,
+    "grains": 37,
     "com": [
-     0.0013415622558178644,
-     0.2847235138927187,
-     -0.0004017533601394733
+     0.004001228819991386,
+     0.2806374700488271,
+     -0.001570337936533865
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.01549999974668026,
+    "motion_ms": 0.029899999499320984,
     "frame": 5
    },
    {
     "grains": 41,
     "com": [
-     -0.0004881040942741608,
-     0.24603118274996919,
-     0.001119502411201231
+     0.002062578016903433,
+     0.2350497375719431,
+     -0.0024911939768438684
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.015799999237060547,
+    "motion_ms": 0.027499999850988388,
     "frame": 6
    },
    {
-    "grains": 45,
+    "grains": 48,
     "com": [
-     -0.0007735018398509259,
-     0.2152733423229721,
-     0.0009771153072102208
+     0.0006224043512096008,
+     0.2166074505463863,
+     -0.0020662615764498087
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.020600000396370888,
+    "motion_ms": 0.026200000196695328,
     "frame": 7
    },
    {
-    "grains": 52,
+    "grains": 55,
     "com": [
-     -0.00033486711394149245,
-     0.20857228234840125,
-     -0.00018410215405031047
+     -0.00030734694393521044,
+     0.2073843731798909,
+     -0.00011371238876811103
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.024299999698996544,
+    "motion_ms": 0.025299999862909317,
     "frame": 8
    },
    {
-    "grains": 54,
+    "grains": 60,
     "com": [
-     -0.0008198342079089747,
-     0.176801698282361,
-     0.0037090026744408533
+     -0.0009014290873892588,
+     0.18473071111366152,
+     0.000672205696658544
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.019700000062584877,
+    "motion_ms": 0.02590000070631504,
     "frame": 9
    },
    {
-    "grains": 62,
+    "grains": 67,
     "com": [
-     -0.001765137530803199,
-     0.16647782200767147,
-     0.004022361960397255
+     -0.0022980710077785825,
+     0.17564088306320244,
+     0.002367600718679937
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02250000089406967,
+    "motion_ms": 0.02500000037252903,
     "frame": 10
    },
    {
-    "grains": 67,
+    "grains": 74,
     "com": [
-     -0.003711607593890112,
-     0.15980264917016032,
-     0.005227279998779071
+     -0.002090920248175848,
+     0.1704010905295208,
+     0.0013783495185733193
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.019700000062584877,
+    "motion_ms": 0.02539999969303608,
     "frame": 11
    },
    {
-    "grains": 74,
+    "grains": 78,
     "com": [
-     -0.003873732173028779,
-     0.1553574228105513,
-     0.006612261415874542
+     -0.0012989246871513399,
+     0.14879092715011957,
+     0.002571152230629164
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.022600000724196434,
+    "motion_ms": 0.025200000032782555,
     "frame": 12
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.005044936408432052,
-     0.1425163836624378,
-     0.006937007955573978
+     0.0006858501103980598,
+     0.14352331060697054,
+     0.003520552414085936
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.035999998450279236,
+    "motion_ms": 0.0272000003606081,
     "frame": 13
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.006850930933022676,
-     0.11639632630902222,
-     0.006844790927621381
+     0.0013407067649121242,
+     0.12082103488638121,
+     0.003915424349799977
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.022600000724196434,
+    "motion_ms": 0.03099999949336052,
     "frame": 14
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.009207977152142945,
-     0.09055716976618917,
-     0.00749592440087536
+     0.0012927926520419502,
+     0.09475569286767174,
+     0.00387104295111973
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02199999988079071,
+    "motion_ms": 0.05050000175833702,
     "frame": 15
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.01173548259808181,
-     0.07277851456250899,
-     0.010098988712669765
+     0.0005451820996206624,
+     0.07307821258026007,
+     0.004211755482623739
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.022600000724196434,
+    "motion_ms": 0.03150000050663948,
     "frame": 16
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.013794887112453611,
-     0.05120740164644444,
-     0.012693229003045215
+     9.07709849450525e-05,
+     0.05589025323005282,
+     0.005902289786814346
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.023399999365210533,
+    "motion_ms": 0.031700000166893005,
     "frame": 17
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.01579244428863511,
-     0.040879113241457,
-     0.014252703365248946
+     0.0002229949678568251,
+     0.04280462140107856,
+     0.00682058370507816
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02419999986886978,
+    "motion_ms": 0.033900000154972076,
     "frame": 18
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.018354355345647305,
-     0.03768569684754579,
-     0.014768535133416905
+     -0.00039088187520119584,
+     0.036939800114316114,
+     0.007962024225579487
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.024900000542402267,
+    "motion_ms": 0.03440000116825104,
     "frame": 19
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.019884422570705825,
-     0.03493253528498687,
-     0.01615632323918339
+     -0.0012017897631534738,
+     0.03458011365112136,
+     0.009243937747498205
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.023900000378489494,
+    "motion_ms": 0.06210000067949295,
     "frame": 20
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.019817121908999962,
-     0.03169082109935773,
-     0.01707843717378683
+     -0.0020483667541103473,
+     0.03214678718324969,
+     0.01046852531349835
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02280000038444996,
+    "motion_ms": 0.03240000084042549,
     "frame": 21
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.01979366080829488,
-     0.03062931159272408,
-     0.017365432538402583
+     -0.0022637580329661704,
+     0.030717272508670297,
+     0.012342855745159545
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.024000000208616257,
+    "motion_ms": 0.02539999969303608,
     "frame": 22
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.01886111359971649,
-     0.030034114129077166,
-     0.01740077372867232
+     -0.0017160871833124549,
+     0.028872091498445066,
+     0.014422413413686783
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.022099999710917473,
+    "motion_ms": 0.032499998807907104,
     "frame": 23
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.017278636746013022,
-     0.028323937374620856,
-     0.017467290078713664
+     -0.002879036765764743,
+     0.02756237757994848,
+     0.016626382098697545
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.031300000846385956,
+    "motion_ms": 0.03150000050663948,
     "frame": 24
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     -0.003715408105841455,
+     0.026507719387026386,
+     0.018739239115487093
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000004768371582,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.022299999371170998,
+    "motion_ms": 0.05260000005364418,
     "frame": 25
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     -0.003541900354492317,
+     0.02570441540549783,
+     0.021015238356502607
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000011920928955,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.0215000007301569,
+    "motion_ms": 0.05249999836087227,
     "frame": 26
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     -0.0041328123441952335,
+     0.025906373538515156,
+     0.022233656963662186
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000004768371582,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.021800000220537186,
+    "motion_ms": 0.07829999923706055,
     "frame": 27
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     -0.0043397342840976695,
+     0.025673648473971033,
+     0.02308139395900074
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000004768371582,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.0215000007301569,
+    "motion_ms": 0.051600001752376556,
     "frame": 28
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     -0.004412693053703082,
+     0.025280468122047532,
+     0.023955347279415378
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000008344650269,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.021900000050663948,
+    "motion_ms": 0.05130000039935112,
     "frame": 29
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     -0.003810951475273167,
+     0.025004033130757955,
+     0.025096567644847263
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000004768371582,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02070000022649765,
+    "motion_ms": 0.04659999907016754,
     "frame": 30
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     -0.0027948777300908375,
+     0.025037863061708587,
+     0.026061441697289845
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000004768371582,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02160000056028366,
+    "motion_ms": 0.05209999904036522,
     "frame": 31
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     -0.002043784502893697,
+     0.02492675459121958,
+     0.02709916086374399
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000001192092896,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.0210999995470047,
+    "motion_ms": 0.06069999933242798,
     "frame": 32
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     -0.0007484940647640597,
+     0.024901191758758885,
+     0.028775564666070456
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000004768371582,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02019999921321869,
+    "motion_ms": 0.04670000076293945,
     "frame": 33
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     0.0011350880061988347,
+     0.024963657536050853,
+     0.029231176955406255
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000001192092896,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.023499999195337296,
+    "motion_ms": 0.04019999876618385,
     "frame": 34
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     0.002876990784630728,
+     0.024932314039153216,
+     0.02943245246458579
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000001192092896,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.020800000056624413,
+    "motion_ms": 0.045499999076128006,
     "frame": 35
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     0.004750292136689969,
+     0.02495424714596833,
+     0.02932030023702658
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000001192092896,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02419999986886978,
+    "motion_ms": 0.05400000140070915,
     "frame": 36
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     0.00675234881448832,
+     0.024938257871305238,
+     0.02925853218664137
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000001192092896,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.020999999716877937,
+    "motion_ms": 0.051100000739097595,
     "frame": 37
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     0.008651938461972491,
+     0.024915242633398848,
+     0.02932593092760617
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000001192092896,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.03579999879002571,
+    "motion_ms": 0.05310000106692314,
     "frame": 38
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     0.010723777378306676,
+     0.02494279740049559,
+     0.028814642295679635
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000001192092896,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.021199999377131462,
+    "motion_ms": 0.05310000106692314,
     "frame": 39
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     0.012841232948224339,
+     0.024922725076184555,
+     0.028206340486512497
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000004768371582,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02019999921321869,
+    "motion_ms": 0.06129999831318855,
     "frame": 40
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     0.01476250828846413,
+     0.024911751466638918,
+     0.027662969380617138
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000001192092896,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.0210999995470047,
+    "motion_ms": 0.06679999828338623,
     "frame": 41
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     0.016766044979586316,
+     0.02495045710135909,
+     0.027348643409855176
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000004768371582,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.0215000007301569,
+    "motion_ms": 0.05139999836683273,
     "frame": 42
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     0.019232779555022717,
+     0.024916265598114804,
+     0.02725370366345437
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000004768371582,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.020999999716877937,
+    "motion_ms": 0.05209999904036522,
     "frame": 43
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     0.021474600638098574,
+     0.024913220808786513,
+     0.027137913248118203
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000008344650269,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.022600000724196434,
+    "motion_ms": 0.04500000178813934,
     "frame": 44
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     0.023627987931318137,
+     0.02491187854286502,
+     0.02705476546988768
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 1.0000004768371582,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.020999999716877937,
+    "motion_ms": 0.05260000005364418,
     "frame": 45
    },
    {
-    "grains": 17,
+    "grains": 85,
     "com": [
-     0.007088741027366589,
-     0.39062829228008494,
-     0.0017917965648367124
+     0.025788988501710037,
+     0.02491059235351928,
+     0.026941150689826283
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
-    "collider_speed_max": 0.0,
+    "collider_faces": 1216,
+    "collider_speed_max": 0.6000008583068848,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.021400000900030136,
+    "motion_ms": 0.05400000140070915,
     "frame": 46
    },
    {
-    "grains": 18,
+    "grains": 85,
     "com": [
-     0.004169011967153185,
-     0.36794033646583557,
-     0.004913116468944483
+     0.02808504643137841,
+     0.0249356746673584,
+     0.02686133748468231
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.022700000554323196,
+    "motion_ms": 0.03240000084042549,
     "frame": 47
    },
    {
-    "grains": 22,
+    "grains": 85,
     "com": [
-     -7.892894262278622e-05,
-     0.3465679789131338,
-     0.002537136791612614
+     0.03005309231469737,
+     0.024922438951976156,
+     0.02677750780301934
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.023499999195337296,
+    "motion_ms": 0.032600000500679016,
     "frame": 48
    },
    {
-    "grains": 28,
+    "grains": 85,
     "com": [
-     0.0004971736426731306,
-     0.3195948659309319,
-     -1.6406078689864704e-06
+     0.031267234305029416,
+     0.02502906730069834,
+     0.026684728966039756
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.024800000712275505,
+    "motion_ms": 0.05400000140070915,
     "frame": 49
    },
    {
-    "grains": 35,
+    "grains": 85,
     "com": [
-     0.0013415622558178644,
-     0.2847235138927187,
-     -0.0004017533601394733
+     0.03242081903359469,
+     0.024945011559654683,
+     0.02657601390691359
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.021900000050663948,
+    "motion_ms": 0.03220000118017197,
     "frame": 50
    },
    {
-    "grains": 41,
+    "grains": 85,
     "com": [
-     -0.0004881040942741608,
-     0.24603118274996919,
-     0.001119502411201231
+     0.033532085226547416,
+     0.024942367239033487,
+     0.026447411100654013
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.022299999371170998,
+    "motion_ms": 0.032600000500679016,
     "frame": 51
    },
    {
-    "grains": 45,
+    "grains": 85,
     "com": [
-     -0.0007735018398509259,
-     0.2152733423229721,
-     0.0009771153072102208
+     0.03455547307042734,
+     0.024920220147160936,
+     0.02631060730885061
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.022299999371170998,
+    "motion_ms": 0.057100001722574234,
     "frame": 52
    },
    {
-    "grains": 52,
+    "grains": 85,
     "com": [
-     -0.00033486711394149245,
-     0.20857228234840125,
-     -0.00018410215405031047
+     0.03547065600150211,
+     0.024917566798189114,
+     0.026191307648139817
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.024000000208616257,
+    "motion_ms": 0.057999998331069946,
     "frame": 53
    },
    {
-    "grains": 54,
+    "grains": 85,
     "com": [
-     -0.0008198342079089747,
-     0.176801698282361,
-     0.0037090026744408533
+     0.03631709271713215,
+     0.024914468211286216,
+     0.02603140951079479
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02250000089406967,
+    "motion_ms": 0.051100000739097595,
     "frame": 54
    },
    {
-    "grains": 62,
+    "grains": 85,
     "com": [
-     -0.001765137530803199,
-     0.16647782200767147,
-     0.004022361960397255
+     0.03732311482376912,
+     0.024914590663769675,
+     0.025932885750251676
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.024800000712275505,
+    "motion_ms": 0.053599998354911804,
     "frame": 55
    },
    {
-    "grains": 67,
+    "grains": 85,
     "com": [
-     -0.003711607593890112,
-     0.15980264917016032,
-     0.005227279998779071
+     0.038380452179733425,
+     0.024914394713499967,
+     0.025835004185929055
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02319999970495701,
+    "motion_ms": 0.03350000083446503,
     "frame": 56
    },
    {
-    "grains": 74,
+    "grains": 85,
     "com": [
-     -0.0043725098815205424,
-     0.15537884967351284,
-     0.0066640122299636406
+     0.03942841711618444,
+     0.024916565900339808,
+     0.025784477942130114
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.022299999371170998,
+    "motion_ms": 0.05530000105500221,
     "frame": 57
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.006290308596828995,
-     0.1425413033232475,
-     0.007061555938353429
+     0.04034318873001371,
+     0.02491452509866042,
+     0.02576655833160176
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02250000089406967,
+    "motion_ms": 0.03229999914765358,
     "frame": 58
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.008870736527919336,
-     0.11640832491983205,
-     0.007026875270569764
+     0.041234906587530595,
+     0.02491445098729695,
+     0.025768432371756536
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02319999970495701,
+    "motion_ms": 0.03269999846816063,
     "frame": 59
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.012035271705080479,
-     0.09058839990160406,
-     0.007710981383495841
+     0.04202657969778074,
+     0.024914437926867428,
+     0.025667885734754443
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.047200001776218414,
+    "motion_ms": 0.03139999881386757,
     "frame": 60
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.015328258971492646,
-     0.07279620933322571,
-     0.010354879294307206
+     0.042770616469137816,
+     0.02491439298233565,
+     0.025577786652480908
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.022299999371170998,
+    "motion_ms": 0.033399999141693115,
     "frame": 61
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.018180711117262674,
-     0.05128748402094994,
-     0.013130673670018887
+     0.043454033059670646,
+     0.02491389309220455,
+     0.025521282150464893
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02239999920129776,
+    "motion_ms": 0.03229999914765358,
     "frame": 62
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.020875708641818713,
-     0.040848561276036935,
-     0.014895495460129896
+     0.04409163864877294,
+     0.024914380382089058,
+     0.025533670888227545
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.0215000007301569,
+    "motion_ms": 0.056299999356269836,
     "frame": 63
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.02378096747904633,
-     0.03762865025932208,
-     0.015488993990845462
+     0.044692225600866727,
+     0.02491439401226886,
+     0.025540063486379737
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.03550000116229057,
+    "motion_ms": 0.051600001752376556,
     "frame": 64
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.025271172665107356,
-     0.034892674368352465,
-     0.016993154780581013
+     0.04521933451075764,
+     0.024914393332951215,
+     0.025518082257579375
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02280000038444996,
+    "motion_ms": 0.03189999982714653,
     "frame": 65
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.02533288307201403,
-     0.0318408763418213,
-     0.01792634334653999
+     0.04569954377982545,
+     0.024914392105796768,
+     0.025500502481180094
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.022600000724196434,
+    "motion_ms": 0.05660000070929527,
     "frame": 66
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.025560184834130927,
-     0.030485030574103185,
-     0.018318041445663538
+     0.04614720541764707,
+     0.02491439162370036,
+     0.02547888159751895
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.023000000044703484,
+    "motion_ms": 0.05260000005364418,
     "frame": 67
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.025109680709787294,
-     0.03007043807361371,
-     0.01851874560666963
+     0.04656052105128765,
+     0.024914391579873428,
+     0.02545761430964752
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.022700000554323196,
+    "motion_ms": 0.031199999153614044,
     "frame": 68
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.024710240678336406,
-     0.028494682688361552,
-     0.01861365153812447
+     0.04693864090915989,
+     0.02491440733566003,
+     0.025436184248503524
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.02290000021457672,
+    "motion_ms": 0.050999999046325684,
     "frame": 69
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.02410532481735566,
-     0.027286531929022233,
-     0.018976828026680787
+     0.04727355353534221,
+     0.02491423340843004,
+     0.02541526564780403
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.021199999377131462,
+    "motion_ms": 0.05719999969005585,
     "frame": 70
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.024009183646203646,
-     0.026147853583097458,
-     0.019085645709240474
+     0.047549556151909,
+     0.024914378366049594,
+     0.02540436746443023
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.023900000378489494,
+    "motion_ms": 0.05660000070929527,
     "frame": 71
    },
    {
-    "grains": 78,
+    "grains": 85,
     "com": [
-     -0.02509193911623112,
-     0.026071057822077706,
-     0.01957818577051142
+     0.04779414669336642,
+     0.02491442385841819,
+     0.02539126627585464
     ],
     "held": false,
     "status": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin",
-    "collider_faces": 528,
+    "collider_faces": 1216,
     "collider_speed_max": 0.0,
     "field_acceleration_max": 0.0,
     "truncated": 0,
-    "motion_ms": 0.021900000050663948,
+    "motion_ms": 0.0333000011742115,
     "frame": 72
    }
   ]
- }
+ },
+ "sphere_object": "GrainMotionSphereMesh"
 }

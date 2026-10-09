@@ -1,4 +1,6 @@
 #include "Fluid/MatterGrainBirth.h"
+#include "Fluid/MatterSubstanceState.h"
+#include "Fluid/SubstanceTag.h"
 
 #include <cmath>
 #include <cstdint>
@@ -17,7 +19,7 @@ MatterGrainBirthFilter::Cell MatterGrainBirthFilter::cell(const Vec3& p) const {
 }
 
 MatterGrainBirthFilter::MatterGrainBirthFilter(const FluidParticles& particles,
-    const FluidSim::FluidGrid& grid, float radius)
+    const FluidSim::FluidGrid& grid, float radius, const APICSolverParams* params)
     : radius_(radius), spacing_(2.0002f * radius) {
     grid.getWorldBounds(low_, high_);
     if (radius_ <= 0.0f) {
@@ -30,6 +32,15 @@ MatterGrainBirthFilter::MatterGrainBirthFilter(const FluidParticles& particles,
         if (i >= particles.constitutive_model.size() ||
             particles.constitutive_model[i] !=
                 static_cast<uint8_t>(MatterConstitutiveModel::Granular)) {
+            continue;
+        }
+        if (i < particles.mass_fraction.size() && !(particles.mass_fraction[i] > 0.02f)) {
+            continue;
+        }
+        const uint32_t tag = i < particles.substance_tag.size()
+            ? particles.substance_tag[i] : kSubstanceUntagged;
+        if (params && substanceTransportOwner(tag, MatterConstitutiveModel::Granular, *params) !=
+            MatterTransportOwner::Grain) {
             continue;
         }
         const Vec3& p = particles.position[i];

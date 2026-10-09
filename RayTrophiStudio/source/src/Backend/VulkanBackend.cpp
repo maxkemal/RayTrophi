@@ -1859,6 +1859,7 @@ void VulkanDevice::detectCapabilities() {
         props2as.pNext = &asProps;
         vkGetPhysicalDeviceProperties2(m_physicalDevice, &props2as);
         m_capabilities.minScratchAlignment = asProps.minAccelerationStructureScratchOffsetAlignment;
+        m_capabilities.maxTlasInstances = asProps.maxInstanceCount;
     }
 
     auto queryCompressedSupport = [this](VkFormat format) -> bool {
@@ -3384,7 +3385,11 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
         !m_tlas.accel || info.instances.size() != m_tlasInstanceCount);
     if (!hasHardwareRT() || !fpCreateAccelerationStructureKHR) return;
 
-    uint32_t instanceCount = (uint32_t)info.instances.size();
+    // Counted as it will be built (truncated to the device limit below), so an
+    // over-limit scene can still take the in-place path.
+    uint32_t instanceCount = (uint32_t)(m_capabilities.maxTlasInstances
+        ? std::min<uint64_t>(info.instances.size(), m_capabilities.maxTlasInstances)
+        : info.instances.size());
 
     // Determine whether we'll perform an UPDATE (more efficient) or full rebuild.
     // We can only perform an update if:
@@ -3457,6 +3462,20 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
         VK_WARN() << "[VulkanDevice] createTLAS: dropped "
                   << (info.instances.size() - vkInstances.size())
                   << " instance(s) with an invalid BLAS index." << std::endl;
+    }
+    // Device limit, checked here and nowhere upstream: a build past it is
+    // undefined. Truncate loudly instead of skipping the build: keeping the old
+    // TLAS could leave it pointing at BLASes rebuilt this frame.
+    if (m_capabilities.maxTlasInstances && vkInstances.size() > m_capabilities.maxTlasInstances) {
+        static std::size_t reported = 0;
+        if (reported != vkInstances.size()) {
+            reported = vkInstances.size();
+            VK_ERROR() << "[VulkanDevice] createTLAS: " << vkInstances.size()
+                       << " instances exceed the device maxInstanceCount "
+                       << m_capabilities.maxTlasInstances << "; the rest are not traced. "
+                       << "Use SDF/fog for this many particles." << std::endl;
+        }
+        vkInstances.resize(static_cast<std::size_t>(m_capabilities.maxTlasInstances));
     }
     // The build range must count what was uploaded, not what was requested.
     instanceCount = (uint32_t)vkInstances.size();

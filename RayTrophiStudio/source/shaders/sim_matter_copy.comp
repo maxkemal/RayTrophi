@@ -1,9 +1,11 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "sim_dispatch.glsl"
 layout(local_size_x = 256) in;
 layout(set = 0, binding = 0) readonly buffer Source { float source_value[]; };
 layout(set = 0, binding = 1) writeonly buffer Target { float target_value[]; };
 layout(push_constant) uniform Params { uint count; } pc;
 void main() {
-    uint i = gl_GlobalInvocationID.x;
+    uint i = simLane256(pc.count);
     if (i < pc.count) target_value[i] = source_value[i];
 }

@@ -221,12 +221,19 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
         grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0) {
         return false;
     }
+    if (n > std::size_t(std::numeric_limits<int32_t>::max()) ||
+        std::max({grid.vel_x.size(), grid.vel_y.size(), grid.vel_z.size()}) >
+            std::size_t(std::numeric_limits<int32_t>::max())) {
+        return false;
+    }
+    // Dense bank, or the canonical compact pages (docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md).
+    const auto mac = Fluid::macVelocityBinding(gpu_buffers);
     if (!gpu_buffers.fluid_positions.valid() ||
         !gpu_buffers.fluid_velocities.valid() ||
         !gpu_buffers.fluid_affine.valid()     ||
-        !gpu_buffers.vel_x.valid()            ||
-        !gpu_buffers.vel_y.valid()            ||
-        !gpu_buffers.vel_z.valid()            ||
+        !mac.velocity[0].valid()              ||
+        !mac.velocity[1].valid()              ||
+        !mac.velocity[2].valid()              ||
         !gpu_buffers.fluid_mask.valid()) {
         return false;
     }
@@ -242,13 +249,20 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
 
     // FLIP snapshot was prepared in scratch before pressure, either by a
     // device copy or by the host-upload fallback.
-    if (has_flip_snapshot &&
-        gpu_buffers.scratch_vel_x.valid() &&
-        gpu_buffers.scratch_vel_y.valid() &&
-        gpu_buffers.scratch_vel_z.valid()) {
+    if (has_flip_snapshot && (mac.compact
+            ? gpu_buffers.sparse_mac_transfer.snapshot_valid
+            : (gpu_buffers.scratch_vel_x.valid() &&
+               gpu_buffers.scratch_vel_y.valid() &&
+               gpu_buffers.scratch_vel_z.valid()))) {
         // No additional transfer is needed here.
     } else {
         has_flip_snapshot = false;
+    }
+    // A compact field lives only on the device: there is no host copy to
+    // upload in its place, so the caller must vouch it is current.
+    if (mac.compact && !(reuse_projected_grid_velocity &&
+                         compute->backendType() == ComputeBackendType::VulkanCompute)) {
+        return false;
     }
 
     // P2G only reads particle velocity. If its full particle upload is still
@@ -284,8 +298,7 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
     c.nx                = grid.nx;
     c.ny                = grid.ny;
     c.nz                = grid.nz;
-    c.particle_count = static_cast<int>(std::min<std::size_t>(
-        n, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    c.particle_count = static_cast<int>(n);
     c.origin_x          = grid.origin.x;
     c.origin_y          = grid.origin.y;
     c.origin_z          = grid.origin.z;
@@ -306,27 +319,39 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
     c.max_affine        = fluid_params.max_affine;
 
     constexpr uint32_t threads = 256;
-    ComputeBufferHandle bufs[10] = {
+    const bool sparse_gather = gpu_buffers.sparse_mac_transfer.used &&
+        (!has_flip_snapshot || gpu_buffers.sparse_mac_transfer.snapshot_valid);
+    if (sparse_gather && !Fluid::captureSparseMacPost(*compute, gpu_buffers)) {
+        return false;
+    }
+    const auto& sparse_pool = gpu_buffers.sparse_mac_transfer.owned;
+    ComputeBufferHandle bufs[11] = {
         gpu_buffers.fluid_positions,
         gpu_buffers.fluid_velocities,
         gpu_buffers.fluid_affine,
-        gpu_buffers.vel_x,
-        gpu_buffers.vel_y,
-        gpu_buffers.vel_z,
-        gpu_buffers.scratch_vel_x,  // pre-projection snapshot (or unused)
-        gpu_buffers.scratch_vel_y,
-        gpu_buffers.scratch_vel_z,
-        gpu_buffers.fluid_mask
+        sparse_gather ? sparse_pool[2] : gpu_buffers.vel_x,
+        sparse_gather ? sparse_pool[3] : gpu_buffers.vel_y,
+        sparse_gather ? sparse_pool[4] : gpu_buffers.vel_z,
+        sparse_gather ? sparse_pool[8] : gpu_buffers.scratch_vel_x,
+        sparse_gather ? sparse_pool[9] : gpu_buffers.scratch_vel_y,
+        sparse_gather ? sparse_pool[10] : gpu_buffers.scratch_vel_z,
+        gpu_buffers.fluid_mask,
+        sparse_pool[0]
     };
     ComputeDispatch cmd;
-    cmd.kernel         = "sim_fluid_g2p";
+    cmd.kernel = sparse_gather ? "sim_sparse_mac_g2p" : "sim_fluid_g2p";
     cmd.buffers        = bufs;
-    cmd.buffer_count   = 10;
+    cmd.buffer_count = sparse_gather ? 11 : 10;
     cmd.constants      = &c;
     cmd.constants_size = sizeof(c);
     cmd.groups.groups_x =
         (static_cast<uint32_t>(c.particle_count) + threads - 1u) / threads;
+    if (compute->backendType() == ComputeBackendType::VulkanCompute) {
+        cmd.groups = FluidGpuDispatch::groups256(static_cast<uint32_t>(c.particle_count));
+    }
     ok = Fluid::dispatchMatterGpuModel(*compute, cmd, gpu_buffers.matter_model);
+    gpu_buffers.sparse_mac_transfer.flip_gather_used =
+        ok && sparse_gather && has_flip_snapshot && c.flip_blend > 0.0f;
 
     if (ok && fluid_params.granular_enabled) {
         Fluid::Granular::Parameters gp;
@@ -417,7 +442,8 @@ bool runGpuFluidAdvectTail(SimulationGridDomainState& state,
                            bool* deferred_g2p_available = nullptr,
                            bool retain_granular_velocity = false,
                            bool* dispatched_tail = nullptr,
-                           bool retain_positions = false) {
+                           bool retain_positions = false,
+                           bool contact_lagrangian = false) {
     if (dispatched_tail) {
         *dispatched_tail = false;
     }
@@ -435,12 +461,18 @@ bool runGpuFluidAdvectTail(SimulationGridDomainState& state,
         !compute->supportsDispatch() || n == 0 || dt <= 0.0f) {
         return false;
     }
-    ComputeBufferHandle bufs[9] = {
+    // Dense bank, or the canonical compact pages plus their map and list
+    // (docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md).
+    const auto mac = Fluid::macVelocityBinding(buffers);
+    ComputeBufferHandle bufs[11] = {
         buffers.fluid_positions, buffers.fluid_velocities,
-        buffers.vel_x, buffers.vel_y, buffers.vel_z,
-        buffers.fluid_mask, buffers.var_svx, buffers.var_svy, buffers.var_svz
+        mac.velocity[0], mac.velocity[1], mac.velocity[2],
+        buffers.fluid_mask, buffers.var_svx, buffers.var_svy, buffers.var_svz,
+        mac.map, mac.list
     };
-    for (const auto& handle : bufs) {
+    const std::size_t buffer_count = mac.compact ? 11u : 9u;
+    for (std::size_t index = 0; index < buffer_count; ++index) {
+        const auto& handle = bufs[index];
         if (!handle.valid()) {
             if (download_affine && buffers.fluid_velocities.valid() &&
                 buffers.fluid_affine.valid()) {
@@ -475,7 +507,7 @@ bool runGpuFluidAdvectTail(SimulationGridDomainState& state,
         params.boundary == Fluid::APICSolverParams::BoundaryMode::Periodic ? 2 : 0;
     // Bits 0..1 retain the boundary enum; bit 2 selects Lagrangian MPM
     // advection. Reuse the existing word so the 64-byte push ABI is unchanged.
-    c.boundary = boundary_mode | (params.granular_enabled ? 4 : 0);
+    c.boundary = boundary_mode | ((params.granular_enabled || contact_lagrangian) ? 4 : 0);
     c.origin_x = grid.origin.x;
     c.origin_y = grid.origin.y;
     c.origin_z = grid.origin.z;
@@ -499,9 +531,9 @@ bool runGpuFluidAdvectTail(SimulationGridDomainState& state,
         1, std::max(1, params.max_substeps));
 
     ComputeDispatch cmd;
-    cmd.kernel = "sim_fluid_advect_tail";
+    cmd.kernel = Fluid::macKernel(mac, "sim_fluid_advect_tail", "sim_sparse_mac_advect");
     cmd.buffers = bufs;
-    cmd.buffer_count = 9;
+    cmd.buffer_count = buffer_count;
     cmd.constants = &c;
     cmd.constants_size = sizeof(c);
     cmd.groups.groups_x = (static_cast<uint32_t>(c.particle_count) + 255u) / 256u;

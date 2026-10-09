@@ -2,6 +2,7 @@
 #include "RtApiInternal.h"
 #include "SubstanceLibrary.h"
 #include "Fluid/FluidDomainSubstance.h"
+#include "Fluid/MatterSubstanceState.h"
 
 namespace rtapi {
 
@@ -94,6 +95,13 @@ Result setSubstanceFields(const std::string& name, const std::string& fields_jso
     nlohmann::json fields = nlohmann::json::parse(fields_json, nullptr, false);
     if (fields.is_discarded()) return Result::fail("substance fields: invalid JSON");
     std::string error;
+    if (fields.contains("granular_transport")) {
+        auto& runtime = scriptSimulationRuntime();
+        if (!RayTrophiSim::Fluid::validateMatterTransportEdit(name, runtime.gridDomains(),
+                runtime.gridDomainStates(), error)) {
+            return Result::fail(error);
+        }
+    }
     if (!RayTrophiSim::patchSubstance(name, fields, error)) return Result::fail(error);
     refreshDomainMaterials();
     invalidateScriptSimulation();

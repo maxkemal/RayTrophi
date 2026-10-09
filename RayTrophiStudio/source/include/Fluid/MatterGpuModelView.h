@@ -1,5 +1,6 @@
 #pragma once
 #include "../SimulationCompute.h"
+#include "FluidGpuDispatch.h"
 #include <array>
 
 namespace RayTrophiSim::Fluid {
@@ -24,7 +25,7 @@ inline bool copyMatterGpuFloat(SimulationComputeContext& compute,
     const ComputeBufferHandle buffers[] = {source, target};
     ComputeDispatch command;
     command.kernel = "sim_matter_copy";
-    command.groups.groups_x = (count + 255u) / 256u;
+    command.groups = FluidGpuDispatch::groups256(count);
     command.buffers = buffers;
     command.buffer_count = 2;
     command.constants = &count;

@@ -24,6 +24,13 @@ layout(set=0,binding=5) readonly buffer CellMask { float mask[]; };
 layout(set=0,binding=6) readonly buffer SolidVX { float svx[]; };
 layout(set=0,binding=7) readonly buffer SolidVY { float svy[]; };
 layout(set=0,binding=8) readonly buffer SolidVZ { float svz[]; };
+#ifdef RT_SPARSE_MAC
+// Compact velocity pages at 2..4 (docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md). A
+// sample past the resident tiles reads 0, as the dense field holds there.
+layout(set=0,binding=9) readonly buffer MacTileMap { uint mac_tile_map[]; };
+layout(set=0,binding=10) readonly buffer MacTileList { uint mac_tile_list[]; };
+#endif
+#include "sim_mac_lane.glsl"
 
 int cellIndex(ivec3 c) { return c.x + c.y*pc.nx + c.z*pc.nx*pc.ny; }
 bool inside(ivec3 c) {
@@ -40,16 +47,14 @@ vec3 solidVelocity(vec3 p) {
     int q=cellIndex(c); return vec3(svx[q],svy[q],svz[q]);
 }
 float fetchComp(int comp, ivec3 c) {
-    if (comp==0) {
-        c=clamp(c,ivec3(0),ivec3(pc.nx,pc.ny-1,pc.nz-1));
-        return vx[c.x+c.y*(pc.nx+1)+c.z*(pc.nx+1)*pc.ny];
+    ivec3 maximum = ivec3(pc.nx - 1, pc.ny - 1, pc.nz - 1);
+    maximum[comp] += 1;
+    c = clamp(c, ivec3(0), maximum);
+    uint a = macAddress(comp, c.x, c.y, c.z);
+    if (a == MAC_ABSENT) {
+        return 0.0;
     }
-    if (comp==1) {
-        c=clamp(c,ivec3(0),ivec3(pc.nx-1,pc.ny,pc.nz-1));
-        return vy[c.x+c.y*pc.nx+c.z*pc.nx*(pc.ny+1)];
-    }
-    c=clamp(c,ivec3(0),ivec3(pc.nx-1,pc.ny-1,pc.nz));
-    return vz[c.x+c.y*pc.nx+c.z*pc.nx*pc.ny];
+    return comp == 0 ? vx[a] : (comp == 1 ? vy[a] : vz[a]);
 }
 float sampleComp(int comp, vec3 p) {
     vec3 g=(p-vec3(pc.origin_x,pc.origin_y,pc.origin_z))/pc.voxel_size;
@@ -70,8 +75,13 @@ vec3 sampleVelocity(vec3 p) {
 
 
 #ifdef MATTER_INDEXED
+#ifdef RT_SPARSE_MAC
+layout(set = 0, binding = 11) readonly buffer MatterIndices { uint matter_index[]; };
+layout(set = 0, binding = 12) readonly buffer MatterCounts { uint matter_count[]; };
+#else
 layout(set = 0, binding = 9) readonly buffer MatterIndices { uint matter_index[]; };
 layout(set = 0, binding = 10) readonly buffer MatterCounts { uint matter_count[]; };
+#endif
 #endif
 void main() {
     int id = int(gl_GlobalInvocationID.x);

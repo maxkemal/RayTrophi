@@ -29,7 +29,9 @@ nlohmann::json matterGrainParamsToJson(const MatterGrainParams& p) {
         {"contact_angle_deg", p.contact_angle_deg},
         {"represented_grain_radius_m", p.represented_grain_radius_m},
         {"birth_saturation", p.birth_saturation},
-        {"max_substeps", p.max_substeps}};
+        {"max_substeps", p.max_substeps},
+        {"sleep", p.sleep}, {"sleep_speed_m_s", p.sleep_speed_m_s},
+        {"sleep_time_s", p.sleep_time_s}};
 }
 
 bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
@@ -60,7 +62,7 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
         }
         const bool integer = it.key() == "max_substeps" || it.key() == "contact_resolution";
         const bool boolean = it.key() == "enabled" || it.key() == "fluid_coupling" ||
-            it.key() == "volume_exclusion" || it.key() == "wet_grains";
+            it.key() == "volume_exclusion" || it.key() == "wet_grains" || it.key() == "sleep";
         if ((boolean && !it.value().is_boolean()) ||
             (integer && !it.value().is_number_integer()) ||
             (!boolean && !integer &&
@@ -93,6 +95,9 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
         candidate.represented_grain_radius_m =
             patch.value("represented_grain_radius_m", p.represented_grain_radius_m);
         candidate.birth_saturation = patch.value("birth_saturation", p.birth_saturation);
+        candidate.sleep = patch.value("sleep", p.sleep);
+        candidate.sleep_speed_m_s = patch.value("sleep_speed_m_s", p.sleep_speed_m_s);
+        candidate.sleep_time_s = patch.value("sleep_time_s", p.sleep_time_s);
         const auto steps = patch.value("max_substeps", double(p.max_substeps));
         if (steps < 1 || steps > 4096) {
             throw std::runtime_error("max_substeps must be 1..4096");
@@ -120,6 +125,8 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
             candidate.surface_tension_n_m < 0.0f || candidate.surface_tension_n_m > 1.0f ||
             candidate.contact_angle_deg < 0.0f || candidate.contact_angle_deg > 89.0f ||
             candidate.birth_saturation < 0.0f || candidate.birth_saturation > 1.0f ||
+            candidate.sleep_speed_m_s < 0.0f || candidate.sleep_speed_m_s > 1.0f ||
+            candidate.sleep_time_s < .01f || candidate.sleep_time_s > 10.0f ||
             (candidate.represented_grain_radius_m != 0.0f &&
              (candidate.represented_grain_radius_m < 1e-6f ||
               candidate.represented_grain_radius_m > candidate.radius_m))) {
@@ -225,6 +232,10 @@ std::size_t ensureMatterGrainRestMasses(FluidParticles& particles,
         }
         const uint32_t tag = i < particles.substance_tag.size()
             ? particles.substance_tag[i] : kSubstanceUntagged;
+        const auto* profile = resolveFluidSubstanceProfile(tag, domain_substance);
+        if (!profile || profile->granular_transport != MatterGranularTransport::Dem) {
+            continue;
+        }
         rest_mass = matterGrainRestMassKg(params, tag, domain_substance, model, legacy_granular);
         ++initialized;
     }

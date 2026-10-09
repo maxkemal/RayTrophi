@@ -2,6 +2,8 @@
 #include "Fluid/FluidParticles.h"
 #include "Fluid/FluidPhysicalMass.h"
 #include "Fluid/FluidThermalLiquid.h"
+#include "Fluid/MatterSubstanceState.h"
+#include "Fluid/APICFluidSolver.h"
 #include "Fluid/SubstanceTag.h"
 #include "MaterialStateField.h"
 
@@ -9,7 +11,6 @@
 #include <cmath>
 #include <initializer_list>
 #include <unordered_map>
-#include <unordered_set>
 
 namespace RayTrophiSim::Fluid {
 namespace {
@@ -170,6 +171,9 @@ bool buildMatterGrainLiquidField(const FluidParticles& liquid, const FluidPartic
     f.parcel_cell.assign(liquid.size(), -1);
     std::unordered_map<uint32_t, double> density_by_tag, viscosity_by_tag;
     for (std::size_t p = 0; p < liquid.size(); ++p) {
+        if (isGranular(liquid, p, false)) {
+            continue;
+        }
         const Vec3& x = liquid.position[p];
         const int i = static_cast<int>(std::floor((x.x - origin.x) / h));
         const int j = static_cast<int>(std::floor((x.y - origin.y) / h));
@@ -759,7 +763,8 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
         (liquid_before + grain_before);
 }
 
-bool partitionMatterGrainOwners(const FluidParticles& p, bool legacy_granular,
+bool partitionMatterGrainOwners(const FluidParticles& p, const APICSolverParams& params,
+    bool legacy_granular,
     bool wet_grains, std::vector<std::size_t>& liquid, std::vector<std::size_t>& grains,
     std::string& error) {
     liquid.clear();
@@ -768,6 +773,11 @@ bool partitionMatterGrainOwners(const FluidParticles& p, bool legacy_granular,
     if (p.particle_id.size() != count || p.constitutive_model.size() != count ||
         p.pore_water_mass_kg.size() != count) {
         error = "grain owner partition: particle sidecars are not sized";
+        return false;
+    }
+    const auto owners = inspectMatterOwners(p, params);
+    if (!owners.ready) {
+        error = owners.reason;
         return false;
     }
     for (std::size_t i = 0; i < count; ++i) {
@@ -782,6 +792,12 @@ bool partitionMatterGrainOwners(const FluidParticles& p, bool legacy_granular,
                     "explicit owner; emit Granular or Fluid";
                 return false;
             }
+            const uint32_t tag = i < p.substance_tag.size()
+                ? p.substance_tag[i] : kSubstanceUntagged;
+            if (substanceTransportOwner(tag, model, params) == MatterTransportOwner::Mpm) {
+                liquid.push_back(i);
+                continue;
+            }
             if (p.pore_water_mass_kg[i] != 0.0f && !wet_grains) {
                 error = "grain domain: a grain holds water but wet_grains is off";
                 return false;
@@ -791,20 +807,19 @@ bool partitionMatterGrainOwners(const FluidParticles& p, bool legacy_granular,
             liquid.push_back(i);
         }
     }
-    // Identity order is only the deterministic default; the coordinator
-    // re-orders by cell (orderMatterGrainsByCell) and the runtime carries the
-    // contact history across any order by identity.
-    std::stable_sort(grains.begin(), grains.end(), [&](std::size_t a, std::size_t b) {
-        return p.particle_id[a] < p.particle_id[b];
-    });
+    // Canonical order. The coordinator re-orders by (cell, identity), a total
+    // order independent of this one, and the runtime carries the contact
+    // history across any order by identity. An identity sort here was undone
+    // every frame (~100 ms at 1.3M grains).
     error.clear();
     return true;
 }
 
-void orderMatterGrainsByCell(const FluidParticles& particles, const Vec3& origin, float cell,
-    std::vector<std::size_t>& grains) {
+float orderMatterGrainsByCell(const FluidParticles& particles, const Vec3& origin, float cell,
+    std::vector<std::size_t>& grains, bool force, float tolerance, bool& sorted) {
+    sorted = false;
     if (!(cell > 0.0f) || grains.size() < 2) {
-        return;
+        return 0.0f;
     }
     // 21 bits per axis: every cell of a 100000-grain domain fits.
     const auto spread = [](uint64_t v) {
@@ -816,35 +831,47 @@ void orderMatterGrainsByCell(const FluidParticles& particles, const Vec3& origin
         v = (v | v << 2) & 0x1249249249249249ull;
         return v;
     };
-    std::vector<std::pair<uint64_t, std::size_t>> keyed(grains.size());
+    // Identity rides in the key: the tie-break no longer reaches back into
+    // particle_id at random from inside the sort.
+    struct Keyed {
+        uint64_t cell;
+        uint64_t id;
+        std::size_t index;
+    };
+    std::vector<Keyed> keyed(grains.size());
     for (std::size_t k = 0; k < grains.size(); ++k) {
         const Vec3& p = particles.position[grains[k]];
         const auto axis = [&](float value, float low) {
             return static_cast<uint64_t>(std::clamp(std::floor((value - low) / cell), 0.0f, 2097151.0f));
         };
         keyed[k] = {spread(axis(p.x, origin.x)) | spread(axis(p.y, origin.y)) << 1 |
-            spread(axis(p.z, origin.z)) << 2, grains[k]};
+            spread(axis(p.z, origin.z)) << 2, particles.particle_id[grains[k]], grains[k]};
     }
-    std::sort(keyed.begin(), keyed.end(), [&](const auto& a, const auto& b) {
-        return a.first != b.first ? a.first < b.first
-            : particles.particle_id[a.second] < particles.particle_id[b.second];
-    });
+    const auto before = [](const Keyed& a, const Keyed& b) {
+        return a.cell != b.cell ? a.cell < b.cell : a.id < b.id;
+    };
+    std::size_t out_of_order = 0;
+    for (std::size_t k = 1; k < keyed.size(); ++k) {
+        out_of_order += before(keyed[k], keyed[k - 1]) ? 1 : 0;
+    }
+    const float disorder = float(out_of_order) / float(keyed.size() - 1);
+    if (out_of_order == 0 || (!force && disorder <= tolerance)) {
+        return disorder;
+    }
+    std::sort(keyed.begin(), keyed.end(), before);
     for (std::size_t k = 0; k < grains.size(); ++k) {
-        grains[k] = keyed[k].second;
+        grains[k] = keyed[k].index;
     }
+    sorted = true;
+    return disorder;
 }
 
 FluidParticles selectMatterParticles(const FluidParticles& particles,
                                      const std::vector<std::size_t>& order) {
-    FluidParticles out = particles;
-    std::vector<uint8_t> drop(particles.size(), 0);
-    for (std::size_t i = order.size(); i < drop.size(); ++i) {
-        drop[i] = 1;
-    }
-    out.compact(drop);
-    for (std::size_t k = 0; k < order.size(); ++k) {
-        out.copyParticleFrom(k, particles, order[k]);
-    }
+    // Was a full copy of every array, a compact and a per-particle copy: three
+    // passes over all 31 arrays per subset (~340 MB each at 1.3M grains).
+    FluidParticles out;
+    out.gatherFrom(particles, order);
     return out;
 }
 
@@ -855,22 +882,27 @@ bool mergeMatterGrainOwners(FluidParticles& particles, const FluidParticles& liq
         error = "grain/liquid merge: an owner changed the carrier count";
         return false;
     }
-    std::unordered_set<uint64_t> identities(particles.particle_id.begin(),
-        particles.particle_id.end());
+    // The owners must hand back the same identities, each once. A flat index
+    // replaces the 1.3M-node hash set that was most of the merge.
+    MatterParticleIdIndex index;
+    std::vector<uint8_t> returned(particles.size(), 0);
+    bool same = index.build(particles.particle_id);
     for (const auto* subset : {&liquid, &grains}) {
-        for (const auto id : subset->particle_id) {
-            if (identities.erase(id) != 1) {
-                error = "grain/liquid merge: identity set changed";
-                return false;
+        for (std::size_t k = 0; same && k < subset->size(); ++k) {
+            const uint32_t at = k < subset->particle_id.size()
+                ? index.find(subset->particle_id[k]) : MatterParticleIdIndex::kMissing;
+            same = at != MatterParticleIdIndex::kMissing && !returned[at];
+            if (same) {
+                returned[at] = 1;
             }
         }
     }
-    for (std::size_t k = 0; k < nl; ++k) {
-        particles.copyParticleFrom(k, liquid, k);
+    if (!same) {
+        error = "grain/liquid merge: identity set changed";
+        return false;
     }
-    for (std::size_t k = 0; k < ng; ++k) {
-        particles.copyParticleFrom(nl + k, grains, k);
-    }
+    particles.copyRangeFrom(0, liquid);
+    particles.copyRangeFrom(nl, grains);
     error.clear();
     return true;
 }

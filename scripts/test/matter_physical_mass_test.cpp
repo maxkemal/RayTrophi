@@ -1,6 +1,7 @@
 // Source regression for the user's test build; Codex does not compile it.
 #include "Fluid/FluidPhysicalMass.h"
 #include "Fluid/SubstanceTag.h"
+#include "MaterialStateField.h"
 
 #include <cassert>
 #include <cmath>
@@ -8,7 +9,8 @@
 using namespace RayTrophiSim::Fluid;
 
 int main() {
-    const auto preset = FluidChemistryPreset::Water;
+    const auto* preset = RayTrophiSim::tryFindSubstance("Water");
+    assert(preset);
     const auto soil = substanceTag("Soil");
     const auto water = substanceTag("Water");
     const auto granular = MatterConstitutiveModel::Granular;

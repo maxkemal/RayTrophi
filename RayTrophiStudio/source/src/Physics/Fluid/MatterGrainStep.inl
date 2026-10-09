@@ -1,8 +1,9 @@
 // Included in ParticleSimulation.cpp's private namespace, after MatterGpuStep.inl.
 //
 // One frame of a grain-enabled Matter domain. Every carrier has exactly one
-// transport owner for the frame: granular carriers -> the DEM grain step,
-// liquid carriers -> the mixed Vulkan liquid lane (P2G/MGPCG/G2P). The two
+// transport owner for the frame, resolved from the substance: DEM carriers
+// use the grain step, continuum carriers use the mixed Vulkan lane. MPM + DEM
+// exchange unilateral contact impulses on device at every DEM substep. The two
 // owners never step the same carrier and never see each other's state except
 // through the coupling below, which is staggered per frame:
 //   1. liquid subset: forces, pressure projection, advection (frame dt);
@@ -91,6 +92,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     const SimulationForceFieldSnapshot* forces,
     const SimulationForceFieldComputeBuffer* force_buffer,
     bool domain_moving, std::string& error) {
+    const auto step_start = std::chrono::steady_clock::now();
     if (!compute || params.boundary != Fluid::APICSolverParams::BoundaryMode::Closed ||
         params.pore_exchange.enabled || params.pore_exchange.wet_response_enabled ||
         params.thermal_liquid_enabled) {
@@ -101,6 +103,12 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     if (domain_moving) {
         error = "grain domain cannot move yet (domain motion would need a frame "
             "acceleration on every grain); keep the domain still";
+        return false;
+    }
+    // A backend change can replace buffers.matter_runtime. Establish the grid
+    // before lending any grain references or persistent coupling storage.
+    if (!ensure(buffers)) {
+        error = "grain domain GPU grid buffers could not be allocated";
         return false;
     }
     std::vector<SurfaceMeshTriangle> triangles;
@@ -181,8 +189,9 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             error = "grain collider type not supported: " + collider.name;
             return false;
         }
-        if (triangles.size() > 4096) {
-            error = "grain candidate flat collider budget is 4096 faces; no face decimation";
+        if (triangles.size() > Fluid::kMatterGrainMaxColliderFaces) {
+            error = "grain collider faces exceed the 30-bit contact patch id: " +
+                std::to_string(triangles.size());
             return false;
         }
     }
@@ -232,9 +241,9 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             appendGrainBoxCollider(proxy.half_extents * -1.0f, proxy.half_extents, triangles,
                 &proxy.world_transform);
         }
-        if (triangles.size() > 4096) {
-            error = "grain collider budget is 4096 faces (colliders + kinematic proxies "
-                "reaching the domain); fewer proxies or a coarser collider mesh";
+        if (triangles.size() > Fluid::kMatterGrainMaxColliderFaces) {
+            error = "grain collider faces (colliders + kinematic proxies) exceed the 30-bit "
+                "contact patch id: " + std::to_string(triangles.size());
             return false;
         }
     }
@@ -291,17 +300,29 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         return std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t).count();
     };
     std::vector<std::size_t> liquid_order, grain_order;
-    if (!Fluid::partitionMatterGrainOwners(state.particles, legacy_granular,
+    if (!Fluid::partitionMatterGrainOwners(state.particles, params, legacy_granular,
             params.grain.wet_grains, liquid_order, grain_order, error)) {
         return false;
     }
-    Fluid::orderMatterGrainsByCell(state.particles, state.grid.origin,
-        2.0f * params.grain.radius_m, grain_order);
+    // Same grains as last published (merge keeps their order): keep that order
+    // while it is nearly cell-sorted, so the device state stays resident. Any
+    // birth or removal re-sorts (the state is uploaded anyway).
+    const auto& published_ids = buffers.matter_runtime->grain.published_ids;
+    bool same_population = published_ids.size() == grain_order.size();
+    for (std::size_t k = 0; same_population && k < grain_order.size(); ++k) {
+        same_population = published_ids[k] == state.particles.particle_id[grain_order[k]];
+    }
+    bool resorted = false;
+    const float disorder = Fluid::orderMatterGrainsByCell(state.particles, state.grid.origin,
+        2.0f * params.grain.radius_m, grain_order, !same_population,
+        Fluid::kMatterGrainResortDisorder, resorted);
     auto liquid = Fluid::selectMatterParticles(state.particles, liquid_order);
     auto grains = Fluid::selectMatterParticles(state.particles, grain_order);
     Fluid::APICSolverStats stats;
     Fluid::MatterGrainStepReport report;
     report.host_order_ms = ms_since(order_start);
+    report.cell_order_disorder = disorder;
+    report.cell_resorted = resorted;
     report.host_motion_ms = std::chrono::duration<float, std::milli>(order_start - motion_start).count();
     report.collider_faces = triangles.size();
     report.collider_speed_max = moving_speed_max;
@@ -315,13 +336,20 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         report.liquid_speed_p99 = *p99;
         report.liquid_speed_max = *std::max_element(p99, speeds.end());
     }
-    report.liquid_parcels = liquid.size();
+    const auto owners = Fluid::inspectMatterOwners(liquid, params);
+    report.liquid_parcels = owners.particles[
+        static_cast<std::size_t>(Fluid::MatterTransportOwner::Fluid)];
+    report.mpm_parcels = owners.particles[
+        static_cast<std::size_t>(Fluid::MatterTransportOwner::Mpm)];
     const auto budget = params.mixed_working_set_budget_bytes;
-    const bool coupled = !liquid.empty() && !grains.empty() && params.grain.fluid_coupling;
+    const bool coupled = report.liquid_parcels > 0 && !grains.empty() &&
+        params.grain.fluid_coupling;
     // B5: the liquid projection sees the grains' volume; the grains then take
     // the force the liquid's own acceleration implies, rho V (Du/Dt - g),
     // instead of hydrostatic buoyancy.
-    const bool exclude = coupled && params.grain.volume_exclusion;
+    // Until porous weights have separate per-owner views, only the fluid-only
+    // continuum can use them. MPM/grain contact has exactly one impulse path.
+    const bool exclude = coupled && params.grain.volume_exclusion && report.mpm_parcels == 0;
     // Each parcel's velocity before the liquid step (after last frame's grain
     // reaction): Du/Dt is measured per parcel, Lagrangian, by identity.
     const auto liquid_start_velocity = exclude ? liquid.velocity : std::vector<Vec3>{};
@@ -329,7 +357,11 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
 
     // 1. Liquid owner. The mixed driver steps state.particles, so the liquid
     // subset is swapped in for the call and swapped back on every path.
-    if (!liquid.empty()) {
+    const auto step_continuum = [&](const Fluid::MatterCommonClockHooks* clock) {
+        if (liquid.empty()) {
+            return true;
+        }
+        const auto continuum_budget = params.mixed_working_set_budget_bytes;
         struct SwapBack {
             Fluid::FluidParticles& canonical;
             Fluid::FluidParticles& subset;
@@ -356,6 +388,13 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         // solid-cell recovery the plain liquid path runs before P2G.
         Fluid::recoverParticlesFromSolidCells(state.particles, state.grid);
         auto liquid_params = params;
+        if (clock && continuum_budget) {
+            if (report.working_set_bytes >= continuum_budget) {
+                error = "shared Matter clock: DEM used the authored domain resource budget";
+                return false;
+            }
+            liquid_params.mixed_working_set_budget_bytes -= report.working_set_bytes;
+        }
         liquid_params.granular_enabled = false;
         if (exclude) {
             // Pore fraction never below .3: a packed bed is ~.36-.4, and a
@@ -376,7 +415,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
                 error = "grain domain: liquid upload after CPU force fields failed";
                 return false;
             }
-        } else if (!runGpuFluidParticleIntegrateForces(state, liquid_params,
+        } else if (!clock && !runGpuFluidParticleIntegrateForces(state, liquid_params,
                 Vec3(0.0f, 0.0f, 0.0f), dt, time_seconds, fields ? force_buffer : nullptr,
                 compute, buffers)) {
             error = "grain domain: liquid force integration failed";
@@ -384,12 +423,17 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         }
         liquid_params.external_forces_preintegrated = true;
         if (!runMatterGpuStep(state, liquid_params, legacy_granular, dt, compute, buffers,
-                ensure, ledger, error)) {
+                ensure, ledger, error, clock)) {
             error = "grain domain liquid lane: " + error;
             return false;
         }
         stats = state.fluid_stats;
-        report.liquid_substeps = stats.mixed_common_substeps;
+        report.liquid_substeps = stats.granular_solver_substeps;
+        return true;
+    };
+    const bool shared_clock = !grains.empty() && report.mpm_parcels > 0;
+    if (!shared_clock && !step_continuum(nullptr)) {
+        return false;
     }
 
     // 2-4. Grain owner with the liquid coupling.
@@ -448,25 +492,116 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         }
         float coupling_ms = ms_since(coupling_start);
         std::vector<Fluid::MatterGrainCouplingOutput> drag;
-        const std::size_t grain_budget = budget > stats.mixed_working_set_bytes
-            ? budget - stats.mixed_working_set_bytes : budget;
-        if (budget && stats.mixed_working_set_bytes >= budget) {
+        const auto continuum_working = shared_clock
+            ? matterGpuWorkingSetBytes(state.grid, params, liquid.size())
+            : stats.mixed_working_set_bytes;
+        const std::size_t grain_budget = budget > continuum_working
+            ? budget - continuum_working : budget;
+        if (budget && continuum_working >= budget) {
             error = "grain domain: liquid lane used the whole resource budget";
             return false;
         }
+        Fluid::MatterGrainMpmContact mpm_contact(*compute);
+        if (!coupled) {
+            Fluid::releaseMatterGrainFluidGpuStorage(
+                *compute, buffers.matter_runtime->liquid_coupling);
+        }
+        Fluid::MatterGrainFluidGpuCoupling liquid_contact(
+            *compute, coupled ? &buffers.matter_runtime->liquid_coupling : nullptr);
+        Fluid::MatterGrainCommonDriver common_driver;
+        if (shared_clock) {
+            common_driver.run = [&](uint32_t minimum, const Fluid::MatterCommonStep& grain_step,
+                                    std::string&) {
+                Fluid::MatterCommonClockHooks clock;
+                clock.minimum_substeps = minimum;
+                const double travel_request = std::ceil(
+                    (double(report.liquid_speed_max) + params.gravity.length() * dt) * dt /
+                    std::max(0.1 * double(params.grain.radius_m), 1e-12));
+                if (!std::isfinite(travel_request) ||
+                    travel_request > std::numeric_limits<int>::max() - 1.0) {
+                    error = "shared Matter clock travel request exceeds its index width";
+                    return false;
+                }
+                clock.minimum_substeps = std::max(minimum, uint32_t(travel_request));
+                clock.authored_max_substeps = static_cast<uint32_t>(params.grain.max_substeps);
+                clock.begin = [&](std::size_t continuum_bytes, std::string&) {
+                    const auto used = continuum_bytes + report.working_set_bytes;
+                    if (budget && used >= budget) {
+                        error = "shared Matter clock: no authored budget remains for coupling";
+                        return false;
+                    }
+                    const auto remaining = budget ? budget - used : 0;
+                    if (!mpm_contact.prepare(state.particles, buffers, grains.size(),
+                            params.grain.radius_m, params.grain.friction, dt, remaining, error)) {
+                        return false;
+                    }
+                    if (coupled) {
+                        const auto coupling_budget = remaining
+                            ? remaining - mpm_contact.workingSetBytes() : 0;
+                        if (!liquid_contact.prepare(state.particles, frame, buffers,
+                                buffers.matter_runtime->grain, coupling_budget, error,
+                                params, motion)) {
+                            return false;
+                        }
+                    }
+                    return true;
+                };
+                clock.forces = [&](uint32_t index, uint32_t, float step_dt, std::string&) {
+                    const bool fields = forces && !forces->empty();
+                    if (fields && !(force_buffer && force_buffer->valid())) {
+                        // Existing CPU-only force fallback is frozen once per frame.
+                        return true;
+                    }
+                    auto force_params = params;
+                    force_params.granular_enabled = false;
+                    if (!runGpuFluidParticleIntegrateForces(state, force_params, Vec3(0.0f),
+                            step_dt, time_seconds - dt + index * step_dt,
+                            fields ? force_buffer : nullptr, compute, buffers, false)) {
+                        error = "shared Matter clock resident force integration failed";
+                        return false;
+                    }
+                    return true;
+                };
+                clock.contact = [&](uint32_t index, uint32_t total, float step_dt,
+                                    std::string&) {
+                    return (!coupled || liquid_contact.refresh(index, step_dt, error)) &&
+                        grain_step(index, total, step_dt, error) &&
+                        (!coupled || liquid_contact.react(index, step_dt, error));
+                };
+                return step_continuum(&clock);
+            };
+        } else if (!mpm_contact.prepare(liquid, buffers, grains.size(), params.grain.radius_m,
+                params.grain.friction, dt, grain_budget, error)) {
+            return false;
+        }
+        const auto dem_budget = grain_budget
+            ? grain_budget - mpm_contact.workingSetBytes() : 0;
         if (!Fluid::stepMatterGrainGpu(grains, low, high, params.grain, dt, params.gravity,
-                grain_budget, *compute, buffers.matter_runtime->grain, triangles,
+                dem_budget, *compute, buffers.matter_runtime->grain, triangles,
                 coupled ? &frame.inputs : nullptr, coupled ? &drag : nullptr, report, error,
-                &motion)) {
+                &motion, &mpm_contact, shared_clock ? &common_driver : nullptr) ||
+            !mpm_contact.publish(report, error, !shared_clock)) {
             return false;
         }
         report.coupling_enabled = coupled;
         const auto reaction_start = std::chrono::steady_clock::now();
         if (coupled) {
-            Fluid::applyMatterGrainLiquidReaction(liquid, frame, drag, report);
+            if (shared_clock) {
+                if (!liquid_contact.publish(drag, report, error)) {
+                    return false;
+                }
+            } else {
+                Fluid::applyMatterGrainLiquidReaction(liquid, frame, drag, report);
+            }
         }
         // B6: after the reaction, so the reaction used the masses it was
         // computed with. Without liquid (or coupling) only drying runs.
+        if (shared_clock && params.grain.wet_grains && coupled &&
+            !Fluid::buildMatterGrainLiquidField(liquid, grains, params.grain.radius_m,
+                Fluid::domainSubstance(params), state.grid.origin, state.grid.nx, state.grid.ny,
+                state.grid.nz, state.grid.voxel_size, frame.field, error)) {
+            return false;
+        }
         Fluid::exchangeMatterGrainWater(liquid, grains, frame, params.grain, dt, report);
         report.host_coupling_ms = coupling_ms + ms_since(reaction_start);
     }
@@ -477,6 +612,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     }
     report.host_merge_ms = ms_since(merge_start);
     report.grains = grains.size();
+    report.host_step_ms = ms_since(step_start);
     stats.particle_count = state.particles.size();
     stats.grain_report = report;
     stats.mixed_model_step = true;
@@ -487,6 +623,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         stats.mixed_contact_pairs = report.contacts;
         stats.pressure_on_gpu = stats.g2p_on_gpu = stats.p2g_on_gpu = false;
     }
+    stats.mixed_contact_pairs += report.mpm_contact_events;
     stats.gpu_status = liquid.empty()
         ? "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin"
         : grains.empty() ? "Grain domain: liquid lane only (Vulkan indexed transfer)"
@@ -494,6 +631,12 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             (!report.coupling_enabled ? "coupling OFF (pass-through)"
              : report.volume_exclusion ? "porous projection + pressure force + implicit drag"
                                        : "implicit drag + hydrostatic buoyancy");
+    if (report.mpm_parcels > 0 && !grains.empty()) {
+        stats.gpu_status = "MPM + grain Vulkan: shared geometry/contact clock, CFL grid refresh";
+        if (report.liquid_parcels > 0) {
+            stats.gpu_status += "; fluid reaction on GPU (porous owner weights pending)";
+        }
+    }
     state.fluid_stats = stats;
     return true;
 }

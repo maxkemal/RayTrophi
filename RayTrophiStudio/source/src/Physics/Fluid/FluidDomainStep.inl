@@ -27,6 +27,7 @@
             auto fluid_params = (i < grid_domains_.size())
                 ? grid_domains_[i].fluid_params
                 : Fluid::APICSolverParams{};
+            Fluid::refreshMatterConstitutiveModels(state.particles, fluid_params);
             // Pore-enabled dry runs must keep the same solver when water arrives
             // or wet response is toggled; saturation zero is the neutral limit.
             const bool mixed_models = matter_domain &&
@@ -38,7 +39,7 @@
             // granular switch must not change Auto ownership, mass or radius.
             const bool mixed_legacy_granular = fluid_params.granular_enabled &&
                 !fluid_params.grain.enabled;
-            if (matter_domain && !mixed_models) {
+            if (!mixed_models) {
                 const auto model = Fluid::resolveSingleMatterModel(
                     state.particles, mixed_legacy_granular);
                 if (model == Fluid::MatterConstitutiveModel::Fluid) {
@@ -272,38 +273,10 @@
             // solid" apart from "I am inside one", and the same list decides
             // whether the overlay is built at all.
             static std::vector<uint32_t> s_solid_tags;
-            s_solid_tags.clear();
-            // ★ The master switch is read HERE, at the producer, and it empties
-            // the tag list rather than skipping the stamp further down. That way
-            // the particle stages see "no solid substance" too: a half-off state
-            // where parcels are exempt from advection but nothing blocks them
-            // would be a third behaviour nobody asked for.
-            if (i < grid_domains_.size() && grid_domains_[i].fluid_solid_phase_enabled) {
-                for (const auto& b : grid_domains_[i].fluid_substance_materials) {
-                    if (b.substance.empty()) continue;
-                    if (b.phase != RayTrophiSim::Fluid::SubstancePhase::Solid) continue;
-                    if (s_solid_tags.size() >= RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials)
-                        break;
-                    const auto tag = RayTrophiSim::Fluid::substanceTag(b.substance);
-                    bool mobile = false;
-                    if (mixed_models) {
-                        for (std::size_t particle = 0; particle < state.particles.size(); ++particle) {
-                            if (particle < state.particles.substance_tag.size() &&
-                                state.particles.substance_tag[particle] == tag) {
-                                const auto model = particle < state.particles.constitutive_model.size()
-                                    ? static_cast<Fluid::MatterConstitutiveModel>(
-                                        state.particles.constitutive_model[particle])
-                                    : Fluid::MatterConstitutiveModel::Auto;
-                                mobile |= model == Fluid::MatterConstitutiveModel::Fluid ||
-                                    model == Fluid::MatterConstitutiveModel::Granular ||
-                                    model == Fluid::MatterConstitutiveModel::Auto;
-                            }
-                        }
-                    }
-                    if (!mobile) {
-                        s_solid_tags.push_back(tag);
-                    }
-                }
+            if (i < grid_domains_.size()) {
+                Fluid::collectMatterStaticTags(grid_domains_[i], s_solid_tags);
+            } else {
+                s_solid_tags.clear();
             }
             std::size_t solid_phase_cell_count = 0;
             std::size_t solid_phase_particle_count = 0;
@@ -722,6 +695,9 @@
                 const auto gpu_p2g_begin = SimulationClock::now();
                 if (context.compute && i < grid_domain_compute_buffers_.size()) {
                     auto& gpu_buffers = grid_domain_compute_buffers_[i];
+                    // The pure-liquid path reads the dense bank (only the mixed
+                    // liquid lane runs compact, MATTER_SPARSE_S1_SIVI_GPU.md).
+                    gpu_buffers.sparse_mac_transfer.compact_owner = false;
                     if (ensureGridDomainComputeBuffers(*context.compute, gpu_buffers, state.grid)) {
                         step_params.p2g_precomputed = runGpuFluidP2G(state,
                                                                      context.compute,
@@ -791,6 +767,7 @@
 
             if (try_gpu_g2p) {
                 auto& gpu_buffers = grid_domain_compute_buffers_[i];
+                gpu_buffers.sparse_mac_transfer.compact_owner = false;
                 if (ensureGridDomainComputeBuffers(*context.compute, gpu_buffers, state.grid)) {
                     // Call 1: P2G + FLIP snapshot + solid boundaries, STOP before
                     // pressure. Viscosity is claimed by the device below, so the
@@ -837,9 +814,10 @@
                         };
                         const bool copied_on_gpu =
                             step_params.p2g_precomputed &&
-                            FluidGpuFlipSnapshot::copyFaceFields(
-                                *context.compute, flip_sources, flip_targets,
-                                face_counts);
+                            (Fluid::captureSparseMacFlip(*context.compute, gpu_buffers) ||
+                             FluidGpuFlipSnapshot::copyFaceFields(
+                                 *context.compute, flip_sources, flip_targets,
+                                 face_counts));
                         if (!copied_on_gpu) {
                             context.compute->beginTransferBatch();
                             upload_ok =
@@ -905,7 +883,8 @@
                         viscosity_ok = runGpuFluidViscosity(state, step_params, dt,
                                                             context.compute, gpu_buffers,
                                                             s_fluid_mask_gpu,
-                                                            &gpu_viscosity_sweeps);
+                                                            &gpu_viscosity_sweeps,
+                                                            &gpu_mgpcg_stats);
                         if (viscosity_ok) {
                             enforceGridSolidFaceBoundaries(state.grid);
                             gpu_viscosity_ms = elapsedMilliseconds(visc_begin, SimulationClock::now());
@@ -1126,6 +1105,13 @@
                 state.fluid_stats.viscosity_ms         = gpu_viscosity_ms;
                 state.fluid_stats.viscosity_on_gpu     = gpu_viscosity_sweeps > 0;
                 state.fluid_stats.viscosity_sweeps_run = gpu_viscosity_sweeps;
+                state.fluid_stats.viscosity_sparse_used = gpu_mgpcg_stats.viscosity_sparse_used;
+                state.fluid_stats.viscosity_sparse_active_tiles =
+                    gpu_mgpcg_stats.viscosity_sparse_active_tiles;
+                state.fluid_stats.viscosity_sparse_allocated_tiles =
+                    gpu_mgpcg_stats.viscosity_sparse_allocated_tiles;
+                state.fluid_stats.viscosity_sparse_resident_bytes =
+                    gpu_mgpcg_stats.viscosity_sparse_resident_bytes;
                 state.fluid_stats.pressure_cg_iterations = gpu_mgpcg_stats.pressure_cg_iterations;
                 state.fluid_stats.pressure_cg_max_iterations = gpu_mgpcg_stats.pressure_cg_max_iterations;
                 state.fluid_stats.pressure_cg_dot_count = gpu_mgpcg_stats.pressure_cg_dot_count;
@@ -1137,6 +1123,13 @@
                     gpu_mgpcg_stats.pressure_window_used;
                 state.fluid_stats.pressure_window_cells =
                     gpu_mgpcg_stats.pressure_window_cells;
+                state.fluid_stats.pressure_sparse_used = gpu_mgpcg_stats.pressure_sparse_used;
+                state.fluid_stats.pressure_sparse_active_tiles =
+                    gpu_mgpcg_stats.pressure_sparse_active_tiles;
+                state.fluid_stats.pressure_sparse_allocated_tiles =
+                    gpu_mgpcg_stats.pressure_sparse_allocated_tiles;
+                state.fluid_stats.pressure_sparse_resident_bytes =
+                    gpu_mgpcg_stats.pressure_sparse_resident_bytes;
                 if (fluid_params.granular_enabled &&
                     granular_substep + 1 == granular_solver_substeps) {
                     std::size_t yielded = 0, detached = 0, invalid = 0, sleeping = 0, damaged = 0;
@@ -1489,6 +1482,8 @@
             state.fluid_stats.density_on_gpu       = density_on_gpu;
             state.fluid_stats.active_fluid_cells   = state.active_density_cells;
             if (i < grid_domain_compute_buffers_.size()) {
+                Fluid::publishSparseMacTransferStats(
+                    grid_domain_compute_buffers_[i].sparse_mac_transfer, state.fluid_stats);
                 state.fluid_stats.normalize_window_cells =
                     grid_domain_compute_buffers_[i].fluid_normalize_window_cells;
                 state.fluid_stats.normalize_window_used = state.fluid_stats.p2g_on_gpu &&

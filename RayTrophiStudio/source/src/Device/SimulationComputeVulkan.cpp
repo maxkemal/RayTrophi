@@ -556,6 +556,8 @@ public:
         // Kernels using float atomics (P2G scatter, density splat) need hardware support.
         const std::string kernel(cmd.kernel ? cmd.kernel : "");
         const bool needs_atomics = (kernel == "sim_fluid_p2g_scatter" ||
+                                    kernel == "sim_sparse_mac_p2g" ||
+                                    kernel == "sim_sparse_mac_matter_p2g" ||
                                     kernel == "sim_fluid_occupancy" ||
                                     kernel == "sim_fluid_density_splat" ||
                                     kernel == "terrain_thermal" ||
@@ -571,7 +573,8 @@ public:
         // without the shaderFloat64 device feature is UB. Failing here sends
         // the host cleanly to the CPU PCG fallback.
         if (!m_has_shader_float64 &&
-            ((kernel == "sim_fluid_cg_dot" ||
+            (kernel.rfind("sim_sparse_pressure_", 0) == 0 ||
+             (kernel == "sim_fluid_cg_dot" ||
               kernel == "sim_fluid_cg_dot_window") ||
              kernel == "sim_fluid_cg_scalar_step" ||
              (kernel == "sim_fluid_cg_axpy_dev" ||
@@ -1032,16 +1035,39 @@ private:
             { "sim_matter_advect", "sim_matter_advect.spv", 11, 84 },
             { "sim_matter_occupancy", "sim_matter_occupancy.spv", 6, 40 },
             { "sim_matter_contact", "sim_matter_contact.spv", 19, 16 },
+            { "sim_grain_mpm_init", "sim_grain_mpm_init.spv", 13, 32 },
+            { "sim_grain_mpm_clear", "sim_grain_mpm_clear.spv", 13, 32 },
+            { "sim_grain_mpm_hash", "sim_grain_mpm_hash.spv", 13, 32 },
+            { "sim_grain_mpm_gather", "sim_grain_mpm_gather.spv", 13, 32 },
+            { "sim_grain_mpm_apply", "sim_grain_mpm_apply.spv", 13, 32 },
+            { "sim_grain_mpm_count", "sim_grain_mpm_count.spv", 13, 32 },
+            { "sim_grain_fluid_cells", "sim_grain_fluid_cells.spv", 21, 96 },
+            { "sim_grain_fluid_refresh", "sim_grain_fluid_refresh.spv", 21, 96 },
+            { "sim_grain_fluid_delta", "sim_grain_fluid_delta.spv", 21, 96 },
+            { "sim_grain_fluid_reaction", "sim_grain_fluid_reaction.spv", 21, 96 },
+            { "sim_grain_fluid_apply", "sim_grain_fluid_apply.spv", 21, 96 },
+            { "sim_grain_fluid_clear", "sim_grain_fluid_clear.spv", 21, 96 },
+            { "sim_grain_fluid_hash", "sim_grain_fluid_hash.spv", 21, 96 },
+            { "sim_grain_fluid_solid", "sim_grain_fluid_solid.spv", 21, 96 },
             { "sim_matter_copy", "sim_matter_copy.spv", 2, 4 },
             { "sim_matter_clear", "sim_matter_clear.spv", 1, 4 },
             { "sim_matter_pores", "sim_matter_pores.spv", 13, 40 },
             { "sim_matter_zero_faces", "sim_matter_zero_faces.spv", 4, 36 },
             { "sim_matter_partition", "sim_matter_partition.spv", 4, 8 },
-            { "sim_matter_grain_clear", "sim_matter_grain_clear.spv", 15, 112 },
-            { "sim_matter_grain_hash", "sim_matter_grain_hash.spv", 15, 112 },
-            { "sim_matter_grain_step", "sim_matter_grain_step.spv", 15, 112 },
-            { "sim_matter_grain_permute", "sim_matter_grain_permute.spv", 15, 112 },
-            { "sim_matter_grain_permute_copy", "sim_matter_grain_permute_copy.spv", 15, 112 },
+            { "sim_sparse_pressure_clear", "sim_sparse_pressure_clear.spv", 16, 80 },
+            { "sim_sparse_pressure_mark", "sim_sparse_pressure_mark.spv", 16, 80 },
+            { "sim_sparse_pressure_init", "sim_sparse_pressure_init.spv", 16, 80 },
+            { "sim_sparse_pressure_jacobi", "sim_sparse_pressure_jacobi.spv", 16, 80 },
+            { "sim_sparse_pressure_copy", "sim_sparse_pressure_copy.spv", 16, 80 },
+            { "sim_sparse_pressure_spmv", "sim_sparse_pressure_spmv.spv", 16, 80 },
+            { "sim_sparse_pressure_axpy", "sim_sparse_pressure_axpy.spv", 16, 80 },
+            { "sim_sparse_pressure_zpby", "sim_sparse_pressure_zpby.spv", 16, 80 },
+            { "sim_sparse_pressure_scatter", "sim_sparse_pressure_scatter.spv", 16, 80 },
+            { "sim_sparse_pressure_dense_clear", "sim_sparse_pressure_dense_clear.spv", 16, 80 },
+            { "sim_matter_grain_list_clear", "sim_matter_grain_list_clear.spv", 17, 128 },
+            { "sim_matter_grain_hash", "sim_matter_grain_hash.spv", 17, 128 },
+            { "sim_matter_grain_list_build", "sim_matter_grain_list_build.spv", 17, 128 },
+            { "sim_matter_grain_step", "sim_matter_grain_step.spv", 17, 128 },
             { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 15, 64 },
             { "sim_fluid_granular_stress_p2g",      "sim_fluid_granular_stress_p2g.spv",    4, 48 },
             { "sim_fluid_granular_settle",          "sim_fluid_granular_settle.spv",        3, 32 },
@@ -1072,6 +1098,40 @@ private:
             // overrides). The push block stayed 52 bytes — a pad word became
             // has_nu — so only the descriptor count moved.
             { "sim_fluid_viscosity_rbgs",           "sim_fluid_viscosity_rbgs.spv",       11, 52 },
+            { "sim_sparse_grid_map_clear", "sim_sparse_grid_map_clear.spv", 7, 48 },
+            { "sim_sparse_grid_map_seed", "sim_sparse_grid_map_seed.spv", 7, 48 },
+            { "sim_sparse_grid_retire", "sim_sparse_grid_retire.spv", 7, 48 },
+            { "sim_sparse_grid_remap", "sim_sparse_grid_remap.spv", 7, 48 },
+            { "sim_sparse_mac_clear", "sim_sparse_mac_clear.spv", 8, 36 },
+            { "sim_sparse_mac_mark", "sim_sparse_mac_mark.spv", 8, 36 },
+            { "sim_sparse_mac_reset", "sim_sparse_mac_reset.spv", 8, 36 },
+            { "sim_sparse_mac_normalize", "sim_sparse_mac_normalize.spv", 8, 36 },
+            { "sim_sparse_mac_publish", "sim_sparse_mac_publish.spv", 8, 36 },
+            { "sim_sparse_mac_gather", "sim_sparse_mac_gather.spv", 8, 36 },
+            { "sim_sparse_mac_capture", "sim_sparse_mac_capture.spv", 8, 36 },
+            { "sim_sparse_mac_p2g", "sim_sparse_mac_p2g.spv", 7, 36 },
+            { "sim_sparse_mac_matter_p2g", "sim_sparse_mac_matter_p2g.spv", 12, 40 },
+            { "sim_sparse_mac_g2p", "sim_sparse_mac_g2p.spv", 11, 68 },
+            { "sim_sparse_mac_matter_g2p", "sim_sparse_mac_matter_g2p.spv", 13, 72 },
+            // Compact MAC velocity is canonical (docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md):
+            // the dense kernel plus the MAC tile map and list.
+            { "sim_sparse_mac_zero_faces", "sim_sparse_mac_zero_faces.spv", 6, 36 },
+            { "sim_sparse_mac_matter_zero_faces", "sim_sparse_mac_matter_zero_faces.spv", 6, 36 },
+            { "sim_sparse_mac_divergence", "sim_sparse_mac_divergence.spv", 7, 52 },
+            { "sim_sparse_mac_divergence_var", "sim_sparse_mac_divergence_var.spv", 13, 52 },
+            { "sim_sparse_mac_divergence_porous", "sim_sparse_mac_divergence_porous.spv", 13, 52 },
+            { "sim_sparse_mac_subtract_gradient", "sim_sparse_mac_subtract_gradient.spv", 7, 52 },
+            { "sim_sparse_mac_subtract_gradient_var", "sim_sparse_mac_subtract_gradient_var.spv", 13, 52 },
+            { "sim_sparse_mac_capture_compact", "sim_sparse_mac_capture_compact.spv", 8, 36 },
+            { "sim_sparse_mac_advect", "sim_sparse_mac_advect.spv", 11, 80 },
+            { "sim_sparse_mac_matter_advect", "sim_sparse_mac_matter_advect.spv", 13, 84 },
+            { "sim_sparse_mac_matter_contact", "sim_sparse_mac_matter_contact.spv", 21, 16 },
+            { "sim_sparse_mac_viscosity_capture", "sim_sparse_mac_viscosity_capture.spv", 15, 68 },
+            { "sim_sparse_mac_viscosity_sweep", "sim_sparse_mac_viscosity_sweep.spv", 15, 68 },
+            { "sim_sparse_viscosity_clear", "sim_sparse_viscosity_clear.spv", 13, 68 },
+            { "sim_sparse_viscosity_mark", "sim_sparse_viscosity_mark.spv", 13, 68 },
+            { "sim_sparse_viscosity_capture", "sim_sparse_viscosity_capture.spv", 13, 68 },
+            { "sim_sparse_viscosity_sweep", "sim_sparse_viscosity_sweep.spv", 13, 68 },
             { "sim_fluid_divergence",               "sim_fluid_divergence.spv",            5, 52 },
             { "sim_fluid_divergence_window", "sim_fluid_divergence_window.spv",
               5, 76 },

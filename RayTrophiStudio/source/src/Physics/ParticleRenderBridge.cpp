@@ -353,42 +353,32 @@ void gatherSceneMeshSource(const std::vector<std::shared_ptr<Hittable>>& objects
     }
 }
 
-constexpr std::size_t kMaxParticleInstancesTotal = 300000;
 constexpr std::size_t kParticlePoolChunk = 4096;
 
+// No instance ceiling here: the only one is the device's TLAS maxInstanceCount,
+// enforced (loudly) in VulkanDevice::createTLAS.
 inline std::size_t particlePoolCapacityFor(std::size_t soa_slots) {
-    const std::size_t capped =
-        std::min(soa_slots, kMaxParticleInstancesTotal);
-    if (capped == 0) return 0;
+    if (soa_slots == 0) return 0;
     std::size_t cap = kParticlePoolChunk;
-    while (cap < capped && cap < kMaxParticleInstancesTotal) cap <<= 1;
-    return std::min(cap, kMaxParticleInstancesTotal);
+    while (cap < soa_slots) cap <<= 1;
+    return cap;
 }
 
-// Fluid particle instancing caps. Without a cap a million-particle seed
-// produces a million TLAS instances; the OptiX/Vulkan accel build then runs out
-// of memory or hits a build limit, which surfaces as a CUDA illegal-memory
-// access that poisons the whole context (every later op — even the density
-// splat — then fails). Two-tier cap:
-//   * the per-domain render budget = min(UI fluid_max_particles, HARD ceiling),
-//     so the cap tracks the value the user actually set in the panel instead
-//     of a magic number divorced from the UI;
-//   * the HARD ceiling is a hardware-safety backstop — one TLAS instance per
-//     particle is inherently heavy (instance records + per-frame refit), so
-//     beyond this the right tool is the SurfaceSDF render mode (a single
-//     volume, independent of particle count) rather than a sphere per drop.
+// Fluid particle instancing: the per-domain render budget is the UI's Max
+// Particles and nothing else. The old 1M "hardware" ceiling dated from a CUDA
+// context crash that was fixed elsewhere, and CUDA/OptiX is frozen; the one
+// real ceiling is the device's TLAS maxInstanceCount (VulkanDevice::createTLAS).
+// One instance per particle is still heavy at millions - SurfaceSDF or fog is
+// the cheaper view there, but that is the user's choice, not a silent cap.
 // Growth is CHUNKED so the expensive structural rebuild (BLAS/SBT) only fires
 // at chunk boundaries instead of every frame during fill-up — that per-frame
 // rebuild was racing the in-flight render and was a crash vector.
-constexpr std::size_t kFluidInstanceHardCeiling = 1000000;
 constexpr std::size_t kFluidPoolMinCapacity = 256;
 constexpr std::size_t kFluidPoolChunk = 16384;
 constexpr std::size_t kFluidSurfaceProxyInstanceCeiling = 32768;
 
 inline std::size_t fluidRenderBudget(std::size_t ui_max_particles) {
-    const std::size_t budget = (ui_max_particles == 0) ? kFluidInstanceHardCeiling
-                                                        : ui_max_particles;
-    return std::min(budget, kFluidInstanceHardCeiling);
+    return ui_max_particles == 0 ? std::numeric_limits<std::size_t>::max() : ui_max_particles;
 }
 
 inline std::size_t fluidPoolCapacityFor(std::size_t live_count, std::size_t budget) {
@@ -459,7 +449,6 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
     // bindings valid frame-to-frame; shrinking the vector would leave ghosts.
     bool structural_change = false;
     bool motion_change = false;
-    std::size_t total_instances = 0;
 
     for (auto& system : particle_systems) {
         // A system with no runtime is genuinely gone, so its group must go too.
@@ -597,8 +586,7 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
 
         // Refresh the stable instance pool from the alive SoA. Do not mirror an
         // unbounded SoA slot history one-for-one: dead particle slots can make
-        // buffers_.alive grow for the whole run even though rendering is capped
-        // at kMaxParticleInstancesTotal. Mirroring that history grew the Vulkan
+        // buffers_.alive grow for the whole run. Mirroring that history grew the Vulkan
         // TLAS/raster pool every frame and repeatedly rebuilt its GPU buffers.
         // Geometric chunks keep bindings stable while making growth infrequent.
         // Dead slots collapse to scale 0 (degenerate -> no GPU intersection). A
@@ -683,8 +671,7 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
             // e.g. an SoA entry left stale by a cache stop/resume — hangs the device.
             const bool finite_pose = std::isfinite(px) && std::isfinite(py) &&
                                      std::isfinite(pz) && std::isfinite(sz);
-            const bool alive = has_slot && (buf.alive[i] != 0u) && sz > 1e-5f && finite_pose &&
-                               total_instances < kMaxParticleInstancesTotal;
+            const bool alive = has_slot && (buf.alive[i] != 0u) && sz > 1e-5f && finite_pose;
             if (alive) {
                 tr.position = Vec3(px, py, pz);
                 tr.scale = Vec3(sz, sz, sz);
@@ -697,7 +684,6 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
                     content = hashCombine(content, quantize(spin_deg));
                 }
                 ++alive_drawn;
-                ++total_instances;
                 content = hashCombine(content, quantize(px));
                 content = hashCombine(content, quantize(py));
                 content = hashCombine(content, quantize(pz));

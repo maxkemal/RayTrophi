@@ -1,4 +1,5 @@
 #include "Fluid/MatterGrainColliderBvh.h"
+#include "Fluid/MatterGrain.h"
 #include "SurfaceMeshCache.h"
 
 #include <algorithm>
@@ -64,7 +65,13 @@ std::vector<uint32_t> surfacePatches(const std::vector<SurfaceMeshTriangle>& tri
                     if (ra == rb) {
                         continue;
                     }
-                    const auto low = std::min(ra, rb), high = std::max(ra, rb);
+                    // Union by size: the smaller group joins the larger and is
+                    // the one tested. Joining by index re-tested a whole flat
+                    // ground plane on every merge, O(faces^2) once colliders
+                    // were no longer capped at 4096 faces.
+                    const bool ra_larger = members[ra].size() > members[rb].size() ||
+                        (members[ra].size() == members[rb].size() && ra < rb);
+                    const auto low = ra_larger ? ra : rb, high = ra_larger ? rb : ra;
                     const auto& seed = triangles[low];
                     Vec3 base = (seed.p1 - seed.p0).cross(seed.p2 - seed.p0);
                     base = base / base.length();
@@ -133,8 +140,8 @@ uint64_t matterGrainColliderFingerprint(const std::vector<SurfaceMeshTriangle>& 
 bool buildMatterGrainColliderBvh(const std::vector<SurfaceMeshTriangle>& triangles,
                                 MatterGrainColliderBvh& result, std::string& error,
                                 const std::vector<Vec3>* velocities, float sweep_seconds) {
-    if (triangles.size() > 4096) {
-        error = "grain collider BVH exceeds 4096 flat faces";
+    if (triangles.size() > kMatterGrainMaxColliderFaces) {
+        error = "grain collider BVH exceeds the 30-bit contact patch id";
         return false;
     }
     if (velocities && velocities->size() != 3 * triangles.size()) {

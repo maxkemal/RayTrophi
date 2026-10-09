@@ -25,7 +25,7 @@ struct ProjectSubstance {
     nlohmann::json overrides = nlohmann::json::object();
 };
 
-enum class SubstanceFieldKind : uint8_t { Float, Bool, Model, Category, Color };
+enum class SubstanceFieldKind : uint8_t { Float, Bool, Model, Category, Color, Transport };
 
 // One authorable field of SubstanceProfile. The key is the stable name used by
 // the project file, IPC, Python and the panel; they all go through this table,

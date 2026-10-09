@@ -110,6 +110,9 @@ struct GPUCapabilities {
     uint32_t shaderGroupHandleSize = 0;
     uint32_t shaderGroupBaseAlignment = 0;
     uint32_t minScratchAlignment = 128;
+    // VkPhysicalDeviceAccelerationStructurePropertiesKHR::maxInstanceCount: the
+    // one TLAS ceiling. Render bridges carry no instance caps of their own.
+    uint64_t maxTlasInstances = 0;
     bool supportsRayQuery = false;          // Inline RT in any shader stage
     bool supportsMotionBlur = false;
     

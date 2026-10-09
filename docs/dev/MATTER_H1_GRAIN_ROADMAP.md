@@ -9,11 +9,47 @@ bölümündedir; çözücünün kendisinin teknik kaydı ve canlı sonuç tablol
 [MATTER_GRAIN_GPU_RUNTIME.md](MATTER_GRAIN_GPU_RUNTIME.md)'dedir. Burası ikisinin arasındaki
 **sıra ve kabul** belgesi.
 
+2026-10-08 kaynak devamı: üç-sahip ortak saat ve device-rebin CFD-DEM desteği
+kaynakta; physique/cinematic kapanış bekliyor. Final tek komut
+`python scripts/test/rt_test_matter_acceptance_ipc.py --extended`; bu runner
+regresyon PASS'ini B11/ana plan PASS'ine çevirmez. Güncel kaynak ve açık kapılar
+[devir](MADDE_T2_T3_HANDOFF.md)'nin ilk checkpoint'indedir.
+
 Çalışma kipi (kullanıcı kararı, 2026-10-06): **uzun partiler, az test döngüsü.** Bulutta kod +
 statik sözleşme + C++ sözleşme testleri yazılır ve buradaki Linux araçlarıyla derlenebilenler
 koşturulur; uygulama derlemesi ve canlı IPC testleri kullanıcının makinesinde tek geçişte yapılır.
 
 ---
+
+## 2026-10-08 MPM + grain temas kaynak devamı
+
+Önceki ortak state/sahiplik partisi kullanıcı tarafından derlendi. Bu devamda
+`MatterGrainMpmContact` Vulkan yolu eklendi; yeni C++ ve beş shader henüz kullanıcı
+build/canlı kabulünden geçmedi. Eski MPM+grain readiness ret kapısı kaldırıldı.
+Panel grain açıkken MPM iskeletini gizlemez; transport madde başına dem|mpm'dir.
+
+- Continuum frame'i sonrası her DEM alt adımında iki sahip GPU hashinden aynı
+  çifti okur. Ayrı gather/apply dispatchleri, eşit-zıt unilateral normal ve Coulomb
+  dürtüsü; 64 komşu sınırı aşılırsa canonical yayın reddedilir. Yalnız metadata
+  yüklenir, kompakt dürtüler alınır; temas için tam particle sidecar transferi yok.
+- MPM taşıyıcısı sıvı drag/viskozite/su emme alanına katılmaz. Üç sahip birlikte
+  çalışır; MPM varken sıvı porous projection kapalı, drag+kaldırma açık. Ortak MAC
+  weight'leri MPM'ye ikinci tepki vermesin diye bu sınır UI/IPC'de açıklanır.
+- `fluid.matter_models.grain_diagnostics.runtime.mpm_contact`: parcels, events
+  (sıfır olmayan çift dürtüleri), grain_impulse_magnitude_n_s, max_neighbours,
+  momentum_residual_n_s ve schedule. Aynı core UI/Python/IPC tarafından okunur.
+  Grain pile/spin tanısı artık MPM'yi DEM küresi saymaz.
+- Dış IPC smoke sıfır olmayan temas, momentum kalıntısı, üç ayrı sahip ve canlı
+  transport edit ret kontrolüne çevrildi. Core regresyon MPM'nin sıvı alanından
+  dışlanmasını kapsar. Final canlı testler kullanıcıda, uygulama başlatılmadı.
+
+**B11/ana plan kapanmadı:** continuum geometrisi DEM frame'i boyunca end-state'te
+sabit; temas hızı DEM alt adımlarında değişir. Ortak üç-sahip zamanlayıcısı,
+deformasyonla değişen MPM temas desteği, angular contact/spin kabulü, ayrı porous
+owner weight'leri, büyük yığın/24 fps maliyeti ve yüksek hızlı blok yakınsaması açık.
+MPM materyal parametrelerinin madde başına solver tüketimi de final denetim ister.
+Gaz/grain, karma elastik MPM, termal hal geçişi ve T0/T6 final kapıları açık kalır.
+Cache/render prep/SimCache/render bridge dosyalarına dokunulmadı.
 
 ## 0. Nerede duruyoruz
 

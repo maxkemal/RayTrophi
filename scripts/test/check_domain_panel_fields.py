@@ -31,7 +31,7 @@ FILES = ['scene_ui_simulation_domains.cpp', 'Matter*Controls.cpp', 'scene_ui_flu
 
 WIDGET = re.compile(
     r'(?:ImGui|UIWidgets|DomainUi)::'
-    r'(Checkbox|Combo|SliderFloat\d?|SliderInt\d?|SliderAngle|DragFloat\d?|DragInt\d?|'
+    r'(Checkbox|Combo|SliderFloat\d?|SliderInt\d?|SliderAngle|DragFloat\d?|DragInt\d?|DragScalar|'
     r'DragFloatRange2|InputFloat\d?|InputInt\d?|InputText|ColorEdit\d|RadioButton|'
     r'Float|Int|Bool|Choice|Color|Slider)'
     r'\s*\(\s*("(?:[^"\\]|\\.)*")\s*,\s*([^,)]*)', re.S)
@@ -56,6 +56,9 @@ CHANGES = {
 # editor. Check the destination schema and its editor consumer instead of
 # pretending that a missing per-domain widget means the operation vanished.
 SUBSTANCE_MIGRATIONS = {
+    'Initial Model': 'default_constitutive_model',
+    'Phase': 'category',
+    'Constitutive Model': 'default_constitutive_model',
     'Enable Granular MPM': 'default_constitutive_model',
     'Friction Angle (deg)': 'granular_friction_degrees',
     'Cohesion (Pa)': 'granular_cohesion',

@@ -186,6 +186,7 @@ struct SubstanceProfile {
     SubstanceCategory category = SubstanceCategory::Solid;
     Fluid::MatterConstitutiveModel default_constitutive_model =
         Fluid::MatterConstitutiveModel::Fluid;
+    Fluid::MatterGranularTransport granular_transport = Fluid::MatterGranularTransport::Mpm;
 
     // ── Thermal ──────────────────────────────────────────────────────────────
     float density            = 1000.0f;  // kg/m^3

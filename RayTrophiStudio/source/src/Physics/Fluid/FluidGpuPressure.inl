@@ -50,19 +50,45 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
         return false;
     };
 
-    if (!gpu_buffers.vel_x.valid())      return reportMissing("vel_x");
-    if (!gpu_buffers.vel_y.valid())      return reportMissing("vel_y");
-    if (!gpu_buffers.vel_z.valid())      return reportMissing("vel_z");
+    // Dense bank, or the compact pages of a compact owner
+    // (docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md).
+    const auto mac = Fluid::macVelocityBinding(gpu_buffers);
+    if (!mac.velocity[0].valid())        return reportMissing("vel_x");
+    if (!mac.velocity[1].valid())        return reportMissing("vel_y");
+    if (!mac.velocity[2].valid())        return reportMissing("vel_z");
     if (!gpu_buffers.pressure.valid())   return reportMissing("pressure");
     if (!gpu_buffers.divergence.valid()) return reportMissing("divergence");
     if (!gpu_buffers.fluid_mask.valid()) return reportMissing("fluid_mask");
+    if (grid.getCellCount() > std::size_t(std::numeric_limits<int32_t>::max()) ||
+        std::max({grid.vel_x.size(), grid.vel_y.size(), grid.vel_z.size()}) >
+            std::size_t(std::numeric_limits<int32_t>::max())) {
+        return bail("pressure mask/face index exceeds signed shader width");
+    }
+    const bool sparse_pressure = Fluid::usesSparsePressure(
+        *compute, grid.sparse_mode_enabled, fluid_params);
+    // The dense CG path below reads and writes the dense bank only.
+    if (mac.compact && !sparse_pressure) {
+        return bail("compact MAC velocity needs the sparse pressure solve");
+    }
+    if (!Fluid::ensurePressureScratch(*compute, gpu_buffers, grid.getCellCount(),
+                                     sparse_pressure)) {
+        return reportMissing("pressure scratch");
+    }
+    if (mgpcg_stats) {
+        mgpcg_stats->pressure_sparse_used = false;
+        mgpcg_stats->pressure_sparse_active_tiles = 0;
+        mgpcg_stats->pressure_sparse_allocated_tiles = 0;
+        mgpcg_stats->pressure_sparse_resident_bytes = 0;
+    }
     // CG scratch missing → signal fallback to the SOR / CPU PCG path.
-    if (!gpu_buffers.cg_residual.valid()) return reportMissing("cg_residual");
-    if (!gpu_buffers.cg_z.valid())        return reportMissing("cg_z");
-    if (!gpu_buffers.cg_search.valid())   return reportMissing("cg_search");
-    if (!gpu_buffers.cg_As.valid())       return reportMissing("cg_As");
-    if (!gpu_buffers.cg_diag.valid())     return reportMissing("cg_diag");
-    if (!gpu_buffers.cg_partials.valid()) return reportMissing("cg_partials");
+    if (!sparse_pressure) {
+        if (!gpu_buffers.cg_residual.valid()) return reportMissing("cg_residual");
+        if (!gpu_buffers.cg_z.valid())        return reportMissing("cg_z");
+        if (!gpu_buffers.cg_search.valid())   return reportMissing("cg_search");
+        if (!gpu_buffers.cg_As.valid())       return reportMissing("cg_As");
+        if (!gpu_buffers.cg_diag.valid())     return reportMissing("cg_diag");
+        if (!gpu_buffers.cg_partials.valid()) return reportMissing("cg_partials");
+    }
 
     const uint32_t threads     = 256; // must match the device block size (256)
     const uint32_t cell_count  = static_cast<uint32_t>(grid.getCellCount());
@@ -269,10 +295,10 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
         gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z,
         gpu_buffers.pressure, gpu_buffers.divergence
     };
-    ComputeBufferHandle fluid_divergence_bufs[11];
-    fluid_divergence_bufs[0] = gpu_buffers.vel_x;
-    fluid_divergence_bufs[1] = gpu_buffers.vel_y;
-    fluid_divergence_bufs[2] = gpu_buffers.vel_z;
+    ComputeBufferHandle fluid_divergence_bufs[13];
+    fluid_divergence_bufs[0] = mac.velocity[0];
+    fluid_divergence_bufs[1] = mac.velocity[1];
+    fluid_divergence_bufs[2] = mac.velocity[2];
     fluid_divergence_bufs[3] = gpu_buffers.fluid_mask;
     fluid_divergence_bufs[4] = gpu_buffers.divergence;
     if (is_variational) {
@@ -283,16 +309,84 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
         fluid_divergence_bufs[9] = gpu_buffers.var_svy;
         fluid_divergence_bufs[10] = gpu_buffers.var_svz;
     }
-    const int div_buf_count = is_variational ? 11 : 5;
+    int div_buf_count = is_variational ? 11 : 5;
+    if (mac.compact) {
+        // The compact twins take the MAC tile map and list after their own.
+        fluid_divergence_bufs[div_buf_count] = mac.map;
+        fluid_divergence_bufs[div_buf_count + 1] = mac.list;
+        div_buf_count += 2;
+    }
 
     const bool porous = vulkan_variational && gpu_buffers.porous_solid_velocity;
+    const char* divergence_kernel = porous
+        ? Fluid::macKernel(mac, "sim_fluid_divergence_porous", "sim_sparse_mac_divergence_porous")
+        : (vulkan_variational
+            ? Fluid::macKernel(mac, "sim_fluid_divergence_var", "sim_sparse_mac_divergence_var")
+            : Fluid::macKernel(mac, "sim_fluid_divergence", "sim_sparse_mac_divergence"));
     ok = dispatch1(use_cuda_fluid_projection
-                       ? (porous ? "sim_fluid_divergence_porous"
-                                 : varKernel("sim_fluid_divergence", "sim_fluid_divergence_var"))
+                       ? (compute->backendType() == ComputeBackendType::CUDA
+                              ? (porous ? "sim_fluid_divergence_porous"
+                                        : varKernel("sim_fluid_divergence",
+                                                    "sim_fluid_divergence_var"))
+                              : divergence_kernel)
                        : "sim_grid_divergence",
                    use_cuda_fluid_projection ? fluid_divergence_bufs : proj_bufs,
                    use_cuda_fluid_projection ? div_buf_count : 5,
                    cell_groups);
+
+    if (sparse_pressure) {
+        std::string sparse_error;
+        if (!ok || !Fluid::solveSparsePressure(*compute, gpu_buffers, fluid_params,
+                grid.nx, grid.ny, grid.nz, grid.voxel_size, dt, is_variational,
+                mgpcg_stats, sparse_error)) {
+            return bail(sparse_error.empty() ? "sparse pressure divergence"
+                                            : sparse_error.c_str());
+        }
+        ComputeBufferHandle gradient_buffers[13] = {
+            mac.velocity[0], mac.velocity[1], mac.velocity[2],
+            gpu_buffers.pressure, gpu_buffers.fluid_mask
+        };
+        int gradient_count = 5;
+        if (is_variational) {
+            gradient_buffers[5] = gpu_buffers.var_u_weight;
+            gradient_buffers[6] = gpu_buffers.var_v_weight;
+            gradient_buffers[7] = gpu_buffers.var_w_weight;
+            gradient_buffers[8] = gpu_buffers.var_svx;
+            gradient_buffers[9] = gpu_buffers.var_svy;
+            gradient_buffers[10] = gpu_buffers.var_svz;
+            gradient_count = 11;
+        }
+        if (mac.compact) {
+            gradient_buffers[gradient_count] = mac.map;
+            gradient_buffers[gradient_count + 1] = mac.list;
+            gradient_count += 2;
+        }
+        ComputeDispatch gradient;
+        gradient.kernel = vulkan_variational
+            ? Fluid::macKernel(mac, "sim_fluid_subtract_gradient_var",
+                               "sim_sparse_mac_subtract_gradient_var")
+            : Fluid::macKernel(mac, "sim_fluid_subtract_gradient",
+                               "sim_sparse_mac_subtract_gradient");
+        gradient.buffers = gradient_buffers;
+        gradient.buffer_count = gradient_count;
+        gradient.constants = &c;
+        gradient.constants_size = sizeof(c);
+        gradient.groups = FluidGpuDispatch::groups256(mac.compact ? mac.face_lanes : max_faces);
+        if (!compute->dispatch(gradient)) {
+            return bail("sparse pressure gradient publication");
+        }
+        if (!gpu_buffers.matter_model.enabled) {
+            compute->beginTransferBatch();
+            ok = compute->downloadBuffer(gpu_buffers.vel_x, grid.vel_x.data(),
+                                          grid.vel_x.size() * sizeof(float)) &&
+                compute->downloadBuffer(gpu_buffers.vel_y, grid.vel_y.data(),
+                                         grid.vel_y.size() * sizeof(float)) &&
+                compute->downloadBuffer(gpu_buffers.vel_z, grid.vel_z.data(),
+                                         grid.vel_z.size() * sizeof(float));
+            ok = compute->endTransferBatch() && ok;
+        }
+        return ok;
+    }
 
     // diag = #in-bounds neighbours (fluid rows; 0 elsewhere).
     {

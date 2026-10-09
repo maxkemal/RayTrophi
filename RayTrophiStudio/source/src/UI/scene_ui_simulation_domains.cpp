@@ -554,10 +554,13 @@ void drawSimulationDomainControls(
                     ImGui::Spacing();
 
                 int res[3] = { domain.resolution_x, domain.resolution_y, domain.resolution_z };
+                // 8..2048 is the drag range only; Ctrl+click types past it. The
+                // solver keeps whatever is typed (resource budget and GPU index
+                // width are its only ceilings), so the panel must not clamp either.
                 if (ImGui::DragInt3("Grid Resolution (X, Y, Z)", res, 1.0f, 8, 2048)) {
-                    domain.resolution_x = std::clamp(res[0], 8, 2048);
-                    domain.resolution_y = std::clamp(res[1], 8, 2048);
-                    domain.resolution_z = std::clamp(res[2], 8, 2048);
+                    domain.resolution_x = std::max(res[0], 8);
+                    domain.resolution_y = std::max(res[1], 8);
+                    domain.resolution_z = std::max(res[2], 8);
                     const Vec3 ext = Vec3::max(domain.bounds_min, domain.bounds_max) - Vec3::min(domain.bounds_min, domain.bounds_max);
                     const float me = std::max({ ext.x, ext.y, ext.z, 0.001f });
                     const int mr = std::max({ domain.resolution_x, domain.resolution_y, domain.resolution_z, 1 });
@@ -565,7 +568,8 @@ void drawSimulationDomainControls(
                 }
                 seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Per-axis resolution of the 3D voxel simulation grid (8-2048 each).\n\n"
+                    ImGui::SetTooltip("Per-axis resolution of the 3D voxel simulation grid (drag 8-2048,\n"
+                                      "Ctrl+click to type higher; no hard ceiling).\n\n"
                                       "WARNING: Cost scales with the product X*Y*Z (cubic for a cube)!\n"
                                       "Use 32-64 for fast interactive testing, 96-128+ for high-quality results.\n"
                                       "512+ requires sparse tiles and Cinema profile or disk bake for memory safety.\n"
@@ -651,7 +655,7 @@ void drawSimulationDomainControls(
                 const int prev_max_auto_res = domain.max_auto_resolution;
                 if (ImGui::DragInt("Max Auto Resolution", &domain.max_auto_resolution, 1.0f, 32, 2048)) {
                     domain.quality_profile = RayTrophiSim::SimulationDomainQualityProfile::Custom;
-                    domain.max_auto_resolution = std::clamp(domain.max_auto_resolution, 32, 2048);
+                    domain.max_auto_resolution = std::max(domain.max_auto_resolution, 32);
                     // Changing the ceiling must keep the grid spanning the FULL domain, so
                     // pick the Preserve Voxel mode that covers it in each direction:
                     //  • LOWER  -> Preserve OFF: voxel is re-derived (coarser) so res*voxel
@@ -672,12 +676,14 @@ void drawSimulationDomainControls(
                     ImGui::SetTooltip("Hard per-axis ceiling for the simulation grid - the solver re-derives\n"
                                       "resolution from voxel size each rebuild and clamps every axis to this.\n"
                                       "It is BOTH the auto-scale safety limit and the cap the manual\n"
-                                      "'Grid Resolution' above can actually reach. Raise to 512 for a full\n"
-                                      "256^3+ run; watch the cell/memory estimate - 512^3 risks OOM/freeze.\n"
+                                      "'Grid Resolution' above can actually reach. No hard ceiling: drag to\n"
+                                      "2048, Ctrl+click to type higher. Memory is bounded only by Enforce\n"
+                                      "Resource Budget; GPU grids stop at ~1080^3 (32-bit face indices).\n"
+                                      "Watch the cell/memory estimate - 512^3+ needs many GB.\n"
                                       "Changing this auto-sets Preserve Voxel Size (ON when raising, OFF when\n"
                                       "lowering) so the grid always re-covers the FULL domain, not a corner.");
                 }
-                domain.max_auto_resolution = std::clamp(domain.max_auto_resolution, 32, 2048);
+                domain.max_auto_resolution = std::max(domain.max_auto_resolution, 32);
                 // Force sparse tiles when any axis exceeds 512 — dense allocation
                 // at these resolutions risks OOM without sparse tile culling.
                 if (domain.max_auto_resolution > 512 || domain.resolution_x > 512 ||
@@ -951,13 +957,21 @@ void drawSimulationDomainControls(
                     }
 
                     ImGui::SetNextItemWidth(DomainUi::itemWidth());
-                    int max_particles_ui = static_cast<int>(std::min<std::size_t>(domain.fluid_max_particles, 10000000u));
-                    if (ImGui::DragInt("Max Particles Limit", &max_particles_ui, 1000.0f, 1000, 10000000)) {
-                        domain.fluid_max_particles = static_cast<std::size_t>(std::max(1000, max_particles_ui));
+                    // 64-bit and unclamped: the drag range is a default feel, Ctrl+click
+                    // types any value. The old int display capped at 10M, so a larger
+                    // value set from a script read back as 10M here.
+                    uint64_t max_particles_ui = static_cast<uint64_t>(domain.fluid_max_particles);
+                    const uint64_t max_particles_drag_min = 1000u, max_particles_drag_max = 10000000u;
+                    if (ImGui::DragScalar("Max Particles Limit", ImGuiDataType_U64, &max_particles_ui,
+                                          1000.0f, &max_particles_drag_min, &max_particles_drag_max)) {
+                        domain.fluid_max_particles =
+                            static_cast<std::size_t>(std::max<uint64_t>(max_particles_ui, 1u));
                     }
                     seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Maximum total active particles allowed to prevent VRAM or RAM overflow.");
+                        ImGui::SetTooltip("Particle budget: seeding and emitters stop here. No hard ceiling -\n"
+                                          "drag to 10M, Ctrl+click to type higher. Memory and the GPU grain\n"
+                                          "path report their own limits when a step cannot run.");
                     }
 
                     ImGui::Checkbox("Clear Existing on Seed##ReplaceOnSeed", &domain.fluid_replace_on_seed);
@@ -1986,11 +2000,9 @@ void drawSimulationDomainControls(
                         selected_domain_index);
                     }
 
-                    // The grain solver owns granular carriers.
+                    // Transport ownership is selected per substance.
                     RayTrophiSim::Fluid::drawMatterGrainMaterial(domain);
-                    if (fp.grain.enabled) {
-                        ImGui::TextDisabled("Legacy MPM granular material is not used while the grain solver is on.");
-                    } else if (fp.granular_enabled &&
+                    if (fp.granular_enabled &&
                                UIWidgets::CollapsingHeader("Granular Skeleton (from substance)",
                                                            ImGuiTreeNodeFlags_DefaultOpen)) {
                         // Read-only: these are the default substance's granular

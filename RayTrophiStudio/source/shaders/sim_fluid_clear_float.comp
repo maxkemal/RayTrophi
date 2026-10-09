@@ -2,6 +2,8 @@
 // Zeros a float buffer. Shared by P2G weight/velocity clear and density clear.
 // push_constant.count = number of elements to zero.
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "sim_dispatch.glsl"
 layout(local_size_x = 256) in;
 
 // Matches FluidP2GGpuConstants / FluidDensitySplatGpuConstants layout.
@@ -16,7 +18,6 @@ layout(push_constant) uniform PC {
 layout(set = 0, binding = 0) buffer Buf { float data[]; };
 
 void main() {
-    uint id = gl_GlobalInvocationID.x;
     // For P2G component clear, compute face_count from dims.
     // For density/scalar clear (component unused), use nx*ny*nz.
     int clear_count;
@@ -24,6 +25,7 @@ void main() {
     else if (pc.component == 1) clear_count = pc.nx*(pc.ny+1)*pc.nz;
     else if (pc.component == 2) clear_count = pc.nx*pc.ny*(pc.nz+1);
     else                        clear_count = pc.nx*pc.ny*pc.nz; // density
-    if (int(id) >= clear_count) return;
+    uint id = simLane256(uint(clear_count));
+    if (id >= uint(clear_count)) return;
     data[id] = 0.0;
 }

@@ -1,6 +1,19 @@
 # Katı buz modeli kararı: granül mü, rijit gövde mi?
 
-> **Durum:** AKTİF — 2026-10-08. Karar önerisi; kullanıcı onayı bekleniyor. Kod yazılmadı.
+> **Durum:** AKTİF — 2026-10-08. Kullanıcı onayladı (Seçenek A + Ice preset düzeltmesi). Kaynakta
+> uygulandı, derlenmedi ve ölçülmedi. Açık: statik sürtünme/AOR ölçümü; E'nin MPM substep maliyeti (aşağıda).
+
+## Uygulama (2026-10-08)
+
+- `MaterialStateField.cpp` Ice preset: `default_constitutive_model = Granular`, sürtünme 2.3° (μ≈0.04,
+  GEÇİCİ), kohezyon 0, E = 9.3 GPa, ν = 0.32, çekme kesmesi 1 MPa, dilatasyon/sertleşme/yumuşama 0.
+- ★ MALİYET RİSKİ (ölçülmedi): granül MPM yolunda E domain'in varsayılan maddesinden okunur
+  (`APICFluidStep.inl:304`, `FluidDomainStep.inl:518`). Ice bir domain'in varsayılan maddesi olup
+  granül MPM seçilirse ses hızı √(E/ρ) ≈ 3.2 km/s olur; adaptif alt adım (CFL) bunu karşılamak için
+  alt adımları çok artırabilir. Grain DEM yolu E'yi okumaz (kendi temas sertliğini kullanır), yani
+  Seçenek A'da risk yoktur. Risk yalnızca Ice'in MPM domain varsayılanı olmasında. Önerim: ölçümle
+  doğrulanana kadar Ice'i MPM varsayılanı olarak kullanmamak; grain taşıyıcı olarak döküm.
+- Kalan ölçümler (kullanıcı onayladığı sahne): tek buz parçası ve yığın dökümü (H1 grain sahnesi).
 
 ## Soru
 
@@ -65,9 +78,9 @@ bu yüzden buz için yanlış. Statik sürtünme ve AOR için ölçüm gerekiyor
 
 ## Kullanıcıdan gereken onay
 
-- [ ] Seçenek A (granül taşıyıcı) ilk aşama olarak onaylansın mı?
-- [ ] Ice preset'inde granül alanlarının açıkça ayarlanması (ilk iş) onaylansın mı?
-- [ ] Statik sürtünme ve AOR için ölçüm: hangi sahne ile yapılsın? (Önerim: tek buz parçası ve yığın dökümü, H1 grain sahnesi.)
+- [x] Seçenek A (granül taşıyıcı) ilk aşama olarak onaylandı.
+- [x] Ice preset'inde granül alanlarının açıkça ayarlanması onaylandı (uygulandı).
+- [x] Statik sürtünme ve AOR ölçümü: tek buz parçası ve yığın dökümü (H1 grain sahnesi), onaylandı; ölçüm build ve test partisinde yapılacak.
 
 ## Açık
 

@@ -15,6 +15,7 @@
 * ─────────────────────────────────────────────────────────────────────────────
 */
 #include "MaterialStateField.h"
+#include "Fluid/MatterSubstanceState.h"
 #include "MaterialDamagePattern.h"
 #include "Fluid/SubstanceTag.h"
 
@@ -629,6 +630,28 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.fluid_extinguishing = true;
             p.cooling_power = 1.0f; p.oxygen_dilution = 0.35f;
             p.molten_emission = 0.0f;
+            // Solid ice poured as loose pieces is a GRAIN carrier (discrete DEM
+            // spheres, decision in docs/dev/BUZ_MODEL_KARARI.md). Granular is the
+            // constitutive model that selects that path; it must be set here
+            // explicitly, not inherited from the sand defaults.
+            p.default_constitutive_model = Fluid::MatterConstitutiveModel::Granular;
+            // ★ PROVISIONAL. Ice-on-ice kinetic friction ~0.02-0.06 (curling
+            // 0.0168, speed skating 0.0046-0.0059, Hypertextbook; J. Glaciology
+            // ice-on-ice). 2.3 deg = atan(0.04). Static friction and repose angle
+            // were NOT found in sources; they need a measured check before this
+            // is called physical. Sand's 35 deg must not leak in here.
+            p.granular_friction_degrees = 2.3f;
+            p.granular_cohesion = 0.0f;
+            // Schulson & Duval 2009 via arXiv 2205.05219: E = 9.3 GPa, nu = 0.32
+            // at 263 K. Tensile strength ~1 MPa (Engineering ToolBox) bounds the
+            // skeleton's tensile cutoff. No dilatancy, hardening or softening for
+            // ice as a pile.
+            p.granular_young_modulus = 9.3e9f;
+            p.granular_poisson_ratio = 0.32f;
+            p.granular_tensile_cutoff = 1.0e6f;
+            p.granular_dilatancy_degrees = 0.0f;
+            p.granular_hardening = 0.0f;
+            p.granular_softening_kelvin = 0.0f;
             add(p);
         }
         {
@@ -658,6 +681,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.char_rate = 1.2f; p.ash_yield = 0.2f;
             add(p);
         }
+        Fluid::configureBuiltinMatterTransport(out);
         return out;
     }();
     return library;

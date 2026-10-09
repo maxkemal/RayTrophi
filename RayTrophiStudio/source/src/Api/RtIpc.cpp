@@ -2938,7 +2938,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"uvw_voxel", info.uvw_voxel},
                         {"uvw_refresh_period", info.uvw_refresh_period},
                         {"substances", substanceCountsToJson(info.substances)},
-                        {"substance_materials", substanceBindingsToJson(info.substance_materials)}, {"views", fluidViewsToJson(info.views)}, {"views_measured", info.views_measured}, {"label_routes", labelRoutesToJson(info.label_routes)}, {"hidden_particles", info.hidden_particles}, {"max_particles", info.max_particles},
+                        {"substance_materials", substanceBindingsToJson(info.substance_materials)}, {"views", fluidViewsToJson(info.views)}, {"views_measured", info.views_measured}, {"label_routes", labelRoutesToJson(info.label_routes)}, {"hidden_particles", info.hidden_particles}, {"max_particles", info.max_particles}, {"max_auto_resolution", info.max_auto_resolution},
                         {"particle_labels", fluidLabelsToJson(info.particle_labels)},
                         {"uvw_drift", info.uvw_drift},
                     // Measured on the last simulated step, not derived from the
@@ -3117,7 +3117,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"uvw_voxel", info.uvw_voxel},
                     {"uvw_refresh_period", info.uvw_refresh_period},
                     {"substances", substanceCountsToJson(info.substances)},
-                    {"substance_materials", substanceBindingsToJson(info.substance_materials)}, {"views", fluidViewsToJson(info.views)}, {"views_measured", info.views_measured}, {"label_routes", labelRoutesToJson(info.label_routes)}, {"hidden_particles", info.hidden_particles}, {"max_particles", info.max_particles},
+                    {"substance_materials", substanceBindingsToJson(info.substance_materials)}, {"views", fluidViewsToJson(info.views)}, {"views_measured", info.views_measured}, {"label_routes", labelRoutesToJson(info.label_routes)}, {"hidden_particles", info.hidden_particles}, {"max_particles", info.max_particles}, {"max_auto_resolution", info.max_auto_resolution},
                         {"particle_labels", fluidLabelsToJson(info.particle_labels)},
                     {"uvw_drift", info.uvw_drift},
                     // Measured on the last simulated step, not derived from the
@@ -3347,6 +3347,11 @@ json dispatchMethod(const std::string& method, const json& params) {
                 if (mp < 0) return rtapi::Result::fail("max_particles must be >= 0");
                 rtapi::Result mr = rtapi::setFluidMaxParticles(domain, static_cast<uint64_t>(mp));
                 if (!mr.ok) return mr;
+            }
+            if (params.contains("max_auto_resolution")) {
+                rtapi::Result rr = rtapi::setFluidMaxResolution(domain,
+                    params.at("max_auto_resolution").get<int>());
+                if (!rr.ok) return rr;
             }
             if (has_surface_patch) {
                 rtapi::Result sr = rtapi::setFluidSurfaceDetail(domain, surface_patch);
@@ -6621,6 +6626,22 @@ json dispatchMethod(const std::string& method, const json& params) {
             j["full_grid_cells"] = s.full_grid_cells;
             j["pressure_window_used"] = s.pressure_window_used;
             j["pressure_window_cells"] = s.pressure_window_cells;
+            j["transfer_sparse_used"] = s.transfer_sparse_used;
+            j["flip_sparse_used"] = s.flip_sparse_used;
+            j["transfer_sparse_active_tiles"] = s.transfer_sparse_active_tiles;
+            j["transfer_sparse_allocated_tiles"] = s.transfer_sparse_allocated_tiles;
+            j["transfer_sparse_resident_bytes"] = s.transfer_sparse_resident_bytes;
+            j["transfer_sparse_status"] = s.transfer_sparse_status;
+            j["transfer_sparse_canonical"] = s.transfer_sparse_canonical;
+            j["transfer_sparse_blocked"] = s.transfer_sparse_blocked;
+            j["pressure_sparse_used"] = s.pressure_sparse_used;
+            j["pressure_sparse_active_tiles"] = s.pressure_sparse_active_tiles;
+            j["pressure_sparse_allocated_tiles"] = s.pressure_sparse_allocated_tiles;
+            j["pressure_sparse_resident_bytes"] = s.pressure_sparse_resident_bytes;
+            j["viscosity_sparse_used"] = s.viscosity_sparse_used;
+            j["viscosity_sparse_active_tiles"] = s.viscosity_sparse_active_tiles;
+            j["viscosity_sparse_allocated_tiles"] = s.viscosity_sparse_allocated_tiles;
+            j["viscosity_sparse_resident_bytes"] = s.viscosity_sparse_resident_bytes;
             j["occupancy_on_gpu"] = s.occupancy_on_gpu;
             j["particle_count"] = s.particle_count;
             j["gpu_status"] = s.gpu_status;

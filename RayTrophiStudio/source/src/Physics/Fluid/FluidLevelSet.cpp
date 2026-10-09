@@ -24,6 +24,7 @@
  */
 
 #include "Fluid/FluidLevelSet.h"
+#include "Fluid/MatterSubstanceState.h"
 #include "Fluid/SubstanceTag.h"
 #include "PerfProfile.h"
 
@@ -1446,18 +1447,6 @@ bool buildSubstanceSolidCells(const FluidParticles& particles,
         return false;
     }
 
-    auto isSolidTag = [&](uint32_t tag) -> bool {
-        if (!use_tags) return false;
-        // ★ Untagged liquid is never solid. A domain fill, a scripted spawn and
-        // everything authored before substances existed all carry tag 0, and
-        // freezing them because a table row happens to exist would turn a
-        // chocolate binding into a domain-wide block of ice.
-        if (tag == kSubstanceUntagged) return false;
-        for (std::size_t i = 0; i < solid_tag_count; ++i)
-            if (solid_tags[i] == tag) return true;
-        return false;
-    };
-
     // Accumulate solid mass and momentum per cell. Sparse in spirit but dense
     // in storage: one float + one Vec3 per cell of function-static scratch is
     // cheaper than hashing, and this runs once per domain per step.
@@ -1471,9 +1460,8 @@ bool buildSubstanceSolidCells(const FluidParticles& particles,
     const float inv_h = 1.0f / voxel;
     bool any_solid_parcel = false;
     for (std::size_t p = 0; p < particle_count; ++p) {
-        const bool solid_parcel =
-            (use_frozen && (particles.flags[p] & kParticleFlagFrozen) != 0u) ||
-            (use_tags && isSolidTag(particles.substance_tag[p]));
+        const bool solid_parcel = isMatterObstacle(
+            particles, p, use_tags ? solid_tags : nullptr, solid_tag_count, use_frozen);
         const float mass = (p < particles.mass_fraction.size())
             ? std::max(0.0f, std::min(1.0f, particles.mass_fraction[p]))
             : 1.0f;

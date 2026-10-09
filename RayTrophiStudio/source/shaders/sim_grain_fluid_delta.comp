@@ -1,0 +1,4 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define FLUID_DELTA
+#include "sim_grain_fluid.glsl"

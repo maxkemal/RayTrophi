@@ -19,6 +19,9 @@ struct SurfaceMeshTriangle;
 struct SubstanceProfile;
 namespace Fluid {
 class FluidParticles;
+class MatterGrainMpmContact;
+struct APICSolverParams;
+struct MatterGrainCommonDriver;
 
 // Opt-in dry DEM candidate. Physical radius is independent of render detail.
 struct MatterGrainParams {
@@ -74,14 +77,42 @@ struct MatterGrainParams {
     // (an emitter of wet sand). Needs wet_grains.
     float birth_saturation = 0.0f;
     int max_substeps = 512;
+    // Sleeping grains (docs/dev/DEM_UYUYAN_TANELER.md): a grain slower than
+    // sleep_speed_m_s (translation, and spin x radius) for sleep_time_s stops
+    // computing contacts and holds still until a faster grain touches it.
+    // Absolute units: the threshold is a property of the motion, not of the
+    // solver settings. Never with moving colliders, MPM contact, the shared
+    // clock, liquid coupling or a force field on the grain.
+    bool sleep = true;
+    float sleep_speed_m_s = 0.002f;
+    float sleep_time_s = 0.2f;
 };
 
 // Host CFL and GLSL history slots share this budget (sim_matter_grain.glsl).
 inline constexpr int kMatterGrainContactBudget = 24;
-inline constexpr uint32_t kMatterGrainShaderRevision = 16;
-// Neighbour hash: three rotating tables of fixed-capacity buckets.
+// 17: 2-D dispatch index, 18: cost counters, 19: Verlet neighbour list,
+// 20: single-bank in-place contact history in host-assigned blocks,
+// 21: sleeping grains (rest counter per block, 128 B push constants).
+inline constexpr uint32_t kMatterGrainShaderRevision = 21;
+// Neighbour hash: one table of fixed-capacity buckets, filled only when the
+// neighbour lists are rebuilt (docs/dev/DEM_VERLET_LISTESI.md).
 inline constexpr uint32_t kMatterGrainBucketCapacity = 16;
-inline constexpr uint32_t kMatterGrainBucketTables = 3;
+inline constexpr uint32_t kMatterGrainBucketTables = 1;
+// Per-grain Verlet list: neighbours within 2r + bridge rupture cap + skin,
+// rebuilt once any grain has moved skin/2 since the last build. More
+// neighbours than the capacity refuse publication (diagnostics bit 8).
+inline constexpr uint32_t kMatterGrainListCapacity = 32;
+inline constexpr float kMatterGrainListSkinRadii = 0.5f;
+// Grains are re-sorted by cell only when the population changed or more than
+// this fraction of neighbours in the array are out of cell order. Each re-sort
+// re-uploads the whole state (88 MB at 1.3M grains); a settled pile keeps its
+// order and stays resident on the device.
+inline constexpr float kMatterGrainResortDisorder = 0.02f;
+// Collider faces: index width only, not a tuning budget. Contact history keys
+// carry the surface patch id (a face index) in 30 bits (PATCH_KEY in
+// sim_matter_grain.glsl). Device memory (storage-buffer limit) binds first and
+// reports itself; there is no face decimation, so the mesh is used as given.
+inline constexpr std::size_t kMatterGrainMaxColliderFaces = std::size_t{1} << 30;
 
 bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& params,
                            std::string& error);
@@ -123,12 +154,27 @@ struct MatterGrainStepReport {
     float substep_dt = 0.0f;
     std::string limit; // accuracy | stability | damping | travel
     uint32_t max_contacts = 0;
+    // Contacts per grain the stability bound assumed this frame, and whether
+    // the frame was re-run at the full budget because more were measured
+    // (the re-run starts without contact history).
+    uint32_t cfl_contacts = 0;
+    bool cfl_budget_retry = false;
+    // Cost counters of the last substep, summed over grains: neighbour-list
+    // entries read, grain-grain contacts found, contact-history slots read,
+    // grains with no contact at all, collider BVH nodes visited.
+    uint64_t neighbour_candidates = 0;
+    uint64_t grain_pairs = 0;
+    uint64_t history_probes = 0;
+    uint64_t contactless_grains = 0;
+    uint64_t collider_nodes_visited = 0;
+    // Neighbour-list builds in this frame (one is forced at the frame start).
+    uint32_t list_rebuilds = 0;
     uint32_t sticking_contacts = 0;
     uint32_t contacts = 0;
     bool history_reset = false;
     // allocation | host_state_changed | first_step | "" (history carried over)
     std::string history_reset_reason;
-    bool history_remapped = false;  // order changed; history gathered on device
+    bool history_remapped = false;  // order changed; grain -> history block map re-uploaded
     // B4 / H1-C7 transfer accounting for this step (grain path only).
     bool state_resident = false;    // bank 0 reused, no state upload
     std::size_t upload_bytes = 0;
@@ -148,6 +194,18 @@ struct MatterGrainStepReport {
     float host_coupling_ms = 0.0f;
     // Collider gather + vertex velocities + force-field evaluation.
     float host_motion_ms = 0.0f;
+    // Inside prepare / gpu_wait: the state upload batch and the readback batch.
+    float upload_ms = 0.0f;
+    float download_ms = 0.0f;
+    // The whole grain-domain step (all of the above plus the liquid lane): a
+    // frame's wall time minus this is spent outside the matter step.
+    float host_step_ms = 0.0f;
+    // Fraction of adjacent grains out of (cell, identity) order this frame, and
+    // whether they were re-sorted (a re-sort forces the full state upload).
+    float cell_order_disorder = 0.0f;
+    bool cell_resorted = false;
+    // Grains asleep on the last substep (skipped contacts and integration).
+    uint32_t sleeping_grains = 0;
     // Moving colliders and force fields seen by this step.
     std::size_t collider_faces = 0;
     float collider_speed_max = 0.0f;       // fastest collider vertex, m/s
@@ -162,9 +220,17 @@ struct MatterGrainStepReport {
     float liquid_speed_p99 = 0.0f;
     int liquid_substeps = 0;
     std::size_t working_set_bytes = 0;
-    // Same-domain liquid (transport owner mpm) beside the grains.
+    // Separate fluid and continuum MPM owners beside the DEM grains.
     std::size_t grains = 0;
     std::size_t liquid_parcels = 0;
+    std::size_t mpm_parcels = 0;
+    uint64_t mpm_contact_events = 0;
+    uint32_t mpm_contact_max_neighbours = 0;
+    double mpm_contact_momentum_residual = 0.0;
+    double mpm_contact_impulse = 0.0;
+    bool common_clock = false;
+    bool liquid_reaction_on_gpu = false;
+    bool liquid_support_dynamic = false;
     bool coupling_enabled = false;
     std::size_t coupled_grains = 0;
     Vec3 drag_impulse;        // sum over grains of the liquid's drag, N*s
@@ -216,25 +282,39 @@ struct MatterGrainGpuRuntime {
     ComputeBufferHandle ids;
     ComputeBufferHandle scratch;
     ComputeBufferHandle history;
-    ComputeBufferHandle history_owner;
+    // Grain -> history block map, then {owner id, occupied-slot mask} per block.
+    ComputeBufferHandle history_blocks;
     ComputeBufferHandle diagnostics;
     ComputeBufferHandle triangles;
     ComputeBufferHandle collider_nodes;
     ComputeBufferHandle collider_patches;
+    // Verlet list: per grain {count, kMatterGrainListCapacity indices}, and
+    // the positions the list was built from.
+    ComputeBufferHandle neighbour_list;
+    ComputeBufferHandle build_positions;
     uint64_t collider_fingerprint = 0;
     uint32_t collider_node_count = 0;
     // Float offset of the vertex velocities in `triangles` (0 = static).
     uint32_t collider_velocity_offset = 0;
     bool collider_uploaded = false;
+    // Contacts per grain the CFL assumes next frame: last frame's measured
+    // maximum + 4, clamped to [12, kMatterGrainContactBudget]. A frame that
+    // measures more is re-run at the full budget (stepMatterGrainGpu).
+    uint32_t cfl_contact_hint = static_cast<uint32_t>(kMatterGrainContactBudget);
     bool history_fresh = true;
+    // The device liquid-coupling rows are known to be all zero (a dry frame's
+    // upload landed and nothing coupled has written them since).
+    bool coupling_zero = false;
     // Device contact history is valid only for the grain state it was
     // published with. Reset, timeline scrub, cache restore or a script edit
     // present a different state (ids restart at 1 after a reset, so identity
     // alone matches the wrong grains): any surviving grain whose position is
     // not bit-identical to the published one drops all history. A new ORDER
-    // of the same grains (cell sort, births, removals) keeps it: the history
-    // is gathered to the new indices on the device (B8).
+    // of the same grains (cell sort, births, removals) keeps it: every grain
+    // keeps its history block and only the grain -> block map is uploaded (B8).
     std::vector<uint64_t> published_ids;
+    // Block of each published grain (no FRESH bit), parallel to published_ids.
+    std::vector<uint32_t> history_block;
     std::vector<Vec3> published_positions;
     // B4: the rest of the published state, to skip re-uploading it.
     std::vector<Vec3> published_velocities;
@@ -263,7 +343,8 @@ struct MatterGrainMotion {
 
 nlohmann::json matterGrainDiagnostics(const FluidParticles& particles,
                                      const MatterGrainParams& params,
-                                     const MatterGrainStepReport* report = nullptr);
+                                     const MatterGrainStepReport* report = nullptr,
+                                     const APICSolverParams* owner_params = nullptr);
 // Free-standing pile shape from grain centres: radial rings of one diameter
 // around the horizontal centroid, ring surface = highest grain top above the
 // lowest grain bottom. The repose angle is the least-squares slope of the
@@ -296,7 +377,9 @@ bool stepMatterGrainGpu(FluidParticles& grains, const Vec3& low, const Vec3& hig
     const std::vector<MatterGrainCouplingInput>* coupling,
     std::vector<MatterGrainCouplingOutput>* drag_out,
     MatterGrainStepReport& report, std::string& error,
-    const MatterGrainMotion* motion = nullptr);
+    const MatterGrainMotion* motion = nullptr,
+    MatterGrainMpmContact* mpm_contact = nullptr,
+    const MatterGrainCommonDriver* common_driver = nullptr);
 
 } // namespace Fluid
 } // namespace RayTrophiSim

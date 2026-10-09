@@ -5,6 +5,25 @@
 > C5/C6/C7 fiziksel yakınsama ve H1 maliyet kapıları bu testlerle kapanmaz.
 > Uzman Gas/Liquid domain'leri T0 eşitlik ölçümü olmadan kaldırılmaz.
 
+## 2026-10-08 ortak saat kaynak devamı
+
+MPM/DEM geometri ve teması cihazda ortak mikro saat; continuum grid transferi
+kendi CFL/elastic sıklığında. Sıvı hız/topak tepkisi GPU'da her tick güncel.
+Keyfi contact 1M/64-neighbour kapıları kaldırıldı, measured degree relaxation ve
+2-D dispatch eklendi. Yeni kaynak henüz derlenmedi; önceki contact smoke PASS.
+Frame CFD-DEM support, porous owner izolasyonu ve cinematic yakınsama/maliyet
+kapıları açık. Ayrıntı: [son devir](MADDE_T2_T3_HANDOFF.md).
+
+## 2026-10-08 ortak madde state / sahiplik kaynak checkpoint
+
+Toplu kullanıcı onayıyla küçük adım onayları kaldırıldı; kaynak planı önce,
+kabul testleri en sonda ve build kullanıcıda. `MatterSubstanceState` ortak
+model/obstacle/ν(T) çekirdeği ve `granular_transport` sahipliği kaynakta.
+**Ana plan kapanmadı:** MPM↔grain için DEM alt adımı başına iki yönlü Vulkan
+contact kaynakta; önceki kullanıcı build PASS, yeni shader/C++ kabulü açık.
+Ortak zamanlayıcı/porous owner izolasyonu, karma elastik MPM, gaz↔grain ve T6 kapıları açık. Güncel kaynak/kabul
+ayrıntısı [MADDE_T2_T3_HANDOFF.md](MADDE_T2_T3_HANDOFF.md)'nin ilk checkpoint'idir.
+
 ## Güncel kısa devir — 2026-10-08
 
 | Konu | Güncel durum |

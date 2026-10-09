@@ -1,0 +1,4 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define RT_GRID_MAP_SEED
+#include "sim_sparse_grid_transaction.glsl"

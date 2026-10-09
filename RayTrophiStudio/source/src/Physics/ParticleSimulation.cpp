@@ -5,6 +5,9 @@
 #include "Fluid/MatterGpuRuntime.h"
 #include "Fluid/MatterGrainBirth.h"
 #include "Fluid/MatterGrainCoupling.h"
+#include "Fluid/MatterGrainMpmContact.h"
+#include "Fluid/MatterCommonClock.h"
+#include "Fluid/MatterGrainFluidGpuCoupling.h"
 #include "Fluid/MatterGpuParticleLease.h"
 #include "Fluid/MatterWetResponse.h"
 #include "Fluid/MatterGranularLoad.h"
@@ -21,6 +24,7 @@
 #include "Fluid/FluidThermalPhaseExchange.h"
 #include "Fluid/FluidGridResourceBudget.h"
 #include "Fluid/FluidLevelSet.h"   // buildSubstanceViscosityField
+#include "Fluid/MatterSubstanceState.h"
 #include "Fluid/SubstanceTag.h"
 #include "Fluid/GranularGpuDispatch.h"
 #include "Fluid/GranularStepPolicy.h"
@@ -1877,7 +1881,8 @@ bool runGpuFluidParticleIntegrateForces(SimulationGridDomainState& state,
                                         float time_seconds,
                                         const SimulationForceFieldComputeBuffer* force_buffer,
                                         SimulationComputeContext* compute,
-                                        SimulationGridDomainComputeBuffers& gpu_buffers) {
+                                        SimulationGridDomainComputeBuffers& gpu_buffers,
+                                        bool publish_velocity = true) {
     const std::size_t particle_count = state.particles.size();
     if (!compute || !compute->supportsDispatch() || particle_count == 0 || dt <= 0.0f) {
         return false;
@@ -1965,6 +1970,9 @@ bool runGpuFluidParticleIntegrateForces(SimulationGridDomainState& state,
     constexpr uint32_t threads = 256;
     cmd.groups.groups_x = (static_cast<uint32_t>(constants.particle_count) + threads - 1u) / threads;
     bool ok = compute->dispatch(cmd);
+    if (!publish_velocity) {
+        return ok;
+    }
     compute->synchronize();
     ok = ok && compute->downloadBuffer(gpu_buffers.fluid_velocities,
                                        state.particles.velocity.data(),
@@ -2268,11 +2276,13 @@ void blockSubstanceSolidFaceWeights(FluidSim::FluidGrid& grid) {
 bool runGpuFluidZeroSolidFaces(const FluidSim::FluidGrid& grid,
                                SimulationComputeContext* compute,
                                SimulationGridDomainComputeBuffers& gpu_buffers) {
+    // Dense bank or compact pages (docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md).
+    const auto mac = Fluid::macVelocityBinding(gpu_buffers);
     if (!compute || compute->backendType() != ComputeBackendType::VulkanCompute ||
         !compute->supportsDispatch() ||
         grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 ||
-        !gpu_buffers.vel_x.valid() || !gpu_buffers.vel_y.valid() ||
-        !gpu_buffers.vel_z.valid() || !gpu_buffers.fluid_mask.valid()) {
+        !mac.velocity[0].valid() || !mac.velocity[1].valid() ||
+        !mac.velocity[2].valid() || !gpu_buffers.fluid_mask.valid()) {
         return false;
     }
     FluidP2GGpuConstants constants;
@@ -2283,17 +2293,20 @@ bool runGpuFluidZeroSolidFaces(const FluidSim::FluidGrid& grid,
     const std::size_t face_count = std::max({ grid.vel_x.size(),
                                               grid.vel_y.size(),
                                               grid.vel_z.size() });
-    ComputeBufferHandle bufs[4] = {
-        gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z,
-        gpu_buffers.fluid_mask
+    ComputeBufferHandle bufs[6] = {
+        mac.velocity[0], mac.velocity[1], mac.velocity[2],
+        gpu_buffers.fluid_mask, mac.map, mac.list
     };
     ComputeDispatch cmd;
-    cmd.kernel = "sim_fluid_zero_solid_faces";
+    cmd.kernel = Fluid::macKernel(mac, "sim_fluid_zero_solid_faces", "sim_sparse_mac_zero_faces");
     cmd.buffers = bufs;
-    cmd.buffer_count = 4;
+    cmd.buffer_count = mac.compact ? 6 : 4;
     cmd.constants = &constants;
     cmd.constants_size = sizeof(constants);
     cmd.groups.groups_x = static_cast<uint32_t>((face_count + 255u) / 256u);
+    if (mac.compact) {
+        cmd.groups = FluidGpuDispatch::groups256(mac.face_lanes);
+    }
     return Fluid::dispatchMatterGpuModel(*compute, cmd, gpu_buffers.matter_model);
 }
 
@@ -2939,23 +2952,7 @@ bool runGpuFluidFreeSurfacePressure(SimulationGridDomainState& state,
 //     every other stage in this file already assumes.
 // The extra upload/download is the price of that; fusing it into the pressure
 // path is a later optimization, not a correctness question.
-struct FluidViscosityGpuConstants {
-    int   nx = 0;
-    int   ny = 0;
-    int   nz = 0;
-    int   boundary = 1;      // 0 = open, 1 = closed, 2 = periodic
-    float voxel_size = 1.0f;
-    float dt = 0.0f;
-    float alpha = 0.0f;         // nu*dt/h^2
-    float solid_weight = 0.0f;  // 1 - wall_slip
-    int   parity = 0;
-    // Per-cell viscosity present in binding 10. Took a pad word rather than
-    // extending the block, so the ABI below is unchanged by this feature.
-    int   has_nu = 0;
-    int   pad1 = 0;
-    int   pad2 = 0;
-    int   pad3 = 0;
-};
+using FluidViscosityGpuConstants = Fluid::ViscosityGpuConstants;
 static_assert(sizeof(FluidViscosityGpuConstants) == 52,
               "sim_fluid_viscosity_rbgs push-constant ABI changed");
 
@@ -10090,6 +10087,9 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.cg_diag);
     destroy(buffers.cg_partials);
     destroy(buffers.cg_scalars);
+    Fluid::releaseSparsePressure(compute, buffers.sparse_pressure);
+    Fluid::releaseSparseViscosity(compute, buffers.sparse_viscosity);
+    Fluid::releaseSparseMacTransfer(compute, buffers.sparse_mac_transfer);
     destroy(buffers.var_u_weight);
     destroy(buffers.var_v_weight);
     destroy(buffers.var_w_weight);
@@ -10132,8 +10132,10 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
     // CPU→GPU→CPU→GPU: CUDA backend is destroyed and recreated, but handle IDs
     // belong to the old instance and are unknown to the new one).
     // getBufferSize returns 0 for IDs not in the current backend's table.
-    const bool stale_handles = buffers.vel_x.valid() &&
-        compute.getBufferSize(buffers.vel_x) == 0;
+    // Probed on pressure, which every grid domain keeps: a compact MAC owner
+    // has no dense velocity bank to probe.
+    const bool stale_handles = buffers.pressure.valid() &&
+        compute.getBufferSize(buffers.pressure) == 0;
 
     // Adaptive bounds may change the resolution by a few cells every frame.
     // Retain the working set and grow individual buffers only when necessary;
@@ -10176,9 +10178,15 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
     const std::size_t max_face_count =
         std::max({ grid.vel_x.size(), grid.vel_y.size(), grid.vel_z.size() });
     const std::size_t weight_bytes = max_face_count * sizeof(float);
-    ensureComputeBuffer(compute, buffers.vel_x, "GridDomainVelX", grid.vel_x.size() * sizeof(float), usage);
-    ensureComputeBuffer(compute, buffers.vel_y, "GridDomainVelY", grid.vel_y.size() * sizeof(float), usage);
-    ensureComputeBuffer(compute, buffers.vel_z, "GridDomainVelZ", grid.vel_z.size() * sizeof(float), usage);
+    // A compact MAC owner keeps its velocity and FLIP baseline on tile pages
+    // only (docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md): no dense bank, and a bank
+    // left from an earlier dense step is released.
+    const bool dense_mac = !Fluid::releaseDenseMacForCompactOwner(compute, buffers);
+    if (dense_mac) {
+        ensureComputeBuffer(compute, buffers.vel_x, "GridDomainVelX", grid.vel_x.size() * sizeof(float), usage);
+        ensureComputeBuffer(compute, buffers.vel_y, "GridDomainVelY", grid.vel_y.size() * sizeof(float), usage);
+        ensureComputeBuffer(compute, buffers.vel_z, "GridDomainVelZ", grid.vel_z.size() * sizeof(float), usage);
+    }
     ensureComputeBuffer(compute, buffers.density, "GridDomainDensity", cell_bytes, render_field_usage);
     ensureComputeBuffer(compute, buffers.temperature, "GridDomainTemperature", weight_bytes, render_field_usage);
     ensureComputeBuffer(compute, buffers.fuel, "GridDomainFuel", weight_bytes, render_field_usage);
@@ -10238,15 +10246,18 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
             buffers.gas_majorant_valid = false;
         }
     }
-    ensureComputeBuffer(compute, buffers.scratch_vel_x, "GridDomainScratchVelX", grid.vel_x.size() * sizeof(float), usage);
-    ensureComputeBuffer(compute, buffers.scratch_vel_y, "GridDomainScratchVelY", grid.vel_y.size() * sizeof(float), usage);
-    ensureComputeBuffer(compute, buffers.scratch_vel_z, "GridDomainScratchVelZ", grid.vel_z.size() * sizeof(float), usage);
+    if (dense_mac) {
+        ensureComputeBuffer(compute, buffers.scratch_vel_x, "GridDomainScratchVelX", grid.vel_x.size() * sizeof(float), usage);
+        ensureComputeBuffer(compute, buffers.scratch_vel_y, "GridDomainScratchVelY", grid.vel_y.size() * sizeof(float), usage);
+        ensureComputeBuffer(compute, buffers.scratch_vel_z, "GridDomainScratchVelZ", grid.vel_z.size() * sizeof(float), usage);
+    }
     ensureComputeBuffer(compute, buffers.scratch_scalar, "GridDomainScratchScalar", weight_bytes, usage);
     ensureComputeBuffer(compute, buffers.scratch_scalar2, "GridDomainScratchScalar2", weight_bytes, usage);
     ensureComputeBuffer(compute, buffers.substance_viscosity, "GridDomainSubstanceViscosity", weight_bytes, usage);
-    ensureComputeBuffer(compute, buffers.scratch2_vel_x, "GridDomainScratch2VelX", grid.vel_x.size() * sizeof(float), usage);
-    ensureComputeBuffer(compute, buffers.scratch2_vel_y, "GridDomainScratch2VelY", grid.vel_y.size() * sizeof(float), usage);
-    ensureComputeBuffer(compute, buffers.scratch2_vel_z, "GridDomainScratch2VelZ", grid.vel_z.size() * sizeof(float), usage);
+    if (grid.allocate_gas_channels && !Fluid::ensureMacRhsScratch(compute, buffers,
+            {grid.vel_x.size(), grid.vel_y.size(), grid.vel_z.size()}, false)) {
+        return false;
+    }
     ensureComputeBuffer(compute, buffers.fluid_mask,    "GridDomainFluidMask",    cell_bytes, usage);
     ensureComputeBuffer(
         compute, buffers.fluid_surface_columns, "GridDomainFluidSurfaceColumns",
@@ -10324,17 +10335,9 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
     // partial sums for the dot reductions. Additive: if any of these fail to
     // allocate the SOR path is unaffected (runGpuFluidMGPCGPressure re-validates
     // and the caller falls back to SOR / CPU PCG).
-    ensureComputeBuffer(compute, buffers.cg_residual, "GridDomainCGResidual", cell_bytes, usage);
-    ensureComputeBuffer(compute, buffers.cg_z,        "GridDomainCGZ",        cell_bytes, usage);
-    ensureComputeBuffer(compute, buffers.cg_search,   "GridDomainCGSearch",   cell_bytes, usage);
-    ensureComputeBuffer(compute, buffers.cg_As,       "GridDomainCGAs",       cell_bytes, usage);
-    ensureComputeBuffer(compute, buffers.cg_diag,     "GridDomainCGDiag",     cell_bytes, usage);
-    const std::size_t cg_blocks = (cell_count + 255u) / 256u;
-    ensureComputeBuffer(compute, buffers.cg_partials, "GridDomainCGPartials", cg_blocks * sizeof(double), usage);
-    ensureComputeBuffer(compute, buffers.cg_scalars,  "GridDomainCGScalars",  7 * sizeof(double), usage);
+    // Projection selects dense or compact tile scratch using its actual physics settings.
 
-    if (compute.backendType() == ComputeBackendType::CUDA ||
-        compute.backendType() == ComputeBackendType::VulkanCompute) {
+    if (compute.backendType() == ComputeBackendType::CUDA) {
         std::vector<SimulationGridDomainMGLevelBuffers> wanted_levels;
         int lx = (grid.nx + 1) / 2;
         int ly = (grid.ny + 1) / 2;
@@ -10394,17 +10397,17 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
     }
 
     bool ok =
-        buffers.vel_x.valid() &&
-        buffers.vel_y.valid() &&
-        buffers.vel_z.valid() &&
+        (!dense_mac || (buffers.vel_x.valid() &&
+                        buffers.vel_y.valid() &&
+                        buffers.vel_z.valid() &&
+                        buffers.scratch_vel_x.valid() &&
+                        buffers.scratch_vel_y.valid() &&
+                        buffers.scratch_vel_z.valid())) &&
         buffers.density.valid() &&
         buffers.temperature.valid() &&
         buffers.fuel.valid() &&
         buffers.pressure.valid() &&
         buffers.divergence.valid() &&
-        buffers.scratch_vel_x.valid() &&
-        buffers.scratch_vel_y.valid() &&
-        buffers.scratch_vel_z.valid() &&
         buffers.scratch_scalar.valid() &&
         buffers.fluid_mask.valid() &&
         buffers.fluid_surface_columns.valid() &&
@@ -10480,6 +10483,8 @@ bool ParticleSimulationSystem::validateGpuFluidMGPCG(SimulationComputeContext* c
     st.type = SimulationDomainType::Fluid;
     st.grid.resize(N, N, N, h, Vec3(0.0f, 0.0f, 0.0f));
     auto& g = st.grid;
+
+    g.sparse_mode_enabled = false; // This self-test inspects dense CG scratch explicitly.
 
     for (int k = 0; k < N; ++k) for (int j = 0; j < N; ++j) for (int i = 0; i <= N; ++i)
         g.vel_x[g.velXIndex(i, j, k)] = std::sin(0.4f * i + 0.2f * j) * 0.5f;

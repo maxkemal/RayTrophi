@@ -2,6 +2,7 @@
 
 #include "Vec3.h"
 #include "SimulationCompute.h"
+#include "FluidGpuDispatch.h"
 
 #include <algorithm>
 #include <cmath>
@@ -112,12 +113,35 @@ inline bool normalize(RayTrophiSim::SimulationComputeContext& compute, const Bou
     command.buffer_count = 2;
     command.constants = &constants;
     command.constants_size = sizeof(constants);
-    command.groups.groups_x = static_cast<uint32_t>((count + 255) / 256);
+    command.groups = FluidGpuDispatch::groups256(static_cast<uint32_t>(count));
     return compute.dispatch(command);
 }
 
 template <typename Block, typename Stats>
 inline void drawDiagnostics(Block& block, const Stats& stats) {
+    if (stats.transfer_sparse_used) {
+        block.Value("Transfer MAC tiles", "%llu active / %llu allocated",
+                    static_cast<unsigned long long>(stats.transfer_sparse_active_tiles),
+                    static_cast<unsigned long long>(stats.transfer_sparse_allocated_tiles));
+        block.Value("Transfer pool memory", "%.2f MiB",
+                    double(stats.transfer_sparse_resident_bytes) / (1024.0 * 1024.0));
+        block.Value("MAC storage", "%s", stats.transfer_sparse_canonical
+            ? "Compact canonical (no dense velocity/FLIP bank)"
+            : "Sparse transfer; dense solver publication");
+        block.Value("FLIP baseline", "%s", stats.flip_sparse_used ? "Sparse" : "Dense/PIC");
+    }
+    if (stats.transfer_sparse_blocked) {
+        // A compact failure is not a slow sparse step: say it fell back and why.
+        block.Value("MAC storage", "Dense (compact blocked: %s)",
+                    stats.transfer_sparse_status.c_str());
+    }
+    if (stats.viscosity_sparse_used) {
+        block.Value("Viscosity MAC tiles", "%llu active / %llu allocated",
+                    static_cast<unsigned long long>(stats.viscosity_sparse_active_tiles),
+                    static_cast<unsigned long long>(stats.viscosity_sparse_allocated_tiles));
+        block.Value("Viscosity RHS memory", "%.2f MiB",
+                    double(stats.viscosity_sparse_resident_bytes) / (1024.0 * 1024.0));
+    }
     if (stats.normalize_window_used && stats.grid_cell_count > 0) {
         block.Value("P2G normalize cells", "%llu / %zu (%.1f%%)",
                     static_cast<unsigned long long>(stats.normalize_window_cells),
@@ -132,6 +156,13 @@ inline void drawDiagnostics(Block& block, const Stats& stats) {
     }
     if (stats.occupancy_on_gpu) {
         block.Value("Occupancy mask", "%s", "GPU (resident)");
+    }
+    if (stats.pressure_sparse_used) {
+        block.Value("Pressure tile storage", "%llu active / %llu allocated",
+                    static_cast<unsigned long long>(stats.pressure_sparse_active_tiles),
+                    static_cast<unsigned long long>(stats.pressure_sparse_allocated_tiles));
+        block.Value("Pressure resident memory", "%.2f MiB",
+                    double(stats.pressure_sparse_resident_bytes) / (1024.0 * 1024.0));
     }
 }
 

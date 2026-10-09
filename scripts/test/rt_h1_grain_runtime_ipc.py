@@ -31,6 +31,11 @@ def main():
                         help="pile at contact_resolution 24 vs 48 (real substep-dt halving)")
     parser.add_argument("--repose-only", action="store_true",
                         help="poured free-standing pile: repose angle, mu_r sensitivity, grain-size convergence")
+    # A/B of the substep dt on the same build: a subset of arms (the cross-arm
+    # gates are skipped) at a contact_resolution that forces a smaller dt.
+    parser.add_argument("--repose-arms", nargs='+', default=None,
+                        help="run only these repose arm labels, e.g. mu_r_.05 mu_r_.1")
+    parser.add_argument("--repose-contact-resolution", type=int, default=24)
     parser.add_argument("--history-only", action="store_true",
                         help="device contact history: carried while the state is unchanged, reset after fluid.reset")
     parser.add_argument("--porous-only", action="store_true",
@@ -648,6 +653,8 @@ def main():
             for label, radius, mu_r, count in [('mu_r_.05', .025, .05, 1500), ('mu_r_.3', .025, .3, 1500),
                                                ('mu_r_.1', .025, .1, 1500),
                                                ('mu_r_.1_r_.0175', .0175, .1, 4373)]:
+                if args.repose_arms and label not in args.repose_arms:
+                    continue
                 scale = radius/.025
                 call('timeline.set_frame', frame=0)
                 call('fluid.reset')
@@ -655,7 +662,8 @@ def main():
                      stiffness_n_m=100000.*scale,
                      restitution=.5,
                      sliding_damping_n_s_m=4.*scale**2, friction=.5, rolling_friction=mu_r,
-                     twisting_friction=.1, tangential_stiffness_ratio=2/7, contact_resolution=24,
+                     twisting_friction=.1, tangential_stiffness_ratio=2/7,
+                     contact_resolution=args.repose_contact_resolution,
                      packing_fraction=.6, max_substeps=4096)
                 call('flow_source.update', name=SOURCE, domain=REPOSE, position=[0, .6, 0], radius=.08,
                      velocity=[0, -.5, 0], max_emitted_particles=count, use_particle_limit=True,
@@ -723,6 +731,10 @@ def main():
             save()
             print('repose angles', angle, flush=True)
             assert not failures, failures
+            if args.repose_arms:
+                call('flow_source.update', name=SOURCE, domain=DOMAIN, enabled=False)
+                data['completed'] = True
+                return
             # Sensitivity proves the measurement sees the rolling spring at all.
             assert angle['mu_r_.3'] >= angle['mu_r_.05'] + 3, ('repose insensitive to mu_r', angle)
             assert 15 <= angle['mu_r_.1'] <= 45, ('implausible repose angle', angle)

@@ -1,11 +1,13 @@
 #pragma once
 #include "../ParticleSimulation.h"
 #include "MatterGpuPartition.h"
+#include "MatterGrainFluidGpuCoupling.h"
 
 namespace RayTrophiSim::Fluid {
 
 struct MatterGpuRuntime {
     MatterGrainGpuRuntime grain;
+    MatterGrainFluidGpuStorage liquid_coupling;
     SimulationGridDomainComputeBuffers granular;
     MatterGpuPartition partition;
     ComputeBufferHandle rest_mass;

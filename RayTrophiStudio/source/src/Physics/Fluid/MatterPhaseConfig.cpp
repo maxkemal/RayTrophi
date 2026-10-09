@@ -180,7 +180,8 @@ PhaseLayouts resolvePhaseLayouts(const SimulationGridDomainDesc& domain,
                                 const Vec3& logical_min, const Vec3& logical_max,
                                 int nx, int ny, int nz, float voxel) {
     PhaseLayouts result;
-    const int cap = std::clamp(domain.max_auto_resolution, 32, 512);
+    // Same knob as the main grid, no hidden ceiling (MatterDomainSynchronization).
+    const int cap = std::max(domain.max_auto_resolution, 32);
     if (simulationDomainHasGas(domain.type)) {
         result.gas = makeLayout(domain.gas_phase_grid, logical_min, logical_max,
                                nx, ny, nz, voxel, cap);
@@ -216,7 +217,7 @@ PhaseLayouts previewPhaseLayouts(const SimulationGridDomainDesc& domain) {
     const Vec3 hi = Vec3::max(domain.bounds_min, domain.bounds_max) +
         Vec3(logicalPadding(domain));
     const Vec3 extent = hi - lo;
-    const int cap = std::clamp(domain.max_auto_resolution, 32, 512);
+    const int cap = std::max(domain.max_auto_resolution, 32);
     const float largest = std::max({extent.x, extent.y, extent.z, 0.001f});
     const float requested = domain.preserve_voxel_size_on_resize && domain.voxel_size > 1e-6f
         ? domain.voxel_size : largest / static_cast<float>(cap);

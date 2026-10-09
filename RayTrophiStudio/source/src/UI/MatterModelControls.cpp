@@ -1,4 +1,5 @@
 #include "Fluid/MatterModelService.h"
+#include "Fluid/MatterSubstanceState.h"
 #include "Api/RtApi.h"
 #include "Fluid/FluidViewResolver.h"
 #include "ParticleSimulation.h"
@@ -217,6 +218,15 @@ void drawMatterModelSummary(const SimulationGridDomainDesc& domain,
     if (!state || !state->valid) {
         ImGui::TextDisabled("No synchronized particle state.");
         return;
+    }
+    const auto owners = inspectMatterDomainOwners(state->particles, domain);
+    ImGui::Text("Transport: fluid %llu / grain %llu / MPM %llu / obstacle %llu",
+        static_cast<unsigned long long>(owners.particles[0]),
+        static_cast<unsigned long long>(owners.particles[1]),
+        static_cast<unsigned long long>(owners.particles[2]),
+        static_cast<unsigned long long>(owners.particles[3]));
+    if (!owners.ready) {
+        ImGui::TextWrapped("%s", owners.reason.c_str());
     }
     static const char* names[] = {"Fluid", "Granular", "Elastic", "Unresolved"};
     if (ImGui::BeginTable("##MatterModels", 3, ImGuiTableFlags_Borders)) {

@@ -165,6 +165,15 @@ inline bool draw(const char* id, std::string& assigned) {
                 if (ImGui::Combo("##v", &idx, models, 3)) apply(spec.key, models[idx]);
                 break;
             }
+            case RayTrophiSim::SubstanceFieldKind::Transport: {
+                static const char* transports[] = {"mpm", "dem"};
+                int index = value == "dem" ? 1 : 0;
+                ImGui::SetNextItemWidth(160.0f);
+                if (ImGui::Combo("##v", &index, transports, 2)) {
+                    apply(spec.key, transports[index]);
+                }
+                break;
+            }
             case RayTrophiSim::SubstanceFieldKind::Category: {
                 static const char* categories[] = {"liquid", "granular", "solid", "fuel"};
                 int idx = 2;

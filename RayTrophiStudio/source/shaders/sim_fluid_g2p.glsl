@@ -1,6 +1,11 @@
 // sim_fluid_g2p.comp
 // APIC grid-to-particle gather. One thread per particle.
 // Buffers store Vec3 as 3 tightly-packed floats (stride 12, NOT vec4/stride 16).
+#include "sim_dispatch.glsl"
+#ifdef RT_SPARSE_MAC
+#include "sim_sparse_mac_address.glsl"
+layout(set = 0, binding = 10) readonly buffer TileMap { uint tile_map[]; };
+#endif
 layout(local_size_x = 256) in;
 
 layout(push_constant) uniform PC {
@@ -51,24 +56,56 @@ void quadratic_weights(float fx, out int base, out float w[3]) {
 }
 
 float fetch_post(int comp, int i, int j, int k) {
+#ifdef RT_SPARSE_MAC
+    ivec3 cells = ivec3(pc.nx, pc.ny, pc.nz);
+    ivec3 face = ivec3(i, j, k);
+    uint slot = tile_map[sparseMacTileKey(face, comp, cells)];
+    if (slot == 0u) return 0.0;
+    uint address = (slot - 1u) * 576u + sparseMacLocal(face, comp, cells);
+    if (comp == 0) return vel_x_post[address];
+    if (comp == 1) return vel_y_post[address];
+    return vel_z_post[address];
+#else
     if      (comp == 0) return vel_x_post[i + j*(pc.nx+1) + k*(pc.nx+1)*pc.ny];
     else if (comp == 1) return vel_y_post[i + j*pc.nx      + k*pc.nx*(pc.ny+1)];
     else                return vel_z_post[i + j*pc.nx      + k*pc.nx*pc.ny];
+#endif
 }
 
 float fetch_pre(int comp, int i, int j, int k) {
+#ifdef RT_SPARSE_MAC
+    ivec3 cells = ivec3(pc.nx, pc.ny, pc.nz);
+    ivec3 face = ivec3(i, j, k);
+    uint slot = tile_map[sparseMacTileKey(face, comp, cells)];
+    if (slot == 0u) return 0.0;
+    uint address = (slot - 1u) * 576u + sparseMacLocal(face, comp, cells);
+    if (comp == 0) return vel_x_pre[address];
+    if (comp == 1) return vel_y_pre[address];
+    return vel_z_pre[address];
+#else
     if      (comp == 0) return vel_x_pre[i + j*(pc.nx+1) + k*(pc.nx+1)*pc.ny];
     else if (comp == 1) return vel_y_pre[i + j*pc.nx      + k*pc.nx*(pc.ny+1)];
     else                return vel_z_pre[i + j*pc.nx      + k*pc.nx*pc.ny];
+#endif
 }
 
 
 #ifdef MATTER_INDEXED
+#ifdef RT_SPARSE_MAC
+layout(set = 0, binding = 11) readonly buffer MatterIndices { uint matter_index[]; };
+#else
 layout(set = 0, binding = 10) readonly buffer MatterIndices { uint matter_index[]; };
+#endif
+#ifdef RT_SPARSE_MAC
+layout(set = 0, binding = 12) readonly buffer MatterCounts { uint matter_count[]; };
+#else
 layout(set = 0, binding = 11) readonly buffer MatterCounts { uint matter_count[]; };
 #endif
+#endif
 void main() {
-    int id = int(gl_GlobalInvocationID.x);
+    uint lane = simLane256(uint(pc.particle_count));
+    if (lane >= uint(pc.particle_count)) return;
+    int id = int(lane);
 #ifdef MATTER_INDEXED
     if (uint(id) >= matter_count[pc.matter_lane]) return;
     id = int(matter_index[id]);

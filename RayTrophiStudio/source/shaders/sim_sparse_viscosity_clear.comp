@@ -1,0 +1,5 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define RT_SPARSE_VISCOSITY
+#define RT_SPARSE_CLEAR
+#include "sim_fluid_viscosity.glsl"

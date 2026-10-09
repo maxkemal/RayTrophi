@@ -70,6 +70,7 @@ const std::vector<FieldAccess>& fieldTable() {
         RT_FLOAT(melt_viscosity, 0.0f, 1.0f, "", "Phase change"),
         // Granular ranges match the solver's own clamps (sanitizeGranularMaterial)
         // so a value the library accepts is a value the solver runs unchanged.
+        FieldAccess{{"granular_transport", Kind::Transport, 0.0f, 0.0f, "", "Granular"}},
         RT_FLOAT(granular_friction_degrees, 0.0f, 55.0f, "deg", "Granular"),
         RT_FLOAT(granular_cohesion, 0.0f, 1.0e7f, "Pa", "Granular"),
         RT_FLOAT(granular_dilatancy_degrees, 0.0f, 30.0f, "deg", "Granular"),
@@ -124,6 +125,7 @@ json fieldValue(const SubstanceProfile& p, const FieldAccess& field) {
         case Kind::Float: return p.*field.number;
         case Kind::Bool: return p.*field.flag;
         case Kind::Model: return Fluid::matterConstitutiveModelName(p.default_constitutive_model);
+        case Kind::Transport: return Fluid::matterGranularTransportName(p.granular_transport);
         case Kind::Category: return substanceCategoryName(p.category);
         case Kind::Color: return json::array({p.char_color[0], p.char_color[1], p.char_color[2]});
     }
@@ -160,6 +162,16 @@ bool setField(SubstanceProfile& p, const FieldAccess& field, const json& value,
                 return false;
             }
             p.default_constitutive_model = model;
+            return true;
+        }
+        case Kind::Transport: {
+            Fluid::MatterGranularTransport transport;
+            if (!value.is_string() ||
+                !Fluid::parseMatterGranularTransport(value.get<std::string>(), transport)) {
+                error = key + " expects dem|mpm";
+                return false;
+            }
+            p.granular_transport = transport;
             return true;
         }
         case Kind::Category: {

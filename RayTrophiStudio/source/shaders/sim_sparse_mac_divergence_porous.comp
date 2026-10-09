@@ -1,0 +1,4 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define RT_SPARSE_MAC
+#include "sim_fluid_divergence_porous.glsl"

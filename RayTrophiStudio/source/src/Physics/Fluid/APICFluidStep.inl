@@ -43,40 +43,10 @@ void step(FluidParticles& particles,
     // existed, which is what keeps liquid-only domains bit-identical.
     static std::vector<uint8_t> s_solid_particle;
     const uint8_t* solid_particle = nullptr;
-    // Two producers of "this parcel IS the solid": a solid-phase substance tag,
-    // and the thermal-liquid FROZEN flag (FluidThermalLiquid.h). Both take the
-    // same exemptions below; only frozen parcels are additionally pinned.
-    const bool tag_solids = params.solid_substance_tags &&
-                            !params.solid_substance_tags->empty() &&
-                            particles.substance_tag.size() >= particles.size();
     bool any_frozen = false;
-    if (particles.flags.size() >= particles.size()) {
-        for (std::size_t pi = 0; pi < particles.size(); ++pi) {
-            if (particles.flags[pi] & kParticleFlagFrozen) { any_frozen = true; break; }
-        }
-    }
-    if (tag_solids || any_frozen) {
-        s_solid_particle.assign(particles.size(), 0u);
-        bool any = false;
-        for (std::size_t pi = 0; pi < particles.size(); ++pi) {
-            if (any_frozen && (particles.flags[pi] & kParticleFlagFrozen)) {
-                s_solid_particle[pi] = 1u;
-                any = true;
-                continue;
-            }
-            if (!tag_solids) continue;
-            const uint32_t tag = particles.substance_tag[pi];
-            // ★ Tag 0 is untagged liquid, never solid — see
-            // buildSubstanceSolidCells for why that matters.
-            if (tag == kSubstanceUntagged) continue;
-            for (uint32_t st : *params.solid_substance_tags) {
-                if (st != tag) continue;
-                s_solid_particle[pi] = 1u;
-                any = true;
-                break;
-            }
-        }
-        if (any) solid_particle = s_solid_particle.data();
+    if (buildMatterObstacleMask(particles, params.solid_substance_tags,
+                                s_solid_particle, any_frozen)) {
+        solid_particle = s_solid_particle.data();
     }
 
     // 1. External forces on particles (gravity + force fields, incl. the wind

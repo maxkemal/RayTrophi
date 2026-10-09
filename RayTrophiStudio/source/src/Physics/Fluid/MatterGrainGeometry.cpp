@@ -43,9 +43,6 @@ bool collectFlatGrainCollider(const std::vector<std::shared_ptr<Hittable>>& obje
                 continue;
             }
             result.push_back(t);
-            if (result.size() > 4096) {
-                return false;
-            }
         }
     }
     if (result.empty()) {

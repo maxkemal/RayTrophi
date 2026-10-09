@@ -71,6 +71,9 @@ def main():
         for name in ("Sand", "Gravel", "Soil"):
             for key in ("solver_flip_blend", "solver_internal_friction"):
                 assert rows[name][key] == 0.0, (name, key, rows[name][key])
+        for name in ("Sand", "Gravel", "Ice"):
+            assert rows[name]["granular_transport"] == "dem", (name, rows[name])
+        assert rows["Soil"]["granular_transport"] == "mpm"
         assert {"Honey", "Chocolate", "Mud"}.issubset(rows)
         assert rows["Water"]["fluid_extinguishing"] is True
         for name in ("Gasoline", "Alcohol", "Oil", "Plastic (PE)", "Wax"):
@@ -92,6 +95,15 @@ def main():
         honey = get(HONEY)
         assert honey["based_on"] == "Water" and not honey["builtin"]
         assert honey["fields"] == water and honey["overridden"] == [], honey
+
+        before_transport = get(HONEY)
+        assert rejected("substance.set", name=HONEY,
+                        fields={"density": 1400.0, "granular_transport": "xpbd"})
+        assert get(HONEY) == before_transport, "invalid transport patch was not transactional"
+        client.call("substance.set", name=HONEY, fields={"granular_transport": "dem"})
+        assert get(HONEY)["fields"]["granular_transport"] == "dem"
+        client.call("substance.set", name=HONEY, fields={"granular_transport": None})
+        assert get(HONEY) == before_transport, "transport Revert did not restore inheritance"
 
         client.call("substance.set", name=HONEY, fields={"liquid_kinematic_viscosity": 2.0e-3})
         honey = get(HONEY)

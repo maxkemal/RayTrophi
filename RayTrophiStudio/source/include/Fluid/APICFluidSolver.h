@@ -523,6 +523,21 @@ struct APICSolverStats {
     bool normalize_window_used = false;
     uint64_t pressure_window_cells = 0;
     bool pressure_window_used = false;
+    bool transfer_sparse_used = false;
+    bool flip_sparse_used = false;
+    uint64_t transfer_sparse_active_tiles = 0;
+    uint64_t transfer_sparse_allocated_tiles = 0;
+    uint64_t transfer_sparse_resident_bytes = 0;
+    std::string transfer_sparse_status;
+    // Compact pages were the canonical device MAC velocity: no dense velocity
+    // or FLIP bank existed (docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md). Blocked: a
+    // compact P2G failed, the lane runs dense until sparse is toggled.
+    bool transfer_sparse_canonical = false;
+    bool transfer_sparse_blocked = false;
+    bool pressure_sparse_used = false;
+    uint64_t pressure_sparse_active_tiles = 0;
+    uint64_t pressure_sparse_allocated_tiles = 0;
+    uint64_t pressure_sparse_resident_bytes = 0;
     bool occupancy_on_gpu = false;
     size_t recovered_solid_particles = 0;
     size_t granular_yielded_particles = 0;
@@ -614,6 +629,10 @@ struct APICSolverStats {
     // from "viscosity is switched off" — the same reading for two very
     // different states is how a dead knob stays invisible.
     int   viscosity_sweeps_run = 0;
+    bool viscosity_sparse_used = false;
+    uint64_t viscosity_sparse_active_tiles = 0;
+    uint64_t viscosity_sparse_allocated_tiles = 0;
+    uint64_t viscosity_sparse_resident_bytes = 0;
     bool  viscosity_on_gpu = false;
     bool  density_on_gpu = false;
     bool  p2g_on_gpu = false;

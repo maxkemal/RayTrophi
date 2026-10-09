@@ -12,6 +12,7 @@
 #include <HittableList.h>
 #include "Fluid/MatterGrainGeometry.h"
 #include "Fluid/MatterPhaseConfig.h"
+#include "Fluid/MatterSubstanceState.h"
 #include "Animation/AnimationData.h"
 #include "AnimationController.h"
 #include "Animation/GeometryCache.h"
@@ -3986,6 +3987,7 @@ struct SceneData {
         // below, but two substances can share every hashed number and still
         // differ in what an untagged parcel weighs or how it burns.
         h = mix(h, static_cast<uint64_t>(std::hash<std::string>{}(fp.default_substance)));
+        h = mix(h, RayTrophiSim::Fluid::kMatterSubstanceStateRevision);
         h = mix(h, fp.free_surface ? 1ull : 0ull);
         h = mix(h, fp.variational_solids ? 1ull : 0ull);
         h = mix(h, fp.ghost_fluid_surface ? 1ull : 0ull);

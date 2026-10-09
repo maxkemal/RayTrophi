@@ -6,6 +6,7 @@
 #include "Fluid/MatterPhaseGrid.h"
 #include "Fluid/MatterAcceptanceMetrics.h"
 #include "Fluid/MatterGrain.h"
+#include "Fluid/MatterSubstanceState.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -150,6 +151,15 @@ nlohmann::json getMatterModels(const std::string& domain, bool include_transfer)
                 {"maximum_pore_pressure_pa", maximum_pore_pressure},
                 {"maximum_capillary_cohesion_pa", maximum_capillary_cohesion}}},
             {"models", models}, {"identity_scope", "domain"},
+            {"transport_owners", [&] {
+                const auto owners = state ? RayTrophiSim::Fluid::inspectMatterDomainOwners(
+                    state->particles, domains[index])
+                    : RayTrophiSim::Fluid::MatterOwnerSummary{};
+                return nlohmann::json{{"measured", state != nullptr},
+                    {"fluid", owners.particles[0]}, {"grain", owners.particles[1]},
+                    {"mpm", owners.particles[2]}, {"obstacle", owners.particles[3]},
+                    {"ready", state != nullptr && owners.ready}, {"reason", owners.reason}};
+            }()},
             {"grain_settings", RayTrophiSim::Fluid::matterGrainParamsToJson(
                 domains[index].fluid_params.grain)},
             {"grain_readiness", [&] {
@@ -166,7 +176,8 @@ nlohmann::json getMatterModels(const std::string& domain, bool include_transfer)
             {"grain_diagnostics", state && domains[index].fluid_params.grain.enabled
                 ? RayTrophiSim::Fluid::matterGrainDiagnostics(
                     state->particles, domains[index].fluid_params.grain,
-                    &state->fluid_stats.grain_report) : nlohmann::json(nullptr)},
+                    &state->fluid_stats.grain_report,
+                    &domains[index].fluid_params) : nlohmann::json(nullptr)},
             {"mixed_transport_available", true},
             {"mixed_transport_ready", state && state->fluid_stats.mixed_model_step},
             {"mixed_execution", {
