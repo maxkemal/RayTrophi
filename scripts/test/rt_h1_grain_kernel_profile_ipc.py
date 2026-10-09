@@ -9,6 +9,7 @@ import argparse
 import json
 from pathlib import Path
 from rt_ipc import RtIpc
+from rt_grain_material import install_grain_material
 from grain_units import restitution_of
 
 DOMAIN = 'H1_Grain_Runtime'
@@ -26,6 +27,7 @@ def main():
     parser.add_argument('--tag', default='')
     args = parser.parse_args()
     client = RtIpc()
+    install_grain_material(client)  # old grain keys -> grain substance
 
     def call(method, **params):
         result = client.call(method, **params)
@@ -49,7 +51,7 @@ def main():
         for count in args.counts:
             call('timeline.set_frame', frame=0)
             call('fluid.reset')
-            call('fluid.set_grain_settings', domain=DOMAIN, enabled=True, radius_m=.025,
+            call('fluid.set_grain_settings', domain=DOMAIN, radius_m=.025,
                  stiffness_n_m=args.stiffness, restitution=restitution_of(4., args.stiffness), sliding_damping_n_s_m=4.,
                  friction=.5, rolling_friction=args.rolling, twisting_friction=0.,
                  tangential_stiffness_ratio=args.tangential, contact_resolution=24,

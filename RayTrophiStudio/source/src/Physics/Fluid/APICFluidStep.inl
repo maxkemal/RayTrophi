@@ -286,6 +286,8 @@ void step(FluidParticles& particles,
         sp.healing_rate = std::max(params.granular_healing_rate, 0.0f);
         sp.rebonding = params.granular_rebonding;
         sp.hardening_coefficient = std::max(params.granular_hardening, 0.0f);
+        sp.compaction_hardening = params.granular_compaction_hardening;
+        sp.compaction_limit = params.granular_compaction_limit;
         sp.max_stored_strain = G::kGranularMaxStoredStrain;
 
         G::SettleParams settle;

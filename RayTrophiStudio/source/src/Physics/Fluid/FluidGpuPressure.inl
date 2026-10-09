@@ -128,9 +128,9 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
                                 (grid.u_weight.size() == grid.vel_x.size()) &&
                                 (grid.v_weight.size() == grid.vel_y.size()) &&
                                 (grid.w_weight.size() == grid.vel_z.size()) &&
-                                gpu_buffers.var_u_weight.valid() &&
-                                gpu_buffers.var_v_weight.valid() &&
-                                gpu_buffers.var_w_weight.valid() &&
+                                mac.solid_weight[0].valid() &&
+                                mac.solid_weight[1].valid() &&
+                                mac.solid_weight[2].valid() &&
                                 gpu_buffers.var_svx.valid() &&
                                 gpu_buffers.var_svy.valid() &&
                                 gpu_buffers.var_svz.valid();
@@ -139,19 +139,29 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
                         (grid.fluid_phi.size() == cell_count) &&
                         gpu_buffers.var_fluid_phi.valid();
 
+    if (is_variational && mac.compact) {
+        std::string weight_error;
+        // P2G may reorder its tile slots every substep. Static collider data
+        // does not imply static page addresses; upload against the current list.
+        if (!Fluid::uploadSparseMacSolidWeights(*compute, gpu_buffers, grid, weight_error)) {
+            return bail(weight_error.c_str());
+        }
+    }
     if (is_variational && (!gpu_buffers.matter_model.enabled ||
         !gpu_buffers.matter_model.pressure_statics_uploaded)) {
-        // Convert and upload weights
-        std::vector<float> uw_float(grid.u_weight.size());
-        std::vector<float> vw_float(grid.v_weight.size());
-        std::vector<float> ww_float(grid.w_weight.size());
-        for (std::size_t i = 0; i < grid.u_weight.size(); ++i) uw_float[i] = FluidSim::FluidGrid::weightToFloat(grid.u_weight[i]);
-        for (std::size_t i = 0; i < grid.v_weight.size(); ++i) vw_float[i] = FluidSim::FluidGrid::weightToFloat(grid.v_weight[i]);
-        for (std::size_t i = 0; i < grid.w_weight.size(); ++i) ww_float[i] = FluidSim::FluidGrid::weightToFloat(grid.w_weight[i]);
-
-        ok = ok && compute->uploadBuffer(gpu_buffers.var_u_weight, uw_float.data(), uw_float.size() * sizeof(float));
-        ok = ok && compute->uploadBuffer(gpu_buffers.var_v_weight, vw_float.data(), vw_float.size() * sizeof(float));
-        ok = ok && compute->uploadBuffer(gpu_buffers.var_w_weight, ww_float.data(), ww_float.size() * sizeof(float));
+        if (!mac.compact) {
+            const std::array<const std::vector<uint8_t>*, 3> host_weights = {
+                &grid.u_weight, &grid.v_weight, &grid.w_weight
+            };
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                std::vector<float> values(host_weights[axis]->size());
+                for (std::size_t i = 0; i < values.size(); ++i) {
+                    values[i] = FluidSim::FluidGrid::weightToFloat((*host_weights[axis])[i]);
+                }
+                ok = compute->uploadBuffer(mac.solid_weight[axis], values.data(),
+                                           values.size() * sizeof(float)) && ok;
+            }
+        }
 
         // Deinterleave and upload solid velocities
         std::vector<float> svx(cell_count, 0.0f);
@@ -302,9 +312,9 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     fluid_divergence_bufs[3] = gpu_buffers.fluid_mask;
     fluid_divergence_bufs[4] = gpu_buffers.divergence;
     if (is_variational) {
-        fluid_divergence_bufs[5] = gpu_buffers.var_u_weight;
-        fluid_divergence_bufs[6] = gpu_buffers.var_v_weight;
-        fluid_divergence_bufs[7] = gpu_buffers.var_w_weight;
+        fluid_divergence_bufs[5] = mac.solid_weight[0];
+        fluid_divergence_bufs[6] = mac.solid_weight[1];
+        fluid_divergence_bufs[7] = mac.solid_weight[2];
         fluid_divergence_bufs[8] = gpu_buffers.var_svx;
         fluid_divergence_bufs[9] = gpu_buffers.var_svy;
         fluid_divergence_bufs[10] = gpu_buffers.var_svz;
@@ -348,9 +358,9 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
         };
         int gradient_count = 5;
         if (is_variational) {
-            gradient_buffers[5] = gpu_buffers.var_u_weight;
-            gradient_buffers[6] = gpu_buffers.var_v_weight;
-            gradient_buffers[7] = gpu_buffers.var_w_weight;
+            gradient_buffers[5] = mac.solid_weight[0];
+            gradient_buffers[6] = mac.solid_weight[1];
+            gradient_buffers[7] = mac.solid_weight[2];
             gradient_buffers[8] = gpu_buffers.var_svx;
             gradient_buffers[9] = gpu_buffers.var_svy;
             gradient_buffers[10] = gpu_buffers.var_svz;

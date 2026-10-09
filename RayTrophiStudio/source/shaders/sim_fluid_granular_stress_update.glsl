@@ -38,8 +38,10 @@ layout(push_constant) uniform PC {
     uint rebonding;
     float hardening_coefficient;
     float max_stored_strain;
-    uint pad1;
-    uint pad2;
+    // Compaction (snow, Stomakhin 2013): xi and the elastic volumetric strain
+    // past which compression becomes permanent. 0 = off (every other material).
+    float compaction_hardening;
+    float compaction_limit;
 #ifdef MATTER_INDEXED
     uint matter_lane;
 #endif
@@ -130,14 +132,21 @@ void main() {
     if(isnan(bond_scale)||isinf(bond_scale))bond_scale=1.0;
     bond_scale=max(bond_scale,0.0);
     float young=max(pc.young_modulus*soft,1.0);
+    // pv is compactness (it shrinks as the material dilates; < 0.5 detaches),
+    // so compacted snow has pv > 1 and is stiffer and stronger by
+    // exp(xi (pv - 1)); loosened snow is weaker, which is how it breaks.
+    bool compaction=pc.compaction_hardening>0.0&&pc.compaction_limit>0.0;
+    float compaction_scale=compaction
+        ?exp(clamp(pc.compaction_hardening*(pv[i]-1.0),-2.0,3.0)):1.0;
+    young*=compaction_scale;
     vec4 wet = vec4(1.0, 1.0, 0.0, 0.0);
 #ifdef MATTER_INDEXED
     wet = wet_response[i];
 #endif
     float friction_tangent = pc.friction_tangent * wet.x;
     float dilatancy_tangent = pc.dilatancy_tangent * wet.y;
-    float cohesion = max(pc.cohesion, 0.0) * bond_scale + wet.z;
-    float tensile_cutoff = max(pc.tensile_cutoff, 0.0) * bond_scale + wet.z;
+    float cohesion = max(pc.cohesion, 0.0) * bond_scale * compaction_scale + wet.z;
+    float tensile_cutoff = max(pc.tensile_cutoff, 0.0) * bond_scale * compaction_scale + wet.z;
     float mu=young/(2.0*(1.0+nu));
     float lambda=young*nu/((1.0+nu)*(1.0-2.0*nu));
     mat3 F=mat3(vec3(f0[i*3],f0[i*3+1],f0[i*3+2]),
@@ -173,6 +182,16 @@ void main() {
     mat3 R=polarRotation(F_trial);
     mat3 stretch=transpose(R)*F_trial;
     mat3 elastic_strain=0.5*(stretch+transpose(stretch))-mat3(1.0);
+    if(compaction){
+        // Compression past the limit is permanent: it moves into pv (the
+        // material gets denser) instead of being stored as elastic strain.
+        float volumetric=elastic_strain[0][0]+elastic_strain[1][1]+elastic_strain[2][2];
+        if(volumetric< -pc.compaction_limit){
+            float excess=volumetric+pc.compaction_limit;
+            pv[i]=clamp(pv[i]*exp(-excess),0.25,4.0);
+            elastic_strain-=(excess/3.0)*mat3(1.0);
+        }
+    }
     mat3 local_stress=2.0*mu*elastic_strain+
         lambda*(elastic_strain[0][0]+elastic_strain[1][1]+elastic_strain[2][2])*mat3(1.0);
     mat3 S=R*local_stress*transpose(R);

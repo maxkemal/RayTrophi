@@ -4,7 +4,8 @@ import re
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = next(parent for parent in Path(__file__).resolve().parents
+            if (parent / 'RayTrophiStudio/source').is_dir())
 SOURCE = ROOT / 'RayTrophiStudio/source'
 
 
@@ -74,10 +75,16 @@ def main():
     assert 'if (pc.substep.x == 0u) history_blocks[i] = g_block;' in shader
     assert 'uint open_slots = ~(g_old_mask|g_allocated) & ((1u<<SLOTS)-1u);' in shader
     assert 'history_blocks[ownerWord()+1u] = g_touched|g_allocated;' in shader
-    # Sleeping grains (revision 21): skip only when the block is the grain's
-    # own; a neighbour's WAKE survives the owner's rewrite of its counter.
-    assert 'if (sleepOn() && valid_block) {' in shader
-    assert shader.index('atomicAnd(history_blocks[rest_word], WAKE);') < shader.index('atomicOr(history_blocks[rest_word], next_rest);')
+    # Sleeping grains (revision 24): last-substep contact audits, physical
+    # eligibility and one CAS commit preserve a concurrent neighbour audit request.
+    assert 'if (sleepOn() && valid_block && can_sleep && input_slow) {' in shader
+    sleep_shader = read('shaders/sim_matter_grain_sleep.glsl')
+    assert 'grainSleepCommit(rest_word, next_rest);' in shader
+    assert 'atomicCompSwap(history_blocks[word], previous, desired)' in sleep_shader
+    assert 'if (sleeping && !audit_requested && !grainSleepAudit())' in shader
+    assert 'pc.substep.x == pc.substep.w ||' in sleep_shader
+    assert 'grainSleepBalanced(acceleration,t*ii,r,p,im,g_contacts)' in shader
+    assert 'runtime.sleep_context = sleep_context;' in gpu
     assert 'runtime.collider_velocity_offset == 0 && !common_driver &&' in gpu
     assert '"sleep_speed_m_s"' in read('src/Physics/Fluid/MatterGrainParams.cpp')
     assert 'fluid.set_grain_settings(sleep=...)' in read('src/UI/MatterGrainControls.cpp')
@@ -175,12 +182,15 @@ def main():
     assert 'Fluid::MatterTransportOwner::Grain;' in births
     assert 'substanceTransportOwner(' in birth_filter
     params_src = read('src/Physics/Fluid/MatterGrainParams.cpp')
-    assert '"fluid_coupling"' in params_src and '"restitution"' in params_src
+    assert '"fluid_coupling"' in params_src
     # One physical value, one home: drag reads the liquid substance viscosity,
-    # and restitution replaced the per-domain normal damping (old scenes convert).
+    # restitution replaced the per-domain normal damping, and (2026-10-09) the
+    # whole grain material is the substance's (MADDE_UI_TEK_OTORITE U2).
     assert 'drag_viscosity_pa_s was removed' in params_src
-    assert 'normal_damping_n_s_m was replaced by restitution' in params_src
-    assert 'json.erase("normal_damping_n_s_m")' in params_src
+    assert "normal_damping_n_s_m was replaced by the substance's grain_restitution" in params_src
+    assert '"normal_damping_n_s_m", "drag_viscosity_pa_s"' in params_src
+    assert '{"restitution", "substance grain_restitution"}' in params_src
+    assert 'p.restitution = std::clamp(grain.grain_restitution' in params_src
     coupling_src = read('src/Physics/Fluid/MatterGrainCoupling.cpp')
     assert 'liquid_kinematic_viscosity' in coupling_src and 'viscous_mass / liquid_mass' in coupling_src
     # 2026-10-07: with volume exclusion the pressure force reaches the liquid
@@ -201,7 +211,8 @@ def main():
     assert 'float cn = 2.0*pc.step_contact.y*sqrt(k/inverse_normal_mass);' in shader_src
     assert 'im+jm,f,t);' in shader_src and shader_src.count('im,f,t);') == 2
     ui = read('src/UI/MatterGrainControls.cpp')
-    assert 'p.fluid_coupling' in ui and 'p.restitution' in ui
+    # Matter tab shows the substance's material read-only; the domain edits none of it.
+    assert 'p.fluid_coupling' in ui and 's->grain_restitution' in ui and 'p.restitution' not in ui
     bridge = read('src/Physics/ParticleRenderBridge.cpp')
     assert 'const float d = grain ? diam : liquid_diam;' in bridge
     assert '--coexist-only' in runtime_test
@@ -259,21 +270,24 @@ def main():
     assert 'coupling_rows[12 * i + 11] = p.pore_water_mass_kg[i] / 1000.0f;' in gpu
     assert coordinator.index('applyMatterGrainLiquidReaction(') < coordinator.index('exchangeMatterGrainWater(')
     assert coordinator.index('exchangeMatterGrainWater(') < coordinator.index('mergeMatterGrainOwners(state.particles')
-    assert 'initMatterGrainBirthWater(' in births and '"birth_saturation"' in params_src
-    assert 'p.wet_grains' in ui and '--wet-only' in runtime_test
+    # Wet at birth is the source's; wet grains are derived (ownership.wet_grains).
+    assert 'initMatterGrainBirthWater(' in births and 'source.grain_birth_saturation' in births
+    assert '{"birth_saturation", "flow source grain_birth_saturation"}' in params_src
+    assert 'ownership.wet_grains' in ui and 'source.grain_birth_saturation' in ui
+    assert '--wet-only' in runtime_test
     # B7 closed (H1-G0, 2026-10-06): XPBD failed the 16k accuracy/cost gate and
     # was removed; DEM is the only grain solver, the old keys are rejected.
     assert 'xpbd' not in shader.lower() and 'solver_kind' not in gpu
     assert 'it.key() == "solver_kind" || it.key() == "xpbd_substeps"' in params_src
     assert 'd["matter_grain"] = RayTrophiSim::Fluid::matterGrainParamsToJson' in read('src/Core/ProjectManager.cpp'), 'project save drops grain settings'
-    assert 'json.erase("solver_kind");' in params_src and "solver_kind='xpbd'" in runtime_test
+    assert '"solver_kind", "xpbd_substeps"}) {' in params_src and "solver_kind='xpbd'" in runtime_test
     # Domain panel (2026-09-27 six-tab decision): grain material in Matter,
     # solver + coupling + readiness in Solvers, report in Measure; the legacy
     # MPM granular block is not offered while grains own the granular phase;
     # every blocker is a lock with its reason, from the core rule.
     panel = read('src/UI/scene_ui_simulation_domains.cpp')
     tab = lambda name: panel.index(f'BeginTabItem("{name}")')
-    assert tab('Matter') < panel.index('drawMatterGrainMaterial(domain)') < tab('Environment')
+    assert tab('Matter') < panel.index('drawMatterGrainMaterial(domain,') < tab('Environment')
     assert tab('Solvers') < panel.index('drawMatterGrainSolver(domain') < tab('Output')
     assert tab('Measure') < panel.index('drawMatterGrainReport(domain')
     assert 'drawMatterGrainControls' not in panel
@@ -282,7 +296,39 @@ def main():
                    'Solid phase cannot run with grains yet.'):
         assert reason in panel, reason
     assert 'const bool reseed_locked = fp.granular_enabled || fp.grain.enabled;' in panel
-    assert 'matterGrainBlockers(domain)' in ui and 'ImGui::DragFloat' not in ui and 'ImGui::SliderFloat' not in ui
+    assert 'ownership.blockers' in ui and 'ImGui::DragFloat' not in ui and 'ImGui::SliderFloat' not in ui
+    # 2026-10-09: no grain switch. Grains follow the substances in reach of the
+    # domain; the step decides before the sources emit, panel and IPC read the
+    # same struct, and a wanted-but-blocked DEM names its blockers.
+    assert 'Enable discrete grains' not in ui and not re.search(r'\bp\.enabled', ui)
+    assert '{"enabled", "derived: grains run when' in params_src
+    assert '{"enabled", p.enabled}' not in params_src
+    # U3: stiffness follows the radius; the scale is the authored value.
+    assert 'p.stiffness_n_m = p.stiffness_scale * kMatterGrainStiffnessPerRadius * p.radius_m;' in params_src
+    assert '{"stiffness_scale", p.stiffness_scale}' in params_src and '"stiffness_n_m", p.' not in params_src
+    # U2: the step copies the DEM substance's material every step.
+    sim_src = read('src/Physics/ParticleSimulation.cpp')
+    assert 'Fluid::applyMatterGrainSubstance(grain, *profile,' in sim_src
+    assert sim_src.index('Fluid::applyMatterGrainSubstance(') < sim_src.index('    injectFlowSourcesIntoGridDomains(')
+    library = read('src/Physics/SubstanceLibrary.cpp')
+    for field in ('grain_friction', 'grain_rolling_friction', 'grain_restitution',
+                  'grain_packing_fraction', 'grain_water_capacity_fraction',
+                  'liquid_surface_tension_n_m', 'granular_compaction_hardening'):
+        assert 'RT_FLOAT(' + field + ',' in library, field
+    owner = read('src/Physics/Fluid/MatterSubstanceState.cpp')
+    assert 'profile->granular_transport == MatterGranularTransport::Dem' in owner
+    assert 'matterGrainBlockers(domain)' in owner and 'result.reset_pending = true;' in owner
+    sim = read('src/Physics/ParticleSimulation.cpp')
+    assert sim.index('grain.enabled = ownership.enabled;') < sim.index('    injectFlowSourcesIntoGridDomains(')
+    assert '"grain_ownership"' in read('src/Api/RtApiMatterModels.cpp')
+    # Substance editor (MADDE_UI_TEK_OTORITE U1): the dragged value is held until
+    # release, DEM substances say their continuum fields are unused, sections
+    # follow what the substance can use and none is unreachable.
+    editor = read('src/UI/scene_ui_substance_editor.hpp')
+    assert 'pending_key == edit_key' in editor and 'IsItemDeactivatedAfterEdit()) apply' in editor
+    assert 'Grains (DEM) use the grain material below' in editor and 'Show unused sections' in editor
+    assert '{"Grains (DEM)", "Grain material (DEM)", dem, nullptr}' in editor
+    assert '"Script key: %s"' in editor and '##substance_filter' in editor
     assert 'grain_locked' in read('src/UI/scene_ui_fluid_thermal.cpp')
     assert 'desc.fluid_params.grain.enabled' in read('src/UI/ParticleBillboardBuilder.cpp')
     cross = read('shaders/sim_grain_mpm.glsl')

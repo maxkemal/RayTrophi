@@ -1,0 +1,364 @@
+{
+  "arms": [
+    {
+      "label": "snow",
+      "substance": "Snow",
+      "samples": [
+        {
+          "step": 30,
+          "particles": 2000,
+          "height_m": 0.2686012452468276,
+          "rms_radius_m": 0.1232431887104113,
+          "kinetic_energy_j": 10.271859845216305,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.8812787532806396,
+            "mean_value": 1.0486046546697616,
+            "min_value": 1.0
+          }
+        },
+        {
+          "step": 60,
+          "particles": 2000,
+          "height_m": 0.1479935348033905,
+          "rms_radius_m": 0.17891744686054176,
+          "kinetic_energy_j": 0.01661090741873079,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.8927875757217407,
+            "mean_value": 1.0501698669791222,
+            "min_value": 1.0
+          }
+        },
+        {
+          "step": 90,
+          "particles": 2000,
+          "height_m": 0.14935930632054806,
+          "rms_radius_m": 0.17942997991659845,
+          "kinetic_energy_j": 0.017021183868099442,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.8927875757217407,
+            "mean_value": 1.0501836256384849,
+            "min_value": 1.0
+          }
+        },
+        {
+          "step": 120,
+          "particles": 2000,
+          "height_m": 0.15089699625968933,
+          "rms_radius_m": 0.17976477252755182,
+          "kinetic_energy_j": 0.016177599648484885,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.8927875757217407,
+            "mean_value": 1.050196673333645,
+            "min_value": 1.0
+          }
+        },
+        {
+          "step": 150,
+          "particles": 2000,
+          "height_m": 0.151406180113554,
+          "rms_radius_m": 0.1800017625628655,
+          "kinetic_energy_j": 0.015419437512645294,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.8927875757217407,
+            "mean_value": 1.0502119655013085,
+            "min_value": 1.0
+          }
+        },
+        {
+          "step": 180,
+          "particles": 2000,
+          "height_m": 0.15173901244997978,
+          "rms_radius_m": 0.1801804168378392,
+          "kinetic_energy_j": 0.017141508993088216,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.8927875757217407,
+            "mean_value": 1.0502313387989999,
+            "min_value": 1.0
+          }
+        }
+      ],
+      "final": {
+        "step": 180,
+        "particles": 2000,
+        "height_m": 0.15173901244997978,
+        "rms_radius_m": 0.1801804168378392,
+        "kinetic_energy_j": 0.017141508993088216,
+        "plastic_volume": {
+          "array_size": 2000,
+          "available": true,
+          "count": 2000,
+          "in_sync": true,
+          "max_value": 1.8927875757217407,
+          "mean_value": 1.0502313387989999,
+          "min_value": 1.0
+        }
+      }
+    },
+    {
+      "label": "no_compaction",
+      "substance": "T: snow no compaction",
+      "samples": [
+        {
+          "step": 30,
+          "particles": 2000,
+          "height_m": 0.27089524641633034,
+          "rms_radius_m": 0.12464154072898088,
+          "kinetic_energy_j": 10.829274601229084,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.0,
+            "mean_value": 1.0,
+            "min_value": 1.0
+          }
+        },
+        {
+          "step": 60,
+          "particles": 2000,
+          "height_m": 0.11562267923727632,
+          "rms_radius_m": 0.20508203094652522,
+          "kinetic_energy_j": 0.01458597627173162,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.0,
+            "mean_value": 1.0,
+            "min_value": 1.0
+          }
+        },
+        {
+          "step": 90,
+          "particles": 2000,
+          "height_m": 0.11543990159407258,
+          "rms_radius_m": 0.2055680143907956,
+          "kinetic_energy_j": 0.01434187308794538,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.0,
+            "mean_value": 1.0,
+            "min_value": 1.0
+          }
+        },
+        {
+          "step": 120,
+          "particles": 2000,
+          "height_m": 0.11527235293760896,
+          "rms_radius_m": 0.2059406299576051,
+          "kinetic_energy_j": 0.01387402286210958,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.0,
+            "mean_value": 1.0,
+            "min_value": 1.0
+          }
+        },
+        {
+          "step": 150,
+          "particles": 2000,
+          "height_m": 0.11501825833693147,
+          "rms_radius_m": 0.20623607435562594,
+          "kinetic_energy_j": 0.01359855075415587,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.0,
+            "mean_value": 1.0,
+            "min_value": 1.0
+          }
+        },
+        {
+          "step": 180,
+          "particles": 2000,
+          "height_m": 0.11352346325293183,
+          "rms_radius_m": 0.20646873440656013,
+          "kinetic_energy_j": 0.013364581979236989,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.0,
+            "mean_value": 1.0,
+            "min_value": 1.0
+          }
+        }
+      ],
+      "final": {
+        "step": 180,
+        "particles": 2000,
+        "height_m": 0.11352346325293183,
+        "rms_radius_m": 0.20646873440656013,
+        "kinetic_energy_j": 0.013364581979236989,
+        "plastic_volume": {
+          "array_size": 2000,
+          "available": true,
+          "count": 2000,
+          "in_sync": true,
+          "max_value": 1.0,
+          "mean_value": 1.0,
+          "min_value": 1.0
+        }
+      }
+    },
+    {
+      "label": "loose",
+      "substance": "T: snow loose",
+      "samples": [
+        {
+          "step": 30,
+          "particles": 2000,
+          "height_m": 0.21127055399119854,
+          "rms_radius_m": 0.1566961520215586,
+          "kinetic_energy_j": 5.260765125815325,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.0,
+            "mean_value": 1.0,
+            "min_value": 1.0
+          }
+        },
+        {
+          "step": 60,
+          "particles": 2000,
+          "height_m": 0.09976058191386983,
+          "rms_radius_m": 0.2430056115596407,
+          "kinetic_energy_j": 0.018075268217715115,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.0,
+            "mean_value": 1.0,
+            "min_value": 1.0
+          }
+        },
+        {
+          "step": 90,
+          "particles": 2000,
+          "height_m": 0.09697972721187398,
+          "rms_radius_m": 0.24468916885768097,
+          "kinetic_energy_j": 0.016622669624451986,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.0,
+            "mean_value": 1.0,
+            "min_value": 1.0
+          }
+        },
+        {
+          "step": 120,
+          "particles": 2000,
+          "height_m": 0.09415816253749654,
+          "rms_radius_m": 0.24563472819353752,
+          "kinetic_energy_j": 0.015103918418607132,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.0,
+            "mean_value": 1.0,
+            "min_value": 1.0
+          }
+        },
+        {
+          "step": 150,
+          "particles": 2000,
+          "height_m": 0.09132995194522664,
+          "rms_radius_m": 0.24636235289226877,
+          "kinetic_energy_j": 0.01376516922065232,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.0,
+            "mean_value": 1.0,
+            "min_value": 1.0
+          }
+        },
+        {
+          "step": 180,
+          "particles": 2000,
+          "height_m": 0.08851449674693868,
+          "rms_radius_m": 0.24698786310697635,
+          "kinetic_energy_j": 0.012493632954005093,
+          "plastic_volume": {
+            "array_size": 2000,
+            "available": true,
+            "count": 2000,
+            "in_sync": true,
+            "max_value": 1.0,
+            "mean_value": 1.0,
+            "min_value": 1.0
+          }
+        }
+      ],
+      "final": {
+        "step": 180,
+        "particles": 2000,
+        "height_m": 0.08851449674693868,
+        "rms_radius_m": 0.24698786310697635,
+        "kinetic_energy_j": 0.012493632954005093,
+        "plastic_volume": {
+          "array_size": 2000,
+          "available": true,
+          "count": 2000,
+          "in_sync": true,
+          "max_value": 1.0,
+          "mean_value": 1.0,
+          "min_value": 1.0
+        }
+      }
+    }
+  ],
+  "verdicts": {
+    "plastic_volume_readable": true,
+    "compaction": true,
+    "cohesion": true,
+    "rest": true
+  }
+}

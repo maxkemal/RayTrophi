@@ -267,6 +267,10 @@ struct SubstanceProfile {
     float granular_poisson_ratio = 0.25f;
     float granular_tensile_cutoff = 0.0f;        // Pa
     float granular_hardening = 0.0f;
+    // Snow: compaction hardening xi (0 = off) and the elastic volumetric strain
+    // past which compression is permanent (Stomakhin 2013 theta_c).
+    float granular_compaction_hardening = 0.0f;
+    float granular_compaction_limit = 0.0f;
     float granular_fracture_strain = 0.04f;
     float granular_damage_rate = 6.0f;           // 1/s
     float granular_healing_rate = 0.0f;          // 1/s
@@ -278,6 +282,23 @@ struct SubstanceProfile {
     float granular_tack_peak = 1.0f;             // cohesion multiplier at peak tack
     // Parcel<->parcel and parcel<->gas conduction rate, 1/s (solver rate, not W/mK).
     float parcel_conduction = 0.0f;
+
+    // ── Grains (DEM): read when granular_transport = dem ─────────────────────
+    // The step copies them into the domain's grain solver (applyMatterGrainSubstance);
+    // the domain keeps only resolution and numerics. One grain material per domain.
+    float grain_friction = 0.5f;                  // Coulomb mu, grain-grain and walls
+    float grain_rolling_friction = 0.02f;         // mu_r: grain shape (round .02, angular .1-.3)
+    float grain_twisting_friction = 0.0f;
+    float grain_restitution = 0.5f;               // normal impact (sand ~.5, glass ~.9)
+    float grain_tangential_stiffness_ratio = 2.0f / 7.0f;
+    float grain_packing_fraction = 0.6f;          // grain density = density / packing
+    float grain_real_radius_m = 0.0f;             // 0 = the simulated grain is the real one
+    float grain_water_capacity_fraction = 0.0f;   // of the sphere volume; 0 = never wet
+    float grain_absorption_rate_per_s = 4.0f;     // of the free capacity, when submerged
+    float grain_drying_rate_per_s = 0.0f;         // of the held water
+    float grain_contact_angle_deg = 20.0f;        // wetting of the grain by liquid
+    // Liquid surface tension (water .072 N/m): liquid bridges between wet grains.
+    float liquid_surface_tension_n_m = 0.072f;
 
     // ── Liquid near its freezing point (thermal-liquid chain) ────────────────
     // ν ramps (log space) from liquid_kinematic_viscosity to liquid_cold_viscosity

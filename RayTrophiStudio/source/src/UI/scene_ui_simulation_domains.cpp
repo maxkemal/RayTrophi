@@ -4,6 +4,7 @@
 #include "Fluid/MatterPhaseConfig.h"
 #include "Fluid/MatterModelService.h"
 #include "Fluid/MatterGrain.h"
+#include "Fluid/MatterSubstanceState.h"
 #include "scene_ui_fluid_thermal.hpp"
 #include "scene_ui_fluid_labels.h"
 #include "ui_modern.h"
@@ -1514,6 +1515,9 @@ void drawSimulationDomainControls(
                                     sizeof(subs_buf))) {
                                 source.fluid_substance = subs_buf;
                             }
+                            if (particles) {
+                                RayTrophiSim::Fluid::drawMatterGrainSourceLine(*particles, source);
+                            }
                             if (SubstanceEditorUI::draw("##FlowSubstanceEditor",
                                                         source.fluid_substance)) {
                                 scene.requestSimulationTimelineRenderResync();
@@ -2001,7 +2005,10 @@ void drawSimulationDomainControls(
                     }
 
                     // Transport ownership is selected per substance.
-                    RayTrophiSim::Fluid::drawMatterGrainMaterial(domain);
+                    RayTrophiSim::Fluid::drawMatterGrainMaterial(domain, particles
+                        ? RayTrophiSim::Fluid::matterGrainOwnership(*particles,
+                              static_cast<std::size_t>(selected_domain_index))
+                        : RayTrophiSim::Fluid::MatterGrainOwnership{});
                     if (fp.granular_enabled &&
                                UIWidgets::CollapsingHeader("Granular Skeleton (from substance)",
                                                            ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -2413,7 +2420,9 @@ void drawSimulationDomainControls(
                     const auto& solver_states = particles->gridDomainStates();
                     RayTrophiSim::Fluid::drawMatterGrainSolver(domain,
                         static_cast<std::size_t>(selected_domain_index) < solver_states.size()
-                            ? &solver_states[static_cast<std::size_t>(selected_domain_index)] : nullptr);
+                            ? &solver_states[static_cast<std::size_t>(selected_domain_index)] : nullptr,
+                        RayTrophiSim::Fluid::matterGrainOwnership(*particles,
+                            static_cast<std::size_t>(selected_domain_index)));
                 }
                 if (is_gas_domain) {
                     // Gas Channel Flags

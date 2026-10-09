@@ -19,7 +19,11 @@ def main():
     parser.add_argument("--viscosity", action="store_true")
     parser.add_argument("--transfer", action="store_true",
                         help="Require compact MAC P2G/G2P and FLIP baseline selection")
+    parser.add_argument("--solid-weights", action="store_true",
+                        help="S1b: require twelve MAC page fields and a fractional AABB collider")
     args = parser.parse_args()
+    if args.solid_weights and not args.transfer:
+        parser.error("--solid-weights requires --transfer")
     client = RtIpc()
     suffix = uuid.uuid4().hex[:8]
     domain = "SparsePressure_" + suffix
@@ -28,9 +32,21 @@ def main():
     source_created = False
     substance = "SparseTransferWater_" + suffix
     substance_created = False
+    collider = "SparseWeightBox_" + suffix
+    collider_created = False
     try:
         assert not client.call("sim.control_state")["playing"], "Pause the timeline"
         assert not client.call("fluid.list_domains")["domains"], "Use an empty scene"
+        if args.solid_weights:
+            assert not any(c.get("enabled", True) for c in
+                           client.call("collider.list")["colliders"]), "Disable other colliders"
+            # Faces are deliberately offset from h=.05 and tile planes. The
+            # box intersects the liquid support; its openness is fractional.
+            client.call("collider.create", name=collider, source_mode="aabb",
+                        bounds_min=[0.383, 0.695, 0.377],
+                        bounds_max=[0.517, 0.813, 0.533],
+                        enabled=True, fluid_collision_enabled=True)
+            collider_created = True
         if args.viscosity or args.transfer:
             client.call("substance.derive", name=substance, based_on="Water")
             substance_created = True
@@ -118,8 +134,12 @@ def main():
             assert 0 < active <= allocated, stats
             assert active * 512 < stats["full_grid_cells"], stats
             assert stats["transfer_sparse_resident_bytes"] >= allocated * 576 * 9 * 4, stats
+            if args.solid_weights:
+                assert stats["transfer_sparse_resident_bytes"] >= active * 576 * 12 * 4, stats
             assert "canonical" in stats["transfer_sparse_status"], stats
             print("PASS: compact canonical MAC velocity/FLIP selected; no dense velocity bank")
+        if args.solid_weights:
+            print("PASS: S1b compact solid-face weight pages with fractional collider parity")
         print(json.dumps({"errors": errors, "dense": dense["stats"], "sparse": stats}))
         print("PASS: sparse pressure GPU selection, dense parity, mass/momentum and compact storage")
     finally:
@@ -128,6 +148,8 @@ def main():
                 client.call("flow_source.remove", name=source)
             if created:
                 client.call("fluid.remove_domain", domain=domain)
+            if collider_created:
+                client.call("collider.remove", name=collider)
             if substance_created:
                 client.call("substance.remove", name=substance)
         finally:

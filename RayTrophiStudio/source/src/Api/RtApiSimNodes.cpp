@@ -156,6 +156,8 @@ const AttributeBinding kParticleAttributes[] = {
     {"granular_bond_scale",   &RayTrophiSim::Fluid::FluidParticles::granular_bond_scale,   nullptr},
     {"granular_damage",       &RayTrophiSim::Fluid::FluidParticles::granular_damage,       nullptr},
     {"granular_hardening",    &RayTrophiSim::Fluid::FluidParticles::granular_hardening,    nullptr},
+    // Compactness (> 1 compacted, < 1 loosened); snow compaction writes it.
+    {"granular_plastic_volume", &RayTrophiSim::Fluid::FluidParticles::granular_plastic_volume, nullptr},
     {"granular_yield_value",  &RayTrophiSim::Fluid::FluidParticles::granular_yield_value,  nullptr},
     {"substance_tag",         nullptr, &RayTrophiSim::Fluid::FluidParticles::substance_tag},
 };

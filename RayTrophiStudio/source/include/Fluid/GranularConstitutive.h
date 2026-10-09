@@ -211,6 +211,9 @@ struct Parameters {
     float hardening = 0.0f;
     float tensile_cutoff = 0.0f;
     float detach_pressure = 1.0e-4f;
+    // Snow compaction (stress update): xi and the permanent-compression limit.
+    float compaction_hardening = 0.0f;
+    float compaction_limit = 0.0f;
 };
 
 // Field-for-field mirror of the shader's push constant block. Angles arrive
@@ -229,6 +232,8 @@ struct StressUpdateParams {
     bool  rebonding = false;
     float hardening_coefficient = 0.0f;
     float max_stored_strain = kGranularMaxStoredStrain;
+    float compaction_hardening = 0.0f;
+    float compaction_limit = 0.0f;
 };
 
 // Flag bits. Shared vocabulary with the shader and with the stats/IPC readout.
@@ -390,9 +395,16 @@ inline void stressUpdateParticle(const AffineC& affine,
         ? std::clamp(softening, 0.0f, 1.0f) : 1.0f;
     const float bond_scale = std::isfinite(bond_scale_in)
         ? std::max(bond_scale_in, 0.0f) : 1.0f;
-    const float young = std::max(pc.young_modulus * soft, 1.0f);
-    const float cohesion = std::max(pc.cohesion, 0.0f) * bond_scale;
-    const float tensile_cutoff = std::max(pc.tensile_cutoff, 0.0f) * bond_scale;
+    // Snow compaction: plastic_volume is compactness (> 1 compacted), and a
+    // compacted body is stiffer and stronger by exp(xi (pv - 1)).
+    const bool compaction = pc.compaction_hardening > 0.0f && pc.compaction_limit > 0.0f;
+    const float compaction_scale = compaction
+        ? std::exp(std::clamp(pc.compaction_hardening * (plastic_volume - 1.0f), -2.0f, 3.0f))
+        : 1.0f;
+    const float young = std::max(pc.young_modulus * soft, 1.0f) * compaction_scale;
+    const float cohesion = std::max(pc.cohesion, 0.0f) * bond_scale * compaction_scale;
+    const float tensile_cutoff =
+        std::max(pc.tensile_cutoff, 0.0f) * bond_scale * compaction_scale;
     const float mu = young / (2.0f * (1.0f + nu));
     const float lambda = young * nu / ((1.0f + nu) * (1.0f - 2.0f * nu));
     Mat3 F(deformation_col0, deformation_col1, deformation_col2);
@@ -417,8 +429,17 @@ inline void stressUpdateParticle(const AffineC& affine,
 
     const Mat3 R = polarRotation(F_trial);
     const Mat3 stretch = transpose(R) * F_trial;
-    const Mat3 elastic_strain =
+    Mat3 elastic_strain =
         (stretch + transpose(stretch)) * 0.5f - Mat3::identity();
+    if (compaction) {
+        // Compression past the limit is permanent: it moves into plastic_volume.
+        const float volumetric = trace(elastic_strain);
+        if (volumetric < -pc.compaction_limit) {
+            const float excess = volumetric + pc.compaction_limit;
+            plastic_volume = std::clamp(plastic_volume * std::exp(-excess), 0.25f, 4.0f);
+            elastic_strain = elastic_strain - Mat3::identity() * (excess / 3.0f);
+        }
+    }
     Mat3 local_stress = elastic_strain * (2.0f * mu) +
                         Mat3::identity() * (lambda * trace(elastic_strain));
     Mat3 S = R * local_stress * transpose(R);

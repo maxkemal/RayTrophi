@@ -26,10 +26,12 @@ layout(std430, binding = 7) buffer Scratch { float scratch[]; };
 // key, tangential spring xyz, rolling spring xyz), updated in place.
 layout(std430, binding = 8) buffer History { uint history[]; };
 // [0, capacity): grain -> history block (FRESH bit: ignore the block's old
-// records this frame). [capacity + 3b]: owner id of block b, [+1]: mask of
-// its occupied slots, [+2]: rest counter (still substeps, WAKE bit set by a
-// faster neighbour). The host keeps each grain on its block across frames.
-layout(std430, binding = 9) buffer HistoryBlocks { uint history_blocks[]; };
+// records this frame). [capacity + 4b]: owner id of block b, [+1]: mask of
+// its occupied slots, [+2]: rest seconds (float bits, AUDIT bit set by a
+// neighbour audit request), [+3]: skipped solve time while asleep, or rest-clock
+// rounding compensation while awake (float bits; only the owner reads/writes it).
+// The host keeps each grain on its block across frames.
+layout(std430, binding = 9) coherent buffer HistoryBlocks { uint history_blocks[]; };
 layout(std430, binding = 10) buffer Diagnostics { uint diagnostics[]; };
 layout(std430, binding = 11) readonly buffer Triangles { float triangles[]; };
 struct ColliderNode { vec3 low; uint first; vec3 high; uint second; };
@@ -56,7 +58,7 @@ layout(push_constant) uniform Constants {
     // 0 = static colliders).
     vec4 wet;
     // Sleeping grains: still substeps before sleep (uint bits), sleep speed
-    // m/s (0 = off for this frame), wake all this frame (uint bits), -.
+    // m/s (0 = off for this frame), wake all this frame (uint bits), sleep time s.
     vec4 sleep;
 } pc;
 
@@ -69,10 +71,12 @@ const uint BUCKET = 16u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 21u;
-const uint WAKE = 0x80000000u;
+const uint REVISION = 24u;
+const uint AUDIT = 0x80000000u;
 const uint SLOT_WORDS = 7u;
 const uint FRESH = 0x80000000u;
+#include "sim_matter_grain_sleep.glsl"
+#include "sim_matter_grain_sleep_transfer.glsl"
 // Shared with the host (kMatterGrainListCapacity).
 const uint LIST = 32u;
 // diagnostics words: 12..14 rebuild flags (k%3), 15 builds this frame,
@@ -176,13 +180,31 @@ uint g_touched = 0u;
 uint g_allocated = 0u;
 
 uint slotWord(uint s) { return (g_block*SLOTS+s)*SLOT_WORDS; }
-uint ownerWord() { return pc.substep.y+3u*g_block; }
+uint ownerWord() { return pc.substep.y+4u*g_block; }
 // Rest counter word of grain j's block (j's map entry may still carry FRESH).
-uint restWordOf(uint j) { return pc.substep.y+3u*(history_blocks[j] & ~FRESH)+2u; }
-uint sleepSubsteps() { return floatBitsToUint(pc.sleep.x); }
+uint restWordOf(uint j) { return pc.substep.y+4u*(history_blocks[j] & ~FRESH)+2u; }
+uint sleepRestLimit() { return floatBitsToUint(max(pc.sleep.w,pc.step_contact.x)); }
 bool sleepOn() { return pc.sleep.y > 0.0; }
-// This grain is moving: touching a sleeping grain wakes it.
+// This grain is moving; only a meaningful transferred kick requests an audit.
 bool g_fast = false;
+bool g_probe_sleep_transfer = false;
+float g_history_dt = 0.0;
+vec3 g_pair_dynamic_impulse = vec3(0.0);
+vec3 g_pair_dynamic_angular_impulse = vec3(0.0);
+vec3 g_pair_forecast_impulse = vec3(0.0);
+vec3 g_pair_forecast_angular_impulse = vec3(0.0);
+vec3 g_bridge_forecast_impulse = vec3(0.0);
+
+void requestNeighbourAudit(uint j) {
+    // Awake grains evaluate contact motion and force balance themselves. Do not
+    // repeatedly erase their rest progress, or write every active contact pair.
+    // This flag requests a full solve; it does not declare the target unbalanced.
+    // Commit never exposes a temporary zero for an already sleeping owner.
+    uint word = restWordOf(j);
+    if ((history_blocks[word] & ~AUDIT) >= sleepRestLimit()) {
+        atomicOr(history_blocks[word], AUDIT);
+    }
+}
 
 uint previousSprings(uint key, out vec3 tangential, out vec3 rolling) {
     tangential = vec3(0.0);
@@ -237,6 +259,13 @@ void bridge(uint i, uint j, float d, vec3 n, float r, inout vec3 force) {
     float s = gap*sqrt(r/volume);
     force -= n*(pc.wet.y*r/(1.0+2.1*s+10.0*s*s));
     ++g_bridges;
+    if (g_probe_sleep_transfer) {
+        vec3 relative = velocity(i, readBank()) - velocity(j, readBank());
+        float inverse_pair_mass = 1.0 / masses[i] + 1.0 / masses[j];
+        float ceiling = min(pc.wet.y * r * grainSleepAuditHorizon(),
+                            2.0 * length(relative) / inverse_pair_mass);
+        g_bridge_forecast_impulse = n * ceiling;
+    }
 }
 
 void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
@@ -254,6 +283,9 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     float fn = max(0.0, k*overlap-cn*normal_speed);
     vec3 tangential, rolling;
     uint slot = previousSprings(key, tangential, rolling);
+    float history_dt = slot == EMPTY ? dt : g_history_dt;
+    vec3 previous_tangent = carry(tangential,n);
+    vec3 previous_roll = carry(rolling,n);
 
     // Sliding: Cundall-Strack spring + viscous part on the Coulomb cone. The
     // aggregate cap keeps a full contact budget from reversing the slip
@@ -266,7 +298,7 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
             speed/(BUDGET*dt*inverse_tangent_mass));
     }
     float kt = uintBitsToFloat(pc.substep.z);
-    tangential = kt > 0.0 ? carry(tangential,n)+slip*dt : vec3(0.0);
+    tangential = kt > 0.0 ? previous_tangent+slip*history_dt : vec3(0.0);
     vec3 ft = damping-kt*tangential;
     float coulomb = pc.step_contact.w*fn;
     float magnitude = length(ft);
@@ -285,10 +317,12 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     float mu_r = pc.rolling.x;
     float inverse_pair_inertia = inv_inertia+other_inv_inertia;
     vec3 rt = vec3(0.0);
+    vec3 previous_rolling_torque = vec3(0.0);
     if (mu_r > 0.0) {
         float kr = 2.25*mu_r*mu_r*k*effective_radius*effective_radius;
         float cr = .6*sqrt(kr/inverse_pair_inertia);
-        rolling = carry(rolling,n)+roll*dt;
+        previous_rolling_torque = -kr*previous_roll;
+        rolling = previous_roll+roll*history_dt;
         vec3 roll_damping = -cr*roll;
         rt = roll_damping-kr*rolling;
         float limit = mu_r*fn*effective_radius;
@@ -309,6 +343,20 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     float twist_limit = abs(twist_speed)/(BUDGET*dt*inverse_pair_inertia);
     float twist_torque = min(uintBitsToFloat(pc.meta.z)*fn*patch_radius,twist_limit);
     torque += cross(arm,ft)+rt-sign(twist_speed)*twist_torque*n;
+    if (g_probe_sleep_transfer) {
+        // Remove the retained elastic preload. Only the changed, post-damping
+        // and post-Coulomb reaction is an instantaneous disturbance.
+        float previous_normal = slot == EMPTY ? 0.0 :
+            max(0.0, k*(overlap+normal_speed*history_dt));
+        vec3 changed_tangent = ft+kt*previous_tangent;
+        g_pair_dynamic_impulse = -(n*(fn-previous_normal)+changed_tangent)*dt;
+        g_pair_dynamic_angular_impulse =
+            (cross(arm,changed_tangent)-(rt-previous_rolling_torque)+
+             sign(twist_speed)*twist_torque*n)*dt;
+        grainSleepContactForecast(n,arm,relative,spin,fn,inverse_normal_mass,
+            inverse_tangent_mass,inverse_pair_inertia,effective_radius,patch_radius,
+            g_pair_forecast_impulse,g_pair_forecast_angular_impulse);
+    }
 }
 
 void main() {
@@ -355,6 +403,12 @@ void main() {
     if (i >= pc.meta.x) return;
     // Proves the fused-step SPIR-V ran; the host refuses publication otherwise.
     if (i == 0u) diagnostics[1] = REVISION;
+    // Reject an old host's three-word metadata before indexing the new layout.
+    // The descriptor/push ABI is unchanged, so reflection alone cannot catch it.
+    if (uint(history_blocks.length()) < 5u*pc.substep.y) {
+        if (i == 0u) atomicOr(diagnostics[0],16u);
+        return;
+    }
     uint bank = readBank();
     bool valid_block = false;
     // The FRESH bit holds for substep 0 of the frame the host assigned it.
@@ -369,18 +423,34 @@ void main() {
     vec3 p = position(i,bank), v = velocity(i,bank), w = omega(i,bank);
     float r = pc.low_radius.w, im = 1.0/masses[i], ii = 2.5*im/(r*r);
     uint dst = writeBank();
-    // Sleeping (docs/dev/DEM_UYUYAN_TANELER.md): a grain still for
-    // sleepSubsteps() substeps holds its place and computes nothing; awake
-    // neighbours see it as a static body. A faster grain touching it sets WAKE.
+    vec4 drag = coupling[3u*i];
+    vec4 lift = coupling[3u*i+1u];
+    bool can_sleep = drag.w == 0.0 && lift == vec4(0.0);
+    bool input_slow = dot(v,v) < pc.sleep.y*pc.sleep.y && length(w)*r < pc.sleep.y;
+    // Sleeping (docs/dev/DEM_UYUYAN_TANELER.md): skip the expensive contact
+    // solve between audits. The last substep always evaluates actual contacts
+    // and bridges, so diagnostics and the next frame's CFL include sleepers.
     uint rest = 0u;
     uint rest_word = ownerWord()+2u;
-    if (sleepOn() && valid_block) {
-        uint raw = atomicAnd(history_blocks[rest_word], ~WAKE);
-        bool woken = (raw & WAKE) != 0u || floatBitsToUint(pc.sleep.z) != 0u;
-        rest = woken ? 0u : raw;
-        if (rest >= sleepSubsteps()) {
+    uint elapsed_word = ownerWord()+3u;
+    bool context_changed = floatBitsToUint(pc.sleep.z) != 0u;
+    uint stored_rest = valid_block ? history_blocks[rest_word] & ~AUDIT : 0u;
+    bool was_sleeping = valid_block && stored_rest >= sleepRestLimit();
+    float clock_auxiliary = valid_block && !context_changed
+        ? uintBitsToFloat(history_blocks[elapsed_word]) : 0.0;
+    float elapsed = was_sleeping ? clock_auxiliary : 0.0;
+    float rest_compensation = !was_sleeping && can_sleep && input_slow
+        ? clock_auxiliary : 0.0;
+    g_history_dt = elapsed+pc.step_contact.x;
+    bool sleeping = false;
+    if (sleepOn() && valid_block && can_sleep && input_slow) {
+        uint raw = grainSleepTakeAudit(rest_word);
+        bool audit_requested = (raw & AUDIT) != 0u;
+        rest = context_changed ? 0u : raw & ~AUDIT;
+        sleeping = rest >= sleepRestLimit();
+        if (sleeping && !audit_requested && !grainSleepAudit()) {
+            history_blocks[elapsed_word] = floatBitsToUint(g_history_dt);
             store(i,dst,p,vec3(0.0),vec3(0.0));
-            if (pc.substep.x == pc.substep.w) atomicAdd(diagnostics[16],1u);
             return;
         }
     }
@@ -390,11 +460,24 @@ void main() {
     uint listed = neighbour_list[list_base];
     g_scanned += listed;
     for (uint s=0u; s<listed; ++s) {
+        g_pair_dynamic_impulse = vec3(0.0);
+        g_pair_dynamic_angular_impulse = vec3(0.0);
+        g_pair_forecast_impulse = vec3(0.0);
+        g_pair_forecast_angular_impulse = vec3(0.0);
+        g_bridge_forecast_impulse = vec3(0.0);
         uint j = neighbour_list[list_base+1u+s];
+        // A slow heavy grain can still move a light neighbour. Do not gate
+        // transfer by the source's sleep speed; gate by the recipient's response.
+        g_probe_sleep_transfer = sleepOn() &&
+            (dot(v,v) > 0.0 || dot(w,w) > 0.0 || !can_sleep) &&
+            (history_blocks[restWordOf(j)] & ~AUDIT) >= sleepRestLimit();
         vec3 separation = p-position(j,bank);
         float d = length(separation);
+        uint bridges_before = g_bridges;
         if (d < 2.0*r+pc.wet.z && d > 1e-9) bridge(i,j,d,separation/d,r,f);
+        bool linked = g_bridges != bridges_before;
         if (d < 2.0*r) {
+            linked = true;
             ++g_pairs;
             vec3 n = d > 1e-9 ? separation/d : vec3(i<j ? -1.0 : 1.0,0,0);
             vec3 arm = -n*(.5*d);
@@ -403,12 +486,20 @@ void main() {
             vec3 relative = v+cross(w,arm)-velocity(j,bank)-cross(wj,-arm);
             contact(i,ids[j],n,2.0*r-d,arm,relative,w-wj,ii,ji,.5*r,
                 im+jm+dot(arm,arm)*(ii+ji),im+jm,f,t);
-            if (g_fast) {
-                uint jw = restWordOf(j);
-                if ((history_blocks[jw] & ~WAKE) >= sleepSubsteps()) atomicOr(history_blocks[jw],WAKE);
+        }
+        if (g_probe_sleep_transfer && linked) {
+            float jm = 1.0/masses[j], ji = 2.5*jm/(r*r);
+            bool significant = grainSleepKickSignificant(g_pair_dynamic_impulse,
+                g_pair_dynamic_angular_impulse,jm,ji,r) ||
+                grainSleepKickSignificant(g_pair_forecast_impulse,
+                    g_pair_forecast_angular_impulse,jm,ji,r) ||
+                grainSleepKickSignificant(g_bridge_forecast_impulse,vec3(0.0),jm,ji,r);
+            if (significant || !can_sleep) {
+                requestNeighbourAudit(j);
             }
         }
     }
+    g_probe_sleep_transfer = false;
     // Closed domain walls. Static collider reaction belongs to the support.
     for (int axis=0; axis<3; ++axis) for (int side=0; side<2; ++side) {
         vec3 n = vec3(0.0); n[axis] = side == 0 ? 1.0 : -1.0;
@@ -565,9 +656,35 @@ void main() {
     }
     // Symplectic Euler from the complete previous-substep state.
     float dt = pc.step_contact.x;
-    vec4 drag = coupling[3u*i];
-    vec4 lift = coupling[3u*i+1u];
-    v += dt*(f*im+pc.rolling.yzw+lift.xyz);
+    vec3 acceleration = f*im+pc.rolling.yzw+lift.xyz;
+    bool force_balanced = sleepOn() &&
+        grainSleepBalanced(acceleration,t*ii,r,p,im,g_contacts);
+    bool balanced = can_sleep && force_balanced;
+    if (sleeping && balanced) {
+        history_blocks[elapsed_word] = 0u;
+        store(i,dst,p,vec3(0.0),vec3(0.0));
+        grainSleepCommit(rest_word, sleepRestLimit());
+        if (pc.substep.x == pc.substep.w) {
+            atomicAdd(diagnostics[16],1u);
+        }
+        return;
+    }
+    if (sleeping) {
+        rest = 0u;
+    }
+    if (sleepOn() && !force_balanced && !g_fast) {
+        // Newly unbalanced supports propagate wake even before they acquire
+        // speed. Include bridge reach, since cohesion may link separated grains.
+        float reach = 2.0*r+pc.wet.z;
+        for (uint s=0u; s<listed; ++s) {
+            uint j = neighbour_list[list_base+1u+s];
+            vec3 separation = p-position(j,bank);
+            if (dot(separation,separation) < reach*reach) {
+                requestNeighbourAudit(j);
+            }
+        }
+    }
+    v += dt*acceleration;
     if (drag.w > 0.0 && lift.w > 0.0) {
         // Implicit drag pair: grain (m) and its private liquid lump (M).
         // The relative velocity decays by 1/(1 + dt beta (1/m + 1/M)) and
@@ -582,14 +699,27 @@ void main() {
     p += dt*v;
     w += dt*t*ii;
     store(i,dst,p,v,w);
-    // Still this substep: count toward sleep. Liquid drag and force fields
-    // (lift row) keep a grain awake: they change between frames. A WAKE set by
+    // Still this substep: accumulate physical rest time. Liquid drag and force fields
+    // (lift row) keep a grain awake: they change between frames. A AUDIT set by
     // a neighbour since the read above survives the rewrite.
-    bool still = sleepOn() && drag.w == 0.0 && lift == vec4(0.0) &&
+    bool still = sleepOn() && balanced &&
         dot(v,v) < pc.sleep.y*pc.sleep.y && length(w)*r < pc.sleep.y;
-    uint next_rest = still ? min(rest+1u, sleepSubsteps()) : 0u;
-    atomicAnd(history_blocks[rest_word], WAKE);
-    atomicOr(history_blocks[rest_word], next_rest);
+    uint next_rest = 0u;
+    float next_compensation = 0.0;
+    if (still) {
+        // Compensated addition keeps a long rest time progressing even when
+        // an adaptive dt is smaller than the float ULP of the accumulated age.
+        float previous_time = uintBitsToFloat(rest);
+        float increment = dt-rest_compensation;
+        float advanced_time = previous_time+increment;
+        float target_time = max(pc.sleep.w,dt);
+        next_rest = floatBitsToUint(min(advanced_time,target_time));
+        if (advanced_time < target_time) {
+            next_compensation = (advanced_time-previous_time)-increment;
+        }
+    }
+    history_blocks[elapsed_word] = floatBitsToUint(next_compensation);
+    grainSleepCommit(rest_word, next_rest);
     // Rebuild the lists before substep k+1 once this grain has moved half the
     // skin since the build: two grains then closed at most the whole skin, so
     // every pair inside 2r + rupture cap was inside the cutoff at the build.

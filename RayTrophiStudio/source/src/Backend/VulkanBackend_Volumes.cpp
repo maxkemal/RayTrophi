@@ -102,6 +102,12 @@ VulkanBackendAdapter::describeVolumeSlots() const {
             r.volume_type = v.volume_type;
             r.has_density = v.vdb_grid_address != 0;
             r.has_temperature = v.vdb_temp_address != 0;
+            r.emission_mode = v.emission_mode;
+            r.color_ramp_enabled = v.color_ramp_enabled != 0;
+            r.blackbody_intensity = v.blackbody_intensity;
+            r.temperature_scale = v.temperature_scale;
+            r.temperature_min = v._ext_reserved[6];
+            r.temperature_max = v.max_temperature;
             for (int k = 0; k < 3; ++k) {
                 r.aabb_min[k] = v.aabb_min[k];
                 r.aabb_max[k] = v.aabb_max[k];
@@ -125,6 +131,12 @@ VulkanBackendAdapter::describeVolumeSlots() const {
             r.volume_type = v.volume_type;
             r.has_density = v.vdb_grid_address != 0;
             r.has_temperature = v.vdb_temp_address != 0;
+            r.emission_mode = v.emission_mode;
+            r.color_ramp_enabled = v.color_ramp_enabled != 0;
+            r.blackbody_intensity = v.blackbody_intensity;
+            r.temperature_scale = v.temperature_scale;
+            r.temperature_min = v._ext_reserved[6];
+            r.temperature_max = v.max_temperature;
             for (int k = 0; k < 3; ++k) {
                 r.aabb_min[k] = v.aabb_min[k];
                 r.aabb_max[k] = v.aabb_max[k];

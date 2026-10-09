@@ -12,11 +12,40 @@
 #include "json.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <utility>
 
 namespace SubstanceEditorUI {
+
+// Readable label for a field key; the key itself is the tooltip (it is what
+// scripts write). "granular_friction_degrees" -> "Friction".
+inline std::string fieldLabel(const char* key) {
+    std::string k = key;
+    if (k == "default_constitutive_model") return "Solid behavior";
+    if (k == "granular_transport") return "Solver (dem = grains, mpm = continuum)";
+    for (const char* prefix : {"granular_", "grain_", "solver_", "liquid_"}) {
+        const std::string p = prefix;
+        if (k.rfind(p, 0) == 0) { k = k.substr(p.size()); break; }
+    }
+    // The unit is printed after the label, so a unit suffix is dropped;
+    // "_kelvin" reads as "temperature" ("Melt temperature (K)").
+    using Suffix = std::pair<const char*, const char*>;
+    for (const auto& [suffix, word] : {Suffix{"_degrees", ""}, Suffix{"_deg", ""},
+                                       Suffix{"_kelvin", "_temperature"}, Suffix{"_per_s", ""},
+                                       Suffix{"_n_m", ""}, Suffix{"_m", ""}}) {
+        const std::string x = suffix;
+        if (k.size() > x.size() && k.compare(k.size() - x.size(), x.size(), x) == 0) {
+            k = k.substr(0, k.size() - x.size()) + word;
+            break;
+        }
+    }
+    std::replace(k.begin(), k.end(), '_', ' ');
+    if (!k.empty()) k[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(k[0])));
+    return k;
+}
 
 // One substance picker for every surface (domain default, flow source,
 // collider): grouped by category, project substances labelled with their base.
@@ -29,6 +58,23 @@ inline bool drawPicker(const char* id, std::string& name, const char* empty_labe
     const char* preview = name.empty() ? (empty_label ? empty_label : "") : name.c_str();
     ImGui::SetNextItemWidth(-FLT_MIN);
     if (ImGui::BeginCombo(id, preview)) {
+        static char filter[48] = {0};
+        if (ImGui::IsWindowAppearing()) {
+            filter[0] = '\0';
+            ImGui::SetKeyboardFocusHere();
+        }
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputTextWithHint("##substance_filter", "Search", filter, sizeof(filter));
+        std::string needle = filter;
+        std::transform(needle.begin(), needle.end(), needle.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const auto matches = [&](const std::string& text) {
+            if (needle.empty()) return true;
+            std::string lower = text;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return lower.find(needle) != std::string::npos;
+        };
         if (empty_label && ImGui::Selectable(empty_label, name.empty())) {
             changed = !name.empty();
             name.clear();
@@ -37,9 +83,16 @@ inline bool drawPicker(const char* id, std::string& name, const char* empty_labe
             {"liquid", "Liquids"}, {"fuel", "Fuels"},
             {"granular", "Granular"}, {"solid", "Solids"}};
         for (const auto& [key, title] : kGroups) {
+            bool any = false;
+            for (const auto& row : substances) {
+                any |= row.category == key && (matches(row.name) || matches(row.based_on));
+            }
+            if (!any) continue;
             ImGui::SeparatorText(title);
             for (const auto& row : substances) {
-                if (row.category != key) continue;
+                if (row.category != key || !(matches(row.name) || matches(row.based_on))) {
+                    continue;
+                }
                 const bool selected = name == row.name;
                 const std::string label = row.builtin
                     ? row.name
@@ -75,6 +128,9 @@ inline bool draw(const char* id, std::string& assigned) {
 
     bool changed = false;
     static std::string last_error;
+    // Field being dragged ("substance/key") and its in-flight value.
+    static std::string pending_key;
+    static float pending_value[3] = {0.0f, 0.0f, 0.0f};
     ImGui::PushID(id);
     const std::string header = builtin
         ? "Substance: " + assigned + " (built-in, read-only)"
@@ -129,27 +185,32 @@ inline bool draw(const char* id, std::string& assigned) {
     };
 
     ImGui::BeginDisabled(builtin);
-    const char* group = "";
-    for (const auto& spec : RayTrophiSim::substanceFieldSpecs()) {
-        if (std::string(group) != spec.group) {
-            group = spec.group;
-            ImGui::SeparatorText(group);
-        }
+    const auto draw_field = [&](const RayTrophiSim::SubstanceFieldSpec& spec) {
         ImGui::PushID(spec.key);
+        const std::string edit_key = assigned + "/" + spec.key;
         const bool marked = is_overridden(spec.key);
-        std::string label = std::string(marked ? "* " : "") + spec.key;
+        std::string label = std::string(marked ? "* " : "") + fieldLabel(spec.key);
         if (spec.unit && spec.unit[0]) label += std::string(" (") + spec.unit + ")";
         const nlohmann::json& value = fields[spec.key];
         switch (spec.kind) {
             case RayTrophiSim::SubstanceFieldKind::Float: {
-                float v = value.get<float>();
+                // The library value is re-read every frame but only written on
+                // release, so the dragged value lives here until then; reading
+                // the library mid-drag snapped the field back each frame.
+                const bool editing = pending_key == edit_key;
+                float v = editing ? pending_value[0] : value.get<float>();
                 const float speed = std::max(std::fabs(v) * 0.005f, 1.0e-4f);
                 ImGui::SetNextItemWidth(160.0f);
                 // Applied on release: dragging would republish the library
                 // and invalidate the bake on every pixel of the drag.
                 ImGui::DragFloat("##v", &v, speed, spec.min, spec.max, "%.5g",
                                  ImGuiSliderFlags_AlwaysClamp);
+                if (ImGui::IsItemActive()) {
+                    pending_key = edit_key;
+                    pending_value[0] = v;
+                }
                 if (ImGui::IsItemDeactivatedAfterEdit()) apply(spec.key, v);
+                if (!ImGui::IsItemActive() && pending_key == edit_key) pending_key.clear();
                 break;
             }
             case RayTrophiSim::SubstanceFieldKind::Bool: {
@@ -183,16 +244,26 @@ inline bool draw(const char* id, std::string& assigned) {
                 break;
             }
             case RayTrophiSim::SubstanceFieldKind::Color: {
+                const bool editing = pending_key == edit_key;
                 float c[3] = {value[0].get<float>(), value[1].get<float>(), value[2].get<float>()};
+                if (editing) std::copy(pending_value, pending_value + 3, c);
                 ImGui::SetNextItemWidth(160.0f);
                 ImGui::ColorEdit3("##v", c, ImGuiColorEditFlags_NoInputs);
+                if (ImGui::IsItemActive()) {
+                    pending_key = edit_key;
+                    std::copy(c, c + 3, pending_value);
+                }
                 if (ImGui::IsItemDeactivatedAfterEdit())
                     apply(spec.key, nlohmann::json::array({c[0], c[1], c[2]}));
+                if (!ImGui::IsItemActive() && pending_key == edit_key) pending_key.clear();
                 break;
             }
         }
         ImGui::SameLine();
         ImGui::TextUnformatted(label.c_str());
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Script key: %s", spec.key);
+        }
         if (marked) {
             ImGui::SameLine();
             if (ImGui::SmallButton("Revert")) apply(spec.key, nullptr);
@@ -200,7 +271,81 @@ inline bool draw(const char* id, std::string& assigned) {
                 ImGui::SetTooltip("Drop this override: follow the base substance again");
         }
         ImGui::PopID();
+    };
+    const auto field_text = [&](const char* key) {
+        return fields.contains(key) && fields[key].is_string()
+            ? fields[key].get<std::string>() : std::string();
+    };
+    const auto field_flag = [&](const char* key) {
+        return fields.contains(key) && fields[key].is_boolean() && fields[key].get<bool>();
+    };
+    const std::string category = field_text("category");
+    const std::string model = field_text("default_constitutive_model");
+    const bool granular = model == "granular" || category == "granular";
+    const bool dem = granular && field_text("granular_transport") == "dem";
+    // A section is drawn when this substance can use it; its switch (combustible,
+    // meltable) is always drawn so the section can be turned on. Nothing is
+    // unreachable: "Show unused sections" draws the rest, and IPC sets any key.
+    struct Section { const char* group; const char* title; bool used; const char* gate; };
+    const Section sections[] = {
+        {"Identity", "Identity", true, nullptr},
+        {"Thermal", "Thermal", true, nullptr},
+        {"Phase change", "Melting and boiling", field_flag("meltable"), "meltable"},
+        {"Liquid", "Liquid", category == "liquid" || category == "fuel" || model == "fluid" ||
+            field_flag("meltable"), nullptr},
+        {"Granular", dem ? "Granular (grains: DEM)" : "Granular (continuum: MPM)", granular,
+            nullptr},
+        {"Grains (DEM)", "Grain material (DEM)", dem, nullptr},
+        {"Moisture", "Moisture", category == "solid" || category == "granular", nullptr},
+        {"Combustion", "Burning (solid)", field_flag("combustible"), "combustible"},
+        {"Liquid fuel", "Liquid fuel", category == "fuel" || field_flag("fluid_flammable") ||
+            field_flag("fluid_extinguishing"), nullptr},
+        {"Optical", "Look", true, nullptr},
+    };
+    static bool show_unused = false;
+    std::string hidden;
+    for (const auto& section : sections) {
+        const bool open = section.used || show_unused;
+        if (!open) {
+            hidden += (hidden.empty() ? "" : ", ") + std::string(section.title);
+        }
+        if (!open && !section.gate) continue;
+        ImGui::SeparatorText(section.title);
+        const bool granular_section = std::string(section.group) == "Granular";
+        if (granular_section && dem) {
+            // These continuum fields feed MPM only; editing them on a DEM
+            // substance changed nothing, which is the panel lying.
+            ImGui::TextWrapped("Grains (DEM) use the grain material below; the continuum fields "
+                "are used only when the solver is mpm (Show unused sections lists them).");
+        }
+        for (const auto& spec : RayTrophiSim::substanceFieldSpecs()) {
+            if (std::string(spec.group) != section.group) continue;
+            const bool is_gate = section.gate && std::string(spec.key) == section.gate;
+            const bool is_transport = std::string(spec.key) == "granular_transport";
+            if (!open && !is_gate) continue;
+            if (granular_section && dem && !is_transport && !show_unused) continue;
+            draw_field(spec);
+        }
     }
+    // Viewing controls stay usable on a read-only built-in; only fields lock.
+    ImGui::EndDisabled();
+    // Solver numerics are tuned per substance but are not material physics.
+    const bool advanced_open = ImGui::TreeNode("Advanced: solver numerics");
+    if (advanced_open) {
+        ImGui::BeginDisabled(builtin);
+        for (const auto& spec : RayTrophiSim::substanceFieldSpecs()) {
+            if (std::string(spec.group) == "Solver hints") draw_field(spec);
+        }
+        ImGui::EndDisabled();
+        ImGui::TreePop();
+    }
+    ImGui::Checkbox("Show unused sections", &show_unused);
+    if (ImGui::IsItemHovered()) {
+        const std::string tip = hidden.empty() ? std::string("Every section is in use.")
+            : "Not used by this substance: " + hidden;
+        ImGui::SetTooltip("%s", tip.c_str());
+    }
+    ImGui::BeginDisabled(builtin);
     ImGui::EndDisabled();
 
     if (!builtin) {

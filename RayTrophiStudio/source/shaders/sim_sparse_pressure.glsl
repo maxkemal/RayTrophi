@@ -26,6 +26,12 @@ layout(set = 0, binding = 12) readonly buffer UW { float uw[]; };
 layout(set = 0, binding = 13) readonly buffer VW { float vw[]; };
 layout(set = 0, binding = 14) readonly buffer WW { float ww[]; };
 layout(set = 0, binding = 15) buffer DensePressure { float dense_pressure[]; };
+#ifdef RT_SPARSE_MAC
+layout(set = 0, binding = 16) readonly buffer MacTileMap { uint mac_tile_map[]; };
+layout(set = 0, binding = 17) readonly buffer MacTileList { uint mac_tile_list[]; };
+#endif
+#include "sim_mac_lane.glsl"
+#include "sim_mac_solid_weight.glsl"
 
 const uint EMPTY = 0xffffffffu;
 const uint LOCKED = 0xfffffffeu;
@@ -90,13 +96,7 @@ float faceWeight(ivec3 cell, int axis, int direction) {
     if (face[axis] <= 0 || face[axis] >= dimension) {
         return pc.boundary == 0 ? 1.0 : 0.0;
     }
-    if (axis == 0) {
-        return uw[face.x + (pc.nx + 1) * (face.y + pc.ny * face.z)];
-    }
-    if (axis == 1) {
-        return vw[face.x + pc.nx * (face.y + (pc.ny + 1) * face.z)];
-    }
-    return ww[face.x + pc.nx * (face.y + pc.ny * face.z)];
+    return macSolidWeight(axis, face.x, face.y, face.z);
 }
 
 void emitReduction(double contribution) {

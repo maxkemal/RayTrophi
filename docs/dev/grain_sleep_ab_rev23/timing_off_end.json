@@ -1,0 +1,52 @@
+{
+  "enabled": true,
+  "kernels": [
+    {
+      "calls": 156762,
+      "kernel": "sim_matter_grain_step",
+      "ms": 1553426.8590079534
+    },
+    {
+      "calls": 156762,
+      "kernel": "sim_matter_grain_list_build",
+      "ms": 133312.0819200441
+    },
+    {
+      "calls": 156762,
+      "kernel": "sim_matter_grain_hash",
+      "ms": 9556.50457599412
+    },
+    {
+      "calls": 156762,
+      "kernel": "sim_matter_grain_list_clear",
+      "ms": 8053.840896000763
+    },
+    {
+      "calls": 358,
+      "kernel": "sim_fluid_density_splat",
+      "ms": 375.1710720000004
+    },
+    {
+      "calls": 358,
+      "kernel": "sim_fluid_label_classify",
+      "ms": 167.5540480000001
+    },
+    {
+      "calls": 358,
+      "kernel": "sim_fluid_label_bin_scatter",
+      "ms": 52.161536000000105
+    },
+    {
+      "calls": 358,
+      "kernel": "sim_fluid_label_bin_clear",
+      "ms": 0.8699520000000005
+    },
+    {
+      "calls": 358,
+      "kernel": "sim_fluid_density_clear",
+      "ms": 0.8537600000000011
+    }
+  ],
+  "supported": true,
+  "total_ms": 1704945.8967679923
+}

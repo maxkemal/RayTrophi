@@ -2,6 +2,7 @@
 
 #include "Fluid/FluidDomainSubstance.h"
 #include "Fluid/FluidParticles.h"
+#include "Fluid/MatterGrain.h"
 #include "Fluid/SubstanceTag.h"
 #include "MaterialStateField.h"
 #include "ParticleSimulation.h"
@@ -18,6 +19,107 @@ void configureBuiltinMatterTransport(std::vector<SubstanceProfile>& profiles) {
         profile.granular_transport = profile.name == "Sand" || profile.name == "Gravel" ||
             profile.name == "Ice" ? MatterGranularTransport::Dem : MatterGranularTransport::Mpm;
     }
+}
+
+MatterGrainOwnership matterGrainOwnership(const SimulationGridDomainDesc& domain,
+                                          const std::vector<SimulationFlowSourceDesc>& sources,
+                                          int domain_index, bool has_particles) {
+    MatterGrainOwnership result;
+    result.enabled = domain.fluid_params.grain.enabled;
+    if (domain.type != SimulationDomainType::Matter) {
+        result.enabled = false;
+        return result;
+    }
+    bool wet_birth = false;
+    const auto consider = [&](const std::string& name) {
+        if (name.empty()) {
+            return;
+        }
+        const auto* profile = tryFindSubstance(name);
+        if (!profile) {
+            return;
+        }
+        if (profile->category == SubstanceCategory::Liquid ||
+            profile->category == SubstanceCategory::Fuel) {
+            if (result.liquid.empty()) {
+                result.liquid = name;
+            }
+            return;
+        }
+        if (profile->default_constitutive_model != MatterConstitutiveModel::Granular ||
+            profile->granular_transport != MatterGranularTransport::Dem) {
+            return;
+        }
+        if (result.substance.empty()) {
+            result.substance = name;
+        } else if (name != result.substance) {
+            result.notes.push_back(name + " also asks for grains; one grain material per domain: " +
+                result.substance + "'s is used.");
+        }
+    };
+    // What is poured comes first: grains carry their source's substance tag,
+    // so its material is the one that runs. Disabled sources count too:
+    // `enabled` is keyable, and the owner is fixed when the first grain is
+    // born. An untagged source pours the Default Substance, considered last.
+    for (const auto& source : sources) {
+        if (source.domain_index == domain_index &&
+            source.phase != SimulationFlowSourceDesc::Phase::Gas) {
+            consider(source.fluid_substance);
+            wet_birth |= source.grain_birth_saturation > 0.0f;
+        }
+    }
+    for (const auto& binding : domain.fluid_substance_materials) {
+        if (binding.phase != SubstancePhase::Solid) {
+            consider(binding.substance);
+        }
+    }
+    consider(domain.fluid_params.default_substance);
+    result.wanted = !result.substance.empty();
+    if (result.wanted) {
+        const auto* grain = tryFindSubstance(result.substance);
+        const bool target_wet = grain && grain->grain_water_capacity_fraction > 0.0f &&
+            (!result.liquid.empty() || wet_birth);
+        // Grains born wet may hold water: they keep wet on until a reset.
+        result.wet_grains = target_wet ||
+            (has_particles && domain.fluid_params.grain.wet_grains);
+    }
+    if (result.wanted) {
+        for (const auto& blocker : matterGrainBlockers(domain)) {
+            result.blockers.push_back(blocker.message);
+        }
+    }
+    const bool target = result.wanted && result.blockers.empty();
+    // Carrier mass and contact ownership are fixed at birth (as for a
+    // granular_transport edit): live particles keep the owner until a reset.
+    if (target != result.enabled && has_particles) {
+        result.reset_pending = true;
+    } else {
+        result.enabled = target;
+    }
+    return result;
+}
+
+MatterGrainOwnership matterGrainOwnership(const ParticleSimulationSystem& system,
+                                          std::size_t index) {
+    const auto& domains = system.gridDomains();
+    const auto& states = system.gridDomainStates();
+    if (index >= domains.size()) {
+        return {};
+    }
+    return matterGrainOwnership(domains[index], system.flowSources(), static_cast<int>(index),
+        index < states.size() && !states[index].particles.empty());
+}
+
+bool matterGrainsInUse(const ParticleSimulationSystem& system,
+                       const SimulationGridDomainDesc& domain) {
+    const auto& domains = system.gridDomains();
+    for (std::size_t index = 0; index < domains.size(); ++index) {
+        if (&domains[index] == &domain || domains[index].name == domain.name) {
+            const auto ownership = matterGrainOwnership(system, index);
+            return ownership.enabled || ownership.wanted;
+        }
+    }
+    return domain.fluid_params.grain.enabled;
 }
 
 MatterTransportOwner substanceTransportOwner(uint32_t tag, MatterConstitutiveModel model,
@@ -80,7 +182,7 @@ MatterOwnerSummary inspectMatterDomainOwners(const FluidParticles& particles,
 bool validateMatterTransportEdit(const std::string& substance,
                                 const std::vector<SimulationGridDomainDesc>& domains,
                                 const std::vector<SimulationGridDomainState>& states,
-                                std::string& error) {
+                                std::string& error, const char* key) {
     const auto affected = [&](const SubstanceProfile* profile) {
         std::unordered_set<std::string> visited;
         while (profile && visited.insert(profile->name).second) {
@@ -102,7 +204,7 @@ bool validateMatterTransportEdit(const std::string& substance,
             }
             if (affected(particleSubstance(tag, domains[domain].fluid_params))) {
                 error = "reset domain '" + domains[domain].name +
-                    "' before editing granular_transport of '" + substance +
+                    "' before editing " + key + " of '" + substance +
                     "' (carrier mass and contact ownership are fixed at birth)";
                 return false;
             }

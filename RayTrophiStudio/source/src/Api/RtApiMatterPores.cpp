@@ -1,6 +1,7 @@
 #include "RtMatterModels.h"
 #include "RtApiInternal.h"
 #include "Fluid/MatterGrain.h"
+#include "Fluid/MatterSubstanceState.h"
 #include "Fluid/MatterPoreAuthoring.h"
 
 #include <stdexcept>
@@ -30,7 +31,7 @@ nlohmann::json setMatterPoreExchange(const std::string& domain, const nlohmann::
             throw std::runtime_error(error);
         }
         if ((candidate.enabled || candidate.wet_response_enabled) &&
-            descriptor.fluid_params.grain.enabled) {
+            RayTrophiSim::Fluid::matterGrainsInUse(scriptSimulationRuntime(), descriptor)) {
             throw std::runtime_error("grains are enabled: pore water exchange cannot run with "
                                      "grains; use wet grains");
         }

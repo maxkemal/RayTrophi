@@ -39,6 +39,9 @@ std::shared_ptr<Material> createMatterMaterialPreset(const std::string& substanc
         roughness = 0.04f;
         transmission = 0.8f;
         ior = 1.46f;
+    } else if (substance == "Snow") {
+        color = Vec3(0.92f, 0.94f, 0.97f);
+        roughness = 0.85f;
     } else if (substance == "Wax") {
         color = Vec3(0.88f, 0.8f, 0.61f);
         roughness = 0.35f;

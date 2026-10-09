@@ -1,0 +1,88 @@
+{
+  "on": {
+    "tail_steps": [
+      161,
+      180
+    ],
+    "tail_wall_median_s": 5.225,
+    "tail_gpu_wait_median_ms": 4660.85,
+    "tail_substeps_median": 440.0,
+    "sleeping": 420072,
+    "sleep_fraction": 0.3231323076923077,
+    "energy_j": 0.0627298981969458,
+    "mass_kg": 7434.82350371778,
+    "com_y": 0.18113010561504722,
+    "rms_translation_m_s": 0.004107872519645497,
+    "native_tail": [
+      {
+        "kernel": "sim_matter_grain_step",
+        "calls": 12760,
+        "ms": 131089.22368000099,
+        "ms_per_call": 10.27345013166152
+      },
+      {
+        "kernel": "sim_matter_grain_list_clear",
+        "calls": 12760,
+        "ms": 3581.2526720000687,
+        "ms_per_call": 0.2806624351097233
+      },
+      {
+        "kernel": "sim_matter_grain_list_build",
+        "calls": 12760,
+        "ms": 1808.6676479985108,
+        "ms_per_call": 0.1417451134795071
+      },
+      {
+        "kernel": "sim_matter_grain_hash",
+        "calls": 12760,
+        "ms": 676.1594879999507,
+        "ms_per_call": 0.05299055548588955
+      }
+    ]
+  },
+  "off": {
+    "tail_steps": [
+      161,
+      180
+    ],
+    "tail_wall_median_s": 6.53,
+    "tail_gpu_wait_median_ms": 5451.35,
+    "tail_substeps_median": 440.0,
+    "sleeping": 0,
+    "sleep_fraction": 0.0,
+    "energy_j": 0.05736850174046959,
+    "mass_kg": 7434.82350371778,
+    "com_y": 0.18103410082299087,
+    "rms_translation_m_s": 0.00392840649254974,
+    "native_tail": [
+      {
+        "kernel": "sim_matter_grain_step",
+        "calls": 12320,
+        "ms": 146098.60095997737,
+        "ms_per_call": 11.858652675322839
+      },
+      {
+        "kernel": "sim_matter_grain_list_build",
+        "calls": 12320,
+        "ms": 1732.6202880117053,
+        "ms_per_call": 0.14063476363731375
+      },
+      {
+        "kernel": "sim_matter_grain_list_clear",
+        "calls": 12320,
+        "ms": 3471.8109119975416,
+        "ms_per_call": 0.2818028337660342
+      },
+      {
+        "kernel": "sim_matter_grain_hash",
+        "calls": 12320,
+        "ms": 655.2350720020331,
+        "ms_per_call": 0.05318466493522996
+      }
+    ]
+  },
+  "tail_wall_speedup": 1.2497607655502394,
+  "physical_sleep_acceptance": false,
+  "live_shader_revision": 22,
+  "pending_source_revision": 23
+}

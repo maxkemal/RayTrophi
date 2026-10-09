@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -4241,6 +4241,7 @@ struct SceneData {
                 h = mix(h, f.fluid_emit_along_normal ? 1ull : 0ull);
                 h = mix(h, f.fluid_temperature_override ? 1ull : 0ull);
                 h = mix(h, qf(f.fluid_temperature_kelvin));
+                h = mix(h, qf(f.grain_birth_saturation));
                 // ★ The substance changes what the liquid IS, so a cached
                 // sequence baked under the old name no longer describes it.
                 h = mix(h, static_cast<uint64_t>(
@@ -4609,6 +4610,7 @@ struct SceneData {
                 h = mix(h, f.fluid_emit_along_normal ? 1ull : 0ull);
                 h = mix(h, f.fluid_temperature_override ? 1ull : 0ull);
                 h = mix(h, qf(f.fluid_temperature_kelvin));
+                h = mix(h, qf(f.grain_birth_saturation));
                 h = mix(h, static_cast<uint64_t>(
                     RayTrophiSim::Fluid::substanceTag(f.fluid_substance)));
                 h = mix(h, f.use_time_limit ? 1ull : 0ull);

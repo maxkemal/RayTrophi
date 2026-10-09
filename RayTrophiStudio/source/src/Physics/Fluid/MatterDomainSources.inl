@@ -349,7 +349,8 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                     nullptr, nullptr, grain_rest_mass, emit_model);
                 if (grain_birth) {
                     Fluid::initMatterGrainBirthWater(state.particles,
-                        state.particles.size() - 1, fluid_domain.fluid_params.grain);
+                        state.particles.size() - 1, source.grain_birth_saturation,
+                        fluid_domain.fluid_params.grain);
                 }
             }
             source.total_emitted_particles +=

@@ -17,6 +17,7 @@ import json
 import time
 
 from rt_ipc import RtIpc
+from rt_grain_material import install_grain_material
 
 GRID = 'Lim_Grid'
 GRAIN = 'Lim_Grain'
@@ -36,11 +37,11 @@ def main():
     parser.add_argument('--window-frames', type=int, default=2)
     parser.add_argument('--grain-radius', type=float, default=.01)
     parser.add_argument('--source-radius', type=float, default=1.6)
-    # A/B for sleeping grains (docs/dev/DEM_UYUYAN_TANELER.md); sent only when
-    # given, so the script still drives builds that predate the setting.
+    # Explicit on/off keeps A/B reproducible when reusing the previous fixture.
     parser.add_argument('--no-sleep', action='store_true')
     args = parser.parse_args()
     client = RtIpc()
+    install_grain_material(client)  # old grain keys -> grain substance
     failures = []
 
     def call(method, **params):
@@ -97,8 +98,11 @@ def main():
     # Radius is fixed once a grain is born: clear the previous run first.
     call('timeline.set_frame', frame=0)
     call('fluid.reset')
-    call('fluid.set_grain_settings', domain=GRAIN, enabled=True, radius_m=args.grain_radius,
-         max_substeps=4096, **({'sleep': False} if args.no_sleep else {}))
+    call('fluid.set_grain_settings', domain=GRAIN, radius_m=args.grain_radius,
+         max_substeps=4096, sleep=not args.no_sleep)
+    sleep_settings = call('fluid.grain_settings', domain=GRAIN)
+    assert sleep_settings['sleep'] == (not args.no_sleep), sleep_settings
+    print('SETTINGS ' + json.dumps(sleep_settings), flush=True)
     floor_faces = 0
     if not args.no_collider:
         objects = call('scene.list_objects')

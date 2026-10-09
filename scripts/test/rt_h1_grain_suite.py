@@ -26,6 +26,11 @@ DENSE_LOG = ROOT / 'docs/dev/matter_h1_dense_grain_scene_live.json'
 # name, script, args, JSON log the arm writes, slow
 ARMS = [
     ('contracts', 'check_matter_grain_contracts.py', [], None, False),
+    ('sleep_contracts', 'check_matter_grain_sleep_contracts.py', [], None, False),
+    ('sleep_transfer_contracts', 'check_matter_grain_sleep_transfer.py', [], None, False),
+    ('sleep', 'rt_test_grain_sleep_ipc.py', [], None, False),
+    ('sleep_transfer', 'rt_test_grain_sleep_transfer_ipc.py', [],
+     ROOT / 'docs/dev/grain_sleep_transfer_live.json', False),
     ('panel_fields', 'check_domain_panel_fields.py', [], None, False),
     ('readiness', 'rt_h1_grain_runtime_ipc.py', ['--readiness-only'], RUNTIME_LOG, False),
     ('base', 'rt_h1_grain_runtime_ipc.py', [], RUNTIME_LOG, False),

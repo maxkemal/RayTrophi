@@ -30,12 +30,35 @@ int main() {
         assert(!patchMatterGrainParams(patch, p, error));
         assert(matterGrainParamsToJson(p) == initial);
     }
-    assert(patchMatterGrainParams({{"enabled", true}, {"radius_m", .05}}, p, error));
-    assert(patchMatterGrainParams({{"twisting_friction", .1}}, p, error));
+    // No enabled switch: grains follow the substances (matterGrainOwnership),
+    // so the key is rejected, and an old save that carries it still loads.
+    assert(!patchMatterGrainParams({{"enabled", true}}, p, error));
+    assert(!matterGrainParamsToJson(p).contains("enabled"));
+    assert(matterGrainParamsToJson(matterGrainParamsFromJson({{"enabled", true}})) == initial);
+    assert(patchMatterGrainParams({{"radius_m", .05}}, p, error));
+    // The grain material moved to the substance: the domain key names its new home.
+    assert(!patchMatterGrainParams({{"twisting_friction", .1}}, p, error));
+    assert(error.find("grain_twisting_friction") != std::string::npos);
     assert(std::abs(p.tangential_stiffness_ratio - 2.0f / 7.0f) < 1e-7f);
-    assert(patchMatterGrainParams({{"tangential_stiffness_ratio", 0.0},
-        {"contact_resolution", 48}, {"packing_fraction", .64}}, p, error));
-    assert(p.contact_resolution == 48 && p.tangential_stiffness_ratio == 0.0f);
+    // Stiffness follows the radius: k = scale x 8e5 N/m per m x r.
+    assert(patchMatterGrainParams({{"contact_resolution", 48}, {"stiffness_scale", 2.0}}, p, error));
+    assert(p.contact_resolution == 48);
+    assert(std::abs(p.stiffness_n_m - 2.0f * kMatterGrainStiffnessPerRadius * .05f) < 1e-2f);
+    {
+        // An old save keeps its stiffness as a scale; its material is dropped and named.
+        std::string dropped;
+        const auto old = matterGrainParamsFromJson(
+            {{"radius_m", .025}, {"stiffness_n_m", 1e5}, {"friction", .3}}, &dropped);
+        assert(std::abs(old.stiffness_n_m - 1e5f) < 1.0f && dropped == "friction");
+        // The substance's grain material reaches the solver params.
+        RayTrophiSim::SubstanceProfile sand = *RayTrophiSim::tryFindSubstance("Sand");
+        sand.grain_friction = .7f;
+        sand.grain_packing_fraction = .55f;
+        auto applied = old;
+        applyMatterGrainSubstance(applied, sand, nullptr, false);
+        assert(applied.friction == .7f && applied.packing_fraction == .55f && !applied.wet_grains);
+        assert(std::abs(applied.stiffness_n_m - 1e5f) < 1.0f);
+    }
     // Grain mass: bulk density / packing * sphere volume. Untagged Water
     // preset liquid density is irrelevant; granular uses dry density, so
     // only check the scaling: doubling radius multiplies mass by eight.

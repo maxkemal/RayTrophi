@@ -28,6 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rt_ipc import RtIpc  # noqa: E402
+from rt_grain_material import install_grain_material  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 LOG = ROOT / 'docs/dev/grain_motion_live.json'
@@ -41,6 +42,7 @@ FPS = 24.
 
 def main():
     client = RtIpc()
+    install_grain_material(client)  # old grain keys -> grain substance
 
     def call(method, **params):
         result = client.call(method, **params)
@@ -68,7 +70,7 @@ def main():
              thermal_liquid_enabled=False)
         call('fluid.set_pore_exchange', domain=DOMAIN, enabled=False, wet_response_enabled=False)
         call('fluid.reset')
-        call('fluid.set_grain_settings', domain=DOMAIN, enabled=True, radius_m=.025,
+        call('fluid.set_grain_settings', domain=DOMAIN, radius_m=.025,
              stiffness_n_m=20000., restitution=.5, friction=.5, rolling_friction=.02,
              max_substeps=1024)
         exists = SOURCE in {s['name'] for s in call('flow_source.list')}

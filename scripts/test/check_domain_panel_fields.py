@@ -42,14 +42,37 @@ TAB = re.compile(r'BeginTabItem\s*\(\s*"([^"#]*)')
 CHANGES = {
     # 2026-10-06 grain reorganisation: material -> Matter tab, solver -> Solvers.
     'Physical radius (m)': 'Simulation grain radius (m)',
-    'Represented grain radius (m, 0 = same)': 'Real grain radius (m, 0 = simulation)',
-    'Normal damping (Ns/m)': 'Restitution',
+    'Represented grain radius (m, 0 = same)':
+        'removed: substance grain_real_radius_m (U2)',
+    'Normal damping (Ns/m)': 'removed: substance grain_restitution (U2)',
     'Liquid viscosity for drag (Pa s)':
         'removed: drag uses the liquid substance viscosity (one physical value, one home)',
     # 2026-10-06 H1-G0: XPBD failed the 16k accuracy/cost gate, DEM is the only solver.
     'Solver (comparison)': 'removed: XPBD removed (H1-G0), DEM is the only grain solver',
     'XPBD substeps per frame': 'removed: XPBD removed (H1-G0)',
     'Chemistry Preset': 'removed: T3 chemistry belongs to the default substance',
+    # 2026-10-09: grains follow the substances (granular_transport=dem); the
+    # Solvers block says which solver runs and why, there is no switch.
+    'Enable discrete grains':
+        'removed: grains follow the substances (matterGrainOwnership); status line instead',
+    # 2026-10-09 MADDE_UI_TEK_OTORITE U2/U3: the grain material is the DEM
+    # substance's (edited in its substance editor); the Matter tab shows it
+    # read-only. Stiffness follows the radius (scale under Advanced).
+    'Contact stiffness (N/m)': 'Stiffness scale',
+    'Sliding friction': 'removed: substance grain_friction (U2)',
+    'Rolling friction': 'removed: substance grain_rolling_friction (U2)',
+    'Twisting friction': 'removed: substance grain_twisting_friction (U2)',
+    'Static friction stiffness (x normal)':
+        'removed: substance grain_tangential_stiffness_ratio (U2)',
+    'Packing fraction': 'removed: substance grain_packing_fraction (U2)',
+    'Wet grains (absorb water, liquid bridges)':
+        'removed: derived from the substances (water capacity + liquid in reach)',
+    'Water capacity (x grain volume)': 'removed: substance grain_water_capacity_fraction (U2)',
+    'Absorption rate (1/s)': 'removed: substance grain_absorption_rate_per_s (U2)',
+    'Drying rate (1/s)': 'removed: substance grain_drying_rate_per_s (U2)',
+    'Surface tension (N/m)': 'removed: liquid substance liquid_surface_tension_n_m (U2)',
+    'Contact angle (deg)': 'removed: substance grain_contact_angle_deg (U2)',
+    'Birth saturation': 'Wet at birth',
 }
 
 # T3 physically moves these widgets to the shared schema-driven substance

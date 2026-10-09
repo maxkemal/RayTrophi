@@ -36,7 +36,7 @@ nlohmann::json matterGrainSettings(const std::string& domain, const nlohmann::js
             throw std::runtime_error(error);
         }
         // Only what is fixed at a grain's birth needs an empty domain: the
-        // owner switch, the radius and packing (mass = density / packing x
+        // radius (packing is the substance's; substance.set guards it) (mass = density / packing x
         // sphere), and dropping wet grains while grains may hold water. The
         // material, contact and coupling settings act on the next step.
         const auto& states = runtime.gridDomainStates();
@@ -44,13 +44,10 @@ nlohmann::json matterGrainSettings(const std::string& domain, const nlohmann::js
             const auto before = RayTrophiSim::Fluid::matterGrainParamsToJson(d.fluid_params.grain);
             const auto after = RayTrophiSim::Fluid::matterGrainParamsToJson(candidate);
             std::string fixed;
-            for (const char* key : {"enabled", "radius_m", "packing_fraction"}) {
+            for (const char* key : {"radius_m"}) {
                 if (before.at(key) != after.at(key)) {
                     fixed += (fixed.empty() ? "" : ", ") + std::string(key);
                 }
-            }
-            if (d.fluid_params.grain.wet_grains && !candidate.wet_grains) {
-                fixed += (fixed.empty() ? "" : ", ") + std::string("wet_grains off");
             }
             if (!fixed.empty()) {
                 throw std::runtime_error("reset domain particles before changing " + fixed +

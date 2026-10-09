@@ -18,7 +18,7 @@ struct alignas(16) StressUpdateConstants {
     uint32_t rebonding=0;
     float hardening_coefficient=0.0f;
     float max_stored_strain=kGranularMaxStoredStrain;
-    uint32_t pad1=0,pad2=0;
+    float compaction_hardening=0.0f,compaction_limit=0.0f;
 };
 static_assert(sizeof(StressUpdateConstants)==64);
 
@@ -259,6 +259,8 @@ inline bool dispatchStressUpdate(SimulationComputeContext& compute,
     c.fracture_strain=std::max(fracture_strain,1.0e-5f);c.damage_rate=std::max(damage_rate,0.0f);
     c.healing_rate=std::max(healing_rate,0.0f);c.rebonding=rebonding?1u:0u;
     c.hardening_coefficient=std::max(params.hardening,0.0f);
+    c.compaction_hardening=std::max(params.compaction_hardening,0.0f);
+    c.compaction_limit=std::max(params.compaction_limit,0.0f);
     ComputeBufferHandle bufs[]={affine,b.stress_diag,b.stress_shear,b.plastic_volume,b.state_flags,
                                 b.yield_value,b.plastic_increment,b.damage,b.hardening,
                                 b.fracture_history,b.deformation_col0,

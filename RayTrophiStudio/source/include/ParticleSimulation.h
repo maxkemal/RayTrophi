@@ -1643,6 +1643,10 @@ struct SimulationFlowSourceDesc {
     // real temperature and not an absence of one.
     bool  fluid_temperature_override = false;
     float fluid_temperature_kelvin = 353.0f;
+    // Water a grain this source pours already holds, as a fraction of its
+    // substance's grain_water_capacity_fraction (an emitter of damp sand).
+    // A state of what is poured, so it lives on the source, not the material.
+    float grain_birth_saturation = 0.0f;
     float fluid_emit_accumulator = 0.0f;
     uint64_t fluid_emit_sample_serial = 0;
     // Dynamic emission limits (Houdini/Blender style flow controls)

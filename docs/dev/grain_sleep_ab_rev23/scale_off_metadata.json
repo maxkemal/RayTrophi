@@ -1,0 +1,38 @@
+{
+  "shader_revision": 23,
+  "native_timestamp_supported": true,
+  "settings": {
+    "absorption_rate_per_s": 4.0,
+    "birth_saturation": 0.0,
+    "contact_angle_deg": 20.0,
+    "contact_resolution": 24,
+    "drying_rate_per_s": 0.0,
+    "enabled": true,
+    "fluid_coupling": true,
+    "friction": 0.5,
+    "max_substeps": 4096,
+    "packing_fraction": 0.6000000238418579,
+    "radius_m": 0.00800000037997961,
+    "represented_grain_radius_m": 0.0,
+    "restitution": 0.5,
+    "rolling_friction": 0.019999999552965164,
+    "sleep": false,
+    "sleep_speed_m_s": 0.0020000000949949026,
+    "sleep_time_s": 0.20000000298023224,
+    "sliding_damping_n_s_m": 4.0,
+    "stiffness_n_m": 20000.0,
+    "surface_tension_n_m": 0.07199999690055847,
+    "tangential_stiffness_ratio": 0.2857142984867096,
+    "twisting_friction": 0.0,
+    "volume_exclusion": true,
+    "water_capacity_fraction": 0.05000000074505806,
+    "wet_grains": false
+  },
+  "common_clock": {
+    "continuum_grid_steps": 0,
+    "enabled": false,
+    "liquid_reaction_on_gpu": false,
+    "liquid_support": "frame_sparse_cfd_dem",
+    "transport_steps": 384
+  }
+}

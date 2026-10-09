@@ -28,7 +28,8 @@ def main():
     assert "matter_dry_volume[id]" in read("shaders/sim_fluid_granular_stress_p2g.glsl")
     assert "binding = 17" in shader and "wet_response[i]" in shader
     assert shader.count("max(pressure - wet.w, 0.0) * friction_tangent") == 3
-    assert "bond_scale + wet.z" in shader
+    # Snow compaction scales bonds too (exp(xi (pv - 1)), 1 when off).
+    assert "bond_scale * compaction_scale + wet.z" in shader
     assert "exp(-dilatancy_tangent * dp)" in shader
     step = read("src/Physics/Fluid/MatterGpuStep.inl")
     assert step.index("buildMatterWetResponses") < step.index("for (int substep")
