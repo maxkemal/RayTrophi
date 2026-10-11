@@ -1,4 +1,5 @@
 #include "RtPostBindings.h"
+#include "RtWeatherEffectsBindings.h"
 #include "RtPhaseGrid.h"
 #include "RtMatterModels.h"
 #include "RtFluidLabelBindings.h"
@@ -691,6 +692,10 @@ static json autosaveStatusJson(const rtapi::AutosaveStatus& st, const rtapi::Res
 }
 
 json dispatchMethod(const std::string& method, const json& params) {
+    json weather_effects_result;
+    if (dispatchWeatherEffectsIpc(method, params,
+        [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
+        weather_effects_result)) return weather_effects_result;
     json clip_binding_result;
     if (dispatchClipBindingIpc(method, params, [](RtIpcTemplateQuery q) { return enqueueQuery(std::move(q)); }, clip_binding_result)) return clip_binding_result;
     json rig_result;

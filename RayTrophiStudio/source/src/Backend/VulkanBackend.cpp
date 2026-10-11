@@ -16190,7 +16190,7 @@ void VulkanBackendAdapter::setCloudState(const atmosphere::CloudState& clouds, f
     // RT render flag: only a Nishita sky has clouds, and only once this
     // device's textures hold the current field (never uninitialised memory).
     Backend::CloudParamsGPU p = cloudParamsGPU();
-    const bool render = m_cachedWorld.mode == WORLD_MODE_NISHITA && m_cachedClouds.anyEnabled() &&
+    const bool render = Backend::sharedWeatherCloudRendering(m_cachedWorld, m_cachedClouds) &&
                         m_device->m_cloudNoiseReady && m_device->m_cloudWeatherHash != 0;
     p.misc[3] += render ? 1.0f : 0.0f;
     m_device->updateCloudRtParams(p);
@@ -16257,6 +16257,7 @@ void VulkanBackendAdapter::recordCloudRasterPass(VkCommandBuffer cmd, uint32_t w
     if (m_device->m_cloudRasterW == 0) return;
 
     Backend::CloudRasterFrameGPU f{};
+    f.weatherEffects = Backend::makeWeatherRenderGPU(m_cachedWorld.weather, m_weatherTime);
     const auto& n = m_cachedWorld.nishita;
     f.sunDir[0] = n.sun_direction.x; f.sunDir[1] = n.sun_direction.y; f.sunDir[2] = n.sun_direction.z;
     f.sunIntensity = n.sun_intensity;
@@ -16285,6 +16286,8 @@ void VulkanBackendAdapter::recordCloudRasterPass(VkCommandBuffer cmd, uint32_t w
     Backend::CloudParamsGPU key = cloudParamsGPU();
     key.wind[0] = key.wind[1] = 0.0f;
     key.weather[2] = 0.0f;
+    key.cirrusDirection[2] = 0.0f;
+    Backend::clearTransientCloudKey(key);
     uint64_t hsh = 1469598103934665603ull;
     auto mix = [&](const void* p, size_t bytes) {
         const unsigned char* c = static_cast<const unsigned char*>(p);
@@ -16308,16 +16311,15 @@ bool VulkanBackendAdapter::syncCloudResources() {
     if (!m_device || !m_device->hasCloudResources() || !m_cloudStateSet) return false;
     // A clear sky builds nothing: ~20 MB of textures and a few ms of compute
     // are not paid by scenes that never turn a layer on.
-    if (!m_cachedClouds.anyEnabled()) return false;
+    if (!Backend::sharedWeatherCloudRendering(m_cachedWorld, m_cachedClouds)) return false;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     return m_device->generateCloudNoise() &&
            m_device->generateCloudWeather(Backend::makeCloudWeatherGenParams(m_cachedClouds));
 }
 
 Backend::CloudParamsGPU VulkanBackendAdapter::cloudParamsGPU() const {
-    return Backend::makeCloudParamsGPU(m_cachedClouds, m_cloudTime, m_cloudDrift, m_cloudWind,
-                                       m_cachedWorld.nishita.planet_radius,
-                                       m_cachedWorld.nishita.altitude);
+    return Backend::makeSharedCloudParamsGPU(
+        m_cachedClouds, m_cloudTime, m_cloudDrift, m_cloudWind, m_cachedWorld, m_weatherTime);
 }
 
 bool VulkanBackendAdapter::sampleClouds(uint32_t mode, uint32_t steps,
@@ -20140,6 +20142,9 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     const WorldData* wd = static_cast<const WorldData*>(w);
     m_cachedWorld = *wd; // Always update cache
+    if (m_cloudStateSet) {
+        setCloudState(m_cachedClouds, m_cloudTime, m_cloudDrift, m_cloudWind);
+    }
 
     if (!m_device || !m_device->isInitialized()) {
         VK_INFO() << "[VulkanBackendAdapter] Device not ready — cached WorldData for later upload" << std::endl;

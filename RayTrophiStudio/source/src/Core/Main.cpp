@@ -1,5 +1,6 @@
 #include "PostProcess/PostSurface.h"
 #include "Backend/VulkanRecoveryPolicy.h"
+#include "Backend/WeatherClock.h"
 #include "Viewport/ViewportGpuWorkPolicy.h"
 #include "Viewport/ViewportPresentationStats.h"
 #include "PostProcess/PostService.h"
@@ -4543,6 +4544,12 @@ int main(int argc, char* argv[]) try {
             const float fps = static_cast<float>(std::max(1, render_settings.animation_fps));
             const float cloudTime = static_cast<float>(scene.timeline.current_frame) / fps;
             ray_renderer.world.setCloudTime(cloudTime);
+            Backend::syncWeatherClock(
+                g_backend.get(), g_viewport_backend.get(), cloudTime,
+                static_cast<float>(SDL_GetTicks()) / 1000.0f,
+                render_settings.realtime_weather_preview &&
+                (ui.viewport_settings.shading_mode == 1 || ui.viewport_settings.shading_mode == 2) &&
+                !render_settings.animation_is_playing && !render_settings.is_render_paused);
             static float s_pushedCloudTime = -1.0f;
             static uint64_t s_pushedCloudRevision = ~0ull;
             const uint64_t cloudRevision = ray_renderer.world.cloudRevision();

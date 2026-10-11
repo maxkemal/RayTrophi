@@ -81,6 +81,8 @@ Result getCloudsJson(std::string& out_json) {
     // Read-only context so a script sees what the renderer is fed.
     const Vec3 drift = w.cloudWindOffset();
     j["time_seconds"] = w.getCloudTime();
+    j["lightning_effective_rate_per_minute"] = Backend::lightningEffectiveRate(
+        w.getClouds().lightning);
     j["wind_offset_m"] = {drift.x, drift.z};
     j["revision"] = w.cloudRevision();
     j["any_enabled"] = w.getClouds().anyEnabled();
@@ -103,6 +105,7 @@ Result setCloudsJson(const std::string& patch_json) {
     // round-trips without the caller having to strip them.
     for (const char* ro : {"time_seconds", "wind_offset_m", "revision", "any_enabled", "presets"})
         patch.erase(ro);
+    patch.erase("lightning_effective_rate_per_minute");
 
     nlohmann::json cur;
     atmosphere::cloudsToJson(g_ctx->renderer.world.getClouds(), cur);

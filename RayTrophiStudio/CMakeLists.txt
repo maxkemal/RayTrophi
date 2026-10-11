@@ -123,6 +123,7 @@ file(GLOB_RECURSE SOURCES_CPP
     "source/src/UI/*.cpp"
     "source/src/Utils/*.cpp"
     "source/src/Animation/*.cpp"
+    "source/src/Atmosphere/*.cpp"
     "source/src/Hair/*.cpp"
     "source/src/Backend/*.cpp"
     "source/src/Paint/*.cpp"

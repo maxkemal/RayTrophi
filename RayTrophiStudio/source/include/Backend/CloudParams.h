@@ -16,6 +16,8 @@
 */
 
 #include "Atmosphere/AtmosphereClouds.h"
+#include "Backend/CloudLightningParams.h"
+#include "Backend/WeatherRenderParams.h"
 #include "Vec3.h"
 #include <algorithm>
 #include <cmath>
@@ -58,7 +60,7 @@ struct CloudParamsGPU {
     float cirrus[4];  // enabled, altitude_m, coverage, optical depth
     float misc[4];    // 1/cirrus_scale_m, weather_seed, rt_max_bounces, rt_flags
                       // rt_flags: +1 render (set by the adapter when the
-                      // textures are ready and the world is Nishita),
+                      // textures are ready for clouds or fast weather),
                       // +2 secondary rays march fully (quality),
                       // +4 reference path tracer instead of the marcher
     float precip[4];  // rate_mm_h, extinction_per_m at that rate, slant_x, slant_z
@@ -67,9 +69,16 @@ struct CloudParamsGPU {
                       // (shear = horizontal metres per metre of height, Faz 3e)
     float scatterAlbedo[4]; // linear RGB albedo, HG g override (2 = droplet fit)
     float emissionSource[4]; // linear RGB source radiance, reserved
-    float cirrusDirection[4]; // authored along-wind direction x,z; reserved
+    float cirrusDirection[4]; // authored wind x,z; camera weather time, reserved
+    CloudLightningGPU lightning[kCloudLightningEvents];
 };
-static_assert(sizeof(CloudParamsGPU) == 480, "CloudParamsGPU std430 layout (cloud_common.glsl)");
+static_assert(sizeof(CloudParamsGPU) == 736, "CloudParamsGPU std430 layout (cloud_common.glsl)");
+
+inline void clearTransientCloudKey(CloudParamsGPU& key) {
+    for (auto& event : key.lightning) {
+        event = {};
+    }
+}
 
 inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float time_seconds,
                                          const Vec3& drift_m, const Vec3& wind_mps,
@@ -190,6 +199,33 @@ inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float 
     if (sl > 0.5f) { sx *= 0.5f / sl; sz *= 0.5f / sl; }
     p.precip2[2] = sx;
     p.precip2[3] = sz;
+    makeCloudLightningGPU(c, time_seconds, planet_radius_m, altitude_offset_m, p.lightning);
+    return p;
+}
+
+inline bool sharedWeatherCloudRendering(const WorldData& world,
+                                       const atmosphere::CloudState& clouds) {
+    return (world.mode == WORLD_MODE_NISHITA && clouds.anyEnabled()) ||
+           weatherNeedsRendering(world.weather);
+}
+
+inline CloudParamsGPU makeSharedCloudParamsGPU(const atmosphere::CloudState& clouds,
+                                              float time, const Vec3& drift,
+                                              const Vec3& wind, const WorldData& world,
+                                              float weatherTime) {
+    CloudParamsGPU p = makeCloudParamsGPU(clouds, time, drift, wind,
+                                        world.nishita.planet_radius, world.nishita.altitude);
+    p.cirrusDirection[2] = weatherTime; // reserved slot, shared camera-weather clock
+    if (world.mode != WORLD_MODE_NISHITA || !clouds.anyEnabled()) {
+        for (auto& layer : p.layers) {
+            layer.b[3] = 0.0f;
+        }
+        p.cirrus[0] = 0.0f;
+        p.precip[0] = p.precip[1] = 0.0f;
+        for (auto& event : p.lightning) {
+            event.start[3] = 0.0f;
+        }
+    }
     return p;
 }
 
@@ -237,8 +273,9 @@ struct CloudRasterFrameGPU {
     float prevUp[4];      // w = wind drift since last frame, z (m)
     float prevFwd[4];
     uint32_t info[4];     // width, height, frame index, steps
+    WeatherRenderGPU weatherEffects;
 };
-static_assert(sizeof(CloudRasterFrameGPU) == 176, "CloudRasterFrameGPU std430 layout (cloud_raster.comp)");
+static_assert(sizeof(CloudRasterFrameGPU) == 256, "CloudRasterFrameGPU std430 layout (cloud_raster.comp)");
 
 // One query for world.sample_clouds. mode 0: density at `a`; mode 1:
 // transmittance along a -> b.

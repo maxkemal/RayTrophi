@@ -2,6 +2,8 @@
 
 #include "Api/RtApi.h"
 #include "Atmosphere/AtmosphereClouds.h"
+#include "Backend/IBackend.h"
+#include "Backend/CloudLightningParams.h"
 #include "VDBVolume.h"
 #include "Renderer.h"
 #include "scene_ui.h"
@@ -46,8 +48,81 @@ static bool drawOpticalControls(atmosphere::CloudMaterial& m) {
     return changed;
 }
 
+static bool drawLightningControls(atmosphere::CloudState& clouds) {
+    bool changed = false;
+    if (ImGui::TreeNodeEx("Lightning / Storm flashes", ImGuiTreeNodeFlags_DefaultOpen)) {
+        atmosphere::CloudLightning& lightning = clouds.lightning;
+        changed |= ImGui::Checkbox("Enable lightning", &lightning.enabled);
+        changed |= ImGui::Checkbox("Lightning rate from climate",
+                                   &lightning.derive_rate_from_climate);
+        ImGui::BeginDisabled(lightning.derive_rate_from_climate);
+        changed |= ImGui::SliderFloat("Flashes per minute", &lightning.rate_per_minute,
+                                      0.0f, 600.0f, "%.1f");
+        ImGui::EndDisabled();
+        changed |= ImGui::SliderFloat("Flash duration (s)", &lightning.duration_s,
+                                      0.08f, 3.0f, "%.2f");
+        changed |= ImGui::DragFloat("Horizontal flash span (m)", &lightning.horizontal_span_m,
+                                    100.0f, 100.0f, 50000.0f, "%.0f");
+        changed |= ImGui::SliderFloat("Branching", &lightning.branching, 0.0f, 1.0f, "%.2f");
+        const float effectiveRate = Backend::lightningEffectiveRate(lightning);
+        if (effectiveRate + 0.1f < lightning.rate_per_minute) {
+            ImGui::TextWrapped("At this duration: up to %.0f flashes/min. "
+                               "Shorter duration allows more frequent flashes.", effectiveRate);
+        }
+        changed |= ImGui::DragFloat("Flash intensity", &lightning.intensity,
+                                    0.1f, 0.0f, 10000.0f, "%.1f");
+        changed |= ImGui::ColorEdit3("Flash colour", &lightning.color.x,
+                                     ImGuiColorEditFlags_Float);
+        float centerXZ[2] = {lightning.center_m.x, lightning.center_m.z};
+        if (ImGui::DragFloat2("Storm centre X/Z (m)", centerXZ,
+                             10.0f, -1000000.0f, 1000000.0f, "%.0f")) {
+            lightning.center_m.x = centerXZ[0];
+            lightning.center_m.z = centerXZ[1];
+            changed = true;
+        }
+        changed |= ImGui::DragFloat("Storm extent (m)", &lightning.extent_m,
+                                    100.0f, 100.0f, 200000.0f, "%.0f");
+        changed |= ImGui::DragFloat("Strike ground altitude (m)", &lightning.ground_altitude_m,
+                                    10.0f, -500.0f, 20000.0f, "%.0f");
+        changed |= ImGui::SliderFloat("Ground strike fraction", &lightning.ground_strike_fraction,
+                                      0.0f, 1.0f, "%.2f");
+        ImGui::TextWrapped("Lower ground strike fraction produces more wide, horizontal "
+                           "cloud-to-cloud flashes. Longer flashes develop their branches over time.");
+        changed |= ImGui::DragFloat("Bolt radius (m)", &lightning.bolt_radius_m,
+                                    0.1f, 0.1f, 30.0f, "%.1f");
+        ImGui::TextWrapped("Vulkan RT and RayFusion share seeded timeline flashes. "
+                           "Requires a convective cloud layer. Use timeline Play to see flashes. "
+                           "Realtime Weather Preview animates rain/snow, not lightning. "
+                           "Try 30-60 flashes/min while adjusting the storm footprint; "
+                           "events outside the camera or clear cloud areas may remain invisible.");
+        ImGui::TreePop();
+    }
+    return changed;
+}
+
 bool drawMaterialControls(atmosphere::CloudState& clouds) {
     return drawOpticalControls(clouds.material);
+}
+
+bool drawWeatherLightningControls(UIContext& ctx) {
+    atmosphere::CloudState clouds = ctx.renderer.world.getClouds();
+    const bool changed = drawLightningControls(clouds);
+    static std::string error;
+    if (changed) {
+        nlohmann::json json;
+        atmosphere::cloudsToJson(clouds, json);
+        const rtapi::Result result = rtapi::setCloudsJson(
+            nlohmann::json{{"lightning", json["lightning"]}}.dump());
+        error = result.error;
+        if (!result.ok) {
+            ImGui::TextWrapped("%s", error.c_str());
+            return false;
+        }
+    }
+    if (!error.empty()) {
+        ImGui::TextWrapped("%s", error.c_str());
+    }
+    return changed;
 }
 
 bool drawLayerControls(atmosphere::CloudLayer& layer) {
@@ -66,6 +141,28 @@ bool drawLayerControls(atmosphere::CloudLayer& layer) {
     return changed;
 }
 
+void beginLegacyShaftControls(const UIContext& ctx, const atmosphere::CloudState& clouds) {
+    const auto backend = ctx.backend_ptr ? ctx.backend_ptr->getInfo().type :
+                                          Backend::BackendType::AUTO;
+    const bool vulkan = backend == Backend::BackendType::VULKAN_RT ||
+                        backend == Backend::BackendType::VULKAN_COMPUTE;
+    bool naturalShafts = false;
+    for (int i = 0; i < atmosphere::kMaxCloudLayers; ++i) {
+        const auto& layer = clouds.layers[i];
+        const auto material = atmosphere::layerMaterial(clouds, i);
+        naturalShafts |= layer.enabled && layer.coverage > 0.0f &&
+            layer.extinction_per_m > 0.0f && material.density_multiplier > 0.0f &&
+            material.scattering_coefficient + material.absorption_coefficient > 0.0f;
+    }
+    naturalShafts &= vulkan;
+    if (naturalShafts) {
+        ImGui::TextWrapped("Vulkan cloud shafts come from the cloud lighting. "
+                           "Sun direction, cloud height and gaps shape them in RT and RayFusion. "
+                           "The extra legacy RT shaft pass is skipped while liquid clouds render.");
+    }
+    ImGui::BeginDisabled(naturalShafts);
+}
+
 void drawWorldCloudProperties(UIContext& ctx) {
     ImGui::PushID("WorldCloudProperties");
     ImGui::TextUnformatted("World clouds");
@@ -74,6 +171,7 @@ void drawWorldCloudProperties(UIContext& ctx) {
     ImGui::TextDisabled("Material transport: Vulkan RT and RayFusion.");
     atmosphere::CloudState clouds = ctx.renderer.world.getClouds();
     bool changed = drawMaterialControls(clouds);
+    changed |= drawLightningControls(clouds);
     if (ImGui::TreeNodeEx("Layer optics", ImGuiTreeNodeFlags_DefaultOpen)) {
         for (int i = 0; i < atmosphere::kMaxCloudLayers; ++i) {
             ImGui::PushID(i);

@@ -19,6 +19,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 #define CLOUD_BINDING_BASE 0
 #define CLOUD_MAJORANT_BINDING 5
 #define CLOUD_RT_LIGHTING
+#define CLOUD_SEPARATE_FLASH_HISTORY
 #include "cloud_rt.glsl"
 
 layout(set = 0, binding = 8) uniform sampler2D prevHistory;
@@ -135,5 +136,5 @@ void main() {
     }
     if (!inside) return;
     imageStore(curHistory, px, outv);
-    imageStore(cloudOut, px, outv);
+    imageStore(cloudOut, px, vec4(outv.rgb + cloudFlashInscatter, outv.a));
 }

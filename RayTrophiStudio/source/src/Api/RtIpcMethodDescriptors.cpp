@@ -11242,7 +11242,7 @@ static const MethodParam params_world_apply_cloud_preset[] = {
 static const MethodDescriptor desc_world_apply_cloud_preset = {
     "world.apply_cloud_preset", "world",
     "Replace cloud formations with a named preset (keeps common material and quality)",
-    "Names are listed by world.get_clouds presets, including towering_cumulus and storm. These two presets use three linked base/tower/anvil regions with local optical modifiers. The preset replaces layer modifiers and angles but preserves the common material and quality.",
+    "Names are listed by world.get_clouds presets. The storm preset uses three linked base/tower/anvil regions with local optical modifiers. The preset replaces layer modifiers and angles but preserves the common material and quality.",
     "write", "SceneWrite", false, "any",
     "world|apply|cloud|preset|environment|sky|clouds",
     "world.get_clouds|world.set_clouds",

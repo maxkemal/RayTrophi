@@ -10,6 +10,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 #define CLOUD_MAJORANT_BINDING 5
 #define CLOUD_RT_LIGHTING
 #include "cloud_rt.glsl"
+#include "weather_fast.glsl"
 
 layout(set = 0, binding = 12) uniform sampler2D sceneDepth;
 layout(set = 0, binding = 13, rgba16f) uniform image2D sceneHDR;
@@ -34,25 +35,33 @@ void main() {
     ivec2 px = ivec2(gl_GlobalInvocationID.xy);
     if (px.x >= int(pc.width) || px.y >= int(pc.height) || !cloudRtEnabled()) return;
     float depth = texelFetch(sceneDepth, px, 0).r;
-    if (depth >= 1.0) return;
+    bool skyPixel = depth >= 1.0;
     vec2 ndc = (vec2(px) + vec2(0.5)) / vec2(pc.width, pc.height) * 2.0 - 1.0;
     float tanH = worldData.camPos.w;
     vec3 direction = normalize(worldData.camFwd.xyz +
         worldData.camRight.xyz * (ndc.x * worldData.camRight.w * tanH) -
         worldData.camUp.xyz * (ndc.y * tanH));
-    float denominator = depth * pc.depthB + pc.depthC;
-    if (denominator <= 0.0) return;
-    float viewDepth = pc.depthA / denominator;
-    float distance = min(viewDepth / max(dot(direction, worldData.camFwd.xyz), 1e-4),
-                         CLOUD_RT_MAX_DIST);
-    if (!cloudSegmentMayContain(worldData.camPos.xyz, direction, distance)) return;
-    vec3 inscatter;
-    float T, cloudDepth;
+    float distance = CLOUD_RT_MAX_DIST;
+    if (!skyPixel) {
+        float denominator = depth * pc.depthB + pc.depthC;
+        if (denominator <= 0.0) return;
+        float viewDepth = pc.depthA / denominator;
+        distance = min(viewDepth / max(dot(direction, worldData.camFwd.xyz), 1e-4),
+                       CLOUD_RT_MAX_DIST);
+    }
+    vec3 inscatter = vec3(0.0);
+    float T = 1.0, cloudDepth = -1.0;
     // Stable per-pixel stratification. This pass precedes post/DoF, not the
     // sky temporal history; a changing seed would flicker on opaque surfaces.
     uint seed = uint(px.x) * 1973u ^ uint(px.y) * 9277u ^ 0x68bc21ebu;
-    cloudMarchLimited(worldData.camPos.xyz, direction, distance, int(pc.steps), seed,
-                      inscatter, T, cloudDepth);
+    if (!skyPixel && cloudSegmentMayContain(worldData.camPos.xyz, direction, distance)) {
+        cloudMarchLimited(worldData.camPos.xyz, direction, distance, int(pc.steps), seed,
+                          inscatter, T, cloudDepth);
+    }
     vec4 surface = imageLoad(sceneHDR, px);
-    imageStore(sceneHDR, px, vec4(surface.rgb * T + inscatter, surface.a));
+    vec3 color = surface.rgb * T + inscatter;
+    color = cloudApplyLightning(color, worldData.camPos.xyz, direction, distance);
+    color = applyWeatherAtmosphere(color, direction, min(distance, 12000.0));
+    color = applyWeatherPrecipitation(color, worldData.camPos.xyz, direction, distance);
+    imageStore(sceneHDR, px, vec4(color, surface.a));
 }

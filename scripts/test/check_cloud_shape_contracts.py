@@ -43,6 +43,9 @@ class CloudShapeContracts(unittest.TestCase):
     def test_cirrus_lookup_budget(self):
         body = function_body(source("cloud_rt.glsl"), "cloudCirrus")
         self.assertEqual(len(re.findall(r"\btextureLod\s*\(", body)), 2)
+        feathers = source("cloud_cirrus_shape.glsl")
+        self.assertNotIn("textureLod", feathers)
+        self.assertIn("cloudCirrusWisps(n, n2)", body)
 
     def test_both_transport_branches_include_cirrus(self):
         text = source("cloud_rt.glsl")
@@ -113,7 +116,7 @@ class CloudShapeContracts(unittest.TestCase):
         packet_glsl = glsl.split("buffer CloudParamsBlock {", 1)[1].split("}", 1)[0]
         fields = re.findall(r"float\s+(\w+)\[4\]", packet_cpp)
         self.assertEqual(fields, re.findall(r"vec4\s+(\w+)\s*;", packet_glsl))
-        self.assertEqual(3 * 112 + len(fields) * 16, 480)
+        self.assertEqual(3 * 112 + len(fields) * 16 + 4 * 64, 736)
 
     def test_production_empty_skip_is_bounded(self):
         march = function_body(source("cloud_rt.glsl"), "cloudMarchLimited")
