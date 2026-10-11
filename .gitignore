@@ -111,3 +111,7 @@ docs/dev/grain_suite/
 # Generated granular regression captures at the repository root
 /granular_g2_radius_ab.png
 /granular_g2_visual_check.png
+
+# Compiled SPIR-V shaders are local build output: build them with
+# compile_shaders.bat / compile_sim_shaders.bat
+*.spv
