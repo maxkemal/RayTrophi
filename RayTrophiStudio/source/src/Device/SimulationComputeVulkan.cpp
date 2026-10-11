@@ -1219,7 +1219,7 @@ private:
             { "sim_inventory_deposit", "sim_inventory_deposit.spv", 3, 4 },
             { "sim_inventory_momentum", "sim_inventory_momentum.spv", 7, 20 },
             { "sim_inventory_summary", "sim_inventory_summary.spv", 4, 36 },
-            { "sim_inventory_surface_exchange", "sim_inventory_surface_exchange.spv", 11, 36 },
+            { "sim_inventory_surface_exchange", "sim_inventory_surface_exchange.spv", 11, 40 },
             { "sim_inventory_surface_commit", "sim_inventory_surface_commit.spv", 8, 8 },
             { "sim_inventory_saturation", "sim_inventory_saturation.spv", 11, 112 },
             { "sim_inventory_rain_fall", "sim_inventory_rain_fall.spv", 4, 32 },

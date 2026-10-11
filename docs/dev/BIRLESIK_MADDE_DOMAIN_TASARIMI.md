@@ -34,9 +34,9 @@ ayrıntısı [MADDE_T2_T3_HANDOFF.md](MADDE_T2_T3_HANDOFF.md)'nin ilk checkpoint
 
 | Konu | Güncel durum |
 |---|---|
-| Son partiler | T2 gizli ısılı erime/donma + yüzey yoğuşması (§4.7); sis suyu: buhar/sis iki havuz, gizli ısılı doygunluk ayarı (§4.8); yağmur: Kessler otokonversiyonu, sis tavanı, uç hızla düşüş, sıvıya iniş/emilim (§4.8b). Hepsi derlendi, canlı PASS, `main`'de (`01284ef`; `.spv` artık izlenmiyor, `6b6c643`). |
+| Son partiler | T2 gizli ısılı erime/donma + yüzey yoğuşması (§4.7); sis suyu: buhar/sis iki havuz, gizli ısılı doygunluk ayarı (§4.8); yağmur: Kessler otokonversiyonu, sis tavanı, uç hızla düşüş, sıvıya iniş/emilim (§4.8b). Hepsi derlendi, canlı PASS, `main`'de (`01284ef`; `.spv` artık izlenmiyor, `6b6c643`). Parti 4 (§4.8c: sanal sıcaklık dönüşümü, yoğuşmayan gaz havuzu, rüzgârla yağmur) CANLI PASS (rüzgâr kanıtı zayıf). |
 | Canlı kanıt | `fusion_condensation_live.json`, `fog_live.json` (9/9: sis ortalaması ≤ 0,0031 kg/m³, su korunumu 6e-6 kg), kaynama, GPU envanter, ısı alışverişi regresyonları. |
-| Açık | (1) Sis ve yağmur render'a bağlı değil — bulut ajanının `CloudPrecipitation` render tarafıyla ortak karar. (2) Yağmurun ~%76'sı emilim yerine parsel doğumuyla sıvıya katılıyor; doğum YERİ ölçülmedi (kaynak üstü mü, tank dibi mi). (3) Kaynama buharının sanal sıcaklığı (~600 K) kaynak üstünde doygunluğu yanıltır. (4) Tek tür buhar. (5) Yağmur rüzgârla sürüklenmez. (6) Ek 11 sıvı↔collider ısısı: son kanıt 2026-10-10, 4/6 (`shell_is_a_body`, `water_warms_through_cube` FAIL) — yeniden koşulmalı. |
+| Açık | (1) Sis ve yağmur render'a bağlı değil — bulut ajanının `CloudPrecipitation` render tarafıyla ortak karar. (2) Yağmurun ~%76'sı emilim yerine parsel doğumuyla sıvıya katılıyor; doğum YERİ ölçülmedi (kaynak üstü mü, tank dibi mi). (3)–(5) parti 4'te kapandı (§4.8c); rüzgâr ölçümü yan duvarları açık sahnede tekrarlanmalı. (6) Ek 11 sıvı↔collider ısısı: son kanıt 2026-10-10, 4/6 (`shell_is_a_body`, `water_warms_through_cube` FAIL) — yeniden koşulmalı. |
 | Sonraki | Doğum yeri ölçümü (küçük) veya sis/yağmur görünürlüğü (bulut işiyle). |
 
 ## Önceki kısa devir — 2026-10-08 (tarihsel)
@@ -440,7 +440,8 @@ anlatıyordu; Vulkan yolunda o artık çalışmıyor. Gerçek yapı:
   (plan/doğrulama/yayın, CPU-GPU ortak), `GasSurfaceExchangeCpu.cpp` (CPU
   referansı), `GasSurfaceExchangeGpu.cpp` + `sim_inventory_surface_exchange` /
   `_commit`. Hava hücresi seçimi `GasSurfaceGeometry` (açık yüzleri olan sütun).
-  Nem: hücredeki TÜM envanter kütlesi buhar sayılır (tek tür; yanma ürünleri de).
+  Nem: buhar havuzu tek tür (yoğuşabilir madde); yakıt buharı ve diğerleri
+  2026-10-11'den beri ayrı yoğuşmayan havuzda (§4.8c).
 - **Gaz faz momentumu**: `GasPhaseMomentum.{h,cpp}` — buhar/mist kütlesinin
   momentumu gaz hızına `sim_inventory_momentum` ile eklenir.
 - **Whitewater çalışma zamanı**: `WhitewaterRuntime.{h,cpp}`.
@@ -482,9 +483,8 @@ ileride bir eşleme meselesi; şimdi bağlanmadı.
 - **Kapı:** Matter + thermal chain, ya da sis suyu taşıyan herhangi gaz domain'i.
   Yoğuşan madde: Default Substance (buhar verisi var ve yanıcı değilse), yoksa Water.
 - **Açık:** sis suyu RENDER'a bağlı değil (görünür buhar hâlâ `gas.density`
-  izleyicisi; bulut işiyle birlikte). Tek tür: yanma ürünleri de "buhar" sayılır.
-  Kaynama buharı sıcaklık izleyicisine sanal sıcaklıkla (≈600 K) yazılıyor —
-  kaynağın hemen üstünde doygunluk yanlış okunur. Sis çökelmesi (damla düşüşü)
+  izleyicisi; bulut işiyle birlikte). ~~Tek tür; ≈600 K sanal sıcaklık~~ →
+  §4.8c. Sis çökelmesi (damla düşüşü)
   ve sisin yüzeye çökmesi yok.
 - **Canlı kanıt (2026-10-11, `rt_test_fog_ipc.py` 6/6 PASS, `docs/dev/fog_live.json`):**
   240 adımda 130,05 kg kaynadı + 2,47 kg mist; yüzey yoğuşması 3,09 kg (%2,4;
@@ -527,7 +527,7 @@ ileride bir eşleme meselesi; şimdi bağlanmadı.
   `:rain→domain` (doğum ve emilim).
 - **Ölçüm:** `fog_autoconverted_kg`, `rained_kg` (doğum+emilim),
   `rain_absorbed_kg`, `gas_rain_kg`, `gas_rain_cells`.
-- **Açık:** yağmur rüzgârla sürüklenmez; açık tabanlı domain'de de tabanda
+- **Açık:** ~~yağmur rüzgârla sürüklenmez~~ (§4.8c); açık tabanlı domain'de de tabanda
   birikir (dışarı akmaz); dar bir yüzey hücresini atlayan yağmur sıvının içinden
   tabana iner ve orada parsel olur (kütle korunur, konum kaba). Bulut ajanının
   `CloudPrecipitation` (`rate_mm_h`) render tarafı; bu fizik tarafı — bağlantı
@@ -540,6 +540,62 @@ ileride bir eşleme meselesi; şimdi bağlanmadı.
   9,383403 kg (fark 6e-6). **Ölçülmedi:** parsel doğumlarının YERİ — kaynak üstünde
   yoğun yoğuşmanın havada doğurduğu yağmur parseli mi (beklenen), yoksa yüzeyi atlayıp
   tank dibinde biriken yağmur mu (sinsi durum).
+
+#### 4.8c Sanal sıcaklık, yoğuşmayan gaz, rüzgârla yağmur (2026-10-11, CANLI PASS)
+
+Madde planının açık listesindeki 3, 4 ve 5. maddeler. Kontrol listesi:
+[NEXT_BUILD_CHECKS](NEXT_BUILD_CHECKS.md).
+
+- **Sanal sıcaklık (3).** Gaz sıcaklık alanı kaldırmayı sürüyor; kaynama buharı
+  oraya Tv = T·Ma/M_karışım olarak yazılıyor (saf buhar 373 K → ~600 K). Bu
+  bilinçli bir seçim: kaldırma üç ayrı yolda (CPU yoğun, sparse, shader) aynı
+  formülle hesaplanıyor ve bileşime dayalı bir kaldırma terimi yok. Gerçek
+  sıcaklığa ihtiyaç duyan okuyucular, yani doygunluk ayarı ve yüzey
+  alışverişi (CPU ve shader), hücrenin buhar kütlesiyle T'ye çeviriyor:
+  - Dönüşüm: `airKelvinFromVirtual`, kapalı form; x ≥ 1 ise saf buhar.
+  - Alt sınır: sonuç `min(Tv, ortam)` altına inmez. Alanın ortama soğuması
+    (dissipation) karışıma giren ortam havasını temsil ediyor; yoksa soğumuş
+    buhar 182 K gibi okunurdu.
+  - Geri yazma: değişiklik alana bir Tv FARKI olarak yazılır. Böylece alt
+    sınırdan doğan sapma alanda kalır ve sıçrama olmaz.
+  - Sonuç: yoğuşan buhar kaldırmasını kaybeder, açığa çıkan gizli ısı havayı
+    ısıtır. Kaynamanın pay ile karıştırması doğrusal bir yaklaşım; x = 0,5'te
+    gerçek Tv'den yaklaşık %5 sapar.
+- **Yoğuşmayan gaz (4).** Envantere 12. yuva eklendi: `gas_phase_foreign_kg`.
+  Enerjisi ortak enerji havuzunda tutuluyor.
+  - Bu havuza girenler: yanma alışverişinin yakıt buharı ve yoğuşabilir madde
+    dışında kaynayan her şey. Doygunluk ayarı bu havuza hiç dokunmaz.
+  - Yüzeyde Hertz–Knudsen buharlaşması ve yoğuşması artık yalnızca yoğuşabilir
+    maddenin parselleri için çalışıyor (planda diğerlerinin buhar verisi
+    sıfırlanıyor). Önceden her madde su buharı havuzuna buharlaşıyordu.
+  - Bankanın taşıdığı yerler: kare önbelleği, disk **v15**, arka uç geçişi,
+    özet. IPC alanları `gas_foreign_kg` ve `gas_foreign_cells`.
+  - Mist damlası: yalnızca yoğuşabilir maddeninki sis suyu; başka sıvının
+    damlası (yanan yağ spreyi) yoğuşmayan havuza, yalnız duyulur enerjiyle.
+    İlk canlı koşu bunu yakaladı: 0,016 kg yağ damlası suya dönüşmüştü.
+  - Bilinen sınırlar:
+    - Yoğuşabilir olmayan, yanıcı da olmayan bir sıvı yüzeyden buharlaşmıyor.
+    - Yabancı gazın Tv izi dönüşümde sayılmıyor.
+- **Rüzgârla yağmur (5).** Bir damla, havanın hızı artı uç hızla düşüşü kadar
+  hareket eder. Yağmur kütlesi [9], enerjisi [10] ve yoğuşmayan gaz [11], ana
+  havuzlardan sonra semi-Lagrangian olarak taşınıyor. Hedef olarak ana
+  havuzların artık boşalmış scratch yuvaları (1/4/7) kullanılıyor. Korunum
+  çekirdeği yağmuru (kütle, enerji) çifti olarak normalize ediyor. MacCormack
+  kullanılmıyor, çünkü yağmur sütununun keskin kenarında taşma yapar. Düşüş
+  geçişi değişmedi. Yukarı akım yağmuru tutar; bu fiziksel bir davranış. CPU
+  referansı aynı. Ölçüm alanı `gas_rain_centroid` (özet indirgemesi ağırlıklı
+  konumu zaten hesaplıyordu).
+- **Ölçülmedi (2):** yağmur parsellerinin doğum yeri. Hâlâ açık.
+- **Canlı kanıt (2026-10-11):**
+  - `rt_test_fog_ipc.py` 10/10 PASS. Havada kalan buhar 1,13 kg'dan 0,65 kg'a
+    indi (kaynayanın %1,2'sinden %0,7'sine): Tv dönüşümü beklenen yönde.
+  - `rt_test_gas_species_ipc.py` 4/4 PASS: 2065,528 kg yakıt buharı ve damlası
+    yoğuşmayan havuzda (fark 1e-4 kg); su buharı ve sis 0.
+  - Rüzgâr, `--wind 4`: PASS ama ZAYIF. Kapalı kutuda tekdüze cisim kuvveti saf
+    bir gradyandır, basınç projeksiyonu onu tamamen siler (ilk koşu: kayma
+    0,0001 m). Açık sınırla merkez +0,53 m kaydı, ama taban da açık olduğu için
+    tank boşaldı ve yağmur kütlesi çok az kaldı. Temiz ölçüm için yalnızca yan
+    duvarları açık bir sahne gerekiyor (açık).
 
 ### 4.6 ★★★ Materyal sözleşmesi: veri hangi materyalle sürülür
 

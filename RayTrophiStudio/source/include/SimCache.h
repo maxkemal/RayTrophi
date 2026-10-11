@@ -84,11 +84,14 @@ constexpr uint32_t kMagic   = 0x43465452u; // 'RTFC'
 // 12: positive-zero scalar arrays store their count without a float payload.
 // 13: gas-phase condensate (fog water, kg per cell) after the kg/J pair.
 // 14: gas-phase rain water (kg per cell) and its energy (J) after the fog water.
-// The reader retains v11-v13 compatibility (missing pools read empty);
+// 15: non-condensable gas (fuel vapour, combustion products; kg per cell)
+//     after the rain. Before it, that mass sat in the vapour pool.
+// The reader retains v11-v14 compatibility (missing pools read empty);
 // other versions remain unsupported.
-constexpr uint32_t kVersion = 14u;
+constexpr uint32_t kVersion = 15u;
 constexpr bool supportsVersion(uint32_t version) {
-    return version == 11u || version == 12u || version == 13u || version == kVersion;
+    return version == 11u || version == 12u || version == 13u || version == 14u ||
+           version == kVersion;
 }
 
 // Absolute path of the per-system, per-frame binary file inside cache_dir.

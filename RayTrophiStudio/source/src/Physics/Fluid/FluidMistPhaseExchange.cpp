@@ -4,6 +4,7 @@
 #include "Fluid/GasSurfaceGeometry.h"
 #include "Fluid/GasSurfaceExchangePlan.h"
 #include "Fluid/GasPhaseMomentum.h"
+#include "Fluid/GasSaturation.h"
 
 #include "Fluid/FluidParticleLabels.h"
 #include "Fluid/FluidPhysicalMass.h"
@@ -79,6 +80,9 @@ FluidMistPhaseExchangeStats transferMistToGas(
             liquid_voxel,
         1.0e-12f);
     std::map<std::string, ExchangeAccumulation> exchanges;
+    const CondensableVapour condensable = resolveCondensableVapour(gas_domain);
+    const std::string condensable_name =
+        condensable.valid() ? condensable.substance : std::string();
 
     for (std::size_t particle = particles.size(); particle-- > 0;) {
         if (particle >= particles.flags.size() ||
@@ -136,8 +140,17 @@ FluidMistPhaseExchangeStats transferMistToGas(
         gas.fuel[cell] += tracer * combustible;
         gas.temperature[cell] += tracer * std::clamp(
             (particle_kelvin - ambient_kelvin) / 1500.0f, 0.0f, 1.0f);
-        depositGasCondensate(gas_state, cell, mass_kg,
-                             static_cast<float>(sensible_energy));
+        // Only the air's condensable substance is fog water. Droplets of any
+        // other liquid (burning oil spray) ride the air as non-condensable
+        // aerosol: no phase change, sensible energy only. ★ Before 2026-10-11
+        // part 4 they became fog water and evaporated into WATER vapour.
+        if (profile && profile->name == condensable_name) {
+            depositGasCondensate(gas_state, cell, mass_kg,
+                                 static_cast<float>(sensible_energy));
+        } else {
+            depositGasForeign(gas_state, cell, mass_kg,
+                              static_cast<float>(sensible_energy));
+        }
         queueGasPhaseMomentum(gas_state, cell, mass_kg, particles.velocity[particle] * mass_kg);
 
         const std::string substance = profile ? profile->name : "Custom";
@@ -257,6 +270,9 @@ FluidBoilingExchangeStats transferBoilingToGas(
     const float gas_cell_volume = std::max(
         gas.voxel_size * gas.voxel_size * gas.voxel_size, 1.0e-12f);
     std::map<std::string, ExchangeAccumulation> exchanges;
+    const CondensableVapour condensable = resolveCondensableVapour(gas_domain);
+    const std::string condensable_name =
+        condensable.valid() ? condensable.substance : std::string();
 
     GasSurfaceGeometry surface(fluid_state, gas,
         gas_domain.boundary_mode == SimulationGridDomainBoundaryMode::Periodic,
@@ -349,8 +365,16 @@ FluidBoilingExchangeStats transferBoilingToGas(
         if (profile->fluid_flammable && gas.fuel.size() == cell_count) {
             gas.fuel[cell] += tracer;
         }
-        depositGasInventory(gas_state, cell, boiled_kg,
-                            static_cast<float>(sensible_j + latent_j));
+        // Only the air's condensable substance joins the vapour pool; any
+        // other boiling liquid (a flammable one is fuel) is non-condensable
+        // gas there. ★ Before 2026-10-11 part 4 every boiled kg was "water".
+        if (profile->name == condensable_name) {
+            depositGasInventory(gas_state, cell, boiled_kg,
+                                static_cast<float>(sensible_j + latent_j));
+        } else {
+            depositGasForeign(gas_state, cell, boiled_kg,
+                              static_cast<float>(sensible_j + latent_j));
+        }
         queueGasPhaseMomentum(gas_state, cell, boiled_kg,
                                particles.velocity[particle] * boiled_kg);
 
@@ -458,6 +482,9 @@ bool advectGasPhaseInventory(
         return false;
     }
     gas_state.gas_phase_condensate_kg.resize(cell_count, 0.0f);
+    gas_state.gas_phase_rain_kg.resize(cell_count, 0.0f);
+    gas_state.gas_phase_rain_energy_j.resize(cell_count, 0.0f);
+    gas_state.gas_phase_foreign_kg.resize(cell_count, 0.0f);
     auto advectInventory = [&](std::vector<float>& field) {
         double before = 0.0;
         for (float& value : field) {
@@ -494,6 +521,11 @@ bool advectGasPhaseInventory(
     advectInventory(gas_state.gas_phase_mass_kg);
     advectInventory(gas_state.gas_phase_energy_j);
     advectInventory(gas_state.gas_phase_condensate_kg);
+    // Rain rides the air (wind drift; an updraft holds it up) and falls
+    // through it in the saturation pass. Non-condensable gas rides it too.
+    advectInventory(gas_state.gas_phase_rain_kg);
+    advectInventory(gas_state.gas_phase_rain_energy_j);
+    advectInventory(gas_state.gas_phase_foreign_kg);
     return true;
 }
 

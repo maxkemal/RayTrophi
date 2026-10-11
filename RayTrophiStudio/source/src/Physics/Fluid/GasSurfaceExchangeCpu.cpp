@@ -1,5 +1,6 @@
 #include "Fluid/GasSurfaceExchangePlan.h"
 #include "Fluid/GasInventoryGpu.h"
+#include "Fluid/GasSaturation.h"
 #include "Fluid/MatterPhaseGrid.h"
 #include "ParticleSimulation.h"
 
@@ -37,6 +38,9 @@ bool exchangeGasSurfaceCpu(
     }
     prepareGasInventoryHostProducer(gas);
     const double volume = static_cast<double>(grid.voxel_size) * grid.voxel_size * grid.voxel_size;
+    // The inventory vapour's molar mass for the virtual temperature (0: none).
+    const CondensableVapour vapour = resolveCondensableVapour(gas_domain);
+    const float vapour_molar = vapour.valid() ? vapour.molar_kg_mol : 0.0f;
     const double humidity = std::clamp(1.0 - static_cast<double>(drying_scale), 0.0, 1.0);
     constexpr double atmosphere = 101325.0, gas_constant = 8.314462, air_molar = 0.028965;
     constexpr double pi = 3.14159265358979;
@@ -68,6 +72,14 @@ bool exchangeGasSurfaceCpu(
         float e = gas.gas_phase_energy_j[group.cell];
         float temperature = grid.temperature[group.cell];
         float density = grid.density[group.cell];
+        // The field holds the virtual temperature; heat and vapour exchange
+        // see the air temperature and return a Tv difference (GasSaturation.h).
+        const float m0 = m;
+        const float air0 = airKelvinFromVirtual(
+            std::max(1.0f, ambient_kelvin +
+                (temperature - gas_ambient_normalized) * scale.kelvin_per_unit),
+            m, static_cast<float>(volume), vapour_molar, ambient_kelvin);
+        double air = air0;
         gas.gas_rain_landing[group.cell] = gas.gas_rain_stamp;
         const double rain_mass = std::max(0.0f, gas.gas_phase_rain_kg[group.cell]);
         const double rain_heat = std::max(0.0f, gas.gas_phase_rain_energy_j[group.cell]);
@@ -87,15 +99,14 @@ bool exchangeGasSurfaceCpu(
             value.kelvin = input.kelvin;
             value.fraction = input.fraction;
             double tp = input.kelvin;
-            const double ta = std::max(1.0, static_cast<double>(ambient_kelvin) +
-                (temperature - gas_ambient_normalized) * scale.kelvin_per_unit);
+            const double ta = std::max(1.0, air);
             const double cp = input.capacity;
             const double ca = atmosphere * air_molar / (gas_constant * ta) * volume * 1005.0;
             if (cp > 0 && ca > 0) {
                 const double decay = -std::expm1(-20.0 * input.share * dt * (1.0 / cp + 1.0 / ca));
                 const double q = (tp - ta) * (cp * ca / (cp + ca)) * decay;
                 tp -= q / cp;
-                temperature += static_cast<float>(q / ca / scale.kelvin_per_unit);
+                air += q / ca;
                 value.heat_to_gas = q;
                 value.exchanged = 1;
             }
@@ -180,6 +191,10 @@ bool exchangeGasSurfaceCpu(
             }
             value.kelvin = static_cast<float>(tp);
         }
+        temperature += (virtualKelvinFromAir(static_cast<float>(air), m,
+                                             static_cast<float>(volume), vapour_molar) -
+                        virtualKelvinFromAir(air0, m0, static_cast<float>(volume),
+                                             vapour_molar)) / scale.kelvin_per_unit;
         if (!std::isfinite(m) || !std::isfinite(e) || !std::isfinite(temperature) ||
             !std::isfinite(density) || m < 0 || e < 0) {
             return false;

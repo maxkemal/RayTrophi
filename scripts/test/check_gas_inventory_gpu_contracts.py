@@ -17,7 +17,7 @@ def main():
     build = read('shaders/compile_sim_shaders.bat')
     kernels = [('advect_scalar', 7, 28), ('maccormack_scalar', 7, 28),
                ('conserve', 6, 16), ('clear', 2, 4), ('deposit', 3, 4), ('momentum', 7, 20),
-               ('summary', 4, 36), ('surface_exchange', 11, 36), ('surface_commit', 8, 8),
+               ('summary', 4, 36), ('surface_exchange', 11, 40), ('surface_commit', 8, 8),
                ('saturation', 11, 112), ('rain_fall', 4, 32)]
     for suffix, bindings, size in kernels:
         name = 'sim_inventory_' + suffix

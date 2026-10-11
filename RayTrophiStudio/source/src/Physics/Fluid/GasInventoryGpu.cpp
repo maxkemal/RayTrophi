@@ -149,6 +149,59 @@ bool advectGasInventoryGpu(SimulationGridDomainState& state,
     scratch.fields[3 + result_slot] = outputs[1];
     std::swap(scratch.fields[6], outputs[2]);
     scratch.fields[6 + result_slot] = outputs[2];
+
+    // Single-slot pools: rain mass [9], rain energy [10], non-condensable gas
+    // [11]. Each advects into a pool scratch slot that is now free in either
+    // scheme (1, 4, 7: the old input or the semi-Lagrangian intermediate).
+    // A drop moves with the air plus its terminal fall: this is the air part
+    // (wind drift; an updraft holds rain up), the fall is the saturation
+    // pass. Semi-Lagrangian only - MacCormack overshoots at a rain shaft's
+    // sharp edge. ★ Before 2026-10-11 part 4 rain did not move with the wind.
+    if (scratch.storage_initialized) {
+        constexpr std::size_t kSingles[3][2] = {{9, 1}, {10, 4}, {11, 7}};
+        for (const auto& single : kSingles) {
+            ComputeBufferHandle bindings[7] = {
+                buffers.vel_x, buffers.vel_y, buffers.vel_z,
+                scratch.fields[single[0]], scratch.fields[single[1]],
+                scratch.fields[single[1]], buffers.gas_solid_mask
+            };
+            ComputeDispatch advect;
+            advect.kernel = "sim_inventory_advect_scalar";
+            advect.buffers = bindings;
+            advect.buffer_count = 7;
+            advect.constants = &pc;
+            advect.constants_size = sizeof(pc);
+            advect.groups = gasInventoryDispatch(cells);
+            if (!compute.dispatch(advect)) {
+                return false;
+            }
+        }
+        // Rain mass and its energy normalize as one pair; the non-condensable
+        // gas alone, its "energy" pair a free slot read and written in place.
+        ComputeBufferHandle rain[6] = {
+            scratch.fields[9], scratch.fields[1], scratch.fields[10], scratch.fields[4],
+            scratch.partials, scratch.totals
+        };
+        ComputeBufferHandle foreign[6] = {
+            scratch.fields[11], scratch.fields[7], scratch.fields[8], scratch.fields[8],
+            scratch.partials, scratch.totals
+        };
+        ComputeBufferHandle* const pairs[2] = {rain, foreign};
+        for (ComputeBufferHandle* pair : pairs) {
+            command.buffers = pair;
+            for (uint32_t phase = 0; phase < 3; ++phase) {
+                rc.phase = phase;
+                command.groups = phase == 1 ? ComputeDispatchSize{1, 1, 1}
+                                            : gasInventoryDispatch(cells);
+                if (!compute.dispatch(command)) {
+                    return false;
+                }
+            }
+        }
+        std::swap(scratch.fields[9], scratch.fields[1]);
+        std::swap(scratch.fields[10], scratch.fields[4]);
+        std::swap(scratch.fields[11], scratch.fields[7]);
+    }
     markGasInventoryDeviceChanged(state);
     state.gas_stats.inventory_transport = "gpu_resident";
     return true;

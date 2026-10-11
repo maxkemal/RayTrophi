@@ -4217,6 +4217,14 @@ struct FluidDomainInfo {
     // Rain water in the air (falling or pooled), kg and cells holding it.
     double gas_rain_kg = 0.0;
     size_t gas_rain_cells = 0;
+    // Non-condensable gas in the air (fuel vapour, combustion products and any
+    // boiled substance that is not condensable_substance), kg and cells. Never
+    // in gas_phase_mass_kg, never condenses into fog water.
+    double gas_foreign_kg = 0.0;
+    size_t gas_foreign_cells = 0;
+    // Mass-weighted centre of the rain water in the air (0 when none): wind
+    // drift shows as its horizontal shift.
+    Vec3 gas_rain_centroid;
     // ★★★ particle_count is only a MEASUREMENT when this is true.
     //
     // Measured 2026-08-16: fluid.get reported particle_count = 0 for a domain

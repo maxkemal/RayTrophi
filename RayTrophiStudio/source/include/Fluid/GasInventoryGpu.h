@@ -38,6 +38,9 @@ struct GasInventorySummary {
     uint64_t condensate_cells = 0;   // cells holding fog water
     double rain_kg = 0.0;            // rain water (falling or pooled)
     uint64_t rain_cells = 0;
+    Vec3 rain_centroid;              // mass-weighted, world space
+    double foreign_kg = 0.0;         // non-condensable gas (fuel vapour, combustion products)
+    uint64_t foreign_cells = 0;
 };
 
 // The compute-buffer bank owns the device allocation. Live states only hold a
@@ -46,14 +49,17 @@ struct GasInventoryDevice {
     SimulationComputeContext* compute = nullptr;
     // Three advected pools x three slots (current, advection scratch,
     // MacCormack scratch): vapour mass [0..2], energy [3..5], condensate
-    // [6..8]. Rain water is not carried by the wind (it falls through it), so
-    // it has one slot each: rain mass [9], rain energy [10].
-    std::array<ComputeBufferHandle, 11> fields{};
+    // [6..8]. One slot each, advected semi-Lagrangian into the pools' free
+    // scratch after them: rain mass [9], rain energy [10] (rain rides the
+    // air, then falls through it) and non-condensable gas mass [11] (fuel
+    // vapour and combustion products; its energy is in the shared pool [3]).
+    std::array<ComputeBufferHandle, 12> fields{};
     ComputeBufferHandle partials;
     ComputeBufferHandle totals;
     ComputeBufferHandle zero;
     ComputeBufferHandle deposits;
     ComputeBufferHandle condensate_deposits;   // own buffer: uploads are not stream-ordered
+    ComputeBufferHandle foreign_deposits;
     ComputeBufferHandle phase_momentum;
     std::map<uint32_t, GasPhaseMomentumDeposit> pending_momentum;
     ComputeBufferHandle summary_partials;
@@ -78,6 +84,8 @@ struct GasInventoryDevice {
     std::map<uint32_t, std::pair<float, float>> pending;
     // Liquid water entering the air (mist parcels): condensate kg, energy J.
     std::map<uint32_t, std::pair<float, float>> pending_condensate;
+    // Non-condensable gas entering the air: kg, energy J.
+    std::map<uint32_t, std::pair<float, float>> pending_foreign;
     // Saturation adjustment scratch: rain-out records and their counter.
     ComputeBufferHandle saturation_records;
     ComputeBufferHandle saturation_counter;
@@ -104,6 +112,12 @@ void depositGasInventory(SimulationGridDomainState& state, std::size_t cell,
 // the condensate pool, its sensible energy into the shared energy pool.
 void depositGasCondensate(SimulationGridDomainState& state, std::size_t cell,
                           float mass_kg, float energy_j);
+// Gas that never condenses into the domain's water (fuel vapour, combustion
+// products): kg into the foreign pool, energy into the shared energy pool.
+// ★ Before 2026-10-11 part 4 it went into the vapour pool, and the saturation
+// adjustment condensed burning oil vapour into fog and rained it as water.
+void depositGasForeign(SimulationGridDomainState& state, std::size_t cell,
+                       float mass_kg, float energy_j);
 // Current condensate device buffer (the 1-float zero buffer before storage).
 ComputeBufferHandle gasInventoryCondensateBuffer(SimulationGridDomainState& state);
 // Rain mass/energy device buffers (the zero buffer before storage).
@@ -138,6 +152,7 @@ struct GasInventoryHostImage {
     std::vector<float> condensate;
     std::vector<float> rain;
     std::vector<float> rain_energy;
+    std::vector<float> foreign;
 };
 GasInventoryHostImage captureGasInventoryHostImage(const SimulationGridDomainState& state);
 bool captureGasInventoryHostImages(const std::vector<SimulationGridDomainState>& states,

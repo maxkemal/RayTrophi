@@ -205,6 +205,35 @@ CondensableVapour resolveCondensableVapour(const SimulationGridDomainDesc& domai
     return out;
 }
 
+float virtualKelvinFromAir(float air_kelvin, float vapour_kg, float cell_volume,
+                           float vapour_molar) {
+    const float t = std::max(air_kelvin, 1.0f);
+    if (!(vapour_molar > 0.0f) || !(vapour_kg > 0.0f) || !(cell_volume > 0.0f)) {
+        return t;
+    }
+    const float k = vapour_kg * kGasConstant / (vapour_molar * kAtmosphere * cell_volume);
+    const float x = std::min(k * t, 1.0f);
+    return t * kAirMolar / (x * vapour_molar + (1.0f - x) * kAirMolar);
+}
+
+float airKelvinFromVirtual(float virtual_kelvin, float vapour_kg, float cell_volume,
+                           float vapour_molar, float floor_kelvin) {
+    const float tv = std::max(virtual_kelvin, 1.0f);
+    if (!(vapour_molar > 0.0f) || !(vapour_kg > 0.0f) || !(cell_volume > 0.0f)) {
+        return tv;
+    }
+    const float k = vapour_kg * kGasConstant / (vapour_molar * kAtmosphere * cell_volume);
+    const float denominator = kAirMolar + tv * k * (kAirMolar - vapour_molar);
+    float t = tv * vapour_molar / kAirMolar;                  // pure vapour
+    if (denominator > 1.0e-12f) {
+        const float mixed = tv * kAirMolar / denominator;
+        if (k * mixed < 1.0f) {
+            t = mixed;
+        }
+    }
+    return std::max(t, std::min(tv, floor_kelvin));
+}
+
 float adjustCellSaturation(float& vapour_kg, float& water_kg, float& energy_j,
                            float& air_kelvin, float cell_volume,
                            const CondensableVapour& vapour, float background_kg) {
@@ -542,12 +571,19 @@ bool adjustGasSaturation(const SimulationGridDomainDesc& domain,
             float& r = state.gas_phase_rain_kg[cell];
             float& re = state.gas_phase_rain_energy_j[cell];
             if ((m > 0.0f || w > 0.0f) && std::isfinite(grid.temperature[cell])) {
-                float air = std::max(inputs.ambient_kelvin +
+                // The field holds the virtual temperature (see the header).
+                const float tv = std::max(inputs.ambient_kelvin +
                     (grid.temperature[cell] - inputs.gas_ambient_normalized) * kpu, 1.0f);
+                const float m0 = m;
+                float air = airKelvinFromVirtual(tv, m, volume, vapour.molar_kg_mol,
+                                                 inputs.ambient_kelvin);
+                const float air0 = air;
                 const float d = adjustCellSaturation(m, w, e, air, volume, vapour, background);
                 if (d != 0.0f) {
-                    grid.temperature[cell] = inputs.gas_ambient_normalized +
-                        (air - inputs.ambient_kelvin) / kpu;
+                    const float tv_change =
+                        virtualKelvinFromAir(air, m, volume, vapour.molar_kg_mol) -
+                        virtualKelvinFromAir(air0, m0, volume, vapour.molar_kg_mol);
+                    grid.temperature[cell] += tv_change / kpu;
                     if (d > 0.0f) totals.condensed += d; else totals.evaporated -= d;
                     kelvin_sum += air;
                     ++kelvin_cells;

@@ -1114,13 +1114,17 @@ struct SimulationGridDomainState {
     // ALL the water in the cell (vapour c*T + L per kg, condensate c*T per kg).
     // Same units as the atmosphere layer: kg/m^3 = kg / cell volume.
     std::vector<float> gas_phase_condensate_kg;
-    // Rain water: autoconverted fog water falling at its terminal speed (not
-    // carried by the wind), kg per cell, and its OWN sensible energy (J) - it
-    // is not in gas_phase_energy_j, which the wind carries away from it. Rain
+    // Rain water: autoconverted fog water riding the air and falling through
+    // it at its terminal speed, kg per cell, and its OWN sensible energy (J) - it
+    // is not in gas_phase_energy_j, so the two advect as their own pair. Rain
     // that lands on liquid is absorbed; where it pools to a whole liquid
     // parcel it becomes one.
     std::vector<float> gas_phase_rain_kg;
     std::vector<float> gas_phase_rain_energy_j;
+    // Non-condensable gas: fuel vapour and combustion products, kg per cell,
+    // carried by the wind like the vapour. Its energy is in gas_phase_energy_j.
+    // The saturation adjustment never touches it (it is not the domain's water).
+    std::vector<float> gas_phase_foreign_kg;
     // Fog or rain water may be present (set by a condensate deposit, refreshed
     // by the saturation pass). Gates the pass on gas domains without a
     // thermal chain.

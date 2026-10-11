@@ -1,6 +1,6 @@
 # Madde tipleri, hal ve preset'ler — tek tanım tablosu
 
-> **Durum:** AKTİF — 2026-10-11: T2 CANLI PASS (gizli ısılı erime/donma, §6f). 2026-10-08: T1/T3 hızlı IPC kabulü PASS; tam T3 kabulü (save/open, legacy göçü) açık. Tane/MPM birleşmesi
+> **Durum:** AKTİF — 2026-10-11: T2 CANLI PASS (gizli ısılı erime/donma, §6f). Aynı gün parti 4 CANLI PASS: açık listedeki 3/4/5 (sanal sıcaklık, yoğuşmayan gaz, rüzgârla yağmur; BIRLESIK §4.8c). 2026-10-08: T1/T3 hızlı IPC kabulü PASS; tam T3 kabulü (save/open, legacy göçü) açık. Tane/MPM birleşmesi
 > (H1 B11) ve birleşik madde domain'i bu tablonun üstüne oturur; önce bu.
 
 Devamı (panel ve tane alanlarının tek otoritesi, kar): [MADDE_UI_TEK_OTORITE.md](MADDE_UI_TEK_OTORITE.md) (TASLAK).

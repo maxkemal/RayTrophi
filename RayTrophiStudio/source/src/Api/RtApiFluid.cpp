@@ -494,6 +494,9 @@ Result fillFluidDensityStats(const RayTrophiSim::SimulationGridDomainState& stat
     info.rain_absorbed_kg = gs.rain_absorbed_kg;
     info.gas_rain_kg = inventory.rain_kg;
     info.gas_rain_cells = inventory.rain_cells;
+    info.gas_foreign_kg = inventory.foreign_kg;
+    info.gas_foreign_cells = inventory.foreign_cells;
+    info.gas_rain_centroid = inventory.rain_centroid;
     // 0 K marks an unwritten parcel, not a cold one (FluidParticles::temperature).
     const auto& temps = state.particles.temperature;
     float t_min = 0.0f, t_max = 0.0f;
