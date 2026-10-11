@@ -1,4 +1,5 @@
 #include "AssetRegistry.h"
+#include "Audio/AudioService.h"
 #include "globals.h"
 #include "VDBVolume.h"
 
@@ -25,7 +26,9 @@ bool isSupportedVolumeExtension(const std::filesystem::path& path) {
 }
 
 bool isSupportedAssetExtension(const std::filesystem::path& path) {
-    return isSupportedModelExtension(path) || isSupportedVolumeExtension(path);
+    const auto ext = AssetRegistry::toLowerCopy(path.extension().string());
+    return isSupportedModelExtension(path) || isSupportedVolumeExtension(path) ||
+           ext == ".wav" || ext == ".flac" || ext == ".mp3";
 }
 
 bool isPreviewExtension(const std::filesystem::path& path) {
@@ -409,6 +412,19 @@ AssetRecord AssetRegistry::buildRecordFromFile(const std::filesystem::path& root
     record.name = deriveDisplayName(record.id);
     record.type = (record.category == "scenes") ? "scene" : "asset";
     record.asset_kind = isSupportedVolumeExtension(record.entry_path) ? "vdb" : "model";
+    const auto audio_ext = AssetRegistry::toLowerCopy(record.entry_path.extension().string());
+    if (audio_ext == ".wav" || audio_ext == ".flac" || audio_ext == ".mp3") {
+        record.asset_kind = "audio";
+        try {
+            audio::AudioService probe;
+            const auto info = probe.invoke("asset_import", {{"path", audio::pathUtf8(record.entry_path)}});
+            record.audio_duration = info.at("duration");
+            record.audio_channels = info.at("channels");
+            record.audio_sample_rate = info.at("sample_rate");
+        } catch (const std::exception&) {
+            // Keep malformed/missing audio visible so its metadata can still be inspected.
+        }
+    }
     const std::string lowered_stem = AssetRegistry::toLowerCopy(stem_name);
     const bool looks_like_anim_clip_name =
         lowered_stem == "anim" ||
@@ -418,7 +434,7 @@ AssetRecord AssetRegistry::buildRecordFromFile(const std::filesystem::path& root
         lowered_stem.find("animation") != std::string::npos ||
         lowered_stem.find("_clip") != std::string::npos ||
         lowered_stem.find("clip_") == 0;
-    if (looks_like_anim_clip_name) {
+    if (looks_like_anim_clip_name && record.asset_kind != "audio") {
         record.asset_kind = "anim_clip";
     }
     record.tags = deriveTags(record.relative_directory, stem_name);
@@ -820,6 +836,11 @@ nlohmann::json AssetRegistry::buildMetadataJson(const AssetRecord& asset) {
     j["favorite"] = asset.favorite;
     j["version"] = asset.version;
     j["fileSizeBytes"] = asset.file_size_bytes;
+    if (asset.asset_kind == "audio") {
+        j["duration"] = asset.audio_duration;
+        j["channels"] = asset.audio_channels;
+        j["sampleRate"] = asset.audio_sample_rate;
+    }
 
     if (asset.is_sequence) {
         j["sequence"] = {
@@ -907,6 +928,8 @@ nlohmann::json AssetRegistry::buildMetadataJson(const AssetRecord& asset) {
 
 AssetAnalysisInfo AssetRegistry::analyzeAssetFile(const std::filesystem::path& entry_path) {
     AssetAnalysisInfo info;
+    const auto extension = toLowerCopy(entry_path.extension().string());
+    if (extension == ".wav" || extension == ".flac" || extension == ".mp3") return info;
     if (entry_path.empty() || !pathExists(entry_path)) {
         return info;
     }

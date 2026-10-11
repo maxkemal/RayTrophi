@@ -211,6 +211,13 @@ bool loadLocked(std::string& error) {
 }
 
 uint32_t requiredCapabilities(const std::string& method) {
+    if (method.rfind("audio.", 0) == 0) {
+        if (method == "audio.list" || method == "audio.get" || method == "audio.status") return Read;
+        if (method == "audio.append" || method == "audio.asset_import" || method == "audio.asset_relink" ||
+            method == "audio.play" || method == "audio.preview" ||
+            method == "audio.preview_file") return SceneWrite | FilesRead;
+        return SceneWrite;
+    }
     // ★ The two agent.* methods that WRITE. The discovery plan says agent.* is
     // read-only; rather than quietly break that rule they get their own
     // capability. send_prompt queues work for another agent, so a Read token

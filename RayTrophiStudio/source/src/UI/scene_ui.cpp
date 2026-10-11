@@ -17,6 +17,7 @@
 #include "scene_ui.h"
 #include "UI/GizmoOcclusion.h"
 #include "PerfProfile.h"
+#include "UI/AudioUI.h"
 #include "Autosave.h"
 #include <thread>
 #include <filesystem>
@@ -384,10 +385,11 @@ bool computeVDBPreviewBounds(const AssetRecord& asset, Vec3& out_min, Vec3& out_
 }
 
 bool isPlaceableAssetRecord(const AssetRecord& asset) {
-    return asset.asset_kind == "model" || asset.asset_kind == "vdb" || asset.asset_kind == "vdb_sequence" || asset.asset_kind == "anim_clip";
+    return asset.asset_kind == "audio" || asset.asset_kind == "model" || asset.asset_kind == "vdb" || asset.asset_kind == "vdb_sequence" || asset.asset_kind == "anim_clip";
 }
 
 bool computeAssetPreviewBounds(const AssetRecord& asset, Vec3& out_min, Vec3& out_max) {
+    if (asset.asset_kind == "audio") return false;
     if (asset.asset_kind == "vdb" || asset.asset_kind == "vdb_sequence") {
         return computeVDBPreviewBounds(asset, out_min, out_max);
     }
@@ -2170,7 +2172,7 @@ static const char* propertyTabRegionId(int tab)
 void SceneUI::drawPoppedTabContent(UIContext& ctx, int tab)
 {
     switch (tab) {
-        case 0:  drawSceneHierarchy(ctx); break;
+        case 0:  drawSceneHierarchy(ctx); AudioUI::drawProperties(ctx); break;
         case 1:  drawRenderInspectorContent(ctx); break;
         case 2:  if (show_terrain_tab) drawTerrainPanel(ctx); break;
         case 3:
@@ -2904,7 +2906,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         // so skip the in-panel switch (avoids double-rendering side effects).
         if (!tab_is_popped)
         switch (active_properties_tab) {
-            case 0: drawSceneHierarchy(ctx); break;
+            case 0: drawSceneHierarchy(ctx); AudioUI::drawProperties(ctx); break;
             case 1:
                 {
                     drawRenderInspectorContent(ctx);
@@ -3962,6 +3964,12 @@ void SceneUI::draw(UIContext& ctx)
     }
 
     drawSelectionGizmos(ctx);
+    AudioUI::updateListener(ctx);
+    if (!(ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active)) {
+        AudioUI::drawViewport(ctx, ctx.scene.camera && ctx.scene.camera->orthographic &&
+            viewport_settings.shading_mode != 2,
+            viewport_settings.show_gizmos && ctx.selection.show_gizmo, gizmo_hit);
+    }
     if(!(ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active)) drawCameraGizmos(ctx);  // Draw camera frustum icons
     if(!(ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active)) drawRiverGizmos(ctx, gizmo_hit);  // Draw river spline control points
 
@@ -6165,6 +6173,12 @@ void SceneUI::appendAssetToScene(UIContext& ctx, const std::filesystem::path& as
         }
     }
 
+    if (asset_record && asset_record->asset_kind == "audio") {
+        Vec3 point(0, 0, 0), normal(0, 1, 0);
+        raycastViewportPlacement(ctx, ImGui::GetMousePos(), point, normal);
+        AudioUI::appendAsset(ctx, *asset_record, point.x, point.y, point.z);
+        return;
+    }
     if (asset_record && asset_record->asset_kind == "anim_clip") {
         appendAnimationClipAssetToScene(ctx, *asset_record, display_name);
         return;
@@ -7012,6 +7026,7 @@ void SceneUI::drawAssetBrowser(UIContext& ctx, bool embedded)
             const std::string asset_name_fit = fitTextToWidth(file_asset ? file_asset->name : "No asset metadata", card_width - 20.0f);
             const std::string relative_file_fit = fitTextToWidth(relative_file, card_width - 20.0f);
             const char* type_label =
+                file_asset && file_asset->asset_kind == "audio" ? "AUDIO" :
                 file_asset && file_asset->asset_kind == "anim_clip" ? "ANIM" :
                 file_asset && file_asset->asset_kind == "vdb_sequence" ? "VDB SEQ" :
                 file_asset && file_asset->asset_kind == "vdb" ? "VDB" :
@@ -7371,6 +7386,7 @@ void SceneUI::drawAssetBrowser(UIContext& ctx, bool embedded)
 
         ImGui::Spacing();
         const char* append_button_label = selected_asset->asset_kind == "anim_clip" ? "Import Clip" : "Append To Scene";
+        AudioUI::drawAssetActions(ctx, *selected_asset);
         if (UIWidgets::PrimaryButton(append_button_label, ImVec2(160, 0)) && isPlaceableAssetRecord(*selected_asset)) {
             appendAssetToScene(ctx, selected_asset->entry_path, selected_asset->name);
         }

@@ -2303,4 +2303,28 @@
     <ClInclude Include="source\include\Fluid\MatterGrainStages.h" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainColliderBvh.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Audio\AudioService.h" />
+    <ClInclude Include="source\include\Audio\AudioAuthoring.h" />
+    <ClInclude Include="source\include\UI\AudioUI.h" />
+    <ClInclude Include="source\src\Api\RtAudioBindings.h" />
+    <ClCompile Include="source\src\Scene\AudioService.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioAuthoring.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtAudioBindings.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <None Include="external\miniaudio\miniaudio.h" />
+    <None Include="external\miniaudio\LICENSE" />
+  </ItemGroup>
 </Project>

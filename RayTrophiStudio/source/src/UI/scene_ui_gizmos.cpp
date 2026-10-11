@@ -2747,6 +2747,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                                viewport_settings.shading_mode != 2;
     ImGuizmo::SetOrthographic(gizmoUseOrtho);
     ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+    if (sel.selected.type == SelectableType::AudioSource) return;
 
     if (!sel.hasSelection() || !sel.show_gizmo || !ctx.scene.camera) return;
 

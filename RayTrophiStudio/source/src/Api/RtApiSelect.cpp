@@ -42,6 +42,7 @@ const char* selectableTypeName(SelectableType t) {
         case SelectableType::SimulationDomain: return "simulation_domain";
         case SelectableType::ParticleEmitter:  return "particle_emitter";
         case SelectableType::World:            return "world";
+        case SelectableType::AudioSource:      return "audio_source";
         default:                               return "none";
     }
 }

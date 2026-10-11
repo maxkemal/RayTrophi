@@ -9,6 +9,7 @@
 * =========================================================================
 */
 #pragma once
+#include "Audio/AudioService.h"
 #include <HittableList.h>
 #include "Fluid/MatterGrainGeometry.h"
 #include "Fluid/MatterPhaseConfig.h"
@@ -110,6 +111,7 @@ std::size_t simFrameCacheBudgetFromHardware();
 std::uint64_t queryAvailablePhysicalRamBytes();
 
 struct SceneData {
+    std::shared_ptr<audio::AudioService> audio = std::make_shared<audio::AudioService>();
     RigAuthoring::ViewState rigView;
     SceneData() {
         syncSimulationWorld();
@@ -9899,6 +9901,7 @@ public:
     // Clear all scene data
     // =========================================================================
     void clear() {
+        audio->clear();
         // Cancel and wait for all active background SDF bakes before destroying the scene objects
         g_cancel_sdf_bakes.store(true, std::memory_order_release);
         while (g_active_sdf_bakes.load(std::memory_order_acquire) > 0) {

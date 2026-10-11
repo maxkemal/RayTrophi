@@ -53,7 +53,7 @@ layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 4, std430) readonly buffe
     vec4 wind;      // drift_x_m, drift_z_m, planet_radius_m, altitude_offset_m
     vec4 cirrus;    // enabled, altitude_m, coverage, optical depth
     vec4 misc;      // 1/cirrus_scale_m, seed, rt_max_bounces, rt_flags (cloud_rt.glsl)
-    vec4 precip;    // rate_mm_h, extinction_per_m at that rate, slant_x, slant_z
+    vec4 precip;    // rate_mm_h, extinction_per_m at that rate, trail_x, trail_z (upwind lag per m of fall at the ground)
     vec4 precip2;   // snow (0/1), ground_fraction, shear_x, shear_z (m per m of height)
     vec4 scatterAlbedo; // RGB albedo, HG g override (2 = droplet fit)
     vec4 emissionSource; // RGB source radiance, reserved
@@ -88,7 +88,10 @@ bool cloudHasLiquidLayers() {
 // are both below every cloud shell cannot enter one. Rain still needs its
 // below-cloud integration. This avoids marching ordinary ground fragments.
 bool cloudSegmentMayContain(vec3 origin, vec3 direction, float distance) {
-    if (cloudParams.precip.x > 0.0) return true;
+    // Rain/snow extinction is bounded by precip.y x the streak peak (1.85):
+    // a segment too short to reach an optical depth of 1e-3 cannot show it
+    // (indoor bounces, contact segments) and skips the whole march.
+    if (cloudParams.precip.x > 0.0 && distance * cloudParams.precip.y * 2.0 > 1e-3) return true;
     float lowest = 1e30;
     for (int i = 0; i < 3; ++i) {
         CloudLayerG L = cloudParams.layers[i];
@@ -447,12 +450,32 @@ float cloudLayerDensity(int li, vec3 p, float alt, bool detail) {
 }
 
 // ── Precipitation (docs/dev/ATMOSPHERE_WEATHER.md §3.1) ─────────────────────
-// Local rate (mm/h) at p: layer 0's weather-map B channel (cluster cores)
-// read where the drops LEFT the base -- the wind carries them sideways while
-// they fall, so shafts lean downwind. Only under cloud (local coverage > 0);
-// above the base nothing, and with ground_fraction < 1 the shaft thins out
-// and ends before the ground (virga).
-float cloudPrecipAt(vec3 p) {
+// Local rate (mm/h) at p, traced back up the fall line to where the drops
+// left the base, and `fallLine` = that release point (cloud frame comes from
+// the weather lookup, which already subtracts the drift).
+//
+// Footprint: the base shape of layer 0 just above its base at the release
+// point -- rain hangs under the cells that are actually drawn, not under the
+// ~12 km weather blobs -- times the weather B channel (cluster cores: which
+// cells rain at all).
+//
+// Lean: the weather map drifts WITH the wind, and so do drops released at the
+// base; uniform wind therefore gives a VERTICAL shaft in the cloud frame.
+// Only the slower air below the base makes the drops lag behind their cloud
+// (precip.zw = lag per metre of fall at the ground, linear wind deficit ->
+// quadratic, trailing foot). The old absolute wind/fall-speed slant tilted a
+// 34 m/s shaft ~80 degrees and was the main source of "rays from everywhere".
+//
+// Tassels ("salkim"): each drop bundle has its own release depth and, as
+// virga, its own evaporation depth -- one column noise along the fall line
+// staggers both, so the base and a virga's foot are fringed, not cut flat.
+//
+// The density continues down to whatever surface the ray meets (terrain in
+// a valley below y = 0 still gets rain). The scene-ground floor for rays that
+// meet NOTHING is cloudPrecipMarch's job: a camera under y = 0 used to look
+// down 40 km of uninterrupted rain.
+float cloudPrecipSample(vec3 p, out vec3 fallLine) {
+    fallLine = p;
     float rate = cloudParams.precip.x;
     CloudLayerG L = cloudParams.layers[0];
     if (rate <= 0.0 || L.b.w < 0.5) return 0.0;
@@ -461,27 +484,66 @@ float cloudPrecipAt(vec3 p) {
     float column = max(L.a.x - cloudParams.wind.w, 1.0);   // base above the scene ground
     float f = below / column;
     float gf = cloudParams.precip2.y;
-    float fade = gf >= 0.999 ? 1.0 : 1.0 - smoothstep(gf * 0.5, gf, f);
-    if (fade <= 0.0) return 0.0;
-    vec3 src = p - vec3(cloudParams.precip.z, 0.0, cloudParams.precip.w) * below;
+    // Cheapest reject first: deeper than any tassel of a virga can reach.
+    if (gf < 0.999 && f >= gf * 1.3) return 0.0;
+    // precip.zw points upwind (where the foot trails), so the release point
+    // of the drop at p is back downwind, under the cloud that has moved on.
+    float fl = min(f, 1.0);
+    vec3 src = p - vec3(cloudParams.precip.z, 0.0, cloudParams.precip.w) * (below * fl * 0.5);
+    // Drops fan out on the way down (turbulence, size sorting): wobble the
+    // lookup by a cloud-frame curl field, growing with the fall distance, so
+    // a shaft widens and frays toward the ground instead of a straight prism.
+    vec2 wob = textureLod(cloudCurlNoise, (src.xz - cloudParams.wind.xy) * (1.0 / 2600.0), 0.0).rg - 0.5;
+    src.xz += wob * min(below, column) * 0.35;
+    fallLine = src;
+    vec2 s = src.xz - cloudParams.wind.xy;
+    float tassel = textureLod(cloudBaseNoise, vec3(s.x / 260.0, 0.13, s.y / 260.0), 0.0).a;
+    float fade = 1.0;
+    if (gf < 0.999) {
+        float reach = gf * mix(0.55, 1.3, tassel);
+        fade = 1.0 - smoothstep(reach * 0.6, reach, f);
+        if (fade <= 0.0) return 0.0;
+    }
     vec4 w = cloudWeatherAt(L, src);
-    float cov = clamp(cloudRemap(w.r, 1.0 - L.a.z, 1.0, 0.0, 1.0), 0.0, 1.0);
-    // Soft top: the shaft grows out of the base over its first ~150 m.
-    float top = smoothstep(0.0, 150.0, below);
-    return rate * w.b * smoothstep(0.0, 0.25, cov) * fade * top;
+    if (w.b <= 0.0) return 0.0;
+    float baseShape;
+    cloudLayerDensityResolved(0, src, L.a.x + min(0.1 * L.a.y, 300.0), false, baseShape);
+    float footprint = smoothstep(0.06, 0.45, baseShape / max(L.b.x, 1e-6));
+    if (footprint <= 0.0) return 0.0;
+    // Fringed top: bundles leave the base over 60..450 m, staggered per column.
+    float top = smoothstep(0.0, mix(60.0, 450.0, tassel), below);
+    return rate * w.b * footprint * fade * top;
 }
 
-// Extinction (1/m) of the falling drops at p, with vertical streaks (the
-// base noise stretched along the fall) so a shaft is not a smooth slab.
-float cloudPrecipDensity(vec3 p) {
-    float r = cloudPrecipAt(p);
+float cloudPrecipAt(vec3 p) {
+    vec3 fallLine;
+    return cloudPrecipSample(p, fallLine);
+}
+
+// Extinction (1/m) of the falling drops at p. Fall streaks: drop bundles
+// tens to a few hundred metres across and kilometres long, read along the
+// fall line so they bend with the trailing foot. Mean ~1, so the Marshall-
+// Palmer optical depth over a long path is kept. `detail` 0..1 fades the
+// streaks to their mean (far shafts: a veil, not sub-pixel aliasing).
+float cloudPrecipDensityLod(vec3 p, float detail) {
+    vec3 fallLine;
+    float r = cloudPrecipSample(p, fallLine);
     if (r <= 0.0) return 0.0;
-    CloudLayerG L = cloudParams.layers[0];
-    vec3 drift = vec3(cloudParams.wind.x, 0.0, cloudParams.wind.y);
-    vec3 q = (p - drift) * L.c.x * vec3(1.5, 0.08, 1.5);
-    float streak = mix(0.55, 1.0, textureLod(cloudBaseNoise, q, 0.0).g);
+    float streak = 1.0;
+    if (detail > 0.0) {
+        vec2 s = fallLine.xz - cloudParams.wind.xy;
+        float alt = cloudAltitude(p);
+        float n1 = textureLod(cloudBaseNoise, vec3(s.x / 420.0, alt / 5200.0, s.y / 420.0), 0.0).g;
+        float n2 = textureLod(cloudBaseNoise, vec3(s.x / 110.0 + 0.37, alt / 1900.0, s.y / 110.0 + 0.61), 0.0).b;
+        float fine = mix(0.15, 1.85, smoothstep(0.25, 0.75, n1 * 0.65 + n2 * 0.35));
+        streak = mix(1.0, fine, detail);
+    }
     float exponent = cloudParams.precip2.x > 0.5 ? 0.7 : 0.63;
     return cloudParams.precip.y * pow(r / cloudParams.precip.x, exponent) * streak;
+}
+
+float cloudPrecipDensity(vec3 p) {
+    return cloudPrecipDensityLod(p, 1.0);
 }
 
 float cloudDensity(vec3 p, bool detail) {

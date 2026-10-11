@@ -89,8 +89,11 @@ her yerinde değil.
 ### 3.1 Uzak alan — yağış perdeleri (hacimsel, `cloudMarch` içinde)
 - Bulut tabanından zemine, `precipAt(xz) > 0` olan sütunlarda düşük yoğunluklu
   bir hacim: sönüm `σ ∝ P^0.63` (Marshall–Palmer damla dağılımından optik
-  sönüm), rüzgârla eğik (düşüş hızı yağmur ~6 m/s, kar ~1 m/s → eğim = rüzgâr /
-  düşüş hızı). Virga: taban altında buharlaşma → yükseklikle incelen yoğunluk
+  sönüm). ★ Eğim mutlak rüzgârdan DEĞİL, taban altı rüzgâr AÇIĞINDAN gelir
+  (2026-10-11): hava haritası rüzgârla sürüklenir, damla da tabandan o hızla
+  çıkar → düzgün rüzgârda perde bulut çerçevesinde DİKEYDİR; yalnız yavaş yüzey
+  havası (~%60) ayağı geride bırakır (karesel, sürüklenen ayak; eğim ≤ 1.5).
+  Eski "eğim = rüzgâr / düşüş hızı" 34 m/s'de perdeyi ~80° yatırıyordu. Virga: taban altında buharlaşma → yükseklikle incelen yoğunluk
   (RH düşükse zemine ulaşmaz).
 - Işık: bulutla aynı march; faz yağmurda neredeyse izotrop + hafif ileri,
   karda izotrop. Bedava: bulutun gölge haritası perdeleri de karartır.
@@ -205,11 +208,15 @@ Eski bulut içe aktarımı silindi (uyumluluk yok).
 
 **4b-1 uygulama notları (perdeler):** `CloudState.precipitation` {rate_mm_h, snow,
 ground_fraction} (türetmede iklimden: virga = RH 0.45–0.8), `CloudParamsGPU.precip/precip2`
-(240 B; sönüm yağmur 2.5e-4·R^0.63, kar 2.6e-3·R^0.7; eğim = rüzgâr / düşüş hızı 6.5 | 1 m/s),
+(240 B; sönüm yağmur 2.5e-4·R^0.63, kar 2.6e-3·R^0.7; ~~eğim = rüzgâr / düşüş hızı~~ → 2026-10-11: `precip.zw` = rüzgâra karşı
+gecikme 0.4·U/düşüş hızı, zeminde, ≤1.5; ayak izi = katman 0'ın taban şekli, zemin altında yağış YOK),
 `cloudPrecipAt/cloudPrecipDensity` (cloud_common), `cloudPrecipMarch` (cloud_rt, `cloudMarch`
 sonunda; 40 km, karesel adım). `world.sample_clouds mode=precipitation` = §6'daki
-`sample_precipitation` (ayrı metot açılmadı). Sınır: yalnız gök ışınları; arazi önündeki
-perde ve yakın parçacık, yüzey ıslaklığı, overlay sökümü → 4b-2.
+`sample_precipitation` (ayrı metot açılmadı). ~~Sınır: yalnız gök ışınları~~ — 2026-10-11:
+perde her bulut taşıyan ışında (RT hit segment + RayFusion `cloud_scene.comp`), yüzeyde biter;
+zemin tabanı (y = 0) yalnız HİÇBİR şeye çarpmayan ışına uygulanır; salkım: sütun başına
+kademeli kopma derinliği (60–450 m) ve virga ucu (gf × 0.55–1.3); çizgi detayı adım boyuna
+göre söner. Yakın parçacık, yüzey ıslaklığı, overlay sökümü → 4b-2.
 
 1. **Kararsızlık girdisi:** ayrı `instability` alanı mı (öneri — sahne
    ölçeğinde anlaşılır), lapse rate'ten mi türetilsin (fiziksel ama kullanıcı

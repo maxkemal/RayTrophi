@@ -5,6 +5,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "UI/AudioUI.h"
 #include "UI/RigViewUI.h"
 #include "renderer.h"
 #include "OptixWrapper.h"
@@ -1504,6 +1505,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
         ImGui::TreePop();
     }
 
+    AudioUI::drawHierarchy(ctx);
     ImGui::EndChild(); // End HierarchyTree
     
     // --- VERTICAL RESIZE SPLITTER ---

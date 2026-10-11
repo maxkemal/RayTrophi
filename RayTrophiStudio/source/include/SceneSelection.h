@@ -45,7 +45,8 @@ enum class SelectableType {
     ParticleSystem, // Particle simulation object
     SimulationDomain, // Non-renderable grid/domain proxy
     ParticleEmitter, // Independently transformable runtime emitter proxy
-    World       // World/Environment settings
+    World,      // World/Environment settings
+    AudioSource // Non-geometric source, identified by persistent audio id
 };
 
 enum class TransformMode {
@@ -71,6 +72,7 @@ enum class MeshElementSelectMode {
 struct SelectableItem {
     SelectableType type = SelectableType::None;
     std::string name = "Unnamed";
+    std::string audio_source_id;
     
     // Pointers to actual objects (only one is valid at a time)
     std::shared_ptr<Light> light = nullptr;
@@ -107,6 +109,7 @@ struct SelectableItem {
 
     bool operator==(const SelectableItem& other) const {
         if (type != other.type) return false;
+        if (type == SelectableType::AudioSource) return audio_source_id == other.audio_source_id;
         if (type == SelectableType::Object) {
             if (spline_object || other.spline_object) return spline_object == other.spline_object;
             if (mesh_object || other.mesh_object) return mesh_object == other.mesh_object;
@@ -132,6 +135,7 @@ struct SelectableItem {
     
     void clear() {
         type = SelectableType::None;
+        audio_source_id.clear();
         light = nullptr;
         camera = nullptr;
         object = nullptr;

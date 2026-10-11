@@ -5,6 +5,7 @@
 // ===============================================================================
 
 #include "scene_ui.h"
+#include "UI/AudioUI.h"
 #include "renderer.h"
 #include "OptixWrapper.h"
 #include "ColorProcessingParams.h"
@@ -1754,6 +1755,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
 // ============================================================================
 // OPTIMIZED VERSION - O(n) instead of O(n�)
 void SceneUI::triggerDelete(UIContext& ctx) {
+    if (AudioUI::editSelection(ctx, false)) return;
     if(ctx.scene.rigView.edit_mode)return;
     if (!ctx.selection.hasSelection()) return;
 
@@ -2281,6 +2283,7 @@ void SceneUI::drawMarqueeRect() {
 }
 
 void SceneUI::triggerDuplicate(UIContext& ctx) {
+    if (AudioUI::editSelection(ctx, true)) return;
     if(ctx.scene.rigView.edit_mode)return;
     SceneSelection& sel = ctx.selection;
     if (!sel.hasSelection()) return;

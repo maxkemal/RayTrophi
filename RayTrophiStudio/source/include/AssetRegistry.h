@@ -28,6 +28,9 @@ struct AssetRecord {
     std::filesystem::path relative_entry_path;
     std::vector<std::string> tags;
     bool favorite = false;
+    double audio_duration = 0;
+    unsigned audio_channels = 0;
+    unsigned audio_sample_rate = 0;
 
     std::uintmax_t file_size_bytes = 0;
     bool has_metadata = false;

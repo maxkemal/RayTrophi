@@ -1839,6 +1839,7 @@ bool ProjectManager::saveProjectImpl(const std::string& filepath, SceneData& sce
         // Force Fields
         if (progress_callback) progress_callback(84, "Saving Force Fields...");
         root["force_fields"] = serializeForceFields(scene.force_field_manager);
+        root["audio"] = scene.audio->save(pathFromUtf8(filepath));
         SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.force_field_manager.force_fields.size()) + " Force Fields.");
 
         // Particle Simulation
@@ -2655,6 +2656,9 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             if (!root["vdb_volumes"].get(vdb_el)) deserializeVDBVolumes(sjsonToNlohmann(vdb_el), scene);
             if (!root["gas_volumes"].get(gas_el)) deserializeGasVolumes(sjsonToNlohmann(gas_el), scene);
             if (!root["force_fields"].get(ff_el)) deserializeForceFields(sjsonToNlohmann(ff_el), scene);
+            simdjson::dom::element audio_el;
+            scene.audio->restore(root["audio"].get(audio_el) ? json() : sjsonToNlohmann(audio_el),
+                                 pathFromUtf8(filepath).parent_path());
             if (!root["particle_simulation"].get(particles_el)) deserializeParticleSimulation(sjsonToNlohmann(particles_el), scene);
             if (!root["kinematic_colliders"].get(kinematic_el)) {
                 std::string error;

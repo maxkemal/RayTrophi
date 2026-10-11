@@ -310,7 +310,8 @@ public:
     // for a constant wind; a keyed wind uses the current velocity (still
     // deterministic per frame).
     Vec3 cloudWindOffset() const;
-    // Climate wind (m/s): slants the precipitation shafts.
+    // Climate wind (m/s): drifts the clouds and drags the precipitation
+    // shafts' feet behind them (only the sub-cloud wind deficit leans a shaft).
     Vec3 cloudWindVelocity() const { return climate.wind_direction * climate.wind_speed_mps; }
     // Bumps on every change that alters the cloud field (params or time).
     uint64_t cloudRevision() const { return cloud_revision; }
