@@ -796,6 +796,7 @@ WeatherParams World::getWeatherParams() const {
 
 void World::setWeatherParams(const WeatherParams& params) {
     data.weather = params;
+    ++cloud_revision; // wake the shared RayFusion weather frame, even with clouds disabled
     // Same stale-copy hazard as setNishitaParams: the wind is climate-owned.
     syncClimatePacket();
 }
@@ -821,8 +822,19 @@ void World::syncClimatePacket() {
 // that would overlap it are switched off (validateClouds forbids overlap).
 // Returns true when anything changed.
 bool World::rederiveClouds() {
-    if (!clouds.derive_from_climate) return false;
     const atmosphere::DerivedWeather w = atmosphere::deriveWeather(climate, data.nishita.altitude);
+    bool lightningChanged = false;
+    if (clouds.lightning.derive_rate_from_climate &&
+        clouds.lightning.rate_per_minute != w.lightning_per_minute) {
+        clouds.lightning.rate_per_minute = w.lightning_per_minute;
+        lightningChanged = true;
+    }
+    if (!clouds.derive_from_climate) {
+        if (lightningChanged) {
+            ++cloud_revision;
+        }
+        return lightningChanged;
+    }
     atmosphere::CloudState c = clouds;
     atmosphere::CloudLayer& l0 = c.layers[0];
     l0.enabled = w.cloud_coverage > 0.01f;
@@ -844,7 +856,7 @@ bool World::rederiveClouds() {
             l.enabled = false;
     }
     const atmosphere::CloudLayer& o = clouds.layers[0];
-    bool changed = o.enabled != l0.enabled || o.base_altitude_m != l0.base_altitude_m ||
+    bool changed = lightningChanged || o.enabled != l0.enabled || o.base_altitude_m != l0.base_altitude_m ||
                    o.thickness_m != l0.thickness_m || o.type != l0.type || o.coverage != l0.coverage ||
                    clouds.precipitation.rate_mm_h != c.precipitation.rate_mm_h ||
                    clouds.precipitation.snow != c.precipitation.snow ||

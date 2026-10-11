@@ -36,6 +36,13 @@ struct CloudLayerG {
     vec4 g;   // group base, height, inverse footprint period, reserved
 };
 
+struct CloudLightningG {
+    vec4 start;
+    vec4 end;
+    vec4 color;
+    vec4 stage;
+};
+
 layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 0) uniform sampler3D cloudBaseNoise;
 layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 1) uniform sampler3D cloudDetailNoise;
 layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 2) uniform sampler2D cloudCurlNoise;
@@ -50,7 +57,8 @@ layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 4, std430) readonly buffe
     vec4 precip2;   // snow (0/1), ground_fraction, shear_x, shear_z (m per m of height)
     vec4 scatterAlbedo; // RGB albedo, HG g override (2 = droplet fit)
     vec4 emissionSource; // RGB source radiance, reserved
-    vec4 cirrusDirection; // along-wind direction x,z; reserved
+    vec4 cirrusDirection; // along-wind x,z; camera weather time, reserved
+    CloudLightningG lightning[4];
 } cloudParams;
 
 const float CLOUD_PI = 3.14159265358979;
@@ -65,6 +73,15 @@ vec3 cloudPlanetCenter() {
 
 float cloudAltitude(vec3 p) {
     return length(p - cloudPlanetCenter()) - cloudParams.wind.z;
+}
+
+bool cloudHasLiquidLayers() {
+    if ((int(cloudParams.misc.w + 0.5) & 1) == 0) return false;
+    for (int i = 0; i < 3; ++i) {
+        if (cloudParams.layers[i].b.w >= 0.5 && cloudParams.layers[i].b.x > 0.0 &&
+            cloudParams.layers[i].a.z > 0.0) return true;
+    }
+    return false;
 }
 
 // The norm is convex along a straight segment, so a segment whose endpoints
@@ -137,6 +154,7 @@ float cloudStormEnvelope(CloudLayerG L, vec3 localPosition, float altitude, vec3
     vec2 q = localPosition.xz * L.g.z;
     ivec2 cell = ivec2(floor(q));
     float h = (altitude - L.g.x) / max(L.g.y, 1.0);
+    if (h <= 0.0 || h >= 1.0) return 0.0;
     float envelope = 0.0;
     for (int z = -1; z <= 1; ++z) {
         for (int x = -1; x <= 1; ++x) {
@@ -161,18 +179,27 @@ float cloudStormEnvelope(CloudLayerG L, vec3 localPosition, float altitude, vec3
                 float k = float(lobe);
                 float lobeHeight = lobe == 3 ? 0.77 : 0.14 + k * 0.25;
                 float verticalRadius = lobe == 3 ? 0.16 : 0.22 + k * 0.025;
+                float verticalDistance = (ch - lobeHeight) / verticalRadius;
+                // Billow displacement is bounded by +/-0.26. Outside this
+                // expanded support the lobe cannot contribute any density.
+                if (abs(verticalDistance) >= 1.26) continue;
                 float radius = lobe == 3 ? mix(0.58, 0.72, r.y) :
                                            mix(0.34, 0.48, r.x) + k * 0.025;
                 vec2 offset = (r.xy - vec2(0.5)) * k * 0.10;
                 vec2 delta = (q - center - offset) / radius;
                 delta.x *= mix(0.85, 1.15, r.y);
-                vec3 v = vec3(delta.x, (ch - lobeHeight) / verticalRadius, delta.y);
+                vec3 v = vec3(delta.x, verticalDistance, delta.y);
+                float distanceSquared = dot(v, v);
+                if (distanceSquared >= 1.26 * 1.26) continue;
                 // Existing 3D formation noise breaks each lobe into smaller
                 // cauliflower bulges without adding a texture lookup.
-                float edge = length(v) + (billow.x - 0.5) * 0.36 +
+                float edge = sqrt(distanceSquared) + (billow.x - 0.5) * 0.36 +
                              (billow.y - 0.5) * 0.16;
                 float mass = 1.0 - smoothstep(0.68, 1.0, edge);
                 envelope = max(envelope, mass * smoothstep(0.0, 0.035, ch));
+                // The union is already full: no remaining neighbour or lobe
+                // can increase it. Keep solving the rim, base and crown.
+                if (envelope >= 1.0) return 1.0;
             }
         }
     }
@@ -252,7 +279,9 @@ vec4 cloudWeatherAt(CloudLayerG L, vec3 p) {
 // passed in so a caller summing layers computes it once. `detail` = false
 // gives the cheap base shape (majorant, light-march, empty-space skip).
 // Bound kept for the RT majorant: result <= local coverage * extinction.
-float cloudLayerDensity(int li, vec3 p, float alt, bool detail) {
+float cloudLayerDensityResolved(int li, vec3 p, float alt, bool detail,
+                               out float baseDensity) {
+    baseDensity = 0.0;
     if (cloudParams.layers[li].b.w < 0.5 || cloudParams.layers[li].b.x <= 0.0) return 0.0;
     CloudLayerG L = cloudStormLayerAt(li, alt);
     if (L.b.w < 0.5 || L.b.x <= 0.0) return 0.0;
@@ -379,7 +408,17 @@ float cloudLayerDensity(int li, vec3 p, float alt, bool detail) {
     shapeN = clamp(cloudRemap(shapeN, midCut, 1.0, 0.0, 1.0), 0.0, 1.0);
     if (shapeN <= 0.0) return 0.0;
     float covScale = min(covH, cov);
-    if (!detail) return shapeN * covScale * L.b.x;
+    baseDensity = shapeN * covScale * L.b.x;
+    if (!detail) return baseDensity;
+
+    // Fine erosion belongs to the boundary, not to an already dense core.
+    // Retain detail at the base and crown even when the horizontal core is
+    // full. Fade continuously so crossing the shell adds no density seam.
+    float boundaryDetail = 1.0 - smoothstep(0.75, 0.95, shapeN);
+    float verticalDetail = max(1.0 - smoothstep(0.04, 0.16, hh),
+                               smoothstep(0.78, 0.94, hh));
+    float detailWeight = stormRegion ? max(boundaryDetail, verticalDetail) : 1.0;
+    if (detailWeight <= 0.0) return shapeN * covScale * L.b.x;
 
     // Curl-distorted erosion: protect the flat convective base, expose
     // cauliflower crowns and keep stratiform edges softer. The cheap shape
@@ -396,10 +435,15 @@ float cloudLayerDensity(int li, vec3 p, float alt, bool detail) {
     float dmod = mix(dfbm, 1.0 - dfbm, crown);
     float erosionHeight = mix(0.65, mix(0.2, 1.0, baseProtection), convective);
     float erosionThreshold = dmod * L.b.z * mix(0.45, 0.72, towering) *
-                             erosionHeight;
+                             erosionHeight * detailWeight;
     float dens = clamp(cloudRemap(shapeN, erosionThreshold, 1.0, 0.0, 1.0),
                        0.0, 1.0);
     return dens * covScale * L.b.x;
+}
+
+float cloudLayerDensity(int li, vec3 p, float alt, bool detail) {
+    float baseDensity;
+    return cloudLayerDensityResolved(li, p, alt, detail, baseDensity);
 }
 
 // ── Precipitation (docs/dev/ATMOSPHERE_WEATHER.md §3.1) ─────────────────────

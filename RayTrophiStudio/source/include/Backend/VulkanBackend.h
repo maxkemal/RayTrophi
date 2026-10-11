@@ -2300,6 +2300,7 @@ public:
     // lazy: a clear-sky scene generates nothing.
     void setCloudState(const atmosphere::CloudState& clouds, float time_seconds, const Vec3& drift_m,
                        const Vec3& wind_mps);
+    void setWeatherTime(float time_seconds);
     void recordCloudScenePass(VkCommandBuffer cmd, uint32_t width, uint32_t height,
                              float depthA, float depthB, float depthC);
     bool cloudSceneDepthAvailable() const {
@@ -2395,6 +2396,7 @@ protected:
     bool m_cloudPipelineAttempted = false;
     atmosphere::CloudState m_cachedClouds;
     float m_cloudTime = 0.0f;
+    float m_weatherTime = 0.0f;
     Vec3 m_cloudDrift = Vec3(0.0f, 0.0f, 0.0f);
     Vec3 m_cloudWind = Vec3(0.0f, 0.0f, 0.0f);
     bool m_cloudStateSet = false;

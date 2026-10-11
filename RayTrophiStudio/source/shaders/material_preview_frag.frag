@@ -202,6 +202,7 @@ uint previewDrawPhase()   { return (pc.materialMeta.y >> 8u) & 0x3u; }
 // the y = 0 plane around the camera. Read only with sceneFlags bit 64 (the
 // adapter bound bindings 26/27). Directional light = the sun (sun rule).
 layout(set = 0, binding = 26) uniform sampler2D cloudShadowMap;
+#include "weather_render_types.glsl"
 layout(set = 0, binding = 27, std430) readonly buffer CloudShadowFrame {
     vec3  sunDir;
     float sunIntensity;
@@ -209,7 +210,20 @@ layout(set = 0, binding = 27, std430) readonly buffer CloudShadowFrame {
     int   lutReady;
     float centerX;
     float centerZ;
+    vec4 camPos;
+    vec4 camRight;
+    vec4 camUp;
+    vec4 camFwd;
+    vec4 prevPos;
+    vec4 prevRight;
+    vec4 prevUp;
+    vec4 prevFwd;
+    uvec4 info;
+    WeatherRenderData weatherEffects;
 } cloudShadowFrame;
+#define WEATHER_DATA cloudShadowFrame.weatherEffects
+#define WEATHER_SURFACE_AVAILABLE ((sceneFlags & 64u) != 0u)
+#include "weather_surface.glsl"
 const float CLOUD_SHADOW_EXTENT_M = 32000.0;   // cloud_shadow.comp
 
 float previewCloudShadow(vec3 P) {
@@ -940,6 +954,12 @@ void main() {
         ? matx.bubble_ior : materialIor;
     float interiorDepth = max(matx.transmission_density, 0.0);
     bool resinSurface = interiorDepth > 1e-4;
+
+    if (WEATHER_SURFACE_AVAILABLE) {
+        vec3 support = normalize(mix(normalize(vWorldNormal), N, 0.85));
+        applyWeatherSurface(vWorldPos, N, support, albedo, roughness, metallic);
+        N = weatherSurfaceNormal(vWorldPos, N, support);
+    }
 
     // Specular anti-aliasing: at authored Roughness=0 a curved highlight can
     // become narrower than one pixel and disappear as the camera recedes.

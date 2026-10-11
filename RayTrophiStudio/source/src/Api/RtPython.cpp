@@ -1,4 +1,5 @@
 #include "RtPostBindings.h"
+#include "RtWeatherEffectsBindings.h"
 #include "RtPhaseGrid.h"
 #include "RtMatterModels.h"
 #include "RtFluidLabelBindings.h"
@@ -5144,6 +5145,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::getWeatherJson(out));
         return pyLoads(out);
     }, "Weather derived from the climate (read-only): climate, derived, derive_from_climate.");
+    rtpy::registerWeatherEffectsBindings(world);
     world.def("get_clouds", [pyLoads] {
         std::string out;
         requireResult(rtapi::getCloudsJson(out));

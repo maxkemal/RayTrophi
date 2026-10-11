@@ -32,7 +32,9 @@ Kaynak tamam, görsel/canlı kabul bekliyor.
 
 **2026-10-11 üçüncü parti:** kullanıcı materyal/cirrus RT kabulü sonrası; katman
 ve cirrus yönü UI/script/IPC'de, baked noise warp ve bağımsız gradient kanal,
-yüksek tiplerde yamaç erozyonu, güncel storm ve `towering_cumulus` preset kaynakta.
+yüksek tiplerde yamaç erozyonu ve güncel storm preset kaynakta.
+`towering_cumulus` kullanıcı talebiyle preset listesinden ve uygulama yolundan
+kaldırıldı (2026-10-11); eski sahnelerdeki kayıtlı katmanlar korunur.
 GPU paket 336 B; C++ + **cloud_noise dahil** tüm tüketici shader'lar birlikte
 derlenip uygulama yeniden açılmalı. Görsel/canlı kabul bekliyor.
 [CLOUD_ORIENTATION_AND_TOWERS_2026_10_11.md](CLOUD_ORIENTATION_AND_TOWERS_2026_10_11.md)

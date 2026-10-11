@@ -135,7 +135,9 @@ void main() {
             c.r = worleyFbm(warped, 2, 51u);
             c.g = worleyFbm(warped, 4, 61u);
             c.b = worleyFbm(warped, 8, 71u);
-            c.a = 1.0;
+            // Cirrus reads a signed-gradient field, not cellular distance
+            // contours. Liquid-cloud detail continues to consume RGB only.
+            c.a = clamp(perlinFbm(warped, 7, 3, 91u) * 0.65 + 0.5, 0.0, 1.0);
             imageStore(detailImg, ivec3(id), c);
         }
         return;

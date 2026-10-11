@@ -1767,8 +1767,11 @@
     <ClCompile Include="source\src\Api\RtApiLights.cpp" />
     <ClCompile Include="source\src\Api\RtApiAtmosphere.cpp" />
     <ClCompile Include="source\src\Api\RtApiClouds.cpp" />
+    <ClCompile Include="source\src\Api\RtApiWeatherEffects.cpp" />
+    <ClCompile Include="source\src\Api\RtWeatherEffectsBindings.cpp" />
     <ClCompile Include="source\src\Backend\VulkanDeviceClouds.cpp" />
     <ClCompile Include="source\src\Backend\VulkanCloudScenePass.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanWeatherClock.cpp" />
     <ClCompile Include="source\src\Api\RtApiSelect.cpp" />
     <ClCompile Include="source\src\Api\RtApiMaterial.cpp" />
     <ClCompile Include="source\src\Api\RtApiNodes.cpp" />

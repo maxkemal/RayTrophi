@@ -127,6 +127,23 @@ struct CloudPrecipitation {
                                    // survives before evaporating (< 1: virga)
 };
 
+// Deterministic timeline events, rendered through the shared Vulkan cloud path.
+struct CloudLightning {
+    bool enabled = false;
+    bool derive_rate_from_climate = false;
+    float rate_per_minute = 6.0f;
+    float intensity = 30.0f;
+    Vec3 color = Vec3(0.65f, 0.78f, 1.0f);
+    Vec3 center_m = Vec3(0.0f);  // world x/z; y is unused
+    float extent_m = 20000.0f;
+    float ground_altitude_m = 0.0f;
+    float ground_strike_fraction = 0.15f;
+    float bolt_radius_m = 2.0f;
+    float duration_s = 0.8f;
+    float horizontal_span_m = 12000.0f;
+    float branching = 0.75f;
+};
+
 struct CloudState {
     // Layer 0 follows the climate (docs/dev/ATMOSPHERE_WEATHER.md §2): base =
     // LCL, genus / coverage / depth from instability + humidity. World
@@ -139,6 +156,8 @@ struct CloudState {
     CloudWeather weather;
     CloudQuality quality;
     CloudMaterial material;
+
+    CloudLightning lightning;
 
     bool anyEnabled() const;
 };

@@ -108,6 +108,32 @@ bool validateClouds(const CloudState& c, std::string* error) {
     if (!validateCloudMaterial(c.material, error)) {
         return false;
     }
+    const CloudLightning& lightning = c.lightning;
+    if (!inRange(lightning.rate_per_minute, 0.0f, 600.0f) ||
+        !inRange(lightning.intensity, 0.0f, 10000.0f) ||
+        !inRange(lightning.extent_m, 100.0f, 200000.0f) ||
+        !inRange(lightning.ground_altitude_m, -500.0f, 20000.0f) ||
+        !inRange(lightning.ground_strike_fraction, 0.0f, 1.0f) ||
+        !inRange(lightning.bolt_radius_m, 0.1f, 30.0f) ||
+        !inRange(lightning.duration_s, 0.08f, 3.0f) ||
+        !inRange(lightning.horizontal_span_m, 100.0f, 50000.0f) ||
+        !inRange(lightning.branching, 0.0f, 1.0f)) {
+        return fail(error, "lightning requires finite rate_per_minute 0..600, "
+                           "intensity 0..10000, extent_m 100..200000, "
+                           "ground_altitude_m -500..20000, ground_strike_fraction 0..1, "
+                           "bolt_radius_m 0.1..30, duration_s 0.08..3, "
+                           "horizontal_span_m 100..50000, branching 0..1");
+    }
+    for (float v : {lightning.color.x, lightning.color.y, lightning.color.z}) {
+        if (!inRange(v, 0.0f, 1.0f)) {
+            return fail(error, "lightning.color must be linear RGB within 0..1");
+        }
+    }
+    for (float v : {lightning.center_m.x, lightning.center_m.y, lightning.center_m.z}) {
+        if (!inRange(v, -1000000.0f, 1000000.0f)) {
+            return fail(error, "lightning.center_m must be finite within +/-1000000 m");
+        }
+    }
     for (int i = 0; i < kMaxCloudLayers; ++i) {
         const CloudLayer& l = c.layers[i];
         const std::string p = "layers[" + std::to_string(i) + "].";
@@ -191,6 +217,22 @@ void cloudMaterialToJson(const CloudMaterial& m, nlohmann::json& j) {
 
 void cloudsToJson(const CloudState& c, nlohmann::json& j) {
     cloudMaterialToJson(c.material, j["material"]);
+    const CloudLightning& lightning = c.lightning;
+    j["lightning"] = {
+        {"enabled", lightning.enabled},
+        {"derive_rate_from_climate", lightning.derive_rate_from_climate},
+        {"rate_per_minute", lightning.rate_per_minute},
+        {"intensity", lightning.intensity},
+        {"color", {lightning.color.x, lightning.color.y, lightning.color.z}},
+        {"center_m", {lightning.center_m.x, lightning.center_m.y, lightning.center_m.z}},
+        {"extent_m", lightning.extent_m},
+        {"ground_altitude_m", lightning.ground_altitude_m},
+        {"ground_strike_fraction", lightning.ground_strike_fraction},
+        {"bolt_radius_m", lightning.bolt_radius_m},
+        {"duration_s", lightning.duration_s},
+        {"horizontal_span_m", lightning.horizontal_span_m},
+        {"branching", lightning.branching}
+    };
     nlohmann::json layers = nlohmann::json::array();
     for (const auto& l : c.layers) {
         nlohmann::json material;
@@ -299,6 +341,55 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
             }
         }
     }
+    if (j.contains("lightning")) {
+        const auto& s = j["lightning"];
+        if (!s.is_object()) {
+            return fail(error, "lightning must be an object");
+        }
+        for (auto it = s.begin(); it != s.end(); ++it) {
+            const bool flag = it.key() == "enabled" || it.key() == "derive_rate_from_climate";
+            const bool vector = it.key() == "color" || it.key() == "center_m";
+            const bool number = it.key() == "rate_per_minute" || it.key() == "intensity" ||
+                it.key() == "extent_m" || it.key() == "ground_altitude_m" ||
+                it.key() == "ground_strike_fraction" || it.key() == "bolt_radius_m" ||
+                it.key() == "duration_s" || it.key() == "horizontal_span_m" ||
+                it.key() == "branching";
+            if ((!flag && !vector && !number) || (flag && !it.value().is_boolean()) ||
+                (number && !it.value().is_number())) {
+                return fail(error, "invalid lightning field or type: " + it.key());
+            }
+        }
+        CloudLightning& lightning = c.lightning;
+        lightning.enabled = s.value("enabled", lightning.enabled);
+        lightning.derive_rate_from_climate = s.value(
+            "derive_rate_from_climate", lightning.derive_rate_from_climate);
+        lightning.rate_per_minute = s.value("rate_per_minute", lightning.rate_per_minute);
+        lightning.intensity = s.value("intensity", lightning.intensity);
+        lightning.extent_m = s.value("extent_m", lightning.extent_m);
+        lightning.ground_altitude_m = s.value("ground_altitude_m", lightning.ground_altitude_m);
+        lightning.ground_strike_fraction = s.value(
+            "ground_strike_fraction", lightning.ground_strike_fraction);
+        lightning.bolt_radius_m = s.value("bolt_radius_m", lightning.bolt_radius_m);
+        lightning.duration_s = s.value("duration_s", lightning.duration_s);
+        lightning.horizontal_span_m = s.value("horizontal_span_m", lightning.horizontal_span_m);
+        lightning.branching = s.value("branching", lightning.branching);
+        for (const char* key : {"color", "center_m"}) {
+            if (!s.contains(key)) {
+                continue;
+            }
+            const auto& value = s[key];
+            if (!value.is_array() || value.size() != 3 ||
+                !value[0].is_number() || !value[1].is_number() || !value[2].is_number()) {
+                return fail(error, std::string("lightning.") + key + " must be three numbers");
+            }
+            const Vec3 vector(value[0].get<float>(), value[1].get<float>(), value[2].get<float>());
+            if (std::string(key) == "color") {
+                lightning.color = vector;
+            } else {
+                lightning.center_m = vector;
+            }
+        }
+    }
     if (j.contains("precipitation") && j["precipitation"].is_object()) {
         const auto& s = j["precipitation"];
         c.precipitation.rate_mm_h = s.value("rate_mm_h", c.precipitation.rate_mm_h);
@@ -383,6 +474,22 @@ CloudState lerpClouds(const CloudState& a, const CloudState& b, float t) {
         l.material = lerpCloudMaterial(la.material, lb.material, t);
     }
     r.precipitation.rate_mm_h = lerpf(a.precipitation.rate_mm_h, b.precipitation.rate_mm_h, t);
+    r.lightning = t < 1.0f ? a.lightning : b.lightning;
+    r.lightning.rate_per_minute = lerpf(
+        a.lightning.rate_per_minute, b.lightning.rate_per_minute, t);
+    r.lightning.intensity = lerpf(a.lightning.intensity, b.lightning.intensity, t);
+    r.lightning.color = a.lightning.color * (1.0f - t) + b.lightning.color * t;
+    r.lightning.center_m = a.lightning.center_m * (1.0f - t) + b.lightning.center_m * t;
+    r.lightning.extent_m = lerpf(a.lightning.extent_m, b.lightning.extent_m, t);
+    r.lightning.ground_altitude_m = lerpf(
+        a.lightning.ground_altitude_m, b.lightning.ground_altitude_m, t);
+    r.lightning.ground_strike_fraction = lerpf(
+        a.lightning.ground_strike_fraction, b.lightning.ground_strike_fraction, t);
+    r.lightning.bolt_radius_m = lerpf(a.lightning.bolt_radius_m, b.lightning.bolt_radius_m, t);
+    r.lightning.duration_s = lerpf(a.lightning.duration_s, b.lightning.duration_s, t);
+    r.lightning.horizontal_span_m = lerpf(
+        a.lightning.horizontal_span_m, b.lightning.horizontal_span_m, t);
+    r.lightning.branching = lerpf(a.lightning.branching, b.lightning.branching, t);
     r.precipitation.snow = t < 1.0f ? a.precipitation.snow : b.precipitation.snow;
     r.precipitation.ground_fraction = lerpf(a.precipitation.ground_fraction, b.precipitation.ground_fraction, t);
     r.cirrus.enabled = t < 1.0f ? a.cirrus.enabled : b.cirrus.enabled;
@@ -445,7 +552,7 @@ void cloudsToLegacyPacket(const CloudState& c, float wind_offset_x_m, float wind
 }
 
 std::vector<std::string> cloudPresetNames() {
-    return {"clear", "fair_weather_cumulus", "towering_cumulus", "scattered", "broken", "overcast_stratus",
+    return {"clear", "fair_weather_cumulus", "scattered", "broken", "overcast_stratus",
             "storm", "high_cirrus", "sunset_altocumulus"};
 }
 
@@ -461,8 +568,6 @@ bool cloudPreset(const std::string& name, CloudState& out) {
         low.coverage = 0.25f; low.type = 0.5f; low.extinction_per_m = 0.05f;
         low.droplet_diameter_um = 10.0f; low.erosion = 0.55f;
         low.cell_size_m = 1500.0f; low.detail_size_m = 150.0f;
-    } else if (name == "towering_cumulus") {
-        configureStormLayers(c, false);
     } else if (name == "scattered") {
         low.enabled = true; low.base_altitude_m = 1400.0f; low.thickness_m = 1800.0f;
         low.coverage = 0.45f; low.type = 0.55f; low.extinction_per_m = 0.06f;

@@ -4,6 +4,7 @@
 
 #include "scene_ui.h"
 #include "UI/CloudMaterialUI.h"
+#include "Api/RtApiWeatherEffects.h"
 #include "renderer.h"
 #include "OptixWrapper.h"
 #include "ColorProcessingParams.h"
@@ -894,6 +895,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Volumetric Light Rays:");
             
             bool godraysEnabled = params.godrays_enabled != 0;
+            cloud_ui::beginLegacyShaftControls(ctx, world.getClouds());
             if (ImGui::Checkbox("Enable God Rays", &godraysEnabled)) {
                 params.godrays_enabled = godraysEnabled ? 1 : 0;
                 changed = true;
@@ -920,6 +922,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 
                 ImGui::Unindent();
             }
+            ImGui::EndDisabled();
             
             ImGui::Spacing();
             ImGui::Separator();
@@ -1131,7 +1134,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             weatherChanged = true;
         }
 
-        const char* weatherVisualModes[] = { "Overlay", "Surface Only" };
+        const char* weatherVisualModes[] = { "Airborne", "Surface Only" };
         int weatherVisualMode = std::clamp(weather.visual_mode, 0, 1);
         if (ImGui::Combo("Visual Mode", &weatherVisualMode, weatherVisualModes, IM_ARRAYSIZE(weatherVisualModes))) {
             weather.visual_mode = weatherVisualMode;
@@ -1193,9 +1196,10 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             weather.surface_settling_output = std::clamp(weather.surface_settling_output, 0.0f, 1.0f);
             weather.surface_height_output = std::clamp(weather.surface_height_output, 0.0f, 1.0f);
             weather.visual_mode = std::clamp(weather.visual_mode, static_cast<int>(WEATHER_VISUAL_OVERLAY), static_cast<int>(WEATHER_VISUAL_SURFACE_ONLY));
-            world.setWeatherParams(weather);
-            changed = true;
+            changed |= rtapi::setWeatherEffects(weather).ok;
         }
+
+        changed |= cloud_ui::drawWeatherLightningControls(ctx);
 
         UIWidgets::EndSection();
     }

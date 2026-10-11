@@ -33,6 +33,7 @@
 #define CLOUD_MAJORANT_BINDING 35
 #endif
 #include "cloud_common.glsl"
+#include "cloud_cirrus_shape.glsl"
 
 layout(set = CLOUD_SET, binding = CLOUD_MAJORANT_BINDING) uniform sampler2D cloudMajorantMap;
 
@@ -263,7 +264,15 @@ float cloudSunTransmittance(vec3 p, vec3 wi, uint seed) {
     return exp(-cloudOpticalDepth(p, wi, CLOUD_RT_MAX_DIST, 24, cloudRand(rng), false));
 }
 
+#include "cloud_lightning.glsl"
+
 #ifdef CLOUD_RT_LIGHTING
+
+#ifdef CLOUD_SEPARATE_FLASH_HISTORY
+// The same march integrates flash energy, but only stable cloud radiance is
+// accumulated in RayFusion history. No extra field samples or buffers.
+vec3 cloudFlashInscatter = vec3(0.0);
+#endif
 
 // Mixture of the two HG lobes of the Jendersie-d'Eon fit as the sampling
 // density; the full phase (HG + Draine) is the target, the ratio is ~1.
@@ -359,9 +368,8 @@ void cloudCirrus(vec3 o, vec3 d, float tLimit, vec3 sunDir, float mu, vec3 ambTo
     vec3 p = o + d * t;
     vec2 wdir = cloudParams.cirrusDirection.xy;
     vec2 xz = p.xz - cloudParams.wind.xy;
-    // Broad packets and fine, bent fibres share two existing texture reads.
-    // Across-wind detail is much finer than along-wind detail; broad channels
-    // bend and taper each packet instead of painting identical straight rows.
+    // Open-ended wisps share two existing reads. Smooth gradient warp avoids
+    // the cusp-shaped bends produced by using cellular distance as a spine.
     vec2 st = vec2(dot(xz, wdir), dot(xz, vec2(-wdir.y, wdir.x))) *
               cloudParams.misc.x;
     vec3 phase = cloudShapePhase(2);
@@ -369,18 +377,13 @@ void cloudCirrus(vec3 o, vec3 d, float tLimit, vec3 sunDir, float mu, vec3 ambTo
     vec4 n = textureLod(cloudBaseNoise,
                         vec3(st.x * 0.23, 0.37, st.y * 0.75) + phase +
                         vec3(evo * 0.08, 0.0, evo * 0.12), 0.0);
-    float bend = (n.g - 0.5) * 1.2;
-    float trail = st.y + bend + (n.a - 0.5) * 0.35;
+    float bend = (n.a - 0.5) * 0.65;
+    float trail = st.y + bend;
     vec4 n2 = textureLod(cloudDetailNoise,
-                         vec3(st.x * 0.55 + (n.b - 0.5) * 0.3,
-                              0.61 + (n.a - 0.5) * 0.2,
-                              trail * 7.0) + phase + vec3(evo * 0.15), 0.0);
-    float field = smoothstep(0.15, 0.60, n.g * 0.65 + n.b * 0.35);
-    float packet = clamp(cloudRemap(field, 1.0 - cloudParams.cirrus.z,
-                                   1.0, 0.0, 1.0), 0.0, 1.0);
-    float fibres = smoothstep(0.16, 0.65, n2.r * 0.7 + n2.g * 0.3);
-    float taper = mix(0.25, 1.0, smoothstep(0.2, 0.75, n.a));
-    float cov = packet * fibres * taper;
+                         vec3(st.x * 0.35 + (n.a - 0.5) * 0.2,
+                              0.61 + (n.a - 0.5) * 0.35,
+                              trail * 3.0) + phase + vec3(evo * 0.15), 0.0);
+    float cov = cloudCirrusWisps(n, n2);
     if (cov <= 0.0) return;
     // Slant path through a thin sheet: optical depth grows toward the horizon.
     vec3 up = normalize(p - cloudPlanetCenter());
@@ -401,13 +404,19 @@ void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout 
 
 void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                 out vec3 inscatter, out float T, out float depth) {
+#ifdef CLOUD_SEPARATE_FLASH_HISTORY
+    cloudFlashInscatter = vec3(0.0);
+#endif
     uint rng = cloudSeed(seed ^ 0x51ed270bu, o + d);
+    vec4 lightningActivity = cloudLightningActivities();
     inscatter = vec3(0.0);
     T = 1.0;
     depth = -1.0;
     vec3 iv[CLOUD_RT_MAX_INTERVALS];
     int n = cloudIntervals(o, d, tLimit, iv);
-    // No early return on n == 0: the cirrus shell is outside the intervals.
+    // Empty liquid intervals may still contain cirrus or precipitation.
+    if (n == 0 && (cloudParams.cirrus.x < 0.5 || cloudParams.cirrus.w <= 0.0) &&
+        cloudParams.precip.x <= 0.0) return;
 
     vec3 sunDir = normalize(worldData.w.sunDir);
     float mu = dot(d, sunDir);
@@ -473,12 +482,14 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                 p = o + d * min(t + completionStep * 0.5, tEnd);
             }
             float alt = cloudAltitude(p);
-            float cheap = cloudLayerDensity(li, p, alt, false);
+            // Detailed evaluation already rejects empty base shape before
+            // erosion. Avoid solving all storm cells twice at the same point.
+            float cheap;
+            float sigma = cloudLayerDensityResolved(li, p, alt, true, cheap);
             if (cheap <= 0.0) {
                 t += min(max(dt, completionStep), tEnd - t);
                 continue;
             }
-            float sigma = cloudLayerDensity(li, p, alt, true);
             // Inside cloud: finer steps (vertical structure), >= 25 m.
             float stepLen = min(max(max(dt * 0.6, 25.0), completionStep), tEnd - t);
             if (sigma > 0.0) {
@@ -491,7 +502,9 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                 float lt = 0.0;
                 for (int j = 0; j < 6; ++j) {
                     float seg = 40.0 * pow(2.0, float(j));
-                    vec3 q = p + sunDir * (lt + seg * 0.5);
+                    // Stratify the existing light samples to soften fixed
+                    // quadrature bands without adding another shaft march.
+                    vec3 q = p + sunDir * (lt + seg * mix(0.2, 0.8, cloudRand(rng)));
                     tau += cloudDensity(q, j < 3) * seg;
                     lt += seg;
                 }
@@ -548,8 +561,14 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                 // the cloud above/below (cheap: height gradient).
                 S += amb;
                 S = S * L.e.rgb + L.f.rgb;
+                vec3 flash = cloudLightningSource(p, lightningActivity);
                 // Energy-conserving integration over the step (Hillaire 2016).
                 float Ts = exp(-sigma * stepLen);
+#ifdef CLOUD_SEPARATE_FLASH_HISTORY
+                cloudFlashInscatter += T * flash * (1.0 - Ts);
+#else
+                S += flash;
+#endif
                 inscatter += T * S * (1.0 - Ts);
                 depthSum += t * T * (1.0 - Ts);
                 depthW += T * (1.0 - Ts);
@@ -564,6 +583,9 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
         depth = depthSum / depthW;
         vec3 Tap = cloudAerialTransmittance(o, d, depth);
         inscatter = inscatter * Tap + cloudSkyAmbient(d) * (vec3(1.0) - Tap) * (1.0 - T);
+#ifdef CLOUD_SEPARATE_FLASH_HISTORY
+        cloudFlashInscatter *= Tap;
+#endif
     }
     cloudCirrus(o, d, tLimit, sunDir, mu, ambTop, inscatter, T);
     cloudPrecipMarch(o, d, tLimit, steps, seed, inscatter, T, depth);
@@ -645,6 +667,9 @@ void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout 
     // From below the shaft is in front of the cloud; from above, behind it.
     if (fromAbove) inscatter += T * pin;
     else           inscatter = pin + pT * inscatter;
+#ifdef CLOUD_SEPARATE_FLASH_HISTORY
+    if (!fromAbove) cloudFlashInscatter *= pT;
+#endif
     T *= pT;
     if (depth < 0.0 || pd < depth) depth = pd;
 }
@@ -664,6 +689,7 @@ void cloudRenderLimited(vec3 o, vec3 d, float tLimit, bool cameraRay, uint seed,
         return;
     }
     uint rng = cloudSeed(seed, o + d);
+    vec4 lightningActivity = cloudLightningActivities();
     inscatter = vec3(0.0);
     depth = -1.0;
     T = cloudTransmittance(o, d, tLimit, rng);
@@ -691,7 +717,8 @@ void cloudRenderLimited(vec3 o, vec3 d, float tLimit, bool cameraRay, uint seed,
         if (b == 0) depth = t;
         // Emission is a source per optical-depth event; absorption reduces
         // the scattering throughput before both NEE and continuation.
-        inscatter += thr * cloudParams.layers[li].f.rgb;
+        inscatter += thr * (cloudParams.layers[li].f.rgb +
+                           cloudLightningSource(pos, lightningActivity));
         thr *= cloudParams.layers[li].e.rgb;
         if (max(thr.r, max(thr.g, thr.b)) <= 0.0) break;
         float dUm = cloudParams.layers[li].b.y;
@@ -727,6 +754,9 @@ void cloudRenderLimited(vec3 o, vec3 d, float tLimit, bool cameraRay, uint seed,
              cloudSkyAmbient(horiz));
         cloudCirrus(o, d, tLimit, sunDir, dot(d, sunDir), ambTop, inscatter, T);
     }
+    // The authored curtain remains the same bounded approximation when the
+    // liquid-cloud reference transport is selected.
+    cloudPrecipMarch(o, d, tLimit, cloudRtSteps(), seed, inscatter, T, depth);
 }
 
 void cloudRender(vec3 o, vec3 d, bool cameraRay, uint seed,
