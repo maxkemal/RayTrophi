@@ -1,6 +1,6 @@
 # Birleşik madde domain'i — gaz/sıvı ayrımı olmayan simülasyon ve render
 
-> **Durum:** AKTİF — 2026-10-11: T2 gizli ısı + yüzey yoğuşması CANLI PASS (yoğuşma ölçeği açık, §4.7) (§4.7, MADDE_TIPLERI §6f). 2026-10-08: Madde T1/T3 kullanıcı build'i ve hızlı
+> **Durum:** AKTİF — 2026-10-11: T2 gizli ısı + yüzey yoğuşması (§4.7, MADDE_TIPLERI §6f), sis suyu/doygunluk (§4.8) ve yağmur: otokonversiyon, sis tavanı, düşüş, iniş (§4.8b) CANLI PASS; commit `01284ef`. Açık: sis/yağmur render'a bağlı değil (bulut işiyle), yağmur parsel doğumlarının yeri ölçülmedi. 2026-10-08: Madde T1/T3 kullanıcı build'i ve hızlı
 > dış IPC kabulü PASS; legacy/save-open/görsel kabul ve T2 hal/model birleşmesi açık.
 > C5/C6/C7 fiziksel yakınsama ve H1 maliyet kapıları bu testlerle kapanmaz.
 > Uzman Gas/Liquid domain'leri T0 eşitlik ölçümü olmadan kaldırılmaz.
@@ -30,9 +30,18 @@ contact kaynakta; önceki kullanıcı build PASS, yeni shader/C++ kabulü açık
 Ortak zamanlayıcı/porous owner izolasyonu, karma elastik MPM, gaz↔grain ve T6 kapıları açık. Güncel kaynak/kabul
 ayrıntısı [MADDE_T2_T3_HANDOFF.md](MADDE_T2_T3_HANDOFF.md)'nin ilk checkpoint'idir.
 
-## Güncel kısa devir — 2026-10-08
+## Güncel kısa devir — 2026-10-11
 
 | Konu | Güncel durum |
+|---|---|
+| Son partiler | T2 gizli ısılı erime/donma + yüzey yoğuşması (§4.7); sis suyu: buhar/sis iki havuz, gizli ısılı doygunluk ayarı (§4.8); yağmur: Kessler otokonversiyonu, sis tavanı, uç hızla düşüş, sıvıya iniş/emilim (§4.8b). Hepsi derlendi, canlı PASS, `main`'de (`01284ef`; `.spv` artık izlenmiyor, `6b6c643`). |
+| Canlı kanıt | `fusion_condensation_live.json`, `fog_live.json` (9/9: sis ortalaması ≤ 0,0031 kg/m³, su korunumu 6e-6 kg), kaynama, GPU envanter, ısı alışverişi regresyonları. |
+| Açık | (1) Sis ve yağmur render'a bağlı değil — bulut ajanının `CloudPrecipitation` render tarafıyla ortak karar. (2) Yağmurun ~%76'sı emilim yerine parsel doğumuyla sıvıya katılıyor; doğum YERİ ölçülmedi (kaynak üstü mü, tank dibi mi). (3) Kaynama buharının sanal sıcaklığı (~600 K) kaynak üstünde doygunluğu yanıltır. (4) Tek tür buhar. (5) Yağmur rüzgârla sürüklenmez. (6) Ek 11 sıvı↔collider ısısı: son kanıt 2026-10-10, 4/6 (`shell_is_a_body`, `water_warms_through_cube` FAIL) — yeniden koşulmalı. |
+| Sonraki | Doğum yeri ölçümü (küçük) veya sis/yağmur görünürlüğü (bulut işiyle). |
+
+## Önceki kısa devir — 2026-10-08 (tarihsel)
+
+| Konu | Durum (o tarihte) |
 |---|---|
 | Son kaynak partisi | T1 madde kalıtımı + T3 Varsayılan Madde, fizik/hints ayrımı, preset/chemistry sökümü; kullanıcı derledi. |
 | Hızlı canlı kabul | Madde library testi (21 yerleşik) ve domain substance sözleşmesi PASS; test nesneleri temizlendi. Simülasyon adımı/görsel kabul yapılmadı. |
@@ -354,14 +363,14 @@ tanımlı olabilir ve bunu hiçbir şey fark etmez.
 | Yanma | sıvı → gaz (+ısı) | var |
 | Yanma / piroliz | katı → gaz + char (MSF) | kısmen (yangın → yapı, MSF char) |
 | Yumuşama / sinterleme | granül ↔ katı / sıvı | kısmen (granül termal zinciri) |
-| Yoğuşma | gaz → sıvı | yüzeyde var (2026-10-11, ters Hertz–Knudsen, CPU+GPU); havada sis suyu + yağış §4.8 (kaynakta) |
+| Yoğuşma | gaz → sıvı | yüzeyde var (2026-10-11, ters Hertz–Knudsen, CPU+GPU); havada sis suyu §4.8, otokonversiyon + yağmur düşüşü/inişi §4.8b (CANLI PASS) |
 | Sis aktarımı | sıvı `mist` → gaz | 27C canlı PASS; 2026-10-11: mist sis suyu havuzuna gider, gizli ısı doygunlukta ödenir (§4.8) |
 
 ★ Enerji de defterdedir: erime ve buharlaşma gizli ısıyı kaynaktan çeker.
 Bugün erime ısı tüketmiyorsa, erime sonsuz hızda ve bedava olur — sonuç
 "makul görünür" ve kimse bug diye raporlamaz.
 
-### 4.7 ★★★ Isı ve faz geçişleri — 2026-10-10 (CANLI, Ek 1–11; Ek 11 derleme bekliyor)
+### 4.7 ★★★ Isı ve faz geçişleri — 2026-10-10 (CANLI, Ek 1–11; Ek 11 kabulü açık: 2026-10-10 kanıtı 4/6)
 
 Her şey parçacığın KENDİ maddesinden okunur: ısı sığası `m·c`, iletkenlik `k`,
 yoğunluk `ρ`, gizli ısı `L`, buhar molar kütlesi `M` (`vapor_molar_mass_kg_mol`),
@@ -378,7 +387,7 @@ alışverişte iki cisim kesin çözümüyle korunur (taşma yok).
 | Kaynama | `transferBoilingToGas`: `dm=min(m, m·c·(T−Tb)/L)`, Tb'ye sabitler, buhar sütun yüzeyinin ÜSTÜNE bırakılır (sıvı hücresine değil — RT'de süt bloğu buydu), sanal sıcaklıkla kaldırma `Tv=Tb·M_hava/M`, yanıcı buhar gaz yakıtına; çekirdekli kaynama: boşluk oranıyla fokurdama + seyrek whitewater Bubble | boiling PASS |
 | Kaynama altı buharlaşma | `exchangeLiquidGasSurface`: Hertz–Knudsen + Clausius–Clapeyron, nem = atmosfer + hücredeki buhar, gizli ısı parçacıktan; etkin katsayı 4e-5 (açık tava 1e-4 kg/m²s) | heat_exchange PASS |
 | Sıvı ↔ hava | Madde domain'inde hava = gaz ızgarası: yüzey parçacığı ↔ üst gaz hücresi, film 20 W/m²K, C_hava=ρ_hava·V·1005; ortama sonsuz soğuma kapalı. Ayrı Fluid+Gas üst üste binince de aynı (Ek 11) | heat_exchange PASS |
-| Sıvı ↔ collider | Ek 11: MSF kabuğu (alan·1 mm·ρ·c, MSF'nin kendi kütle kuralı) ↔ temas parçacığı, film 500 W/m²K; sıvı tarafı bir readback geriden okur, kabuğa giden ısı `sim_msf_ambient` binding 4 ile cihaza EKLENİR (durum ezilmez) | `rt_test_contact_heat_ipc.py` bekliyor |
+| Sıvı ↔ collider | Ek 11: MSF kabuğu (alan·1 mm·ρ·c, MSF'nin kendi kütle kuralı) ↔ temas parçacığı, film 500 W/m²K; sıvı tarafı bir readback geriden okur, kabuğa giden ısı `sim_msf_ambient` binding 4 ile cihaza EKLENİR (durum ezilmez) | `rt_test_contact_heat_ipc.py` 2026-10-10: 4/6 — ısı katıdan sıvıya akıyor, ama `shell_is_a_body` ve `water_warms_through_cube` FAIL; yeniden koşulmadı |
 | Donma | Kapı: thermal liquid VEYA ısı alanı (domain `granular_enabled` artık kapatmaz); serbest yüzey de çekirdek (göl yüzeyden donar) | elle doğrulandı (zemin); yüzey Ek 11 |
 | Gizli ısı (füzyon) | 2026-10-11: `fusion_solid_fraction` F; Tm'de parsel bekler, `dF = c·ΔT/L`; hal = F ≥ 0.5 (Water/Wax çivili, Snow/Ice model değişir); defter gerçek ödenen ısıyı yazar. Domain donma aynası söküldü | CANLI PASS 2026-10-11: 997 kg tank tam donar, gizli ısı 332 997 993,59 J = defter 332 997 993,53 J |
 | Yüzey yoğuşması | 2026-10-11: hava hücresindeki envanter buharı (pv ≤ 1 atm) yüzey sıcaklığındaki doygunluğu aşınca ters HK akısı; buharın kendi enerjisi (e/m) parsele; önce kaybettiği kütleyi doldurur, sonra `rest_mass_kg` büyür, 2× kanonikte ikiye bölünür (`mass_fraction ≤ 1` değişmezi korunur). Defter `condensation` (kaynak gaz domain'i). CPU referansı + `sim_inventory_surface_exchange.comp` | CANLI PASS 2026-10-11 ama ★ölçek yanlış: 68 kg kaynadı, 0,010 kg yoğuştu (aşağıda) |
@@ -489,7 +498,7 @@ ileride bir eşleme meselesi; şimdi bağlanmadı.
   hücre başına asılı su tavanı (otokonversiyon, Kessler tipi, ~1e-3 kg/m³ üstü
   yağmur suyuna) + yağmur suyunun çökme hızıyla düşmesi; kaynaktaki +400 K alan
   zorlaması ölçeği büyütüyor ama sınırın yokluğu ölçekten bağımsız.
-  → **Parti 3'te yazıldı (aşağı), derlenmedi.**
+  → **Parti 3'te çözüldü (§4.8b, CANLI PASS): sis ortalaması ≤ 0,0031 kg/m³.**
 
 #### 4.8b Yağmur: otokonversiyon, sis tavanı, düşüş, iniş — 2026-10-11 (CANLI PASS)
 
