@@ -858,6 +858,7 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
     // 1. Metadata
     extern std::string active_model_path;
     root["model_path"] = active_model_path;
+    root["audio"] = scene.audio->save(pathFromUtf8(filepath));
 
     // 2. Camera
     if (scene.camera) {
@@ -1727,6 +1728,9 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
     }
 
     // 10. Rebuild All
+    simdjson::dom::element audio_el;
+    scene.audio->restore(root["audio"].get(audio_el) ? json() : sjsonToNlohmann(audio_el),
+                         pathFromUtf8(filepath).parent_path());
     renderer.rebuildBVH(scene, settings.UI_use_embree);
     
     if (backend) {

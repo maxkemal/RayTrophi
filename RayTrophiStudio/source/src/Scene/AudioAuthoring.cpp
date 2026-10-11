@@ -1,0 +1,159 @@
+#include "Audio/AudioAuthoring.h"
+#include "Audio/AudioService.h"
+#include "scene_ui.h"
+#include "scene_data.h"
+#include "SceneSelection.h"
+#include "SceneHistory.h"
+#include "ProjectManager.h"
+#include "Api/RtApi.h"
+#include <cmath>
+#include <stdexcept>
+
+namespace audio {
+namespace {
+Matrix4x4 parentMatrix(const nlohmann::json& emitter) {
+    Matrix4x4 matrix;
+    const auto parent = emitter.value("parent", std::string());
+    if (!parent.empty()) {
+        // getObjectWorldTransform resolves the canonical flat mesh/spline transform and
+        // composes the existing rigid-body world delta; no Triangle facades are involved.
+        const auto result = rtapi::getObjectWorldTransform(parent, matrix);
+        if (!result.ok) {
+            throw std::invalid_argument("Audio parent unavailable: " + parent);
+        }
+        const float determinant =
+            matrix.m[0][0] * (matrix.m[1][1] * matrix.m[2][2] - matrix.m[1][2] * matrix.m[2][1]) -
+            matrix.m[0][1] * (matrix.m[1][0] * matrix.m[2][2] - matrix.m[1][2] * matrix.m[2][0]) +
+            matrix.m[0][2] * (matrix.m[1][0] * matrix.m[2][1] - matrix.m[1][1] * matrix.m[2][0]);
+        if (!std::isfinite(determinant) || std::abs(determinant) < 1e-9f) {
+            throw std::invalid_argument("Audio parent has a singular transform: " + parent);
+        }
+    }
+    return matrix;
+}
+nlohmann::json transform(const Matrix4x4& matrix, const nlohmann::json& value, float w) {
+    const auto v = matrix.multiplyVector(Vec4(value[0], value[1], value[2], w));
+    if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) {
+        throw std::invalid_argument("Audio world transform must be finite");
+    }
+    return nlohmann::json::array({v.x, v.y, v.z});
+}
+}
+
+nlohmann::json worldPose(UIContext&, const nlohmann::json& emitter) {
+    const auto matrix = parentMatrix(emitter);
+    return {{"position", transform(matrix, emitter.at("position"), 1)},
+            {"direction", transform(matrix, emitter.at("direction"), 0)}};
+}
+
+nlohmann::json localPosition(UIContext&, const nlohmann::json& emitter,
+                             const nlohmann::json& worldPosition) {
+    return transform(parentMatrix(emitter).inverse(), worldPosition, 1);
+}
+
+void syncScene(UIContext& ctx) {
+    const auto data = ctx.scene.audio->snapshot();
+    bool selectionExists = false;
+    for (const auto& emitter : data.at("emitters")) {
+        selectionExists = selectionExists || emitter.at("id") == ctx.selection.selected.audio_source_id;
+        try {
+            const auto pose = worldPose(ctx, emitter);
+            ctx.scene.audio->resolvedPose(emitter.at("id"), pose.at("position"),
+                                          pose.at("direction"), true);
+        } catch (const std::exception&) {
+            ctx.scene.audio->resolvedPose(emitter.at("id"), emitter.at("position"),
+                                          emitter.at("direction"), false);
+        }
+    }
+    if (ctx.selection.selected.type == SelectableType::AudioSource && !selectionExists) {
+        ctx.selection.clearSelection();
+    }
+}
+
+namespace {
+class AudioCommand final : public SceneCommand {
+public:
+    AudioCommand(nlohmann::json before, nlohmann::json after, std::string description)
+        : before_(std::move(before)), after_(std::move(after)), description_(std::move(description)) {}
+
+    void execute(UIContext& ctx) override {
+        ctx.scene.audio->restore(after_);
+        ProjectManager::getInstance().markModified();
+    }
+    void undo(UIContext& ctx) override {
+        ctx.scene.audio->restore(before_);
+        ProjectManager::getInstance().markModified();
+    }
+    Type getType() const override {
+        return Type::Generic;
+    }
+    bool handlesUiCacheSync() const override {
+        return true;
+    }
+    std::string getDescription() const override {
+        return description_;
+    }
+private:
+    nlohmann::json before_;
+    nlohmann::json after_;
+    std::string description_;
+};
+}
+
+void recordEdit(UIContext& ctx, SceneHistory* history, const nlohmann::json& before,
+                const std::string& description) {
+    const auto after = ctx.scene.audio->snapshot();
+    if (before == after) {
+        return;
+    }
+    if (history) {
+        history->record(std::make_unique<AudioCommand>(before, after, description));
+    }
+    ProjectManager::getInstance().markModified();
+}
+
+nlohmann::json author(UIContext& ctx, SceneHistory* history, const std::string& operation,
+                      const nlohmann::json& params) {
+    if (g_scene_loading_in_progress.load()) {
+        throw std::runtime_error("Scene audio is unavailable while a project is loading");
+    }
+    if (AudioService::isAuthoring(operation) && rtapi::renderOutputPending()) {
+        throw std::runtime_error("Scene audio authoring is locked by the render job");
+    }
+    if (params.contains("parent") && !params.at("parent").get<std::string>().empty()) {
+        parentMatrix(params);
+    }
+    syncScene(ctx);
+    if (operation == "play") {
+        const auto sceneData = ctx.scene.audio->snapshot();
+        for (const auto& e : sceneData.at("emitters")) {
+            if (e.at("id") == params.at("id")) {
+                parentMatrix(e);
+            }
+        }
+    }
+    const bool mutation = AudioService::isAuthoring(operation);
+    const auto before = mutation ? ctx.scene.audio->snapshot() : nlohmann::json();
+    auto result = ctx.scene.audio->invoke(operation, params);
+    if (operation == "select") {
+        ctx.selection.clearSelection();
+        auto& item = ctx.selection.selected;
+        item.type = SelectableType::AudioSource;
+        item.audio_source_id = result.at("id");
+        item.name = result.at("name");
+        item.position = Vec3(result.at("position")[0], result.at("position")[1], result.at("position")[2]);
+        try {
+            const auto pose = worldPose(ctx, result);
+            item.position = Vec3(pose.at("position")[0], pose.at("position")[1], pose.at("position")[2]);
+        } catch (const std::exception&) {
+            // Missing parents remain selectable for repair.
+        }
+        ctx.selection.multi_selection.push_back(item);
+    }
+    syncScene(ctx);
+    if (mutation) {
+        recordEdit(ctx, history, before, "Audio " + operation);
+    }
+    return result;
+}
+}

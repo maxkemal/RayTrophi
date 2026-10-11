@@ -63,8 +63,9 @@ struct CloudParamsGPU {
                       // textures are ready for clouds or fast weather),
                       // +2 secondary rays march fully (quality),
                       // +4 reference path tracer instead of the marcher
-    float precip[4];  // rate_mm_h, extinction_per_m at that rate, slant_x, slant_z
-                      // (slant = horizontal metres per metre of fall)
+    float precip[4];  // rate_mm_h, extinction_per_m at that rate, trail_x, trail_z
+                      // (trail = upwind lag behind the drifting cloud, metres
+                      //  per metre of fall, at the ground; see makeCloudParamsGPU)
     float precip2[4]; // snow (0/1), ground_fraction, shear_x, shear_z
                       // (shear = horizontal metres per metre of height, Faz 3e)
     float scatterAlbedo[4]; // linear RGB albedo, HG g override (2 = droplet fit)
@@ -185,9 +186,20 @@ inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float 
     const bool snow = c.precipitation.snow;
     p.precip[0] = rate;
     p.precip[1] = rate > 0.0f ? (snow ? 2.6e-3f * std::pow(rate, 0.7f) : 2.5e-4f * std::pow(rate, 0.63f)) : 0.0f;
+    // precip[2..3] = how far the drops TRAIL their cloud per metre of fall,
+    // at the ground (cloudPrecipSample). The weather map drifts with the
+    // wind and the drops leave the base at that speed, so uniform wind gives
+    // a vertical shaft in the cloud frame; only the slower near-surface air
+    // (~60% of the cloud-level wind, linear deficit) drags the foot back.
+    // Capped at ~56 degrees so snow in a gale still reads as a fall.
     const float fall = snow ? 1.0f : 6.5f;
-    p.precip[2] = wind_mps.x / fall;
-    p.precip[3] = wind_mps.z / fall;
+    const float kSurfaceWindFraction = 0.6f;
+    float tx = -wind_mps.x * (1.0f - kSurfaceWindFraction) / fall;
+    float tz = -wind_mps.z * (1.0f - kSurfaceWindFraction) / fall;
+    const float tl = std::sqrt(tx * tx + tz * tz);
+    if (tl > 1.5f) { tx *= 1.5f / tl; tz *= 1.5f / tl; }
+    p.precip[2] = tx;
+    p.precip[3] = tz;
     p.precip2[0] = snow ? 1.0f : 0.0f;
     p.precip2[1] = c.precipitation.ground_fraction;
     // Wind shear: crowns lean downwind ~0.015 m/m per m/s at the top (quadratic

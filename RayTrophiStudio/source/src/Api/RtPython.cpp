@@ -1,4 +1,5 @@
 #include "RtPostBindings.h"
+#include "RtAudioBindings.h"
 #include "RtWeatherEffectsBindings.h"
 #include "RtPhaseGrid.h"
 #include "RtMatterModels.h"
@@ -217,6 +218,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     module.doc() = "RayTrophi Studio embedded scripting API";
 
     rtpy::registerTemplateBindings(module);
+    rtpy::registerAudioBindings(module);
     rtpy::registerRayFusionBindings(module);
     rtpy::registerAgentBindings(module);
 

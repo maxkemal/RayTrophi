@@ -1,60 +1,78 @@
-# 2026-10-11 parti 5: gizmolar perspektifte oturuyor (derinlik testi)
+# 2026-10-11 parti 6: yağış perdeleri — zemin tabanı, bulut çerçevesinde eğim, hücre ayak izi, salkım, arazi önü
 
-Önceki parti (gaz envanteri: sanal sıcaklık, yoğuşmayan gaz, rüzgârla yağmur)
-canlı PASS ve commit'li (`331cf5c`, `ffd7619`); kanıt BIRLESIK §4.8c.
+Önceki parti (gizmo derinlik testi) commit'li (`c23169d`). Bu parti iki turda
+yazıldı, ikisi de DERLENMEDİ.
 
-**Sorun:** sahne gizmoları ImGui 2D çizgileriydi; derinlik taşımadıkları için
-her şeyin önünde çiziliyorlardı. Domain kutusu bir duvarın arkasında olsa bile
-önünde gibi görünüyordu, bu yüzden konum vermek için üst/ön görünüme geçmek
-gerekiyordu.
+**Belirti (kullanıcı, canlı sahne):** RT ve RayFusion'da kamera y < 0'a inince
+güneş yönünden bağımsız, çapraz gelen "god ray" benzeri şeritler; y > 0'da
+neredeyse yok; yağış açılınca artıyor. Yağış perdeleri de kaba.
 
-**Çözüm:** Yeni `UI/GizmoOcclusion.{h,cpp}` modülü.
-- Her çizgi ekranda ~6 piksellik parçalara bölünür. Her parçaya gözden, tıklamayla
-  seçmenin kullandığı CPU BVH'si üzerinden bir ışın atılır. Bu her backend'de
-  çalışır; ışında hacimler yok sayılır.
-- Arkada kalan parça soluk çizilir (`hidden_alpha`), Blender'daki "hidden line"
-  görünümü gibi.
-- Sonuçlar önbellekte tutulur. Önbellek kamera, geometri revizyonu veya timeline
-  karesi değişince boşalır.
-- Kare başına 6.000 ışın bütçesi var; aşılırsa kalan çizgiler eski görünümle,
-  önde çizilir.
-- Taşıma/döndürme tutamaçları (ImGuizmo) bilerek hep önde kalır.
+**Ölçüm (IPC, düzeltme öncesi):** kamera y = -3693, katman 0 tabanı 1200 m,
+rüzgâr 33.9 m/s, yağış 0.5 mm/h. `rate_mm_h = 0` yapınca ufkun altındaki
+şeritler tamamen kayboldu → kaynak yağış perdesi march'ı.
 
-Bağlanan gizmolar:
-- sim domain kutuları, seed kutuları;
-- collider'lar: OBB, AABB, düzlem, küre, kapsül, SDF;
-- flow-source küreleri;
-- kuvvet alanının yön oku ve sınır şekli (küre, kutu, silindir, koni).
-Kuvvet alanının ortadaki simgesi tıklanabilir olduğu için önde kalır.
+**Kök nedenler:**
+1. Gök ışını için zemin tabanı yoktu (yalnız deniz seviyesi küresi). Zemin altındaki
+   kamera aşağı bakınca 40 km kesintisiz yağmur görüyordu.
+2. Eğim = rüzgâr / düşüş hızı ≈ 5.2 m/m → perde ~80° yatık. Hava haritası zaten
+   rüzgârla sürükleniyor; düzgün rüzgârda perde bulut çerçevesinde DİKEY olmalı.
+3. Ayak izi 12 km'lik hava lekesi, çizgiler 1 km × 18 km → kaba levhalar.
 
-Ayar: `viewport_settings.gizmo_occlusion` (varsayılan açık) ve
-`gizmo_hidden_alpha` (0,25). Panelde gizmo düğmesine sağ tık →
-"Gizmo Depth" ve "Hidden Alpha". Proje kaydına yazılıyor. IPC'de
-`viewport.set_gizmo_occlusion` ve `viewport.get_gizmo_occlusion`; Python'da
-`rt.viewport.*`. Yeni dosya `.vcxproj` ve `.filters`'a eklendi. Shader değişikliği yok.
+**Değişiklik:**
+- `cloud_common.glsl` `cloudPrecipSample`:
+  - düşüş çizgisi bulut çerçevesinde geriye izlenir (karesel, sürüklenen ayak);
+  - ayak izi = katman 0'ın taban şekli, curl ile aşağı doğru açılıp saçaklanır;
+  - salkım: sütun başına kademeli kopma derinliği (60–450 m) ve virga ucu
+    (gf × 0.55–1.3);
+  - çizgiler düşüş çizgisi boyunca iki oktav (420 / 110 m, ortalama ~1).
+- `cloudSegmentMayContain`: optik derinliği 1e-3'e ulaşamayacak kısa segmentler
+  (iç mekân sekmeleri) yağış march'ını atlar.
+- `cloud_rt.glsl` `cloudPrecipMarch`:
+  - yüzeye çarpan ışında perde yüzeyde biter (y < 0 vadiler dahil); y = 0 tabanı
+    yalnız hiçbir şeye çarpmayan ışına uygulanır;
+  - çizgi detayı adım boyuna göre söner (120–600 m).
+- `CloudParams.h`: `precip[2..3]` = rüzgâra karşı gecikme / m düşüş, zeminde =
+  0.4·U / düşüş hızı, ≤ 1.5.
+- Arazi önündeki perde zaten iki yolda çağrılıyordu (`cloud_hit_segment.glsl`,
+  `cloud_scene.comp`); "yalnız gök ışını" yorumu bayattı, düzeltildi.
 
-Sıra: önce bağımsız ve hızlı olanlar.
+Shader değişti → **`compile_shaders.bat` + C++ derlemesi** (CloudParams.h).
 
-1. **Derleme.** Hata çıkarsa ilk bakılacak yerler:
-   - `GizmoOcclusion.cpp` içindeki `extern g_scene_geometry_generation` (tanımı
-     `Core/Main.cpp:639`'da).
-   - `HitRecord` (`Hittable.h`).
-   - `scene_ui.cpp` ve `RtApiViewport.cpp`'ye eklenen include'lar.
-2. **Gözle kontrol:** bir domain kutusunu bir mesh'in arkasına koy, perspektifte bak.
-   - Mesh'in arkasında kalan kenarlar soluk, önündekiler tam renkli olmalı.
-   - Sağ tık → "Gizmo Depth" kapatılınca eski görünüm (her şey önde) gelmeli.
-   - ★ **Sinsi durum:** bir collider kutusu kendi nesnesine yapışık; kenarları
-     yüzeyin üstünde ve tamamı soluk çiziliyor. Bu, toleransın yetmediğini
-     gösterir (`kRelativeTolerance`). "Kutu nesnenin içinde" gibi makul
-     göründüğü için kolay gözden kaçar.
-3. **Maliyet (IPC):** `viewport.get_gizmo_occlusion`.
-   - Kamera dururken `rays` ≈ 0 olmalı (önbellek çalışıyor).
-   - Kamerayı döndürürken `rays` birkaç yüz ile birkaç bin arasında olmalı.
-   - `budget_exhausted=true` ise bütçe dolmuş ve kalan çizgiler önde çiziliyor
-     demektir; bunu söyle, bütçeyi ölçerek ayarlayalım.
-   - `active=false` ise `inactive_reason` kapının adını verir.
-4. **Rendered modu ve ortografik:** üst görünümde (ortografik) ve Rendered
-   modunda da aynı davranış beklenir. Ortografikte ışınlar paraleldir.
+## Kontrol listesi (sırayla)
 
-Henüz bağlanmayanlar (sonraki tur): flow-source yön okları, ışık ve kamera
-gizmoları, emitter yönü, rig/terrain overlay'leri.
+1. **Shader derleniyor mu** — `compile_shaders.bat` hatasız; özellikle `cloud_raster`,
+   `cloud_scene`, `cloud_shadow`, `cloud_sample`, `miss`, `raygen`, `closesthit`.
+   Bozuksa: hata satırını bildir.
+
+2. **Zemin altı, yağış açık (ana belirti)** — kamera y ≈ -3700, sahnede arazi yok,
+   RT ve RayFusion. Ufkun ALTINDA şerit olmamalı.
+   Bozuksa: önce exe/spv zaman damgası, sonra `world.get_atmosphere` altitude.
+
+3. **Zemin altı, yağış KAPALI** — ufkun altında güneş yönünde hafif ışık kalırsa
+   AYRI konu (aerial/froxel). Bu partide dokunulmadı; bana söyle.
+
+4. **Arazi önü (asıl istek)** — dağlı sahne, yağış 3–5 mm/h, kamera dağlara bakıyor;
+   RayFusion VE RT final render. Görmen gereken:
+   - perde dağın ÖNÜNDE asılı, yamaca değdiği yerde bitiyor;
+   - perdenin arkasındaki yamaç soluklaşıyor;
+   - tabandan sarkan tabanı saçaklı salkımlar;
+   - neredeyse dik, aşağı doğru genişleyen perdeler, ince lifler.
+   Bozuksa: perde yalnız gökte, dağın önünde yoksa RayFusion'da `cloud_scene`
+   geçişinin çalıştığını doğrula (bulutlar dağa çöküyorsa çalışıyor) ve
+   `rate_mm_h` > 0 olsun.
+
+5. **Virga salkımı** — `precipitation.ground_fraction = 0.5`. Perdeler yarı yolda,
+   FARKLI yüksekliklerde bitmeli (püsküllü uç). Hepsi aynı düz çizgide bitiyorsa
+   salkım gürültüsü etkisiz.
+
+6. **Kar** — `snow:true`, 1 mm/h. Daha eğik (≤ 56°) ama yere paralel değil.
+
+7. **★ Sessizce makul görünen sonuç:** rüzgâr yönünü 180° çevir (`world.set_climate`,
+   wind_direction [-1,0,0]). Ayak yine rüzgâra karşı tarafta kalmalı, yani yönle
+   birlikte dönmeli. Aynı tarafta kalıyorsa işaret ters: perde yine "makul" görünür
+   ama ayak bulutun önünde koşar.
+
+8. **Perf** — yağışlı/yağışsız RT ve RayFusion kare süresi. İç mekân + yağış açık
+   sahnede fark ~0 olmalı (kısa segment atlama). Açık arazide belirgin kayıp
+   (> %15) varsa bildir. Adım başına maliyet arttı: taban şekli + salkım + 2 çizgi
+   fetch'i.

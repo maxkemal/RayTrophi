@@ -71,6 +71,11 @@ def required(method, namespaces):
     if method in ("project.open", "scene.import_model",
                   "terrain.import_heightmap", "paint.import_channel"):
         return "FilesRead|SceneWrite"
+    # audio.*: these read a sound file from disk while changing scene audio
+    # state (or starting playback); mirrors the audio block in RtIpcSecurity.cpp.
+    if method in ("audio.append", "audio.asset_import", "audio.asset_relink",
+                  "audio.play", "audio.preview", "audio.preview_file"):
+        return "FilesRead|SceneWrite"
     # scene.export_gltf sits in the "scene." namespace but reads the scene and
     # writes a FILE, so it must be named here or the namespace table below would
     # mirror it as SceneWrite and disagree with RtIpcSecurity.cpp.

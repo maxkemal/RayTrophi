@@ -982,6 +982,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
         }
 
         if (ImGui::BeginMenu("Add")) {
+             if (ImGui::MenuItem("Audio Source")) AudioUI::addSource(ctx);
              if (ImGui::BeginMenu("Mesh")) {
                  if (ImGui::MenuItem("Plane")) {
                      addProceduralPlane(ctx);

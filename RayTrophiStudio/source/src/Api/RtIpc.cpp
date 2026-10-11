@@ -33,6 +33,7 @@
 #include "Api/RtApi.h"
 #include "Fluid/FluidFoam.h"
 #include "Api/RtPython.h"   // addons.* dispatch (rtpython::listAddons/enableAddon/...)
+#include "RtAudioBindings.h"
 #include "RtIpcSecurity.h"
 #include "RtIpcSession.h"
 #include "RtIpcAudit.h"
@@ -692,6 +693,11 @@ static json autosaveStatusJson(const rtapi::AutosaveStatus& st, const rtapi::Res
 }
 
 json dispatchMethod(const std::string& method, const json& params) {
+    json audio_result;
+    if (dispatchAudioIpc(method, params,
+            [](RtIpcTemplateQuery q) { return enqueueQuery(std::move(q)); }, audio_result)) {
+        return audio_result;
+    }
     json weather_effects_result;
     if (dispatchWeatherEffectsIpc(method, params,
         [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },

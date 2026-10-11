@@ -2729,4 +2729,16 @@
     <ClInclude Include="source\include\Fluid\MatterGrainStages.h" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainColliderBvh.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Audio\AudioService.h" />
+    <ClInclude Include="source\include\Audio\AudioAuthoring.h" />
+    <ClInclude Include="source\include\UI\AudioUI.h" />
+    <ClInclude Include="source\src\Api\RtAudioBindings.h" />
+    <ClCompile Include="source\src\Scene\AudioService.cpp" />
+    <ClCompile Include="source\src\Scene\AudioAuthoring.cpp" />
+    <ClCompile Include="source\src\Api\RtAudioBindings.cpp" />
+    <ClCompile Include="source\src\UI\AudioUI.cpp" />
+    <None Include="external\miniaudio\miniaudio.h" />
+    <None Include="external\miniaudio\LICENSE" />
+  </ItemGroup>
 </Project>

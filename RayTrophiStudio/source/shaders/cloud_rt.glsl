@@ -601,8 +601,10 @@ void cloudMarch(vec3 o, vec3 d, int steps, uint seed,
 // column above (cheap base-shape optical depth) with a mild forward lobe for
 // rain, isotropic snow, plus the sky / ground ambient the base lets through.
 // Shafts hang below the base: seen from below they are in front of the
-// cloud they fall from, from above behind it. Sky rays only (miss shader /
-// RayFusion sky layer): a shaft in front of terrain is not drawn yet.
+// cloud they fall from, from above behind it. Every ray that carries clouds
+// gets the shafts: sky rays (miss shader, RayFusion sky layer) and finite
+// segments in front of a surface (cloud_hit_segment RT, cloud_scene.comp
+// RayFusion), so a shaft hangs in front of a mountain and ends on it.
 const float kPrecipMaxDist = 40000.0;
 void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout vec3 inscatter, inout float T,
                       inout float depth) {
@@ -610,11 +612,23 @@ void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout 
     CloudLayerG L = cloudParams.layers[0];
     if (L.b.w < 0.5) return;
     float R = cloudParams.wind.z;
-    vec2 g = cloudSphere(o, d, R);
     float tEnd = min(kPrecipMaxDist, tLimit);
-    if (g.x <= g.y && g.x > 0.0) tEnd = min(tEnd, g.x);
-    vec2 b = cloudSphere(o, d, R + L.a.x);
     float t0 = 0.0;
+    // A ray that met a surface ends the shaft there (terrain, even below
+    // y = 0). A ray that met NOTHING ends at the implied scene ground (altitude
+    // offset), not sea level; a camera under it (no terrain, y < 0) starts
+    // where the ray climbs out -- looking down it sees no rain instead of
+    // 40 km of it.
+    if (tLimit >= CLOUD_RT_MAX_DIST * 0.999) {
+        vec2 g = cloudSphere(o, d, R + cloudParams.wind.w);
+        if (cloudAltitude(o) < cloudParams.wind.w) {
+            if (g.x > g.y || g.y <= 0.0) return;
+            t0 = g.y;
+        } else if (g.x <= g.y && g.x > 0.0) {
+            tEnd = min(tEnd, g.x);
+        }
+    }
+    vec2 b = cloudSphere(o, d, R + L.a.x);
     bool fromAbove = cloudAltitude(o) >= L.a.x;
     if (fromAbove) {           // above the base: enter at it
         if (b.x > b.y || b.x <= 0.0) return;
@@ -645,7 +659,10 @@ void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout 
         float dt = tb - ta;
         if (dt <= 0.0) continue;
         vec3 p = o + d * ta;
-        float sigma = cloudPrecipDensity(p);
+        // Streaks only where the step resolves them (~110 m fine octave):
+        // a short segment in front of a nearby slope keeps them at any
+        // distance, a long sky ray turns far shafts into their mean veil.
+        float sigma = cloudPrecipDensityLod(p, 1.0 - smoothstep(120.0, 600.0, dt));
         if (sigma <= 0.0) continue;
         if (Es.r < 0.0) Es = cloudSunIrradiance(p, sunDir);
         float tauSun = cloudOpticalDepth(p, sunDir, CLOUD_RT_MAX_DIST, 4, jitter, false);

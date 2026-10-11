@@ -2,6 +2,38 @@
 
 > **Durum:** AKTİF — 2026-10-11: T2 CANLI PASS (gizli ısı, ayna sökümü; Ice→Water iptal) — [MADDE_TIPLERI §6f](MADDE_TIPLERI_TASARIMI.md). 2026-10-08: T1/T3 hızlı dış IPC kabulü PASS, tam T3 kabulü açık.
 
+## T4 ilk canlı kabul koşusu — 2026-10-11
+
+`rt_test_matter_acceptance_ipc.py --extended`, boş sahnede koşuldu. 18:48Z'deki
+ilk deneme "Use an empty scene" şartıyla hiç başlamamıştı. Kanıt dosyası:
+`matter_acceptance_20261011T193836Z.json`.
+
+- PASS: madde kütüphanesi, domain maddesi, sparse basınç, sparse viskozite,
+  sparse MAC aktarımı (viskoziteli ve viskozitesiz).
+- **FAIL: `shared_clock_and_dynamic_support`.** DEM, MPM ve sıvı sahipleri
+  doğru sayılıyor (1/1/1), adım tutulmuyor, ama su parseli taneyle hiç
+  destek hücresi paylaşmıyor (`coupled_grains` sürekli 0).
+- **Kök neden (ölçüldü):** üç sahip birlikteyken tek su parseli doğduğu yerde
+  **duruyor**. y = 0,599 ve x neredeyse sabit; raporlanan hız 4 m/s, ama
+  konum ilerlemiyor. Karşılaştırma (aynı geometri, 6 adım):
+
+  | Sahipler | Su |
+  |---|---|
+  | yalnız su (varsayılan madde Soil veya Water) | hareket ediyor |
+  | DEM + su | hareket ediyor |
+  | MPM + su | hareket ediyor |
+  | DEM + MPM + su | **duruyor** |
+
+  Yani hata yalnız ortak saat yolunda: `MatterGrainStep.inl` içindeki
+  `shared_clock = grains && mpm_parcels`. Bu yolda `step_continuum(&clock)`
+  çağrılıyor, oradan `runMatterGpuStep(..., clock)` (`MatterGpuStep.inl`) ve
+  her alt adımda `runGpuFluidAdvectTail` çalışıyor. Konumun ilerlemediği mi,
+  yoksa yayın/birleştirme sırasında mı kaybolduğu henüz ayrılmadı. Sıradaki
+  adım: ortak saat yolunda sıvı lane'inin konumunu, advect'ten sonra ve
+  canonical birleştirmeden sonra ölçen bir tanı.
+- Kalan aşamalar (H1 detay vb.) bu FAIL yüzünden koşmadı.
+- Koşucunun `remaining_gates` listesi ölçüm değil, sabit bir liste.
+
 ## Son devam: sparse pressure GPU kaynağı
 
 Güncel devam: P2G/G2P/FLIP transfer/copy ve mixed MAC clear/contact dengeli 2D
