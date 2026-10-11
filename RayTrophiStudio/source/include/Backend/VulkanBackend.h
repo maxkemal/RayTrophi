@@ -1473,6 +1473,11 @@ public:
     // march + temporal history (ping-pong) + a stable output the sky pass
     // samples through material-preview binding 25.
     bool createCloudRasterPipeline(const std::vector<uint32_t>& spv);
+    bool createCloudScenePipeline(const std::vector<uint32_t>& spv);
+    void invalidateCloudSceneDescriptors();
+    void recordCloudScene(VkCommandBuffer cmd, VkImageView hdr, VkImageView depth,
+                          VkSampler sampler, uint32_t width, uint32_t height,
+                          float depthA, float depthB, float depthC, uint32_t steps);
     bool ensureCloudRasterTargets(uint32_t w, uint32_t h);   // true = (re)created
     void writeCloudRasterLutDescriptors();
     void recordCloudRaster(VkCommandBuffer cmd, const Backend::CloudRasterFrameGPU& frame);
@@ -1481,6 +1486,11 @@ public:
     VkPipeline m_cloudShadowPipeline = VK_NULL_HANDLE;
     ImageHandle m_cloudShadowMap;   // 512^2, y = 0 plane around the camera
     VkPipeline m_cloudRasterPipeline = VK_NULL_HANDLE;
+    VkPipeline m_cloudScenePipeline = VK_NULL_HANDLE;
+    VkDescriptorSet m_cloudSceneSet = VK_NULL_HANDLE;
+    VkImageView m_cloudSceneHdr = VK_NULL_HANDLE;
+    VkImageView m_cloudSceneDepth = VK_NULL_HANDLE;
+    VkSampler m_cloudSceneSampler = VK_NULL_HANDLE;
     VkPipelineLayout m_cloudRasterLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_cloudRasterDescLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_cloudRasterPool = VK_NULL_HANDLE;
@@ -2290,6 +2300,11 @@ public:
     // lazy: a clear-sky scene generates nothing.
     void setCloudState(const atmosphere::CloudState& clouds, float time_seconds, const Vec3& drift_m,
                        const Vec3& wind_mps);
+    void recordCloudScenePass(VkCommandBuffer cmd, uint32_t width, uint32_t height,
+                             float depthA, float depthB, float depthC);
+    bool cloudSceneDepthAvailable() const {
+        return m_device && m_device->m_cloudScenePipeline != VK_NULL_HANDLE;
+    }
     Backend::CloudParamsGPU cloudParamsGPU() const;
     // Synchronous measurement (world.sample_clouds). Builds the textures on
     // demand, so a query works with clouds off (and measures 0).

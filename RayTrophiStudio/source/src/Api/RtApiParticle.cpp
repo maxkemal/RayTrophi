@@ -1285,6 +1285,9 @@ Result getGasStepStats(const std::string& domain_id_or_name, GasStepStats& out) 
     // and a caller that skips this flag records an idle domain as a 0 ms step —
     // which in an optimisation A/B reads as a total win.
     out.measured = state.valid && gs.stepped;
+    out.inventory_step_held = !state.gas_inventory_error.empty();
+    out.inventory_error = state.gas_inventory_error;
+    out.inventory_transport = out.inventory_step_held ? "gpu_failed" : gs.inventory_transport;
     if (!out.measured) return Result::success();
 
     out.resolution[0] = state.resolution_x;
@@ -1299,10 +1302,19 @@ Result getGasStepStats(const std::string& domain_id_or_name, GasStepStats& out) 
     out.total_ms = gs.total_ms;
     out.voxelize_ms = gs.voxelize_ms;
     out.inventory_advection_ms = gs.inventory_advection_ms;
+    out.inventory_grid_upload_bytes = gs.inventory_grid_upload_bytes;
+    out.inventory_grid_download_bytes = gs.inventory_grid_download_bytes;
+    out.inventory_snapshot_download_bytes = gs.inventory_snapshot_download_bytes;
+    out.inventory_query_download_bytes = gs.inventory_query_download_bytes;
+    if (const auto inventory = RayTrophiSim::Fluid::gasInventoryDevice(state)) {
+        out.inventory_snapshot_download_bytes = inventory->snapshot_download_bytes;
+        out.inventory_query_download_bytes = inventory->query_download_bytes;
+    }
     out.analysis_ms = gs.analysis_ms;
 
     out.gpu_collider_source_ms = gs.gpu_collider_source_ms;
     out.gpu_msf_ms = gs.gpu_msf_ms;
+    out.gpu_surface_exchange_ms = gs.gpu_surface_exchange_ms;
     out.gpu_source_upload_ms = gs.gpu_source_upload_ms;
     out.gpu_fluid_combustion_ms = gs.gpu_fluid_combustion_ms;
     out.gpu_velocity_advect_ms = gs.gpu_velocity_advect_ms;

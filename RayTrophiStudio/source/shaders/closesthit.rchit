@@ -390,7 +390,7 @@ struct VkVolumeInstance {
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
 // Cloud field (Faz 3b): the sun NEE below reads the clouds\' shadow.
-#include "cloud_rt.glsl"
+#include "cloud_hit_segment.glsl"
 
 // Live Vulkan gas density is a device-addressable dense float grid. Surface
 // shadows must sample it too; otherwise source type 5 falls through to the
@@ -1173,7 +1173,7 @@ void applyWeatherSurface(vec3 hitPos, vec3 normal, vec3 supportNormal, inout vec
 // ============================================================
 // Main — Closest Hit Entry Point
 // ============================================================
-void main() {
+void shadeSceneHit() {
     payload.skipGasVolumes = false;
     // ----------------------------------------------------------
     // 1. Instance & materyal verisi
@@ -2771,4 +2771,11 @@ if (emissionTexID > 0 && (mpWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
     if (resinActive && payload.scattered) {
         payload.bounceType = BOUNCE_RESIN;
     }
+}
+
+void main() {
+    uint pathFlags = payload.primaryMeta & (PL_CAMERA_SEGMENT | PL_NO_SKY_RADIANCE);
+    shadeSceneHit();
+    payload.primaryMeta |= pathFlags;
+    cloudApplyHitSegment(gl_HitTEXT);
 }

@@ -1,0 +1,502 @@
+{
+  "weak_off": {
+    "before": {
+      "particles": 27,
+      "mass_kg": 4.712388440966606,
+      "com": [
+        0.02879752567969263,
+        0.02652380946609709,
+        0.042122860865977906
+      ],
+      "energy_j": 0.006089489246710122,
+      "sleeping": 0,
+      "contacts": 51,
+      "substeps": 54,
+      "gpu_wait_ms": 3.116499900817871,
+      "history_reset": null,
+      "history_reset_reason": ""
+    },
+    "samples": [
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.02854697899547992,
+          0.0265207149916225,
+          0.042093042480431636
+        ],
+        "energy_j": 0.003468129084267742,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.5655999183654785,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028450967528408876,
+          0.02652023649877972,
+          0.042086142693059866
+        ],
+        "energy_j": 0.001954364931015865,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.5067999362945557,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028461752079979134,
+          0.02652286883029673,
+          0.042073207670236354
+        ],
+        "energy_j": 0.001956123017289815,
+        "sleeping": 0,
+        "contacts": 49,
+        "substeps": 54,
+        "gpu_wait_ms": 2.517899990081787,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028552137461870356,
+          0.026525687564302375,
+          0.04204276420124289
+        ],
+        "energy_j": 0.0013366882189780847,
+        "sleeping": 0,
+        "contacts": 49,
+        "substeps": 54,
+        "gpu_wait_ms": 2.5230000019073486,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028695731794599583,
+          0.02652533076427601,
+          0.042019063856935615
+        ],
+        "energy_j": 0.000664400651803398,
+        "sleeping": 0,
+        "contacts": 49,
+        "substeps": 54,
+        "gpu_wait_ms": 2.508500099182129,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.02882868465450075,
+          0.026523005493261195,
+          0.04200810566113365
+        ],
+        "energy_j": 0.0006402266410320391,
+        "sleeping": 0,
+        "contacts": 49,
+        "substeps": 54,
+        "gpu_wait_ms": 2.500499963760376,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028892625899364557,
+          0.02652196944863708,
+          0.04199592349619639
+        ],
+        "energy_j": 0.0005443895079574961,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.533600091934204,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.02888266178477487,
+          0.02652384340763092,
+          0.04198915541335871
+        ],
+        "energy_j": 0.0005316115060047537,
+        "sleeping": 0,
+        "contacts": 53,
+        "substeps": 54,
+        "gpu_wait_ms": 2.5450000762939453,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028814455664595937,
+          0.026524015943761223,
+          0.041993052920723264
+        ],
+        "energy_j": 0.00047836235248113496,
+        "sleeping": 0,
+        "contacts": 53,
+        "substeps": 54,
+        "gpu_wait_ms": 2.665600061416626,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.02870998564564312,
+          0.026522309553843958,
+          0.04199943727494597
+        ],
+        "energy_j": 0.00037250095252674785,
+        "sleeping": 0,
+        "contacts": 53,
+        "substeps": 54,
+        "gpu_wait_ms": 2.378999948501587,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.02860816096869746,
+          0.026521811537720538,
+          0.042007472396276335
+        ],
+        "energy_j": 0.00033007286046758634,
+        "sleeping": 0,
+        "contacts": 53,
+        "substeps": 54,
+        "gpu_wait_ms": 2.3757998943328857,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028542628343631,
+          0.026522389026703657,
+          0.042014837502156975
+        ],
+        "energy_j": 0.0003056795871826329,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.371500015258789,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028528788601289743,
+          0.02652234556498351,
+          0.042016348585969324
+        ],
+        "energy_j": 0.0003015728621802232,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.3215999603271484,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.02856650281507798,
+          0.02652216916558919,
+          0.0420140845882189
+        ],
+        "energy_j": 0.00027158489412795934,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.6247000694274902,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.02863960829994607,
+          0.02652256301155797,
+          0.0420106117165199
+        ],
+        "energy_j": 0.00023527744346851933,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.3336000442504883,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.02872012584918627,
+          0.02652307116874942,
+          0.042006248110232666
+        ],
+        "energy_j": 0.00019564123172189092,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.380500078201294,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.02878111814735112,
+          0.026523190309052116,
+          0.042002108487024625
+        ],
+        "energy_j": 0.00017012182299793764,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.2795000076293945,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.02880461879195301,
+          0.026523217903795065,
+          0.04199944012065383
+        ],
+        "energy_j": 0.00016865338317083949,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.285599946975708,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028786147125410257,
+          0.02652345073443872,
+          0.04199842335570052
+        ],
+        "energy_j": 0.00016545147454473687,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.317199945449829,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028735692979319504,
+          0.026523413481535734,
+          0.041999383971819446
+        ],
+        "energy_j": 0.0001486341391241755,
+        "sleeping": 0,
+        "contacts": 53,
+        "substeps": 54,
+        "gpu_wait_ms": 2.2962000370025635,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028672880350819063,
+          0.026522925399519778,
+          0.04200226526828137
+        ],
+        "energy_j": 0.00011935527835778747,
+        "sleeping": 0,
+        "contacts": 53,
+        "substeps": 54,
+        "gpu_wait_ms": 2.4093000888824463,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.02861943176119692,
+          0.026522465947049635,
+          0.04200647588974486
+        ],
+        "energy_j": 9.545871939795354e-05,
+        "sleeping": 0,
+        "contacts": 53,
+        "substeps": 54,
+        "gpu_wait_ms": 2.3961000442504883,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028592106222209555,
+          0.026522461117969617,
+          0.04201110257094519
+        ],
+        "energy_j": 9.094732965504089e-05,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.531100034713745,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028597099227934252,
+          0.02652256239067625,
+          0.0420143946561169
+        ],
+        "energy_j": 9.805083576111858e-05,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.475100040435791,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028629641811777316,
+          0.02652254238448761,
+          0.04201488714035669
+        ],
+        "energy_j": 9.307564015145966e-05,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.5192999839782715,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028676572928412098,
+          0.026522758865246066,
+          0.04201226393881909
+        ],
+        "energy_j": 7.453924358580909e-05,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.5715999603271484,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.02872092798093541,
+          0.02652317444207492,
+          0.042007478225665786
+        ],
+        "energy_j": 5.458647998197195e-05,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 3.090399980545044,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.028748349700536996,
+          0.026523325661266292,
+          0.042002276073347916
+        ],
+        "energy_j": 4.9230866115426755e-05,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 2.6449999809265137,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.0287517454319944,
+          0.02652315643650514,
+          0.04199863875638348
+        ],
+        "energy_j": 5.471579755640389e-05,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 6.777400016784668,
+        "history_reset": null,
+        "history_reset_reason": ""
+      },
+      {
+        "particles": 27,
+        "mass_kg": 4.712388440966606,
+        "com": [
+          0.0287325737213164,
+          0.026523025775397266,
+          0.04199811185416938
+        ],
+        "energy_j": 5.812249655201168e-05,
+        "sleeping": 0,
+        "contacts": 51,
+        "substeps": 54,
+        "gpu_wait_ms": 1.642899990081787,
+        "history_reset": null,
+        "history_reset_reason": ""
+      }
+    ]
+  }
+}

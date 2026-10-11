@@ -13,29 +13,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 // cloud_rt.glsl reads worldData.w.{sunDir, sunIntensity, atmosphereHeight,
 // _pad5} and atmosphereLUTs[0]; this block provides exactly those names.
-struct CloudWorldLite {
-    vec3  sunDir;
-    float sunIntensity;
-    float atmosphereHeight;
-    int   _pad5;          // 1 = atmosphere LUTs bound (same meaning as RT)
-    float shadowCenterX;  // cloud_shadow.comp
-    float shadowCenterZ;
-};
-
-layout(set = 0, binding = 7, std430) readonly buffer CloudRasterFrame {
-    CloudWorldLite w;
-    vec4  camPos;         // xyz, w = tan(vertical fov / 2)
-    vec4  camRight;       // xyz, w = aspect
-    vec4  camUp;
-    vec4  camFwd;         // xyz, w = 1 when the history is valid
-    vec4  prevPos;        // previous frame, same layout
-    vec4  prevRight;
-    vec4  prevUp;
-    vec4  prevFwd;
-    uvec4 info;           // width, height, frame index, march steps
-} worldData;
-
-layout(set = 0, binding = 6) uniform sampler2D atmosphereLUTs[2];   // 0 transmittance, 1 sky-view
+#include "cloud_raster_frame.glsl"
 
 #define CLOUD_SET 0
 #define CLOUD_BINDING_BASE 0

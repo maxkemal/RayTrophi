@@ -1497,7 +1497,7 @@ static const MethodParam params_fluid_get[] = {
 static const MethodDescriptor desc_fluid_get = {
     "fluid.get", "fluid",
     "Return one fluid or gas domain's complete settings and live counters",
-    "views[] is the view resolver's decision (sdf | splat | fog): which substances each view draws, whether any live parcel resolves there, and the vdb_id it is published on. One domain can hold an sdf AND a fog volume at once; match vdb_id against render.volume_slots domains[].vdb_id / fog_vdb_id. substance_materials[].effective_representation comes from the same resolver. particle_labels reports simulation-owned primary labels and separate spray/foam/bubble secondary counts. Sum(primary) equals primary_particles; sum(secondary) equals secondary_particles. Secondary whitewater carries no liquid mass. unknown includes new particles, old disk cache and unsupported granular/solid states. The neighborhood_v1 classifier runs after simulation, with 1.5-voxel radius and 2/6-neighbor hysteresis; last_step reports its timing and changed count. Mist is routed to fog, entrained by overlapping gas and then transferred into gas-phase physical inventory. gas_phase_mass_kg/energy_j report totals; gas_phase_active_cells and gas_phase_mass_centroid expose spatial transport. Missing domains retain the existing API error; gas or missing live state reports available=false.",
+    "views[] is the view resolver's decision (sdf | splat | fog): which substances each view draws, whether any live parcel resolves there, and the vdb_id it is published on. One domain can hold an sdf AND a fog volume at once; match vdb_id against render.volume_slots domains[].vdb_id / fog_vdb_id. substance_materials[].effective_representation comes from the same resolver. particle_labels reports simulation-owned primary labels and separate spray/foam/bubble secondary counts. Sum(primary) equals primary_particles; sum(secondary) equals secondary_particles. Secondary whitewater carries no liquid mass. unknown includes new particles, old disk cache and unsupported granular/solid states. The neighborhood_v1 classifier runs after simulation, with 1.5-voxel radius and 2/6-neighbor hysteresis; last_step reports its timing and changed count. Mist is routed to fog, entrained by overlapping gas and then transferred into gas-phase physical inventory. gas_phase_mass_kg/energy_j report totals; gas_phase_active_cells and gas_phase_mass_centroid expose spatial transport. Missing domains retain the existing API error; gas or missing live state reports available=false. Surface telemetry includes surface_work_cells (padded scheduled tile lanes), surface_bin_cells (physical bins independent of refinement), and surface_bin_ms/surface_anisotropy_ms/surface_schedule_ms/surface_gather_ms/surface_smooth_ms CPU wall times. surface_build_ms includes dense output initialization and all producer work; these do not include downstream NanoVDB upload/render time. surface_anisotropy_ms is the legacy name for particle preparation time: temporary centre smoothing plus covariance/eigensolve when anisotropy is enabled. Position smoothing applies to spherical and anisotropic kernels; zero restores raw centres. Sparse UVW extension covers filtered surface support and preserves advected residual coordinates. Fusion latent heat: thermal_mushy_particles are parcels part solid/part liquid held at their substance's melt point; thermal_fusion_released_j / thermal_fusion_absorbed_j are the latent heat freezing gave back and melting consumed this step (state switches at half solid, so a parcel at 0 C stays ice/water until that heat crosses). The melt point is per parcel substance: the domain no longer reports a thermal_freeze_kelvin copy (read substance.get melt_kelvin). thermal_condensed_kg is vapour condensed onto surface parcels this step (reverse Hertz-Knudsen against the gas inventory); thermal_condensation_splits counts parcels grown past twice their canonical mass and split in two. Fog water (2026-10-11): gas_phase_mass_kg is VAPOUR only; gas_condensate_kg / gas_condensate_cells / gas_condensate_mean_kg_m3 are the condensed water the air carries (kg/m^3 like the atmosphere layer). Each gas step a saturation adjustment (Clausius-Clapeyron of condensable_substance, latent heat to/from the air, world humidity as background vapour) moves vapour<->fog water: fog_condensed_kg, fog_evaporated_kg, fog_latent_to_air_j (+ warms the air); rained_kg / rain_parcels count fog water that reached one liquid parcel inside the matter domain's liquid grid. saturation_measured false = it did not run (no thermal chain and no fog water, or no vapour data). Mist parcels now enter the fog-water pool, not vapour.",
     "read", "Read", false, "FluidDomainInfo",
     "fluid|get|simulation",
     nullptr,
@@ -1593,7 +1593,7 @@ static const MethodParam params_fluid_get_whitewater[] = {
 static const MethodDescriptor desc_fluid_get_whitewater = {
     "fluid.get_whitewater", "fluid",
     "Read a liquid domain's whitewater (Ihmsen spray/foam/bubble) settings plus live counts and step timings",
-    "stats.alive/spray/foam/bubble count the secondary massless particles; stats.live false means no live state. views {spray, foam, bubble} is where each type is drawn (sdf|splat|fog|hidden), decided by the label routes; stats.in_sdf/in_splat/in_fog/hidden count live whitewater per view.",
+    "stats.alive/spray/foam/bubble count the secondary massless particles; stats.live false means no live state. views {spray, foam, bubble} is where each type is drawn (sdf|splat|fog|hidden), decided by the label routes; stats.in_sdf/in_splat/in_fog/hidden count live whitewater per view. Current inputs are sampled in the same step; inputs_current reports this. input_ms is the combined GPU bin/criterion/neighbour input batch wall time. bin_cells is its current logical window; bin_bytes is actual GPU bin allocation. overflow_fallback means exact current CPU gather replaced an incomplete GPU bin. Disabled whitewater clears secondary particles and releases its compute buffers; it contributes no liquid mass or latent physics.",
     "read", "Read", false, "any",
     "fluid|get|whitewater|foam|spray|bubble|measure",
     "fluid.set_whitewater|fluid.get",
@@ -1644,7 +1644,7 @@ static const MethodRegistration reg_fluid_grain_settings(desc_fluid_grain_settin
 static const MethodDescriptor desc_fluid_list_domains = {
     "fluid.list_domains", "fluid",
     "List every fluid and gas domain with its full settings",
-    "particle_labels has the same schema and semantics as fluid.get; primary and secondary populations are counted separately.",
+    "particle_labels has the same schema and semantics as fluid.get; primary and secondary populations are counted separately. Surface telemetry includes surface_work_cells (padded scheduled tile lanes), surface_bin_cells (physical bins independent of refinement), and surface_bin_ms/surface_anisotropy_ms/surface_schedule_ms/surface_gather_ms/surface_smooth_ms CPU wall times. surface_build_ms includes dense output initialization and all producer work; these do not include downstream NanoVDB upload/render time. surface_anisotropy_ms is the legacy name for particle preparation time: temporary centre smoothing plus covariance/eigensolve when anisotropy is enabled. Position smoothing applies to spherical and anisotropic kernels; zero restores raw centres. Sparse UVW extension covers filtered surface support and preserves advected residual coordinates. Fusion latent heat: thermal_mushy_particles are parcels part solid/part liquid held at their substance's melt point; thermal_fusion_released_j / thermal_fusion_absorbed_j are the latent heat freezing gave back and melting consumed this step (state switches at half solid, so a parcel at 0 C stays ice/water until that heat crosses). The melt point is per parcel substance: the domain no longer reports a thermal_freeze_kelvin copy (read substance.get melt_kelvin). thermal_condensed_kg is vapour condensed onto surface parcels this step (reverse Hertz-Knudsen against the gas inventory); thermal_condensation_splits counts parcels grown past twice their canonical mass and split in two. Fog water (2026-10-11): gas_phase_mass_kg is VAPOUR only; gas_condensate_kg / gas_condensate_cells / gas_condensate_mean_kg_m3 are the condensed water the air carries (kg/m^3 like the atmosphere layer). Each gas step a saturation adjustment (Clausius-Clapeyron of condensable_substance, latent heat to/from the air, world humidity as background vapour) moves vapour<->fog water: fog_condensed_kg, fog_evaporated_kg, fog_latent_to_air_j (+ warms the air); rained_kg / rain_parcels count fog water that reached one liquid parcel inside the matter domain's liquid grid. saturation_measured false = it did not run (no thermal chain and no fog water, or no vapour data). Mist parcels now enter the fog-water pool, not vapour.",
     "read", "Read", false, "FluidDomainInfo[]",
     "fluid|list|domains|simulation|inventory",
     "fluid.get",
@@ -1707,16 +1707,17 @@ static const MethodParam params_fluid_seed[] = {
     {"particles_per_cell", "int", false, "Particle density per grid cell; 4 is standard", "4", nullptr},
     {"replace", "bool", false, "Clear existing particles first", "true", nullptr},
     {"persistent", "bool", false, "Re-apply this seed after every reset", "false", nullptr},
+    {"fill_level", "float", false, "", "-1.0", nullptr},
 };
 static const MethodDescriptor desc_fluid_seed = {
     "fluid.seed", "fluid",
     "Fill a liquid domain with particles - a given box, or the domain's lower half",
-    "Omit seed_min and seed_max to fill the bottom half of the domain; there is no fixed default box any more, because the old one was derived from nothing and seeded zero particles in any domain that did not contain it. A region that does not overlap the domain is refused with both boxes in the error. particles_per_cell applies to this initial fill and becomes the solver's material-point density target. Point, object-bounds and mesh-surface flow sources use their independent fluid_particles_per_second rate. persistent=true re-seeds the box every reset.",
+    "Omit seed_min and seed_max to fill the bottom half of the domain; there is no fixed default box any more, because the old one was derived from nothing and seeded zero particles in any domain that did not contain it. A region that does not overlap the domain is refused with both boxes in the error. particles_per_cell applies to this initial fill and becomes the solver's material-point density target. Point, object-bounds and mesh-surface flow sources use their independent fluid_particles_per_second rate. persistent=true re-seeds the box every reset. fill_level 0..1 = Fill Domain (the panel's resting tank up to that fraction of the domain height; a persistent FillLevel recipe, seed_min/seed_max ignored). Seeded parcels are the domain's Default Substance; a meltable solid (Snow, Ice) is born 10 K under its melt point when the ambient is warmer, as from a flow source.",
     "write", "SceneWrite", false, "any",
     "fluid|seed|simulation|liquid|water|fill|particles|initial",
     "fluid.create_domain|fluid.clear|flow_source.create",
     nullptr, nullptr, "fluid.get", nullptr,
-    params_fluid_seed, 6,
+    params_fluid_seed, 7,
     true
 };
 static const MethodRegistration reg_fluid_seed(desc_fluid_seed);
@@ -1880,6 +1881,9 @@ static const MethodParam params_fluid_set_param[] = {
     {"domain_max", "vec3", false, "", nullptr, nullptr},
     {"domain_min", "vec3", false, "", nullptr, nullptr},
     {"enabled", "any", false, "", nullptr, nullptr},
+    {"fog_autoconversion_kg_m3", "any", false, "", nullptr, nullptr},
+    {"fog_autoconversion_rate", "any", false, "", nullptr, nullptr},
+    {"fog_ceiling_kg_m3", "any", false, "", nullptr, nullptr},
     {"granular_max_solver_substeps", "any", false, "", nullptr, nullptr},
     {"kernel_radius_voxels", "any", false, "", nullptr, nullptr},
     {"max_auto_resolution", "any", false, "", nullptr, nullptr},
@@ -1914,7 +1918,7 @@ static const MethodDescriptor desc_fluid_set_param = {
     "fluid|set|param|simulation|configure|viscosity|granular|render-mode|backend",
     "fluid.get|fluid.set_substance_material|substance.get|substance.derive|substance.set",
     "fluid.create_domain", "timeline.set_frame", "fluid.get|render.probe", "simulation_cache",
-    params_fluid_set_param, 38,
+    params_fluid_set_param, 41,
     true
 };
 static const MethodRegistration reg_fluid_set_param(desc_fluid_set_param);
@@ -2364,7 +2368,7 @@ static const MethodRegistration reg_gas_get_shader(desc_gas_get_shader);
 static const MethodDescriptor desc_gas_list_domains = {
     "gas.list_domains", "gas",
     "List every gas and fluid domain with its settings",
-    nullptr,
+    " Surface telemetry includes surface_work_cells (padded scheduled tile lanes), surface_bin_cells (physical bins independent of refinement), and surface_bin_ms/surface_anisotropy_ms/surface_schedule_ms/surface_gather_ms/surface_smooth_ms CPU wall times. surface_build_ms includes dense output initialization and all producer work; these do not include downstream NanoVDB upload/render time. surface_anisotropy_ms is the legacy name for particle preparation time: temporary centre smoothing plus covariance/eigensolve when anisotropy is enabled. Position smoothing applies to spherical and anisotropic kernels; zero restores raw centres. Sparse UVW extension covers filtered surface support and preserves advected residual coordinates.",
     "read", "Read", false, "any",
     "gas|list|domains|simulation|inventory",
     nullptr,
@@ -2455,6 +2459,9 @@ static const MethodParam params_gas_set_param[] = {
     {"domain_max", "vec3", false, "", nullptr, nullptr},
     {"domain_min", "vec3", false, "", nullptr, nullptr},
     {"enabled", "any", false, "", nullptr, nullptr},
+    {"fog_autoconversion_kg_m3", "any", false, "", nullptr, nullptr},
+    {"fog_autoconversion_rate", "any", false, "", nullptr, nullptr},
+    {"fog_ceiling_kg_m3", "any", false, "", nullptr, nullptr},
     {"granular_max_solver_substeps", "any", false, "", nullptr, nullptr},
     {"kernel_radius_voxels", "any", false, "", nullptr, nullptr},
     {"max_auto_resolution", "any", false, "", nullptr, nullptr},
@@ -2489,7 +2496,7 @@ static const MethodDescriptor desc_gas_set_param = {
     "gas|set|param|simulation|configure",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_gas_set_param, 38,
+    params_gas_set_param, 41,
     true
 };
 static const MethodRegistration reg_gas_set_param(desc_gas_set_param);
@@ -2603,7 +2610,7 @@ static const MethodParam params_gas_step_stats[] = {
 static const MethodDescriptor desc_gas_step_stats = {
     "gas.step_stats", "gas",
     "Per-stage timing breakdown of the last gas solver step, including physical inventory advection, grid size, CFL and field peaks",
-    "Read `measured` FIRST - every timing is 0.0 both for a free stage and for a step that never ran, so an idle domain otherwise records as a 0 ms step, which in an optimisation A/B reads as a total win. inventory_advection_ms is the host transport of liquid-to-gas kg/J sidecars. Times are HOST WALL TIME around each call, so a GPU row includes the submit/fence the host waited on; that is the cost the frame pays, not isolated kernel time. cfl above 1 means the semi-Lagrangian trace jumps more than one cell per step and smears detail. liquid_boundary_cells and liquid_boundary_mean_velocity report the overlapping liquid cells imposed on gas as moving walls.",
+    "Read `measured` FIRST - every timing is 0.0 both for a free stage and for a step that never ran, so an idle domain otherwise records as a 0 ms step, which in an optimisation A/B reads as a total win. inventory_advection_ms measures GPU kg/J transport/conservation on the resident path. inventory_transport is idle, cpu, gpu_resident_idle, gpu_resident or gpu_failed. Resident physics has zero full-grid kg/J upload/download; snapshot/query counters report explicit consumers separately. Timeline cache can still read snapshots every frame. inventory_step_held/error require reset after device failure. gpu_surface_exchange_ms includes compact parcel publication. Times are HOST WALL TIME around each call, so a GPU row includes the submit/fence the host waited on; that is the cost the frame pays, not isolated kernel time. cfl above 1 means the semi-Lagrangian trace jumps more than one cell per step and smears detail. liquid_boundary_cells and liquid_boundary_mean_velocity report the overlapping liquid cells imposed on gas as moving walls.",
     "write", "SceneWrite", false, "any",
     "gas|step|stats|simulation|performance|timing|profiling|optimisation|cfl",
     "particle.stats|gas.get_settings|gas.measure_plume|perf.get_gpu_memory",
@@ -3571,9 +3578,9 @@ static const MethodRegistration reg_material_textures(desc_material_textures);
 static const MethodDescriptor desc_matter_exchanges = {
     "matter.exchanges", "matter",
     "Report physical matter transfers that ran in the latest simulation step",
-    "Mass uses kg, energy uses joules and momentum uses kg*m/s. Empty with traced=true means the solver stepped without a transfer.",
+    "Mass uses kg, energy uses joules and momentum uses kg*m/s. Empty with traced=true means the solver stepped without a transfer. kinds include melting/freezing (mass that changed phase this step, m*dF, with the latent heat actually paid through the parcel temperature) and condensation (gas inventory vapour onto a liquid surface parcel; source is the gas domain). In the air: condensation '<domain>:vapour' -> '<domain>:fog' and vaporization back, latent heat to/from the air; precipitation '<domain>:fog' -> '<domain>' is fog water becoming liquid parcels (no phase change).",
     "read", "Read", false, "any",
-    "matter|exchanges|exchange|mass|energy|momentum|conservation|phase|melting|mist",
+    "matter|exchanges|exchange|mass|energy|momentum|conservation|phase|melting|mist|freezing|condensation|latent|fog|precipitation",
     "sim_graph.couplings|msf.fields|substance.list",
     nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
@@ -11234,8 +11241,8 @@ static const MethodParam params_world_apply_cloud_preset[] = {
 };
 static const MethodDescriptor desc_world_apply_cloud_preset = {
     "world.apply_cloud_preset", "world",
-    "Replace the clouds with a named preset (keeps quality settings)",
-    "Names: clear, fair_weather_cumulus, scattered, broken, overcast_stratus, storm, high_cirrus, sunset_altocumulus (also listed by world.get_clouds presets).",
+    "Replace cloud formations with a named preset (keeps common material and quality)",
+    "Names are listed by world.get_clouds presets, including towering_cumulus and storm. These two presets use three linked base/tower/anvil regions with local optical modifiers. The preset replaces layer modifiers and angles but preserves the common material and quality.",
     "write", "SceneWrite", false, "any",
     "world|apply|cloud|preset|environment|sky|clouds",
     "world.get_clouds|world.set_clouds",
@@ -11521,8 +11528,8 @@ static const MethodParam params_world_set_clouds[] = {
 };
 static const MethodDescriptor desc_world_set_clouds = {
     "world.set_clouds", "world",
-    "Patch the cloud authority: layers (element-wise), cirrus, weather, quality",
-    "Partial: objects merge, and layers merges per element, so {layers:[{},{coverage:0.4}]} edits layer 1 only. Invalid values (range, overlapping enabled layers) are REJECTED, never clamped, and leave the state untouched. Read-only keys from world.get_clouds are ignored, so get -> edit -> set round-trips.",
+    "Patch cloud layers (formation roles/groups and optical modifiers), cirrus, weather, quality and common material",
+    "Partial objects merge; layers merge per element. Layer fields include rotation_degrees (-360..360), formation_role (integer 0 generic, 1 storm base, 2 tower, 3 anvil), formation_group (integer 0 independent, 1..3 linked), use_custom_material and material. Common material and local material share density_multiplier, scattering_coefficient/color, absorption_coefficient, override_anisotropy/anisotropy, emission_color/strength. Enabled local optics multiply density/scattering/colour, add absorption/emission, and optionally override phase. Invalid values or overlapping enabled layers are rejected without changing state. Read-only keys from world.get_clouds are ignored for round-trips.",
     "write", "SceneWrite", false, "any",
     "world|set|clouds|environment|sky|atmosphere",
     "world.get_clouds|world.apply_cloud_preset",

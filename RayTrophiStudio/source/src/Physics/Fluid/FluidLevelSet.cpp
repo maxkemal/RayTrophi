@@ -24,6 +24,8 @@
  */
 
 #include "Fluid/FluidLevelSet.h"
+#include "Fluid/SurfaceWorkTiles.h"
+#include "Fluid/SurfaceParticleBins.h"
 #include "Fluid/MatterSubstanceState.h"
 #include "Fluid/SubstanceTag.h"
 #include "PerfProfile.h"
@@ -44,77 +46,6 @@ namespace {
 
 inline float lengthSq(const Vec3& v) {
     return v.x * v.x + v.y * v.y + v.z * v.z;
-}
-
-void smoothSDF(std::vector<float>& sdf, int nx, int ny, int nz, float far_value, int iterations, int thread_cap) {
-    if (iterations <= 0 || sdf.size() != static_cast<size_t>(nx) * ny * nz) return;
-
-    const float alpha = 0.5f;
-
-    auto cellIndex = [nx, ny](int i, int j, int k) {
-        return static_cast<size_t>(i) + static_cast<size_t>(j) * nx + static_cast<size_t>(k) * nx * ny;
-    };
-
-    // Ping-pong between sdf and one scratch buffer instead of copying the whole
-    // grid back each iteration (the old `temp = sdf` was O(cell_count) per
-    // sweep). src holds the current field, dst receives the smoothed one; every
-    // cell writes dst so no stale values survive the swap. Scratch is function-
-    // static (reused across calls — never a per-call vector, per the heap-lock
-    // rule); callers are sequential on the main thread.
-    static std::vector<float> s_scratch;
-    if (s_scratch.size() < sdf.size()) s_scratch.resize(sdf.size());
-    std::vector<float>* src = &sdf;
-    std::vector<float>* dst = &s_scratch;
-
-    for (int iter = 0; iter < iterations; ++iter) {
-        const std::vector<float>& in = *src;
-        std::vector<float>& outv = *dst;
-#ifdef _OPENMP
-        #pragma omp parallel for collapse(3) schedule(static) num_threads(thread_cap)
-#endif
-        for (int k = 0; k < nz; ++k) {
-            for (int j = 0; j < ny; ++j) {
-                for (int i = 0; i < nx; ++i) {
-                    size_t c = cellIndex(i, j, k);
-                    float val = in[c];
-
-                    // Skip cells that are completely outside the narrow band on all sides to avoid work
-                    if (val >= far_value - 1e-5f) {
-                        bool neighbor_active = false;
-                        if (i > 0      && in[c - 1] < far_value - 1e-5f) neighbor_active = true;
-                        if (i + 1 < nx && in[c + 1] < far_value - 1e-5f) neighbor_active = true;
-                        if (j > 0      && in[c - nx] < far_value - 1e-5f) neighbor_active = true;
-                        if (j + 1 < ny && in[c + nx] < far_value - 1e-5f) neighbor_active = true;
-                        if (k > 0      && in[c - nx * ny] < far_value - 1e-5f) neighbor_active = true;
-                        if (k + 1 < nz && in[c + nx * ny] < far_value - 1e-5f) neighbor_active = true;
-
-                        if (!neighbor_active) {
-                            outv[c] = far_value;
-                            continue;
-                        }
-                    }
-
-                    float sum = 0.0f;
-                    float count = 0.0f;
-
-                    if (i > 0)      { sum += in[c - 1]; count += 1.0f; }
-                    if (i + 1 < nx) { sum += in[c + 1]; count += 1.0f; }
-                    if (j > 0)      { sum += in[c - nx]; count += 1.0f; }
-                    if (j + 1 < ny) { sum += in[c + nx]; count += 1.0f; }
-                    if (k > 0)      { sum += in[c - nx * ny]; count += 1.0f; }
-                    if (k + 1 < nz) { sum += in[c + nx * ny]; count += 1.0f; }
-
-                    outv[c] = (count > 0.0f) ? ((1.0f - alpha) * val + alpha * (sum / count)) : val;
-                }
-            }
-        }
-        std::swap(src, dst);
-    }
-
-    // Final field lives in *src; copy back only when it ended in scratch. Copy
-    // exactly sdf.size() elements — s_scratch may be larger (reused from a
-    // bigger grid), so a whole-vector assign would wrongly resize sdf.
-    if (src != &sdf) std::copy(src->begin(), src->begin() + sdf.size(), sdf.begin());
 }
 
 // ── Anisotropic-kernel helpers (Yu & Turk 2013) ─────────────────────────────
@@ -273,6 +204,9 @@ bool buildLevelSet(const FluidParticles& particles,
     const float far_value = narrow_band;
 
     if (stats) {
+        *stats = {};
+        stats->work_cells = 0;
+        stats->bin_cells = 0;
         stats->active_cells = 0;
         stats->surface_cells = 0;
         stats->particle_count = particle_count;
@@ -293,12 +227,29 @@ bool buildLevelSet(const FluidParticles& particles,
         return false;
     }
 
+    auto stage_start = clock::now();
+    const auto elapsed = [&]() {
+        return std::chrono::duration<float, std::milli>(clock::now() - stage_start).count();
+    };
+
     // ── 1. CSR particle->cell bin --------------------------------------------
     // particle_cell[p] = flat cell index, or kInvalid if the particle is out
     // of grid bounds (silently dropped from the SDF).
     constexpr std::size_t kInvalid = static_cast<std::size_t>(-1);
     std::vector<std::size_t> particle_cell(particle_count, kInvalid);
-    std::vector<int> cell_count_per(cell_count, 0);
+    // Particle bins are independent of display refinement. Physical support
+    // stays fixed when quality grows, so neighbour search need not grow m^3.
+    const float bin_voxel = std::max(kernel_R, sim_voxel);
+    const float inv_bin = 1.0f / bin_voxel;
+    const int bnx = std::max(1, static_cast<int>(std::ceil(grid.nx * sim_voxel * inv_bin)));
+    const int bny = std::max(1, static_cast<int>(std::ceil(grid.ny * sim_voxel * inv_bin)));
+    const int bnz = std::max(1, static_cast<int>(std::ceil(grid.nz * sim_voxel * inv_bin)));
+    const std::size_t bin_count = static_cast<std::size_t>(bnx) * bny * bnz;
+    const auto binIndex = [bnx, bny](int i, int j, int k) {
+        return static_cast<std::size_t>(i) + static_cast<std::size_t>(bnx) *
+            (j + static_cast<std::size_t>(bny) * k);
+    };
+    std::vector<int> cell_count_per(bin_count, 0);
 
     const float inv_h = 1.0f / voxel;
     for (std::size_t p = 0; p < particle_count; ++p) {
@@ -307,26 +258,34 @@ bool buildLevelSet(const FluidParticles& particles,
         // lifecycle compaction pass. Do not let an already evaporated slot
         // keep the rendered SurfaceSDF artificially thick.
         if (p < particles.mass_fraction.size() &&
-            particles.mass_fraction[p] <= 0.02f) continue;
+            !(particles.mass_fraction[p] > 0.02f)) continue;
         const Vec3& wp = particles.position[p];
         if (!std::isfinite(wp.x) || !std::isfinite(wp.y) || !std::isfinite(wp.z)) continue;
         const Vec3 local = (wp - origin) * inv_h;
+        if (local.x < 0.0f || local.x >= nx || local.y < 0.0f || local.y >= ny ||
+            local.z < 0.0f || local.z >= nz) {
+            continue;
+        }
         const int i = static_cast<int>(std::floor(local.x));
         const int j = static_cast<int>(std::floor(local.y));
         const int k = static_cast<int>(std::floor(local.z));
         if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
-        const std::size_t ci = cellIndex(i, j, k);
+        const Vec3 bin_local = (wp - origin) * inv_bin;
+        const int bi = std::clamp(static_cast<int>(std::floor(bin_local.x)), 0, bnx - 1);
+        const int bj = std::clamp(static_cast<int>(std::floor(bin_local.y)), 0, bny - 1);
+        const int bk = std::clamp(static_cast<int>(std::floor(bin_local.z)), 0, bnz - 1);
+        const std::size_t ci = binIndex(bi, bj, bk);
         particle_cell[p] = ci;
         ++cell_count_per[ci];
     }
 
     // Prefix-sum -> CSR offsets.
-    std::vector<std::size_t> cell_offset(cell_count + 1, 0);
-    for (std::size_t c = 0; c < cell_count; ++c) {
+    std::vector<std::size_t> cell_offset(bin_count + 1, 0);
+    for (std::size_t c = 0; c < bin_count; ++c) {
         cell_offset[c + 1] = cell_offset[c] + static_cast<std::size_t>(cell_count_per[c]);
     }
     std::vector<std::size_t> cell_csr(cell_offset.back());
-    std::vector<std::size_t> cursor(cell_count, 0);
+    std::vector<std::size_t> cursor(bin_count, 0);
     for (std::size_t p = 0; p < particle_count; ++p) {
         const std::size_t ci = particle_cell[p];
         if (ci == kInvalid) continue;
@@ -342,6 +301,11 @@ bool buildLevelSet(const FluidParticles& particles,
     (void)thread_cap;
 #endif
 
+    if (stats) {
+        stats->bin_ms = elapsed();
+    }
+    stage_start = clock::now();
+
     // ── 1b. Per-particle anisotropy (Yu & Turk 2013) -------------------------
     // For each particle compute a smoothed position x~ and an anisotropy matrix
     // G (symmetric) from the weighted covariance of its neighbours, so the
@@ -353,14 +317,15 @@ bool buildLevelSet(const FluidParticles& particles,
     static std::vector<Vec3> s_xtilde;
     static std::vector<Sym3> s_aniso;
     const bool use_aniso = params.anisotropy_enabled;
-    if (use_aniso) {
+    const bool prepare_centres = use_aniso || params.position_smoothing > 0.0f;
+    if (prepare_centres) {
         if (s_xtilde.size() < particle_count) s_xtilde.resize(particle_count);
         if (s_aniso.size()  < particle_count) s_aniso.resize(particle_count);
 
         const float rs     = std::max(1e-4f, params.anisotropy_radius_voxels * sim_voxel);
         const float rs_sq  = rs * rs;
         const int   reach_a = std::max(1, static_cast<int>(
-            std::ceil(params.anisotropy_radius_voxels * static_cast<float>(m))));
+            std::ceil(rs * inv_bin)));
         const float kr     = std::max(1.0f, params.anisotropy_max_stretch);
         const int   nmin   = std::max(1, params.anisotropy_neighbor_min);
         const float lambda = std::clamp(params.position_smoothing, 0.0f, 1.0f);
@@ -375,13 +340,13 @@ bool buildLevelSet(const FluidParticles& particles,
             const Vec3 xp = particles.position[pidx];
             if (particle_cell[pidx] == kInvalid) { s_xtilde[pidx] = xp; s_aniso[pidx] = isoG; continue; }
 
-            const Vec3 lp = (xp - origin) * inv_h;
+            const Vec3 lp = (xp - origin) * inv_bin;
             const int ci = static_cast<int>(std::floor(lp.x));
             const int cj = static_cast<int>(std::floor(lp.y));
             const int ck = static_cast<int>(std::floor(lp.z));
-            const int ai0 = std::max(0, ci - reach_a), ai1 = std::min(nx - 1, ci + reach_a);
-            const int aj0 = std::max(0, cj - reach_a), aj1 = std::min(ny - 1, cj + reach_a);
-            const int ak0 = std::max(0, ck - reach_a), ak1 = std::min(nz - 1, ck + reach_a);
+            const int ai0 = std::max(0, ci - reach_a), ai1 = std::min(bnx - 1, ci + reach_a);
+            const int aj0 = std::max(0, cj - reach_a), aj1 = std::min(bny - 1, cj + reach_a);
+            const int ak0 = std::max(0, ck - reach_a), ak1 = std::min(bnz - 1, ck + reach_a);
 
             // Single-pass weighted mean + covariance. Accumulate the moments
             // relative to xp (rel = xj - xp, magnitudes < rs) so the float
@@ -390,30 +355,47 @@ bool buildLevelSet(const FluidParticles& particles,
             float wsum = 0.0f; int ncount = 0;
             Vec3 mom1(0, 0, 0);                                // sum w*rel
             Sym3 mom2;                                         // sum w*(rel (x) rel)
-            for (int kk = ak0; kk <= ak1; ++kk)
-            for (int jj = aj0; jj <= aj1; ++jj)
-            for (int ii = ai0; ii <= ai1; ++ii) {
-                const std::size_t nci = cellIndex(ii, jj, kk);
-                for (std::size_t a = cell_offset[nci]; a < cell_offset[nci + 1]; ++a) {
-                    const Vec3& xj = particles.position[cell_csr[a]];
-                    const float rx = xj.x - xp.x, ry = xj.y - xp.y, rz = xj.z - xp.z;
-                    const float d2 = rx * rx + ry * ry + rz * rz;
-                    if (d2 >= rs_sq) continue;
-                    const float tt = 1.0f - d2 / rs_sq;
-                    const float w = tt * tt * tt;
-                    wsum += w; ++ncount;
-                    mom1.x += w * rx; mom1.y += w * ry; mom1.z += w * rz;
-                    mom2.xx += w * rx * rx; mom2.yy += w * ry * ry; mom2.zz += w * rz * rz;
-                    mom2.xy += w * rx * ry; mom2.xz += w * rx * rz; mom2.yz += w * ry * rz;
+            for (int kk = ak0; kk <= ak1; ++kk) {
+                for (int jj = aj0; jj <= aj1; ++jj) {
+                    for (int ii = ai0; ii <= ai1; ++ii) {
+                        const std::size_t nci = binIndex(ii, jj, kk);
+                        for (std::size_t a = cell_offset[nci]; a < cell_offset[nci + 1]; ++a) {
+                            const Vec3& xj = particles.position[cell_csr[a]];
+                            const float rx = xj.x - xp.x, ry = xj.y - xp.y, rz = xj.z - xp.z;
+                            const float d2 = rx * rx + ry * ry + rz * rz;
+                            if (d2 >= rs_sq) continue;
+                            const float tt = 1.0f - d2 / rs_sq;
+                            const float w = tt * tt * tt;
+                            wsum += w; ++ncount;
+                            mom1.x += w * rx; mom1.y += w * ry; mom1.z += w * rz;
+                            if (use_aniso) {
+                                mom2.xx += w * rx * rx;
+                                mom2.yy += w * ry * ry;
+                                mom2.zz += w * rz * rz;
+                                mom2.xy += w * rx * ry;
+                                mom2.xz += w * rx * rz;
+                                mom2.yz += w * ry * rz;
+                            }
+                        }
+            
+                    }
                 }
             }
             if (wsum < 1e-12f) { s_xtilde[pidx] = xp; s_aniso[pidx] = isoG; continue; }
+            if (ncount < nmin) {
+                s_xtilde[pidx] = xp;
+                s_aniso[pidx] = isoG;
+                continue;
+            }
             const float invw = 1.0f / wsum;
             const Vec3 mr(mom1.x * invw, mom1.y * invw, mom1.z * invw); // mean relative to xp
             s_xtilde[pidx] = Vec3(xp.x + mr.x * lambda,
                                   xp.y + mr.y * lambda,
                                   xp.z + mr.z * lambda);
-            if (ncount < nmin) { s_aniso[pidx] = isoG; continue; }
+            if (!use_aniso) {
+                s_aniso[pidx] = isoG;
+                continue;
+            }
 
             Sym3 C;
             C.xx = mom2.xx * invw - mr.x * mr.x; C.yy = mom2.yy * invw - mr.y * mr.y; C.zz = mom2.zz * invw - mr.z * mr.z;
@@ -423,100 +405,59 @@ bool buildLevelSet(const FluidParticles& particles,
             analyticEigen3(C, ev, R);
             const float emax = std::max(ev[0], std::max(ev[1], ev[2]));
             if (emax < 1e-12f) { s_aniso[pidx] = isoG; continue; }
-            // Clamp each axis variance to [emax/kr, emax] then volume-normalise so
+            // Convert variance to axis length, clamp aspect ratio, then normalise so
             // det == 1 (every particle's kernel covers ~the same volume — no blob
-            // dominates). Stretch the kernel along low-variance (thin) axes by
-            // using 1/sigma so a sheet's surface stays flat instead of bulging.
-            const float floorv = emax / kr;
-            float s0 = std::max(ev[0], floorv);
-            float s1 = std::max(ev[1], floorv);
-            float s2 = std::max(ev[2], floorv);
+            // dominates). Low-variance axes stay thin; high-variance axes follow
+            // the local sheet or stream direction.
+            const float floorv = emax / (kr * kr);
+            float s0 = std::sqrt(std::max(ev[0], floorv));
+            float s1 = std::sqrt(std::max(ev[1], floorv));
+            float s2 = std::sqrt(std::max(ev[2], floorv));
             const float vol = std::cbrt(std::max(1e-20f, s0 * s1 * s2));
             s0 /= vol; s1 /= vol; s2 /= vol;
             s_aniso[pidx] = symFromEigen(R, inv_kR / s0, inv_kR / s1, inv_kR / s2);
         }
     }
 
-    // ── 2. Output pass --------------------------------------------------------
-    // Stencil half-width in REFINED cells. kernel_R is physical (reach grows with
-    // the multiplier). The anisotropic kernel stretches along its major axis; the
-    // volume-normalised covariance bounds the worst-case major-axis stretch at
-    // kr^(2/3) (one axis at the clamp ceiling, two at emax/kr), so size the reach
-    // to exactly that — no clipping of elongated kernels, and reach shrinks with
-    // smaller anisotropy_max_stretch instead of paying a fixed 2.5x.
+    if (stats) {
+        stats->anisotropy_ms = elapsed();
+    }
+    stage_start = clock::now();
+
+    // Sparse work tiles cover every ellipsoid and smoothing dependency.
+    // Rebin temporary centres after filtering. Neighbour queries then need
+    // only physical support, rather than worst-case support + centre shift.
     const float kr_stretch = std::max(1.0f, params.anisotropy_max_stretch);
-    const float stretch_reach = use_aniso
-        ? std::clamp(std::cbrt(kr_stretch * kr_stretch), 1.0f, 4.0f) : 1.0f;
+    const float stretch_reach = use_aniso ? std::cbrt(kr_stretch * kr_stretch) : 1.0f;
+    const float support = kernel_R * stretch_reach;
+    const auto& centres = prepare_centres ? s_xtilde : particles.position;
+    SurfaceParticleBins surface_bins(origin, grid.nx, grid.ny, grid.nz,
+                                     sim_voxel, support);
+    surface_bins.build(centres, particle_cell);
     const int reach = std::max(1, static_cast<int>(
-        std::ceil(params.kernel_radius_voxels * static_cast<float>(m) * stretch_reach)));
-
-    // ── 2a. Active-cell band -------------------------------------------------
-    // Only refined cells within `reach` of an occupied cell can pick up a
-    // contribution; everything else keeps the far_value already assigned. A
-    // full-grid sweep wastes a stencil traversal on the empty air around the
-    // surface (the bulk of a typical domain). Dilate the occupancy by `reach`
-    // (three separable 1-D OR passes) and gather only the survivors. Function-
-    // static scratch — reused across calls, never per-call alloc.
-    static std::vector<uint8_t> s_occ_a, s_occ_b;
-    static std::vector<int64_t> s_active;
-    if (s_occ_a.size() < cell_count) s_occ_a.resize(cell_count);
-    if (s_occ_b.size() < cell_count) s_occ_b.resize(cell_count);
-    const std::size_t plane = static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny);
-
-#ifdef _OPENMP
-    #pragma omp parallel for schedule(static) num_threads(thread_cap)
-#endif
-    for (int64_t c = 0; c < static_cast<int64_t>(cell_count); ++c)
-        s_occ_a[static_cast<std::size_t>(c)] = (cell_count_per[static_cast<std::size_t>(c)] > 0) ? 1 : 0;
-
-    // X dilation: s_occ_a -> s_occ_b
-#ifdef _OPENMP
-    #pragma omp parallel for collapse(2) schedule(static) num_threads(thread_cap)
-#endif
-    for (int k = 0; k < nz; ++k)
-    for (int j = 0; j < ny; ++j) {
-        const std::size_t base = static_cast<std::size_t>(k) * plane + static_cast<std::size_t>(j) * nx;
-        for (int i = 0; i < nx; ++i) {
-            const int lo = std::max(0, i - reach), hi = std::min(nx - 1, i + reach);
-            uint8_t v = 0;
-            for (int ii = lo; ii <= hi; ++ii) if (s_occ_a[base + ii]) { v = 1; break; }
-            s_occ_b[base + i] = v;
+        std::ceil(support * surface_bins.inverse_width)));
+    const int smoothing = std::max(0, params.smoothing_iterations);
+    SurfaceWorkTiles work_tiles(nx, ny, nz, origin, voxel);
+    for (std::size_t p = 0; p < particle_count; ++p) {
+        if (particle_cell[p] != kInvalid) {
+            work_tiles.addSupport(centres[p],
+                                  support + smoothing * sim_voxel);
         }
     }
-    // Y dilation: s_occ_b -> s_occ_a
-#ifdef _OPENMP
-    #pragma omp parallel for collapse(2) schedule(static) num_threads(thread_cap)
-#endif
-    for (int k = 0; k < nz; ++k)
-    for (int i = 0; i < nx; ++i) {
-        const std::size_t base_k = static_cast<std::size_t>(k) * plane;
-        for (int j = 0; j < ny; ++j) {
-            const int lo = std::max(0, j - reach), hi = std::min(ny - 1, j + reach);
-            uint8_t v = 0;
-            for (int jj = lo; jj <= hi; ++jj) if (s_occ_b[base_k + static_cast<std::size_t>(jj) * nx + i]) { v = 1; break; }
-            s_occ_a[base_k + static_cast<std::size_t>(j) * nx + i] = v;
-        }
-    }
-    // Z dilation: s_occ_a -> s_occ_b
-#ifdef _OPENMP
-    #pragma omp parallel for collapse(2) schedule(static) num_threads(thread_cap)
-#endif
-    for (int j = 0; j < ny; ++j)
-    for (int i = 0; i < nx; ++i) {
-        const std::size_t col = static_cast<std::size_t>(j) * nx + i;
-        for (int k = 0; k < nz; ++k) {
-            const int lo = std::max(0, k - reach), hi = std::min(nz - 1, k + reach);
-            uint8_t v = 0;
-            for (int kk = lo; kk <= hi; ++kk) if (s_occ_a[static_cast<std::size_t>(kk) * plane + col]) { v = 1; break; }
-            s_occ_b[static_cast<std::size_t>(k) * plane + col] = v;
-        }
+    work_tiles.finish();
+    const int64_t active_n = static_cast<int64_t>(work_tiles.workSize());
+    // Transient compact reconstruction evidence; never stored in simulation cache.
+    std::vector<float> support_confidence(
+        smoothing > 0 ? work_tiles.workSize() : 0, 0.0f);
+    if (stats) {
+        stats->work_cells = work_tiles.workSize();
+        stats->bin_cells = surface_bins.offsets.size() - 1;
     }
 
-    // Compact active cells into an index list (serial, O(cell_count)).
-    s_active.clear();
-    for (std::size_t c = 0; c < cell_count; ++c)
-        if (s_occ_b[c]) s_active.push_back(static_cast<int64_t>(c));
-    const int64_t active_n = static_cast<int64_t>(s_active.size());
+    if (stats) {
+        stats->schedule_ms = elapsed();
+    }
+    stage_start = clock::now();
 
     std::size_t active_cells = 0;
     std::size_t surface_cells = 0;
@@ -526,99 +467,142 @@ bool buildLevelSet(const FluidParticles& particles,
         reduction(+:active_cells, surface_cells)
 #endif
     for (int64_t at = 0; at < active_n; ++at) {
-            const std::size_t c_flat = static_cast<std::size_t>(s_active[static_cast<std::size_t>(at)]);
-            const int k = static_cast<int>(c_flat / plane);
-            const std::size_t rem = c_flat - static_cast<std::size_t>(k) * plane;
-            const int j = static_cast<int>(rem / nx);
-            const int i = static_cast<int>(rem % nx);
-                const Vec3 p_c = origin + Vec3(
-                    (static_cast<float>(i) + 0.5f) * voxel,
-                    (static_cast<float>(j) + 0.5f) * voxel,
-                    (static_cast<float>(k) + 0.5f) * voxel);
+        int i, j, k;
+        if (!work_tiles.cellAt(static_cast<std::size_t>(at), i, j, k)) {
+            continue;
+        }
+        const Vec3 p_c = origin + Vec3(
+            (static_cast<float>(i) + 0.5f) * voxel,
+            (static_cast<float>(j) + 0.5f) * voxel,
+            (static_cast<float>(k) + 0.5f) * voxel);
+        int bi, bj, bk;
+        surface_bins.coordinate(p_c, bi, bj, bk);
+        const int i0 = std::max(0, bi - reach), i1 = std::min(surface_bins.nx - 1, bi + reach);
+        const int j0 = std::max(0, bj - reach), j1 = std::min(surface_bins.ny - 1, bj + reach);
+        const int k0 = std::max(0, bk - reach), k1 = std::min(surface_bins.nz - 1, bk + reach);
 
-                const int i0 = std::max(0, i - reach);
-                const int i1 = std::min(nx - 1, i + reach);
-                const int j0 = std::max(0, j - reach);
-                const int j1 = std::min(ny - 1, j + reach);
-                const int k0 = std::max(0, k - reach);
-                const int k1 = std::min(nz - 1, k + reach);
+        float acc_w = 0.0f;
+        float acc_mass = 0.0f;
+        float acc_w_squared = 0.0f;
+        Sym3 acc_metric;
+        Vec3  acc_p(0.0f, 0.0f, 0.0f);
 
-                float acc_w = 0.0f;
-                float acc_mass = 0.0f;
-                Vec3  acc_p(0.0f, 0.0f, 0.0f);
-
-                for (int kk = k0; kk <= k1; ++kk) {
-                    for (int jj = j0; jj <= j1; ++jj) {
-                        for (int ii = i0; ii <= i1; ++ii) {
-                            const std::size_t nci = cellIndex(ii, jj, kk);
-                            const std::size_t beg = cell_offset[nci];
-                            const std::size_t end = cell_offset[nci + 1];
-                            for (std::size_t a = beg; a < end; ++a) {
-                                const std::size_t pa = cell_csr[a];
-                                if (use_aniso) {
-                                    // Ellipsoidal kernel: support is |G*(x - x~)| < 1.
-                                    const Vec3& xt = s_xtilde[pa];
-                                    const Vec3 dd(p_c.x - xt.x, p_c.y - xt.y, p_c.z - xt.z);
-                                    const Vec3 q = symMul(s_aniso[pa], dd);
-                                    const float q2 = lengthSq(q);
-                                    if (q2 >= 1.0f) continue;
-                                    const float t = 1.0f - q2;
-                                    const float w = t * t * t;
-                                    const float mass = pa < particles.mass_fraction.size()
-                                        ? std::clamp(particles.mass_fraction[pa], 0.0f, 1.0f)
-                                        : 1.0f;
-                                    acc_w += w;
-                                    acc_mass += w * mass;
-                                    acc_p.x += w * xt.x;
-                                    acc_p.y += w * xt.y;
-                                    acc_p.z += w * xt.z;
-                                } else {
-                                    const Vec3& pp = particles.position[pa];
-                                    const Vec3 d = p_c - pp;
-                                    const float d2 = lengthSq(d);
-                                    if (d2 >= kernel_R_sq) continue;
-                                    // Wendland-like cubic falloff: smooth, finite
-                                    // support, derivative is well-behaved.
-                                    const float t = 1.0f - d2 / kernel_R_sq;
-                                    const float w = t * t * t;
-                                    const float mass = pa < particles.mass_fraction.size()
-                                        ? std::clamp(particles.mass_fraction[pa], 0.0f, 1.0f)
-                                        : 1.0f;
-                                    acc_w += w;
-                                    acc_mass += w * mass;
-                                    acc_p.x += w * pp.x;
-                                    acc_p.y += w * pp.y;
-                                    acc_p.z += w * pp.z;
-                                }
-                            }
+        for (int kk = k0; kk <= k1; ++kk) {
+            for (int jj = j0; jj <= j1; ++jj) {
+                for (int ii = i0; ii <= i1; ++ii) {
+                    const std::size_t nci = surface_bins.index(ii, jj, kk);
+                    const std::size_t beg = surface_bins.offsets[nci];
+                    const std::size_t end = surface_bins.offsets[nci + 1];
+                    for (std::size_t a = beg; a < end; ++a) {
+                        const std::size_t pa = surface_bins.particles[a];
+                        if (use_aniso) {
+                            // Ellipsoidal kernel: support is |G*(x - x~)| < 1.
+                            const Vec3& xt = s_xtilde[pa];
+                            const Vec3 dd(p_c.x - xt.x, p_c.y - xt.y, p_c.z - xt.z);
+                            const Vec3 q = symMul(s_aniso[pa], dd);
+                            const float q2 = lengthSq(q);
+                            if (q2 >= 1.0f) continue;
+                            const float t = 1.0f - q2;
+                            const float w = t * t * t;
+                            const float mass = pa < particles.mass_fraction.size()
+                                ? std::clamp(particles.mass_fraction[pa], 0.0f, 1.0f)
+                                : 1.0f;
+                            acc_metric.xx += w * s_aniso[pa].xx;
+                            acc_metric.yy += w * s_aniso[pa].yy;
+                            acc_metric.zz += w * s_aniso[pa].zz;
+                            acc_metric.xy += w * s_aniso[pa].xy;
+                            acc_metric.xz += w * s_aniso[pa].xz;
+                            acc_metric.yz += w * s_aniso[pa].yz;
+                            acc_w += w;
+                            acc_w_squared += w * w;
+                            acc_mass += w * mass;
+                            acc_p.x += w * xt.x;
+                            acc_p.y += w * xt.y;
+                            acc_p.z += w * xt.z;
+                        } else {
+                            const Vec3& pp = centres[pa];
+                            const Vec3 d = p_c - pp;
+                            const float d2 = lengthSq(d);
+                            if (d2 >= kernel_R_sq) continue;
+                            // Wendland-like cubic falloff: smooth, finite
+                            // support, derivative is well-behaved.
+                            const float t = 1.0f - d2 / kernel_R_sq;
+                            const float w = t * t * t;
+                            const float mass = pa < particles.mass_fraction.size()
+                                ? std::clamp(particles.mass_fraction[pa], 0.0f, 1.0f)
+                                : 1.0f;
+                            acc_w += w;
+                            acc_w_squared += w * w;
+                            acc_mass += w * mass;
+                            acc_p.x += w * pp.x;
+                            acc_p.y += w * pp.y;
+                            acc_p.z += w * pp.z;
                         }
                     }
                 }
+            }
+        }
 
-                const std::size_t out_ci = cellIndex(i, j, k);
-                if (acc_w > 1e-12f) {
-                    const float inv_w = 1.0f / acc_w;
-                    const Vec3 x_bar(acc_p.x * inv_w, acc_p.y * inv_w, acc_p.z * inv_w);
-                    const float dlen = std::sqrt(lengthSq(p_c - x_bar));
-                    const float mean_mass = std::clamp(acc_mass / std::max(acc_w, 1.0e-12f), 0.0f, 1.0f);
-                    const float mass_radius = particle_r * std::cbrt(std::max(mean_mass, 0.02f));
-                    const float phi = dlen - mass_radius - surface_offset;
-                    // Clamp to narrow band so far interior cells still report
-                    // a finite distance the iso-walker can step through.
-                    const float phi_clamped = std::min(narrow_band, std::max(-narrow_band, phi));
-                    sdf_out[out_ci] = phi_clamped;
-                    ++active_cells;
-                    if (std::fabs(phi_clamped) < voxel) {
-                        ++surface_cells;
-                    }
-                } else {
-                    sdf_out[out_ci] = far_value;
+        const std::size_t out_ci = cellIndex(i, j, k);
+        if (acc_w > 1e-12f) {
+            const float inv_w = 1.0f / acc_w;
+            if (smoothing > 0) {
+                const float effective_neighbours = acc_w * acc_w /
+                    std::max(acc_w_squared, 1.0e-12f);
+                const float t = std::clamp((effective_neighbours - 4.0f) / 12.0f,
+                                           0.0f, 1.0f);
+                support_confidence[static_cast<std::size_t>(at)] = t * t * (3.0f - 2.0f * t);
+            }
+            const Vec3 x_bar(acc_p.x * inv_w, acc_p.y * inv_w, acc_p.z * inv_w);
+            const float dlen = std::sqrt(lengthSq(p_c - x_bar));
+            const float mean_mass = std::clamp(acc_mass / std::max(acc_w, 1.0e-12f), 0.0f, 1.0f);
+            const float mass_radius = particle_r * std::cbrt(std::max(mean_mass, 0.02f));
+            float phi = dlen - mass_radius - surface_offset;
+            if (use_aniso) {
+                // Apply the same ellipsoid metric to the reconstructed surface,
+                // not just its neighbourhood weights. Convert the implicit
+                // residual to world units using its local gradient magnitude.
+                const float scale = kernel_R * inv_w;
+                acc_metric.xx *= scale;
+                acc_metric.yy *= scale;
+                acc_metric.zz *= scale;
+                acc_metric.xy *= scale;
+                acc_metric.xz *= scale;
+                acc_metric.yz *= scale;
+                const Vec3 shaped = symMul(acc_metric, p_c - x_bar);
+                const float shaped_length = std::sqrt(lengthSq(shaped));
+                float gradient_length = 1.0f;
+                if (shaped_length > 1.0e-8f) {
+                    const Vec3 gradient = symMul(acc_metric, shaped / shaped_length);
+                    gradient_length = std::max(1.0e-6f, std::sqrt(lengthSq(gradient)));
                 }
+                phi = (shaped_length - mass_radius - surface_offset) / gradient_length;
+            }
+            // Clamp to narrow band so far interior cells still report
+            // a finite distance the iso-walker can step through.
+            const float phi_clamped = std::min(narrow_band, std::max(-narrow_band, phi));
+            sdf_out[out_ci] = phi_clamped;
+            ++active_cells;
+            if (std::fabs(phi_clamped) < voxel) {
+                ++surface_cells;
+            }
+        } else {
+            sdf_out[out_ci] = far_value;
+        }
     }
+
+
+    if (stats) {
+        stats->gather_ms = elapsed();
+    }
+    stage_start = clock::now();
 
     // ── 3. Optional fast Laplacian smoothing sweeps --------------------------
     if (params.smoothing_iterations > 0) {
-        smoothSDF(sdf_out, nx, ny, nz, far_value, params.smoothing_iterations, thread_cap);
+        smoothSurfaceTiles(sdf_out, work_tiles, nx, ny, nz, far_value, smoothing,
+                           thread_cap, &support_confidence,
+                           std::max(1, static_cast<int>(std::lround(sim_voxel / voxel))),
+                           0.2f * sim_voxel);
 
         // Recalculate active and surface cell counts on the smoothed field
         active_cells = 0;
@@ -626,8 +610,12 @@ bool buildLevelSet(const FluidParticles& particles,
 #ifdef _OPENMP
         #pragma omp parallel for reduction(+:active_cells, surface_cells) num_threads(thread_cap)
 #endif
-        for (int64_t ci = 0; ci < static_cast<int64_t>(cell_count); ++ci) {
-            float val = sdf_out[static_cast<size_t>(ci)];
+        for (int64_t lane = 0; lane < active_n; ++lane) {
+            int i, j, k;
+            if (!work_tiles.cellAt(static_cast<std::size_t>(lane), i, j, k)) {
+                continue;
+            }
+            const float val = sdf_out[cellIndex(i, j, k)];
             if (val < far_value - 1e-5f) {
                 ++active_cells;
                 if (std::abs(val) < voxel) {
@@ -638,397 +626,13 @@ bool buildLevelSet(const FluidParticles& particles,
     }
 
     if (stats) {
+        stats->smooth_ms = elapsed();
         stats->active_cells = active_cells;
         stats->surface_cells = surface_cells;
         stats->build_ms = std::chrono::duration<float, std::milli>(
                               clock::now() - t_start).count();
     }
     return active_cells > 0;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// THIS GRID HOLDS A DISPLACEMENT, NOT A COORDINATE.
-// ═══════════════════════════════════════════════════════════════════════════
-// Cell c stores  d = mean over nearby particles of (uvw - position), and the
-// shader reconstructs the material coordinate as  worldPos + trilinear(d).
-//
-// ★★★ The reason is a resolution argument, and it is the entire quality story
-// of this feature. Split the coordinate into its two natural parts:
-//
-//     uvw(x) = x + d(x)
-//              ^   ^
-//              |   deformation: genuinely LOW frequency, belongs on a grid
-//              position: FULL resolution, continuous, free in the shader
-//
-// Storing the sum condemns the full-resolution half to the sim voxel size
-// (typically 5 cm), which is precisely the reported symptom: "material mode
-// looks like one pixel per cell". Storing only d leaves the position term
-// exact, so the coordinate is continuous everywhere and only the DEFORMATION is
-// grid-limited — and deformation is smooth, so that limit costs nothing.
-//
-// ★ It also makes the feature falsifiable. Liquid that has not moved has
-// uvw == position for EVERY particle, so d is identically zero — not "small",
-// zero, and independently of how the particles are distributed, because the
-// difference is taken per particle before the average. COORD_MATERIAL then
-// reduces to worldPos exactly: a resting tank must be pixel-identical in
-// Material and World mode. That turns "is the quality good enough?" from a
-// judgement call into a diff, which is the only reason this note is worth
-// writing down.
-//
-// Two consequences that are easy to get wrong and are handled below:
-//   - extrapolation averages d directly, with NO world offsets (section 3)
-//   - d may be filtered freely, which the absolute form could never allow (4)
-bool buildMaterialCoordinateGrid(const FluidParticles& particles,
-                                 const FluidSim::FluidGrid& grid,
-                                 const LevelSetParams& params,
-                                 std::vector<float>& uvw_out,
-                                 const FluidViewSelection* selection)
-{
-    RTPERF_FRAME_SCOPE("sim.render.surface.material_coordinates");
-    const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
-    const float voxel = grid.voxel_size;
-    const std::size_t cell_count = static_cast<std::size_t>(nx) *
-                                   static_cast<std::size_t>(ny) *
-                                   static_cast<std::size_t>(nz);
-    const std::size_t particle_count = particles.size();
-
-    // A uvw sidecar shorter than the particle array means some producer emitted
-    // without one. Refuse rather than gathering a partial field: a coordinate
-    // that is right for most of the body and origin-seeded for the rest reads as
-    // a torn texture, which looks like a shader bug and is far harder to trace
-    // back here than an outright "no coordinate, world-anchored as before".
-    if (cell_count == 0 || particle_count == 0 || voxel <= 0.0f ||
-        particles.uvw.size() < particle_count) {
-        uvw_out.clear();
-        return false;
-    }
-
-    uvw_out.assign(cell_count * 3u, 0.0f);
-
-    auto cellIndex = [nx, ny](int i, int j, int k) -> std::size_t {
-        return static_cast<std::size_t>(i) +
-               static_cast<std::size_t>(j) * static_cast<std::size_t>(nx) +
-               static_cast<std::size_t>(k) * static_cast<std::size_t>(nx) *
-               static_cast<std::size_t>(ny);
-    };
-
-    // Same kernel the level set uses, so the coordinate is supported wherever
-    // the surface is. Deliberately NOT a wider one: a wider kernel would smear
-    // uvw across a gap between two separate bodies of liquid and blend two
-    // unrelated coordinates into the space between them.
-    // Generation weights for this frame. Read once: they are a property of the
-    // schedule, not of the cell being filled, and re-deriving them per particle
-    // would let a mid-gather change tear the field.
-    float w_a = 1.0f, w_b = 0.0f;
-    particles.materialCoordWeights(w_a, w_b);
-    // A short second generation means it was never built (an older cache, a
-    // producer that emitted without it). Fall back to generation A alone rather
-    // than mixing against zeros, which would drag the coordinate toward the
-    // identity by w_b and read as the texture partly detaching from the liquid.
-    const bool has_gen_b = particles.uvw_b.size() >= particle_count;
-    if (!has_gen_b) { w_a = 1.0f; w_b = 0.0f; }
-
-    const float kernel_R    = std::max(1e-4f, params.kernel_radius_voxels * voxel);
-    const float kernel_R_sq = kernel_R * kernel_R;
-    const int   reach       = std::max(1, static_cast<int>(
-        std::ceil(params.kernel_radius_voxels)));
-
-    int thread_cap = params.threads;
-#ifdef _OPENMP
-    if (thread_cap <= 0) thread_cap = omp_get_max_threads();
-    thread_cap = std::max(1, thread_cap);
-#else
-    (void)thread_cap;
-#endif
-
-    // ── 1. CSR particle -> cell bin (sim grid) ───────────────────────────────
-    constexpr std::size_t kInvalid = static_cast<std::size_t>(-1);
-    static std::vector<std::size_t> s_particle_cell;
-    static std::vector<int>         s_count_per;
-    static std::vector<std::size_t> s_offset, s_csr, s_cursor;
-    s_particle_cell.assign(particle_count, kInvalid);
-    s_count_per.assign(cell_count, 0);
-
-    const float inv_h = 1.0f / voxel;
-    for (std::size_t p = 0; p < particle_count; ++p) {
-        // Match the level set's depleted-particle rule exactly. If the two
-        // disagreed, the coordinate field would be supported in cells the
-        // surface does not occupy (or the reverse) — and the reverse is the
-        // dangerous direction, because it puts an unsupported cell under a
-        // surface that IS drawn.
-        if (p < particles.mass_fraction.size() &&
-            particles.mass_fraction[p] <= 0.02f) continue;
-        // ★ Same exclusion the level set applied. A substance routed to splat
-        // has no isosurface, so it must not contribute to a field that describes
-        // one — the three gathers have to agree about which particles the
-        // surface is made of, or the surface takes on the look of liquid that
-        // is not there. That reads as plausible wetness, not as a bug.
-        if (selection && !selection->keeps(particles, p)) continue;
-        const Vec3& wp = particles.position[p];
-        if (!std::isfinite(wp.x) || !std::isfinite(wp.y) || !std::isfinite(wp.z)) continue;
-        const Vec3 local = (wp - grid.origin) * inv_h;
-        const int i = static_cast<int>(std::floor(local.x));
-        const int j = static_cast<int>(std::floor(local.y));
-        const int k = static_cast<int>(std::floor(local.z));
-        if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
-        const std::size_t ci = cellIndex(i, j, k);
-        s_particle_cell[p] = ci;
-        ++s_count_per[ci];
-    }
-
-    s_offset.assign(cell_count + 1, 0);
-    for (std::size_t c = 0; c < cell_count; ++c)
-        s_offset[c + 1] = s_offset[c] + static_cast<std::size_t>(s_count_per[c]);
-    if (s_offset.back() == 0) {          // every particle fell outside the grid
-        uvw_out.clear();
-        return false;
-    }
-    s_csr.assign(s_offset.back(), 0);
-    s_cursor.assign(cell_count, 0);
-    for (std::size_t p = 0; p < particle_count; ++p) {
-        const std::size_t ci = s_particle_cell[p];
-        if (ci == kInvalid) continue;
-        s_csr[s_offset[ci] + s_cursor[ci]++] = p;
-    }
-
-    // ── 2. Weighted gather ───────────────────────────────────────────────────
-    // valid[c] marks cells that received real support; everything else is filled
-    // by the extrapolation below. A separate mask rather than testing the value
-    // against zero: (0,0,0) is a perfectly legal material coordinate for liquid
-    // born at the world origin, and using the value as its own validity flag
-    // would make that liquid's cells re-fill from their neighbours every frame.
-    static std::vector<uint8_t> s_valid;
-    s_valid.assign(cell_count, 0u);
-
-#ifdef _OPENMP
-    #pragma omp parallel for collapse(3) schedule(dynamic, 8) num_threads(thread_cap)
-#endif
-    for (int k = 0; k < nz; ++k) {
-        for (int j = 0; j < ny; ++j) {
-            for (int i = 0; i < nx; ++i) {
-                const Vec3 p_c = grid.origin + Vec3(
-                    (static_cast<float>(i) + 0.5f) * voxel,
-                    (static_cast<float>(j) + 0.5f) * voxel,
-                    (static_cast<float>(k) + 0.5f) * voxel);
-
-                const int i0 = std::max(0, i - reach), i1 = std::min(nx - 1, i + reach);
-                const int j0 = std::max(0, j - reach), j1 = std::min(ny - 1, j + reach);
-                const int k0 = std::max(0, k - reach), k1 = std::min(nz - 1, k + reach);
-
-                float acc_w = 0.0f;
-                Vec3  acc_u(0.0f, 0.0f, 0.0f);
-                for (int kk = k0; kk <= k1; ++kk)
-                for (int jj = j0; jj <= j1; ++jj)
-                for (int ii = i0; ii <= i1; ++ii) {
-                    const std::size_t nci = cellIndex(ii, jj, kk);
-                    for (std::size_t a = s_offset[nci]; a < s_offset[nci + 1]; ++a) {
-                        const std::size_t pa = s_csr[a];
-                        const Vec3 d = p_c - particles.position[pa];
-                        const float d2 = lengthSq(d);
-                        if (d2 >= kernel_R_sq) continue;
-                        const float t = 1.0f - d2 / kernel_R_sq;
-                        const float w = t * t * t;
-                        // ★★★ THE DIFFERENCE IS TAKEN PER PARTICLE, not by
-                        // subtracting the cell centre from the averaged
-                        // coordinate afterwards. The two are NOT the same:
-                        //
-                        //   mean(uvw_i) - c      carries (mean(p_i) - c), the
-                        //                        centroid of whichever particles
-                        //                        happened to sit near this cell
-                        //   mean(uvw_i - p_i)    the average DISPLACEMENT, and
-                        //                        the sampling bias cancels
-                        //
-                        // The first leaves millimetres of per-cell jitter that
-                        // has no physical meaning and reads as cell-frequency
-                        // noise. The second is exactly zero for liquid that has
-                        // not moved, whatever the particle distribution does.
-                        // ★ TWO GENERATIONS, BLENDED HERE — per particle, before
-                        // the gather. Blending is linear and so is the gather,
-                        // so this is identical to building two grids and mixing
-                        // them, at half the memory and with NOTHING to change
-                        // downstream: the buffer, the ABI and the shader stay
-                        // exactly as they were.
-                        //
-                        // ★★ And it is only well-posed because these are
-                        // DISPLACEMENTS. Mixing two absolute coordinates would
-                        // average two positions and flatten the gradient — the
-                        // same failure the extrapolation sweep once had, and the
-                        // reason the residual work had to land first.
-                        const Vec3 dp_a = particles.uvw[pa] - particles.position[pa];
-                        const Vec3 dp_b = has_gen_b
-                            ? (particles.uvw_b[pa] - particles.position[pa]) : dp_a;
-                        acc_w += w;
-                        acc_u.x += w * (w_a * dp_a.x + w_b * dp_b.x);
-                        acc_u.y += w * (w_a * dp_a.y + w_b * dp_b.y);
-                        acc_u.z += w * (w_a * dp_a.z + w_b * dp_b.z);
-                    }
-                }
-
-                if (acc_w > 1e-12f) {
-                    const float inv_w = 1.0f / acc_w;
-                    const std::size_t o = cellIndex(i, j, k) * 3u;
-                    // ★★★ RESIDUAL, not the absolute coordinate. The cell stores
-                    // the mean displacement (uvw - position); the shader
-                    // reconstructs uvw as worldPos + trilinear(residual). See the
-                    // block comment above the function for why this is the whole
-                    // quality story.
-                    uvw_out[o + 0] = acc_u.x * inv_w;
-                    uvw_out[o + 1] = acc_u.y * inv_w;
-                    uvw_out[o + 2] = acc_u.z * inv_w;
-                    s_valid[cellIndex(i, j, k)] = 1u;
-                }
-            }
-        }
-    }
-
-    // ── 3. Extrapolation outward ─────────────────────────────────────────────
-    // Flood the coordinate one voxel per sweep into unsupported cells, averaging
-    // whichever face neighbours are already valid.
-    //
-    // ★ Sweep count is set by the CONSUMER's reach, not by taste: the shader
-    // samples at the ISO crossing and trilinearly touches the 8 cells around it,
-    // so the coordinate must be valid up to ~2 voxels past the last supported
-    // cell. 3 sweeps covers that with a voxel to spare. Fewer, and the outermost
-    // corner of the filter stencil is still zero — which does not blank the
-    // texture, it drags it toward the origin by a fraction, i.e. it appears as a
-    // subtle coordinate warp hugging the silhouette. That is the failure mode
-    // nobody reports as a bug, so it is worth the extra sweep.
-    //
-    // ★★★ A PLAIN AVERAGE IS CORRECT HERE, AND ONLY BECAUSE THE FIELD IS A
-    // RESIDUAL. When this grid held absolute coordinates, averaging the
-    // neighbours FLATTENED the field as it extended — moving one voxel in world
-    // must move one voxel in coordinate, and a mean destroys exactly that
-    // gradient. It showed up as "a coarse vortex wrapped around every droplet":
-    // a pool's surface sits in SUPPORTED cells so it looked right, while a
-    // droplet spanning two or three cells crosses the ISO mostly in
-    // EXTRAPOLATED ones, where the coordinate went nearly constant and the
-    // texture blew up. The fix then was to carry the world offset on every tap.
-    //
-    // Storing the residual makes that offset arithmetic not just unnecessary but
-    // WRONG: the identity part now lives in the shader (worldPos + d), so the
-    // gradient is exact by construction, and re-adding ±voxel here would tilt
-    // the displacement field by one voxel per sweep. Smoothness of d is all this
-    // loop owes, and a mean is the right tool for that.
-    //
-    // ★ If you ever revert to absolute storage, the offsets must come back with
-    // it. They are two halves of one decision, not an optimisation.
-    constexpr int kExtrapolationSweeps = 3;
-    static std::vector<uint8_t> s_next_valid;
-    const std::size_t plane = static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny);
-    for (int sweep = 0; sweep < kExtrapolationSweeps; ++sweep) {
-        s_next_valid = s_valid;
-        // int + bitwise-or rather than bool + `||`: the reduction operator set
-        // that is portable across the OpenMP versions this project is built
-        // with is the C one, and a bool reduction is the kind of thing that
-        // compiles on one toolchain and not the next.
-        int any_filled = 0;
-#ifdef _OPENMP
-        #pragma omp parallel for collapse(3) schedule(static) num_threads(thread_cap) \
-            reduction(|:any_filled)
-#endif
-        for (int k = 0; k < nz; ++k) {
-            for (int j = 0; j < ny; ++j) {
-                for (int i = 0; i < nx; ++i) {
-                    const std::size_t c = cellIndex(i, j, k);
-                    if (s_valid[c]) continue;
-                    float sx = 0.0f, sy = 0.0f, sz = 0.0f;
-                    int n = 0;
-                    // Reads s_valid (this sweep's INPUT) and writes s_next_valid,
-                    // so a cell filled during this sweep cannot itself become a
-                    // donor until the next one. Without that separation the
-                    // result would depend on iteration order and the fill would
-                    // race ahead along +x/+y/+z, dragging one cell's coordinate
-                    // across the whole band in a single pass.
-                    auto tap = [&](std::size_t nc) {
-                        if (!s_valid[nc]) return;
-                        sx += uvw_out[nc * 3u + 0];
-                        sy += uvw_out[nc * 3u + 1];
-                        sz += uvw_out[nc * 3u + 2];
-                        ++n;
-                    };
-                    if (i > 0)      tap(c - 1);
-                    if (i + 1 < nx) tap(c + 1);
-                    if (j > 0)      tap(c - nx);
-                    if (j + 1 < ny) tap(c + nx);
-                    if (k > 0)      tap(c - plane);
-                    if (k + 1 < nz) tap(c + plane);
-                    if (n == 0) continue;
-                    const float inv_n = 1.0f / static_cast<float>(n);
-                    uvw_out[c * 3u + 0] = sx * inv_n;
-                    uvw_out[c * 3u + 1] = sy * inv_n;
-                    uvw_out[c * 3u + 2] = sz * inv_n;
-                    s_next_valid[c] = 1u;
-                    any_filled = 1;
-                }
-            }
-        }
-        s_valid.swap(s_next_valid);
-        if (!any_filled) break;
-    }
-
-    // ── 4. Smooth the displacement ───────────────────────────────────────────
-    // The per-particle difference above already cancels the sampling bias, so
-    // what is left here is the SPREAD of displacement among the particles a cell
-    // gathered — real signal in a shear zone, but at the band edge it is mostly
-    // the seam between a cell with dozens of donors and one with two, plus the
-    // step where gathered cells meet extrapolated ones.
-    //
-    // ★★★ THIS IS WHAT THE RESIDUAL BUYS. Smoothing d cannot damage the
-    // coordinate's scale, because the identity part is not in this buffer at
-    // all. Under absolute storage no filter was safe here: anything strong
-    // enough to touch the noise also attacked the gradient carrying the
-    // coordinate's world scale, which is why the field simply had to live with
-    // whatever the gather produced.
-    //
-    // Two Jacobi passes, half centre / half neighbour mean. Deliberately weak:
-    // real deformation is low-frequency and passes through untouched, while the
-    // seams above sit at exactly the cell frequency this attenuates hardest.
-    // More passes would start rounding off the sharp shear where two streams
-    // meet, and that shear is signal.
-    //
-    // ★ Only valid cells donate and only valid cells are written, so the band
-    // built above keeps its outward extension instead of being pulled back
-    // toward zero by the untouched cells beyond it.
-    {
-        constexpr int kSmoothingPasses = 2;
-        static std::vector<float> s_smooth_scratch;
-        for (int pass = 0; pass < kSmoothingPasses; ++pass) {
-            s_smooth_scratch = uvw_out;
-#ifdef _OPENMP
-            #pragma omp parallel for collapse(3) schedule(static) num_threads(thread_cap)
-#endif
-            for (int k = 0; k < nz; ++k) {
-                for (int j = 0; j < ny; ++j) {
-                    for (int i = 0; i < nx; ++i) {
-                        const std::size_t c = cellIndex(i, j, k);
-                        if (!s_valid[c]) continue;
-                        float sx = 0.0f, sy = 0.0f, sz = 0.0f;
-                        int n = 0;
-                        auto tap = [&](std::size_t nc) {
-                            if (!s_valid[nc]) return;
-                            sx += s_smooth_scratch[nc * 3u + 0];
-                            sy += s_smooth_scratch[nc * 3u + 1];
-                            sz += s_smooth_scratch[nc * 3u + 2];
-                            ++n;
-                        };
-                        if (i > 0)      tap(c - 1);
-                        if (i + 1 < nx) tap(c + 1);
-                        if (j > 0)      tap(c - nx);
-                        if (j + 1 < ny) tap(c + nx);
-                        if (k > 0)      tap(c - plane);
-                        if (k + 1 < nz) tap(c + plane);
-                        if (n == 0) continue;
-                        const float inv_n = 0.5f / static_cast<float>(n);
-                        uvw_out[c * 3u + 0] = 0.5f * s_smooth_scratch[c * 3u + 0] + sx * inv_n;
-                        uvw_out[c * 3u + 1] = 0.5f * s_smooth_scratch[c * 3u + 1] + sy * inv_n;
-                        uvw_out[c * 3u + 2] = 0.5f * s_smooth_scratch[c * 3u + 2] + sz * inv_n;
-                    }
-                }
-            }
-        }
-    }
-
-    return true;
 }
 
 bool buildCompositionGrid(const FluidParticles& particles,

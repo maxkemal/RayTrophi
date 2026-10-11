@@ -1,11 +1,17 @@
 # Birleşik madde domain'i — gaz/sıvı ayrımı olmayan simülasyon ve render
 
-> **Durum:** AKTİF — 2026-10-08. Madde T1/T3 kullanıcı build'i ve hızlı
+> **Durum:** AKTİF — 2026-10-11: T2 gizli ısı + yüzey yoğuşması CANLI PASS (yoğuşma ölçeği açık, §4.7) (§4.7, MADDE_TIPLERI §6f). 2026-10-08: Madde T1/T3 kullanıcı build'i ve hızlı
 > dış IPC kabulü PASS; legacy/save-open/görsel kabul ve T2 hal/model birleşmesi açık.
 > C5/C6/C7 fiziksel yakınsama ve H1 maliyet kapıları bu testlerle kapanmaz.
 > Uzman Gas/Liquid domain'leri T0 eşitlik ölçümü olmadan kaldırılmaz.
 
 ## 2026-10-08 ortak saat kaynak devamı
+
+2026-10-10 gaz/termal performans: termal-açık sahnede CPU kg/J taşınımı
+713/823 ms. Kg/J advection, korunum ve sahiplik GPU residency yoluna taşındı;
+sürekli tam-grid host mirror kaldırıldı. Surface heat/evaporation GPU envanterini
+doğrudan kullanıyor. Kaynak hazır; tek kullanıcı build/canlı kabul bekliyor.
+Mevcut parçacık yayını ve diğer termal yolların tam residency işi açık. Kapsam, kalanlar ve kesin checklist: [GAS_INVENTORY_GPU.md](GAS_INVENTORY_GPU.md).
 
 MPM/DEM geometri ve teması cihazda ortak mikro saat; continuum grid transferi
 kendi CFL/elastic sıklığında. Sıvı hız/topak tepkisi GPU'da her tick güncel.
@@ -288,10 +294,11 @@ seçim etiket başınadır, domain başına değil.
 
 | Yön | Terim | Bugün |
 |---|---|---|
-| sıvı → gaz | buharlaşma, yanma ürünü, `mist` aktarımı | yanma ve mist→gaz 27C canlı PASS |
+| sıvı → gaz | kaynama, kaynama altı buharlaşma, yanma ürünü, `mist` | hepsi var (2026-10-10, §4.7) |
+| ısı | sıvı ↔ gaz yüzey filmi, sıvı ↔ collider kabuğu (MSF), sıvı içi iletim + konveksiyon | var (2026-10-10, §4.7) |
 | gaz → sıvı | rüzgar/gaz hızıyla sürükleme (sprey, mist) | rüzgar + düşük kütleli mist gaz sürüklemesi var |
 | sıvı → gaz | sıvı hücreleri gaz için hareketli sınır | 27D kodda; canlı kabul bekliyor |
-| ısı | sıvı ↔ gaz ↔ katı iletim | termal zincir kısmen |
+| sıvı ↔ katı | donma / erime | var (donma: yüzey + temas çekirdeği; erime MSF ve madde) |
 | sıvı ↔ katı | donma / erime | var (donma), erime MSF'de |
 | dış → domain | `Domain Deposit` (partikül sistemi, Flow Source, sahne emitter'ı) | kısmen |
 | domain → yüzey | `Surface State Deposit` → MSF (char, ıslaklık, is) | MSF var, sıvıdan yazım yok |
@@ -342,17 +349,188 @@ tanımlı olabilir ve bunu hiçbir şey fark etmez.
 | Dönüşüm | Kaynak → hedef | Bugün |
 |---|---|---|
 | Erime | katı mesh / MSF → sıvı parçacık | var (`MoltenMassTransfer`, MSF 6b/6c) |
-| Donma | sıvı → katı (`frozen`) | var (termal sıvı) |
-| Buharlaşma / kaynama | sıvı → gaz | yok (yanma dışında) |
+| Donma / erime | sıvı ↔ katı (`frozen`, iskelet modeli) | var; 2026-10-11'den beri gizli ısı öder (`fusion_solid_fraction`, §4.7) |
+| Buharlaşma / kaynama | sıvı → gaz | kaynama kaynakta (2026-10-10, `transferBoilingToGas`: aşırı ısı → gizli ısı, buhar aynı domain'in gaz fazına, `vaporization` defter kaydı); kaynama altı buharlaşma yok |
 | Yanma | sıvı → gaz (+ısı) | var |
 | Yanma / piroliz | katı → gaz + char (MSF) | kısmen (yangın → yapı, MSF char) |
 | Yumuşama / sinterleme | granül ↔ katı / sıvı | kısmen (granül termal zinciri) |
-| Yoğuşma | gaz → sıvı | yok |
-| Sis aktarımı | sıvı `mist` → gaz | 27C canlı PASS; fiziksel kg/J + defter + uzamsal taşıma |
+| Yoğuşma | gaz → sıvı | yüzeyde var (2026-10-11, ters Hertz–Knudsen, CPU+GPU); havada sis suyu + yağış §4.8 (kaynakta) |
+| Sis aktarımı | sıvı `mist` → gaz | 27C canlı PASS; 2026-10-11: mist sis suyu havuzuna gider, gizli ısı doygunlukta ödenir (§4.8) |
 
 ★ Enerji de defterdedir: erime ve buharlaşma gizli ısıyı kaynaktan çeker.
 Bugün erime ısı tüketmiyorsa, erime sonsuz hızda ve bedava olur — sonuç
 "makul görünür" ve kimse bug diye raporlamaz.
+
+### 4.7 ★★★ Isı ve faz geçişleri — 2026-10-10 (CANLI, Ek 1–11; Ek 11 derleme bekliyor)
+
+Her şey parçacığın KENDİ maddesinden okunur: ısı sığası `m·c`, iletkenlik `k`,
+yoğunluk `ρ`, gizli ısı `L`, buhar molar kütlesi `M` (`vapor_molar_mass_kg_mol`),
+sıvı genleşmesi `β` (`thermal_expansion_per_k`), `Tb`, erime noktası. Karışık bir
+domain'de su, yağ, erimiş metal kendi değerleriyle alışveriş eder. Enerji her
+alışverişte iki cisim kesin çözümüyle korunur (taşma yok).
+
+| Süreç | Uygulama | Kanıt |
+|---|---|---|
+| Doğum fazı | Kaynak/Seed/Fill: erir katı (Snow, Ice) ortam sıcaksa erime−10 K'de, sıvı kaynama noktası üstünde doğmaz (Tb'de doğar) — `substanceAmbientBirthKelvin` | canlı PASS |
+| Termal alan | Tek `ThermalSource` (96 B float, yerel matris + şekil) MSF ve madde parçacığı için; Box/Cylinder/Cone şekle uyar; eski int→float okuma hatası (MSF falloff hep None) düzeldi | canlı PASS |
+| Sıvı içi iletim | `conductThermalLiquid`: hücre ısı sığası + harmonik k, yüz başına kesin çözüm | heat_exchange PASS |
+| Konveksiyon | `applyThermalConvection`: Boussinesq `dv=−g·β·(T−Tort)·dt` | boiling `convects` PASS |
+| Kaynama | `transferBoilingToGas`: `dm=min(m, m·c·(T−Tb)/L)`, Tb'ye sabitler, buhar sütun yüzeyinin ÜSTÜNE bırakılır (sıvı hücresine değil — RT'de süt bloğu buydu), sanal sıcaklıkla kaldırma `Tv=Tb·M_hava/M`, yanıcı buhar gaz yakıtına; çekirdekli kaynama: boşluk oranıyla fokurdama + seyrek whitewater Bubble | boiling PASS |
+| Kaynama altı buharlaşma | `exchangeLiquidGasSurface`: Hertz–Knudsen + Clausius–Clapeyron, nem = atmosfer + hücredeki buhar, gizli ısı parçacıktan; etkin katsayı 4e-5 (açık tava 1e-4 kg/m²s) | heat_exchange PASS |
+| Sıvı ↔ hava | Madde domain'inde hava = gaz ızgarası: yüzey parçacığı ↔ üst gaz hücresi, film 20 W/m²K, C_hava=ρ_hava·V·1005; ortama sonsuz soğuma kapalı. Ayrı Fluid+Gas üst üste binince de aynı (Ek 11) | heat_exchange PASS |
+| Sıvı ↔ collider | Ek 11: MSF kabuğu (alan·1 mm·ρ·c, MSF'nin kendi kütle kuralı) ↔ temas parçacığı, film 500 W/m²K; sıvı tarafı bir readback geriden okur, kabuğa giden ısı `sim_msf_ambient` binding 4 ile cihaza EKLENİR (durum ezilmez) | `rt_test_contact_heat_ipc.py` bekliyor |
+| Donma | Kapı: thermal liquid VEYA ısı alanı (domain `granular_enabled` artık kapatmaz); serbest yüzey de çekirdek (göl yüzeyden donar) | elle doğrulandı (zemin); yüzey Ek 11 |
+| Gizli ısı (füzyon) | 2026-10-11: `fusion_solid_fraction` F; Tm'de parsel bekler, `dF = c·ΔT/L`; hal = F ≥ 0.5 (Water/Wax çivili, Snow/Ice model değişir); defter gerçek ödenen ısıyı yazar. Domain donma aynası söküldü | CANLI PASS 2026-10-11: 997 kg tank tam donar, gizli ısı 332 997 993,59 J = defter 332 997 993,53 J |
+| Yüzey yoğuşması | 2026-10-11: hava hücresindeki envanter buharı (pv ≤ 1 atm) yüzey sıcaklığındaki doygunluğu aşınca ters HK akısı; buharın kendi enerjisi (e/m) parsele; önce kaybettiği kütleyi doldurur, sonra `rest_mass_kg` büyür, 2× kanonikte ikiye bölünür (`mass_fraction ≤ 1` değişmezi korunur). Defter `condensation` (kaynak gaz domain'i). CPU referansı + `sim_inventory_surface_exchange.comp` | CANLI PASS 2026-10-11 ama ★ölçek yanlış: 68 kg kaynadı, 0,010 kg yoğuştu (aşağıda) |
+| Yanan sıvı | Görsel ısı eki söküldü; buharlaşan yakıtın gizli ısısı parçacıktan, alev ısısı gaz filmiyle geri | Ek 11 |
+| Canlı düzenleme | Kuvvet alanı değişikliği koşuyu sıfırlamaz: `invalidateSimCacheAfterCurrentFrame` | Ek 11 |
+
+IPC (`fluid.list_domains`): `thermal_field_heated_particles`, `thermal_convecting_particles`,
+`thermal_conducting_cells`, `thermal_gas_exchange_particles`, `thermal_heat_to_gas_j`,
+`thermal_evaporated_kg`, `thermal_solid_contact_particles`, `thermal_heat_to_solid_j`;
+`flow_source.list`: `fluid_birth_kelvin`, `fluid_born_solid`; `fluid.seed fill_level`;
+defter `matter.exchanges` (`vaporization`). Testler: `rt_test_snow_ipc.py`,
+`rt_test_boiling_ipc.py`, `rt_test_heat_exchange_ipc.py`, `rt_test_contact_heat_ipc.py`.
+
+**★ Canlı ölçümün gösterdiği (2026-10-11, `fusion_condensation_live.json`):**
+(1) envanter basınçla sınırlı değil — 8 m³ kutuda 68 kg buhar ≈ 8,5 kg/m³,
+1 atm doymuş buharın (~0,6 kg/m³) 14 katı; (2) yoğuşma katsayısı 4e-5 havaya
+difüzyon sınırlı buharlaşmaya kalibre, saf buharın soğuk yüzeye yoğuşması
+yüzlerce kat hızlı olmalı (sınır gizli ısının uzaklaştırılması). Test yalnız
+">0" sınadığı için PASS verdi.
+
+**Açık (bilinçli):** hacimsel yoğuşma (sis/yağmur) — ölçek engeli: bir sıvı
+parseli (ρh³/ppc ≈ 8 g @ 4 cm) bir gaz hücresinin fiziksel olarak taşıyabileceği
+buhardan (doygunlukta ~mg) binlerce kat büyük; "aşırı doymuş hücre → damla"
+hiç tetiklenmez. Doğru yol bulut modellerindeki doygunluk ayarı + hücre başına
+taşınan bir **kondensat (sis suyu) alanı**; bu, GPU envanter bankasına (aşağıda)
+üçüncü taşınan alan demek, derlenmemiş koda kör eklenmedi. Ayrıca
+`transferMistToGas` mist parselini buhara çevirirken gizli ısıyı envantere
+**ekliyor ama hiçbir yerden almıyor** (defter "ödendi" diyor) — aynı ölçek
+sorunu yüzünden basit düzeltmesi yok, kondensat alanıyla birlikte ele alınmalı.
+Gaz içi iletim; gaz havasının fiziksel enerji
+envanteri (bugün sıcaklık alanı + hücre ısı sığası); DEM tanelerinin sıcaklığı
+([HANDOFF_DEM_THERMAL.md](HANDOFF_DEM_THERMAL.md)); erimiş/donmuş "buz" rijit gövde değil,
+sabitlenmiş parçacık ([BUZ_MODEL_KARARI.md](BUZ_MODEL_KARARI.md)); sıvı↔hava filmi
+madde başına değil sabit (20 W/m²K). Kaynama sırasında 702 K'de kalan parçacıklar
+gözlendi (kaynama kapısından düşen bir alt küme) — ölçülmedi.
+
+### 4.7b Plana yazılmamış yapılar (diğer ajan, 2026-10-10, kodda var)
+
+§4.7 tablosu yüzey ısısı/buharlaşmayı CPU `exchangeLiquidGasSurface` olarak
+anlatıyordu; Vulkan yolunda o artık çalışmıyor. Gerçek yapı:
+
+- **Gaz kg/J envanteri GPU'da sahiplidir** (`GasInventoryGpu.h`,
+  `GasInventoryDevice.cpp`, `GasInventoryGpu.cpp`, shader'lar
+  `sim_inventory_{advect_scalar,maccormack_scalar,conserve,clear,deposit,momentum,summary}`).
+  Fizik adımında tam grid upload/download 0 byte; CPU üreticileri (kaynama,
+  mist, yanma) `depositGasInventory` ile küçük benzersiz-hücre kayıtları kuyruğa
+  koyar. Hata sessiz CPU'ya düşmez: `inventory_step_held`, reset gerekir.
+  Belge: [GAS_INVENTORY_GPU.md](GAS_INVENTORY_GPU.md).
+- **Yüzey ısı/buharlaşma (ve artık yoğuşma)**: `GasSurfaceExchangePlan.{h,cpp}`
+  (plan/doğrulama/yayın, CPU-GPU ortak), `GasSurfaceExchangeCpu.cpp` (CPU
+  referansı), `GasSurfaceExchangeGpu.cpp` + `sim_inventory_surface_exchange` /
+  `_commit`. Hava hücresi seçimi `GasSurfaceGeometry` (açık yüzleri olan sütun).
+  Nem: hücredeki TÜM envanter kütlesi buhar sayılır (tek tür; yanma ürünleri de).
+- **Gaz faz momentumu**: `GasPhaseMomentum.{h,cpp}` — buhar/mist kütlesinin
+  momentumu gaz hızına `sim_inventory_momentum` ile eklenir.
+- **Whitewater çalışma zamanı**: `WhitewaterRuntime.{h,cpp}`.
+- **Kare önbelleği**: `MatterGridFrameCache.h`, `LosslessFrameArray.h`,
+  `GasInventoryFrameCapture` (kg/J kayıpsız RAM payload).
+- Yüzey/UVW: `SurfaceParticleBins.h`, `SurfaceWorkTiles.h`
+  ([SDF_SPARSE_WORK_OPTIMIZATION_2026_10_10.md](SDF_SPARSE_WORK_OPTIMIZATION_2026_10_10.md)).
+
+Hepsi 2026-10-10 itibarıyla derlenmemiş/canlı kabul bekliyor (NEXT_BUILD_CHECKS).
+
+### 4.8 Sis suyu: doygunluk ayarı ve kondensat — 2026-10-11 (CANLI PASS)
+
+Kullanıcı kararı (2026-10-11): sis suyu **domain içinde**, atmosfer katmanıyla
+**aynı birimlerle** (kg/m³ = kg / hücre hacmi, K). Bulut sistemiyle birleşme
+ileride bir eşleme meselesi; şimdi bağlanmadı.
+
+- **İki havuz.** `gas_phase_mass_kg` yalnız BUHAR; yeni `gas_phase_condensate_kg`
+  havanın taşıdığı sıvı su (sis/bulut). `gas_phase_energy_j` hücredeki TÜM suyun
+  enerjisi (buhar c·T + L, sis c·T). GPU bankası 3 havuz × 3 yuva; kondensat
+  buharla aynı çekirdeklerle taşınır ve korunur (conserve ikinci çağrı), kare
+  önbelleği + disk v13 + backend geçişi + anlık görüntü taşır.
+- **Doygunluk ayarı** (`GasSaturation.{h,cpp}`, `sim_inventory_saturation.comp`):
+  her gaz adımında hücre, hava sıcaklığıyla dengeye getirilir. Yoğuşan buharın gizli
+  ısısı havayı ısıtır, buharlaşan sis havayı soğutur; miktar ısının doyma noktasını
+  kaydırmasıyla birlikte ÇÖZÜLÜR (ikiye bölme), aşma yok. C = hava + suyun ısı
+  sığası. 1 atm tavanı YOK (tavan kaçak ısınma yaratıyordu; aşırı basınçlı hücre
+  basınçlı kap gibi dengeye gelir). Dünya nemi kütlesiz arka plan buharı.
+  Python oracle: nemli hava 0,03 kg/m³ @293 K → 5,3 g/m³ yoğuşur, +9 K; kuru
+  havada 5 g/m³ sis → 4,5 g/m³ buharlaşır, −8 K; 8,5 kg/m³ buhar ~470 K'de durur.
+- **Yağış:** bir hücrenin sis suyu bir sıvı parseline (ρh³/ppc) ulaşınca, Matter
+  domain'inin sıvı gridi içindeyse parsel olarak doğar (`precipitation` defter
+  türü). Fiziksel sisle tetiklenmez; yoğun buharda döngüyü kapatır.
+- **Mist düzeltmesi:** mist parselleri artık buhara değil sis havuzuna gider
+  (faz değişimi yok); gizli ısıyı sonra doygunluk ayarında havadan öder. Eskiden
+  L·m enerji hiçbir yerden alınmadan envantere ekleniyordu.
+- **Yüzey HK katsayısı:** 4e-5 (açık tava, hava içinden difüzyon) hava payıyla
+  ölçeklenir, saf buharda arayüz değeri 0,04'e çıkar (iki yön, CPU + shader).
+  Yoğuşan buharın enerjisi c·T_hava + L (havuz artık tüm suyu tuttuğu için e/m değil).
+- **Kapı:** Matter + thermal chain, ya da sis suyu taşıyan herhangi gaz domain'i.
+  Yoğuşan madde: Default Substance (buhar verisi var ve yanıcı değilse), yoksa Water.
+- **Açık:** sis suyu RENDER'a bağlı değil (görünür buhar hâlâ `gas.density`
+  izleyicisi; bulut işiyle birlikte). Tek tür: yanma ürünleri de "buhar" sayılır.
+  Kaynama buharı sıcaklık izleyicisine sanal sıcaklıkla (≈600 K) yazılıyor —
+  kaynağın hemen üstünde doygunluk yanlış okunur. Sis çökelmesi (damla düşüşü)
+  ve sisin yüzeye çökmesi yok.
+- **Canlı kanıt (2026-10-11, `rt_test_fog_ipc.py` 6/6 PASS, `docs/dev/fog_live.json`):**
+  240 adımda 130,05 kg kaynadı + 2,47 kg mist; yüzey yoğuşması 3,09 kg (%2,4;
+  önceki 0,010/68 kg), yağış 94,09 kg, havada 1,54 kg buhar + 33,81 kg sis.
+  Su korunumu: havada 35,343248 kg, beklenen 35,343257 kg (fark 9e-6 kg).
+  Regresyonlar (T2, mist, kaynama, ısı, GPU envanter) PASS.
+- **★ Sinsi — sis yoğunluğu fiziksel değil:** sis tutan hücrelerde ortalama
+  **41,7 kg/m³** (gerçek sis/bulut 1e-4–1e-3 kg/m³). Yağış eşiği bir sıvı parseli
+  (ρh³/ppc ≈ 250 kg/m³ bu kurulumda) olduğu için asılı damla sınırı yok; sıvı
+  havada %4 hacimle süzülüyor. Test korunumu ölçüyor, bunu ölçmüyor. Çözüm adayı:
+  hücre başına asılı su tavanı (otokonversiyon, Kessler tipi, ~1e-3 kg/m³ üstü
+  yağmur suyuna) + yağmur suyunun çökme hızıyla düşmesi; kaynaktaki +400 K alan
+  zorlaması ölçeği büyütüyor ama sınırın yokluğu ölçekten bağımsız.
+  → **Parti 3'te yazıldı (aşağı), derlenmedi.**
+
+#### 4.8b Yağmur: otokonversiyon, sis tavanı, düşüş, iniş — 2026-10-11 (CANLI PASS)
+
+- **Üç domain parametresi** (`APICSolverParams`, kg/m³ — atmosfer birimi; API
+  `fluid.set_param`, panel Thermal Liquid altında, proje + sahne kaydı + hash):
+  `fog_autoconversion_kg_m3` = 1e-3 (Kessler eşiği), `fog_autoconversion_rate`
+  = 1e-3 1/s (Kessler k1, örtük: (w−eşik)(1−e^(−k dt))), `fog_ceiling_kg_m3` = 5e-3
+  (yoğun kümülüs; üstü anında yağmura). Yalnız sıvı içeren domain'de
+  (`setFluidThermal`) yazılabilir; saf gaz domain'i varsayılanı kullanır.
+- **Yağmur havuzu:** envanterde rüzgârla TAŞINMAYAN iki yuva — yağmur kütlesi [9],
+  yağmur enerjisi [10] (kendi duyulur enerjisi; paylaşılan enerji havuzu rüzgârla
+  gider). Banka 11 yuva; kalıcı yuvalar `kPersistentSlots = {0,3,6,9,10}` tek
+  listeden snapshot/upload/arka uç değişimi. Disk önbelleği **v14** (v11–13 okunur).
+- **Düşüş** (`sim_inventory_rain_fall`, CPU `fallRain`): sütun başına bir iş
+  parçacığı, Kessler/Klemp–Wilhelmson uç hızı 36,34·(ρ_r[g/cm³])^0,1364 m/s
+  (1 g/m³'te 5,5 m/s; 10 m/s tavan), alt adımla hücre başına en çok bir hücre,
+  aşağıdan yukarı tarama. Durduğu yerler: katı hücrenin üstü (`gas_solid_mask`),
+  ızgara tabanı, yüzey değişiminin **iniş damgası** vurduğu hücre.
+- **İniş:** yüzey değişimi her yüzey parselinin hava hücresini o adımın
+  damgasıyla işaretler (`gas_rain_landing`, adımda bir ilerleyen
+  `gas_rain_stamp`) ve hücredeki yağmuru parsellere yüzey payıyla verir
+  (duyulur, faz değişimi yok; `GasSurfaceResult::rain_kg/rain_energy_j`,
+  commit yağmuru sıfırlar). Sıvı olmayan yerde (taban) yağmur birikir, bir sıvı
+  parseli kütlesine ulaşınca parsel doğar (eski sis yağışı artık yağmur
+  havuzundan). Defter: `autoconversion` `:fog→:rain`, `precipitation`
+  `:rain→domain` (doğum ve emilim).
+- **Ölçüm:** `fog_autoconverted_kg`, `rained_kg` (doğum+emilim),
+  `rain_absorbed_kg`, `gas_rain_kg`, `gas_rain_cells`.
+- **Açık:** yağmur rüzgârla sürüklenmez; açık tabanlı domain'de de tabanda
+  birikir (dışarı akmaz); dar bir yüzey hücresini atlayan yağmur sıvının içinden
+  tabana iner ve orada parsel olur (kütle korunur, konum kaba). Bulut ajanının
+  `CloudPrecipitation` (`rate_mm_h`) render tarafı; bu fizik tarafı — bağlantı
+  bulut işiyle.
+- **Canlı kanıt (2026-10-11, `rt_test_fog_ipc.py` 9/9 PASS + regresyonlar):** 96,19 kg
+  kaynadı; sis ortalaması en çok **0,0031 kg/m³** (tavan 0,005; önceki 41,7);
+  otokonversiyon 94,08 kg, yağmur→sıvı 85,82 kg (20,83 kg yüzeyde emildi, ~65 kg
+  parsel doğumu), havada 1,13 kg buhar + 0,0007 kg sis + 8,26 kg düşen yağmur
+  (2713 hücre; ~23 kg/s üretim × 2 m düşüş süresiyle tutarlı). Korunum: 9,383396 /
+  9,383403 kg (fark 6e-6). **Ölçülmedi:** parsel doğumlarının YERİ — kaynak üstünde
+  yoğun yoğuşmanın havada doğurduğu yağmur parseli mi (beklenen), yoksa yüzeyi atlayıp
+  tank dibinde biriken yağmur mu (sinsi durum).
 
 ### 4.6 ★★★ Materyal sözleşmesi: veri hangi materyalle sürülür
 
@@ -1472,6 +1650,63 @@ probe son karede FAIL: havuz dolu olduğundan drained_kg=0, bu aşamada beklenen
 budget koşulu; önceki kayıtlı örnekte drenaj doğumu görüldü. C5 genel finite /
 saturation / GPU publication probe ayrıca çalıştırıldı. C5 tam kabul açık.
 
+## 2026-10-10 karar — 2026-10-11 öncelikleri
+
+Kullanıcı aşağıdaki iki açık işi yarın ele almak üzere ana plana bağladı.
+Bu kayıt uygulama veya canlı kabul değildir; diğer açık kapılar korunur.
+
+### 1. DEM uyku doğruluğu — mevcut revizyon 23/24 işinin devamı
+
+Yeni bir uyku projesi açılmaz. Başlangıç kaydı
+[Revizyon 23 — uyku canlı A/B (2026-10-09)](grain_sleep_ab_rev23/REPORT.md),
+güncel kaynak devamı [DEM_UYUYAN_TANELER.md](DEM_UYUYAN_TANELER.md) içindeki
+revizyon 24 ve [DEM_SLEEP_TRANSFER_IMPLEMENTATION.md](DEM_SLEEP_TRANSFER_IMPLEMENTATION.md).
+Rev23 kısa sleep ve açı paritesi PASS olsa da açık repose tane boyutu kapısı
+FAIL olduğundan tam kabul açık; rev24 kaynak durumu canlı kabul değildir.
+
+Kullanıcının hareketsiz parçacıkların uyumasıyla ilgili bugünkü sorunu problemli
+sahnede yeniden üretilir; kök neden henüz kesinleşmedi. Durgun/desteklenen tane
+uyumalı, desteksiz düşüş uyumamalı; darbe, destek kaybı, hareketli collider ve
+dış kuvvet doğru uyanmayı sağlamalı. Sıvı/MPM birlikteliğinde uyku politikası
+etkileşim kuvvetlerini kaybetmemeli. Mevcut sleep/transfer, repose ve büyük-N
+A/B kapıları ile kullanıcı sahnesi geçmeden bu iş kapatılmaz. Uyuyan/uyanık
+sayıları, wake nedenleri, enerji, temas ve maliyet aynı core üzerinden
+UI/Python/IPC'de izlenebilir olmalı; cache/reset davranışı doğrulanmalı.
+
+### 2. FG1 — Matter içi sıvı–gaz etkileşimi ve söndürme kabulü
+
+2026-10-10 salt okunur denetimde aynı Matter domaininde
+`liquid_moving_boundary` çalışırken eski `runGpuFluidSurfaceQuench` aynı domaini
+atlıyor ve yalnız ayrı Fluid/Gas Vulkan çiftini kabul ediyor. Okuma anındaki
+emitter Soil/MPM idi; bu gözlem Water ile canlı A/B kabulü değildir.
+
+- Hareketli hacim sınırı, termal alışveriş, kimyasal söndürme ve faz/yanma
+  aktarımı ayrı doğrulanır. Gazın kaplanan hücrelerden dışlanması gerçek
+  soğutma veya alev kaynağının söndürülmesi kabulü yerine kullanılamaz.
+- Water/APIC söndürmesi aynı Matter domainine bağlanır; seçim parçacığın
+  substance_tag ve madde özelliklerinden yapılır. Domain varsayılan maddesi
+  bütün karışımın kimyasını belirlememeli. Fazların farklı bounds/voxel
+  eşlemesi ve GPU alan sahipliği korunmalı.
+- Gaz→sıvı ısı ve sıvı→gaz soğutma, mevcut kaynama/yanma aktarımıyla ortak
+  core/ledger sözleşmesinde tutarlı olmalı; kg/J iki kez yazılmamalı.
+  DEM/MPM mekanik engellemesi ile maddeye bağlı termal/kimyasal etkiler ayrılır;
+  çözücü adı tek başına kimya seçmez. Gaz/granülün eksik bağlantıları ayrıca
+  raporlanır; mevcut hareketli sınır tam bağlantı kabulü sayılmaz.
+- Sürekli gaz flow source ve yanıcı yüzey/MSF ayrı kabul kollarıdır: sıcaklık,
+  fuel/flame azalması, su kaldırılınca sürekli kaynağın yeniden beslemesi ve
+  yüzey moisture/ısı/yeniden tutuşma ölçülür. Kaynağın enabled alanının
+  otomatik kapatılması söndürme tanımı değildir.
+- Kabul matrisi: aynı Matter içinde ateş+Water/APIC, ateş+Sand/DEM,
+  ateş+Soil/MPM, water+granül karışımı, temassız kontrol ve ayrı-domain referansı.
+  Desteklenen backendler doğrulanır; desteklenmeyen yol sessiz no-op olmaz.
+  sim_graph.couplings gerçekten çalışan işlemi gösterir. UI/Python/IPC aynı
+  core servis, validation ve hata semantiğini paylaşır. Cache/rewind,
+  ledger/termal ve render regresyonları geçmeden FG1 ve C7 kapatılmaz.
+
+Uygulama odaklı modüllerde yapılır; 2000 satır üstü kaynaklarda yalnız küçük
+entegrasyon olur. Build/shader derlemesi kullanıcıda; canlı testler uygulama
+açıkken ayrı süreçte scripts/test/rt_ipc.py ile yürütülür.
+
 ## Öncelikli sonraki düzeltmeler
 1. FluidPhysicalMass.cpp densityForParticle yalnız liquid_density kullanıyor.
    Sand/Gravel/Soil bu alanı override etmiyor (default 1000); dry density alanı
@@ -1498,3 +1733,35 @@ bağlı. C6 fiziksel kabul kapanmadı; local head pressure PDE değildir. Toplu 
 ABI: stress_update 18/68, stress_p2g 9/52. Güncel kısa durum/test listesi:
 [MATTER_C5_HANDOFF.md](MATTER_C5_HANDOFF.md); model sınırları:
 [MATTER_WET_RESPONSE.md](MATTER_WET_RESPONSE.md).
+
+### 2026-10-10 sıvı/gaz yüzeyi ve whitewater kaynak güncellemesi
+
+Altı açık yüz üzerinden ortak CPU/GPU ısı-buharlaşma planı, yerel kaynama
+çıkışı, faz momentumunun gaz MAC hızına aktarılması ve enerji bütçesi düzeltmesi
+kaynakta hazır. WW kapalı hesap kapısı, güncel criterion/komşu girdileri, dar bin
+penceresi ve taşmada eksiksiz CPU fallback aynı partidedir. Script/IPC maliyet
+ve doğruluk sayaçları eklendi. Dokuz kaynak/matematik kontrolü PASS; build
+yapılmadı ve canlı fizik/performans kabulü açık. Güncel kapsam ve tek kullanıcı
+derlemesi checklist'i:
+[GAS_WHITEWATER_PHYSICS_COST_2026_10_10.md](GAS_WHITEWATER_PHYSICS_COST_2026_10_10.md).
+DEM Revizyon 23/24 uyku kabulü bu kaynak kontrolüyle kapanmış sayılmaz.
+
+
+### 2026-10-10 SDF yüzey çalışma maliyeti
+
+Fiziksel ölçekte kalite çarpanından bağımsız CSR, aktif surface tile planı ve
+halo yumuşatma kaynakta hazır. Anisotropik kernel merkez kaymasının eksik
+sorgu desteği düzeltildi; ortak native/script/IPC aşama sayaçları eklendi.
+Final dense SDF/NanoVDB consumer storage korunuyor. Kaynak/matematik kontrolleri
+PASS; C++ derlemesi, canlı hız/kalite/rewind kabulü açık. Kapsam ve checklist:
+[SDF_SPARSE_WORK_OPTIMIZATION_2026_10_10.md](SDF_SPARSE_WORK_OPTIMIZATION_2026_10_10.md).
+
+
+### 2026-10-10 UVW maliyeti ve yüzey merkezi filtresi
+
+UVW gather/extrapolation/smoothing aktif tile planına taşındı; output CSR
+filtrelenmiş render merkezlerine kurulur. Position smoothing spherical yolda
+da uygulanır; düşük komşulukta isolated droplet korunur, fizik SoA değişmez.
+Mevcut UI/script/IPC parametreleri aynı core servise bağlıdır. Kaynak/math
+kontrolleri PASS, C++ build ve canlı hız/kalite/UVW/rewind kabulü açık.
+[UVW_SURFACE_FILTER_OPTIMIZATION_2026_10_10.md](UVW_SURFACE_FILTER_OPTIMIZATION_2026_10_10.md).

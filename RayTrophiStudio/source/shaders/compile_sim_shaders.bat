@@ -70,6 +70,28 @@ glslc "%SHADER_DIR%sim_grid_divergence.comp"          -o "%SHADER_DIR%sim_grid_d
 glslc "%SHADER_DIR%sim_grid_sor.comp"                 -o "%SHADER_DIR%sim_grid_sor.spv"                 --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_grid_subtract_gradient.comp"   -o "%SHADER_DIR%sim_grid_subtract_gradient.spv"   --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_grid_advect_scalar.comp"       -o "%SHADER_DIR%sim_grid_advect_scalar.spv"       --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_inventory_advect_scalar.comp" -o "%SHADER_DIR%sim_inventory_advect_scalar.spv" --target-env=vulkan1.2
+if errorlevel 1 exit /b 1
+glslc "%SHADER_DIR%sim_inventory_maccormack_scalar.comp" -o "%SHADER_DIR%sim_inventory_maccormack_scalar.spv" --target-env=vulkan1.2
+if errorlevel 1 exit /b 1
+glslc "%SHADER_DIR%sim_inventory_conserve.comp" -o "%SHADER_DIR%sim_inventory_conserve.spv" --target-env=vulkan1.2
+if errorlevel 1 exit /b 1
+glslc "%SHADER_DIR%sim_inventory_clear.comp" -o "%SHADER_DIR%sim_inventory_clear.spv" --target-env=vulkan1.2
+if errorlevel 1 exit /b 1
+glslc "%SHADER_DIR%sim_inventory_deposit.comp" -o "%SHADER_DIR%sim_inventory_deposit.spv" --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_inventory_momentum.comp" -o "%SHADER_DIR%sim_inventory_momentum.spv" --target-env=vulkan1.2
+if errorlevel 1 exit /b 1
+if errorlevel 1 exit /b 1
+glslc "%SHADER_DIR%sim_inventory_summary.comp" -o "%SHADER_DIR%sim_inventory_summary.spv" --target-env=vulkan1.2
+if errorlevel 1 exit /b 1
+glslc "%SHADER_DIR%sim_inventory_surface_exchange.comp" -o "%SHADER_DIR%sim_inventory_surface_exchange.spv" --target-env=vulkan1.2
+if errorlevel 1 exit /b 1
+glslc "%SHADER_DIR%sim_inventory_surface_commit.comp" -o "%SHADER_DIR%sim_inventory_surface_commit.spv" --target-env=vulkan1.2
+if errorlevel 1 exit /b 1
+glslc "%SHADER_DIR%sim_inventory_saturation.comp" -o "%SHADER_DIR%sim_inventory_saturation.spv" --target-env=vulkan1.2
+if errorlevel 1 exit /b 1
+glslc "%SHADER_DIR%sim_inventory_rain_fall.comp" -o "%SHADER_DIR%sim_inventory_rain_fall.spv" --target-env=vulkan1.2
+if errorlevel 1 exit /b 1
 glslc "%SHADER_DIR%sim_grid_advect_velocity.comp"     -o "%SHADER_DIR%sim_grid_advect_velocity.spv"     --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_grid_velocity_dissipate.comp"  -o "%SHADER_DIR%sim_grid_velocity_dissipate.spv"  --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_grid_maccormack_scalar.comp"   -o "%SHADER_DIR%sim_grid_maccormack_scalar.spv"   --target-env=vulkan1.2

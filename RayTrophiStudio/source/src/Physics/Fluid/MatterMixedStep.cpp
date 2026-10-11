@@ -92,6 +92,7 @@ std::size_t estimateMixedMatterWorkingSet(const FluidParticles& particles,
     bytes += bytesOf(particles.rest_mass_kg);
     bytes += bytesOf(particles.temperature);
     bytes += bytesOf(particles.combustible_fraction);
+    bytes += bytesOf(particles.fusion_solid_fraction);
     bytes += bytesOf(particles.substance_tag);
     bytes += bytesOf(particles.constitutive_model);
     bytes += bytesOf(particles.granular_deformation_col0);

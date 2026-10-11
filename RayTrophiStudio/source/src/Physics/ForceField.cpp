@@ -15,17 +15,17 @@ namespace Physics {
 // FORCE FIELD - EVALUATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
+Matrix4x4 ForceField::worldToLocalMatrix() const {
+    const Matrix4x4 mat = Matrix4x4::translation(position) *
+                          Matrix4x4::rotationX(rotation.x * 0.0174533f) *
+                          Matrix4x4::rotationY(rotation.y * 0.0174533f) *
+                          Matrix4x4::rotationZ(rotation.z * 0.0174533f) *
+                          Matrix4x4::scaling(scale);
+    return mat.inverse();
+}
+
 Vec3 ForceField::worldToLocal(const Vec3& world_pos) const {
-    // Construct full transform matrix
-    Matrix4x4 mat = Matrix4x4::translation(position) * 
-                    Matrix4x4::rotationX(rotation.x * 0.0174533f) * 
-                    Matrix4x4::rotationY(rotation.y * 0.0174533f) * 
-                    Matrix4x4::rotationZ(rotation.z * 0.0174533f) * 
-                    Matrix4x4::scaling(scale);
-                    
-    // Inverse transform to get local position
-    Matrix4x4 inv = mat.inverse();
-    return inv.transform_point(world_pos);
+    return worldToLocalMatrix().transform_point(world_pos);
 }
 
 bool ForceField::isInsideInfluenceZone(const Vec3& world_pos) const {

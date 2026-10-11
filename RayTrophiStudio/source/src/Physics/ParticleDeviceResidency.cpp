@@ -323,6 +323,8 @@ bool ParticleSimulationSystem::syncHostState(const char* reason) {
 }
 
 void ParticleSimulationSystem::onComputeBackendChanging(SimulationComputeContext& compute) {
+    Fluid::releaseGasInventoryDomainsForBackendChange(
+        grid_domain_states_, grid_domain_compute_buffers_, compute);
     if (residency_ == ParticleKinematicResidency::Device && residentBuffersValidFor(compute)) {
         downloadResidentKinematics(compute, "backend_switch", /*in_step=*/false);
     }

@@ -1508,7 +1508,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     ImGui::InputInt("Frame", &current_frame, 0, 0);
     ImGui::PopItemWidth();
     
-    current_frame = std::clamp(current_frame, start_frame, end_frame);
+    clampCurrentFrameToRange();
     
     ImGui::SameLine();
     ImGui::TextDisabled("|");

@@ -124,6 +124,7 @@ Result applyCloudPreset(const std::string& name) {
     }
     // A look preset keeps the quality settings, like the panel.
     preset.quality = g_ctx->renderer.world.getClouds().quality;
+    preset.material = g_ctx->renderer.world.getClouds().material;
     return commit(preset);
 }
 
@@ -149,6 +150,7 @@ Result cloudStatsJson(std::string& out_json) {
             // The flag the RT shaders read: false while textures build, in a
             // non-Nishita world, or with every layer off.
             r["rt_rendering"] = vk->cloudRtRendering();
+            r["scene_depth_pipeline_available"] = vk->cloudSceneDepthAvailable();
         }
         rows.push_back(r);
     };

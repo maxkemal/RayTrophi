@@ -75,6 +75,7 @@ layout(push_constant) uniform CameraPC {
 // Payload — shared ABI, single source of truth
 #include "rt_payload.glsl"
 #include "volume_instrumentation.glsl"
+#include "surface_sdf_march_policy.glsl"
 
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
@@ -253,6 +254,7 @@ struct VkWorldDataExtended {
 
 layout(set = 0, binding = 7, scalar) readonly buffer WorldBuffer { VkWorldDataExtended w; } worldData;
 layout(set = 0, binding = 8) uniform sampler2D atmosphereLUTs[4];
+#include "cloud_hit_segment.glsl"
 
 // ============================================================
 // Hit Attributes from intersection shader
@@ -2028,11 +2030,9 @@ float nearestSurfaceSDFCrossing(vec3 rayOrigin,
         const float ISO = 0.5;
         float span = endT - beginT;
         int cap = clamp(surface.max_steps, 32, 512);
-        float fineStep = clamp(surface.step_size,
-                               surface.voxel_size * 0.1,
-                               surface.voxel_size * 0.5);
-        float step = max(0.001, max(fineStep, span / float(cap)));
-        int steps = min(int(ceil(span / step)) + 1, cap + 1);
+        int steps;
+        float step = surfaceSdfMarchStep(span, surface.voxel_size,
+                                        surface.step_size, cap, steps);
         float t0s = beginT;
         float d0 = sampleIsoField(
             surface, rayOrigin + rayDir * t0s, surfaceBuf, mapH, acc);
@@ -2741,7 +2741,7 @@ void volumeRandomWalk(VkVolumeInstance vol, vec3 rayOrigin, vec3 rayDir,
 
 #include "volume_overlap_selection.glsl"
 
-void main() {
+void shadeVolumeHit() {
     // Volume instance index from gl_InstanceCustomIndexEXT
     // (Set via TLASInstance::customIndex when building TLAS for volume objects)
     uint volIdx = gl_InstanceCustomIndexEXT;
@@ -5206,4 +5206,11 @@ void main() {
         measuredTopologySegments,
         measuredDensityLeafSegments,
         marchOutcome);
+}
+
+void main() {
+    uint pathFlags = payload.primaryMeta & (PL_CAMERA_SEGMENT | PL_NO_SKY_RADIANCE);
+    shadeVolumeHit();
+    payload.primaryMeta |= pathFlags;
+    cloudApplyVolumeSegment();
 }

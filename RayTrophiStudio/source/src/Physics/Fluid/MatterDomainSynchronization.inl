@@ -318,6 +318,9 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
             // Stable per-domain seed: index-based, so jitter patterns are
             // reproducible across runs and don't depend on heap addresses
             // (the desc vector can reallocate as domains are added).
+            // Seeded parcels are the domain's Default Substance (untagged), born
+            // by the same rule as a flow source: Snow seeded into a warm domain
+            // is snow, not water (substanceAmbientBirthKelvin).
             const std::size_t seed_begin = state.particles.size();
             Fluid::seedBox(state.particles,
                            Fluid::liquidGrid(state),
@@ -326,7 +329,9 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
                            ppc,
                            /*seed=*/static_cast<uint32_t>(i + 1u) * 2654435761u,
                            seed_budget,
-                           fluidDomainAmbientKelvin(domain, world_thermal_));
+                           Fluid::substanceAmbientBirthKelvin(
+                               Fluid::kSubstanceUntagged, domain.fluid_params,
+                               fluidDomainAmbientKelvin(domain, world_thermal_)));
             Fluid::initializeMatterBirthModels(
                 state.particles, seed_begin, domain.fluid_params);
             domain.fluid_pending_seed = false;

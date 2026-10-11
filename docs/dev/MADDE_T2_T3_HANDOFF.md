@@ -1,6 +1,6 @@
 # Madde T1/T3 kabulü ve T2 devam noktası
 
-> **Durum:** AKTİF — 2026-10-08. Kullanıcı build'i başarılı; T1/T3 hızlı dış IPC kabulü PASS. T2 kısmi, tam T3 kabulü açık.
+> **Durum:** AKTİF — 2026-10-11: T2 CANLI PASS (gizli ısı, ayna sökümü; Ice→Water iptal) — [MADDE_TIPLERI §6f](MADDE_TIPLERI_TASARIMI.md). 2026-10-08: T1/T3 hızlı dış IPC kabulü PASS, tam T3 kabulü açık.
 
 ## Son devam: sparse pressure GPU kaynağı
 

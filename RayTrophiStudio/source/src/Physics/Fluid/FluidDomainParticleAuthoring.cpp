@@ -10,16 +10,23 @@ bool ParticleSimulationSystem::seedFluidDomainParticles(
     const Vec3& seed_max,
     int particles_per_cell,
     bool replace,
-    bool persistent) {
+    bool persistent,
+    float fill_level) {
     for (auto& domain : grid_domains_) {
         if (domain.name != domain_name ||
             !simulationDomainHasLiquid(domain.type)) {
             continue;
         }
 
-        domain.fluid_seed_mode = FluidSeedMode::SeedBox;
-        domain.fluid_seed_min = Vec3::min(seed_min, seed_max);
-        domain.fluid_seed_max = Vec3::max(seed_min, seed_max);
+        if (fill_level >= 0.0f) {
+            // Fill Domain: the panel's resting tank, reachable from IPC too.
+            domain.fluid_seed_mode = FluidSeedMode::FillLevel;
+            domain.fluid_fill_level = std::clamp(fill_level, 0.0f, 1.0f);
+        } else {
+            domain.fluid_seed_mode = FluidSeedMode::SeedBox;
+            domain.fluid_seed_min = Vec3::min(seed_min, seed_max);
+            domain.fluid_seed_max = Vec3::max(seed_min, seed_max);
+        }
         domain.fluid_seed_particles_per_cell =
             std::clamp(particles_per_cell, 1, 64);
         domain.fluid_replace_on_seed = replace;

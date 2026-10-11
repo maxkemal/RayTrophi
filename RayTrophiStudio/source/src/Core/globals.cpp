@@ -132,20 +132,51 @@ void deferRenderMeshEdit(const std::string& objectName, uint64_t fromGeneration,
 // Macros are defined in globals.h
 
 RenderSettings render_settings;  // Uses default values from header
+namespace {
+std::atomic<bool> scene_logging_available{true};
+}
+
+void disableSceneLoggingForShutdown() {
+    scene_logging_available.store(false, std::memory_order_release);
+}
+
 UILogger g_sceneLog; // global logger’ın tanımı burada
 
+void sceneLogMessage(const std::string& msg, LogLevel level) {
+    if (scene_logging_available.load(std::memory_order_acquire)) {
+        g_sceneLog.add(msg, level);
+    }
+}
+
 namespace {
+struct SceneLogChangeState {
+    std::mutex mutex;
+    std::unordered_map<std::string, long long> states;
+
+    ~SceneLogChangeState() {
+        // Late global renderer destructors may log after this local static dies.
+        // Disable logging before either the map or its mutex is destroyed.
+        disableSceneLoggingForShutdown();
+    }
+};
+
+SceneLogChangeState& sceneLogChangeState() {
+    static SceneLogChangeState state;
+    return state;
+}
+
 std::mutex& sceneLogOnChangeMutex() {
-    static std::mutex m;
-    return m;
+    return sceneLogChangeState().mutex;
 }
 std::unordered_map<std::string, long long>& sceneLogOnChangeStates() {
-    static std::unordered_map<std::string, long long> s;
-    return s;
+    return sceneLogChangeState().states;
 }
 }
 
 void sceneLogOnChangeReset() {
+    if (!scene_logging_available.load(std::memory_order_acquire)) {
+        return;
+    }
     // ★ The recorded states MUST be dropped when the scene is replaced.
     //
     // Two runs of the same script in one session (new project in between) were
@@ -159,6 +190,9 @@ void sceneLogOnChangeReset() {
 }
 
 void sceneLogOnChange(const std::string& key, long long state, const std::string& msg) {
+    if (!scene_logging_available.load(std::memory_order_acquire)) {
+        return;
+    }
     std::mutex& s_mutex = sceneLogOnChangeMutex();
     std::unordered_map<std::string, long long>& s_states = sceneLogOnChangeStates();
     {

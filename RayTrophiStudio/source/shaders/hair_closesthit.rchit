@@ -129,6 +129,8 @@ struct VkWorldDataExtended {
     float envOverlayRotation;
 };
 layout(set = 0, binding = 7, scalar) readonly buffer WorldBuffer { VkWorldDataExtended w; } worldData;
+layout(set = 0, binding = 8) uniform sampler2D atmosphereLUTs[4];
+#include "cloud_hit_segment.glsl"
 
 // --- Binding 6: Material textures (Environment map) ---
 layout(set = 0, binding = 6) uniform sampler2D materialTextures[];
@@ -462,7 +464,7 @@ vec3 hair_bsdf_eval(
 // Main
 // ═══════════════════════════════════════════════════════════════════════════════
 
-void main()
+void shadeHairHit()
 {
     payload.skipGasVolumes = false;
     vec3 hitPoint = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
@@ -669,4 +671,11 @@ void main()
     payload.scatterDir    = normalize(gl_WorldRayDirectionEXT);
     payload.scattered   = false;
     payload.skipVolumeAABBs   = false;
+}
+
+void main() {
+    uint pathFlags = payload.primaryMeta & (PL_CAMERA_SEGMENT | PL_NO_SKY_RADIANCE);
+    shadeHairHit();
+    payload.primaryMeta |= pathFlags;
+    cloudApplyHitSegment(gl_HitTEXT);
 }

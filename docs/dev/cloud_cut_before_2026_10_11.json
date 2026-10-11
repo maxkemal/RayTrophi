@@ -1,0 +1,155 @@
+{
+  "clouds": {
+    "any_enabled": true,
+    "cirrus": {
+      "altitude_m": 9000.0,
+      "coverage": 0.30000001192092896,
+      "enabled": false,
+      "opacity": 0.30000001192092896,
+      "rotation_degrees": 0.0,
+      "scale_m": 8000.0
+    },
+    "derive_from_climate": false,
+    "layers": [
+      {
+        "base_altitude_m": 1100.0,
+        "cell_size_m": 4200.0,
+        "coverage": 0.6600000262260437,
+        "detail_size_m": 500.0,
+        "droplet_diameter_um": 39.099998474121094,
+        "enabled": true,
+        "erosion": 0.6499999761581421,
+        "extinction_per_m": 0.07500000298023224,
+        "rotation_degrees": 0.0,
+        "thickness_m": 7910.0,
+        "type": 1.0
+      },
+      {
+        "base_altitude_m": 1500.0,
+        "cell_size_m": 1800.0,
+        "coverage": 0.3499999940395355,
+        "detail_size_m": 180.0,
+        "droplet_diameter_um": 10.0,
+        "enabled": false,
+        "erosion": 0.5,
+        "extinction_per_m": 0.05000000074505806,
+        "rotation_degrees": 0.0,
+        "thickness_m": 1500.0,
+        "type": 0.5
+      },
+      {
+        "base_altitude_m": 1500.0,
+        "cell_size_m": 1800.0,
+        "coverage": 0.3499999940395355,
+        "detail_size_m": 180.0,
+        "droplet_diameter_um": 10.0,
+        "enabled": false,
+        "erosion": 0.5,
+        "extinction_per_m": 0.05000000074505806,
+        "rotation_degrees": 0.0,
+        "thickness_m": 1500.0,
+        "type": 0.5
+      }
+    ],
+    "material": {
+      "absorption_coefficient": 0.0,
+      "anisotropy": 0.6060000061988831,
+      "density_multiplier": 1.0,
+      "emission_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "emission_strength": 0.0,
+      "override_anisotropy": true,
+      "scattering_coefficient": 1.0,
+      "scattering_color": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "precipitation": {
+      "ground_fraction": 1.0,
+      "rate_mm_h": 0.0,
+      "snow": false
+    },
+    "presets": [
+      "clear",
+      "fair_weather_cumulus",
+      "towering_cumulus",
+      "scattered",
+      "broken",
+      "overcast_stratus",
+      "storm",
+      "high_cirrus",
+      "sunset_altocumulus"
+    ],
+    "quality": {
+      "realtime_resolution_divisor": 1,
+      "realtime_steps": 128,
+      "rt_max_bounces": 8,
+      "rt_reference_path_trace": false,
+      "rt_secondary_full_march": true,
+      "rt_steps": 128
+    },
+    "revision": 1286,
+    "time_seconds": 0.0,
+    "weather": {
+      "evolution_speed": 0.0020000000949949026,
+      "extent_m": 150000.0,
+      "feature_size_m": 12000.0,
+      "seed": 1,
+      "type_variation": 0.25
+    },
+    "wind_offset_m": [
+      0.0,
+      0.0
+    ]
+  },
+  "camera": {
+    "aperture": 0.0,
+    "auto_exposure": true,
+    "depth_of_field": false,
+    "effective_lens_radius": 0.0,
+    "ev_compensation": 0.0,
+    "exposure_factor": 1.0,
+    "f_number": 2.0,
+    "focus_distance": 4817.61328125,
+    "fov": 40.0,
+    "fstop_preset_index": 4,
+    "iso_preset_index": 1,
+    "iso_value": 100.0,
+    "position": [
+      -4.0246076583862305,
+      1.9194376468658447,
+      7.020350456237793
+    ],
+    "shutter_preset_index": 1,
+    "shutter_seconds": 0.0002500000118743628,
+    "target": [
+      4547.9453125,
+      1029.6197509765625,
+      -1189.9912109375
+    ],
+    "up": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "use_physical_exposure": false
+  },
+  "viewport": {
+    "accumulation_complete": true,
+    "available": true,
+    "backend": "vulkan",
+    "capture_enabled": false,
+    "frame_available": false,
+    "height": 0,
+    "ms_per_sample": 0.0,
+    "rendering_active": false,
+    "samples": 128,
+    "shading": "rendered",
+    "width": 0
+  }
+}

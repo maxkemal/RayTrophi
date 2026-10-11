@@ -1,0 +1,17 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Constants { uint count; } pc;
+layout(set = 0, binding = 0) buffer Mass { float mass[]; };
+layout(set = 0, binding = 1) buffer Energy { float energy[]; };
+struct Deposit { uint cell; float mass; float energy; uint padding; };
+layout(set = 0, binding = 2) readonly buffer Deposits { Deposit deposits[]; };
+void main() {
+    uint id = gl_GlobalInvocationID.x +
+        gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (id < pc.count) {
+        // Sorted, unique cell records: no float atomics and no lost updates.
+        Deposit value = deposits[id];
+        mass[value.cell] += value.mass;
+        energy[value.cell] += value.energy;
+    }
+}

@@ -1,0 +1,506 @@
+[
+  {
+    "frame": 60,
+    "particles": 25000,
+    "surface": {
+      "surface_active_cells": 74050,
+      "surface_anisotropy_ms": 0.00019999999494757503,
+      "surface_bin_cells": 262144,
+      "surface_bin_ms": 1.5748000144958496,
+      "surface_build_ms": 7.958399772644043,
+      "surface_gather_ms": 2.8206000328063965,
+      "surface_grid_dim": [
+        128,
+        128,
+        128
+      ],
+      "surface_material": "",
+      "surface_measured": true,
+      "surface_offset_voxels": 0.6499999761581421,
+      "surface_resolution_multiplier": 1,
+      "surface_schedule_ms": 2.152899980545044,
+      "surface_smooth_ms": 0.9075000286102295,
+      "surface_voxel": 0.0390625,
+      "surface_work_cells": 211968
+    },
+    "sections": [
+      {
+        "count": 95,
+        "last_ms": 80.5545,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 171.249,
+        "name": "sim.timeline.render_sync",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17683,
+        "total_ms": 6792.654399999999
+      },
+      {
+        "count": 122,
+        "last_ms": 9.8036,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 57.3626,
+        "name": "sim.render.volume.publish",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17682,
+        "total_ms": 1516.9379999999996
+      },
+      {
+        "count": 92,
+        "last_ms": 0.0003,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 0.0009,
+        "name": "sim.render.surface.composition",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17681,
+        "total_ms": 0.026300000000000004
+      },
+      {
+        "count": 92,
+        "last_ms": 49.2706,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 62.5014,
+        "name": "sim.render.surface.material_coordinates",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17680,
+        "total_ms": 4531.9785999999995
+      },
+      {
+        "count": 92,
+        "last_ms": 8.2072,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 95.0678,
+        "name": "sim.render.surface.level_set",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17679,
+        "total_ms": 655.5787
+      },
+      {
+        "count": 95,
+        "last_ms": 12.1779,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 20.4479,
+        "name": "sim.render.fog_volume",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17678,
+        "total_ms": 849.3568000000002
+      },
+      {
+        "count": 98,
+        "last_ms": 40.7364,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 61.2932,
+        "name": "sim.timeline.restore_frame",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17676,
+        "total_ms": 1323.3027999999997
+      },
+      {
+        "count": 31,
+        "last_ms": 0.0001,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 0.0007,
+        "name": "sim.cache.restore.prepare",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17675,
+        "total_ms": 0.0066
+      },
+      {
+        "count": 67,
+        "last_ms": 0.0,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 0.0006,
+        "name": "sim.timeline.restore_frame_disk",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 9539,
+        "total_ms": 0.010899999999999995
+      }
+    ]
+  },
+  {
+    "frame": 61,
+    "particles": 25416,
+    "surface": {
+      "surface_active_cells": 78767,
+      "surface_anisotropy_ms": 0.0003000000142492354,
+      "surface_bin_cells": 262144,
+      "surface_bin_ms": 1.684999942779541,
+      "surface_build_ms": 7.760200023651123,
+      "surface_gather_ms": 2.8057000637054443,
+      "surface_grid_dim": [
+        128,
+        128,
+        128
+      ],
+      "surface_material": "",
+      "surface_measured": true,
+      "surface_offset_voxels": 0.6499999761581421,
+      "surface_resolution_multiplier": 1,
+      "surface_schedule_ms": 1.7990000247955322,
+      "surface_smooth_ms": 0.9688000082969666,
+      "surface_voxel": 0.0390625,
+      "surface_work_cells": 224256
+    },
+    "sections": [
+      {
+        "count": 96,
+        "last_ms": 76.7256,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 171.249,
+        "name": "sim.timeline.render_sync",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17731,
+        "total_ms": 6869.379999999999
+      },
+      {
+        "count": 124,
+        "last_ms": 9.2493,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 57.3626,
+        "name": "sim.render.volume.publish",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17730,
+        "total_ms": 1538.2285999999997
+      },
+      {
+        "count": 93,
+        "last_ms": 0.0003,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 0.0009,
+        "name": "sim.render.surface.composition",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17729,
+        "total_ms": 0.026600000000000006
+      },
+      {
+        "count": 93,
+        "last_ms": 46.506,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 62.5014,
+        "name": "sim.render.surface.material_coordinates",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17728,
+        "total_ms": 4578.4846
+      },
+      {
+        "count": 93,
+        "last_ms": 7.9926,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 95.0678,
+        "name": "sim.render.surface.level_set",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17727,
+        "total_ms": 663.5713000000001
+      },
+      {
+        "count": 96,
+        "last_ms": 12.0508,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 20.4479,
+        "name": "sim.render.fog_volume",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17726,
+        "total_ms": 861.4076000000002
+      },
+      {
+        "count": 99,
+        "last_ms": 40.8868,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 61.2932,
+        "name": "sim.timeline.restore_frame",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17724,
+        "total_ms": 1364.1895999999997
+      },
+      {
+        "count": 32,
+        "last_ms": 0.0002,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 0.0007,
+        "name": "sim.cache.restore.prepare",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17723,
+        "total_ms": 0.0068
+      },
+      {
+        "count": 67,
+        "last_ms": 0.0,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 0.0006,
+        "name": "sim.timeline.restore_frame_disk",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 9539,
+        "total_ms": 0.010899999999999995
+      }
+    ]
+  },
+  {
+    "frame": 60,
+    "particles": 25000,
+    "surface": {
+      "surface_active_cells": 74050,
+      "surface_anisotropy_ms": 0.00039999998989515007,
+      "surface_bin_cells": 262144,
+      "surface_bin_ms": 1.7610000371932983,
+      "surface_build_ms": 9.203300476074219,
+      "surface_gather_ms": 2.9718000888824463,
+      "surface_grid_dim": [
+        128,
+        128,
+        128
+      ],
+      "surface_material": "",
+      "surface_measured": true,
+      "surface_offset_voxels": 0.6499999761581421,
+      "surface_resolution_multiplier": 1,
+      "surface_schedule_ms": 2.5316998958587646,
+      "surface_smooth_ms": 1.4306999444961548,
+      "surface_voxel": 0.0390625,
+      "surface_work_cells": 211968
+    },
+    "sections": [
+      {
+        "count": 97,
+        "last_ms": 79.9867,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 171.249,
+        "name": "sim.timeline.render_sync",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17779,
+        "total_ms": 6949.3667
+      },
+      {
+        "count": 126,
+        "last_ms": 9.5164,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 57.3626,
+        "name": "sim.render.volume.publish",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17778,
+        "total_ms": 1559.7977999999996
+      },
+      {
+        "count": 94,
+        "last_ms": 0.0004,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 0.0009,
+        "name": "sim.render.surface.composition",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17777,
+        "total_ms": 0.027000000000000007
+      },
+      {
+        "count": 94,
+        "last_ms": 47.6768,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 62.5014,
+        "name": "sim.render.surface.material_coordinates",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17776,
+        "total_ms": 4626.1614
+      },
+      {
+        "count": 94,
+        "last_ms": 9.435,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 95.0678,
+        "name": "sim.render.surface.level_set",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17775,
+        "total_ms": 673.0063
+      },
+      {
+        "count": 97,
+        "last_ms": 12.0628,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 20.4479,
+        "name": "sim.render.fog_volume",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17774,
+        "total_ms": 873.4704000000003
+      },
+      {
+        "count": 100,
+        "last_ms": 41.8706,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 61.2932,
+        "name": "sim.timeline.restore_frame",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17772,
+        "total_ms": 1406.0601999999997
+      },
+      {
+        "count": 33,
+        "last_ms": 0.0001,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 0.0007,
+        "name": "sim.cache.restore.prepare",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17771,
+        "total_ms": 0.0069
+      },
+      {
+        "count": 67,
+        "last_ms": 0.0,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 0.0006,
+        "name": "sim.timeline.restore_frame_disk",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 9539,
+        "total_ms": 0.010899999999999995
+      }
+    ]
+  },
+  {
+    "frame": 61,
+    "particles": 25416,
+    "surface": {
+      "surface_active_cells": 78767,
+      "surface_anisotropy_ms": 0.0003000000142492354,
+      "surface_bin_cells": 262144,
+      "surface_bin_ms": 1.6261999607086182,
+      "surface_build_ms": 8.078700065612793,
+      "surface_gather_ms": 2.9275999069213867,
+      "surface_grid_dim": [
+        128,
+        128,
+        128
+      ],
+      "surface_material": "",
+      "surface_measured": true,
+      "surface_offset_voxels": 0.6499999761581421,
+      "surface_resolution_multiplier": 1,
+      "surface_schedule_ms": 1.8042000532150269,
+      "surface_smooth_ms": 1.2110999822616577,
+      "surface_voxel": 0.0390625,
+      "surface_work_cells": 224256
+    },
+    "sections": [
+      {
+        "count": 98,
+        "last_ms": 79.3272,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 171.249,
+        "name": "sim.timeline.render_sync",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17827,
+        "total_ms": 7028.693899999999
+      },
+      {
+        "count": 128,
+        "last_ms": 9.4844,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 57.3626,
+        "name": "sim.render.volume.publish",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17826,
+        "total_ms": 1581.4295999999997
+      },
+      {
+        "count": 95,
+        "last_ms": 0.0002,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 0.0009,
+        "name": "sim.render.surface.composition",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17825,
+        "total_ms": 0.027200000000000005
+      },
+      {
+        "count": 95,
+        "last_ms": 48.2233,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 62.5014,
+        "name": "sim.render.surface.material_coordinates",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17824,
+        "total_ms": 4674.3847
+      },
+      {
+        "count": 95,
+        "last_ms": 8.3379,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 95.0678,
+        "name": "sim.render.surface.level_set",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17823,
+        "total_ms": 681.3442
+      },
+      {
+        "count": 98,
+        "last_ms": 12.157,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 20.4479,
+        "name": "sim.render.fog_volume",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17822,
+        "total_ms": 885.6274000000003
+      },
+      {
+        "count": 101,
+        "last_ms": 40.6275,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 61.2932,
+        "name": "sim.timeline.restore_frame",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17820,
+        "total_ms": 1446.6876999999997
+      },
+      {
+        "count": 34,
+        "last_ms": 0.0001,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 0.0007,
+        "name": "sim.cache.restore.prepare",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 17819,
+        "total_ms": 0.007
+      },
+      {
+        "count": 67,
+        "last_ms": 0.0,
+        "last_rss_delta_mb": 0.0,
+        "max_ms": 0.0006,
+        "name": "sim.timeline.restore_frame_disk",
+        "rss_after_mb": 0.0,
+        "rss_measured": false,
+        "seq": 9539,
+        "total_ms": 0.010899999999999995
+      }
+    ]
+  }
+]

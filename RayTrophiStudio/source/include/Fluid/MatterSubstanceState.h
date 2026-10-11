@@ -17,7 +17,7 @@ class ParticleSimulationSystem;
 namespace Fluid {
 struct APICSolverParams;
 class FluidParticles;
-constexpr uint64_t kMatterSubstanceStateRevision = 8u;
+constexpr uint64_t kMatterSubstanceStateRevision = 9u;  // 9: fusion latent heat
 
 enum class MatterTransportOwner : uint8_t { Fluid, Grain, Mpm, Obstacle };
 struct MatterOwnerSummary {
@@ -75,9 +75,29 @@ bool validateMatterTransportEdit(const std::string& substance,
 
 // One substance lookup policy for birth, freezing and viscosity. Tag zero
 // means the domain default; an unknown nonzero tag retains that same fallback.
+// No substance at all (a domain whose Default Substance is missing) has no
+// freeze point: substanceFreezeKelvin is -inf, never a domain-wide copy.
 const SubstanceProfile* particleSubstance(uint32_t tag, const APICSolverParams& params);
+// A meltable substance whose solid is a mechanical skeleton (granular or
+// elastic: Snow, Ice). Its solid and liquid are two constitutive models of one
+// parcel; a meltable liquid (Water, Wax) freezes in place instead.
+bool substanceHasSolidSkeleton(const SubstanceProfile* profile);
+// A parcel is in the solid state while at least this share of it is solid
+// (fusion_solid_fraction). The latent heat of half the parcel separates the
+// two switch points, so the state does not flicker at the melt point.
+constexpr float kFusionSolidThreshold = 0.5f;
 MatterConstitutiveModel substanceBirthModel(uint32_t tag, const APICSolverParams& params,
                                           float kelvin);
+// A source that does not set its own temperature pours the substance as
+// itself: the domain ambient, except that a meltable granular or elastic
+// substance (Snow, Ice) is born kSolidBirthBelowMeltKelvin under its melt point
+// when the ambient is warmer. Snow poured into a 20 C room is snow that melts
+// over time, not water. A liquid is likewise never born above its boiling
+// point (born at Tb, then boils as heat arrives). `lowered` reports whether
+// the ambient was overridden.
+constexpr float kSolidBirthBelowMeltKelvin = 10.0f;
+float substanceAmbientBirthKelvin(uint32_t tag, const APICSolverParams& params,
+                                  float ambient_kelvin, bool* lowered = nullptr);
 void initializeMatterBirthModels(FluidParticles& particles, std::size_t begin,
                                 const APICSolverParams& params);
 void refreshMatterConstitutiveModels(FluidParticles& particles,
@@ -95,7 +115,6 @@ void collectMatterStaticTags(const SimulationGridDomainDesc& domain,
                             std::vector<uint32_t>& tags);
 
 float substanceFreezeKelvin(uint32_t tag, const APICSolverParams& params);
-float substanceMeltReleaseKelvin(uint32_t tag, const APICSolverParams& params);
 float substanceThermalViscosity(uint32_t tag, float kelvin,
                                const APICSolverParams& params);
 

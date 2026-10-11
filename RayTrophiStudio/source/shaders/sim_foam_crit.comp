@@ -31,6 +31,7 @@ layout(push_constant) uniform PC {
     float wc_min; float wc_max;
     float ke_min; float ke_max;
     float dt;
+    int offset_x; int offset_y; int offset_z;
 } pc;
 
 layout(set = 0, binding = 0) readonly buffer Positions  { float pos_data[]; };
@@ -38,6 +39,7 @@ layout(set = 0, binding = 1) readonly buffer Velocities { float vel_data[]; };
 layout(set = 0, binding = 2) readonly buffer Counts     { uint  counts[];   };
 layout(set = 0, binding = 3) readonly buffer Items      { uint  items[];    };
 layout(set = 0, binding = 4) buffer          Expected   { float expected[]; };
+layout(set = 0, binding = 5) readonly buffer Eligible { uint eligible[]; };
 
 // Byte-for-byte the host's clamp01 (FluidFoam.cpp), degenerate branch included —
 // hi <= lo must behave as a hard threshold, not as zero, or a domain configured
@@ -59,7 +61,8 @@ void main() {
     //
     // Consequence handled elsewhere: particles that never binned get no thread, so
     // expected[] is zeroed by sim_foam_bin_clear instead of at the top here.
-    int slot = int(gl_GlobalInvocationID.x);
+    int slot = int(gl_GlobalInvocationID.x +
+        gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x);
     int nci  = slot / pc.max_per_cell;
     int a    = slot - nci * pc.max_per_cell;
     // Derived, not passed: FoamCritGpuConstants has no cell_count and growing a
@@ -67,7 +70,7 @@ void main() {
     if (nci >= pc.nx * pc.ny * pc.nz) return;
     if (uint(a) >= min(counts[nci], uint(pc.max_per_cell))) return;
     int pi = int(items[uint(nci) * uint(pc.max_per_cell) + uint(a)]);
-    if (pi >= pc.particle_count) return;
+    if (pi >= pc.particle_count || eligible[pi] == 0u) return;
     if (pc.voxel_size <= 1e-6 || pc.h <= 1e-6) return;
 
     vec3 xi = vec3(pos_data[pi * 3], pos_data[pi * 3 + 1], pos_data[pi * 3 + 2]);
@@ -78,9 +81,9 @@ void main() {
     float inv_h = 1.0 / pc.voxel_size;
     // Cell indices come from the bin that placed this particle, so they are known
     // in range; recomputing keeps the arithmetic identical to the host reference.
-    int ci = int(floor((xi.x - pc.origin_x) * inv_h));
-    int cj = int(floor((xi.y - pc.origin_y) * inv_h));
-    int ck = int(floor((xi.z - pc.origin_z) * inv_h));
+    int ci = int(floor((xi.x - pc.origin_x) * inv_h)) - pc.offset_x;
+    int cj = int(floor((xi.y - pc.origin_y) * inv_h)) - pc.offset_y;
+    int ck = int(floor((xi.z - pc.origin_z) * inv_h)) - pc.offset_z;
     if (ci < 0 || ci >= pc.nx || cj < 0 || cj >= pc.ny || ck < 0 || ck >= pc.nz) return;
 
     int i0 = max(0, ci - pc.reach), i1 = min(pc.nx - 1, ci + pc.reach);

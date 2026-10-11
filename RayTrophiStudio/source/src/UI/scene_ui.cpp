@@ -26,6 +26,7 @@
 #include <fstream>
 #include "json.hpp"
 #include "ProjectManager.h"
+#include "ProjectTimelineReset.h"
 #include "TerrainManager.h"
 #include "TerrainCurveNodes.h"
 #include "MeshEdit/SplineObject.h"
@@ -3758,6 +3759,8 @@ void SceneUI::draw(UIContext& ctx)
         replayFractureRecipes(ctx);
     }
 
+    applyPendingProjectTimelineReset(timeline, ctx.scene, ctx.render_settings);
+
     // Texture Safety Cleanup
     manageTextureGraveyard();
     {
@@ -4032,6 +4035,10 @@ void SceneUI::draw(UIContext& ctx)
             previous_timeline_end = timeline.getEndFrame();
         }
         ctx.scene.updateSimulationTimeline(timeline.getCurrentFrame(), timeline.isPlaying(), rt_dt, 24.0f, live_mode, ui_editing);
+        if (!RayTrophiSim::Fluid::gasInventoryStepError(ctx.scene).empty()) {
+            timeline.pausePlayback();
+            ctx.render_settings.animation_is_playing = false;
+        }
         // A fluid-affecting edit rewinds the sim to frame 0 instead of auto-resimming
         // up to a high parked frame; move the playhead to start so the cost of the
         // re-bake is opt-in (the user plays forward when ready). Flash a transient

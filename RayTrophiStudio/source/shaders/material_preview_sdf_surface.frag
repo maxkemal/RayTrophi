@@ -18,6 +18,7 @@ layout(location = 0) out vec4 outColor;
 #include "material_preview_transmission.glsl"
 #include "post_chain.glsl"
 #include "material_preview_ray.glsl"
+#include "surface_sdf_march_policy.glsl"
 
 layout(set = 0, binding = 0, std430) readonly buffer MaterialBuffer {
     GpuMaterial materials[];
@@ -215,9 +216,8 @@ bool marchSurface(uint vi, vec3 ro, vec3 rd, float maxVisibleT,
     int cap = quality <= 1u ? 192 : (quality == 2u ? 512 : 1024);
     float voxel = max(volFloat(vi, 176u), 1e-4);
     float authoredStep = max(volFloat(vi, 152u), voxel * 0.1);
-    float targetStep = min(authoredStep, voxel * 0.45);
-    float stepSize = max(targetStep, (endT - beginT) / float(cap));
-    int steps = min(int(ceil((endT - beginT) / stepSize)) + 1, cap + 1);
+    int steps;
+    float stepSize = surfaceSdfMarchStep(endT - beginT, voxel, authoredStep, cap, steps);
 
     const float iso = 0.5;
     float t0 = beginT;

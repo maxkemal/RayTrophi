@@ -51,11 +51,16 @@ def main():
 
     original = {'control': call('sim.control_state'),
                 'domains': call('fluid.list_domains')['domains'],
-                'sources': call('flow_source.list')}
+                'sources': call('flow_source.list'),
+                'fields': call('forcefield.list')}
     assert not original['control']['playing'], 'Pause first'
     domain_ready = source_ready = False
+    heat_field = None
     derived = []
     try:
+        # Scene fields off: a Thermal field now heats matter parcels too.
+        for field in original['fields']:
+            call('forcefield.set_param', field=field['name'], enabled=False)
         for source in original['sources']:
             call('flow_source.update', name=source['name'], enabled=False)
         for domain in original['domains']:
@@ -111,6 +116,63 @@ def main():
                   ('particles', 'height_m', 'rms_radius_m', 'kinetic_energy_j')}),
                   'pv', json.dumps(last['plastic_volume']), flush=True)
 
+        # Born at the domain ambient (no custom temperature): Snow must still be
+        # poured as snow. Before 2026-10-09 a warm ambient birthed it above its
+        # melt point and every parcel ran as water (the fixed 263 K above hid it).
+        call('fluid.set_param', domain=DOMAIN, default_substance='Snow')
+        call('flow_source.update', name=SOURCE, enabled=True, fluid_substance='Snow',
+             fluid_temperature_override=False)
+        listed = {row['name']: row for row in call('flow_source.list')}[SOURCE]
+        call('timeline.set_frame', frame=0)
+        call('fluid.reset')
+        for _ in range(20):
+            call('fluid.step', dt=1 / 60)
+        domain_row = {d['name']: d for d in call('fluid.list_domains')['domains']}[DOMAIN]
+        ambient = {'birth_kelvin': listed['fluid_birth_kelvin'],
+                   'born_solid': listed['fluid_born_solid'],
+                   'granular_particles': domain_row['granular_model_particles'],
+                   'fluid_particles': domain_row['fluid_model_particles']}
+        data['ambient_birth'] = ambient
+        print('ambient_birth', json.dumps(ambient), flush=True)
+
+        # A Thermal force field over the pile melts it (2026-10-09: fields
+        # heated only meshes, snow under one stayed snow).
+        heat_field = call('forcefield.create', type='thermal', name='T: snow heat')['name']
+        call('forcefield.set_param', field=heat_field, enabled=True, shape='sphere',
+             position=[0, 0, 0], inner_radius=1.5, falloff_radius=2.0,
+             thermal_delta_kelvin=200.0)
+        for _ in range(120):
+            call('fluid.step', dt=1 / 60)
+        domain_row = {d['name']: d for d in call('fluid.list_domains')['domains']}[DOMAIN]
+        heat = {'heated': domain_row.get('thermal_field_heated_particles'),
+                'max_kelvin': domain_row['particle_max_kelvin'],
+                'granular_particles': domain_row['granular_model_particles'],
+                'fluid_particles': domain_row['fluid_model_particles']}
+        data['heat_field'] = heat
+        print('heat_field', json.dumps(heat), flush=True)
+
+        # Seed Fluid Now and Fill Domain pour the Default Substance by the same
+        # birth rule as a source (2026-10-09: both birthed Snow at ambient and
+        # it ran as water).
+        call('flow_source.update', name=SOURCE, enabled=False)
+        call('forcefield.remove', field=heat_field)  # it would melt the seeds
+        heat_field = None
+        seeded = {}
+        for label, extra in (('seed_box', {'seed_min': [-.3, .2, -.3], 'seed_max': [.3, .5, .3]}),
+                             ('fill', {'fill_level': .15})):
+            call('timeline.set_frame', frame=0)
+            call('fluid.reset')
+            call('fluid.seed', domain=DOMAIN, particles_per_cell=4, replace=True, **extra)
+            for _ in range(5):
+                call('fluid.step', dt=1 / 60)
+            row = {d['name']: d for d in call('fluid.list_domains')['domains']}[DOMAIN]
+            seeded[label] = {'granular_particles': row['granular_model_particles'],
+                             'fluid_particles': row['fluid_model_particles'],
+                             'min_kelvin': row['particle_min_kelvin']}
+        call('fluid.clear', domain=DOMAIN, clear_seed=True)
+        data['seeded'] = seeded
+        print('seeded', json.dumps(seeded), flush=True)
+
         final = {a['label']: a['final'] for a in data['arms']}
         pv_max = {k: (v['plastic_volume'] or {}).get('max_value') for k, v in final.items()}
         verdicts = {
@@ -119,6 +181,13 @@ def main():
             'compaction': pv_max['snow'] is not None and pv_max['snow'] > 1.005 and
                           pv_max['no_compaction'] is not None and pv_max['no_compaction'] <= 1.005,
             'cohesion': final['snow']['rms_radius_m'] < .8 * final['loose']['rms_radius_m'],
+            'ambient_birth_is_snow': ambient['birth_kelvin'] < 273.15 and
+                                     ambient['granular_particles'] > 0 and
+                                     ambient['fluid_particles'] == 0,
+            'seed_and_fill_are_snow': all(v['granular_particles'] > 0 and v['fluid_particles'] == 0
+                                          for v in seeded.values()),
+            'heat_field_melts': (heat['heated'] or 0) > 0 and heat['max_kelvin'] > 273.15 and
+                                heat['fluid_particles'] > 0,
             'rest': all(v['kinetic_energy_j'] / max(v['particles'], 1) < 1e-4
                         for v in final.values()),
         }
@@ -129,6 +198,10 @@ def main():
         if not all(verdicts.values()):
             raise SystemExit(1)
     finally:
+        if heat_field:
+            call('forcefield.remove', field=heat_field)
+        for field in original['fields']:
+            call('forcefield.set_param', field=field['name'], enabled=field['enabled'])
         if source_ready:
             # Release the derived substances so they can be removed.
             call('flow_source.update', name=SOURCE, enabled=False, fluid_substance='Snow')

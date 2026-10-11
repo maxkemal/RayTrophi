@@ -1,0 +1,87 @@
+{
+  "samples": [
+    {
+      "step": 1,
+      "particles": 32000,
+      "max_kelvin": 306.11346435546875,
+      "boiled_kg": 0.0,
+      "gas_phase_mass_kg": 0.0,
+      "gas_active_cells": 0,
+      "gas_phase_active_cells": 0,
+      "convecting": 31993
+    },
+    {
+      "step": 20,
+      "particles": 32000,
+      "max_kelvin": 373.1499938964844,
+      "boiled_kg": 39.02173335465298,
+      "gas_phase_mass_kg": 39.021734149968715,
+      "gas_active_cells": 4426,
+      "gas_phase_active_cells": 21733,
+      "convecting": 32000
+    },
+    {
+      "step": 40,
+      "particles": 32000,
+      "max_kelvin": 373.1499938964844,
+      "boiled_kg": 106.67635165981021,
+      "gas_phase_mass_kg": 106.676354567014,
+      "gas_active_cells": 5585,
+      "gas_phase_active_cells": 41042,
+      "convecting": 32000
+    },
+    {
+      "step": 60,
+      "particles": 32000,
+      "max_kelvin": 373.1499938964844,
+      "boiled_kg": 166.6522553488972,
+      "gas_phase_mass_kg": 166.65227384310177,
+      "gas_active_cells": 7194,
+      "gas_phase_active_cells": 42043,
+      "convecting": 32000
+    },
+    {
+      "step": 80,
+      "particles": 32000,
+      "max_kelvin": 373.1499938964844,
+      "boiled_kg": 226.38841861185048,
+      "gas_phase_mass_kg": 226.38840425587998,
+      "gas_active_cells": 7071,
+      "gas_phase_active_cells": 33893,
+      "convecting": 32000
+    },
+    {
+      "step": 100,
+      "particles": 32000,
+      "max_kelvin": 373.1499938964844,
+      "boiled_kg": 277.44858745520384,
+      "gas_phase_mass_kg": 277.4485941037772,
+      "gas_active_cells": 8183,
+      "gas_phase_active_cells": 36482,
+      "convecting": 32000
+    },
+    {
+      "step": 120,
+      "particles": 31499,
+      "max_kelvin": 373.1499938964844,
+      "boiled_kg": 325.0166885342024,
+      "gas_phase_mass_kg": 327.33846487418043,
+      "gas_active_cells": 9763,
+      "gas_phase_active_cells": 30500,
+      "convecting": 31516
+    }
+  ],
+  "mist_kg": 2.3217898746952415,
+  "boiled_kg": 325.0166885342024,
+  "transferred_kg": 327.33847840889763,
+  "worst_mass_error": 0.0,
+  "worst_energy_error": 9.313225746154785e-10,
+  "verdicts": {
+    "boils": true,
+    "exchange_balanced": true,
+    "inventory_holds_steam": true,
+    "steam_visible": true,
+    "convects": true,
+    "liquid_lost_mass": true
+  }
+}

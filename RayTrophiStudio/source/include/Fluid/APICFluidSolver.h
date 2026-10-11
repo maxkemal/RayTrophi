@@ -232,14 +232,17 @@ struct APICSolverParams {
     //                  the domain ambient); the interior only cools through
     //                  conduction (granular_thermal_conductivity, which already
     //                  drives particle<->particle conduction for every domain);
-    //   2. viscosity - ν ramps from the domain's hot value to
-    //                  thermal_cold_viscosity over thermal_viscosity_range K
-    //                  above the freeze point, interpolated in LOG space (a
+    //   2. viscosity - ν ramps from the parcel substance's hot value to its
+    //                  liquid_cold_viscosity over liquid_freeze_viscosity_range
+    //                  K above its melt point, interpolated in LOG space (a
     //                  linear ramp would spend the whole range near the cold
     //                  end and read as "suddenly solid");
-    //   3. freezing  - below thermal_freeze_kelvin a parcel becomes a pinned
-    //                  solid, but only where it touches a support. See
-    //                  FluidThermalLiquid.h for why.
+    //   3. freezing  - below the substance's melt_kelvin a parcel pays its
+    //                  latent heat and becomes a pinned solid, but only where it
+    //                  touches a support. See FluidThermalLiquid.h for why.
+    // The melt point and the viscosity curve are the SUBSTANCE's, per parcel:
+    // the domain keeps no copy (a domain copy froze Water and Wax at one
+    // threshold and lied for every mixed domain).
     //
     // ★ Off by default, and every other domain behaves exactly as before: the
     // viscosity field is only built, and the frozen flag only ever set, when
@@ -247,18 +250,24 @@ struct APICSolverParams {
     bool  thermal_liquid_enabled = false;
     float thermal_air_cooling_rate = 0.15f;     // 1/s, parcels in a surface cell
     float thermal_contact_cooling_rate = 2.0f;  // 1/s, parcels touching a collider/closed wall
-    float thermal_freeze_kelvin = 330.0f;       // K, below = solid where supported
-    float thermal_viscosity_range = 25.0f;      // K above freeze over which ν ramps
-    float thermal_cold_viscosity = 0.05f;       // m²/s at the freeze point
+
+    // Fog water microphysics of this domain's air (Fluid/GasSaturation.h), in
+    // the atmosphere layer's unit kg/m^3. Kessler autoconversion: fog water
+    // above the onset coalesces into rain water at the rate (1/s); whatever is
+    // still above the ceiling turns into rain at once. Real fog holds
+    // 1e-4..1e-3 kg/m^3, dense cumulus up to ~5e-3. Without the ceiling a
+    // boiling tank kept 41.7 kg/m^3 of fog suspended (2026-10-11 live).
+    float fog_autoconversion_kg_m3 = 1.0e-3f;
+    float fog_autoconversion_rate = 1.0e-3f;
+    float fog_ceiling_kg_m3 = 5.0e-3f;
 
     void sanitizeThermalLiquid() {
         thermal_air_cooling_rate = std::clamp(thermal_air_cooling_rate, 0.0f, 100.0f);
         thermal_contact_cooling_rate = std::clamp(thermal_contact_cooling_rate, 0.0f, 100.0f);
-        thermal_freeze_kelvin = std::clamp(thermal_freeze_kelvin, 1.0f, 5000.0f);
-        // A zero range is a step function: a parcel would jump from hot ν to
-        // cold ν between two frames, which reads as a sudden jam, not a setting.
-        thermal_viscosity_range = std::clamp(thermal_viscosity_range, 1.0f, 2000.0f);
-        thermal_cold_viscosity = std::clamp(thermal_cold_viscosity, 0.0f, 1000.0f);
+        // 1000 kg/m^3 is liquid water itself: a physical bound, not a scale cap.
+        fog_autoconversion_kg_m3 = std::clamp(fog_autoconversion_kg_m3, 0.0f, 1000.0f);
+        fog_autoconversion_rate = std::clamp(fog_autoconversion_rate, 0.0f, 100.0f);
+        fog_ceiling_kg_m3 = std::clamp(fog_ceiling_kg_m3, 0.0f, 1000.0f);
     }
 
     // Canonical validation used by UI, scripting/IPC and scene loading. Keep

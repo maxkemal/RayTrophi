@@ -1,0 +1,13 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Constants { uint cells; } pc;
+layout(set = 0, binding = 0) buffer Mass { float mass[]; };
+layout(set = 0, binding = 1) buffer Energy { float energy[]; };
+void main() {
+    uint cell = gl_GlobalInvocationID.x +
+        gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (cell < pc.cells) {
+        mass[cell] = 0.0;
+        energy[cell] = 0.0;
+    }
+}

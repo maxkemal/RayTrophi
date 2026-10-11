@@ -25,9 +25,11 @@
 #include "GasVolume.h"
 #include "ForceField.h"
 #include "ParticleSimulation.h"
+#include "Fluid/GasInventoryFrameCapture.h"
 #include "SimCache.h"
 #include "SimFrameCompress.h"
 #include "SimFrameCacheMemory.h"
+#include "MatterGridFrameCache.h"
 #include "SimulationSystems.h"
 #include "SimulationWorld.h"
 #include "SimulationComputeVulkanContext.h"
@@ -2239,13 +2241,19 @@ struct SceneData {
         // solver's own defaults; a resume always starts from a keyframe. The
         // arrays that ARE read back (damage, softening, hardening, yield, bond,
         // material flags) stay exact, collapsing only when uniform.
+        RayTrophiSim::SimFrameCache::MatterGridFrameCache matter_grid_cache;
+        RayTrophiSim::SimFrameCache::LosslessArray<float> gas_mass_cache, gas_energy_cache,
+            gas_condensate_cache, gas_rain_cache, gas_rain_energy_cache;
         bool granular_dropped = false;
         RayTrophiSim::SimFrameCompress::ConstScalar<float> k_g_softening, k_g_bond,
             k_g_hardening, k_g_yield, k_g_damage;
         RayTrophiSim::SimFrameCompress::ConstScalar<uint32_t> k_g_flags;
         std::size_t bytes() const {
             return q_position.bytes() + q_velocity.bytes() + q_uvw.bytes() + q_uvw_b.bytes() +
-                   sizeof(CachedGridDomain) +
+                   sizeof(CachedGridDomain) + matter_grid_cache.bytes() +
+                   gas_mass_cache.bytes() + gas_energy_cache.bytes() +
+                   gas_condensate_cache.bytes() + gas_rain_cache.bytes() +
+                   gas_rain_energy_cache.bytes() +
                    RayTrophiSim::SimFrameCacheMemory::metaAllocationBytes(meta) +
                    density.bytes() + temperature.bytes() +
                    fuel.bytes() + interaction.bytes() +
@@ -2410,15 +2418,24 @@ struct SceneData {
     static constexpr int kSimCacheVelocityKeyframeStride = 25;
 
     static std::vector<CachedGridDomain> compressGridDomainStates(
-        const std::vector<RayTrophiSim::SimulationGridDomainState>& states,
+        std::vector<RayTrophiSim::SimulationGridDomainState>&& states,
         bool with_velocity) {
         namespace SFC = RayTrophiSim::SimFrameCompress;
         std::vector<CachedGridDomain> out;
         out.reserve(states.size());
-        for (const auto& st : states) {
+        for (auto& input : states) {
             CachedGridDomain c;
-            c.meta = st;                       // metadata + particles/foam
+            c.meta = std::move(input);          // consume the independent snapshot
+            const auto& st = c.meta;
             c.meta.fluid_transfer_stats = {};  // diagnostics belong to a solver step
+            c.matter_grid_cache.captureAndRelease(c.meta.matter_liquid_grid);
+            c.gas_mass_cache.captureAndRelease(c.meta.gas_phase_mass_kg);
+            c.gas_energy_cache.captureAndRelease(c.meta.gas_phase_energy_j);
+            c.gas_condensate_cache.captureAndRelease(c.meta.gas_phase_condensate_kg);
+            c.gas_rain_cache.captureAndRelease(c.meta.gas_phase_rain_kg);
+            c.gas_rain_energy_cache.captureAndRelease(c.meta.gas_phase_rain_energy_j);
+            // Landing stamps are per step, not state.
+            std::vector<uint32_t>().swap(c.meta.gas_rain_landing);
             const int nx = st.grid.nx, ny = st.grid.ny, nz = st.grid.nz;
             SFC::compress(st.grid.density,     nx, ny, nz, c.density);
             SFC::compress(st.grid.temperature, nx, ny, nz, c.temperature);
@@ -2498,6 +2515,12 @@ struct SceneData {
         out.reserve(cached.size());
         for (const auto& c : cached) {
             RayTrophiSim::SimulationGridDomainState st = c.meta;
+            c.matter_grid_cache.restore(st.matter_liquid_grid);
+            c.gas_mass_cache.restore(st.gas_phase_mass_kg);
+            c.gas_energy_cache.restore(st.gas_phase_energy_j);
+            c.gas_condensate_cache.restore(st.gas_phase_condensate_kg);
+            c.gas_rain_cache.restore(st.gas_phase_rain_kg);
+            c.gas_rain_energy_cache.restore(st.gas_phase_rain_energy_j);
             st.fluid_transfer_stats = {};
             const int nx = st.grid.nx, ny = st.grid.ny, nz = st.grid.nz;
             const std::size_t cells =
@@ -3762,6 +3785,36 @@ struct SceneData {
         last_fluid_coupling_sig_ = computeFluidCouplingSignature();
     }
 
+    // A live edit that changes what happens NEXT (a force field switched off,
+    // a heater turned down) but not what already happened: keep the live state
+    // and the cached past, drop only the frames after the current one, and
+    // adopt the new setup. invalidateRigidBodySimulationCache() instead
+    // rewinds everything to frame 0 - editing a heater mid-run used to reseed
+    // the tank, so "turn the stove off and watch it cool" was impossible.
+    void invalidateSimCacheAfterCurrentFrame() {
+        const int keep = sim_timeline_frame_;
+        if (keep < 0) {
+            invalidateRigidBodySimulationCache();
+            return;
+        }
+        for (auto it = sim_frame_cache_.upper_bound(keep); it != sim_frame_cache_.end(); ++it) {
+            for (const auto& per_system : it->second)
+                for (const auto& d : per_system)
+                    sim_frame_cache_bytes_ -= (std::min)(sim_frame_cache_bytes_, d.bytes());
+        }
+        sim_frame_cache_.erase(sim_frame_cache_.upper_bound(keep), sim_frame_cache_.end());
+        rigid_frame_cache_.erase(rigid_frame_cache_.upper_bound(keep), rigid_frame_cache_.end());
+        soft_frame_cache_.erase(soft_frame_cache_.upper_bound(keep), soft_frame_cache_.end());
+        particle_frame_cache_.erase(particle_frame_cache_.upper_bound(keep),
+                                    particle_frame_cache_.end());
+        msf_frame_cache_.erase(msf_frame_cache_.upper_bound(keep), msf_frame_cache_.end());
+        // A disk bake no longer describes the frames ahead; detach it.
+        sim_cache_valid_ = false;
+        sim_cache_dir_.clear();
+        sim_cache_valid_system_ids_.clear();
+        acceptSimConfigAsBaked();
+    }
+
     // Remove damage history without throwing away costly gas/fluid/rigid frame
     // caches. An empty object key means every MSF snapshot. Disk snapshots cannot
     // be edited safely in place, so detach the bake binding; otherwise a later RAM
@@ -4038,10 +4091,20 @@ struct SceneData {
         // under other values no longer describes this liquid.
         h = mix(h, fp.thermal_liquid_enabled ? 1ull : 0ull);
         h = mix(h, fb(fp.thermal_air_cooling_rate));
+        h = mix(h, fb(fp.fog_autoconversion_kg_m3));
+        h = mix(h, fb(fp.fog_autoconversion_rate));
+        h = mix(h, fb(fp.fog_ceiling_kg_m3));
         h = mix(h, fb(fp.thermal_contact_cooling_rate));
-        h = mix(h, fb(fp.thermal_freeze_kelvin));
-        h = mix(h, fb(fp.thermal_viscosity_range));
-        h = mix(h, fb(fp.thermal_cold_viscosity));
+        // The freeze curve is the Default Substance's (no domain copy). The
+        // substance API invalidates on edit; hashing it here keeps a panel
+        // edit honest too.
+        if (const auto* fusion = RayTrophiSim::tryFindSubstance(fp.default_substance)) {
+            h = mix(h, fusion->meltable ? 1ull : 0ull);
+            h = mix(h, fb(fusion->melt_kelvin));
+            h = mix(h, fb(fusion->latent_heat_fusion));
+            h = mix(h, fb(fusion->liquid_freeze_viscosity_range));
+            h = mix(h, fb(fusion->liquid_cold_viscosity));
+        }
 
         // Authored initial state. A seed box or fill level that does not re-key
         // the cache means the tank the user just resized replays at its old
@@ -5970,6 +6033,11 @@ struct SceneData {
             // I scrubbed back", which is indistinguishable from a solver bug.
             return;
         }
+        auto captured = RayTrophiSim::Fluid::captureGasInventoryFrame(*this);
+        if (!captured.ok) {
+            SCENE_LOG_WARN("Simulation cache snapshot rejected: " + captured.error);
+            return;
+        }
         if (already_cached) {
             for (const auto& per_system : sim_frame_cache_[frame])
                 for (const auto& d : per_system)
@@ -5982,14 +6050,8 @@ struct SceneData {
         // nearest keyframe at or below the target; between keyframes the cache
         // is render-only, which is what SimCache's disk format has always been.
         const bool velocity_keyframe = (frame % kSimCacheVelocityKeyframeStride) == 0;
-        for (auto& system : particle_systems) {
-            if (system.runtime) {
-                entry.push_back(compressGridDomainStates(
-                    system.runtime->captureGridDomainStatesForCache(
-                        simulation_world.compute()),
-                    velocity_keyframe));
-            }
-            else entry.emplace_back();
+        for (auto& states : captured.states) {
+            entry.push_back(compressGridDomainStates(std::move(states), velocity_keyframe));
         }
         for (const auto& per_system : entry)
             for (const auto& d : per_system) sim_frame_cache_bytes_ += d.bytes();
@@ -8138,7 +8200,7 @@ public:
         sim_timeline_frame_ = -1;
         rigid_timeline_frame_ = -1;
         if (system.runtime) {
-            system.runtime->releaseComputeResources(simulation_world.compute());
+            system.runtime->releaseComputeResources(simulation_world.compute(), false);
             simulation_world.removeSystem(system.runtime.get());
             system.runtime.reset();
         }
@@ -9616,7 +9678,7 @@ public:
 
     void clearParticles() {
         if (auto runtime = activeParticleRuntime()) {
-            runtime->releaseComputeResources(simulation_world.compute());
+            runtime->releaseComputeResources(simulation_world.compute(), false);
             runtime->clear();
         }
     }
@@ -9904,7 +9966,7 @@ public:
         // Release particle system compute resources before clearing.
         for (auto& system : particle_systems) {
             if (system.runtime) {
-                system.runtime->releaseComputeResources(simulation_world.compute());
+                system.runtime->releaseComputeResources(simulation_world.compute(), false);
             }
         }
 

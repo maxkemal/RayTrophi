@@ -1,3 +1,4 @@
+#include "surface_sdf_march_policy.glsl"
 #ifndef RT_SURFACE_SDF_SHADOW_QUERY
 #define RT_SURFACE_SDF_SHADOW_QUERY
 
@@ -171,10 +172,9 @@ bool rfSurfaceSdfOccludes(vec3 origin, vec3 direction, float rayMin,
 
         const int maxSteps = 192;
         float voxelSize = max(rfVolFloat(vi, 176u), 1e-4);
-        float stepSize = max(voxelSize * 0.65,
-                             (endT - beginT) / float(maxSteps));
-        int steps = min(int(ceil((endT - beginT) / stepSize)) + 1,
-                        maxSteps + 1);
+        int steps;
+        float stepSize = surfaceSdfMarchStep(endT - beginT, voxelSize,
+                                            voxelSize * 0.45, maxSteps, steps);
         for (int step = 0; step < steps; ++step) {
             float distance = min(beginT + float(step) * stepSize, endT);
             if (rfSampleSurfaceSdf(

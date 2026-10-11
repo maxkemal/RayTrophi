@@ -1483,6 +1483,20 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["gas_phase_mass_kg"] = info.gas_phase_mass_kg;
         d["gas_phase_energy_j"] = info.gas_phase_energy_j;
         d["gas_phase_active_cells"] = info.gas_phase_active_cells;
+        d["gas_condensate_kg"] = info.gas_condensate_kg;
+        d["gas_condensate_cells"] = info.gas_condensate_cells;
+        d["gas_condensate_mean_kg_m3"] = info.gas_condensate_mean_kg_m3;
+        d["saturation_measured"] = info.saturation_measured;
+        d["condensable_substance"] = info.condensable_substance;
+        d["fog_condensed_kg"] = info.fog_condensed_kg;
+        d["fog_evaporated_kg"] = info.fog_evaporated_kg;
+        d["fog_latent_to_air_j"] = info.fog_latent_to_air_j;
+        d["rained_kg"] = info.rained_kg;
+        d["rain_parcels"] = info.rain_parcels;
+        d["fog_autoconverted_kg"] = info.fog_autoconverted_kg;
+        d["rain_absorbed_kg"] = info.rain_absorbed_kg;
+        d["gas_rain_kg"] = info.gas_rain_kg;
+        d["gas_rain_cells"] = info.gas_rain_cells;
         d["gas_phase_mass_centroid"] = vec3ToPython(info.gas_phase_mass_centroid);
         d["live_state"] = info.live_state;
         d["render_mode"] = info.render_mode;
@@ -1525,20 +1539,40 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["surface_measured"] = info.surface_measured;
         d["surface_voxel"] = info.surface_voxel;
         d["surface_build_ms"] = info.surface_build_ms;
+        d["surface_bin_ms"] = info.surface_bin_ms;
+        d["surface_anisotropy_ms"] = info.surface_anisotropy_ms;
+        d["surface_schedule_ms"] = info.surface_schedule_ms;
+        d["surface_gather_ms"] = info.surface_gather_ms;
+        d["surface_smooth_ms"] = info.surface_smooth_ms;
         d["surface_active_cells"] = info.surface_active_cells;
+        d["surface_work_cells"] = info.surface_work_cells;
+        d["surface_bin_cells"] = info.surface_bin_cells;
         d["thermal_liquid_enabled"] = info.thermal_liquid_enabled;
         d["thermal_air_cooling_rate"] = info.thermal_air_cooling_rate;
+        d["fog_autoconversion_kg_m3"] = info.fog_autoconversion_kg_m3;
+        d["fog_autoconversion_rate"] = info.fog_autoconversion_rate;
+        d["fog_ceiling_kg_m3"] = info.fog_ceiling_kg_m3;
         d["thermal_contact_cooling_rate"] = info.thermal_contact_cooling_rate;
-        d["thermal_freeze_kelvin"] = info.thermal_freeze_kelvin;
-        d["thermal_viscosity_range"] = info.thermal_viscosity_range;
-        d["thermal_cold_viscosity"] = info.thermal_cold_viscosity;
         d["thermal_ambient_kelvin"] = info.thermal_ambient_kelvin;
         d["thermal_measured"] = info.thermal_measured;
         d["thermal_frozen_particles"] = info.thermal_frozen_particles;
         d["thermal_froze_this_frame"] = info.thermal_froze_this_frame;
         d["thermal_melted_this_frame"] = info.thermal_melted_this_frame;
         d["thermal_cold_unsupported"] = info.thermal_cold_unsupported;
+        d["thermal_mushy_particles"] = info.thermal_mushy_particles;
+        d["thermal_fusion_released_j"] = info.thermal_fusion_released_j;
+        d["thermal_fusion_absorbed_j"] = info.thermal_fusion_absorbed_j;
         d["thermal_air_cooled_particles"] = info.thermal_air_cooled_particles;
+        d["thermal_field_heated_particles"] = info.thermal_field_heated_particles;
+        d["thermal_convecting_particles"] = info.thermal_convecting_particles;
+        d["thermal_conducting_cells"] = info.thermal_conducting_cells;
+        d["thermal_gas_exchange_particles"] = info.thermal_gas_exchange_particles;
+        d["thermal_heat_to_gas_j"] = info.thermal_heat_to_gas_j;
+        d["thermal_evaporated_kg"] = info.thermal_evaporated_kg;
+        d["thermal_condensed_kg"] = info.thermal_condensed_kg;
+        d["thermal_condensation_splits"] = info.thermal_condensation_splits;
+        d["thermal_solid_contact_particles"] = info.thermal_solid_contact_particles;
+        d["thermal_heat_to_solid_j"] = info.thermal_heat_to_solid_j;
         d["thermal_contact_cooled_particles"] = info.thermal_contact_cooled_particles;
         d["thermal_min_kelvin"] = info.thermal_min_kelvin;
         d["thermal_mean_kelvin"] = info.thermal_mean_kelvin;
@@ -1731,6 +1765,20 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["gas_phase_mass_kg"] = info.gas_phase_mass_kg;
             d["gas_phase_energy_j"] = info.gas_phase_energy_j;
             d["gas_phase_active_cells"] = info.gas_phase_active_cells;
+            d["gas_condensate_kg"] = info.gas_condensate_kg;
+            d["gas_condensate_cells"] = info.gas_condensate_cells;
+            d["gas_condensate_mean_kg_m3"] = info.gas_condensate_mean_kg_m3;
+            d["saturation_measured"] = info.saturation_measured;
+            d["condensable_substance"] = info.condensable_substance;
+            d["fog_condensed_kg"] = info.fog_condensed_kg;
+            d["fog_evaporated_kg"] = info.fog_evaporated_kg;
+            d["fog_latent_to_air_j"] = info.fog_latent_to_air_j;
+            d["rained_kg"] = info.rained_kg;
+            d["rain_parcels"] = info.rain_parcels;
+            d["fog_autoconverted_kg"] = info.fog_autoconverted_kg;
+            d["rain_absorbed_kg"] = info.rain_absorbed_kg;
+            d["gas_rain_kg"] = info.gas_rain_kg;
+            d["gas_rain_cells"] = info.gas_rain_cells;
             d["gas_phase_mass_centroid"] = vec3ToPython(info.gas_phase_mass_centroid);
             d["live_state"] = info.live_state;
             d["render_mode"] = info.render_mode;
@@ -1773,20 +1821,40 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["surface_measured"] = info.surface_measured;
         d["surface_voxel"] = info.surface_voxel;
         d["surface_build_ms"] = info.surface_build_ms;
+        d["surface_bin_ms"] = info.surface_bin_ms;
+        d["surface_anisotropy_ms"] = info.surface_anisotropy_ms;
+        d["surface_schedule_ms"] = info.surface_schedule_ms;
+        d["surface_gather_ms"] = info.surface_gather_ms;
+        d["surface_smooth_ms"] = info.surface_smooth_ms;
         d["surface_active_cells"] = info.surface_active_cells;
+        d["surface_work_cells"] = info.surface_work_cells;
+        d["surface_bin_cells"] = info.surface_bin_cells;
         d["thermal_liquid_enabled"] = info.thermal_liquid_enabled;
         d["thermal_air_cooling_rate"] = info.thermal_air_cooling_rate;
+        d["fog_autoconversion_kg_m3"] = info.fog_autoconversion_kg_m3;
+        d["fog_autoconversion_rate"] = info.fog_autoconversion_rate;
+        d["fog_ceiling_kg_m3"] = info.fog_ceiling_kg_m3;
         d["thermal_contact_cooling_rate"] = info.thermal_contact_cooling_rate;
-        d["thermal_freeze_kelvin"] = info.thermal_freeze_kelvin;
-        d["thermal_viscosity_range"] = info.thermal_viscosity_range;
-        d["thermal_cold_viscosity"] = info.thermal_cold_viscosity;
         d["thermal_ambient_kelvin"] = info.thermal_ambient_kelvin;
         d["thermal_measured"] = info.thermal_measured;
         d["thermal_frozen_particles"] = info.thermal_frozen_particles;
         d["thermal_froze_this_frame"] = info.thermal_froze_this_frame;
         d["thermal_melted_this_frame"] = info.thermal_melted_this_frame;
         d["thermal_cold_unsupported"] = info.thermal_cold_unsupported;
+        d["thermal_mushy_particles"] = info.thermal_mushy_particles;
+        d["thermal_fusion_released_j"] = info.thermal_fusion_released_j;
+        d["thermal_fusion_absorbed_j"] = info.thermal_fusion_absorbed_j;
         d["thermal_air_cooled_particles"] = info.thermal_air_cooled_particles;
+        d["thermal_field_heated_particles"] = info.thermal_field_heated_particles;
+        d["thermal_convecting_particles"] = info.thermal_convecting_particles;
+        d["thermal_conducting_cells"] = info.thermal_conducting_cells;
+        d["thermal_gas_exchange_particles"] = info.thermal_gas_exchange_particles;
+        d["thermal_heat_to_gas_j"] = info.thermal_heat_to_gas_j;
+        d["thermal_evaporated_kg"] = info.thermal_evaporated_kg;
+        d["thermal_condensed_kg"] = info.thermal_condensed_kg;
+        d["thermal_condensation_splits"] = info.thermal_condensation_splits;
+        d["thermal_solid_contact_particles"] = info.thermal_solid_contact_particles;
+        d["thermal_heat_to_solid_j"] = info.thermal_heat_to_solid_j;
         d["thermal_contact_cooled_particles"] = info.thermal_contact_cooled_particles;
         d["thermal_min_kelvin"] = info.thermal_min_kelvin;
         d["thermal_mean_kelvin"] = info.thermal_mean_kelvin;
@@ -1961,6 +2029,20 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["gas_phase_mass_kg"] = info.gas_phase_mass_kg;
         d["gas_phase_energy_j"] = info.gas_phase_energy_j;
         d["gas_phase_active_cells"] = info.gas_phase_active_cells;
+        d["gas_condensate_kg"] = info.gas_condensate_kg;
+        d["gas_condensate_cells"] = info.gas_condensate_cells;
+        d["gas_condensate_mean_kg_m3"] = info.gas_condensate_mean_kg_m3;
+        d["saturation_measured"] = info.saturation_measured;
+        d["condensable_substance"] = info.condensable_substance;
+        d["fog_condensed_kg"] = info.fog_condensed_kg;
+        d["fog_evaporated_kg"] = info.fog_evaporated_kg;
+        d["fog_latent_to_air_j"] = info.fog_latent_to_air_j;
+        d["rained_kg"] = info.rained_kg;
+        d["rain_parcels"] = info.rain_parcels;
+        d["fog_autoconverted_kg"] = info.fog_autoconverted_kg;
+        d["rain_absorbed_kg"] = info.rain_absorbed_kg;
+        d["gas_rain_kg"] = info.gas_rain_kg;
+        d["gas_rain_cells"] = info.gas_rain_cells;
         d["gas_phase_mass_centroid"] = vec3ToPython(info.gas_phase_mass_centroid);
         d["live_state"] = info.live_state;
         d["render_mode"] = info.render_mode;
@@ -2003,20 +2085,40 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["surface_measured"] = info.surface_measured;
         d["surface_voxel"] = info.surface_voxel;
         d["surface_build_ms"] = info.surface_build_ms;
+        d["surface_bin_ms"] = info.surface_bin_ms;
+        d["surface_anisotropy_ms"] = info.surface_anisotropy_ms;
+        d["surface_schedule_ms"] = info.surface_schedule_ms;
+        d["surface_gather_ms"] = info.surface_gather_ms;
+        d["surface_smooth_ms"] = info.surface_smooth_ms;
         d["surface_active_cells"] = info.surface_active_cells;
+        d["surface_work_cells"] = info.surface_work_cells;
+        d["surface_bin_cells"] = info.surface_bin_cells;
         d["thermal_liquid_enabled"] = info.thermal_liquid_enabled;
         d["thermal_air_cooling_rate"] = info.thermal_air_cooling_rate;
+        d["fog_autoconversion_kg_m3"] = info.fog_autoconversion_kg_m3;
+        d["fog_autoconversion_rate"] = info.fog_autoconversion_rate;
+        d["fog_ceiling_kg_m3"] = info.fog_ceiling_kg_m3;
         d["thermal_contact_cooling_rate"] = info.thermal_contact_cooling_rate;
-        d["thermal_freeze_kelvin"] = info.thermal_freeze_kelvin;
-        d["thermal_viscosity_range"] = info.thermal_viscosity_range;
-        d["thermal_cold_viscosity"] = info.thermal_cold_viscosity;
         d["thermal_ambient_kelvin"] = info.thermal_ambient_kelvin;
         d["thermal_measured"] = info.thermal_measured;
         d["thermal_frozen_particles"] = info.thermal_frozen_particles;
         d["thermal_froze_this_frame"] = info.thermal_froze_this_frame;
         d["thermal_melted_this_frame"] = info.thermal_melted_this_frame;
         d["thermal_cold_unsupported"] = info.thermal_cold_unsupported;
+        d["thermal_mushy_particles"] = info.thermal_mushy_particles;
+        d["thermal_fusion_released_j"] = info.thermal_fusion_released_j;
+        d["thermal_fusion_absorbed_j"] = info.thermal_fusion_absorbed_j;
         d["thermal_air_cooled_particles"] = info.thermal_air_cooled_particles;
+        d["thermal_field_heated_particles"] = info.thermal_field_heated_particles;
+        d["thermal_convecting_particles"] = info.thermal_convecting_particles;
+        d["thermal_conducting_cells"] = info.thermal_conducting_cells;
+        d["thermal_gas_exchange_particles"] = info.thermal_gas_exchange_particles;
+        d["thermal_heat_to_gas_j"] = info.thermal_heat_to_gas_j;
+        d["thermal_evaporated_kg"] = info.thermal_evaporated_kg;
+        d["thermal_condensed_kg"] = info.thermal_condensed_kg;
+        d["thermal_condensation_splits"] = info.thermal_condensation_splits;
+        d["thermal_solid_contact_particles"] = info.thermal_solid_contact_particles;
+        d["thermal_heat_to_solid_j"] = info.thermal_heat_to_solid_j;
         d["thermal_contact_cooled_particles"] = info.thermal_contact_cooled_particles;
         d["thermal_min_kelvin"] = info.thermal_min_kelvin;
         d["thermal_mean_kelvin"] = info.thermal_mean_kelvin;
@@ -2176,7 +2278,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     // not contain it seeded zero particles and said so to nobody.
     fluid.def("seed", [](const std::string& domain, const py::object& seed_min,
                           const py::object& seed_max, int particles_per_cell,
-                          bool replace, bool persistent) {
+                          bool replace, bool persistent, float fill_level) {
         const bool has_region = !seed_min.is_none() && !seed_max.is_none();
         Vec3 smin, smax;
         if (has_region) {
@@ -2187,11 +2289,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                                                  has_region ? &smin : nullptr,
                                                  has_region ? &smax : nullptr,
                                                  particles_per_cell, replace,
-                                                 persistent));
+                                                 persistent, fill_level));
     }, py::arg("domain"), py::arg("seed_min") = py::none(),
        py::arg("seed_max") = py::none(),
        py::arg("particles_per_cell") = 4, py::arg("replace") = true,
-       py::arg("persistent") = false,
+       py::arg("persistent") = false, py::arg("fill_level") = -1.0f,
        "Fill a fluid domain with particles. Omit seed_min/seed_max to fill the "
        "bottom half of the domain; a region that does not overlap the domain is "
        "refused rather than silently creating nothing. particles_per_cell applies "
@@ -2490,6 +2592,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         bool has_thermal_patch = false;
         if(kwargs.contains("thermal_liquid_enabled")){thermal_patch.enabled=py::cast<bool>(kwargs["thermal_liquid_enabled"]);has_thermal_patch=true;}
         if(kwargs.contains("thermal_air_cooling_rate")){thermal_patch.air_cooling_rate=py::cast<float>(kwargs["thermal_air_cooling_rate"]);has_thermal_patch=true;}
+        if(kwargs.contains("fog_autoconversion_kg_m3")){thermal_patch.fog_autoconversion_kg_m3=py::cast<float>(kwargs["fog_autoconversion_kg_m3"]);has_thermal_patch=true;}
+        if(kwargs.contains("fog_autoconversion_rate")){thermal_patch.fog_autoconversion_rate=py::cast<float>(kwargs["fog_autoconversion_rate"]);has_thermal_patch=true;}
+        if(kwargs.contains("fog_ceiling_kg_m3")){thermal_patch.fog_ceiling_kg_m3=py::cast<float>(kwargs["fog_ceiling_kg_m3"]);has_thermal_patch=true;}
         if(kwargs.contains("thermal_contact_cooling_rate")){thermal_patch.contact_cooling_rate=py::cast<float>(kwargs["thermal_contact_cooling_rate"]);has_thermal_patch=true;}
 
         requireResult(rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_vs, p_rm, p_dev, p_bound, p_substance, p_sweeps, p_slip, p_surf_mat,
@@ -2738,14 +2843,22 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::getGasStepStats(domain, s));
         py::dict d;
         d["measured"] = s.measured;
+        d["inventory_transport"] = s.inventory_transport;
+        d["inventory_step_held"] = s.inventory_step_held;
+        d["inventory_error"] = s.inventory_error;
         if (!s.measured) return d;
         d["resolution"] = py::make_tuple(s.resolution[0], s.resolution[1], s.resolution[2]);
         d["total_ms"] = s.total_ms;
         d["voxelize_ms"] = s.voxelize_ms;
         d["inventory_advection_ms"] = s.inventory_advection_ms;
+        d["inventory_grid_upload_bytes"] = s.inventory_grid_upload_bytes;
+        d["inventory_grid_download_bytes"] = s.inventory_grid_download_bytes;
+        d["inventory_snapshot_download_bytes"] = s.inventory_snapshot_download_bytes;
+        d["inventory_query_download_bytes"] = s.inventory_query_download_bytes;
         d["analysis_ms"] = s.analysis_ms;
         d["gpu_collider_source_ms"] = s.gpu_collider_source_ms;
         d["gpu_msf_ms"] = s.gpu_msf_ms;
+        d["gpu_surface_exchange_ms"] = s.gpu_surface_exchange_ms;
         d["gpu_source_upload_ms"] = s.gpu_source_upload_ms;
         d["gpu_fluid_combustion_ms"] = s.gpu_fluid_combustion_ms;
         d["gpu_velocity_advect_ms"] = s.gpu_velocity_advect_ms;
@@ -2899,6 +3012,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         s["foam"] = st.foam; s["bubble"] = st.bubble; s["spawned"] = st.spawned;
         s["gen_ms"] = st.gen_ms; s["advect_ms"] = st.advect_ms;
         s["crit_on_gpu"] = st.crit_on_gpu; s["neigh_on_gpu"] = st.neigh_on_gpu;
+        s["inputs_current"] = st.inputs_current;
+        s["overflow_fallback"] = st.overflow_fallback;
+        s["bin_cells"] = st.bin_cells;
+        s["bin_bytes"] = st.bin_bytes;
+        s["input_ms"] = st.input_ms;
         s["in_sdf"] = st.in_sdf; s["in_splat"] = st.in_splat;
         s["in_fog"] = st.in_fog; s["hidden"] = st.hidden;
         d["stats"] = s;
@@ -3110,6 +3228,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["fluid_substance"] = s.fluid_substance;
         d["fluid_temperature_override"] = s.fluid_temperature_override;
         d["fluid_temperature_kelvin"] = s.fluid_temperature_kelvin;
+        d["fluid_birth_kelvin"] = s.fluid_birth_kelvin;
+        d["fluid_born_solid"] = s.fluid_born_solid;
         d["grain_birth_saturation"] = s.grain_birth_saturation;
         d["use_time_limit"] = s.use_time_limit;
         d["start_time"] = s.start_time; d["end_time"] = s.end_time;
@@ -3384,6 +3504,10 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["mass_budget_overflow"] = f.mass_budget_overflow;
             d["mass_negative"] = f.mass_negative;
             d["mass_invalid_elements"] = f.mass_invalid_elements;
+            d["temperature_valid"] = f.temperature_valid;
+            d["mean_kelvin"] = f.mean_kelvin;
+            d["min_kelvin"] = f.min_kelvin;
+            d["max_kelvin"] = f.max_kelvin;
             d["domain"] = "surface_uv";
             py::list semantics;
             for (const auto& semantic : f.semantics) semantics.append(semantic);
@@ -5018,7 +5142,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     });
     world.def("set_clouds", [pyDumps](const py::kwargs& kwargs) {
         requireResult(rtapi::setCloudsJson(pyDumps(kwargs)));
-    }, "Partial patch: layers=[{...}, ...] (element-wise), cirrus={...}, weather={...}, quality={...}.");
+    }, "Partial patch: layers=[{...}, ...] (element-wise; formation_role/group and optical material modifiers supported), cirrus={...}, weather={...}, quality={...}, material={...}.");
     world.def("apply_cloud_preset", [](const std::string& preset) {
         requireResult(rtapi::applyCloudPreset(preset));
     }, py::arg("preset"));

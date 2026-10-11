@@ -174,14 +174,19 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             // FluidParticles note that emit starts at ambient. Harmless while
             // nothing read the field; the thermal-liquid chain would freeze such
             // a parcel on its first contact.
+            // Without a custom value a meltable solid is poured as itself
+            // (substanceAmbientBirthKelvin): Snow at a warm ambient was born
+            // above its melt point and ran as water.
             const float emit_kelvin =
                 source.fluid_temperature_override
                     ? std::max(1.0f, source.fluid_temperature_kelvin)
-                    : (static_cast<std::size_t>(source.domain_index) < grid_domains_.size()
-                           ? fluidDomainAmbientKelvin(
-                                 grid_domains_[static_cast<std::size_t>(source.domain_index)],
-                                 world_thermal_)
-                           : world_thermal_.ambientKelvin());
+                    : Fluid::substanceAmbientBirthKelvin(
+                          emit_substance, fluid_domain.fluid_params,
+                          static_cast<std::size_t>(source.domain_index) < grid_domains_.size()
+                              ? fluidDomainAmbientKelvin(
+                                    grid_domains_[static_cast<std::size_t>(source.domain_index)],
+                                    world_thermal_)
+                              : world_thermal_.ambientKelvin());
 
             const auto emit_model = Fluid::substanceBirthModel(
                 emit_substance, fluid_domain.fluid_params, emit_kelvin);

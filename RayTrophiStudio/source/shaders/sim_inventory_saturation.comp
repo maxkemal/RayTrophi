@@ -1,0 +1,177 @@
+#version 450
+// Fog water microphysics of one gas cell (CPU reference:
+// src/Physics/Fluid/GasSaturation.cpp, adjustCellSaturation + adjustGasSaturation):
+//   1. saturation adjustment between vapour and fog water, the latent heat
+//      paid to / taken from the air;
+//   2. autoconversion: fog water above the onset coalesces into rain water at
+//      the Kessler rate, and anything still above the ceiling at once; the
+//      water's sensible energy moves with it into the rain energy pool;
+//   3. rain-out: rain water enough for a whole liquid parcel becomes one.
+// The fall of the rain is a separate pass (sim_inventory_rain_fall).
+// One thread per cell; every cell writes its own condensed/evaporated/
+// autoconverted outputs (zero when nothing happened), so they need no clearing.
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Constants {
+    uint cells;
+    float cell_volume;
+    float ambient;          // K at the gas solver's ambient normalized value
+    float gas_ambient;      // normalized temperature of the ambient
+    float kelvin_per_unit;
+    float boiling;          // condensable substance: Tb (K)
+    float latent;           // L (J/kg)
+    float molar;            // M (kg/mol)
+    float specific_heat;    // c (J/kg K), liquid and vapour sensible alike
+    float background;       // kg of ambient vapour per cell (not in inventory)
+    float quantum;          // kg of one liquid parcel; 0 = no rain-out
+    uint capacity;          // rain record slots
+    int nx;
+    int ny;
+    float origin_x;
+    float origin_y;
+    float origin_z;
+    float voxel;
+    float rain_min_x;       // rain-out only where the liquid grid can hold it
+    float rain_min_y;
+    float rain_min_z;
+    float rain_max_x;
+    float rain_max_y;
+    float rain_max_z;
+    float onset;            // kg of fog water per cell where rain starts forming
+    float conversion;       // 1 - exp(-rate dt): share of the excess per step
+    float ceiling;          // kg of fog water per cell the air can hold
+    float padding;
+} pc;
+layout(set = 0, binding = 0) buffer Mass { float vapour[]; };
+layout(set = 0, binding = 1) buffer Energy { float energy[]; };
+layout(set = 0, binding = 2) buffer Condensate { float water[]; };
+layout(set = 0, binding = 3) buffer Temperature { float temperature[]; };
+layout(set = 0, binding = 4) buffer Condensed { float condensed_out[]; };
+layout(set = 0, binding = 5) buffer Evaporated { float evaporated_out[]; };
+struct Rain { uint cell; uint parcels; float kelvin; uint padding; };
+layout(set = 0, binding = 6) buffer Records { Rain records[]; };
+// [0] rain records written, [1] 1 when any cell still holds fog or rain water.
+layout(set = 0, binding = 7) buffer Counters { uint counters[]; };
+layout(set = 0, binding = 8) buffer RainMass { float rain[]; };
+layout(set = 0, binding = 9) buffer RainEnergy { float rain_energy[]; };
+layout(set = 0, binding = 10) buffer Autoconverted { float autoconverted_out[]; };
+
+const float kGasConstant = 8.314462;
+const float kAtmosphere = 101325.0;
+const float kAirMolar = 0.028965;
+
+float saturatedMass(float kelvin) {
+    float t = max(kelvin, 1.0);
+    float a = pc.latent * pc.molar / kGasConstant;
+    float psat = kAtmosphere * exp(clamp(a * (1.0 / pc.boiling - 1.0 / t), -80.0, 30.0));
+    return psat * pc.cell_volume * pc.molar / (kGasConstant * t);
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x +
+        gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (id >= pc.cells) {
+        return;
+    }
+    float m = max(vapour[id], 0.0);
+    float w = max(water[id], 0.0);
+    float r = max(rain[id], 0.0);
+    float t = temperature[id];
+    bool t_valid = !isnan(t) && !isinf(t);
+    float condensed = 0.0;
+    float evaporated = 0.0;
+    float autoconverted = 0.0;
+    if ((m > 0.0 || w > 0.0) && t_valid) {
+        float t0 = max(pc.ambient + (t - pc.gas_ambient) * pc.kelvin_per_unit, 1.0);
+        float rho_air = kAtmosphere * kAirMolar / (kGasConstant * t0);
+        float capacity = rho_air * pc.cell_volume * 1005.0 + (m + w) * pc.specific_heat;
+        float heat_per_kg = pc.latent / capacity;
+        // f(d) = (m - d) + background - msat(T0 + L d / C): decreasing in d.
+        float excess = m + pc.background - saturatedMass(t0);
+        float lo = 0.0;
+        float hi = 0.0;
+        if (excess > 0.0 && m > 0.0) {
+            hi = m;
+        } else if (excess < 0.0 && w > 0.0) {
+            lo = -w;
+        }
+        float d = 0.0;
+        if (hi > lo) {
+            float f_lo = (m - lo) + pc.background - saturatedMass(t0 + heat_per_kg * lo);
+            float f_hi = (m - hi) + pc.background - saturatedMass(t0 + heat_per_kg * hi);
+            if (f_hi >= 0.0) {
+                d = hi;           // even all of it cannot saturate the cell
+            } else if (f_lo <= 0.0) {
+                d = lo;           // all fog water evaporates and it is still dry
+            } else {
+                for (int i = 0; i < 28; ++i) {
+                    float mid = 0.5 * (lo + hi);
+                    float f = (m - mid) + pc.background - saturatedMass(t0 + heat_per_kg * mid);
+                    if (f > 0.0) lo = mid; else hi = mid;
+                }
+                d = 0.5 * (lo + hi);
+            }
+        }
+        if (d != 0.0) {
+            m = max(m - d, 0.0);
+            w = max(w + d, 0.0);
+            energy[id] = max(energy[id] - d * pc.latent, 0.0);
+            t = t + d * heat_per_kg / pc.kelvin_per_unit;
+            temperature[id] = t;
+            condensed = max(d, 0.0);
+            evaporated = max(-d, 0.0);
+        }
+        // Autoconversion: the excess over the onset coalesces at the Kessler
+        // rate; whatever the air still cannot hold above the ceiling rains at
+        // once. The water keeps its air temperature: c*Ta per kg moves from
+        // the shared energy pool into the rain's own.
+        float converted = w > pc.onset ? (w - pc.onset) * pc.conversion : 0.0;
+        if (w - converted > pc.ceiling) {
+            converted = w - pc.ceiling;
+        }
+        if (converted > 0.0) {
+            float ta = max(pc.ambient + (t - pc.gas_ambient) * pc.kelvin_per_unit, 1.0);
+            float e = energy[id];
+            float sensible = min(e, converted * pc.specific_heat * ta);
+            energy[id] = e - sensible;
+            w -= converted;
+            r += converted;
+            rain_energy[id] = max(rain_energy[id], 0.0) + sensible;
+            autoconverted = converted;
+        }
+        vapour[id] = m;
+        water[id] = w;
+    }
+    // Rain-out: rain water enough for a whole liquid parcel becomes one, at
+    // the rain's own temperature.
+    if (pc.quantum > 0.0 && r >= pc.quantum) {
+        uint nxy = uint(pc.nx) * uint(pc.ny);
+        vec3 centre = vec3(pc.origin_x, pc.origin_y, pc.origin_z) +
+            (vec3(float(id % uint(pc.nx)), float((id / uint(pc.nx)) % uint(pc.ny)),
+                  float(id / nxy)) + 0.5) * pc.voxel;
+        bool inside = centre.x > pc.rain_min_x && centre.y > pc.rain_min_y &&
+            centre.z > pc.rain_min_z && centre.x < pc.rain_max_x &&
+            centre.y < pc.rain_max_y && centre.z < pc.rain_max_z;
+        if (inside) {
+            uint parcels = min(uint(r / pc.quantum), 8u);
+            uint slot = atomicAdd(counters[0], 1u);
+            if (slot < pc.capacity) {
+                float re = max(rain_energy[id], 0.0);
+                float kelvin = max(re / (pc.specific_heat * r), 1.0);
+                float rained = float(parcels) * pc.quantum;
+                rain_energy[id] = re * max(1.0 - rained / r, 0.0);
+                r = max(r - rained, 0.0);
+                records[slot] = Rain(id, parcels, kelvin, 0u);
+            }
+        }
+    }
+    rain[id] = r;
+    if (r <= 0.0) {
+        rain_energy[id] = 0.0;
+    }
+    if (water[id] > 0.0 || r > 0.0) {
+        atomicOr(counters[1], 1u);
+    }
+    condensed_out[id] = condensed;
+    evaporated_out[id] = evaporated;
+    autoconverted_out[id] = autoconverted;
+}

@@ -772,12 +772,12 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         // Reaction field. Live gas only; a baked VDB has no combustion channel
         // and keeps the temperature-driven emission it always had.
         dst.flame_address = liveDenseGas ? src.dense_flame_address : 0;
-        const bool emissiveUsable =
-            liveDenseGas && src.dense_emissive_list_address != 0 &&
-            src.dense_emissive_capacity > 0 && majorantUsable;
-        dst.emissive_list_address = emissiveUsable ? src.dense_emissive_list_address : 0;
-        dst.emissive_capacity =
-            emissiveUsable ? static_cast<float>(src.dense_emissive_capacity) : 0.0f;
+        // Keep live and cached gas on the same lighting estimator. The live-only
+        // emitter list adds a one-block Monte Carlo light weighted by the whole
+        // list, allowing bright scatter spikes in changing simulation frames.
+        // Direct volume emission and scene/sky scattering remain in the march.
+        dst.emissive_list_address = 0;
+        dst.emissive_capacity = 0.0f;
         
         int vdb_id = src.vdb_id;
         if (!liveDenseGas && vdb_id >= 0) {

@@ -18,8 +18,6 @@ int main() {
     APICSolverParams params;
     params.default_substance = "Water";
     params.thermal_liquid_enabled = true;
-    params.thermal_freeze_kelvin = 999.0f;
-    params.thermal_cold_viscosity = 999.0f;
     const auto water = substanceTag("Water");
     const auto wax = substanceTag("Wax");
     const auto ice = substanceTag("Ice");
@@ -70,6 +68,45 @@ int main() {
     const float expected = 0.5f * (water_profile->liquid_kinematic_viscosity +
                                   wax_profile->liquid_cold_viscosity);
     assert(std::abs(viscosity[grid.cellIndex(1, 1, 1)] - expected) < 1.0e-6f);
+
+    // Latent heat of fusion (T2). Water 10 K under its melt point freezes only
+    // c*dT/L = 4180*10/334000 = 0.125 of itself and returns to 273.15 K; it is
+    // not frozen (pinned) until half of it has crystallised.
+    FluidParticles pond;
+    pond.emit(Vec3(0.15f), Vec3(0.0f), 263.15f, 0.0f, water, nullptr, nullptr, 0.01f,
+        MatterConstitutiveModel::Fluid);
+    ThermalLiquidStats fusion_stats;
+    std::vector<float> change;
+    updateThermalFreeze(pond, grid, params, fusion_stats, false, &change);
+    assert(std::abs(pond.fusion_solid_fraction[0] - 0.12515f) < 1.0e-3f);
+    assert(std::abs(pond.temperature[0] - 273.15f) < 1.0e-3f);
+    assert((pond.flags[0] & kParticleFlagFrozen) == 0u);
+    assert(std::abs(change[0] - pond.fusion_solid_fraction[0]) < 1.0e-6f);
+    assert(fusion_stats.fusion_released_j > 0.0 && fusion_stats.mushy_particles == 1u);
+    for (int i = 0; i < 4; ++i) {
+        pond.temperature[0] = 263.15f;
+        updateThermalFreeze(pond, grid, params, fusion_stats, false);
+    }
+    assert((pond.flags[0] & kParticleFlagFrozen) != 0u);
+    // Melting pays it back: still frozen after one 10 K overshoot.
+    pond.temperature[0] = 283.15f;
+    updateThermalFreeze(pond, grid, params, fusion_stats, false);
+    assert((pond.flags[0] & kParticleFlagFrozen) != 0u);
+    assert(std::abs(pond.temperature[0] - 273.15f) < 1.0e-3f);
+
+    // A skeleton carrier (Ice) heated past its melt point stays ice while the
+    // latent heat crosses: 2100*(300-273.15)/334000 = 0.169 melts.
+    FluidParticles cube;
+    cube.emit(Vec3(0.15f), Vec3(0.0f), 263.0f, 0.0f, ice, nullptr, nullptr, 0.01f,
+        MatterConstitutiveModel::Granular);
+    updateThermalFreeze(cube, grid, params, fusion_stats, false);
+    assert(cube.fusion_solid_fraction[0] == 1.0f);
+    cube.temperature[0] = 300.0f;
+    updateThermalFreeze(cube, grid, params, fusion_stats, false);
+    assert(std::abs(cube.fusion_solid_fraction[0] - 0.8312f) < 1.0e-3f);
+    refreshMatterConstitutiveModels(cube, params);
+    assert(cube.constitutive_model[0] == static_cast<uint8_t>(MatterConstitutiveModel::Granular));
+    assert((cube.flags[0] & kParticleFlagFrozen) == 0u);
 
     params.grain.enabled = true;
     assert(substanceTransportOwner(substanceTag("Sand"), MatterConstitutiveModel::Granular,

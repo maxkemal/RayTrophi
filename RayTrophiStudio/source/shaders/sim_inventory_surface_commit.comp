@@ -1,0 +1,29 @@
+#version 450
+layout(local_size_x = 128) in;
+layout(push_constant) uniform Constants { uint count; uint inventory; } pc;
+struct Group { uint first; uint count; uint cell; uint padding; };
+layout(set = 0, binding = 0) readonly buffer Groups { Group groups[]; };
+layout(set = 0, binding = 1) readonly buffer Columns { vec4 columns[]; };
+layout(set = 0, binding = 2) buffer Mass { float gas_mass[]; };
+layout(set = 0, binding = 3) buffer Energy { float gas_energy[]; };
+layout(set = 0, binding = 4) buffer Temperature { float gas_temperature[]; };
+layout(set = 0, binding = 5) buffer Density { float gas_density[]; };
+layout(set = 0, binding = 6) buffer RainMass { float gas_rain[]; };
+layout(set = 0, binding = 7) buffer RainEnergy { float gas_rain_energy[]; };
+void main() {
+    uint id = gl_GlobalInvocationID.x +
+        gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (id < pc.count) {
+        uint cell = groups[id].cell;
+        vec4 value = columns[2u * id];
+        if (pc.inventory != 0u) {
+            gas_mass[cell] = value.x;
+            gas_energy[cell] = value.y;
+            vec4 rain = columns[2u * id + 1u];
+            gas_rain[cell] = rain.x;
+            gas_rain_energy[cell] = rain.y;
+        }
+        gas_temperature[cell] = value.z;
+        gas_density[cell] = value.w;
+    }
+}

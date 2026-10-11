@@ -1,0 +1,57 @@
+#version 450
+// Rain water falls through the air at its terminal speed (CPU reference:
+// src/Physics/Fluid/GasSaturation.cpp, fallRain). One thread per grid column.
+// Kessler / Klemp-Wilhelmson terminal speed V = 36.34 (rho_r)^0.1364 m/s with
+// rho_r the rain water in g/cm^3 (about 5.5 m/s at 1 g/m^3), capped at 10 m/s.
+// Rain stops above a solid cell, at the grid floor, and in a cell the surface
+// exchange stamped as lying on liquid (it is absorbed there next step).
+// Substeps keep every move within one cell; within a substep the column is
+// swept bottom-up, so water that just arrived in a cell does not move again.
+layout(local_size_x = 64) in;
+layout(push_constant) uniform Constants {
+    uint nx;
+    uint ny;
+    uint nz;
+    uint stamp;             // current landing stamp
+    uint substeps;
+    float dt;               // per substep
+    float voxel;
+    float cell_volume;
+} pc;
+layout(set = 0, binding = 0) buffer RainMass { float rain[]; };
+layout(set = 0, binding = 1) buffer RainEnergy { float rain_energy[]; };
+layout(set = 0, binding = 2) readonly buffer Landing { uint landing[]; };
+layout(set = 0, binding = 3) readonly buffer Solid { float solid[]; };
+
+void main() {
+    uint column = gl_GlobalInvocationID.x +
+        gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (column >= pc.nx * pc.nz) {
+        return;
+    }
+    uint x = column % pc.nx;
+    uint z = column / pc.nx;
+    uint base = x + pc.nx * pc.ny * z;
+    for (uint s = 0u; s < pc.substeps; ++s) {
+        for (uint y = 1u; y < pc.ny; ++y) {
+            uint cell = base + y * pc.nx;
+            float r = rain[cell];
+            if (!(r > 0.0) || landing[cell] == pc.stamp) {
+                continue;
+            }
+            uint below = cell - pc.nx;
+            if (solid[below] > 0.5) {
+                continue;
+            }
+            float density = r / pc.cell_volume;   // kg/m^3
+            float speed = min(36.34 * pow(density * 1.0e-3, 0.1364), 10.0);
+            float f = min(speed * pc.dt / pc.voxel, 1.0);
+            float moved = r * f;
+            float moved_energy = max(rain_energy[cell], 0.0) * f;
+            rain[cell] = r - moved;
+            rain_energy[cell] = max(rain_energy[cell] - moved_energy, 0.0);
+            rain[below] += moved;
+            rain_energy[below] += moved_energy;
+        }
+    }
+}

@@ -354,6 +354,10 @@ bool readRigidFrame(const std::string& cache_dir, int frame,
 bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame,
                       const std::vector<SimulationGridDomainState>& domains,
                       const std::vector<MaterialStateFieldSnapshot>& msf) {
+    std::vector<Fluid::GasInventoryHostImage> inventories;
+    if (!Fluid::captureGasInventoryHostImages(domains, inventories)) {
+        return false;
+    }
     std::error_code ec;
     fs::create_directories(cache_dir, ec);
 
@@ -364,6 +368,7 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
     writePod(os, kVersion);
     writePod(os, static_cast<uint32_t>(domains.size()));
 
+    std::size_t inventory_index = 0;
     for (const auto& d : domains) {
         writePod(os, static_cast<uint32_t>(d.type));
         writePod(os, d.channels);
@@ -392,8 +397,12 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
         writeFloatArray(os, d.grid.temperature);
         writeFloatArray(os, d.grid.fuel);
         writeFloatArray(os, d.grid.interaction);
-        writeFloatArray(os, d.gas_phase_mass_kg);
-        writeFloatArray(os, d.gas_phase_energy_j);
+        const auto& inventory = inventories[inventory_index++];
+        writeFloatArray(os, inventory.mass);
+        writeFloatArray(os, inventory.energy);
+        writeFloatArray(os, inventory.condensate);
+        writeFloatArray(os, inventory.rain);
+        writeFloatArray(os, inventory.rain_energy);
 
         // Fluid particles — position + material coordinate. Both are render
         // source of truth: position places the surface, uvw anchors what is
@@ -592,7 +601,8 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         }
 
         std::vector<float> density, temperature, fuel, interaction;
-        std::vector<float> gas_phase_mass_kg, gas_phase_energy_j;
+        std::vector<float> gas_phase_mass_kg, gas_phase_energy_j, gas_phase_condensate_kg,
+            gas_phase_rain_kg, gas_phase_rain_energy_j;
         {
             RTPERF_FRAME_SCOPE("sim.cache.disk.scalar_fields");
             if (!readFloatArray(is, density, version)) return false;
@@ -601,6 +611,11 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
             if (!readFloatArray(is, interaction, version)) return false;
             if (!readFloatArray(is, gas_phase_mass_kg, version)) return false;
             if (!readFloatArray(is, gas_phase_energy_j, version)) return false;
+            if (version >= 13u &&
+                !readFloatArray(is, gas_phase_condensate_kg, version)) return false;
+            if (version >= 14u &&
+                (!readFloatArray(is, gas_phase_rain_kg, version) ||
+                 !readFloatArray(is, gas_phase_rain_energy_j, version))) return false;
         }
         if (!density.empty())     d.grid.density     = std::move(density);
         if (!temperature.empty()) d.grid.temperature = std::move(temperature);
@@ -608,6 +623,9 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         if (!interaction.empty()) d.grid.interaction = std::move(interaction);
         d.gas_phase_mass_kg = std::move(gas_phase_mass_kg);
         d.gas_phase_energy_j = std::move(gas_phase_energy_j);
+        d.gas_phase_condensate_kg = std::move(gas_phase_condensate_kg);
+        d.gas_phase_rain_kg = std::move(gas_phase_rain_kg);
+        d.gas_phase_rain_energy_j = std::move(gas_phase_rain_energy_j);
 
         // Fluid particles — positions restored; velocity/affine/flags zeroed to
         // match the count so any consumer iterating them in lockstep stays valid.
@@ -640,6 +658,10 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         // which is exactly why it went unnoticed.
         d.particles.temperature.assign(static_cast<size_t>(pcount), 293.0f);
         d.particles.combustible_fraction.assign(static_cast<size_t>(pcount), 0.0f);
+        // Not stored: the fusion pass derives each parcel's solid share from
+        // its frozen flag / constitutive model (playback has no latent history).
+        d.particles.fusion_solid_fraction.assign(static_cast<size_t>(pcount),
+            std::numeric_limits<float>::quiet_NaN());
         // Playback caches are render-oriented and do not preserve constitutive
         // history, but every particle sidecar must still remain cardinality-safe
         // if the frame is inspected or resumed through the live domain path.

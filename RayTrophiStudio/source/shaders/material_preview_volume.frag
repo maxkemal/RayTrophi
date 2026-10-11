@@ -298,7 +298,15 @@ void main(){
                 continue;
             }
             vec3 sigmaS=max(volVec3(vi,88u),vec3(0))*max(volFloat(vi,100u),0.0)*density;
-            vec3 sigmaA=max(volVec3(vi,120u),vec3(0))*max(volFloat(vi,132u),0.0)*density;
+            // Match RT: legacy black absorption means neutral extinction,
+            // while a tint selects the wavelengths removed by the medium.
+            // Treating black as zero made scatter=0 discard even emissive gas.
+            vec3 absorptionColor = max(volVec3(vi,120u), vec3(0.0));
+            float absorptionPeak = max(absorptionColor.r,
+                                       max(absorptionColor.g, absorptionColor.b));
+            vec3 absorptionWeights = absorptionPeak > 1e-5
+                ? absorptionColor / absorptionPeak : vec3(1.0);
+            vec3 sigmaA = absorptionWeights * max(volFloat(vi,132u),0.0) * density;
             vec3 sigmaT=max(sigmaS+sigmaA,vec3(1e-6));
             vec3 sampleT=exp(-sigmaT*dt), oneMinusT=vec3(1)-sampleT;
             vec3 scatterWeight=oneMinusT*sigmaS/sigmaT;

@@ -223,6 +223,12 @@ const SubstanceProfile* particleSubstance(uint32_t tag, const APICSolverParams& 
     return domainSubstance(params);
 }
 
+bool substanceHasSolidSkeleton(const SubstanceProfile* profile) {
+    return profile && profile->meltable &&
+        (profile->default_constitutive_model == MatterConstitutiveModel::Granular ||
+         profile->default_constitutive_model == MatterConstitutiveModel::Elastic);
+}
+
 MatterConstitutiveModel substanceBirthModel(uint32_t tag, const APICSolverParams& params,
                                           float kelvin) {
     const auto* profile = particleSubstance(tag, params);
@@ -240,6 +246,72 @@ MatterConstitutiveModel substanceBirthModel(uint32_t tag, const APICSolverParams
                                    : MatterConstitutiveModel::Fluid;
 }
 
+float substanceAmbientBirthKelvin(uint32_t tag, const APICSolverParams& params,
+                                  float ambient_kelvin, bool* lowered) {
+    if (lowered) {
+        *lowered = false;
+    }
+    const auto* profile = particleSubstance(tag, params);
+    // A liquid is poured as liquid: never above its boiling point. Water born
+    // into a 450 K domain otherwise flash-boils the whole tank in one step.
+    if (profile && profile->boiling_kelvin > 0.0f &&
+        profile->latent_heat_vaporization > 0.0f &&
+        (profile->default_constitutive_model == MatterConstitutiveModel::Fluid ||
+         profile->default_constitutive_model == MatterConstitutiveModel::Auto) &&
+        ambient_kelvin > profile->boiling_kelvin) {
+        if (lowered) {
+            *lowered = true;
+        }
+        return profile->boiling_kelvin;
+    }
+    if (!profile || !profile->meltable || !(profile->melt_kelvin > 0.0f) ||
+        (profile->default_constitutive_model != MatterConstitutiveModel::Granular &&
+         profile->default_constitutive_model != MatterConstitutiveModel::Elastic)) {
+        return ambient_kelvin;
+    }
+    const float solid_kelvin =
+        std::max(1.0f, profile->melt_kelvin - kSolidBirthBelowMeltKelvin);
+    if (!(ambient_kelvin > solid_kelvin)) {
+        return ambient_kelvin;
+    }
+    if (lowered) {
+        *lowered = true;
+    }
+    return solid_kelvin;
+}
+
+namespace {
+// One writer for a parcel's regime. A newly solidified carrier starts from its
+// current shape: old stress from a preceding solid interval must not
+// reappear after melting.
+void assignMatterModel(FluidParticles& particles, std::size_t index,
+                       MatterConstitutiveModel value) {
+    const auto model = static_cast<uint8_t>(value);
+    if (particles.constitutive_model[index] == model) {
+        return;
+    }
+    particles.constitutive_model[index] = model;
+    if (index < particles.granular_deformation_col0.size()) {
+        particles.granular_deformation_col0[index] = Vec3(1.0f, 0.0f, 0.0f);
+    }
+    if (index < particles.granular_deformation_col1.size()) {
+        particles.granular_deformation_col1[index] = Vec3(0.0f, 1.0f, 0.0f);
+    }
+    if (index < particles.granular_deformation_col2.size()) {
+        particles.granular_deformation_col2[index] = Vec3(0.0f, 0.0f, 1.0f);
+    }
+    if (index < particles.granular_plastic_volume.size()) {
+        particles.granular_plastic_volume[index] = 1.0f;
+    }
+    if (index < particles.granular_stress_diag.size()) {
+        particles.granular_stress_diag[index] = Vec3(0.0f);
+    }
+    if (index < particles.granular_stress_shear.size()) {
+        particles.granular_stress_shear[index] = Vec3(0.0f);
+    }
+}
+} // namespace
+
 void initializeMatterBirthModels(FluidParticles& particles, std::size_t begin,
                                 const APICSolverParams& params) {
     particles.constitutive_model.resize(particles.size(),
@@ -249,37 +321,36 @@ void initializeMatterBirthModels(FluidParticles& particles, std::size_t begin,
             ? particles.substance_tag[index] : kSubstanceUntagged;
         const float kelvin = index < particles.temperature.size()
             ? particles.temperature[index] : std::numeric_limits<float>::quiet_NaN();
-        const auto model = static_cast<uint8_t>(substanceBirthModel(tag, params, kelvin));
-        if (particles.constitutive_model[index] == model) {
-            continue;
-        }
-        particles.constitutive_model[index] = model;
-        // A newly solidified carrier starts from its current shape. Old stress
-        // from a preceding solid interval must not reappear after melting.
-        if (index < particles.granular_deformation_col0.size()) {
-            particles.granular_deformation_col0[index] = Vec3(1.0f, 0.0f, 0.0f);
-        }
-        if (index < particles.granular_deformation_col1.size()) {
-            particles.granular_deformation_col1[index] = Vec3(0.0f, 1.0f, 0.0f);
-        }
-        if (index < particles.granular_deformation_col2.size()) {
-            particles.granular_deformation_col2[index] = Vec3(0.0f, 0.0f, 1.0f);
-        }
-        if (index < particles.granular_plastic_volume.size()) {
-            particles.granular_plastic_volume[index] = 1.0f;
-        }
-        if (index < particles.granular_stress_diag.size()) {
-            particles.granular_stress_diag[index] = Vec3(0.0f);
-        }
-        if (index < particles.granular_stress_shear.size()) {
-            particles.granular_stress_shear[index] = Vec3(0.0f);
-        }
+        assignMatterModel(particles, index, substanceBirthModel(tag, params, kelvin));
     }
 }
 
 void refreshMatterConstitutiveModels(FluidParticles& particles,
                                     const APICSolverParams& params) {
-    initializeMatterBirthModels(particles, 0u, params);
+    // Before the first fusion pass (or for a parcel born since) the state is
+    // the birth rule. After it, a meltable skeleton carrier (Snow, Ice) is
+    // solid while most of it is solid: the latent heat, not the thermometer,
+    // decides when it turns to liquid.
+    const std::vector<float>& solid = particles.fusion_solid_fraction;
+    if (solid.size() != particles.size()) {
+        initializeMatterBirthModels(particles, 0u, params);
+        return;
+    }
+    particles.constitutive_model.resize(particles.size(),
+        static_cast<uint8_t>(MatterConstitutiveModel::Auto));
+    for (std::size_t index = 0; index < particles.size(); ++index) {
+        const uint32_t tag = index < particles.substance_tag.size()
+            ? particles.substance_tag[index] : kSubstanceUntagged;
+        const float kelvin = index < particles.temperature.size()
+            ? particles.temperature[index] : std::numeric_limits<float>::quiet_NaN();
+        auto model = substanceBirthModel(tag, params, kelvin);
+        const SubstanceProfile* profile = particleSubstance(tag, params);
+        if (std::isfinite(solid[index]) && substanceHasSolidSkeleton(profile)) {
+            model = solid[index] >= kFusionSolidThreshold
+                ? profile->default_constitutive_model : MatterConstitutiveModel::Fluid;
+        }
+        assignMatterModel(particles, index, model);
+    }
 }
 
 bool isMatterObstacle(const FluidParticles& particles, std::size_t index,
@@ -330,7 +401,7 @@ bool buildMatterObstacleMask(const FluidParticles& particles,
 float substanceFreezeKelvin(uint32_t tag, const APICSolverParams& params) {
     const auto* profile = particleSubstance(tag, params);
     if (!profile) {
-        return params.thermal_freeze_kelvin;
+        return -std::numeric_limits<float>::infinity();   // no substance, no freeze point
     }
     return profile->meltable ? profile->melt_kelvin
                              : -std::numeric_limits<float>::infinity();
@@ -360,29 +431,22 @@ void collectMatterStaticTags(const SimulationGridDomainDesc& domain,
 float substanceThermalViscosity(uint32_t tag, float kelvin,
                                const APICSolverParams& params) {
     const auto* profile = particleSubstance(tag, params);
-    const float hot = std::max(0.0f, profile ? profile->liquid_kinematic_viscosity
-                                          : params.kinematic_viscosity);
-    if (profile && !profile->meltable) {
+    if (!profile) {
+        return std::max(0.0f, params.kinematic_viscosity);
+    }
+    const float hot = std::max(0.0f, profile->liquid_kinematic_viscosity);
+    if (!profile->meltable) {
         return hot;
     }
     const float freeze = substanceFreezeKelvin(tag, params);
-    const float range = std::max(1.0f, profile ? profile->liquid_freeze_viscosity_range
-                                             : params.thermal_viscosity_range);
-    const float cold = std::max(1.0e-7f, profile ? profile->liquid_cold_viscosity
-                                              : params.thermal_cold_viscosity);
+    const float range = std::max(1.0f, profile->liquid_freeze_viscosity_range);
+    const float cold = std::max(1.0e-7f, profile->liquid_cold_viscosity);
     const float fraction = std::clamp((kelvin - freeze) / range, 0.0f, 1.0f);
     if (fraction >= 1.0f) {
         return hot;
     }
     return std::exp(fraction * std::log(std::max(1.0e-7f, hot)) +
                     (1.0f - fraction) * std::log(cold));
-}
-
-float substanceMeltReleaseKelvin(uint32_t tag, const APICSolverParams& params) {
-    const auto* profile = particleSubstance(tag, params);
-    const float range = profile ? profile->liquid_freeze_viscosity_range
-                                : params.thermal_viscosity_range;
-    return substanceFreezeKelvin(tag, params) + std::max(1.0f, 0.1f * range);
 }
 
 } // namespace RayTrophiSim::Fluid

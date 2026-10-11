@@ -370,6 +370,8 @@ json flowSourceToJson(const rtapi::SimulationFlowSourceInfo& s) {
         {"fluid_substance", s.fluid_substance},
         {"fluid_temperature_override", s.fluid_temperature_override},
         {"fluid_temperature_kelvin", s.fluid_temperature_kelvin},
+        {"fluid_birth_kelvin", s.fluid_birth_kelvin},
+        {"fluid_born_solid", s.fluid_born_solid},
         {"grain_birth_saturation", s.grain_birth_saturation},
         {"use_time_limit", s.use_time_limit},
         {"start_time", s.start_time}, {"end_time", s.end_time},
@@ -2779,6 +2781,20 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"active_density_cells", info.active_density_cells}, {"max_density", info.max_density},
                         {"gas_phase_mass_kg", info.gas_phase_mass_kg}, {"gas_phase_energy_j", info.gas_phase_energy_j},
                         {"gas_phase_active_cells", info.gas_phase_active_cells},
+                        {"gas_condensate_kg", info.gas_condensate_kg},
+                        {"gas_condensate_cells", info.gas_condensate_cells},
+                        {"gas_condensate_mean_kg_m3", info.gas_condensate_mean_kg_m3},
+                        {"saturation_measured", info.saturation_measured},
+                        {"condensable_substance", info.condensable_substance},
+                        {"fog_condensed_kg", info.fog_condensed_kg},
+                        {"fog_evaporated_kg", info.fog_evaporated_kg},
+                        {"fog_latent_to_air_j", info.fog_latent_to_air_j},
+                        {"rained_kg", info.rained_kg},
+                        {"rain_parcels", info.rain_parcels},
+                        {"fog_autoconverted_kg", info.fog_autoconverted_kg},
+                        {"rain_absorbed_kg", info.rain_absorbed_kg},
+                        {"gas_rain_kg", info.gas_rain_kg},
+                        {"gas_rain_cells", info.gas_rain_cells},
                         {"gas_phase_mass_centroid", json::array({
                             info.gas_phase_mass_centroid.x,
                             info.gas_phase_mass_centroid.y,
@@ -2804,6 +2820,20 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"active_density_cells", info.active_density_cells}, {"max_density", info.max_density},
                         {"gas_phase_mass_kg", info.gas_phase_mass_kg}, {"gas_phase_energy_j", info.gas_phase_energy_j},
                         {"gas_phase_active_cells", info.gas_phase_active_cells},
+                        {"gas_condensate_kg", info.gas_condensate_kg},
+                        {"gas_condensate_cells", info.gas_condensate_cells},
+                        {"gas_condensate_mean_kg_m3", info.gas_condensate_mean_kg_m3},
+                        {"saturation_measured", info.saturation_measured},
+                        {"condensable_substance", info.condensable_substance},
+                        {"fog_condensed_kg", info.fog_condensed_kg},
+                        {"fog_evaporated_kg", info.fog_evaporated_kg},
+                        {"fog_latent_to_air_j", info.fog_latent_to_air_j},
+                        {"rained_kg", info.rained_kg},
+                        {"rain_parcels", info.rain_parcels},
+                        {"fog_autoconverted_kg", info.fog_autoconverted_kg},
+                        {"rain_absorbed_kg", info.rain_absorbed_kg},
+                        {"gas_rain_kg", info.gas_rain_kg},
+                        {"gas_rain_cells", info.gas_rain_cells},
                         {"gas_phase_mass_centroid", json::array({
                             info.gas_phase_mass_centroid.x,
                             info.gas_phase_mass_centroid.y,
@@ -2848,20 +2878,40 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"surface_grid_dim", json::array({info.surface_grid_dim[0], info.surface_grid_dim[1], info.surface_grid_dim[2]})},
                         {"surface_voxel", info.surface_voxel},
                         {"surface_build_ms", info.surface_build_ms},
+                        {"surface_bin_ms", info.surface_bin_ms},
+                        {"surface_anisotropy_ms", info.surface_anisotropy_ms},
+                        {"surface_schedule_ms", info.surface_schedule_ms},
+                        {"surface_gather_ms", info.surface_gather_ms},
+                        {"surface_smooth_ms", info.surface_smooth_ms},
                         {"surface_active_cells", info.surface_active_cells},
+                        {"surface_work_cells", info.surface_work_cells},
+                        {"surface_bin_cells", info.surface_bin_cells},
                         {"thermal_liquid_enabled", info.thermal_liquid_enabled},
                         {"thermal_air_cooling_rate", info.thermal_air_cooling_rate},
+                        {"fog_autoconversion_kg_m3", info.fog_autoconversion_kg_m3},
+                        {"fog_autoconversion_rate", info.fog_autoconversion_rate},
+                        {"fog_ceiling_kg_m3", info.fog_ceiling_kg_m3},
                         {"thermal_contact_cooling_rate", info.thermal_contact_cooling_rate},
-                        {"thermal_freeze_kelvin", info.thermal_freeze_kelvin},
-                        {"thermal_viscosity_range", info.thermal_viscosity_range},
-                        {"thermal_cold_viscosity", info.thermal_cold_viscosity},
                         {"thermal_ambient_kelvin", info.thermal_ambient_kelvin},
                         {"thermal_measured", info.thermal_measured},
                         {"thermal_frozen_particles", info.thermal_frozen_particles},
                         {"thermal_froze_this_frame", info.thermal_froze_this_frame},
                         {"thermal_melted_this_frame", info.thermal_melted_this_frame},
                         {"thermal_cold_unsupported", info.thermal_cold_unsupported},
+                        {"thermal_mushy_particles", info.thermal_mushy_particles},
+                        {"thermal_fusion_released_j", info.thermal_fusion_released_j},
+                        {"thermal_fusion_absorbed_j", info.thermal_fusion_absorbed_j},
                         {"thermal_air_cooled_particles", info.thermal_air_cooled_particles},
+                        {"thermal_field_heated_particles", info.thermal_field_heated_particles},
+                        {"thermal_convecting_particles", info.thermal_convecting_particles},
+                        {"thermal_conducting_cells", info.thermal_conducting_cells},
+                        {"thermal_gas_exchange_particles", info.thermal_gas_exchange_particles},
+                        {"thermal_heat_to_gas_j", info.thermal_heat_to_gas_j},
+                        {"thermal_evaporated_kg", info.thermal_evaporated_kg},
+                        {"thermal_condensed_kg", info.thermal_condensed_kg},
+                        {"thermal_condensation_splits", info.thermal_condensation_splits},
+                        {"thermal_solid_contact_particles", info.thermal_solid_contact_particles},
+                        {"thermal_heat_to_solid_j", info.thermal_heat_to_solid_j},
                         {"thermal_contact_cooled_particles", info.thermal_contact_cooled_particles},
                         {"thermal_min_kelvin", info.thermal_min_kelvin},
                         {"thermal_mean_kelvin", info.thermal_mean_kelvin},
@@ -2985,6 +3035,20 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"active_density_cells", info.active_density_cells}, {"max_density", info.max_density},
                     {"gas_phase_mass_kg", info.gas_phase_mass_kg}, {"gas_phase_energy_j", info.gas_phase_energy_j},
                     {"gas_phase_active_cells", info.gas_phase_active_cells},
+                    {"gas_condensate_kg", info.gas_condensate_kg},
+                    {"gas_condensate_cells", info.gas_condensate_cells},
+                    {"gas_condensate_mean_kg_m3", info.gas_condensate_mean_kg_m3},
+                    {"saturation_measured", info.saturation_measured},
+                    {"condensable_substance", info.condensable_substance},
+                    {"fog_condensed_kg", info.fog_condensed_kg},
+                    {"fog_evaporated_kg", info.fog_evaporated_kg},
+                    {"fog_latent_to_air_j", info.fog_latent_to_air_j},
+                    {"rained_kg", info.rained_kg},
+                    {"rain_parcels", info.rain_parcels},
+                    {"fog_autoconverted_kg", info.fog_autoconverted_kg},
+                    {"rain_absorbed_kg", info.rain_absorbed_kg},
+                    {"gas_rain_kg", info.gas_rain_kg},
+                    {"gas_rain_cells", info.gas_rain_cells},
                     {"gas_phase_mass_centroid", json::array({
                         info.gas_phase_mass_centroid.x,
                         info.gas_phase_mass_centroid.y,
@@ -3029,20 +3093,40 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"surface_grid_dim", json::array({info.surface_grid_dim[0], info.surface_grid_dim[1], info.surface_grid_dim[2]})},
                         {"surface_voxel", info.surface_voxel},
                         {"surface_build_ms", info.surface_build_ms},
+                        {"surface_bin_ms", info.surface_bin_ms},
+                        {"surface_anisotropy_ms", info.surface_anisotropy_ms},
+                        {"surface_schedule_ms", info.surface_schedule_ms},
+                        {"surface_gather_ms", info.surface_gather_ms},
+                        {"surface_smooth_ms", info.surface_smooth_ms},
                         {"surface_active_cells", info.surface_active_cells},
+                        {"surface_work_cells", info.surface_work_cells},
+                        {"surface_bin_cells", info.surface_bin_cells},
                         {"thermal_liquid_enabled", info.thermal_liquid_enabled},
                         {"thermal_air_cooling_rate", info.thermal_air_cooling_rate},
+                        {"fog_autoconversion_kg_m3", info.fog_autoconversion_kg_m3},
+                        {"fog_autoconversion_rate", info.fog_autoconversion_rate},
+                        {"fog_ceiling_kg_m3", info.fog_ceiling_kg_m3},
                         {"thermal_contact_cooling_rate", info.thermal_contact_cooling_rate},
-                        {"thermal_freeze_kelvin", info.thermal_freeze_kelvin},
-                        {"thermal_viscosity_range", info.thermal_viscosity_range},
-                        {"thermal_cold_viscosity", info.thermal_cold_viscosity},
                         {"thermal_ambient_kelvin", info.thermal_ambient_kelvin},
                         {"thermal_measured", info.thermal_measured},
                         {"thermal_frozen_particles", info.thermal_frozen_particles},
                         {"thermal_froze_this_frame", info.thermal_froze_this_frame},
                         {"thermal_melted_this_frame", info.thermal_melted_this_frame},
                         {"thermal_cold_unsupported", info.thermal_cold_unsupported},
+                        {"thermal_mushy_particles", info.thermal_mushy_particles},
+                        {"thermal_fusion_released_j", info.thermal_fusion_released_j},
+                        {"thermal_fusion_absorbed_j", info.thermal_fusion_absorbed_j},
                         {"thermal_air_cooled_particles", info.thermal_air_cooled_particles},
+                        {"thermal_field_heated_particles", info.thermal_field_heated_particles},
+                        {"thermal_convecting_particles", info.thermal_convecting_particles},
+                        {"thermal_conducting_cells", info.thermal_conducting_cells},
+                        {"thermal_gas_exchange_particles", info.thermal_gas_exchange_particles},
+                        {"thermal_heat_to_gas_j", info.thermal_heat_to_gas_j},
+                        {"thermal_evaporated_kg", info.thermal_evaporated_kg},
+                        {"thermal_condensed_kg", info.thermal_condensed_kg},
+                        {"thermal_condensation_splits", info.thermal_condensation_splits},
+                        {"thermal_solid_contact_particles", info.thermal_solid_contact_particles},
+                        {"thermal_heat_to_solid_j", info.thermal_heat_to_solid_j},
                         {"thermal_contact_cooled_particles", info.thermal_contact_cooled_particles},
                         {"thermal_min_kelvin", info.thermal_min_kelvin},
                         {"thermal_mean_kelvin", info.thermal_mean_kelvin},
@@ -3157,11 +3241,14 @@ json dispatchMethod(const std::string& method, const json& params) {
         int ppc = optionalInt(params, "particles_per_cell", 4);
         bool replace = optionalBool(params, "replace", true);
         bool persistent = optionalBool(params, "persistent", false);
-        return enqueueResult([domain, smin, smax, has_region, ppc, replace, persistent](UIContext&) {
+        // fill_level (0..1) = Fill Domain, the panel's resting tank.
+        const float fill_level = optionalFloat(params, "fill_level", -1.0f);
+        return enqueueResult([domain, smin, smax, has_region, ppc, replace, persistent,
+                              fill_level](UIContext&) {
             return rtapi::seedFluidParticles(domain,
                                              has_region ? &smin : nullptr,
                                              has_region ? &smax : nullptr,
-                                             ppc, replace, persistent);
+                                             ppc, replace, persistent, fill_level);
         });
     }
     if (method == "fluid.clear" || method == "gas.clear") {
@@ -3335,6 +3422,9 @@ json dispatchMethod(const std::string& method, const json& params) {
             bool has_thermal_patch = false;
             if(params.contains("thermal_liquid_enabled")){thermal_patch.enabled=params.at("thermal_liquid_enabled").get<bool>();has_thermal_patch=true;}
             if(params.contains("thermal_air_cooling_rate")){thermal_patch.air_cooling_rate=params.at("thermal_air_cooling_rate").get<float>();has_thermal_patch=true;}
+            if(params.contains("fog_autoconversion_kg_m3")){thermal_patch.fog_autoconversion_kg_m3=params.at("fog_autoconversion_kg_m3").get<float>();has_thermal_patch=true;}
+            if(params.contains("fog_autoconversion_rate")){thermal_patch.fog_autoconversion_rate=params.at("fog_autoconversion_rate").get<float>();has_thermal_patch=true;}
+            if(params.contains("fog_ceiling_kg_m3")){thermal_patch.fog_ceiling_kg_m3=params.at("fog_ceiling_kg_m3").get<float>();has_thermal_patch=true;}
             if(params.contains("thermal_contact_cooling_rate")){thermal_patch.contact_cooling_rate=params.at("thermal_contact_cooling_rate").get<float>();has_thermal_patch=true;}
             rtapi::Result main_result = rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_voxel, p_render,
                                             p_backend, p_boundary, p_substance,
@@ -3641,6 +3731,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"foam", st.foam}, {"bubble", st.bubble}, {"spawned", st.spawned},
                     {"gen_ms", st.gen_ms}, {"advect_ms", st.advect_ms},
                     {"crit_on_gpu", st.crit_on_gpu}, {"neigh_on_gpu", st.neigh_on_gpu},
+                    {"inputs_current", st.inputs_current}, {"overflow_fallback", st.overflow_fallback},
+                    {"bin_cells", st.bin_cells}, {"bin_bytes", st.bin_bytes}, {"input_ms", st.input_ms},
                     {"in_sdf", st.in_sdf}, {"in_splat", st.in_splat},
                     {"in_fog", st.in_fog}, {"hidden", st.hidden}}}};
         });
@@ -3899,6 +3991,10 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"mass_budget_overflow", f.mass_budget_overflow},
                     {"mass_negative", f.mass_negative},
                     {"mass_invalid_elements", f.mass_invalid_elements},
+                    {"temperature_valid", f.temperature_valid},
+                    {"mean_kelvin", f.mean_kelvin},
+                    {"min_kelvin", f.min_kelvin},
+                    {"max_kelvin", f.max_kelvin},
                     {"domain", "surface_uv"},
                     {"semantics", f.semantics}
                 });
@@ -6691,14 +6787,22 @@ json dispatchMethod(const std::string& method, const json& params) {
             auto r = rtapi::getGasStepStats(domain, s);
             if (!r.ok) return json{{"ok", false}, {"error", r.error}};
             json j{{"ok", true}, {"measured", s.measured}};
+            j["inventory_transport"] = s.inventory_transport;
+            j["inventory_step_held"] = s.inventory_step_held;
+            j["inventory_error"] = s.inventory_error;
             if (!s.measured) return j;
             j["resolution"] = json::array({s.resolution[0], s.resolution[1], s.resolution[2]});
                 j["total_ms"] = s.total_ms;
                 j["voxelize_ms"] = s.voxelize_ms;
                 j["inventory_advection_ms"] = s.inventory_advection_ms;
+                j["inventory_grid_upload_bytes"] = s.inventory_grid_upload_bytes;
+                j["inventory_grid_download_bytes"] = s.inventory_grid_download_bytes;
+                j["inventory_snapshot_download_bytes"] = s.inventory_snapshot_download_bytes;
+                j["inventory_query_download_bytes"] = s.inventory_query_download_bytes;
                 j["analysis_ms"] = s.analysis_ms;
                 j["gpu_collider_source_ms"] = s.gpu_collider_source_ms;
                 j["gpu_msf_ms"] = s.gpu_msf_ms;
+                j["gpu_surface_exchange_ms"] = s.gpu_surface_exchange_ms;
                 j["gpu_source_upload_ms"] = s.gpu_source_upload_ms;
                 j["gpu_fluid_combustion_ms"] = s.gpu_fluid_combustion_ms;
                 j["gpu_velocity_advect_ms"] = s.gpu_velocity_advect_ms;

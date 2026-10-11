@@ -5,7 +5,8 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
                               SimulationComputeContext* compute,
                               SimulationGridDomainComputeBuffers& gpu_buffers,
                               const std::vector<float>& fluid_mask_cpu,
-                              Fluid::APICSolverStats* mgpcg_stats = nullptr) {
+                              Fluid::APICSolverStats* mgpcg_stats = nullptr,
+                              bool velocity_input_on_device = false) {
     auto& grid = state.grid;
     if (!compute || !compute->supportsDispatch() || dt <= 0.0f ||
         grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 ||
@@ -100,13 +101,13 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     // Batched: one submission instead of four (Vulkan submit+fence per copy).
     const auto mg_upload_begin = SimulationClock::now();
     compute->beginTransferBatch();
-    bool ok = (gpu_buffers.matter_model.enabled ||
+    bool ok = (gpu_buffers.matter_model.enabled || velocity_input_on_device ||
              compute->uploadBuffer(gpu_buffers.vel_x, grid.vel_x.data(),
                                      grid.vel_x.size() * sizeof(float))) &&
-              (gpu_buffers.matter_model.enabled ||
+              (gpu_buffers.matter_model.enabled || velocity_input_on_device ||
              compute->uploadBuffer(gpu_buffers.vel_y, grid.vel_y.data(),
                                      grid.vel_y.size() * sizeof(float))) &&
-              (gpu_buffers.matter_model.enabled ||
+              (gpu_buffers.matter_model.enabled || velocity_input_on_device ||
              compute->uploadBuffer(gpu_buffers.vel_z, grid.vel_z.data(),
                                      grid.vel_z.size() * sizeof(float))) &&
               // cell_count, NOT fluid_mask_cpu.size(): the caller's scratch vector is

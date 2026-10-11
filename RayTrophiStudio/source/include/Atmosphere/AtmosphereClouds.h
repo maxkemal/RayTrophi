@@ -35,6 +35,18 @@ namespace atmosphere {
 
 constexpr int kMaxCloudLayers = 3;
 
+// Coefficients scale nominal layer extinction; colours are linear RGB.
+struct CloudMaterial {
+    float density_multiplier = 1.0f;
+    float scattering_coefficient = 1.0f;
+    Vec3 scattering_color = Vec3(1.0f);
+    float absorption_coefficient = 0.0f;
+    bool override_anisotropy = false;
+    float anisotropy = 0.75f;
+    Vec3 emission_color = Vec3(1.0f);
+    float emission_strength = 0.0f;
+};
+
 // One volumetric layer: a spherical shell between base and base+thickness.
 struct CloudLayer {
     bool  enabled = false;
@@ -59,6 +71,11 @@ struct CloudLayer {
     // Characteristic cloud size (base-shape noise period) and detail size, m.
     float cell_size_m = 1800.0f;
     float detail_size_m = 180.0f;
+    float rotation_degrees = 0.0f;  // world Y rotation of the layer field
+    int formation_role = 0;  // 0 generic, 1 storm base, 2 tower, 3 anvil
+    int formation_group = 0; // 0 independent; 1..3 share a storm footprint/span
+    bool use_custom_material = false;
+    CloudMaterial material;
 };
 
 // High, thin ice layer (cirrus / cirrostratus). Rendered as a thin shell
@@ -69,6 +86,7 @@ struct CirrusLayer {
     float coverage = 0.3f;
     float opacity = 0.3f;          // optical depth of the sheet at full coverage
     float scale_m = 8000.0f;       // streak length
+    float rotation_degrees = 0.0f;  // relative to the climate wind direction
 };
 
 // World-anchored weather map (procedural source in 3a).
@@ -120,12 +138,42 @@ struct CloudState {
     CloudPrecipitation precipitation;
     CloudWeather weather;
     CloudQuality quality;
+    CloudMaterial material;
 
     bool anyEnabled() const;
 };
 
 // Rejects (does not clamp) out-of-range input.
 bool validateClouds(const CloudState& c, std::string* error);
+bool validateCloudMaterial(const CloudMaterial& material, std::string* error);
+void cloudMaterialToJson(const CloudMaterial& material, nlohmann::json& out);
+bool cloudMaterialFromJson(const nlohmann::json& json, CloudMaterial& out,
+                          std::string* error);
+CloudMaterial lerpCloudMaterial(const CloudMaterial& a, const CloudMaterial& b, float t);
+
+inline CloudMaterial layerMaterial(const CloudState& state, int index) {
+    CloudMaterial m = state.material;
+    const CloudLayer& layer = state.layers[index];
+    if (!layer.use_custom_material) {
+        return m;
+    }
+    const CloudMaterial& local = layer.material;
+    m.density_multiplier *= local.density_multiplier;
+    m.scattering_coefficient *= local.scattering_coefficient;
+    m.scattering_color = Vec3(m.scattering_color.x * local.scattering_color.x,
+                             m.scattering_color.y * local.scattering_color.y,
+                             m.scattering_color.z * local.scattering_color.z);
+    m.absorption_coefficient += local.absorption_coefficient;
+    if (local.override_anisotropy) {
+        m.override_anisotropy = true;
+        m.anisotropy = local.anisotropy;
+    }
+    const Vec3 emission = m.emission_color * m.emission_strength +
+                          local.emission_color * local.emission_strength;
+    m.emission_color = emission;
+    m.emission_strength = 1.0f;
+    return m;
+}
 
 void cloudsToJson(const CloudState& c, nlohmann::json& j);
 // Missing keys keep the defaults; an out-of-range present value fails.
