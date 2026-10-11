@@ -161,7 +161,8 @@ Physics::ForceFieldManager& manager() { return g_ctx->scene.force_field_manager;
 // The panel's post-edit step. See the file header — this is the part that
 // cannot be dropped.
 void touchForceFields() {
-    g_ctx->scene.invalidateRigidBodySimulationCache();
+    // Live edit: keep the run, re-simulate only what comes next.
+    g_ctx->scene.invalidateSimCacheAfterCurrentFrame();
     g_ctx->renderer.resetCPUAccumulation();
     if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
 }

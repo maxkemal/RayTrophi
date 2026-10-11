@@ -1,0 +1,171 @@
+{
+  "any_enabled": true,
+  "cirrus": {
+    "altitude_m": 14000.0,
+    "coverage": 0.0,
+    "enabled": false,
+    "opacity": 0.30000001192092896,
+    "rotation_degrees": 0.0,
+    "scale_m": 8000.0
+  },
+  "derive_from_climate": false,
+  "layers": [
+    {
+      "base_altitude_m": 800.0,
+      "cell_size_m": 6000.0,
+      "coverage": 0.23000000417232513,
+      "detail_size_m": 450.0,
+      "droplet_diameter_um": 18.0,
+      "enabled": true,
+      "erosion": 0.6000000238418579,
+      "extinction_per_m": 0.06499999761581421,
+      "formation_group": 1,
+      "formation_role": 1,
+      "material": {
+        "absorption_coefficient": 0.03500000014901161,
+        "anisotropy": 0.75,
+        "density_multiplier": 1.149999976158142,
+        "emission_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "emission_strength": 0.0,
+        "override_anisotropy": false,
+        "scattering_coefficient": 1.0,
+        "scattering_color": [
+          0.9200000166893005,
+          0.9399999976158142,
+          0.9599999785423279
+        ]
+      },
+      "rotation_degrees": 0.0,
+      "thickness_m": 1600.0,
+      "type": 0.4000000059604645,
+      "use_custom_material": true
+    },
+    {
+      "base_altitude_m": 2400.0,
+      "cell_size_m": 3200.0,
+      "coverage": 0.44999998807907104,
+      "detail_size_m": 320.0,
+      "droplet_diameter_um": 18.0,
+      "enabled": true,
+      "erosion": 0.699999988079071,
+      "extinction_per_m": 0.04500000178813934,
+      "formation_group": 1,
+      "formation_role": 2,
+      "material": {
+        "absorption_coefficient": 0.004999999888241291,
+        "anisotropy": 0.75,
+        "density_multiplier": 1.0,
+        "emission_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "emission_strength": 0.0,
+        "override_anisotropy": false,
+        "scattering_coefficient": 1.0,
+        "scattering_color": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "rotation_degrees": 0.0,
+      "thickness_m": 7100.0,
+      "type": 1.0,
+      "use_custom_material": true
+    },
+    {
+      "base_altitude_m": 9500.0,
+      "cell_size_m": 5500.0,
+      "coverage": 0.44999998807907104,
+      "detail_size_m": 600.0,
+      "droplet_diameter_um": 8.0,
+      "enabled": true,
+      "erosion": 0.5,
+      "extinction_per_m": 0.02199999988079071,
+      "formation_group": 1,
+      "formation_role": 3,
+      "material": {
+        "absorption_coefficient": 0.004999999888241291,
+        "anisotropy": 0.75,
+        "density_multiplier": 0.6499999761581421,
+        "emission_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "emission_strength": 0.0,
+        "override_anisotropy": false,
+        "scattering_coefficient": 1.0,
+        "scattering_color": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "rotation_degrees": 0.0,
+      "thickness_m": 3000.0,
+      "type": 0.30000001192092896,
+      "use_custom_material": true
+    }
+  ],
+  "material": {
+    "absorption_coefficient": 0.0,
+    "anisotropy": 0.75,
+    "density_multiplier": 1.0,
+    "emission_color": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "emission_strength": 0.0,
+    "override_anisotropy": false,
+    "scattering_coefficient": 1.0,
+    "scattering_color": [
+      1.0,
+      1.0,
+      1.0
+    ]
+  },
+  "precipitation": {
+    "ground_fraction": 1.0,
+    "rate_mm_h": 0.0,
+    "snow": false
+  },
+  "presets": [
+    "clear",
+    "fair_weather_cumulus",
+    "towering_cumulus",
+    "scattered",
+    "broken",
+    "overcast_stratus",
+    "storm",
+    "high_cirrus",
+    "sunset_altocumulus"
+  ],
+  "quality": {
+    "realtime_resolution_divisor": 1,
+    "realtime_steps": 128,
+    "rt_max_bounces": 64,
+    "rt_reference_path_trace": false,
+    "rt_secondary_full_march": false,
+    "rt_steps": 128
+  },
+  "revision": 538,
+  "time_seconds": 0.0,
+  "weather": {
+    "evolution_speed": 0.0020000000949949026,
+    "extent_m": 150000.0,
+    "feature_size_m": 12000.0,
+    "seed": 1,
+    "type_variation": 0.25
+  },
+  "wind_offset_m": [
+    0.0,
+    0.0
+  ]
+}

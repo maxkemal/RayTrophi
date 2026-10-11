@@ -1,0 +1,2639 @@
+{
+  "rows": [
+    {
+      "requested_frame": 1,
+      "control": {
+        "driver": "none",
+        "dropped_seeds": [],
+        "epoch": 0,
+        "frame": 1,
+        "playing": false,
+        "script_driving": false,
+        "script_sim_seconds": 0.0
+      },
+      "wall_ms": 511.98459998704493,
+      "process": {
+        "pid": 30752,
+        "working_set_bytes": 1917505536,
+        "private_bytes": 4109123584
+      },
+      "cache": {
+        "baking": false,
+        "budget_bytes": 36014621076,
+        "budget_reached": false,
+        "cache_dir": "",
+        "config_signature": 1552502693866506894,
+        "first_frame": 0,
+        "has_range": true,
+        "last_frame": 1,
+        "ram_bytes": 36063512,
+        "ram_frames": 2,
+        "valid": false
+      },
+      "fluid": {
+        "advect_ms": 0.2671000063419342,
+        "batch_end_calls": 14,
+        "batch_end_ms": 16.965799999999994,
+        "density_ms": 2.9117000102996826,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 0.7474999999999999,
+        "dispatch_calls": 104,
+        "download_bytes": 84507600,
+        "download_call_ms": 0.10080000000000003,
+        "download_calls": 19,
+        "flip_sparse_used": true,
+        "full_grid_cells": 2097152,
+        "g2p_ms": 0.04580000042915344,
+        "g2p_on_gpu": true,
+        "gpu_status": "GPU on Vulkan Simulation Compute: P2G/pressure(MGPCG)/G2P/density/advect+boundaries. Reseed topology CPU. forces GPU.",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": true,
+        "ok": true,
+        "p2g_ms": 5.275000095367432,
+        "p2g_on_gpu": true,
+        "particle_count": 416,
+        "pressure_ms": 5.088200092315674,
+        "pressure_on_gpu": true,
+        "pressure_sparse_active_tiles": 0,
+        "pressure_sparse_allocated_tiles": 0,
+        "pressure_sparse_resident_bytes": 0,
+        "pressure_sparse_used": false,
+        "pressure_window_cells": 18975,
+        "pressure_window_used": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "synchronize_calls": 3,
+        "synchronize_ms": 0.7019,
+        "total_ms": 73.21859741210938,
+        "transfer_sparse_active_tiles": 32,
+        "transfer_sparse_allocated_tiles": 819,
+        "transfer_sparse_blocked": false,
+        "transfer_sparse_canonical": false,
+        "transfer_sparse_resident_bytes": 17015556,
+        "transfer_sparse_status": "compact P2G/FLIP with dense projection/contact publication",
+        "transfer_sparse_used": true,
+        "upload_bytes": 50391552,
+        "upload_call_ms": 5.5632,
+        "upload_calls": 15,
+        "viscosity_sparse_active_tiles": 28,
+        "viscosity_sparse_allocated_tiles": 746,
+        "viscosity_sparse_resident_bytes": 5189124,
+        "viscosity_sparse_used": true
+      },
+      "gas": {
+        "active_blocks": 2411,
+        "active_density_cells": 0,
+        "analysis_ms": 6.3140997886657715,
+        "burning_cells": 0,
+        "cell_count": 2097152,
+        "cfl": 1.9998058080673218,
+        "cpu_advect_scalar_ms": 9.999999747378752e-05,
+        "cpu_advect_velocity_ms": 0.0,
+        "cpu_boundary_ms": 0.21040000021457672,
+        "cpu_buoyancy_ms": 0.0,
+        "cpu_combustion_ms": 0.0,
+        "cpu_dissipation_ms": 0.0,
+        "cpu_force_fields_ms": 0.0,
+        "cpu_pressure_ms": 0.0,
+        "cpu_surface_dust_ms": 0.0003000000142492354,
+        "cpu_total_ms": 0.21089999377727509,
+        "cpu_turbulence_ms": 0.0,
+        "cpu_vorticity_ms": 0.0,
+        "gpu_body_forces_ms": 1.4235999584197998,
+        "gpu_collider_source_ms": 6.564599990844727,
+        "gpu_combustion_ms": 0.0003000000142492354,
+        "gpu_dissipation_ms": 1.8898999691009521,
+        "gpu_fluid_combustion_ms": 0.0003000000142492354,
+        "gpu_host_sync_ms": 7.576399803161621,
+        "gpu_majorant_ms": 0.1005999967455864,
+        "gpu_msf_ms": 0.0,
+        "gpu_pressure_ms": 26.99690055847168,
+        "gpu_publish_ms": 2.112299919128418,
+        "gpu_scalar_advect_ms": 8.814000129699707,
+        "gpu_scalar_dissipate_ms": 0.006399999838322401,
+        "gpu_source_upload_ms": 2.7416999340057373,
+        "gpu_surface_dust_ms": 0.0006000000284984708,
+        "gpu_surface_exchange_ms": 3.1191999912261963,
+        "gpu_velocity_advect_ms": 2.1433000564575195,
+        "grid_memory_bytes": 77791232,
+        "inventory_advection_ms": 0.002099999925121665,
+        "inventory_error": "",
+        "inventory_grid_download_bytes": 0,
+        "inventory_grid_upload_bytes": 0,
+        "inventory_query_download_bytes": 0,
+        "inventory_snapshot_download_bytes": 0,
+        "inventory_step_held": false,
+        "inventory_transport": "gpu_resident_idle",
+        "liquid_boundary_cells": 36,
+        "liquid_boundary_mean_velocity": [
+          0.00622396869584918,
+          -4.063232898712158,
+          -0.06920825690031052
+        ],
+        "max_density": 0.0,
+        "max_speed": 1.874817967414856,
+        "max_temperature": 0.0,
+        "measured": true,
+        "ok": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "solid_cells": 36,
+        "total_blocks": 4096,
+        "total_ms": 106.69530487060547,
+        "voxelize_ms": 22.24489974975586
+      },
+      "observed_step_and_queries_ms": 980.7565999217331,
+      "kernels": {
+        "enabled": true,
+        "kernels": [
+          {
+            "calls": 80,
+            "kernel": "sim_grid_sor",
+            "ms": 16.468991999999997
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_maccormack_velocity",
+            "ms": 0.635904
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_maccormack_scalar",
+            "ms": 0.5980159999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_advect_velocity",
+            "ms": 0.515392
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_vorticity_force",
+            "ms": 0.44339199999999995
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_advect_scalar",
+            "ms": 0.418112
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_velocity_dissipate_clamp",
+            "ms": 0.325632
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_subtract_gradient",
+            "ms": 0.306176
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_sparse_viscosity_sweep",
+            "ms": 0.26931200000000005
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_velocity_max_abs",
+            "ms": 0.245824
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_vorticity_curl",
+            "ms": 0.21606399999999998
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_divergence",
+            "ms": 0.20582399999999998
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_publish",
+            "ms": 0.16896
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_subtract_gradient",
+            "ms": 0.161376
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_scalar_dissipate",
+            "ms": 0.101376
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_buoyancy",
+            "ms": 0.101376
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_advect_tail",
+            "ms": 0.086016
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_residual_init",
+            "ms": 0.074752
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_majorant",
+            "ms": 0.070688
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_g2p",
+            "ms": 0.063488
+          },
+          {
+            "calls": 17,
+            "kernel": "sim_fluid_cg_scalar_step",
+            "ms": 0.046079999999999996
+          },
+          {
+            "calls": 8,
+            "kernel": "sim_fluid_cg_spmv_dot_window",
+            "ms": 0.039936
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_p2g",
+            "ms": 0.039936
+          },
+          {
+            "calls": 9,
+            "kernel": "sim_fluid_cg_jacobi_dot_window",
+            "ms": 0.038911999999999995
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_mark",
+            "ms": 0.030719999999999997
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_mark",
+            "ms": 0.029696
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_clear",
+            "ms": 0.028863999999999997
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_clear_float",
+            "ms": 0.025471999999999998
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_surface_exchange",
+            "ms": 0.024832
+          },
+          {
+            "calls": 8,
+            "kernel": "sim_fluid_cg_axpy2_dev_window",
+            "ms": 0.022528
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_classify",
+            "ms": 0.021504
+          },
+          {
+            "calls": 8,
+            "kernel": "sim_fluid_cg_zpby_dev_window",
+            "ms": 0.016384
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_bin_clear",
+            "ms": 0.01184
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_capture",
+            "ms": 0.008512
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_gather",
+            "ms": 0.007808
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_reset",
+            "ms": 0.005504
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_capture",
+            "ms": 0.004384
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_normalize",
+            "ms": 0.004096
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_copy_window",
+            "ms": 0.004096
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_particle_integrate_forces",
+            "ms": 0.003584
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_divergence_window",
+            "ms": 0.003296
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_splat",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_build_diag_window",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_clear",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_bin_scatter",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_clear",
+            "ms": 0.002048
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_occupancy",
+            "ms": 0.002048
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_clear",
+            "ms": 0.0012159999999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_surface_commit",
+            "ms": 0.000928
+          }
+        ],
+        "supported": true,
+        "total_ms": 21.913183999999983
+      }
+    },
+    {
+      "requested_frame": 2,
+      "control": {
+        "driver": "none",
+        "dropped_seeds": [],
+        "epoch": 0,
+        "frame": 2,
+        "playing": false,
+        "script_driving": false,
+        "script_sim_seconds": 0.0
+      },
+      "wall_ms": 30.7090999558568,
+      "process": {
+        "pid": 30752,
+        "working_set_bytes": 1954168832,
+        "private_bytes": 4179718144
+      },
+      "cache": {
+        "baking": false,
+        "budget_bytes": 36014621076,
+        "budget_reached": false,
+        "cache_dir": "",
+        "config_signature": 1552502693866506894,
+        "first_frame": 0,
+        "has_range": true,
+        "last_frame": 2,
+        "ram_bytes": 70003644,
+        "ram_frames": 3,
+        "valid": false
+      },
+      "fluid": {
+        "advect_ms": 0.27390000224113464,
+        "batch_end_calls": 16,
+        "batch_end_ms": 14.302600000000002,
+        "density_ms": 3.1328001022338867,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 0.6724999999999998,
+        "dispatch_calls": 152,
+        "download_bytes": 84539348,
+        "download_call_ms": 0.12600000000000003,
+        "download_calls": 20,
+        "flip_sparse_used": true,
+        "full_grid_cells": 2097152,
+        "g2p_ms": 0.03180000185966492,
+        "g2p_on_gpu": true,
+        "gpu_status": "GPU on Vulkan Simulation Compute: P2G/pressure(MGPCG)/G2P/density/advect+boundaries. Reseed topology CPU. forces GPU.",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": true,
+        "ok": true,
+        "p2g_ms": 4.3343000411987305,
+        "p2g_on_gpu": true,
+        "particle_count": 833,
+        "pressure_ms": 4.461100101470947,
+        "pressure_on_gpu": true,
+        "pressure_sparse_active_tiles": 0,
+        "pressure_sparse_allocated_tiles": 0,
+        "pressure_sparse_resident_bytes": 0,
+        "pressure_sparse_used": false,
+        "pressure_window_cells": 21000,
+        "pressure_window_used": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "synchronize_calls": 3,
+        "synchronize_ms": 0.7975,
+        "total_ms": 56.34519958496094,
+        "transfer_sparse_active_tiles": 37,
+        "transfer_sparse_allocated_tiles": 819,
+        "transfer_sparse_blocked": false,
+        "transfer_sparse_canonical": false,
+        "transfer_sparse_resident_bytes": 17015556,
+        "transfer_sparse_status": "compact P2G/FLIP with dense projection/contact publication",
+        "transfer_sparse_used": true,
+        "upload_bytes": 33727696,
+        "upload_call_ms": 2.7304000000000004,
+        "upload_calls": 18,
+        "viscosity_sparse_active_tiles": 25,
+        "viscosity_sparse_allocated_tiles": 746,
+        "viscosity_sparse_resident_bytes": 5189124,
+        "viscosity_sparse_used": true
+      },
+      "gas": {
+        "active_blocks": 0,
+        "active_density_cells": 574,
+        "analysis_ms": 6.800300121307373,
+        "burning_cells": 0,
+        "cell_count": 2097152,
+        "cfl": 2.0300509929656982,
+        "cpu_advect_scalar_ms": 9.999999747378752e-05,
+        "cpu_advect_velocity_ms": 0.0,
+        "cpu_boundary_ms": 0.26809999346733093,
+        "cpu_buoyancy_ms": 0.0,
+        "cpu_combustion_ms": 0.0,
+        "cpu_dissipation_ms": 0.0,
+        "cpu_force_fields_ms": 0.0,
+        "cpu_pressure_ms": 0.0,
+        "cpu_surface_dust_ms": 0.0003000000142492354,
+        "cpu_total_ms": 0.2685000002384186,
+        "cpu_turbulence_ms": 0.0,
+        "cpu_vorticity_ms": 0.0,
+        "gpu_body_forces_ms": 1.4545999765396118,
+        "gpu_collider_source_ms": 0.00279999990016222,
+        "gpu_combustion_ms": 0.00019999999494757503,
+        "gpu_dissipation_ms": 2.0524001121520996,
+        "gpu_fluid_combustion_ms": 0.00039999998989515007,
+        "gpu_host_sync_ms": 7.246300220489502,
+        "gpu_majorant_ms": 0.11509999632835388,
+        "gpu_msf_ms": 0.0,
+        "gpu_pressure_ms": 27.269800186157227,
+        "gpu_publish_ms": 1.9494999647140503,
+        "gpu_scalar_advect_ms": 7.986199855804443,
+        "gpu_scalar_dissipate_ms": 0.006800000090152025,
+        "gpu_source_upload_ms": 4.514500141143799,
+        "gpu_surface_dust_ms": 0.0006000000284984708,
+        "gpu_surface_exchange_ms": 9.88640022277832,
+        "gpu_velocity_advect_ms": 0.014299999922513962,
+        "grid_memory_bytes": 77791232,
+        "inventory_advection_ms": 0.03720000013709068,
+        "inventory_error": "",
+        "inventory_grid_download_bytes": 0,
+        "inventory_grid_upload_bytes": 0,
+        "inventory_query_download_bytes": 0,
+        "inventory_snapshot_download_bytes": 16777216,
+        "inventory_step_held": false,
+        "inventory_transport": "gpu_resident",
+        "liquid_boundary_cells": 119,
+        "liquid_boundary_mean_velocity": [
+          0.03238493576645851,
+          -4.294349670410156,
+          -0.020241741091012955
+        ],
+        "max_density": 0.014089908450841904,
+        "max_speed": 1.9031727313995361,
+        "max_temperature": 0.8142347931861877,
+        "measured": true,
+        "ok": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "solid_cells": 119,
+        "total_blocks": 4096,
+        "total_ms": 96.08740234375,
+        "voxelize_ms": 14.944000244140625
+      },
+      "observed_step_and_queries_ms": 466.2809999426827,
+      "kernels": {
+        "enabled": true,
+        "kernels": [
+          {
+            "calls": 80,
+            "kernel": "sim_grid_sor",
+            "ms": 17.15302399999999
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_inventory_conserve",
+            "ms": 0.9707519999999998
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_maccormack_velocity",
+            "ms": 0.6369279999999999
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_maccormack_scalar",
+            "ms": 0.6000639999999999
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_inventory_maccormack_scalar",
+            "ms": 0.561152
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_advect_velocity",
+            "ms": 0.514048
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_vorticity_force",
+            "ms": 0.44544
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_advect_scalar",
+            "ms": 0.42032
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_inventory_advect_scalar",
+            "ms": 0.395264
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_velocity_dissipate_clamp",
+            "ms": 0.34304
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_subtract_gradient",
+            "ms": 0.28876799999999997
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_sparse_viscosity_sweep",
+            "ms": 0.27136
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_velocity_max_abs",
+            "ms": 0.24515199999999998
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_vorticity_curl",
+            "ms": 0.217088
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_divergence",
+            "ms": 0.20479999999999998
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_publish",
+            "ms": 0.16896
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_subtract_gradient",
+            "ms": 0.16111999999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_scalar_dissipate",
+            "ms": 0.101376
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_buoyancy",
+            "ms": 0.100352
+          },
+          {
+            "calls": 33,
+            "kernel": "sim_fluid_cg_scalar_step",
+            "ms": 0.09215999999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_advect_tail",
+            "ms": 0.08806399999999999
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_fluid_cg_spmv_dot_window",
+            "ms": 0.08639999999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_residual_init",
+            "ms": 0.0768
+          },
+          {
+            "calls": 17,
+            "kernel": "sim_fluid_cg_jacobi_dot_window",
+            "ms": 0.07372800000000002
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_majorant",
+            "ms": 0.07071999999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_g2p",
+            "ms": 0.062464
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_clear",
+            "ms": 0.051648
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_p2g",
+            "ms": 0.044032
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_fluid_cg_axpy2_dev_window",
+            "ms": 0.043008
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_mark",
+            "ms": 0.039936
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_fluid_cg_zpby_dev_window",
+            "ms": 0.03686400000000001
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_surface_exchange",
+            "ms": 0.033472
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_mark",
+            "ms": 0.030719999999999997
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_classify",
+            "ms": 0.028672
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_clear",
+            "ms": 0.027808
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_clear_float",
+            "ms": 0.024992
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_capture",
+            "ms": 0.008672
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_gather",
+            "ms": 0.008352
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_bin_clear",
+            "ms": 0.007584
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_reset",
+            "ms": 0.007168
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_momentum",
+            "ms": 0.006144
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_normalize",
+            "ms": 0.0051199999999999996
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_particle_integrate_forces",
+            "ms": 0.00432
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_capture",
+            "ms": 0.00432
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_deposit",
+            "ms": 0.0038399999999999997
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_divergence_window",
+            "ms": 0.0036799999999999997
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_clear",
+            "ms": 0.003296
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_bin_scatter",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_occupancy",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_copy_window",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_surface_commit",
+            "ms": 0.0024
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_build_diag_window",
+            "ms": 0.002048
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_splat",
+            "ms": 0.002048
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_clear",
+            "ms": 0.002048
+          }
+        ],
+        "supported": true,
+        "total_ms": 24.79075199999999
+      }
+    },
+    {
+      "requested_frame": 3,
+      "control": {
+        "driver": "none",
+        "dropped_seeds": [],
+        "epoch": 0,
+        "frame": 3,
+        "playing": false,
+        "script_driving": false,
+        "script_sim_seconds": 0.0
+      },
+      "wall_ms": 31.618000008165836,
+      "process": {
+        "pid": 30752,
+        "working_set_bytes": 1988993024,
+        "private_bytes": 4217819136
+      },
+      "cache": {
+        "baking": false,
+        "budget_bytes": 36014621076,
+        "budget_reached": false,
+        "cache_dir": "",
+        "config_signature": 1552502693866506894,
+        "first_frame": 0,
+        "has_range": true,
+        "last_frame": 3,
+        "ram_bytes": 104023004,
+        "ram_frames": 4,
+        "valid": false
+      },
+      "fluid": {
+        "advect_ms": 0.28679999709129333,
+        "batch_end_calls": 16,
+        "batch_end_ms": 17.135199999999998,
+        "density_ms": 3.1603000164031982,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 1.3488999999999964,
+        "dispatch_calls": 152,
+        "download_bytes": 84571040,
+        "download_call_ms": 0.12640000000000004,
+        "download_calls": 20,
+        "flip_sparse_used": true,
+        "full_grid_cells": 2097152,
+        "g2p_ms": 0.03840000182390213,
+        "g2p_on_gpu": true,
+        "gpu_status": "GPU on Vulkan Simulation Compute: P2G/pressure(MGPCG)/G2P/density/advect+boundaries. Reseed topology CPU. forces GPU.",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": true,
+        "ok": true,
+        "p2g_ms": 6.281199932098389,
+        "p2g_on_gpu": true,
+        "particle_count": 1250,
+        "pressure_ms": 4.8242998123168945,
+        "pressure_on_gpu": true,
+        "pressure_sparse_active_tiles": 0,
+        "pressure_sparse_allocated_tiles": 0,
+        "pressure_sparse_resident_bytes": 0,
+        "pressure_sparse_used": false,
+        "pressure_window_cells": 24050,
+        "pressure_window_used": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "synchronize_calls": 3,
+        "synchronize_ms": 1.0737,
+        "total_ms": 74.91710662841797,
+        "transfer_sparse_active_tiles": 40,
+        "transfer_sparse_allocated_tiles": 819,
+        "transfer_sparse_blocked": false,
+        "transfer_sparse_canonical": false,
+        "transfer_sparse_resident_bytes": 17015556,
+        "transfer_sparse_status": "compact P2G/FLIP with dense projection/contact publication",
+        "transfer_sparse_used": true,
+        "upload_bytes": 33814432,
+        "upload_call_ms": 2.9512,
+        "upload_calls": 18,
+        "viscosity_sparse_active_tiles": 28,
+        "viscosity_sparse_allocated_tiles": 746,
+        "viscosity_sparse_resident_bytes": 5189124,
+        "viscosity_sparse_used": true
+      },
+      "gas": {
+        "active_blocks": 29,
+        "active_density_cells": 1776,
+        "analysis_ms": 13.68529987335205,
+        "burning_cells": 0,
+        "cell_count": 2097152,
+        "cfl": 2.2894222736358643,
+        "cpu_advect_scalar_ms": 9.999999747378752e-05,
+        "cpu_advect_velocity_ms": 0.0,
+        "cpu_boundary_ms": 0.24039998650550842,
+        "cpu_buoyancy_ms": 0.0,
+        "cpu_combustion_ms": 0.0,
+        "cpu_dissipation_ms": 0.0,
+        "cpu_force_fields_ms": 0.0,
+        "cpu_pressure_ms": 0.0,
+        "cpu_surface_dust_ms": 0.0006000000284984708,
+        "cpu_total_ms": 0.24130000174045563,
+        "cpu_turbulence_ms": 0.0,
+        "cpu_vorticity_ms": 0.0,
+        "gpu_body_forces_ms": 1.7445000410079956,
+        "gpu_collider_source_ms": 0.00279999990016222,
+        "gpu_combustion_ms": 0.0003000000142492354,
+        "gpu_dissipation_ms": 2.0097999572753906,
+        "gpu_fluid_combustion_ms": 0.0003000000142492354,
+        "gpu_host_sync_ms": 7.638700008392334,
+        "gpu_majorant_ms": 0.3400999903678894,
+        "gpu_msf_ms": 0.0,
+        "gpu_pressure_ms": 27.374500274658203,
+        "gpu_publish_ms": 4.101200103759766,
+        "gpu_scalar_advect_ms": 7.928100109100342,
+        "gpu_scalar_dissipate_ms": 0.004900000058114529,
+        "gpu_source_upload_ms": 3.598599910736084,
+        "gpu_surface_dust_ms": 0.0006000000284984708,
+        "gpu_surface_exchange_ms": 9.833399772644043,
+        "gpu_velocity_advect_ms": 0.015300000086426735,
+        "grid_memory_bytes": 77791232,
+        "inventory_advection_ms": 0.08760000020265579,
+        "inventory_error": "",
+        "inventory_grid_download_bytes": 0,
+        "inventory_grid_upload_bytes": 0,
+        "inventory_query_download_bytes": 0,
+        "inventory_snapshot_download_bytes": 33554432,
+        "inventory_step_held": false,
+        "inventory_transport": "gpu_resident",
+        "liquid_boundary_cells": 124,
+        "liquid_boundary_mean_velocity": [
+          0.021327484399080276,
+          -4.448427200317383,
+          0.009778439067304134
+        ],
+        "max_density": 0.054254546761512756,
+        "max_speed": 2.1463332176208496,
+        "max_temperature": 0.8142968416213989,
+        "measured": true,
+        "ok": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "solid_cells": 124,
+        "total_blocks": 4096,
+        "total_ms": 106.72880554199219,
+        "voxelize_ms": 16.037099838256836
+      },
+      "observed_step_and_queries_ms": 502.4479000130668,
+      "kernels": {
+        "enabled": true,
+        "kernels": [
+          {
+            "calls": 80,
+            "kernel": "sim_grid_sor",
+            "ms": 16.462847999999997
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_inventory_conserve",
+            "ms": 0.9697279999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_maccormack_velocity",
+            "ms": 0.64
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_maccormack_scalar",
+            "ms": 0.6031359999999999
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_inventory_maccormack_scalar",
+            "ms": 0.5631999999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_advect_velocity",
+            "ms": 0.515072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_vorticity_force",
+            "ms": 0.44339199999999995
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_advect_scalar",
+            "ms": 0.422176
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_inventory_advect_scalar",
+            "ms": 0.395264
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_sparse_viscosity_sweep",
+            "ms": 0.30822399999999994
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_velocity_dissipate_clamp",
+            "ms": 0.30672
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_subtract_gradient",
+            "ms": 0.289792
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_velocity_max_abs",
+            "ms": 0.24528
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_vorticity_curl",
+            "ms": 0.21606399999999998
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_divergence",
+            "ms": 0.20479999999999998
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_publish",
+            "ms": 0.166912
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_subtract_gradient",
+            "ms": 0.160928
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_buoyancy",
+            "ms": 0.101376
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_scalar_dissipate",
+            "ms": 0.100352
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_fluid_cg_spmv_dot_window",
+            "ms": 0.09481599999999998
+          },
+          {
+            "calls": 33,
+            "kernel": "sim_fluid_cg_scalar_step",
+            "ms": 0.09420799999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_advect_tail",
+            "ms": 0.08806399999999999
+          },
+          {
+            "calls": 17,
+            "kernel": "sim_fluid_cg_jacobi_dot_window",
+            "ms": 0.08703999999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_residual_init",
+            "ms": 0.078848
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_majorant",
+            "ms": 0.070752
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_g2p",
+            "ms": 0.064512
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_mark",
+            "ms": 0.052224
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_fluid_cg_axpy2_dev_window",
+            "ms": 0.046079999999999996
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_p2g",
+            "ms": 0.043008
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_fluid_cg_zpby_dev_window",
+            "ms": 0.039936
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_surface_exchange",
+            "ms": 0.038335999999999995
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_clear_float",
+            "ms": 0.034111999999999996
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_mark",
+            "ms": 0.031744
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_classify",
+            "ms": 0.031744
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_clear",
+            "ms": 0.027264
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_gather",
+            "ms": 0.008672
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_bin_clear",
+            "ms": 0.008608
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_capture",
+            "ms": 0.008512
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_reset",
+            "ms": 0.005568
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_capture",
+            "ms": 0.0048319999999999995
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_normalize",
+            "ms": 0.004096
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_particle_integrate_forces",
+            "ms": 0.003935999999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_clear",
+            "ms": 0.003935999999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_momentum",
+            "ms": 0.003935999999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_deposit",
+            "ms": 0.003744
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_divergence_window",
+            "ms": 0.003296
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_build_diag_window",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_copy_window",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_splat",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_occupancy",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_bin_scatter",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_clear",
+            "ms": 0.002176
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_surface_commit",
+            "ms": 0.001408
+          }
+        ],
+        "supported": true,
+        "total_ms": 24.116031999999983
+      }
+    },
+    {
+      "requested_frame": 4,
+      "control": {
+        "driver": "none",
+        "dropped_seeds": [],
+        "epoch": 0,
+        "frame": 4,
+        "playing": false,
+        "script_driving": false,
+        "script_sim_seconds": 0.0
+      },
+      "wall_ms": 30.700800009071827,
+      "process": {
+        "pid": 30752,
+        "working_set_bytes": 2025455616,
+        "private_bytes": 4257046528
+      },
+      "cache": {
+        "baking": false,
+        "budget_bytes": 36014621076,
+        "budget_reached": false,
+        "cache_dir": "",
+        "config_signature": 1552502693866506894,
+        "first_frame": 0,
+        "has_range": true,
+        "last_frame": 4,
+        "ram_bytes": 138128148,
+        "ram_frames": 5,
+        "valid": false
+      },
+      "fluid": {
+        "advect_ms": 0.2799000144004822,
+        "batch_end_calls": 16,
+        "batch_end_ms": 15.079699999999995,
+        "density_ms": 2.387399911880493,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 0.8722000000000001,
+        "dispatch_calls": 152,
+        "download_bytes": 84602656,
+        "download_call_ms": 0.14229999999999998,
+        "download_calls": 20,
+        "flip_sparse_used": true,
+        "full_grid_cells": 2097152,
+        "g2p_ms": 0.04340000078082085,
+        "g2p_on_gpu": true,
+        "gpu_status": "GPU on Vulkan Simulation Compute: P2G/pressure(MGPCG)/G2P/density/advect+boundaries. Reseed topology CPU. forces GPU.",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": true,
+        "ok": true,
+        "p2g_ms": 4.237100124359131,
+        "p2g_on_gpu": true,
+        "particle_count": 1666,
+        "pressure_ms": 4.929599761962891,
+        "pressure_on_gpu": true,
+        "pressure_sparse_active_tiles": 0,
+        "pressure_sparse_allocated_tiles": 0,
+        "pressure_sparse_resident_bytes": 0,
+        "pressure_sparse_used": false,
+        "pressure_window_cells": 27000,
+        "pressure_window_used": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "synchronize_calls": 3,
+        "synchronize_ms": 0.9036,
+        "total_ms": 59.51359939575195,
+        "transfer_sparse_active_tiles": 40,
+        "transfer_sparse_allocated_tiles": 819,
+        "transfer_sparse_blocked": false,
+        "transfer_sparse_canonical": false,
+        "transfer_sparse_resident_bytes": 17015556,
+        "transfer_sparse_status": "compact P2G/FLIP with dense projection/contact publication",
+        "transfer_sparse_used": true,
+        "upload_bytes": 33900960,
+        "upload_call_ms": 3.1555,
+        "upload_calls": 18,
+        "viscosity_sparse_active_tiles": 34,
+        "viscosity_sparse_allocated_tiles": 746,
+        "viscosity_sparse_resident_bytes": 5189124,
+        "viscosity_sparse_used": true
+      },
+      "gas": {
+        "active_blocks": 35,
+        "active_density_cells": 2783,
+        "analysis_ms": 6.749100208282471,
+        "burning_cells": 0,
+        "cell_count": 2097152,
+        "cfl": 2.8352231979370117,
+        "cpu_advect_scalar_ms": 9.999999747378752e-05,
+        "cpu_advect_velocity_ms": 0.0,
+        "cpu_boundary_ms": 0.28440001606941223,
+        "cpu_buoyancy_ms": 0.0,
+        "cpu_combustion_ms": 0.0,
+        "cpu_dissipation_ms": 0.0,
+        "cpu_force_fields_ms": 0.0,
+        "cpu_pressure_ms": 0.0,
+        "cpu_surface_dust_ms": 0.00019999999494757503,
+        "cpu_total_ms": 0.2849000096321106,
+        "cpu_turbulence_ms": 0.0,
+        "cpu_vorticity_ms": 0.0,
+        "gpu_body_forces_ms": 1.4189000129699707,
+        "gpu_collider_source_ms": 0.002400000113993883,
+        "gpu_combustion_ms": 0.0003000000142492354,
+        "gpu_dissipation_ms": 2.098599910736084,
+        "gpu_fluid_combustion_ms": 0.00039999998989515007,
+        "gpu_host_sync_ms": 6.869800090789795,
+        "gpu_majorant_ms": 0.09690000116825104,
+        "gpu_msf_ms": 0.0,
+        "gpu_pressure_ms": 26.904499053955078,
+        "gpu_publish_ms": 1.9229999780654907,
+        "gpu_scalar_advect_ms": 8.017800331115723,
+        "gpu_scalar_dissipate_ms": 0.006300000008195639,
+        "gpu_source_upload_ms": 3.9800000190734863,
+        "gpu_surface_dust_ms": 0.0003000000142492354,
+        "gpu_surface_exchange_ms": 11.103599548339844,
+        "gpu_velocity_advect_ms": 0.015699999406933784,
+        "grid_memory_bytes": 77791232,
+        "inventory_advection_ms": 0.033900000154972076,
+        "inventory_error": "",
+        "inventory_grid_download_bytes": 0,
+        "inventory_grid_upload_bytes": 0,
+        "inventory_query_download_bytes": 0,
+        "inventory_snapshot_download_bytes": 50331648,
+        "inventory_step_held": false,
+        "inventory_transport": "gpu_resident",
+        "liquid_boundary_cells": 189,
+        "liquid_boundary_mean_velocity": [
+          0.0050387573428452015,
+          -4.704303741455078,
+          -0.014997447840869427
+        ],
+        "max_density": 0.10288020223379135,
+        "max_speed": 2.6580216884613037,
+        "max_temperature": 0.8143320083618164,
+        "measured": true,
+        "ok": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "solid_cells": 189,
+        "total_blocks": 4096,
+        "total_ms": 99.3342056274414,
+        "voxelize_ms": 16.141700744628906
+      },
+      "observed_step_and_queries_ms": 501.6920999623835,
+      "kernels": {
+        "enabled": true,
+        "kernels": [
+          {
+            "calls": 80,
+            "kernel": "sim_grid_sor",
+            "ms": 17.189887999999993
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_inventory_conserve",
+            "ms": 0.9697279999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_maccormack_velocity",
+            "ms": 0.6410239999999999
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_maccormack_scalar",
+            "ms": 0.607232
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_inventory_maccormack_scalar",
+            "ms": 0.565248
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_advect_velocity",
+            "ms": 0.516096
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_vorticity_force",
+            "ms": 0.43724799999999997
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_advect_scalar",
+            "ms": 0.42291199999999995
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_inventory_advect_scalar",
+            "ms": 0.396288
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_velocity_dissipate_clamp",
+            "ms": 0.30822399999999994
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_sparse_viscosity_sweep",
+            "ms": 0.293888
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_subtract_gradient",
+            "ms": 0.289792
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_velocity_max_abs",
+            "ms": 0.245408
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_vorticity_curl",
+            "ms": 0.21606399999999998
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_divergence",
+            "ms": 0.20479999999999998
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_publish",
+            "ms": 0.16896
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_subtract_gradient",
+            "ms": 0.160992
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_scalar_dissipate",
+            "ms": 0.101376
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_buoyancy",
+            "ms": 0.101376
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_fluid_cg_spmv_dot_window",
+            "ms": 0.09843199999999998
+          },
+          {
+            "calls": 33,
+            "kernel": "sim_fluid_cg_scalar_step",
+            "ms": 0.09625600000000002
+          },
+          {
+            "calls": 17,
+            "kernel": "sim_fluid_cg_jacobi_dot_window",
+            "ms": 0.08908799999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_advect_tail",
+            "ms": 0.08806399999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_residual_init",
+            "ms": 0.0768
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_majorant",
+            "ms": 0.070912
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_mark",
+            "ms": 0.068608
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_g2p",
+            "ms": 0.063488
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_fluid_cg_axpy2_dev_window",
+            "ms": 0.04812799999999998
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_surface_exchange",
+            "ms": 0.043968
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_p2g",
+            "ms": 0.043008
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_fluid_cg_zpby_dev_window",
+            "ms": 0.039936
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_classify",
+            "ms": 0.038911999999999995
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_mark",
+            "ms": 0.031744
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_clear",
+            "ms": 0.027072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_clear_float",
+            "ms": 0.025151999999999997
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_capture",
+            "ms": 0.00912
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_bin_clear",
+            "ms": 0.008128
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_gather",
+            "ms": 0.007488
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_normalize",
+            "ms": 0.006144
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_reset",
+            "ms": 0.005408
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_capture",
+            "ms": 0.004416
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_deposit",
+            "ms": 0.00432
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_momentum",
+            "ms": 0.00432
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_particle_integrate_forces",
+            "ms": 0.004064
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_divergence_window",
+            "ms": 0.003456
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_build_diag_window",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_copy_window",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_splat",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_occupancy",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_bin_scatter",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_clear",
+            "ms": 0.0027519999999999997
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_clear",
+            "ms": 0.0014399999999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_surface_commit",
+            "ms": 0.001408
+          }
+        ],
+        "supported": true,
+        "total_ms": 24.863935999999974
+      }
+    },
+    {
+      "requested_frame": 5,
+      "control": {
+        "driver": "none",
+        "dropped_seeds": [],
+        "epoch": 0,
+        "frame": 5,
+        "playing": false,
+        "script_driving": false,
+        "script_sim_seconds": 0.0
+      },
+      "wall_ms": 30.967900063842535,
+      "process": {
+        "pid": 30752,
+        "working_set_bytes": 2061348864,
+        "private_bytes": 4293591040
+      },
+      "cache": {
+        "baking": false,
+        "budget_bytes": 36014621076,
+        "budget_reached": false,
+        "cache_dir": "",
+        "config_signature": 1552502693866506894,
+        "first_frame": 0,
+        "has_range": true,
+        "last_frame": 5,
+        "ram_bytes": 172303112,
+        "ram_frames": 6,
+        "valid": false
+      },
+      "fluid": {
+        "advect_ms": 1.3509999513626099,
+        "batch_end_calls": 16,
+        "batch_end_ms": 44.9698,
+        "density_ms": 4.5071001052856445,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 1.7338999999999998,
+        "dispatch_calls": 152,
+        "download_bytes": 84634348,
+        "download_call_ms": 0.30729999999999996,
+        "download_calls": 20,
+        "flip_sparse_used": true,
+        "full_grid_cells": 2097152,
+        "g2p_ms": 0.08950000256299973,
+        "g2p_on_gpu": true,
+        "gpu_status": "GPU on Vulkan Simulation Compute: P2G/pressure(MGPCG)/G2P/density/advect+boundaries. Reseed topology CPU. forces GPU.",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": true,
+        "ok": true,
+        "p2g_ms": 22.69580078125,
+        "p2g_on_gpu": true,
+        "particle_count": 2083,
+        "pressure_ms": 11.826600074768066,
+        "pressure_on_gpu": true,
+        "pressure_sparse_active_tiles": 0,
+        "pressure_sparse_allocated_tiles": 0,
+        "pressure_sparse_resident_bytes": 0,
+        "pressure_sparse_used": false,
+        "pressure_window_cells": 29484,
+        "pressure_window_used": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "synchronize_calls": 3,
+        "synchronize_ms": 4.3713999999999995,
+        "total_ms": 108.86599731445312,
+        "transfer_sparse_active_tiles": 52,
+        "transfer_sparse_allocated_tiles": 819,
+        "transfer_sparse_blocked": false,
+        "transfer_sparse_canonical": false,
+        "transfer_sparse_resident_bytes": 17015556,
+        "transfer_sparse_status": "compact P2G/FLIP with dense projection/contact publication",
+        "transfer_sparse_used": true,
+        "upload_bytes": 33987696,
+        "upload_call_ms": 4.266299999999998,
+        "upload_calls": 18,
+        "viscosity_sparse_active_tiles": 38,
+        "viscosity_sparse_allocated_tiles": 746,
+        "viscosity_sparse_resident_bytes": 5189124,
+        "viscosity_sparse_used": true
+      },
+      "gas": {
+        "active_blocks": 45,
+        "active_density_cells": 3748,
+        "analysis_ms": 9.050299644470215,
+        "burning_cells": 0,
+        "cell_count": 2097152,
+        "cfl": 2.8581581115722656,
+        "cpu_advect_scalar_ms": 9.999999747378752e-05,
+        "cpu_advect_velocity_ms": 0.0,
+        "cpu_boundary_ms": 0.4602000117301941,
+        "cpu_buoyancy_ms": 0.0,
+        "cpu_combustion_ms": 0.0,
+        "cpu_dissipation_ms": 0.0,
+        "cpu_force_fields_ms": 0.0,
+        "cpu_pressure_ms": 0.0,
+        "cpu_surface_dust_ms": 0.000699999975040555,
+        "cpu_total_ms": 0.46160000562667847,
+        "cpu_turbulence_ms": 0.0,
+        "cpu_vorticity_ms": 0.0,
+        "gpu_body_forces_ms": 1.906000018119812,
+        "gpu_collider_source_ms": 0.00279999990016222,
+        "gpu_combustion_ms": 0.0003000000142492354,
+        "gpu_dissipation_ms": 2.774899959564209,
+        "gpu_fluid_combustion_ms": 0.00039999998989515007,
+        "gpu_host_sync_ms": 8.562199592590332,
+        "gpu_majorant_ms": 0.1598999947309494,
+        "gpu_msf_ms": 0.0,
+        "gpu_pressure_ms": 29.732900619506836,
+        "gpu_publish_ms": 2.5815000534057617,
+        "gpu_scalar_advect_ms": 10.097700119018555,
+        "gpu_scalar_dissipate_ms": 0.008200000040233135,
+        "gpu_source_upload_ms": 5.783899784088135,
+        "gpu_surface_dust_ms": 0.0005000000237487257,
+        "gpu_surface_exchange_ms": 31.229400634765625,
+        "gpu_velocity_advect_ms": 0.024700000882148743,
+        "grid_memory_bytes": 77791232,
+        "inventory_advection_ms": 0.05510000139474869,
+        "inventory_error": "",
+        "inventory_grid_download_bytes": 0,
+        "inventory_grid_upload_bytes": 0,
+        "inventory_query_download_bytes": 0,
+        "inventory_snapshot_download_bytes": 67108864,
+        "inventory_step_held": false,
+        "inventory_transport": "gpu_resident",
+        "liquid_boundary_cells": 248,
+        "liquid_boundary_mean_velocity": [
+          -0.009366465732455254,
+          -4.951804161071777,
+          -0.019967349246144295
+        ],
+        "max_density": 0.07593267410993576,
+        "max_speed": 2.679523229598999,
+        "max_temperature": 0.8143385052680969,
+        "measured": true,
+        "ok": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "solid_cells": 248,
+        "total_blocks": 4096,
+        "total_ms": 138.77569580078125,
+        "voxelize_ms": 18.22439956665039
+      },
+      "observed_step_and_queries_ms": 627.3469000589103,
+      "kernels": {
+        "enabled": true,
+        "kernels": [
+          {
+            "calls": 80,
+            "kernel": "sim_grid_sor",
+            "ms": 17.072128
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_inventory_conserve",
+            "ms": 1.00864
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_maccormack_velocity",
+            "ms": 0.6635519999999999
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_maccormack_scalar",
+            "ms": 0.62976
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_inventory_maccormack_scalar",
+            "ms": 0.5888
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_advect_velocity",
+            "ms": 0.5365759999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_vorticity_force",
+            "ms": 0.454656
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_advect_scalar",
+            "ms": 0.438848
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_inventory_advect_scalar",
+            "ms": 0.41164799999999996
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_velocity_dissipate_clamp",
+            "ms": 0.30723199999999995
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_sparse_viscosity_sweep",
+            "ms": 0.29696
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_subtract_gradient",
+            "ms": 0.28876799999999997
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_vorticity_curl",
+            "ms": 0.26111999999999996
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_velocity_max_abs",
+            "ms": 0.25529599999999997
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_publish",
+            "ms": 0.218112
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_divergence",
+            "ms": 0.20479999999999998
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_subtract_gradient",
+            "ms": 0.16697599999999999
+          },
+          {
+            "calls": 17,
+            "kernel": "sim_fluid_cg_jacobi_dot_window",
+            "ms": 0.10854399999999996
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_fluid_cg_spmv_dot_window",
+            "ms": 0.10687999999999998
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_scalar_dissipate",
+            "ms": 0.104448
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_buoyancy",
+            "ms": 0.100352
+          },
+          {
+            "calls": 33,
+            "kernel": "sim_fluid_cg_scalar_step",
+            "ms": 0.09830400000000003
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_advect_tail",
+            "ms": 0.090112
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_residual_init",
+            "ms": 0.0768
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_mark",
+            "ms": 0.075776
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_majorant",
+            "ms": 0.07232
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_g2p",
+            "ms": 0.06656
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_surface_exchange",
+            "ms": 0.060863999999999994
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_fluid_cg_axpy2_dev_window",
+            "ms": 0.05734399999999999
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_fluid_cg_zpby_dev_window",
+            "ms": 0.04505599999999999
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_p2g",
+            "ms": 0.044032
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_classify",
+            "ms": 0.043008
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_mark",
+            "ms": 0.031744
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_clear",
+            "ms": 0.02736
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_clear_float",
+            "ms": 0.025887999999999998
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_capture",
+            "ms": 0.00944
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_gather",
+            "ms": 0.009344
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_bin_clear",
+            "ms": 0.008608
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_reset",
+            "ms": 0.007103999999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_momentum",
+            "ms": 0.005312
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_normalize",
+            "ms": 0.0051199999999999996
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_capture",
+            "ms": 0.004863999999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_particle_integrate_forces",
+            "ms": 0.004448
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_divergence_window",
+            "ms": 0.004256
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_deposit",
+            "ms": 0.003968
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_clear",
+            "ms": 0.003328
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_splat",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_copy_window",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_bin_scatter",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_occupancy",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_surface_commit",
+            "ms": 0.00208
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_build_diag_window",
+            "ms": 0.002048
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_clear",
+            "ms": 0.002048
+          }
+        ],
+        "supported": true,
+        "total_ms": 25.123519999999992
+      }
+    },
+    {
+      "requested_frame": 6,
+      "control": {
+        "driver": "none",
+        "dropped_seeds": [],
+        "epoch": 0,
+        "frame": 6,
+        "playing": false,
+        "script_driving": false,
+        "script_sim_seconds": 0.0
+      },
+      "wall_ms": 30.694999964907765,
+      "process": {
+        "pid": 30752,
+        "working_set_bytes": 2097717248,
+        "private_bytes": 4287750144
+      },
+      "cache": {
+        "baking": false,
+        "budget_bytes": 36014621076,
+        "budget_reached": false,
+        "cache_dir": "",
+        "config_signature": 1552502693866506894,
+        "first_frame": 0,
+        "has_range": true,
+        "last_frame": 6,
+        "ram_bytes": 206542024,
+        "ram_frames": 7,
+        "valid": false
+      },
+      "fluid": {
+        "advect_ms": 0.39399999380111694,
+        "batch_end_calls": 16,
+        "batch_end_ms": 15.316299999999998,
+        "density_ms": 3.2507998943328857,
+        "density_on_gpu": true,
+        "dispatch_call_ms": 0.9203000000000005,
+        "dispatch_calls": 152,
+        "download_bytes": 84666040,
+        "download_call_ms": 0.12960000000000005,
+        "download_calls": 20,
+        "flip_sparse_used": true,
+        "full_grid_cells": 2097152,
+        "g2p_ms": 0.043699998408555984,
+        "g2p_on_gpu": true,
+        "gpu_status": "GPU on Vulkan Simulation Compute: P2G/pressure(MGPCG)/G2P/density/advect+boundaries. Reseed topology CPU. forces GPU.",
+        "measured": true,
+        "normalize_window_cells": 0,
+        "normalize_window_used": false,
+        "occupancy_on_gpu": true,
+        "ok": true,
+        "p2g_ms": 4.3495001792907715,
+        "p2g_on_gpu": true,
+        "particle_count": 2500,
+        "pressure_ms": 5.394700050354004,
+        "pressure_on_gpu": true,
+        "pressure_sparse_active_tiles": 0,
+        "pressure_sparse_allocated_tiles": 0,
+        "pressure_sparse_resident_bytes": 0,
+        "pressure_sparse_used": false,
+        "pressure_window_cells": 32076,
+        "pressure_window_used": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "synchronize_calls": 3,
+        "synchronize_ms": 0.9212,
+        "total_ms": 60.63529968261719,
+        "transfer_sparse_active_tiles": 52,
+        "transfer_sparse_allocated_tiles": 819,
+        "transfer_sparse_blocked": false,
+        "transfer_sparse_canonical": false,
+        "transfer_sparse_resident_bytes": 17015556,
+        "transfer_sparse_status": "compact P2G/FLIP with dense projection/contact publication",
+        "transfer_sparse_used": true,
+        "upload_bytes": 34074432,
+        "upload_call_ms": 3.1218000000000004,
+        "upload_calls": 18,
+        "viscosity_sparse_active_tiles": 47,
+        "viscosity_sparse_allocated_tiles": 746,
+        "viscosity_sparse_resident_bytes": 5189124,
+        "viscosity_sparse_used": true
+      },
+      "gas": {
+        "active_blocks": 45,
+        "active_density_cells": 4567,
+        "analysis_ms": 8.398699760437012,
+        "burning_cells": 0,
+        "cell_count": 2097152,
+        "cfl": 2.9829788208007812,
+        "cpu_advect_scalar_ms": 9.999999747378752e-05,
+        "cpu_advect_velocity_ms": 0.0,
+        "cpu_boundary_ms": 0.29100000858306885,
+        "cpu_buoyancy_ms": 0.0,
+        "cpu_combustion_ms": 0.0,
+        "cpu_dissipation_ms": 0.0,
+        "cpu_force_fields_ms": 0.0,
+        "cpu_pressure_ms": 0.0,
+        "cpu_surface_dust_ms": 0.0003000000142492354,
+        "cpu_total_ms": 0.29159998893737793,
+        "cpu_turbulence_ms": 0.0,
+        "cpu_vorticity_ms": 0.0,
+        "gpu_body_forces_ms": 1.527500033378601,
+        "gpu_collider_source_ms": 0.003100000089034438,
+        "gpu_combustion_ms": 0.00039999998989515007,
+        "gpu_dissipation_ms": 2.1510000228881836,
+        "gpu_fluid_combustion_ms": 0.00039999998989515007,
+        "gpu_host_sync_ms": 7.100599765777588,
+        "gpu_majorant_ms": 0.13120000064373016,
+        "gpu_msf_ms": 0.0,
+        "gpu_pressure_ms": 26.663799285888672,
+        "gpu_publish_ms": 2.5360000133514404,
+        "gpu_scalar_advect_ms": 8.438199996948242,
+        "gpu_scalar_dissipate_ms": 0.006099999882280827,
+        "gpu_source_upload_ms": 4.627699851989746,
+        "gpu_surface_dust_ms": 0.0006000000284984708,
+        "gpu_surface_exchange_ms": 11.913999557495117,
+        "gpu_velocity_advect_ms": 0.01590000092983246,
+        "grid_memory_bytes": 77791232,
+        "inventory_advection_ms": 0.05849999934434891,
+        "inventory_error": "",
+        "inventory_grid_download_bytes": 0,
+        "inventory_grid_upload_bytes": 0,
+        "inventory_query_download_bytes": 0,
+        "inventory_snapshot_download_bytes": 83886080,
+        "inventory_step_held": false,
+        "inventory_transport": "gpu_resident",
+        "liquid_boundary_cells": 279,
+        "liquid_boundary_mean_velocity": [
+          -0.01801941730082035,
+          -5.139248371124268,
+          -0.02332541160285473
+        ],
+        "max_density": 0.08325410634279251,
+        "max_speed": 2.7965426445007324,
+        "max_temperature": 0.8143479824066162,
+        "measured": true,
+        "ok": true,
+        "resolution": [
+          128,
+          128,
+          128
+        ],
+        "solid_cells": 279,
+        "total_blocks": 4096,
+        "total_ms": 104.43340301513672,
+        "voxelize_ms": 16.38559913635254
+      },
+      "observed_step_and_queries_ms": 691.4360999362543,
+      "kernels": {
+        "enabled": true,
+        "kernels": [
+          {
+            "calls": 80,
+            "kernel": "sim_grid_sor",
+            "ms": 16.3584
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_inventory_conserve",
+            "ms": 0.923648
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_maccormack_velocity",
+            "ms": 0.63488
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_maccormack_scalar",
+            "ms": 0.5898239999999999
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_inventory_maccormack_scalar",
+            "ms": 0.551936
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_advect_velocity",
+            "ms": 0.49356799999999995
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_vorticity_force",
+            "ms": 0.44134399999999996
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_advect_scalar",
+            "ms": 0.412128
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_inventory_advect_scalar",
+            "ms": 0.379904
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_sparse_viscosity_sweep",
+            "ms": 0.356352
+          },
+          {
+            "calls": 2,
+            "kernel": "sim_grid_velocity_dissipate_clamp",
+            "ms": 0.30822399999999994
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_subtract_gradient",
+            "ms": 0.287744
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_grid_velocity_max_abs",
+            "ms": 0.23366399999999998
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_vorticity_curl",
+            "ms": 0.21503999999999998
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_divergence",
+            "ms": 0.20464
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_publish",
+            "ms": 0.16896
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_subtract_gradient",
+            "ms": 0.152384
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_fluid_cg_spmv_dot_window",
+            "ms": 0.10793599999999998
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_buoyancy",
+            "ms": 0.101376
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_scalar_dissipate",
+            "ms": 0.101376
+          },
+          {
+            "calls": 33,
+            "kernel": "sim_fluid_cg_scalar_step",
+            "ms": 0.09932800000000004
+          },
+          {
+            "calls": 17,
+            "kernel": "sim_fluid_cg_jacobi_dot_window",
+            "ms": 0.09932799999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_advect_tail",
+            "ms": 0.084992
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_residual_init",
+            "ms": 0.0768
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_gas_majorant",
+            "ms": 0.068704
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_g2p",
+            "ms": 0.065536
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_mark",
+            "ms": 0.063488
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_fluid_cg_axpy2_dev_window",
+            "ms": 0.060416000000000004
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_surface_exchange",
+            "ms": 0.048319999999999995
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_classify",
+            "ms": 0.047104
+          },
+          {
+            "calls": 16,
+            "kernel": "sim_fluid_cg_zpby_dev_window",
+            "ms": 0.047104
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_p2g",
+            "ms": 0.040959999999999996
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_mark",
+            "ms": 0.031744
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_clear",
+            "ms": 0.026431999999999997
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_clear_float",
+            "ms": 0.024895999999999998
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_bin_clear",
+            "ms": 0.010048
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_capture",
+            "ms": 0.008512
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_gather",
+            "ms": 0.00848
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_normalize",
+            "ms": 0.006144
+          },
+          {
+            "calls": 3,
+            "kernel": "sim_sparse_mac_reset",
+            "ms": 0.005823999999999999
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_capture",
+            "ms": 0.0048
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_momentum",
+            "ms": 0.004256
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_divergence_window",
+            "ms": 0.004064
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_particle_integrate_forces",
+            "ms": 0.004
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_deposit",
+            "ms": 0.0036799999999999997
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_mac_clear",
+            "ms": 0.003424
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_copy_window",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_density_splat",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_occupancy",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_label_bin_scatter",
+            "ms": 0.003072
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_fluid_cg_build_diag_window",
+            "ms": 0.002048
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_sparse_viscosity_clear",
+            "ms": 0.002048
+          },
+          {
+            "calls": 1,
+            "kernel": "sim_inventory_surface_commit",
+            "ms": 0.001344
+          }
+        ],
+        "supported": true,
+        "total_ms": 23.989439999999988
+      }
+    }
+  ],
+  "gpu_memory": {
+    "blas_compaction_enabled": true,
+    "devices": [
+      {
+        "allocations": 64,
+        "backend": "vulkan",
+        "categories": {
+          "accel_struct": {
+            "allocations": 5,
+            "device_local_bytes": 8192,
+            "host_bytes": 256
+          },
+          "geometry": {
+            "allocations": 1,
+            "device_local_bytes": 1536,
+            "host_bytes": 0
+          },
+          "other": {
+            "allocations": 30,
+            "device_local_bytes": 6192,
+            "host_bytes": 211443472
+          },
+          "render_target": {
+            "allocations": 27,
+            "device_local_bytes": 360582640,
+            "host_bytes": 0
+          },
+          "scratch": {
+            "allocations": 1,
+            "device_local_bytes": 2304,
+            "host_bytes": 0
+          },
+          "texture": {
+            "allocations": 0,
+            "device_local_bytes": 0,
+            "host_bytes": 0
+          }
+        },
+        "compaction": {
+          "bytes_after": 2944,
+          "bytes_before": 4224,
+          "compacted": 1,
+          "failures": 0,
+          "skipped_skinned": 0,
+          "supported": true
+        },
+        "device_local_bytes": 360600864,
+        "host_bytes": 211443728,
+        "role": "render",
+        "tracked": true
+      },
+      {
+        "allocations": 87,
+        "backend": "vulkan",
+        "categories": {
+          "accel_struct": {
+            "allocations": 3,
+            "device_local_bytes": 3328,
+            "host_bytes": 256
+          },
+          "geometry": {
+            "allocations": 7,
+            "device_local_bytes": 194560,
+            "host_bytes": 0
+          },
+          "other": {
+            "allocations": 45,
+            "device_local_bytes": 71446608,
+            "host_bytes": 53865376
+          },
+          "render_target": {
+            "allocations": 27,
+            "device_local_bytes": 225821424,
+            "host_bytes": 0
+          },
+          "scratch": {
+            "allocations": 1,
+            "device_local_bytes": 2176,
+            "host_bytes": 0
+          },
+          "texture": {
+            "allocations": 4,
+            "device_local_bytes": 963584,
+            "host_bytes": 0
+          }
+        },
+        "compaction": {
+          "bytes_after": 4608,
+          "bytes_before": 15360,
+          "compacted": 4,
+          "failures": 0,
+          "skipped_skinned": 0,
+          "supported": true
+        },
+        "device_local_bytes": 298431680,
+        "host_bytes": 53865632,
+        "role": "viewport",
+        "tracked": true
+      }
+    ],
+    "tracked_device_local_bytes": 659032544,
+    "untracked_bytes": 1452951072,
+    "vram_budget_bytes": 12114612224,
+    "vram_measured": true,
+    "vram_usage_bytes": 2111983616
+  }
+}

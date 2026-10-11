@@ -28,19 +28,99 @@ constexpr float kLegacyScaleCellProduct = 0.45f * 1800.0f;
 
 float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 
+void configureStormLayers(CloudState& c, bool storm) {
+    const float bases[kMaxCloudLayers] = {800.0f, 2400.0f, 9500.0f};
+    const float thicknesses[kMaxCloudLayers] = {1600.0f, 7100.0f, 3000.0f};
+    const float types[kMaxCloudLayers] = {0.40f, 1.0f, 0.30f};
+    const float periods[kMaxCloudLayers] = {14000.0f, 4200.0f, 7000.0f};
+    const float details[kMaxCloudLayers] = {650.0f, 450.0f, 700.0f};
+    const float extinctions[kMaxCloudLayers] = {0.012f, 0.008f, 0.004f};
+    for (int i = 0; i < kMaxCloudLayers; ++i) {
+        CloudLayer& l = c.layers[i];
+        l.enabled = true;
+        l.base_altitude_m = bases[i];
+        l.thickness_m = thicknesses[i];
+        l.coverage = storm ? 0.65f : 0.45f;
+        l.type = types[i];
+        l.cell_size_m = periods[i];
+        l.detail_size_m = details[i];
+        l.extinction_per_m = extinctions[i];
+        l.erosion = i == 1 ? 0.70f : 0.50f;
+        l.droplet_diameter_um = i == 2 ? 8.0f : 18.0f;
+        l.formation_group = 1;
+        l.formation_role = i + 1;
+        l.use_custom_material = true;
+        l.material.density_multiplier = i == 0 ? 1.15f : (i == 2 ? 0.65f : 1.0f);
+        l.material.absorption_coefficient = i == 0 ? 0.035f : 0.005f;
+        l.material.scattering_color = i == 0 ? Vec3(0.92f, 0.94f, 0.96f) : Vec3(1.0f);
+    }
+    c.cirrus.enabled = storm;
+    c.cirrus.altitude_m = 14000.0f;
+    c.cirrus.coverage = storm ? 0.30f : 0.0f;
+    c.cirrus.opacity = 0.30f;
+}
+
 } // namespace
 
 bool CloudState::anyEnabled() const {
-    for (const auto& l : layers) {
-        if (l.enabled && l.coverage > 0.0f && l.extinction_per_m > 0.0f) return true;
+    if (material.density_multiplier <= 0.0f) {
+        return false;
     }
-    return cirrus.enabled && cirrus.coverage > 0.0f && cirrus.opacity > 0.0f;
+    for (int i = 0; i < kMaxCloudLayers; ++i) {
+        const CloudLayer& l = layers[i];
+        const CloudMaterial m = layerMaterial(*this, i);
+        if (l.enabled && l.coverage > 0.0f && l.extinction_per_m > 0.0f &&
+            m.density_multiplier > 0.0f &&
+            m.scattering_coefficient + m.absorption_coefficient > 0.0f) {
+            return true;
+        }
+    }
+    return cirrus.enabled && cirrus.coverage > 0.0f && cirrus.opacity > 0.0f &&
+           material.scattering_coefficient + material.absorption_coefficient > 0.0f;
+}
+
+bool validateCloudMaterial(const CloudMaterial& m, std::string* error) {
+    if (!inRange(m.density_multiplier, 0.0f, 100.0f)) {
+        return fail(error, "material.density_multiplier must be within 0..100");
+    }
+    if (!inRange(m.scattering_coefficient, 0.0f, 100.0f) ||
+        !inRange(m.absorption_coefficient, 0.0f, 100.0f)) {
+        return fail(error, "material scattering/absorption coefficients must be within 0..100");
+    }
+    if (!inRange(m.scattering_color.x, 0.0f, 1.0f) ||
+        !inRange(m.scattering_color.y, 0.0f, 1.0f) ||
+        !inRange(m.scattering_color.z, 0.0f, 1.0f)) {
+        return fail(error, "material.scattering_color must be linear RGB within 0..1");
+    }
+    if (!inRange(m.anisotropy, -0.99f, 0.99f)) {
+        return fail(error, "material.anisotropy must be within -0.99..0.99");
+    }
+    if (!inRange(m.emission_color.x, 0.0f, 1.0f) ||
+        !inRange(m.emission_color.y, 0.0f, 1.0f) ||
+        !inRange(m.emission_color.z, 0.0f, 1.0f) ||
+        !inRange(m.emission_strength, 0.0f, 100000.0f)) {
+        return fail(error, "material emission colour must be RGB 0..1, strength within 0..100000");
+    }
+    return true;
 }
 
 bool validateClouds(const CloudState& c, std::string* error) {
+    if (!validateCloudMaterial(c.material, error)) {
+        return false;
+    }
     for (int i = 0; i < kMaxCloudLayers; ++i) {
         const CloudLayer& l = c.layers[i];
         const std::string p = "layers[" + std::to_string(i) + "].";
+        if (l.formation_role < 0 || l.formation_role > 3 ||
+            l.formation_group < 0 || l.formation_group > 3) {
+            return fail(error, p + "formation_role/group must be within 0..3");
+        }
+        if (!validateCloudMaterial(l.material, error)) {
+            if (error) {
+                *error = p + *error;
+            }
+            return false;
+        }
         if (!inRange(l.base_altitude_m, -500.0f, 20000.0f))
             return fail(error, p + "base_altitude_m must be within -500..20000 m");
         if (!inRange(l.thickness_m, 10.0f, 15000.0f))
@@ -54,6 +134,9 @@ bool validateClouds(const CloudState& c, std::string* error) {
         if (!inRange(l.erosion, 0.0f, 1.0f)) return fail(error, p + "erosion must be within 0..1");
         if (!inRange(l.cell_size_m, 50.0f, 50000.0f)) return fail(error, p + "cell_size_m must be within 50..50000 m");
         if (!inRange(l.detail_size_m, 5.0f, 5000.0f)) return fail(error, p + "detail_size_m must be within 5..5000 m");
+        if (!inRange(l.rotation_degrees, -360.0f, 360.0f)) {
+            return fail(error, p + "rotation_degrees must be within -360..360");
+        }
     }
     // Enabled layers must not overlap: two shells sharing altitude would be
     // marched twice and double their density where they meet.
@@ -75,6 +158,9 @@ bool validateClouds(const CloudState& c, std::string* error) {
     if (!inRange(c.cirrus.coverage, 0.0f, 1.0f)) return fail(error, "cirrus.coverage must be within 0..1");
     if (!inRange(c.cirrus.opacity, 0.0f, 5.0f)) return fail(error, "cirrus.opacity (optical depth) must be within 0..5");
     if (!inRange(c.cirrus.scale_m, 100.0f, 100000.0f)) return fail(error, "cirrus.scale_m must be within 100..100000 m");
+    if (!inRange(c.cirrus.rotation_degrees, -360.0f, 360.0f)) {
+        return fail(error, "cirrus.rotation_degrees must be within -360..360");
+    }
     if (!inRange(c.weather.extent_m, 5000.0f, 1000000.0f)) return fail(error, "weather.extent_m must be within 5000..1000000 m");
     if (!inRange(c.weather.feature_size_m, 500.0f, 200000.0f)) return fail(error, "weather.feature_size_m must be within 500..200000 m");
     if (!inRange(c.weather.type_variation, 0.0f, 1.0f)) return fail(error, "weather.type_variation must be within 0..1");
@@ -90,14 +176,33 @@ bool validateClouds(const CloudState& c, std::string* error) {
     return true;
 }
 
+void cloudMaterialToJson(const CloudMaterial& m, nlohmann::json& j) {
+    j = {
+        {"density_multiplier", m.density_multiplier},
+        {"scattering_coefficient", m.scattering_coefficient},
+        {"scattering_color", {m.scattering_color.x, m.scattering_color.y,
+                              m.scattering_color.z}},
+        {"absorption_coefficient", m.absorption_coefficient},
+        {"override_anisotropy", m.override_anisotropy}, {"anisotropy", m.anisotropy},
+        {"emission_color", {m.emission_color.x, m.emission_color.y, m.emission_color.z}},
+        {"emission_strength", m.emission_strength}
+    };
+}
+
 void cloudsToJson(const CloudState& c, nlohmann::json& j) {
+    cloudMaterialToJson(c.material, j["material"]);
     nlohmann::json layers = nlohmann::json::array();
     for (const auto& l : c.layers) {
+        nlohmann::json material;
+        cloudMaterialToJson(l.material, material);
         layers.push_back({
             {"enabled", l.enabled}, {"base_altitude_m", l.base_altitude_m},
             {"thickness_m", l.thickness_m}, {"coverage", l.coverage}, {"type", l.type},
             {"extinction_per_m", l.extinction_per_m}, {"droplet_diameter_um", l.droplet_diameter_um},
-            {"erosion", l.erosion}, {"cell_size_m", l.cell_size_m}, {"detail_size_m", l.detail_size_m}});
+            {"erosion", l.erosion}, {"cell_size_m", l.cell_size_m},
+            {"detail_size_m", l.detail_size_m}, {"rotation_degrees", l.rotation_degrees},
+            {"formation_role", l.formation_role}, {"formation_group", l.formation_group},
+            {"use_custom_material", l.use_custom_material}, {"material", material}});
     }
     j["layers"] = layers;
     j["derive_from_climate"] = c.derive_from_climate;
@@ -105,7 +210,8 @@ void cloudsToJson(const CloudState& c, nlohmann::json& j) {
                           {"ground_fraction", c.precipitation.ground_fraction}};
     j["cirrus"] = {{"enabled", c.cirrus.enabled}, {"altitude_m", c.cirrus.altitude_m},
                    {"coverage", c.cirrus.coverage}, {"opacity", c.cirrus.opacity},
-                   {"scale_m", c.cirrus.scale_m}};
+                   {"scale_m", c.cirrus.scale_m},
+                   {"rotation_degrees", c.cirrus.rotation_degrees}};
     j["weather"] = {{"seed", c.weather.seed}, {"extent_m", c.weather.extent_m},
                     {"feature_size_m", c.weather.feature_size_m},
                     {"type_variation", c.weather.type_variation},
@@ -118,8 +224,47 @@ void cloudsToJson(const CloudState& c, nlohmann::json& j) {
                     {"rt_secondary_full_march", c.quality.rt_secondary_full_march}};
 }
 
+bool cloudMaterialFromJson(const nlohmann::json& s, CloudMaterial& out,
+                          std::string* error) {
+    CloudMaterial m;
+    if (!s.is_object()) {
+        return fail(error, "material must be an object");
+    }
+    m.density_multiplier = s.value("density_multiplier", m.density_multiplier);
+    m.scattering_coefficient = s.value("scattering_coefficient", m.scattering_coefficient);
+    m.absorption_coefficient = s.value("absorption_coefficient", m.absorption_coefficient);
+    m.override_anisotropy = s.value("override_anisotropy", m.override_anisotropy);
+    m.anisotropy = s.value("anisotropy", m.anisotropy);
+    m.emission_strength = s.value("emission_strength", m.emission_strength);
+    auto readColor = [&](const char* key, Vec3& color) {
+        if (!s.contains(key)) {
+            return true;
+        }
+        const auto& v = s[key];
+        if (!v.is_array() || v.size() != 3 || !v[0].is_number() ||
+            !v[1].is_number() || !v[2].is_number()) {
+            return fail(error, std::string("material.") + key + " must be [r,g,b]");
+        }
+        color = Vec3(v[0].get<float>(), v[1].get<float>(), v[2].get<float>());
+        return true;
+    };
+    if (!readColor("scattering_color", m.scattering_color) ||
+        !readColor("emission_color", m.emission_color)) {
+        return false;
+    }
+    if (!validateCloudMaterial(m, error)) {
+        return false;
+    }
+    out = m;
+    return true;
+}
+
 bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error) {
     CloudState c;
+    if (j.contains("material") &&
+        !cloudMaterialFromJson(j["material"], c.material, error)) {
+        return false;
+    }
     c.derive_from_climate = j.value("derive_from_climate", c.derive_from_climate);
     if (j.contains("layers") && j["layers"].is_array()) {
         const auto& arr = j["layers"];
@@ -136,6 +281,22 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
             l.erosion = s.value("erosion", l.erosion);
             l.cell_size_m = s.value("cell_size_m", l.cell_size_m);
             l.detail_size_m = s.value("detail_size_m", l.detail_size_m);
+            l.rotation_degrees = s.value("rotation_degrees", l.rotation_degrees);
+            for (const char* key : {"formation_role", "formation_group"}) {
+                if (s.contains(key) && !s[key].is_number_integer()) {
+                    return fail(error, std::string("layer.") + key + " must be an integer");
+                }
+            }
+            l.formation_role = s.value("formation_role", l.formation_role);
+            l.formation_group = s.value("formation_group", l.formation_group);
+            l.use_custom_material = s.value("use_custom_material", l.use_custom_material);
+            if (s.contains("material") &&
+                !cloudMaterialFromJson(s["material"], l.material, error)) {
+                if (error) {
+                    *error = "layers[" + std::to_string(i) + "]." + *error;
+                }
+                return false;
+            }
         }
     }
     if (j.contains("precipitation") && j["precipitation"].is_object()) {
@@ -151,6 +312,7 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
         c.cirrus.coverage = s.value("coverage", c.cirrus.coverage);
         c.cirrus.opacity = s.value("opacity", c.cirrus.opacity);
         c.cirrus.scale_m = s.value("scale_m", c.cirrus.scale_m);
+        c.cirrus.rotation_degrees = s.value("rotation_degrees", c.cirrus.rotation_degrees);
     }
     if (j.contains("weather") && j["weather"].is_object()) {
         const auto& s = j["weather"];
@@ -180,8 +342,26 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
 }
 
 
+CloudMaterial lerpCloudMaterial(const CloudMaterial& a, const CloudMaterial& b, float t) {
+    CloudMaterial r = a;
+    r.density_multiplier =
+        lerpf(a.density_multiplier, b.density_multiplier, t);
+    r.scattering_coefficient =
+        lerpf(a.scattering_coefficient, b.scattering_coefficient, t);
+    r.absorption_coefficient =
+        lerpf(a.absorption_coefficient, b.absorption_coefficient, t);
+    r.scattering_color = a.scattering_color * (1.0f - t) + b.scattering_color * t;
+    r.override_anisotropy = t < 1.0f ? a.override_anisotropy : b.override_anisotropy;
+    r.anisotropy = lerpf(a.anisotropy, b.anisotropy, t);
+    r.emission_color = a.emission_color * (1.0f - t) + b.emission_color * t;
+    r.emission_strength =
+        lerpf(a.emission_strength, b.emission_strength, t);
+    return r;
+}
+
 CloudState lerpClouds(const CloudState& a, const CloudState& b, float t) {
     CloudState r = a;
+    r.material = lerpCloudMaterial(a.material, b.material, t);
     for (int i = 0; i < kMaxCloudLayers; ++i) {
         const CloudLayer& la = a.layers[i];
         const CloudLayer& lb = b.layers[i];
@@ -196,6 +376,11 @@ CloudState lerpClouds(const CloudState& a, const CloudState& b, float t) {
         l.erosion = lerpf(la.erosion, lb.erosion, t);
         l.cell_size_m = lerpf(la.cell_size_m, lb.cell_size_m, t);
         l.detail_size_m = lerpf(la.detail_size_m, lb.detail_size_m, t);
+        l.rotation_degrees = lerpf(la.rotation_degrees, lb.rotation_degrees, t);
+        l.formation_role = t < 1.0f ? la.formation_role : lb.formation_role;
+        l.formation_group = t < 1.0f ? la.formation_group : lb.formation_group;
+        l.use_custom_material = t < 1.0f ? la.use_custom_material : lb.use_custom_material;
+        l.material = lerpCloudMaterial(la.material, lb.material, t);
     }
     r.precipitation.rate_mm_h = lerpf(a.precipitation.rate_mm_h, b.precipitation.rate_mm_h, t);
     r.precipitation.snow = t < 1.0f ? a.precipitation.snow : b.precipitation.snow;
@@ -205,6 +390,8 @@ CloudState lerpClouds(const CloudState& a, const CloudState& b, float t) {
     r.cirrus.coverage = lerpf(a.cirrus.coverage, b.cirrus.coverage, t);
     r.cirrus.opacity = lerpf(a.cirrus.opacity, b.cirrus.opacity, t);
     r.cirrus.scale_m = lerpf(a.cirrus.scale_m, b.cirrus.scale_m, t);
+    r.cirrus.rotation_degrees =
+        lerpf(a.cirrus.rotation_degrees, b.cirrus.rotation_degrees, t);
     r.weather.type_variation = lerpf(a.weather.type_variation, b.weather.type_variation, t);
     r.weather.evolution_speed = lerpf(a.weather.evolution_speed, b.weather.evolution_speed, t);
     r.weather.feature_size_m = lerpf(a.weather.feature_size_m, b.weather.feature_size_m, t);
@@ -258,7 +445,7 @@ void cloudsToLegacyPacket(const CloudState& c, float wind_offset_x_m, float wind
 }
 
 std::vector<std::string> cloudPresetNames() {
-    return {"clear", "fair_weather_cumulus", "scattered", "broken", "overcast_stratus",
+    return {"clear", "fair_weather_cumulus", "towering_cumulus", "scattered", "broken", "overcast_stratus",
             "storm", "high_cirrus", "sunset_altocumulus"};
 }
 
@@ -274,6 +461,8 @@ bool cloudPreset(const std::string& name, CloudState& out) {
         low.coverage = 0.25f; low.type = 0.5f; low.extinction_per_m = 0.05f;
         low.droplet_diameter_um = 10.0f; low.erosion = 0.55f;
         low.cell_size_m = 1500.0f; low.detail_size_m = 150.0f;
+    } else if (name == "towering_cumulus") {
+        configureStormLayers(c, false);
     } else if (name == "scattered") {
         low.enabled = true; low.base_altitude_m = 1400.0f; low.thickness_m = 1800.0f;
         low.coverage = 0.45f; low.type = 0.55f; low.extinction_per_m = 0.06f;
@@ -293,12 +482,7 @@ bool cloudPreset(const std::string& name, CloudState& out) {
         low.cell_size_m = 6000.0f; low.detail_size_m = 400.0f;
         c.weather.type_variation = 0.05f;
     } else if (name == "storm") {
-        low.enabled = true; low.base_altitude_m = 800.0f; low.thickness_m = 9000.0f;
-        low.coverage = 0.65f; low.type = 0.95f; low.extinction_per_m = 0.12f;
-        low.droplet_diameter_um = 20.0f; low.erosion = 0.45f;
-        low.cell_size_m = 8000.0f; low.detail_size_m = 400.0f;
-        c.cirrus.enabled = true; c.cirrus.altitude_m = 11000.0f; c.cirrus.coverage = 0.6f;
-        c.cirrus.opacity = 0.8f;   // anvil outflow
+        configureStormLayers(c, true);
     } else if (name == "high_cirrus") {
         c.cirrus.enabled = true; c.cirrus.altitude_m = 9500.0f; c.cirrus.coverage = 0.45f;
         c.cirrus.opacity = 0.35f; c.cirrus.scale_m = 12000.0f;

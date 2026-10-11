@@ -1,0 +1,211 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+layout(local_size_x = 128) in;
+layout(push_constant) uniform Constants {
+    uint groups;
+    float cell_volume;
+    float ambient;
+    float gas_ambient;
+    float kelvin_per_unit;
+    float humidity;
+    float dt;
+    uint inventory;
+    uint stamp;             // rain landing stamp of this step
+} pc;
+struct Parcel {
+    uint particle;
+    uint air_cell;
+    float kelvin;
+    float rest_mass;
+    float fraction;
+    float specific_heat;
+    float boiling;
+    float latent;
+    float molar;
+    float share;
+    double capacity;
+    vec4 velocity;
+};
+struct Group { uint first; uint count; uint cell; uint padding; };
+struct Result { dvec4 energy; vec4 state; vec4 padding; };
+layout(set = 0, binding = 0) readonly buffer Parcels { Parcel parcels[]; };
+layout(set = 0, binding = 1) readonly buffer Groups { Group groups[]; };
+layout(set = 0, binding = 2) buffer Results { Result results[]; };
+layout(set = 0, binding = 3) readonly buffer Mass { float gas_mass[]; };
+layout(set = 0, binding = 4) readonly buffer Energy { float gas_energy[]; };
+layout(set = 0, binding = 5) readonly buffer Temperature { float gas_temperature[]; };
+layout(set = 0, binding = 6) readonly buffer Density { float gas_density[]; };
+// Two vec4 per group: (vapour kg, energy J, temperature, density) and
+// (rain kg left, rain energy J left, 0, 0).
+layout(set = 0, binding = 7) buffer Columns { vec4 columns[]; };
+layout(set = 0, binding = 8) readonly buffer RainMass { float gas_rain[]; };
+layout(set = 0, binding = 9) readonly buffer RainEnergy { float gas_rain_energy[]; };
+layout(set = 0, binding = 10) buffer Landing { uint landing[]; };
+
+// Avoid cancellation when film * dt / capacity is smaller than float epsilon.
+// GLSL FP64 does not provide double transcendental overloads on every driver.
+double relaxation(double x) {
+    if (x < 0.05) {
+        return x * (1.0 - x * (0.5 - x * (1.0 / 6.0 -
+            x * (1.0 / 24.0 - x * (1.0 / 120.0 - x / 720.0)))));
+    }
+    return double(1.0 - exp(float(-x)));
+}
+
+// Effective Hertz-Knudsen coefficient (CPU reference: GasSurfaceExchangeCpu).
+// Open-pan 4e-5 is diffusion through air; it rises with the vapour share up to
+// the interface value 0.04 in nearly pure steam.
+double hkCoefficient(double vapour_pressure, double atmosphere) {
+    double air_share = max(1.0 - vapour_pressure / atmosphere, 1.0e-3);
+    return min(0.04, 4.0e-5 / air_share);
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x +
+        gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (id >= pc.groups) {
+        return;
+    }
+    Group group = groups[id];
+    uint inventory_cell = pc.inventory != 0u ? group.cell : 0u;
+    float m = gas_mass[inventory_cell];
+    float e = gas_energy[inventory_cell];
+    float t = gas_temperature[group.cell];
+    float density = gas_density[group.cell];
+    const double gas_constant = 8.314462;
+    const double atmosphere = 101325.0;
+    const double air_molar = 0.028965;
+    const double pi = 3.14159265358979;
+    // Rain landing: this air cell lies on liquid, so the rain fall stops here
+    // and the cell's rain water joins these parcels, shared by surface share.
+    landing[group.cell] = pc.stamp;
+    double rain_mass = pc.inventory != 0u ? double(max(gas_rain[inventory_cell], 0.0)) : 0.0;
+    double rain_heat = pc.inventory != 0u ? double(max(gas_rain_energy[inventory_cell], 0.0)) : 0.0;
+    double share_sum = 0.0;
+    for (uint r = group.first; r < group.first + group.count; ++r) {
+        Parcel p = parcels[r];
+        if (!isnan(p.kelvin) && !isinf(p.kelvin) && p.kelvin > 0.0 && p.capacity > 0.0 &&
+            p.rest_mass > 0.0) {
+            share_sum += double(max(p.share, 0.0));
+        }
+    }
+    for (uint r = group.first; r < group.first + group.count; ++r) {
+        Parcel p = parcels[r];
+        Result parcel_result = Result(dvec4(0.0), vec4(p.kelvin, p.fraction, 0.0, 0.0), vec4(0.0));
+        double tp = double(p.kelvin);
+        if (isnan(p.kelvin) || isinf(p.kelvin) || tp <= 0.0) {
+            // The CPU reference skips unwritten/invalid temperatures.
+            results[r] = parcel_result;
+            continue;
+        }
+        double ta = max(double(pc.ambient) +
+            (double(t) - double(pc.gas_ambient)) * double(pc.kelvin_per_unit), 1.0);
+        double cp = p.capacity;
+        double rho_air = atmosphere * air_molar / (gas_constant * ta);
+        double ca = rho_air * double(pc.cell_volume) * 1005.0;
+        if (cp > 0.0 && ca > 0.0) {
+            double decay = relaxation(20.0 * double(p.share) * double(pc.dt) *
+                                      (1.0 / cp + 1.0 / ca));
+            // Equal/opposite heat, independent of the two capacities' scale.
+            double q = (tp - ta) * (cp * ca / (cp + ca)) * decay;
+            tp -= q / cp;
+            t += float(q / ca / double(pc.kelvin_per_unit));
+            parcel_result.energy.x = q;
+            parcel_result.state.z = 1.0;
+        }
+        double boil = double(p.boiling);
+        double latent = double(p.latent);
+        double molar = double(p.molar);
+        double rest = double(p.rest_mass);
+        if (boil > 0.0 && latent > 0.0 && molar > 0.0 && rest > 0.0 && tp <= boil) {
+            double a = latent * molar / gas_constant;
+            double psat = atmosphere * double(exp(float(a * (1.0 / boil - 1.0 / tp))));
+            double psat_air = atmosphere *
+                double(exp(float(a * (1.0 / boil - 1.0 / min(ta, boil)))));
+            // Device mass is the current advected vapour, never a stale CPU mirror.
+            double pv = max(double(pc.humidity) * psat_air,
+                double(m) / double(pc.cell_volume) * gas_constant * ta / molar);
+            double flux = hkCoefficient(pv, atmosphere) * max(0.0, psat - pv) *
+                double(sqrt(float(molar / (2.0 * pi * gas_constant * tp))));
+            double mass = rest * double(p.fraction);
+            double thermal_budget = cp * max(0.0, tp - 1.0) / latent;
+            double dm = min(min(flux * double(p.share) * double(pc.dt), 0.5 * mass),
+                            thermal_budget);
+            if (dm > 0.0 && cp > 0.0) {
+                double c = double(p.specific_heat);
+                // The vapour and remaining liquid share this final temperature.
+                // Their combined sensible capacity is the pre-evaporation cp.
+                tp -= dm * latent / cp;
+                parcel_result.state.y = float((mass - dm) / rest);
+                m += float(dm);
+                e += float(dm * (c * tp + latent));
+                double vapour_density = atmosphere * molar / (gas_constant * tp);
+                density += float(min(dm / (vapour_density * double(pc.cell_volume)),
+                                     max(0.0, 1.0 - double(density))));
+                parcel_result.energy.y = dm * c * tp;
+                parcel_result.energy.z = dm * latent;
+                parcel_result.energy.w = dm;
+            }
+        }
+        // Condensation (CPU reference: GasSurfaceExchangeCpu.cpp). Reverse
+        // Hertz-Knudsen when inventory vapour is above saturation at the
+        // surface temperature; negative mass in energy.w. The vapour's energy
+        // per kg (c*Ta + L: vapour at the air temperature) goes to the parcel.
+        if (!(parcel_result.energy.w > 0.0) && boil > 0.0 && latent > 0.0 &&
+            molar > 0.0 && rest > 0.0 && tp < boil && cp > 0.0 && m > 0.0) {
+            double a = latent * molar / gas_constant;
+            double psat = atmosphere * double(exp(float(a * (1.0 / boil - 1.0 / tp))));
+            double pv = min(atmosphere,
+                double(m) / double(pc.cell_volume) * gas_constant * ta / molar);
+            if (pv > psat) {
+                double c = double(p.specific_heat);
+                double flux = hkCoefficient(pv, atmosphere) * (pv - psat) *
+                    double(sqrt(float(molar / (2.0 * pi * gas_constant * tp))));
+                double saturated = psat * double(pc.cell_volume) * molar / (gas_constant * ta);
+                double mass = rest * double(p.fraction);
+                double eps = max(c * ta + latent, c * tp);
+                double heat_budget = cp * (boil - tp) / max(eps - c * tp, 1.0);
+                double dm = min(min(flux * double(p.share) * double(pc.dt),
+                                    max(0.0, double(m) - saturated)),
+                                min(mass, heat_budget));
+                if (dm > 0.0) {
+                    tp = (cp * tp + dm * eps) / (cp + dm * c);
+                    m = max(0.0, m - float(dm));
+                    e = max(0.0, e - float(dm * eps));
+                    double vapour_density = atmosphere * molar / (gas_constant * ta);
+                    density = max(0.0, density -
+                        float(dm / (vapour_density * double(pc.cell_volume))));
+                    parcel_result.energy.y = dm * max(0.0, eps - latent);
+                    parcel_result.energy.z = dm * latent;
+                    parcel_result.energy.w = -dm;
+                }
+            }
+        }
+        // Rain absorbed at its own temperature (sensible only, no phase change).
+        if (rain_mass > 0.0 && share_sum > 0.0 && cp > 0.0 && rest > 0.0) {
+            double portion = double(max(p.share, 0.0)) / share_sum;
+            double dr = rain_mass * portion;
+            double er = rain_heat * portion;
+            double c = double(p.specific_heat);
+            double gained = max(-parcel_result.energy.w, 0.0);
+            double capacity_now = cp + gained * c;
+            tp = (capacity_now * tp + er) / (capacity_now + dr * c);
+            parcel_result.padding.x = float(dr);
+            parcel_result.padding.y = float(er);
+        }
+        parcel_result.state.x = float(tp);
+        results[r] = parcel_result;
+    }
+    vec4 value = vec4(m, e, t, density);
+    bool invalid = any(isnan(value)) || any(isinf(value)) || m < 0.0 || e < 0.0;
+    if (invalid) {
+        for (uint r = group.first; r < group.first + group.count; ++r) {
+            results[r].state.w = 1.0;
+        }
+    }
+    // Commit is a separate dispatch, after compact parcel result validation.
+    columns[2u * id] = value;
+    bool absorbed = rain_mass > 0.0 && share_sum > 0.0;
+    columns[2u * id + 1u] = absorbed ? vec4(0.0)
+        : vec4(float(rain_mass), float(rain_heat), 0.0, 0.0);
+}

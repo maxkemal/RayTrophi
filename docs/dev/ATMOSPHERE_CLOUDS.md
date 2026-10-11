@@ -12,6 +12,45 @@ geçerli: aynı compute shader her cihazda, tek parametre paketi, sayıyla parit
 
 ## ▶ DEVİR NOTU — başka bir ajan buradan devam edebilir (2026-09-30)
 
+**2026-10-11 beşinci parti — sahne derinliği:** önceki miss-only/sky-only sınırı
+kaldırılıyor. RT hit aşamalarına ortak sonlu segment, RayFusion opak derinliği
+hazır olduktan sonra `cloud_scene.comp` HDR kompoziti kaynakta eklendi. Bulut
+geometriden önce ışına girdiğinde görünür; yüzeyin arkasındaki doğrudan katkı
+kesilir. C++ + RT hit/raygen/miss ve cloud shader'lar birlikte derlenmeli.
+[CLOUD_SCENE_DEPTH_2026_10_11.md](CLOUD_SCENE_DEPTH_2026_10_11.md) güncel devir,
+sınırlar ve kabul listesidir; kaynak hazır, görsel/canlı kabul bekliyor.
+
+**2026-10-11 dördüncü parti:** tek kabuklu towering preset stratiform kaldı;
+storm/towering artık ortak hücre ve dikey span ile üç taban–gövde–örs bölgesi.
+Katman optik modifier'ları UI/script/IPC'de, ortak materyal master kalıyor.
+Production boş majorant bölgesinde sınırı aşan sıçrama düzeltildi; bütçe kuyruğu
+kaba tamamlanıyor ve 200 km sınırı yüksek bulutlar için 1000 km'ye genişledi.
+GPU paket 480 B; C++ + tüketici shader'lar birlikte derlenmeli. Kullanıcının
+doğru kesilme görüntüsü ve güncel kabul listesi:
+[CLOUD_STORM_REGIONS_AND_CUTS_2026_10_11.md](CLOUD_STORM_REGIONS_AND_CUTS_2026_10_11.md).
+Kaynak tamam, görsel/canlı kabul bekliyor.
+
+**2026-10-11 üçüncü parti:** kullanıcı materyal/cirrus RT kabulü sonrası; katman
+ve cirrus yönü UI/script/IPC'de, baked noise warp ve bağımsız gradient kanal,
+yüksek tiplerde yamaç erozyonu, güncel storm ve `towering_cumulus` preset kaynakta.
+GPU paket 336 B; C++ + **cloud_noise dahil** tüm tüketici shader'lar birlikte
+derlenip uygulama yeniden açılmalı. Görsel/canlı kabul bekliyor.
+[CLOUD_ORIENTATION_AND_TOWERS_2026_10_11.md](CLOUD_ORIENTATION_AND_TOWERS_2026_10_11.md)
+güncel devir, açık sahne görüntüsü ve kabul listesidir.
+
+**2026-10-11 ikinci parti:** hücre başına kule gelişimi/yönelimi, lifli cirrus,
+reference dalında eksik cirrus çağrısı ve düzenlenebilir ortak bulut materyali
+kaynakta tamamlandı. VDB bulut satırı CloudState'e bağlı; script/IPC aynı material
+şemasını kullanıyor. GPU paket 272 B: **C++ ve shader birlikte derlenmeli**.
+[CLOUD_MATERIAL_AND_CIRRUS_2026_10_11.md](CLOUD_MATERIAL_AND_CIRRUS_2026_10_11.md)
+güncel devir ve kabul listesidir; görsel/canlı kabul bekliyor.
+
+**2026-10-11 şekil önceliği:** katman başına yön/faz ayrımı, mevcut büyük oluşum
+örneğinden küçük kabarıklıklara warp, stratiform gövde sürekliliği ve konvektif
+taban/tepe erozyonu kaynakta yazıldı. Doku okuma sayısı artmadı; derleme ve görsel
+kabul bekliyor. Ayrıntı ve kullanıcı kontrol listesi:
+[CLOUD_SHAPE_FIRST_2026_10_11.md](CLOUD_SHAPE_FIRST_2026_10_11.md).
+
 **Faz 3e (2026-10-01, yazıldı, derlenmedi):** dikey yapı — weather A = hücre gelişme
 yüksekliği (`topFrac` çarpanı + taban ±%4), `cloudShear` (rüzgâr kesmesi, tüm katman
 okumaları + majorant), konvektif gürültü dikey esnetme, ışık march'ı mutlak 40 m'den +

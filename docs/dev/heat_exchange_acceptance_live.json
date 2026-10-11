@@ -1,0 +1,44 @@
+{
+  "samples": [
+    {
+      "step": 30,
+      "phase": "heating",
+      "mean_kelvin": 305.4665832519531,
+      "max_kelvin": 330.17877197265625,
+      "conducting_cells": 10838,
+      "gas_exchange": 2925,
+      "heat_to_gas_j": 7.180614919766916,
+      "evaporated_kg": 1.1375269609144282e-05,
+      "gas_phase_mass_kg": 0.0002959939062425615
+    },
+    {
+      "step": 60,
+      "phase": "heating",
+      "mean_kelvin": 299.03399658203125,
+      "max_kelvin": 310.00799560546875,
+      "conducting_cells": 9168,
+      "gas_exchange": 2951,
+      "heat_to_gas_j": 4.2045263923190115,
+      "evaporated_kg": 9.731476177116435e-06,
+      "gas_phase_mass_kg": 9.035433292767265e-05
+    },
+    {
+      "step": 90,
+      "phase": "heating",
+      "mean_kelvin": 307.3892822265625,
+      "max_kelvin": 337.1838073730469,
+      "conducting_cells": 11094,
+      "gas_exchange": 3511,
+      "heat_to_gas_j": 7.409647558114403,
+      "evaporated_kg": 1.1568373551834283e-05,
+      "gas_phase_mass_kg": 0.00042246690850638555
+    }
+  ],
+  "verdicts": {
+    "conducts": true,
+    "surface_exchanges_with_gas": true,
+    "heat_flows_to_air_when_warmer": true,
+    "evaporates_below_boiling": true,
+    "evaporation_balanced": true
+  }
+}

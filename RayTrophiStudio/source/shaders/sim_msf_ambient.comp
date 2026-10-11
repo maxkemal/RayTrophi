@@ -32,10 +32,13 @@ layout(set=0, binding=0) readonly buffer Centers { vec4 centers[]; };  // xyz wo
 // anything, which is the whole reason MSF exists.
 layout(set=0, binding=1)          buffer State   { vec4 state[]; };
 
-// Thermal force fields, 32 B each.
+// Thermal force fields, 96 B each (MaterialStateFieldSystem::ThermalSource).
 //   a: xyz = world position, w = inner_radius
 //   b: x = falloff_radius, y = delta_kelvin, z = falloff_type, w = infinite
-struct ThermalSource { vec4 a; vec4 b; };
+//   c, d, e: rows of the world -> field-local affine transform
+//   f: x = shape (0 sphere, 1 box, 2 cylinder, 3 cone)
+// All floats on the host too (they used to be raw ints read as floats).
+struct ThermalSource { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; vec4 f; };
 layout(set=0, binding=2) readonly buffer Sources { ThermalSource sources[]; };
 
 // Domain ambient overrides as world AABBs, 32 B each.
@@ -43,6 +46,11 @@ layout(set=0, binding=2) readonly buffer Sources { ThermalSource sources[]; };
 //   b: xyz = bounds_max, w = reserved
 struct AmbientZone { vec4 a; vec4 b; };
 layout(set=0, binding=3) readonly buffer Zones { AmbientZone zones[]; };
+
+// Liquid contact heat since the last pass, normalized temperature delta per
+// element (MaterialStateFieldSystem::depositThermalContactHeat). Only read when
+// counts.w != 0; otherwise the state buffer is bound here as a dummy.
+layout(set=0, binding=4) readonly buffer HeatIn { float heat_in[]; };
 
 // Mirrors Physics::FalloffType / ForceField::calculateFalloff on the host. Kept
 // in the same order so the UI's falloff combo means the same thing for a heat
@@ -63,6 +71,23 @@ float falloffAt(float dist, float inner, float outer, int mode) {
     }
     if (mode == 5) return exp(-3.0 * t);             // Exponential
     return 1.0 - t;                                  // Custom -> linear
+}
+
+// Mirrors thermalSourceWeight() in MaterialStateField.h.
+float sourceWeight(ThermalSource s, vec3 p) {
+    if (s.b.w > 0.5) return 1.0;
+    vec4 hp = vec4(p, 1.0);
+    vec3 l = vec3(dot(s.c, hp), dot(s.d, hp), dot(s.e, hp));
+    int shape = int(s.f.x + 0.5);
+    float dist = length(l);
+    if (shape == 1) {
+        dist = max(abs(l.x), max(abs(l.y), abs(l.z)));
+    } else if (shape == 2) {
+        dist = max(length(l.xz), abs(l.y));
+    } else if (shape == 3 && (l.y < 0.0 || l.y > s.b.x || length(l.xz) > l.y)) {
+        return 0.0;
+    }
+    return falloffAt(dist, s.a.w, s.b.x, int(s.b.z + 0.5));
 }
 
 void main() {
@@ -94,14 +119,9 @@ void main() {
     //    a heat SOURCE, not a thermostat.
     int source_count = pc.counts.y;
     for (int i = 0; i < source_count; ++i) {
-        vec4 a = sources[i].a;
-        vec4 b = sources[i].b;
-        float w = 1.0;
-        if (b.w < 0.5) {
-            w = falloffAt(length(p - a.xyz), a.w, b.x, int(b.z));
-            if (w <= 0.0) continue;
-        }
-        ambient_k += b.y * w;
+        float w = sourceWeight(sources[i], p);
+        if (w <= 0.0) continue;
+        ambient_k += sources[i].b.y * w;
     }
 
     // Kelvin -> normalized against the CALIBRATION zero. For a scene whose
@@ -118,6 +138,7 @@ void main() {
     // Thermal field. Relaxation also cannot overshoot at any timestep.
     float k = max(0.0, pc.params.y);
     st.x = ambient + (st.x - ambient) * exp(-k * pc.params.x);
+    if (pc.counts.w != 0) st.x += heat_in[id];
 
     // A cold zone may legitimately sit below the world ambient, so the floor is
     // the local ambient rather than 0 — clamping at 0 would silently make every

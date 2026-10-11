@@ -485,6 +485,11 @@ VkSampler makeClampSampler(VkDevice device) {
 } // namespace
 
 void VulkanDevice::destroyCloudRaster() {
+    if (m_cloudScenePipeline) vkDestroyPipeline(m_device, m_cloudScenePipeline, nullptr);
+    m_cloudScenePipeline = VK_NULL_HANDLE;
+    m_cloudSceneSet = VK_NULL_HANDLE;
+    m_cloudSceneHdr = m_cloudSceneDepth = VK_NULL_HANDLE;
+    m_cloudSceneSampler = VK_NULL_HANDLE;
     for (ImageHandle* img : {&m_cloudHist[0], &m_cloudHist[1], &m_cloudRasterOut, &m_cloudShadowMap}) {
         if (img->image || img->view) destroyImage(*img);
         *img = {};
@@ -508,26 +513,26 @@ void VulkanDevice::destroyCloudRaster() {
 bool VulkanDevice::createCloudRasterPipeline(const std::vector<uint32_t>& spv) {
     if (spv.empty() || !ensureCloudTextures()) return false;
     destroyCloudRaster();
-    VkDescriptorSetLayoutBinding b[12]{};
-    for (uint32_t i = 0; i < 12; ++i) {
+    VkDescriptorSetLayoutBinding b[14]{};
+    for (uint32_t i = 0; i < 14; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = (i == 6) ? 2u : 1u;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         b[i].descriptorType = (i == 4 || i == 7) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
-                            : (i >= 9)           ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+                            : ((i >= 9 && i <= 11) || i == 13) ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
                                                  : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     }
     VkDescriptorSetLayoutCreateInfo li{};
     li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    li.bindingCount = 12; li.pBindings = b;
+    li.bindingCount = 14; li.pBindings = b;
     bool ok = vkCreateDescriptorSetLayout(m_device, &li, nullptr, &m_cloudRasterDescLayout) == VK_SUCCESS;
     if (ok) {
-        VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * 9},
-                                         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * 2},
-                                         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * 3}};
+        VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * 10},
+                                         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 * 2},
+                                         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 * 4}};
         VkDescriptorPoolCreateInfo pi{};
         pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        pi.poolSizeCount = 3; pi.pPoolSizes = sizes; pi.maxSets = 2;
+        pi.poolSizeCount = 3; pi.pPoolSizes = sizes; pi.maxSets = 3;
         ok = vkCreateDescriptorPool(m_device, &pi, nullptr, &m_cloudRasterPool) == VK_SUCCESS;
     }
     if (ok) {
@@ -541,6 +546,9 @@ bool VulkanDevice::createCloudRasterPipeline(const std::vector<uint32_t>& spv) {
         VkPipelineLayoutCreateInfo pl{};
         pl.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pl.setLayoutCount = 1; pl.pSetLayouts = &m_cloudRasterDescLayout;
+        VkPushConstantRange scenePush{VK_SHADER_STAGE_COMPUTE_BIT, 0, 24};
+        pl.pushConstantRangeCount = 1;
+        pl.pPushConstantRanges = &scenePush;
         ok = vkCreatePipelineLayout(m_device, &pl, nullptr, &m_cloudRasterLayout) == VK_SUCCESS;
     }
     ok = ok && makeComputePipeline(m_device, spv, m_cloudRasterLayout, m_cloudRasterPipeline);
@@ -554,6 +562,120 @@ bool VulkanDevice::createCloudRasterPipeline(const std::vector<uint32_t>& spv) {
     }
     if (!ok) destroyCloudRaster();
     return ok;
+}
+
+bool VulkanDevice::createCloudScenePipeline(const std::vector<uint32_t>& spv) {
+    if (m_cloudScenePipeline) {
+        return true;
+    }
+    if (spv.empty() || !m_cloudRasterLayout) {
+        return false;
+    }
+    if (!makeComputePipeline(m_device, spv, m_cloudRasterLayout, m_cloudScenePipeline)) {
+        return false;
+    }
+    VkDescriptorSetAllocateInfo allocate{};
+    allocate.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocate.descriptorPool = m_cloudRasterPool;
+    allocate.descriptorSetCount = 1;
+    allocate.pSetLayouts = &m_cloudRasterDescLayout;
+    if (vkAllocateDescriptorSets(m_device, &allocate, &m_cloudSceneSet) != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, m_cloudScenePipeline, nullptr);
+        m_cloudScenePipeline = VK_NULL_HANDLE;
+        m_cloudSceneSet = VK_NULL_HANDLE;
+        return false;
+    }
+    ImageHandle* textures[6] = {&m_cloudBase, &m_cloudDetail, &m_cloudCurl,
+                                &m_cloudWeather, nullptr, &m_cloudMajorant};
+    VkDescriptorImageInfo images[6]{};
+    VkDescriptorBufferInfo params{m_cloudRtParamsBuffer.buffer, 0, sizeof(Backend::CloudParamsGPU)};
+    VkDescriptorBufferInfo frame{m_cloudRasterFrameBuf.buffer, 0, sizeof(Backend::CloudRasterFrameGPU)};
+    VkWriteDescriptorSet writes[7]{};
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < 8; ++i) {
+        if (i == 6) {
+            continue;
+        }
+        auto& write = writes[count++];
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = m_cloudSceneSet;
+        write.dstBinding = i;
+        write.descriptorCount = 1;
+        if (i == 4 || i == 7) {
+            write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            write.pBufferInfo = i == 4 ? &params : &frame;
+        } else {
+            images[i] = {textures[i]->sampler, textures[i]->view, VK_IMAGE_LAYOUT_GENERAL};
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.pImageInfo = &images[i];
+        }
+    }
+    vkUpdateDescriptorSets(m_device, count, writes, 0, nullptr);
+    writeCloudRasterLutDescriptors();
+    return true;
+}
+
+void VulkanDevice::invalidateCloudSceneDescriptors() {
+    m_cloudSceneHdr = m_cloudSceneDepth = VK_NULL_HANDLE;
+    m_cloudSceneSampler = VK_NULL_HANDLE;
+}
+
+void VulkanDevice::recordCloudScene(VkCommandBuffer cmd, VkImageView hdr, VkImageView depth,
+                                   VkSampler sampler, uint32_t width, uint32_t height,
+                                   float depthA, float depthB, float depthC, uint32_t steps) {
+    if (!cmd || !m_cloudScenePipeline || !hdr || !depth || !sampler ||
+        width == 0 || height == 0) {
+        return;
+    }
+    // Target recreation already waits for viewport work. Cache descriptors
+    // so steady-state frames never rewrite a set used by an in-flight frame.
+    if (hdr != m_cloudSceneHdr || depth != m_cloudSceneDepth || sampler != m_cloudSceneSampler) {
+        VkDescriptorImageInfo images[2] = {
+            {sampler, depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL},
+            {VK_NULL_HANDLE, hdr, VK_IMAGE_LAYOUT_GENERAL}
+        };
+        VkWriteDescriptorSet writes[2]{};
+        for (uint32_t i = 0; i < 2; ++i) {
+            auto& write = writes[i];
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = m_cloudSceneSet;
+            write.dstBinding = 12 + i;
+            write.descriptorCount = 1;
+            write.descriptorType = i == 0 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER :
+                                            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            write.pImageInfo = &images[i];
+        }
+        vkUpdateDescriptorSets(m_device, 2, writes, 0, nullptr);
+        m_cloudSceneHdr = hdr;
+        m_cloudSceneDepth = depth;
+        m_cloudSceneSampler = sampler;
+    }
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier,
+                         0, nullptr, 0, nullptr);
+    struct ScenePush {
+        uint32_t width, height;
+        float depthA, depthB, depthC;
+        uint32_t steps;
+    } push{width, height, depthA, depthB, depthC, steps};
+    static_assert(sizeof(ScenePush) == 24, "cloud_scene push ABI");
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudScenePipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudRasterLayout,
+                            0, 1, &m_cloudSceneSet, 0, nullptr);
+    vkCmdPushConstants(cmd, m_cloudRasterLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(push), &push);
+    vkCmdDispatch(cmd, (width + 7u) / 8u, (height + 7u) / 8u, 1);
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier,
+                         0, nullptr, 0, nullptr);
 }
 
 // Shadow map (binding 11 of the same set): created with its pipeline, fixed
@@ -603,16 +725,20 @@ void VulkanDevice::writeCloudRasterLutDescriptors() {
         ii[i].imageView = have ? lut.view : m_cloudWeather.view;
         ii[i].imageLayout = have ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
     }
-    VkWriteDescriptorSet w[2]{};
-    for (uint32_t s = 0; s < 2; ++s) {
-        w[s].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w[s].dstSet = m_cloudRasterSets[s];
-        w[s].dstBinding = 6;
-        w[s].descriptorCount = 2;
-        w[s].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w[s].pImageInfo = ii;
+    VkDescriptorSet sets[3] = {m_cloudRasterSets[0], m_cloudRasterSets[1], m_cloudSceneSet};
+    VkWriteDescriptorSet w[3]{};
+    uint32_t count = 0;
+    for (VkDescriptorSet set : sets) {
+        if (!set) continue;
+        auto& write = w[count++];
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = set;
+        write.dstBinding = 6;
+        write.descriptorCount = 2;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = ii;
     }
-    vkUpdateDescriptorSets(m_device, 2, w, 0, nullptr);
+    vkUpdateDescriptorSets(m_device, count, w, 0, nullptr);
 }
 
 bool VulkanDevice::ensureCloudRasterTargets(uint32_t w, uint32_t h) {

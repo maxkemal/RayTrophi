@@ -1,0 +1,471 @@
+{
+  "clouds": {
+    "any_enabled": true,
+    "cirrus": {
+      "altitude_m": 9000.0,
+      "coverage": 1.0,
+      "enabled": false,
+      "opacity": 0.8899999856948853,
+      "scale_m": 8000.0
+    },
+    "derive_from_climate": false,
+    "layers": [
+      {
+        "base_altitude_m": 1400.0,
+        "cell_size_m": 2200.0,
+        "coverage": 0.38999998569488525,
+        "detail_size_m": 200.0,
+        "droplet_diameter_um": 50.0,
+        "enabled": true,
+        "erosion": 1.0,
+        "extinction_per_m": 0.006000000052154064,
+        "thickness_m": 3710.0,
+        "type": 0.10000000149011612
+      },
+      {
+        "base_altitude_m": 1500.0,
+        "cell_size_m": 1800.0,
+        "coverage": 0.3499999940395355,
+        "detail_size_m": 180.0,
+        "droplet_diameter_um": 10.0,
+        "enabled": false,
+        "erosion": 0.5,
+        "extinction_per_m": 0.05000000074505806,
+        "thickness_m": 1500.0,
+        "type": 0.5
+      },
+      {
+        "base_altitude_m": 1500.0,
+        "cell_size_m": 1800.0,
+        "coverage": 0.3499999940395355,
+        "detail_size_m": 180.0,
+        "droplet_diameter_um": 10.0,
+        "enabled": false,
+        "erosion": 0.5,
+        "extinction_per_m": 0.05000000074505806,
+        "thickness_m": 1500.0,
+        "type": 0.5
+      }
+    ],
+    "precipitation": {
+      "ground_fraction": 1.0,
+      "rate_mm_h": 0.0,
+      "snow": false
+    },
+    "presets": [
+      "clear",
+      "fair_weather_cumulus",
+      "scattered",
+      "broken",
+      "overcast_stratus",
+      "storm",
+      "high_cirrus",
+      "sunset_altocumulus"
+    ],
+    "quality": {
+      "realtime_resolution_divisor": 8,
+      "realtime_steps": 8,
+      "rt_max_bounces": 7,
+      "rt_reference_path_trace": true,
+      "rt_secondary_full_march": true,
+      "rt_steps": 16
+    },
+    "revision": 151,
+    "time_seconds": 9.125,
+    "weather": {
+      "evolution_speed": 0.0020000000949949026,
+      "extent_m": 150000.0,
+      "feature_size_m": 12000.0,
+      "seed": 1,
+      "type_variation": 0.25
+    },
+    "wind_offset_m": [
+      0.0,
+      0.0
+    ]
+  },
+  "fog": {
+    "absorption_coefficient": 0.0,
+    "absorption_color": [
+      0.15000000596046448,
+      0.41999998688697815,
+      0.7799999713897705
+    ],
+    "anisotropy": 0.871999979019165,
+    "anisotropy_back": -0.492000013589859,
+    "created": true,
+    "density_cutoff": 0.014999999664723873,
+    "density_multiplier": 100.0,
+    "lobe_mix": 0.0,
+    "max_steps": 16,
+    "multi_scatter": 1.0,
+    "ok": true,
+    "random_walk": true,
+    "random_walk_exact_events": 13,
+    "random_walk_max_events": 51,
+    "scattering_coefficient": 0.33000001311302185,
+    "scattering_color": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "shadow_steps": 8,
+    "shadow_strength": 0.800000011920929,
+    "shadow_stride": 4,
+    "voxel_step_multiplier": 1.5750000476837158
+  },
+  "cases": [
+    {
+      "case": "reference_full_secondary_fog_walk",
+      "completed_samples": 6,
+      "elapsed_ms": 2087.120999931358,
+      "ms_per_completed_sample": 347.85349998855963,
+      "applied_clouds": {
+        "realtime_resolution_divisor": 8,
+        "realtime_steps": 8,
+        "rt_max_bounces": 7,
+        "rt_reference_path_trace": true,
+        "rt_secondary_full_march": true,
+        "rt_steps": 16
+      },
+      "applied_fog": {
+        "absorption_coefficient": 0.0,
+        "absorption_color": [
+          0.15000000596046448,
+          0.41999998688697815,
+          0.7799999713897705
+        ],
+        "anisotropy": 0.871999979019165,
+        "anisotropy_back": -0.492000013589859,
+        "created": true,
+        "density_cutoff": 0.014999999664723873,
+        "density_multiplier": 100.0,
+        "lobe_mix": 0.0,
+        "max_steps": 16,
+        "multi_scatter": 1.0,
+        "ok": true,
+        "random_walk": true,
+        "random_walk_exact_events": 13,
+        "random_walk_max_events": 51,
+        "scattering_coefficient": 0.33000001311302185,
+        "scattering_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "shadow_steps": 8,
+        "shadow_strength": 0.800000011920929,
+        "shadow_stride": 4,
+        "voxel_step_multiplier": 1.5750000476837158
+      },
+      "before": {
+        "accumulation_complete": false,
+        "available": true,
+        "backend": "vulkan",
+        "capture_enabled": false,
+        "frame_available": false,
+        "height": 0,
+        "ms_per_sample": 0.0,
+        "rendering_active": true,
+        "samples": 3,
+        "shading": "rendered",
+        "width": 0
+      },
+      "after": {
+        "accumulation_complete": false,
+        "available": true,
+        "backend": "vulkan",
+        "capture_enabled": false,
+        "frame_available": false,
+        "height": 0,
+        "ms_per_sample": 0.0,
+        "rendering_active": true,
+        "samples": 9,
+        "shading": "rendered",
+        "width": 0
+      }
+    },
+    {
+      "case": "reference_capped_secondary_fog_walk",
+      "completed_samples": 6,
+      "elapsed_ms": 2075.2092000329867,
+      "ms_per_completed_sample": 345.8682000054978,
+      "applied_clouds": {
+        "realtime_resolution_divisor": 8,
+        "realtime_steps": 8,
+        "rt_max_bounces": 7,
+        "rt_reference_path_trace": true,
+        "rt_secondary_full_march": false,
+        "rt_steps": 16
+      },
+      "applied_fog": {
+        "absorption_coefficient": 0.0,
+        "absorption_color": [
+          0.15000000596046448,
+          0.41999998688697815,
+          0.7799999713897705
+        ],
+        "anisotropy": 0.871999979019165,
+        "anisotropy_back": -0.492000013589859,
+        "created": true,
+        "density_cutoff": 0.014999999664723873,
+        "density_multiplier": 100.0,
+        "lobe_mix": 0.0,
+        "max_steps": 16,
+        "multi_scatter": 1.0,
+        "ok": true,
+        "random_walk": true,
+        "random_walk_exact_events": 13,
+        "random_walk_max_events": 51,
+        "scattering_coefficient": 0.33000001311302185,
+        "scattering_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "shadow_steps": 8,
+        "shadow_strength": 0.800000011920929,
+        "shadow_stride": 4,
+        "voxel_step_multiplier": 1.5750000476837158
+      },
+      "before": {
+        "accumulation_complete": false,
+        "available": true,
+        "backend": "vulkan",
+        "capture_enabled": false,
+        "frame_available": false,
+        "height": 0,
+        "ms_per_sample": 0.0,
+        "rendering_active": true,
+        "samples": 3,
+        "shading": "rendered",
+        "width": 0
+      },
+      "after": {
+        "accumulation_complete": false,
+        "available": true,
+        "backend": "vulkan",
+        "capture_enabled": false,
+        "frame_available": false,
+        "height": 0,
+        "ms_per_sample": 0.0,
+        "rendering_active": true,
+        "samples": 9,
+        "shading": "rendered",
+        "width": 0
+      }
+    },
+    {
+      "case": "production_cloud_fog_walk",
+      "completed_samples": 6,
+      "elapsed_ms": 1382.5867000268772,
+      "ms_per_completed_sample": 230.4311166711462,
+      "applied_clouds": {
+        "realtime_resolution_divisor": 8,
+        "realtime_steps": 8,
+        "rt_max_bounces": 7,
+        "rt_reference_path_trace": false,
+        "rt_secondary_full_march": false,
+        "rt_steps": 16
+      },
+      "applied_fog": {
+        "absorption_coefficient": 0.0,
+        "absorption_color": [
+          0.15000000596046448,
+          0.41999998688697815,
+          0.7799999713897705
+        ],
+        "anisotropy": 0.871999979019165,
+        "anisotropy_back": -0.492000013589859,
+        "created": true,
+        "density_cutoff": 0.014999999664723873,
+        "density_multiplier": 100.0,
+        "lobe_mix": 0.0,
+        "max_steps": 16,
+        "multi_scatter": 1.0,
+        "ok": true,
+        "random_walk": true,
+        "random_walk_exact_events": 13,
+        "random_walk_max_events": 51,
+        "scattering_coefficient": 0.33000001311302185,
+        "scattering_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "shadow_steps": 8,
+        "shadow_strength": 0.800000011920929,
+        "shadow_stride": 4,
+        "voxel_step_multiplier": 1.5750000476837158
+      },
+      "before": {
+        "accumulation_complete": false,
+        "available": true,
+        "backend": "vulkan",
+        "capture_enabled": false,
+        "frame_available": false,
+        "height": 0,
+        "ms_per_sample": 0.0,
+        "rendering_active": true,
+        "samples": 3,
+        "shading": "rendered",
+        "width": 0
+      },
+      "after": {
+        "accumulation_complete": false,
+        "available": true,
+        "backend": "vulkan",
+        "capture_enabled": false,
+        "frame_available": false,
+        "height": 0,
+        "ms_per_sample": 0.0,
+        "rendering_active": true,
+        "samples": 9,
+        "shading": "rendered",
+        "width": 0
+      }
+    },
+    {
+      "case": "production_cloud_fog_march",
+      "completed_samples": 7,
+      "elapsed_ms": 263.3419999619946,
+      "ms_per_completed_sample": 37.62028570885637,
+      "applied_clouds": {
+        "realtime_resolution_divisor": 8,
+        "realtime_steps": 8,
+        "rt_max_bounces": 7,
+        "rt_reference_path_trace": false,
+        "rt_secondary_full_march": false,
+        "rt_steps": 16
+      },
+      "applied_fog": {
+        "absorption_coefficient": 0.0,
+        "absorption_color": [
+          0.15000000596046448,
+          0.41999998688697815,
+          0.7799999713897705
+        ],
+        "anisotropy": 0.871999979019165,
+        "anisotropy_back": -0.492000013589859,
+        "created": true,
+        "density_cutoff": 0.014999999664723873,
+        "density_multiplier": 100.0,
+        "lobe_mix": 0.0,
+        "max_steps": 16,
+        "multi_scatter": 1.0,
+        "ok": true,
+        "random_walk": false,
+        "random_walk_exact_events": 13,
+        "random_walk_max_events": 51,
+        "scattering_coefficient": 0.33000001311302185,
+        "scattering_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "shadow_steps": 8,
+        "shadow_strength": 0.800000011920929,
+        "shadow_stride": 4,
+        "voxel_step_multiplier": 1.5750000476837158
+      },
+      "before": {
+        "accumulation_complete": false,
+        "available": true,
+        "backend": "vulkan",
+        "capture_enabled": false,
+        "frame_available": false,
+        "height": 0,
+        "ms_per_sample": 0.0,
+        "rendering_active": true,
+        "samples": 4,
+        "shading": "rendered",
+        "width": 0
+      },
+      "after": {
+        "accumulation_complete": false,
+        "available": true,
+        "backend": "vulkan",
+        "capture_enabled": false,
+        "frame_available": false,
+        "height": 0,
+        "ms_per_sample": 0.0,
+        "rendering_active": true,
+        "samples": 11,
+        "shading": "rendered",
+        "width": 0
+      }
+    },
+    {
+      "case": "reference_full_secondary_fog_walk_late",
+      "before": {
+        "accumulation_complete": false,
+        "available": true,
+        "backend": "vulkan",
+        "capture_enabled": false,
+        "frame_available": false,
+        "height": 0,
+        "ms_per_sample": 0.0,
+        "rendering_active": true,
+        "samples": 40,
+        "shading": "rendered",
+        "width": 0
+      },
+      "after": {
+        "accumulation_complete": false,
+        "available": true,
+        "backend": "vulkan",
+        "capture_enabled": false,
+        "frame_available": false,
+        "height": 0,
+        "ms_per_sample": 0.0,
+        "rendering_active": true,
+        "samples": 46,
+        "shading": "rendered",
+        "width": 0
+      },
+      "completed_samples": 6,
+      "elapsed_ms": 1954.7390999505296,
+      "ms_per_completed_sample": 325.7898499917549
+    }
+  ],
+  "restored": {
+    "clouds": {
+      "realtime_resolution_divisor": 8,
+      "realtime_steps": 8,
+      "rt_max_bounces": 7,
+      "rt_reference_path_trace": true,
+      "rt_secondary_full_march": true,
+      "rt_steps": 16
+    },
+    "fog": {
+      "absorption_coefficient": 0.0,
+      "absorption_color": [
+        0.15000000596046448,
+        0.41999998688697815,
+        0.7799999713897705
+      ],
+      "anisotropy": 0.871999979019165,
+      "anisotropy_back": -0.492000013589859,
+      "created": true,
+      "density_cutoff": 0.014999999664723873,
+      "density_multiplier": 100.0,
+      "lobe_mix": 0.0,
+      "max_steps": 16,
+      "multi_scatter": 1.0,
+      "ok": true,
+      "random_walk": true,
+      "random_walk_exact_events": 13,
+      "random_walk_max_events": 51,
+      "scattering_coefficient": 0.33000001311302185,
+      "scattering_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "shadow_steps": 8,
+      "shadow_strength": 0.800000011920929,
+      "shadow_stride": 4,
+      "voxel_step_multiplier": 1.5750000476837158
+    }
+  }
+}

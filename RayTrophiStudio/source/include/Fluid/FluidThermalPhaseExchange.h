@@ -27,7 +27,8 @@ FluidThermalPhaseExchangeStats updateThermalFreezeAndRecord(
     SimulationGridDomainState& state,
     const APICSolverParams& params,
     uint64_t event_id_base,
-    MatterExchangeLedger& ledger);
+    MatterExchangeLedger& ledger,
+    bool heat_fields_present = false);
 
 } // namespace Fluid
 } // namespace RayTrophiSim

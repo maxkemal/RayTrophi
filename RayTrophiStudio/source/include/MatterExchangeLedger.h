@@ -18,7 +18,9 @@ enum class MatterExchangeKind : uint8_t {
     MistToGas,
     Condensation,
     Absorption,
-    Drainage
+    Drainage,
+    Precipitation,  // rain water -> liquid parcels (no phase change)
+    Autoconversion  // fog water -> rain water inside the air (no phase change)
 };
 
 const char* matterExchangeKindName(MatterExchangeKind kind);

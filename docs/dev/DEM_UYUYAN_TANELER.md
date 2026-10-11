@@ -208,5 +208,9 @@ wake nedeni değil; skipped history süresi tutulur. Metadata +4 B/capacity;
 17/128 ve 4 dispatch/substep aynı. Aktif frontier E2 henüz yazılmadı.
 Sıra ve sınırlar: [DEM_SLEEP_TRANSFER_IMPLEMENTATION.md](DEM_SLEEP_TRANSFER_IMPLEMENTATION.md).
 İlk kullanıcı kapısı: `python scripts/test/rt_h1_grain_suite.py --only sleep sleep_transfer`.
+2026-10-10 ilk canlı tur: revision=24; temel sleep PASS, sleep_transfer ilk
+uyku-kapalı kolda projectile doğmadığı için FAIL. Darbe aktarımı ölçülmedi;
+tam kabul açık. Ayrıntı ve loglar yukarıdaki uygulama belgesinin canlı kabul
+bölümünde kayıtlıdır.
 Rev23 canlı rakamları rev24 kabulü değildir. Bağımsız diğer ajan görevi:
 [HANDOFF_S1B_CELL_FIELDS.md](HANDOFF_S1B_CELL_FIELDS.md).

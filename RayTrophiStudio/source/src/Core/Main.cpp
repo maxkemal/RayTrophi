@@ -1,5 +1,7 @@
 #include "PostProcess/PostSurface.h"
 #include "Backend/VulkanRecoveryPolicy.h"
+#include "Viewport/ViewportGpuWorkPolicy.h"
+#include "Viewport/ViewportPresentationStats.h"
 #include "PostProcess/PostService.h"
 #include <SDL_main.h> 
 #include <fstream>
@@ -4462,6 +4464,7 @@ int main(int argc, char* argv[]) try {
 
             // Notify scripting rt.on_scene_load() subscribers. Fires for UI-driven
             // opens; rtapi::openProject() raises this flag itself for API-driven ones.
+            ui.timeline.reset();
             rtapi::notifySceneLoaded();
         }
 
@@ -5141,7 +5144,11 @@ int main(int argc, char* argv[]) try {
 
             // 2. Handle Interactive Render (One Frame / Progressive)
             // ONLY if no background rendering is happening
-            if (start_render) {
+            if (start_render && Viewport::allowGpuWork(
+                    ui.viewport_settings.shading_mode == 0,
+                    (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) != 0,
+                    (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) == 0,
+                    g_seq_save_active, rtapi::viewportCaptureEnabled())) {
                  // CRITICAL INVARIANT:
                  // rendering_in_progress may remain true in some non-animation GPU flows.
                  // Only block interactive rendering while a WORKER animation render is
@@ -6228,40 +6235,14 @@ int main(int argc, char* argv[]) try {
                         if (render_settings.render_current_samples > prev_samples) {
                             const auto total_frame_end = std::chrono::high_resolution_clock::now();
                             const float total_frame_time_ms = std::chrono::duration<float, std::milli>(total_frame_end - sample_start).count();
-                            const float total_frame_fps = total_frame_time_ms > 0.0f ? (1000.0f / total_frame_time_ms) : 0.0f;
 
                             render_settings.avg_sample_time_ms = render_settings.avg_sample_time_ms * 0.8f + total_frame_time_ms * 0.2f;
-                            render_settings.avg_total_frame_time_ms = render_settings.avg_total_frame_time_ms * 0.8f + total_frame_time_ms * 0.2f;
-                            render_settings.avg_total_frame_fps = render_settings.avg_total_frame_fps * 0.8f + total_frame_fps * 0.2f;
                             render_settings.render_elapsed_seconds += total_frame_time_ms / 1000.0f;
 
                             const int remaining_samples = render_settings.render_target_samples - render_settings.render_current_samples;
                             render_settings.render_estimated_remaining = (remaining_samples * render_settings.avg_sample_time_ms) / 1000.0f;
 
-                            if (window && active_gpu_backend_for_stats) {
-                                std::string projectName = active_model_path;
-                                if (projectName.empty() || projectName == "Untitled") {
-                                    projectName = "Untitled Project";
-                                } else {
-                                    size_t lastSlash = projectName.find_last_of("\\/");
-                                    if (lastSlash != std::string::npos) projectName = projectName.substr(lastSlash + 1);
-                                }
-                                size_t dot = projectName.find_last_of(".");
-                                if (dot != std::string::npos) projectName = projectName.substr(0, dot);
 
-                                float progress_pct = render_settings.render_progress * 100.0f;
-                                std::string backend_name = isActiveRenderBackendVulkan() ? "Vulkan" :
-                                    (isActiveRenderBackendOptix() ? "OptiX" : "CPU");
-                                const bool denoiser_enabled_now = effective_denoiser && denoiser_sample_count > 0;
-                                std::string title = "RayTrophi Studio [" + projectName + "] - " + backend_name + " - Sample " +
-                                    std::to_string(render_settings.render_current_samples) + "/" +
-                                    std::to_string(render_settings.render_target_samples) +
-                                    " (" + std::to_string(int(progress_pct)) + "%) - " +
-                                    std::to_string(int(total_frame_time_ms)) + "ms/frame - " +
-                                    std::to_string(total_frame_fps).substr(0, 4) + " fps";
-                                if (denoiser_enabled_now) title += " - Denoised";
-                                SDL_SetWindowTitle(window, title.c_str());
-                            }
                         }
                         } // end anim_owns_backend else
                         }
@@ -6427,38 +6408,14 @@ int main(int argc, char* argv[]) try {
                         if (render_settings.render_current_samples > prev_samples) {
                             const auto total_frame_end = std::chrono::high_resolution_clock::now();
                             const float total_frame_time_ms = std::chrono::duration<float, std::milli>(total_frame_end - sample_start).count();
-                            const float total_frame_fps = total_frame_time_ms > 0.0f ? (1000.0f / total_frame_time_ms) : 0.0f;
 
                             render_settings.avg_sample_time_ms = render_settings.avg_sample_time_ms * 0.8f + total_frame_time_ms * 0.2f;
-                            render_settings.avg_total_frame_time_ms = render_settings.avg_total_frame_time_ms * 0.8f + total_frame_time_ms * 0.2f;
-                            render_settings.avg_total_frame_fps = render_settings.avg_total_frame_fps * 0.8f + total_frame_fps * 0.2f;
                             render_settings.render_elapsed_seconds += total_frame_time_ms / 1000.0f;
 
                             const int remaining_samples = render_settings.render_target_samples - render_settings.render_current_samples;
                             render_settings.render_estimated_remaining = (remaining_samples * render_settings.avg_sample_time_ms) / 1000.0f;
 
-                            if (window) {
-                                std::string projectName = active_model_path;
-                                if (projectName.empty() || projectName == "Untitled") {
-                                    projectName = "Untitled Project";
-                                } else {
-                                    size_t lastSlash = projectName.find_last_of("\\/");
-                                    if (lastSlash != std::string::npos) projectName = projectName.substr(lastSlash + 1);
-                                }
-                                size_t dot = projectName.find_last_of(".");
-                                if (dot != std::string::npos) projectName = projectName.substr(0, dot);
 
-                                float progress_pct = render_settings.render_progress * 100.0f;
-                                const bool denoiser_enabled_now = effective_denoiser && ray_renderer.getCPUAccumulatedSamples() > 0;
-                                std::string title = "RayTrophi Studio [" + projectName + "] - CPU - Sample " +
-                                    std::to_string(render_settings.render_current_samples) + "/" +
-                                    std::to_string(render_settings.render_target_samples) +
-                                    " (" + std::to_string(int(progress_pct)) + "%) - " +
-                                    std::to_string(int(total_frame_time_ms)) + "ms/frame - " +
-                                    std::to_string(total_frame_fps).substr(0, 4) + " fps";
-                                if (denoiser_enabled_now) title += " - Denoised";
-                                SDL_SetWindowTitle(window, title.c_str());
-                            }
                         }
                         }
                     }
@@ -7166,73 +7123,32 @@ int main(int argc, char* argv[]) try {
             // (arka plan / gorunmez pencere / idle) yayinlamak, sifirlari
             // "ekran yolu bedava" diye okunacak bir ortalamaya karistirirdi.
             {
-                static auto s_lastDisplayPublish = std::chrono::steady_clock::time_point{};
-                const auto nowTp = std::chrono::steady_clock::now();
                 rtapi::DisplayPathTiming dpt;
                 dpt.post_ms = display_post_ms;
                 dpt.texture_upload_ms = display_texture_upload_ms;
                 dpt.post_was_noop_copy = display_post_noop_copy;
-                if (s_lastDisplayPublish.time_since_epoch().count() != 0) {
-                    dpt.loop_period_ms = std::chrono::duration<double, std::milli>(
-                        nowTp - s_lastDisplayPublish).count();
-
-                    // [FIX v2] Raster modu için gerçek duvar saati kare süresini
-                    // (VSync + ImGui + SDL present dahil) başlığa yaz.
-                    // sample_time_ms yalnızca GPU render kernel'ini ölçer;
-                    // buradaki delta tam "kullanıcının algıladığı" fps'tir.
-                    if (g_solid_viewport_active && dpt.loop_period_ms > 0.5 && window) {
-                        const float wall_ms  = static_cast<float>(dpt.loop_period_ms);
-                        const float wall_fps = 1000.0f / wall_ms;
-
-                        // Eüzsel ortalama: 0.9/0.1 — hızlı değişimler görünsün ama titrşemesin
-                        render_settings.avg_total_frame_time_ms =
-                            render_settings.avg_total_frame_time_ms * 0.9f + wall_ms  * 0.1f;
-                        render_settings.avg_total_frame_fps =
-                            render_settings.avg_total_frame_fps   * 0.9f + wall_fps * 0.1f;
-
-                        // Başlığı ~10 Hz'de güncelle (her kare string alloc + syscall engellemek için)
-                        static uint32_t s_lastRasterTitleMs = 0;
-                        const uint32_t nowMs = SDL_GetTicks();
-                        if (nowMs - s_lastRasterTitleMs >= 100u) {
-                            s_lastRasterTitleMs = nowMs;
-                            std::string pn = active_model_path;
-                            if (pn.empty() || pn == "Untitled") {
-                                pn = "Untitled Project";
-                            } else {
-                                size_t sl = pn.find_last_of("\\/");
-                                if (sl != std::string::npos) pn = pn.substr(sl + 1);
-                                size_t dt = pn.find_last_of(".");
-                                if (dt != std::string::npos) pn = pn.substr(0, dt);
-                            }
-                            const Backend::ViewportMode rasterMode =
-                                viewportModeFromShadingMode(ui.viewport_settings.shading_mode);
-                            const char* modeName =
-                                (rasterMode == Backend::ViewportMode::Solid)  ? "Solid" :
-                                (rasterMode == Backend::ViewportMode::Matcap) ? "Matcap" :
-                                "RayFusion";
-                            char titleBuf[256];
-                            snprintf(titleBuf, sizeof(titleBuf),
-                                "RayTrophi Studio [%s] - %s - %.0f ms/frame - %.1f fps",
-                                pn.c_str(), modeName,
-                                render_settings.avg_total_frame_time_ms,
-                                render_settings.avg_total_frame_fps);
-                            SDL_SetWindowTitle(window, titleBuf);
-                        }
-                    }
-                }
-                s_lastDisplayPublish = nowTp;
+                dpt.loop_period_ms = Viewport::notePresentationStats(
+                    render_settings, window, active_model_path,
+                    viewportModeFromShadingMode(ui.viewport_settings.shading_mode),
+                    isActiveRenderBackendVulkan() ? "Vulkan" :
+                        (isActiveRenderBackendOptix() ? "OptiX" : "CPU"));
                 rtapi::noteDisplayPathTiming(dpt);
             }
         } else {
             // Idle — consume ImGui draw data without GPU work.
+            Viewport::resetPresentationStats();
             ImGui::Render();
             ImGui::GetDrawData();
 
             if (tier4_background || !window_visible) {
                 // Background / minimized: long sleep, wake only on events.
                 // GPU usage drops to ~0%. Final render thread (if any) keeps going.
-                const bool keep_pumping_scene_load = scene_load_active || pending_scene_refresh || start_render;
-                SDL_WaitEventTimeout(nullptr, keep_pumping_scene_load ? 16 : 500);
+                const bool keep_pumping_scene_load = scene_load_active ||
+                    pending_scene_refresh || (start_render && in_rendered_mode);
+                SDL_WaitEventTimeout(nullptr, Viewport::backgroundWaitMilliseconds(
+                    ui.timeline.isPlaying() || autonomous_anim_graph_playing ||
+                        g_seq_save_active,
+                    keep_pumping_scene_load));
             } else {
                 // Foreground dormant: moderate wait, responsive to mouse/keyboard.
                 SDL_WaitEventTimeout(nullptr, 200);

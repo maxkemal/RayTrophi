@@ -74,6 +74,32 @@ ve kalan assertion'ların yeniden koşulması S1b devir notunda kayıtlı.
    `grain_sleep_ab_rev23/REPORT.md`: dört açı paritesi PASS ama açık size 4.04849°
    > 4° FAIL, wall 5.75 / 6.47 s, sleeping %37.7. Bu eski ölçümler rev24 kazancı değil.
 
+## 2026-10-10 canlı ilk kabul
+
+Açık, boş ve durmuş uygulamada dış IPC ile çalıştırıldı; çalışma anındaki
+contact_shader_revision=24. Sleep ve sleep-transfer kaynak sözleşmeleri PASS.
+`rt_test_grain_sleep_ipc.py` PASS: gevşek eşikle desteksiz düşüş donmuyor;
+yerleşmiş tane uyku açıkken sleeping=1, kapalıyken sleeping=0. Temas/sticking
+tanıları korunuyor. Log: [grain_suite/sleep.log](grain_suite/sleep.log).
+
+`rt_test_grain_sleep_transfer_ipc.py` ilk `weak_off` kolunda FAIL:
+27 taneli yatak oluştu, ancak sonraki 30 örnekte planlanan projectile doğmadı
+(`particles=27`; `len(born)>=10` kapısı). Bu nedenle zayıf/güçlü darbe uyku
+aktarımı ve COM/enerji A/B henüz ölçülmedi. Sorun uyku kapalı kolda olduğundan
+DEM uyku aktarımı hatası olarak sınıflandırılmaz; kaynak zamanlaması/doğum
+fixture'ı ayrıca teşhis edilmeli. Kabul eşikleri değiştirilmedi.
+Log: [grain_suite/sleep_transfer.log](grain_suite/sleep_transfer.log),
+örnekler: [grain_suite/sleep_transfer.json](grain_suite/sleep_transfer.json).
+Tam E1 kabulü ve E2 başlangıç kapısı açık kalır.
+
+Aynı uygulamada ardından `--only history static settle wet motion coexist`
+regresyonları 6/6 PASS (dış IPC). Static hold karşılaştırma kolunda 0.146423 m
+kayma; settle kütle sapması 0 kg, son COM/RMS aralığı 0 m. Su dökümünde 256
+tane coupled, su ve kuru tane kütle sapması 0 kg. Wet absorption toplam su
+sapması 7.72499e-7 kg; motion kuvvet alanı/hareketli collider PASS.
+Loglar: [grain_suite](grain_suite/). Bunlar tam dört-kollu repose veya 1.3M
+A/B yerine geçmez; sleep_transfer projectile fixture kapısı da açık kalır.
+
 ## Sonraki E2 — aktif hesap alanı
 
 E1 fizik kapısı geçmeden başlamaz. Aktif grain listesi + denetim cephesiyle gerçek

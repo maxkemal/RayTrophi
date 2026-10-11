@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 
 namespace RayTrophiSim {
 namespace Fluid {
@@ -102,6 +103,17 @@ public:
     // conduction toward the gas from 0 K produces nonsense heating rates.
     std::vector<float>    temperature;
     std::vector<float>    combustible_fraction;
+    // Solid share of a meltable parcel, 0 = all liquid, 1 = all solid. The
+    // latent heat of fusion is paid through this value: a parcel at its melt
+    // point stays there while L*m*dF crosses, so melting and freezing take
+    // real energy instead of flipping at a threshold. NaN = not resolved yet
+    // (a new birth, a disk-cache frame): the next fusion pass derives it from
+    // the parcel's state. See Fluid::updateThermalFreeze.
+    // ★ Every birth pushes it (emit), so a partition rebuilt by emit +
+    // copyParticleFrom (MatterModelBatch) carries it. A column that was only
+    // allocated "when used" was silently dropped there, and the partial melt
+    // of every snow parcel in a mixed domain reset each step.
+    std::vector<float>    fusion_solid_fraction;
     std::vector<uint32_t> substance_tag;
     // Per-parcel solver regime. Auto exists only for legacy/unresolved data;
     // emitters resolve it from the substance before creating new matter.
@@ -246,6 +258,7 @@ public:
         pore_water_energy_j.clear();
         temperature.clear();
         combustible_fraction.clear();
+        fusion_solid_fraction.clear();
         substance_tag.clear();
         constitutive_model.clear();
         granular_deformation_col0.clear(); granular_deformation_col1.clear();
@@ -296,6 +309,7 @@ public:
         pore_water_energy_j.reserve(n);
         temperature.reserve(n);
         combustible_fraction.reserve(n);
+        fusion_solid_fraction.reserve(n);
         substance_tag.reserve(n);
         constitutive_model.reserve(n);
         granular_deformation_col0.reserve(n); granular_deformation_col1.reserve(n);
@@ -332,6 +346,9 @@ public:
               float physical_rest_mass_kg = 0.0f,
               MatterConstitutiveModel model = MatterConstitutiveModel::Auto) {
         ensureParticleIdentities();
+        // Pushed only while aligned: a lagging column (older producer) is
+        // re-sized by the fusion pass, never shifted by one here.
+        const bool fusion_aligned = fusion_solid_fraction.size() == position.size();
         const uint64_t identity = allocateMatterParticleId(next_particle_id);
         particle_id.push_back(identity);
         position.push_back(p);
@@ -346,6 +363,10 @@ public:
         pore_water_energy_j.push_back(0.0f);
         temperature.push_back(temp);
         combustible_fraction.push_back(combustible);
+        // NaN: not yet resolved; the next fusion pass reads the birth state.
+        if (fusion_aligned) {
+            fusion_solid_fraction.push_back(std::numeric_limits<float>::quiet_NaN());
+        }
         substance_tag.push_back(material);
         constitutive_model.push_back(static_cast<uint8_t>(model));
         granular_deformation_col0.emplace_back(1,0,0);
@@ -373,6 +394,7 @@ public:
     void removeSwap(size_t i) {
         ensureParticleIdentities();
         size_t last = position.size() - 1;
+        const bool fusion_aligned = fusion_solid_fraction.size() == position.size();
         if (i != last) {
             particle_id[i] = particle_id[last];
             position[i] = position[last];
@@ -387,6 +409,9 @@ public:
             pore_water_energy_j[i] = pore_water_energy_j[last];
             temperature[i] = temperature[last];
             combustible_fraction[i] = combustible_fraction[last];
+            if (fusion_aligned) {
+                fusion_solid_fraction[i] = fusion_solid_fraction[last];
+            }
             substance_tag[i] = substance_tag[last];
             constitutive_model[i] = constitutive_model[last];
             granular_deformation_col0[i] = granular_deformation_col0[last];
@@ -419,6 +444,7 @@ public:
         pore_water_energy_j.pop_back();
         temperature.pop_back();
         combustible_fraction.pop_back();
+        if (fusion_aligned) fusion_solid_fraction.pop_back();
         substance_tag.pop_back();
         constitutive_model.pop_back();
         granular_deformation_col0.pop_back(); granular_deformation_col1.pop_back();
@@ -528,6 +554,7 @@ private:
         fn(a.pore_water_energy_j, b.pore_water_energy_j);
         fn(a.temperature, b.temperature);
         fn(a.combustible_fraction, b.combustible_fraction);
+        fn(a.fusion_solid_fraction, b.fusion_solid_fraction);
         fn(a.substance_tag, b.substance_tag);
         fn(a.constitutive_model, b.constitutive_model);
         fn(a.uvw, b.uvw);
@@ -577,6 +604,7 @@ private:
         uvw.resize(n);
         auto shrink = [&](auto& v) { if (!v.empty()) v.resize(n); };
         shrink(uvw_b);
+        shrink(fusion_solid_fraction);
         shrink(granular_deformation_col0);
         shrink(granular_deformation_col1);
         shrink(granular_deformation_col2);

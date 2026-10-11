@@ -1,3 +1,185 @@
+# 2026-10-11 parti 3 — yağmur: otokonversiyon, sis tavanı, düşüş, iniş
+
+Parti 2 (sis suyu) canlı 6/6 PASS, ama sis tutan hücreler ortalama 41,7 kg/m³
+taşıyordu (gerçek sis 1e-4–1e-3). Bu parti sisi tavana bağlar, fazlasını yağmura
+çevirir, yağmuru düşürür ve sıvıya indirir. Ayrıntı:
+[BIRLESIK §4.8b](BIRLESIK_MADDE_DOMAIN_TASARIMI.md).
+
+Yeni shader: **`sim_inventory_rain_fall.comp`**. Değişenler:
+`sim_inventory_saturation.comp` (11 bağlama, 112 B itme sabiti),
+`sim_inventory_surface_exchange.comp` (11 bağlama, 36 B), `sim_inventory_surface_commit.comp`
+(8 bağlama) → `compile_sim_shaders.bat`. Disk önbelleği **v14** (v11–13 okunur, yağmur boş).
+
+1. **Derleme.** Hata çıkarsa: `GasInventoryDevice::fields` artık 11;
+   `gasInventoryScratchBuffers` 3 eleman döndürüyor; `GasSurfaceResult`'ın
+   `padding[4]`'ü `rain_kg, rain_energy_j, padding[2]` oldu (64 B aynı);
+   `MatterExchangeKind::Autoconversion` yeni; `gas_fog_present` →
+   **`gas_liquid_water_present`** (adı değişti: artık sis VEYA yağmur).
+2. **Exe/.spv zaman damgası.** Eski `.spv` ile itme sabiti/bağlama sayısı uyuşmaz →
+   `inventory_step_held` "gas saturation dispatch/readback failed" veya
+   "gas surface exchange dispatch failed". Önce shader derlemesini doğrula.
+3. **Panel:** Thermal Liquid altında "Fog water in the air" — Rain Onset, Rain
+   Formation (tau gösterir), Fog Ceiling. Gas Step → Physical gas inventory:
+   "fog -> rain (autoconversion)" ve "rain -> liquid (… absorbed, … parcels)".
+4. **IPC:** `fluid.set_param` `fog_autoconversion_kg_m3`, `fog_autoconversion_rate`,
+   `fog_ceiling_kg_m3` (aralık dışı → hata, kırpma yok); `fluid.get` bunları ve
+   `gas_rain_kg`, `gas_rain_cells`, `fog_autoconverted_kg`, `rain_absorbed_kg` döner.
+5. **Canlı kabul:** `python scripts/test/rt_test_fog_ipc.py` (9 hüküm). Yeni üçü:
+   - `fog_capped` FAIL (ortalama sis > 2× tavan) → otokonversiyon çekirdeği çalışmıyor
+     ya da tavan kg/m³ → kg/hücre çevriminde yanlış. Önce `fog_autoconverted_kg`'ya bak.
+   - `rain_forms` FAIL → defterde `autoconversion` kaydı yok.
+   - `rain_reaches_liquid` FAIL, `gas_rain_kg` büyüyor → yağmur iniyor ama emilmiyor:
+     iniş damgası (yüzey değişimi) ile düşüş aynı damgayı görmüyor, ya da commit
+     yağmuru geri yazmıyor. `gas_rain_cells` küçük ve `gas_rain_kg` büyükse yağmur
+     tabanda birikmiş (sıvının içinden geçmiş).
+   - `water_conserved` artık buhar + sis + **yağmur** sayar; FAIL → yağmur yuvaları
+     (9/10) snapshot/önbellek/arka uç değişiminde düşüyor.
+   Kanıt: `docs/dev/fog_live.json`.
+6. **Regresyon:** `rt_test_boiling_ipc.py` (`inventory_holds_steam` yağmuru sayar),
+   `rt_test_gas_inventory_gpu_ipc.py` (havada = buhar+sis+yağmur, dönen = yoğuşma +
+   precipitation), `rt_test_fusion_condensation_ipc.py`, `rt_test_fluid_mist_ipc.py`,
+   `rt_test_heat_exchange_ipc.py`.
+7. **CPP regresyon:** `scripts/test/gas_saturation_test.cpp` (otokonversiyon, uç hızı
+   5,52 m/s @ 1 g/m³, sütun düşüşü korunumu ve iniş damgasında durma).
+8. **Önbellek:** geri sar/ileri oynat — `gas_rain_kg` kareyle geri gelmeli; diske
+   bake edip aç (v14).
+
+★ **Sinsi — yağmur tabanda birikip "korunum PASS" der.** Yüzey hücresini atlayan
+yağmur sıvının içinden tabana iner, orada bir parsel kütlesine kadar birikir. Kütle
+korunur, test geçer, ama yağmur su yüzeyine değil tank dibine katılır. Belirtisi:
+`rain_absorbed_kg` ≈ 0 iken `rain_parcels` > 0, ve `gas_rain_cells` taban satırında.
+
+★ **Sinsi — sis hâlâ görünmüyor**, yağmur da (render bağlı değil; bulut işi).
+
+---
+
+# 2026-10-11 parti — T2: gizli ısılı erime/donma + yüzey yoğuşması
+
+Bu parti, aşağıdaki 2026-10-10 partileriyle **aynı build'e** girer (onların
+C++/shader'ları da henüz derlenmedi). Önce bu listeyi uygula; sonuçlar
+aşağıdakileri maskelemez, aşağıdakiler bunu maskeleyebilir (gaz yüzey GPU
+yolu iki partide ortak). Ayrıntı: [MADDE_TIPLERI_TASARIMI.md §6f](MADDE_TIPLERI_TASARIMI.md),
+[BIRLESIK_MADDE_DOMAIN_TASARIMI.md §4.7](BIRLESIK_MADDE_DOMAIN_TASARIMI.md).
+
+Değişen shader: **`sim_inventory_surface_exchange.comp`** (yoğuşma dalı) →
+`compile_sim_shaders.bat`. Yeni dosya yok, vcxproj değişmedi.
+
+1. **Derleme.** Hata çıkarsa ilk bakılacak yerler: kaldırılan
+   `thermal_freeze_kelvin / thermal_viscosity_range / thermal_cold_viscosity`
+   (APICSolverParams + `FluidDomainInfo`) alanlarına kalmış bir referans;
+   `substanceMeltReleaseKelvin` (söküldü); `drawBirthTemperatureWarning`
+   (yeni `substance_tag` argümanı); `updateThermalFreeze` (yeni
+   `solid_change` argümanı). Shader: `max/min` double/float karışımı
+   (diğer satırlarla aynı desen).
+2. **Exe zaman damgası** yeni mi? Değilse aşağıdakilerin hepsi eski binary'yi ölçer.
+3. **Panel (Domain → Thermal):** "Water: melts at 273.15 K, latent 334 kJ/kg …"
+   satırı görünür; "Phase thresholds: set below … release above …" satırı
+   **yok**. Domain "Resolved:" satırı "melts at 273.1 K" der (Sand'de "does not
+   melt"). Bozuksa: UI hâlâ domain kopyasını okuyordur (derlenmemiş dosya).
+4. **IPC okuma:** `fluid.get` içinde `thermal_mushy_particles`,
+   `thermal_fusion_released_j`, `thermal_fusion_absorbed_j`,
+   `thermal_condensed_kg`, `thermal_condensation_splits` var;
+   `thermal_freeze_kelvin` **yok**. `fluid.set_param thermal_freeze_kelvin=…`
+   "property of the domain's substance" hatasıyla reddedilir (beklenen).
+5. **Canlı kabul:** `python scripts/test/rt_test_fusion_condensation_ipc.py`
+   (uygulama açık, duraklatılmış). 8 hüküm:
+   - `mushy_seen` / `latent_released` FAIL → füzyon geçişi çalışmıyor
+     (gizli ısı yolu bağlanmadı); `water_freezes` FAIL ama ikisi PASS →
+     150 karede yarı donmaya yetecek ısı çekilmedi (soğuk alanı kontrol et).
+   - `freeze_ledger_matches_latent` FAIL → defter ile sıcaklıktan gerçekten
+     düşülen ısı ayrıştı: **en önemli hüküm**, eskiden defter ödenmeyen ısıyı
+     "ödendi" yazıyordu.
+   - `boils` FAIL → sıcak köşe kaynamadı (bu parti değil, Ek 10 yolu).
+   - `condenses` FAIL, `boils` PASS → soğuk taraftaki hava hücresinde buhar
+     doygunluğu geçmedi veya GPU shader eski (.spv derlenmedi).
+   - `condense_stats_match_ledger` FAIL → istatistik sıfırlama sırası
+     (sıvı termal geçişi gaz adımından SONRA koşuyorsa okunan değer 0'dır).
+   Kanıt dosyası: `docs/dev/fusion_condensation_live.json`.
+6. **Regresyon (davranış değişti, eşikler yetmeli):**
+   `rt_test_thermal_wax_ipc.py` (mum artık 100 K eşdeğeri gizli ısı öder;
+   240 karede donmalı), `rt_test_snow_ipc.py` (`heat_field_melts`),
+   `rt_test_boiling_ipc.py`, `rt_test_heat_exchange_ipc.py`. Mum FAIL ederse
+   önce donma süresini oku: gizli ısı gerçek, hız sanatsal oranlardan gelir.
+7. **CPP regresyon (derliyorsan):** `scripts/test/matter_substance_state_test.cpp`
+   — yeni gizli ısı assert'leri (Water 10 K altında 0.125 donar ve 273.15 K'e
+   döner; Ice 300 K'de 0.169 erir ve hâlâ Granular).
+8. **Görsel:** soğuk alanda su tankı yüzeyden aşağı doğru, saniyeler içinde
+   donar (eskiden 273 K'e değdiği karede donuyordu).
+
+★ **Sinsi başarısızlık — karışık domain'de kar hiç erimez.** Snow + Water
+karışık Matter domain'i ısı alanı altında: `thermal_mushy_particles` > 0
+olmalı ve kar zamanla suya dönmeli. Mushy hep 0, kar 273.15 K'de takılı
+duruyorsa `fusion_solid_fraction` sütunu karışık adımda (`MatterModelBatch`
+emit+copy) düşüyor demektir; her adım kısmi erime sıfırlanır. Hata vermez,
+"kar soğuk kalıyor" gibi makul görünür.
+
+★ **Sinsi — yoğuşan parsel bölünmesi.** `thermal_condensation_splits` artarken
+`particle_count` de artmalı; kütle defteri dengeli kalmalı. Yoğuşma çok
+uzun sürerse yüzey parselleri 2× kütleye ulaşıp bölünür — bu beklenen.
+
+---
+
+# 2026-10-10 güncel parti — yüzey fiziği, momentum ve whitewater
+
+**Project timeline reset ek düzeltmesi:** widget/model/settings reset debt,
+UI layout restore sonrası tüketim ve authored start>0 rest-frame kapısı.
+C++ build/live load kabulü bekliyor; shader değişmedi. UVW yeni binary'de
+azaldı; yüzey görsel kalite kabulü açık.
+[UVW_LIVE_AND_PROJECT_TIMELINE_FIX_2026_10_10.md](UVW_LIVE_AND_PROJECT_TIMELINE_FIX_2026_10_10.md).
+
+**UVW/yüzey filtre ek partisi:** UVW gather/extrapolation/smoothing sparse tile,
+fiziksel CSR, spherical+anisotropic render-centre filtresi ve centre sonrası
+output CSR. C++ build/live kalite-hız kabulü bekliyor; shader değişmedi.
+[UVW_SURFACE_FILTER_OPTIMIZATION_2026_10_10.md](UVW_SURFACE_FILTER_OPTIMIZATION_2026_10_10.md).
+
+**SDF yüzey ek partisi:** fiziksel CSR bin, sparse çalışma tile'ları ve halo
+yumuşatma; anisotropi destek sınırı düzeltmesi ve ortak API aşama sayaçları.
+C++ build/live kabul bekliyor, shader değişmedi. Final dense SDF ABI korunuyor.
+[SDF_SPARSE_WORK_OPTIMIZATION_2026_10_10.md](SDF_SPARSE_WORK_OPTIMIZATION_2026_10_10.md).
+
+**Solid background ek partisi:** yalnız Solid viewport çizimine fokus/görünürlük
+kapısı, background Play/cache için kısa event beklemesi. C++ build/live kabul
+bekliyor; shader değişmedi. [SOLID_BACKGROUND_GPU_FIX_2026_10_10.md](SOLID_BACKGROUND_GPU_FIX_2026_10_10.md).
+
+**İlk-kare/kapanış ek düzeltmesi:** kullanıcı derlemesinde gaz hold canlı
+doğrulandı. Surface/summary readback komut sırası ve logger static-destruction
+kapısı düzeltildi; C++ yeniden derlemesi ve canlı kabul bekliyor.
+[GAS_READBACK_SHUTDOWN_FIX_2026_10_10.md](GAS_READBACK_SHUTDOWN_FIX_2026_10_10.md).
+
+Önce bu checklist uygulanır:
+[GAS_WHITEWATER_PHYSICS_COST_2026_10_10.md](GAS_WHITEWATER_PHYSICS_COST_2026_10_10.md).
+C++ ile momentum/yüzey/dört whitewater shader'ı birlikte kullanıcı tarafından
+derlenmeli. Kaynak kontrolleri PASS; bu partide build ve canlı kabul yapılmadı.
+WW kapalı/açık maliyet, temas öncesi jet buharı, yerel momentum, ledger-grid
+korunum ve rewind kabulü bekliyor. Aşağıdaki partiler de aynı build'e dahildir.
+
+# 2026-10-10 son düzeltme — korunum ve Matter cache
+
+Güncel kaynak partisi: [GAS_RESIDENCY_OPTIMIZATION_2026_10_10.md](GAS_RESIDENCY_OPTIMIZATION_2026_10_10.md).
+Closed zero-advection inventory koruması, boiling telemetry toplamı, kayıpsız
+Matter ikinci-grid/kgJ RAM payload'u, eksiksiz budget ve snapshot move birlikte
+C++/simulation shader derlemesine girer. Özellikle sim_inventory_conserve SPV
+eski kalmamalı. Canlı kütle/rewind/performans kabulü bekliyor; build yapılmadı.
+
+# 2026-10-10 — kg/J GPU sahipliği: tek kullanıcı derlemesi
+
+Kullanıcı önce kaynak değişikliklerinin bitmesini, sonra tek derleme ve test
+istedi. Güncel kapsam/checklist: [GAS_INVENTORY_GPU.md](GAS_INVENTORY_GPU.md).
+Sekiz inventory shader, iki ortak scalar wrapper, C++ owner/surface/cache/API
+kayıtları ve proje açılışında kare 0 düzeltmesi aynı derleme partisine dahildir.
+Codex build çalıştırmadı. Kaynak sözleşmesi/matematik/phase/solver kontrolleri PASS;
+canlı performans ve fizik kabulü bekliyor. Fizik kg/J tam-grid roundtrip kaldırıldı;
+CPU timeline/bake snapshot transferi ve compact parcel IO kapsam sınırıdır.
+
+Dış terminalde, kullanıcı derlemesinden sonra durmuş disposable sahnede sırayla:
+
+```powershell
+python scripts/test/rt_test_gas_inventory_gpu_ipc.py
+python scripts/test/rt_test_contact_heat_ipc.py
+```
+
+Önceki checklist'ler aşağıda tarihsel bağlamıyla korunur.
+
 # Güncel kabul: MPM + grain GPU temas devamı
 
 > **DEM uyku güncellemesi:** canlı revision=23. Dört repose A/B paritesi PASS;
@@ -861,3 +1043,68 @@ Sıra:
    Default Substance'ı Snow olmalı; `melt_product` (eriyen kar Water etiketi) yazılmadı.
 
 **Sonuç (2026-10-09, derlendi):** 1–5 PASS. Kontrat 21/21, kütüphane, grain süiti (base history static settle wet repose; dense fiziği tamam, yalnız görsel jpg yazılamadı — dosya kilitli), kar 4/4 (pv_max 1.89, kapalı kol 1.0). `grain_ownership.material` çevrilmiş test değerlerini gösteriyor. Düzeltme: çevirici artık yalnız değişen alanları yazıyor (canlı tane varken packing yeniden gönderilince reddediliyordu). 6 (elle panel) bekliyor; kar değerleri hâlâ geçici.
+
+**Ek (derlenmedi): kar ambient'te su doğuyordu.** Özel sıcaklık girilmemiş bir kaynak domain ambient'inde (293 K) doğuruyordu; bu Snow'un erime noktasının (273.15) üstü, yani her parçacık sıvı modelinde koştu (kullanıcı sahnesi: granular 0 / fluid 10416). Test bunu kaçırdı çünkü 263 K'yi zorluyordu. Düzeltme: `Fluid::substanceAmbientBirthKelvin` — erir granular/elastic madde (Snow, Ice) ambient daha sıcaksa erime noktasının 10 K altında doğar, sonra zamanla erir. Emitter, kaynak paneli ("… poured 10 K below its melt point") ve `flow_source.list` (`fluid_birth_kelvin`, `fluid_born_solid`) aynı fonksiyonu kullanır. Kontrol: `python scripts/test/rt_test_snow_ipc.py` → yeni `ambient_birth_is_snow` PASS (birth < 273.15, granular > 0, fluid 0). Bozuksa: emitter eski ambient yolunda.
+
+Ambient doğumu derlendi ve elle doğrulandı (kullanıcı: domain sıcaklığı yükselince kar eridi). **Ek 2 (derlenmedi): termal kuvvet alanı karı ısıtmıyordu.** Termal alan yalnız MSF'yi (mesh) ısıtıyordu; madde parçacığına hiç bağlı değildi. Şimdi `coolThermalLiquid` aynı alan listesini alır (MSF profili, ambient'e eklenerek): alanın içindeki her parçacık yerel sıcaklığa `thermal_contact_cooling_rate` ile gevşer, **thermal liquid kapalıyken bile** (yerleştirilen ısı kaynağı açık bir istektir; kapalıyken yalnız alan içindekiler değişir). Erime mevcut model yenilemesiyle olur. IPC: `thermal_field_heated_particles`; panel: "Heated by thermal fields: N". Kontrol: `rt_test_snow_ipc.py` → `heat_field_melts` PASS (heated > 0, max K > 273.15, fluid > 0). Test artık sahnedeki kuvvet alanlarını kapatıp geri açar. ★ Sinsi: heated > 0 ama fluid 0 → sıcaklık host'ta değişiyor ama GPU-yerleşik parçacıkta model yenilemesi görünmüyor. Bozuksa ne: host→GPU sıcaklık/model senkronu.
+
+Ek 2 derlendi ve elle doğrulandı (ısı alanındaki kar eriyor). **Ek 3 (derlenmedi): Seed Fluid Now / Fill Domain karı su doğuruyordu.** İkisi aynı tüketiciden (`MatterDomainSynchronization.inl`) düz ambient'le doğuruyordu; kaynak kuralı (`substanceAmbientBirthKelvin`) oraya da uygulandı — seed edilen parçacık domain'in Default Substance'ıdır. Ayrıca panelin "Seed Fluid Now" düğmesi Fill modunda da modu SeedBox'a zorluyordu; artık seçili modu iletir. Fill Domain IPC'de yoktu: `fluid.seed fill_level=0..1` (API/IPC/Python/overlay). Kontrol: `rt_test_snow_ipc.py` → `seed_and_fill_are_snow` PASS (iki kolda granular > 0, fluid 0). Elle: Snow domain'de Seed Box ve Fill Domain → kar gibi durmalı.
+
+Ek 3 derlendi ve elle doğrulandı. **Ek 4 (derlenmedi): kaynama.** Madde domain'inde `boiling_kelvin` üstündeki sıvı parçacık aşırı ısısını gizli ısıya harcar: `dm = min(m, m·c·(T−Tb)/L)` buhar olur, parçacık Tb'ye sabitlenir (hız sabiti yok; ısı kaynağı hızı belirler). Buhar aynı domain'in gaz fazına kg/J envanter + yoğunluk/sıcaklık izi olarak girer (izleyici = 1 atm ideal gaz hacmi / hücre, hücre boşluğuyla sınırlı); kayıt `vaporization`. Yalnız akışkan modelli, donmamış, yanıcı olmayan sıvılar (yanıcılar yanma yolundan). Kaynamaya hazır parçacık boşta gaz adımını uyandırır. Yeni madde alanı `vapor_molar_mass_kg_mol` (Water 0.018). Kaynama altı buharlaşma ve yoğuşma YOK. Sıra: (1) kontratlar; (2) `python scripts/test/rt_test_boiling_ipc.py` → boils, exchange_balanced, inventory_holds_steam, steam_visible PASS; (3) elle: Water dolu madde domain'i + termal alan → buhar fog olarak yükselmeli. ★ Sinsi: boils PASS ama steam_visible FAIL → envanter dolu ama izleyici GPU'ya yüklenmemiş (markHostWrote yolu). Bozuksa: gaz adımı boşta kapısı ya da gridsOverlap.
+
+Ek 4 derlendi: kaynama çalışıyor (kullanıcı). Ama iki kusur görüldü, **Ek 5 (derlenmedi, SHADER dahil)**:
+- **Termal alan şekli:** ısı her zaman küresel profil kullanıyordu (kutu alan suda daire kaynattı). Artık tek `ThermalSource` (96 B, hepsi float) alanın yerel dönüşüm matrisini ve şeklini taşır; Box = Chebyshev mesafesi, Cylinder = max(radyal, |y|), Cone = koni içi — kuvvet bölgesiyle aynı. `collectThermalSources` hem MSF hem madde parçacığı için tek liste kurar; `thermalSourceWeight` CPU'da, `sourceWeight` `sim_msf_ambient.comp`'ta birebir. ★ Ayrıca eski hata: `falloff_type`/`infinite` int olarak ham yükleniyor, shader float okuyordu → MSF'de falloff hep "None", Infinite hiç görülmüyordu. **`compile_shaders.bat` gerekli** (sim_msf_ambient).
+- **Buhar zayıf yükseliyordu:** gaz sıcaklık izi `(Tb−ambient)/1500 ≈ 0.05` idi ve molar kütle yoktu. Artık buhar hücresi sanal sıcaklığa karışır: `Tv = Tb·M_hava/M_buhar` (su: ~600 K), çözücünün ölçeğinde (350 K/birim) ≈ 0.88.
+Kontrol: (1) shader + build; (2) kutu termal alan → kaynama kutunun izdüşümünde (daire değil); MSF mesh ısınması artık falloff'a uyar (önceden tüm yarıçapta tam güç — **görünür davranış değişikliği**, sinsi değil); (3) buhar belirgin yükselmeli; (4) `rt_test_boiling_ipc.py` yine PASS. Bilinen: ortam sıcaklığı sıvıyı yalnız yüzeyden ve thermal liquid açıkken ısıtır; sıvı içi iletim/konveksiyon YOK.
+
+**Not:** kullanıcının son build'i (exe 00:38) Ek 5'ten ESKİ — küre hâlâ görüldü çünkü şekil kodu derlemede yoktu. **Ek 6 (derlenmedi):** (a) Kaynama maddeye bağlı, suya özel değil: yanıcılar da kaynar (buharı gaz yakıtına), molar kütle bilinmiyorsa buhar hava kadar (nötr). Yeni/girilen değerler: `vapor_molar_mass_kg_mol` ve `thermal_expansion_per_k` (Water/Snow/Ice/Mud, Alcohol, Gasoline, Oil, Wax, metaller, Stone, Honey, Chocolate); Mud artık su gibi kaynar. (b) Doğal konveksiyon (Boussinesq): `dv = −g·β·(T−Tort)·dt`, akışkan modelli donmamış parçacıklara, thermal liquid açıkken ya da ısı alanı varken; host hızları yeniden yüklenir (donma yolu gibi, ayrı bayrakla — katı örtüsünü tetiklemez). IPC `thermal_convecting_particles`. Kontrol: shader + build; `rt_test_boiling_ipc.py` → `convects` dahil PASS; elle: thermal liquid AÇIK + domain ortamı 450 K → duvar/dipten ısınan su yükselir, zamanla tüm tank kaynar. Ortam yalnız thermal liquid açıkken etki eder (bilinçli).
+
+Ek 6 derlendi: şekil doğru, kaynama sıcaklığa göre. Canlı ölçüm (80k su, adım başına 110–165 ms duvar saati, IPC dahil): konveksiyon 79996 parçacık; test `convects` FAIL'i testin hatasıydı (alan tüm suyu eşit ısıtıyordu → fark yok). Ortam 450 K'ye çekilince Fill tarifi yeniden seed ediyor ve su 450 K'de doğup tek adımda tüm tank kaynıyordu (1518 kg). **Ek 7 (derlenmedi):** (a) doğum kuralı: sıvı kaynama noktasının üstünde doğmaz (Tb'de doğar); panel metni genel. (b) çekirdekli kaynama: kaynayan parçacık boşluk oranıyla kaldırılır `dv = −g·Vv/(Vv+Vl)·dt` (fokurdama) ve boşluk > 0.2 ise whitewater Bubble doğar (adım başına ≤4096; görmek için whitewater açık olmalı). (c) test alanı alttan ısıtır. Kontrol: `rt_test_boiling_ipc.py` hepsi PASS; elle: thermal liquid AÇIK + domain override 450 K → tank tek adımda patlamaz, dipten/duvardan fokurdar, kabarcık yükselir. ★ Sinsi: kabarcık yok ama kaynama var → whitewater kapalı ya da foam taşıyıcısı host emit'ini görmüyor.
+
+Ek 7 derlendi: tüm testler PASS, kaynama davranışı doğru (kullanıcı). RT'de buhar çıkınca su süt gibi görünüyordu. Kanıt (iki viewport görüntüsü): bulanık kenarlı beyaz levha = HACİM, dielektrik değil. Sebep: kaynama buhar izini parçacığın kendi hücresine, yani sıvının içine yazıyordu; gaz sisi sıvı hücrelerini doldurup yüzeyi örttü. **Ek 8 (derlenmedi):** buhar sütundaki en üst sıvı hücresinin bir üstüne bırakılır. Kontrol: RT'de kaynayan su dielektrik kalır, buhar yüzeyin üstünden yükselir; `rt_test_boiling_ipc.py` PASS. ★ AÇIK: kare 0'dan 3 adımda parçacık max 702 K okundu (alan 293+410). Kaynama her adım Tb'ye sabitlemeli; 702 K kalan parçacıklar kaynamanın bir kapısından düşüyor (gaz ızgarası dışı? mass_fraction 0? model≠Fluid?). Ayrıca 3 adımda ~32k parçacık kayboldu — sıfırlama sonrası doğum sıcaklığını ve ortam override'ını kontrol et.
+
+Ek 8 derlendi, süt görüntüsü sürdü. Kare 0 görüntüsü: mavi su üstünde IZGARA HİZALI beyaz bloklar (gaz yok). **Ek 9 (derlenmedi):** (a) `registerOrUpdateLiveVolume` sıcaklık işaretçisi null gelince ESKİ sıcaklık ızgarasını tutup GPU'ya yüklüyordu ve `getGPUTemperatureGrid` `has_temperature`'a bakmıyordu → su yüzeyinin köpük kanalı önceki koşunun köpüğünü sıfırlamadan sonra da beyaz blok olarak çiziyordu. Artık eski ızgara silinir, getter bayrağa bakar (tüm hacimler, OptiX dahil). (b) Süt = Ek 7 kabarcıkları: her kaynayan parçacık her adım kabarcık doğuruyor, whitewater yüzey hacminin sıcaklık kanalını beyaz ortamla dolduruyordu. Artık seyrek: olasılık boşluk·0.05/adım, ≤512/adım, ömür 0.75 s. Kontrol: kare 0 temiz mavi su (blok yok); kaynarken su şeffaf kalır, seyrek kabarcık + yüzeyde köpük; beyazlık whitewater volume_density ile ayarlanır. ★ Sinsi: (a) değişikliği başka hacimlerin emisyonunu kapatırsa — sıcaklıklı ateş/duman VDB'si hâlâ yanmalı.
+
+**Ek 10 (derlenmedi, shader YOK): sıvı ısı taşınımı, her madde kendi c/k/ρ/L/M/Tb'siyle.** (a) İletim: hücre başına ısı sığası (m·c) ve kapasite ağırlıklı k toplanır, yüz başına harmonik ortalama k ile kesin iki cisim çözümü (taşmaz, enerji korunur), parçacığa yalnız değişim yazılır. (b) Madde domain'inde hava = gaz ızgarası: yüzey parçacığı üstündeki gaz hücresiyle 20 W/m²K film üzerinden iki cisim dengesine gider (C_hava = ρ_hava(T)·V·1005); ortama sonsuz rezervuar soğuması madde domain'inde kapatıldı. Hava T = domain ortamı + (gaz.T − dünya ortamı)·K/birim. (c) Kaynama altı buharlaşma: Hertz–Knudsen + Clausius–Clapeyron (maddenin Tb, L, M), nem = atmosfer + hücredeki buhar; gizli ısı parçacıktan, buhar gaza, defter `vaporization`; etkin katsayı 4e-5 (20 °C kuru havada açık tava ~1e-4 kg/m²s). Thermal liquid açık madde domain'i gaz adımını uyandırır (maliyet: gaz çözümü her kare). IPC: `thermal_conducting_cells`, `thermal_gas_exchange_particles`, `thermal_heat_to_gas_j`, `thermal_evaporated_kg`. Kontrol: `python scripts/test/rt_test_heat_exchange_ipc.py` (6 karar) + `rt_test_boiling_ipc.py` yine PASS. ★ Bilinçli fizik: suyun havayla soğuması artık YAVAŞ (gerçekçi; eski 0.15/s abartılıydı); duvar teması hâlâ parametreli. ★ Sinsi: heat_to_gas > 0 ama gaz ısınmıyor → host gaz sıcaklığı GPU'ya yüklenmiyor (markHostWrote).
+
+Ek 10 derlendi: boiling testi tam PASS; heat_exchange 5/5 PASS (iletim ~11k hücre, ~3k yüzey parçacığı, ısıtırken gaza ~+7 J/adım, buharlaşma ~1e-5 kg/adım, defter dengeli). İlk koşudaki 2 FAIL testin hatasıydı: kuvvet alanını kaldırmak `touchForceFields → invalidateRigidBodySimulationCache` ile madde domain'ini geri sarıp yeniden seed ediyor (310 K → taze 293 K). Soğuma kolu kaldırıldı; `end_frame` simde okunmuyor. ★ AÇIK karar: koşu sırasında alan düzenlemesi simülasyonu sıfırlamalı mı? Ayrıca ikinci koşuda adım 60'ta ortalama 305→299 K ve gaz kütlesi düştü (başka bir sıfırlama ya da kullanıcı etkileşimi — doğrulanmadı).
+
+**Ek 11 (derlenmedi, shader YOK):** (a) Kuvvet alanı düzenlemesi artık koşuyu SIFIRLAMAZ: `invalidateSimCacheAfterCurrentFrame()` canlı durumu ve geçmiş kareleri tutar, yalnız şimdiki kareden sonraki önbelleği (sim/rigid/soft/particle/MSF) atar, disk bake'ini ayırır ve yeni ayarı benimser. API (`touchForceFields`) ve kuvvet alanı paneli bunu kullanır; rigid body/collider düzenlemeleri eskisi gibi tam sıfırlar. (b) Donma: kapı artık thermal liquid VEYA ısı/soğuk alanı; domain `granular_enabled` donmayı kapatmaz (kar görmüş madde domain'inde su hiç donmuyordu). Ayrıca serbest yüzey (üstü hava) destek sayılır: göl yüzeyden donar (canlı sahne: 13961 parçacık donma altında ama hepsi desteksiz, donan 0). Kontrol: `rt_test_heat_exchange_ipc.py` → yeni `field_edit_keeps_run`, `cools_after_source_off`, `freezes_from_surface` dahil hepsi PASS. ★ Sinsi: alan kaldırınca kare atlaması/titreme — kesilen önbellek karesi oynatılıyor olabilir.
+
+**Ek 12 (derlenmedi, SHADER VAR: `sim_msf_ambient.comp` — `compile_shaders.bat` gerekli):**
+(a) Sıvı ↔ collider temas ısısı: MSF kabuğu (alan·1 mm·ρ·c) ↔ temas parçacığı, film 500 W/m²K,
+enerji korunur; sıvı tarafı bir readback geriden okur, kabuğa giden ısı yeni binding 4 ile
+cihaza EKLENİR (kernel tablosu 4→5 tampon). Kabuklu collider'a temas artık ortama sonsuz
+soğuma değil. (b) Ayrı Fluid + Gas domain'i üst üste binince sıvı havası gaz ızgarası
+(çift soğuma yok) ve thermal liquid açık sıvı gaz domain'ini uyandırır. (c) Yanan sıvı:
+görsel ısı eki söküldü, buharlaşan yakıtın gizli ısısı parçacıktan. IPC:
+`thermal_solid_contact_particles`, `thermal_heat_to_solid_j`.
+Sıra: (1) shader + build; (2) `rt_test_heat_exchange_ipc.py` (8 karar) ve `rt_test_boiling_ipc.py`;
+(3) `python scripts/test/rt_test_contact_heat_ipc.py` → demir küp alttan ısıtılır, alan suya
+değmez, su küpten ısınır (4 karar). ★ Sinsi: `heat_flows_solid_to_liquid` PASS ama
+`water_warms_through_cube` FAIL → MSF host durumu güncellenmiyor (readback) ya da kabuk
+hücresi parçacığın komşuluğuna düşmüyor. ★ Sinsi 2: MSF elemanları su içinde değilken
+binding 4 kayarsa tüm MSF sıcaklıkları sapar — ateş/odun yanma sahnesi hâlâ normal yanmalı.
+Kontratlar 21/21, audit OK.
+
+**Ek 13 (derlenmedi, yalnız C++; shader yok):** `msf.fields` satırına eleman sıcaklığı
+eklendi: `temperature_valid`, `mean_kelvin`, `min_kelvin`, `max_kelvin` (host readback'ten;
+readback yoksa valid=false, 293 K diye uydurmaz). Kontakt testi fiziksel senaryoya çevrildi:
+"kızgın demir suya" — kuru küp alanla ısıtılır, alan kalkar, tank doldurulur. Eski "ocak
+alttan" kurgusu MSF'de katı içi iletim olmadığından (ve demirde 0.3 m için ~4000 s
+gerektiğinden) geçemezdi. ★ Test collider'da `gas_interaction_enabled` + `gas_ignite_on_contact`
+açıyor: MSF kabuğu bugün yalnız bu iki kapının arkasında var (gaz oranları 0, enjeksiyon yok).
+Sıra: (1) build; (2) `rt_test_contact_heat_ipc.py` → 5 karar; `shell_hot_before_fill`
+max_kelvin > 350 olmalı. ★ Sinsi: 5/5 PASS ama su yalnız ~0.0x K ısınıyorsa → kabuk ısısı
+MSF'nin sabit `cooling_rate` gevşemesiyle havaya kaçıyor (bkz. açık iş: kütleden türeyen
+kapasite).
+
+**Ek 14 (derlenmedi, yalnız C++):** Temas ısısında kabuk kalınlığı artık cisimden: kapalı mesh'te
+hacim/alan (iki orijinli diverjans hacmi eşitse kapalı), üst sınır Biot=1 derinliği k/500;
+açık mesh 1 mm. Demir küp 0.6 m → 0.1 m (eskiden 1 mm; ölçüm: 1200 kg suyu +0.02 K ısıttı,
+kabuk 347/394 K iken — tutarlı ama içi boş sac). Test kararları: `shell_is_a_body`
+(adım 200'de heat_to_solid_j < −100 J; beklenen ~−400) ve `water_warms_through_cube`
+(max > 293.1 K; 5 cm parsel duvar dibinde ~+0.5 K). ★ Sinsi: su ısınıyor ama odun/taş
+collider'lı yanma sahnesinde değişiklik olmamalı — kalınlık yalnız sıvı temasında kullanılır.
+Bilinen açık: MSF'nin havaya gevşemesi (`cooling_rate`) kapasiteden bağımsız; kalın demir
+blok da sac kadar hızlı havaya soğur.

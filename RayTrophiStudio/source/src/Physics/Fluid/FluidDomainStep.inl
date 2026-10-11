@@ -247,22 +247,75 @@
                 RTPERF_FRAME_SCOPE("sim.fluid.thermal_cool_freeze");
                 const float ambient_kelvin =
                     fluidDomainAmbientKelvin(grid_domains_[i], world_thermal_);
+                // Thermal force fields heat matter parcels too (snow under a
+                // heat field melts), with the MSF profile and stacking.
+                static std::vector<MaterialStateFieldSystem::ThermalSource> s_heat_sources;
+                collectThermalSources(context.force_snapshot, s_heat_sources);
+                // Collider surfaces with an MSF shell trade real heat with the
+                // liquid (a heated pot warms its water, an ice tray freezes it).
+                // Host temperatures are one readback behind; keep them coming.
+                static std::vector<float> s_shell_cap, s_shell_k, s_shell_q;
+                const bool shell_contact =
+                    fluid_params.thermal_liquid_enabled &&
+                    !material_state_fields_.fields().empty() &&
+                    material_state_fields_.gatherThermalContact(
+                        state.grid.origin, state.grid.voxel_size,
+                        state.grid.nx, state.grid.ny, state.grid.nz,
+                        world_thermal_.scale(), s_shell_cap, s_shell_k);
+                if (fluid_params.thermal_liquid_enabled &&
+                    !material_state_fields_.fields().empty()) {
+                    material_state_fields_.requestReadback();
+                }
+                // The air is a gas grid when this domain has one or overlaps one:
+                // the surface then trades heat there (exchangeLiquidGasSurface).
+                bool air_through_gas = matter_domain;
+                for (std::size_t g = 0; !air_through_gas && g < grid_domains_.size(); ++g) {
+                    const auto& gd = grid_domains_[g];
+                    if (g == i || !gd.enabled || !simulationDomainHasGas(gd.type)) continue;
+                    const Vec3 lo = Vec3::max(gd.bounds_min, grid_domains_[i].bounds_min);
+                    const Vec3 hi = Vec3::min(gd.bounds_max, grid_domains_[i].bounds_max);
+                    air_through_gas = lo.x < hi.x && lo.y < hi.y && lo.z < hi.z;
+                }
                 Fluid::coolThermalLiquid(state.particles, state.grid, fluid_params,
-                                         ambient_kelvin, dt, state.thermal_stats);
+                                         ambient_kelvin, dt, state.thermal_stats,
+                                         &s_heat_sources, air_through_gas,
+                                         shell_contact ? &s_shell_cap : nullptr);
+                if (shell_contact) {
+                    Fluid::exchangeLiquidSolidContact(state.particles, state.grid, fluid_params,
+                                                      dt, s_shell_cap, s_shell_k, s_shell_q,
+                                                      state.thermal_stats);
+                    material_state_fields_.depositThermalContactHeat(
+                        state.grid.origin, state.grid.voxel_size,
+                        state.grid.nx, state.grid.ny, state.grid.nz,
+                        world_thermal_.scale(), s_shell_cap, s_shell_q);
+                }
+                if (fluid_params.thermal_liquid_enabled || !s_heat_sources.empty()) {
+                    Fluid::conductThermalLiquid(state.particles, state.grid, fluid_params,
+                                                dt, state.thermal_stats);
+                }
                 const uint64_t phase_event_id =
                     (matter_exchange_step_ << 32u) |
                     (static_cast<uint64_t>(i & 0xffffu) << 16u) |
                     uint64_t{0xF000u};
                 Fluid::updateThermalFreezeAndRecord(
                     grid_domains_[i], state, fluid_params, phase_event_id,
-                    matter_exchange_ledger_);
+                    matter_exchange_ledger_, !s_heat_sources.empty());
+                // Natural convection carries the heat a wall or a field puts
+                // in through the whole liquid (a pot boils, not just its skin).
+                if (fluid_params.thermal_liquid_enabled || !s_heat_sources.empty()) {
+                    Fluid::applyThermalConvection(state.particles, fluid_params, dt,
+                                                  state.thermal_stats);
+                }
             }
             const bool frozen_present = state.thermal_stats.frozen_particles > 0;
+            // Convection also edits host velocities after the device force pass.
+            const bool host_velocity_edited =
+                frozen_present || state.thermal_stats.convecting_particles > 0;
             // The freeze pass pinned velocities on the HOST. The force pass
             // already uploaded post-force velocities to the device, and GPU P2G
             // reuses that copy — so a frozen parcel would still splat gravity
             // into the grid. Refresh, exactly as the solid-recovery path above.
-            if (frozen_present && gpu_integrated_forces && context.compute &&
+            if (host_velocity_edited && gpu_integrated_forces && context.compute &&
                 i < grid_domain_compute_buffers_.size()) {
                 gpu_integrated_forces = ensureGpuFluidParticleBuffers(
                     state, context.compute, grid_domain_compute_buffers_[i]);
@@ -870,6 +923,12 @@
                     // deliver is a FALLBACK, not something to skip: silently
                     // shipping an inviscid step for a honey preset is the exact
                     // class of failure that looks plausible and gets tuned around.
+                    // With no solid cells, Call 1 only snapshots an unchanged
+                    // GPU P2G field. Collider cases retain the existing uploads:
+                    // a CPU boundary write must never be mistaken for residency.
+                    bool pressure_device_input = upload_ok && step_params.p2g_precomputed &&
+                        gpu_integrated_forces && !fluid_params.granular_enabled &&
+                        !state.grid.hasAnySolid();
                     bool viscosity_ok = true;
                     // ★ step_params, NOT fluid_params: the per-substance field
                     // hangs off step_params, and passing the domain params here
@@ -884,9 +943,14 @@
                                                             context.compute, gpu_buffers,
                                                             s_fluid_mask_gpu,
                                                             &gpu_viscosity_sweeps,
-                                                            &gpu_mgpcg_stats);
+                                                            &gpu_mgpcg_stats,
+                                                            pressure_device_input);
                         if (viscosity_ok) {
                             enforceGridSolidFaceBoundaries(state.grid);
+                            // Its downloaded output still matches the device if
+                            // the host boundary pass had no solid cells to edit.
+                            pressure_device_input = !fluid_params.granular_enabled &&
+                                !state.grid.hasAnySolid();
                             gpu_viscosity_ms = elapsedMilliseconds(visc_begin, SimulationClock::now());
                         }
                     }
@@ -905,7 +969,8 @@
                         pressure_on_gpu = runGpuFluidMGPCGPressure(state, fluid_params, dt,
                                                                    context.compute, gpu_buffers,
                                                                    s_fluid_mask_gpu,
-                                                                   &gpu_mgpcg_stats);
+                                                                   &gpu_mgpcg_stats,
+                                                                   pressure_device_input);
                         if (pressure_on_gpu) {
                             // CPU PCG zeros solid-adjacent faces during the
                             // projection update. The GPU gradient kernel uses
@@ -1323,8 +1388,22 @@
             // (relative velocity / wave crest / kinetic energy). Never fed back
             // into the pressure solve, so it cannot affect liquid mass/stability.
             // stepFoam early-outs cheaply when fluid_foam_params.enabled is false.
-            if (i < grid_domains_.size()) {
+            if (i < grid_domains_.size() && !grid_domains_[i].fluid_foam_params.enabled) {
+                Fluid::disableWhitewaterRuntime(
+                    state, context.compute,
+                    i < grid_domain_compute_buffers_.size()
+                        ? &grid_domain_compute_buffers_[i] : nullptr);
+                if (matter_domain && i < matter_liquid_compute_buffers_.size()) {
+                    Fluid::disableWhitewaterRuntime(
+                        state, context.compute, &matter_liquid_compute_buffers_[i]);
+                }
+            }
+            if (i < grid_domains_.size() && grid_domains_[i].fluid_foam_params.enabled) {
                 const auto& fparams = grid_domains_[i].fluid_foam_params;
+                if (!particle_residency.recover()) {
+                    Fluid::holdGasInventory(state, "whitewater source publication failed; reset required");
+                    continue;
+                }
                 const uint32_t foam_seed =
                     static_cast<uint32_t>(context.time_seconds * 600.0f) +
                     static_cast<uint32_t>(i) * 9176u + 1u;
@@ -1338,6 +1417,7 @@
                 const uint32_t* gpu_neigh = nullptr;
                 float foam_crit_gpu_ms = 0.0f;
                 float foam_neigh_gpu_ms = 0.0f;
+                bool foam_overflow_fallback = false;
                 static thread_local std::vector<float> s_foam_expected;
                 static thread_local std::vector<uint32_t> s_foam_neigh;
                 const bool foam_gpu_available =
@@ -1345,32 +1425,21 @@
                     context.compute->supportsDispatch() &&
                     i < grid_domain_compute_buffers_.size();
                 if (foam_gpu_available) {
-                    // Counts for the foam about to be classified were dispatched at
-                    // the end of the PREVIOUS step over this exact array. Read them
-                    // BEFORE queueing anything new: a readback drains the queue, so
-                    // doing it after runGpuFoamCriteria would make it wait on that
-                    // call's freshly submitted bin+crit work for no reason.
-                    const auto neigh_begin = SimulationClock::now();
-                    if (consumeGpuFoamNeighbours(state.foam, context.compute,
-                                                 grid_domain_compute_buffers_[i],
-                                                 s_foam_neigh)) {
-                        gpu_neigh = s_foam_neigh.data();
-                    }
-                    foam_neigh_gpu_ms =
-                        elapsedMilliseconds(neigh_begin, SimulationClock::now());
-
-                    const auto crit_begin = SimulationClock::now();
-                    if (runGpuFoamCriteria(state, fparams, dt, context.compute,
-                                           grid_domain_compute_buffers_[i],
-                                           s_foam_expected)) {
-                        gpu_expected = s_foam_expected.data();
-                    }
-                    foam_crit_gpu_ms =
-                        elapsedMilliseconds(crit_begin, SimulationClock::now());
+                    const auto input_begin = SimulationClock::now();
+                    bool expected_ready = false;
+                    bool neighbours_ready = false;
+                    prepareGpuWhitewaterCurrentInputs(
+                        state, fparams, dt, context.compute, grid_domain_compute_buffers_[i],
+                        s_foam_expected, s_foam_neigh, expected_ready, neighbours_ready,
+                        foam_overflow_fallback, fluid_params);
+                    gpu_expected = expected_ready ? s_foam_expected.data() : nullptr;
+                    gpu_neigh = neighbours_ready ? s_foam_neigh.data() : nullptr;
+                    // Combined current-input batch; no previous-frame index reuse.
+                    foam_crit_gpu_ms = elapsedMilliseconds(input_begin, SimulationClock::now());
                 }
                 Fluid::stepFoam(state.particles, state.grid, state.foam, fparams,
                                 fluid_params.gravity, dt, foam_seed, &state.foam_stats,
-                                gpu_expected, gpu_neigh);
+                                gpu_expected, gpu_neigh, &fluid_params);
                 // Foam is produced FROM the fluid and consumed by rendering; it
                 // is a coupling in the same sense as the others, and a graph
                 // that shows the others but hides this one would misdescribe the
@@ -1380,40 +1449,25 @@
                                                       : std::string(),
                              i < grid_domains_.size() ? grid_domains_[i].name
                                                       : std::string());
-                // Queue the next step's counts over the array stepFoam just left
-                // behind — advected, culled and topped up. It stays untouched until
-                // the consume above runs again, which is what makes the indices line
-                // up. Silent no-op when the bins were not built this step.
-                float foam_gpu_exec_ms = 0.0f;
-                if (foam_gpu_available) {
-                    dispatchGpuFoamNeighbours(state, fparams, context.compute,
-                                              grid_domain_compute_buffers_[i]);
-                    // Flush the foam pipeline here instead of letting it ride along
-                    // with whatever downloads next.
-                    //
-                    // The Vulkan backend records dispatches and only submits when
-                    // something forces a fence. None of the four foam kernels
-                    // download in the step that queues them, so all of them — bins,
-                    // criterion, neighbours — were being submitted by the density
-                    // splat's readback, and their execution time was charged to
-                    // "Density -> NanoVDB". That row read 15.6 ms with foam on and
-                    // 1.5 ms with foam off: ~14 ms of foam work wearing someone
-                    // else's name, while the foam block advertised 3.00 ms.
-                    //
-                    // One extra submit costs ~0.3-1 ms of WDDM latency. That is the
-                    // price of the panel telling the truth about which phase to
-                    // optimise, and it is cheap next to the misread it prevents.
-                    const auto flush_begin = SimulationClock::now();
-                    context.compute->synchronize();
-                    foam_gpu_exec_ms =
-                        elapsedMilliseconds(flush_begin, SimulationClock::now());
-                }
+                // Current inputs already completed in one transfer batch. No
+                // post-step neighbour dispatch or second explicit fence is needed.
+                const float foam_gpu_exec_ms = 0.0f;
                 // stepFoam resets the stats block, so these are written after it.
                 state.foam_stats.crit_on_gpu = (gpu_expected != nullptr);
                 state.foam_stats.crit_gpu_ms = foam_crit_gpu_ms;
                 state.foam_stats.neigh_on_gpu = (gpu_neigh != nullptr);
                 state.foam_stats.neigh_gpu_ms = foam_neigh_gpu_ms;
                 state.foam_stats.gpu_exec_ms = foam_gpu_exec_ms;
+                state.foam_stats.inputs_current = true;
+                state.foam_stats.overflow_fallback = foam_overflow_fallback;
+                if (foam_gpu_available) {
+                    const auto& bins = grid_domain_compute_buffers_[i];
+                    if (bins.foam_bin_counts.valid() && bins.foam_bin_items.valid()) {
+                        state.foam_stats.bin_cells = bins.foam_bin_cell_count;
+                        state.foam_stats.bin_bytes = context.compute->getBufferSize(bins.foam_bin_counts) +
+                            context.compute->getBufferSize(bins.foam_bin_items);
+                    }
+                }
             }
 
             bool labels_on_gpu = false;

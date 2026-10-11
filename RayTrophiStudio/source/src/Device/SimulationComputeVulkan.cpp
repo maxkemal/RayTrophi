@@ -573,7 +573,10 @@ public:
         // without the shaderFloat64 device feature is UB. Failing here sends
         // the host cleanly to the CPU PCG fallback.
         if (!m_has_shader_float64 &&
-            (kernel.rfind("sim_sparse_pressure_", 0) == 0 ||
+            (kernel == "sim_inventory_conserve" ||
+             kernel == "sim_inventory_summary" ||
+             kernel == "sim_inventory_surface_exchange" ||
+             kernel.rfind("sim_sparse_pressure_", 0) == 0 ||
              (kernel == "sim_fluid_cg_dot" ||
               kernel == "sim_fluid_cg_dot_window") ||
              kernel == "sim_fluid_cg_scalar_step" ||
@@ -1012,13 +1015,13 @@ private:
             // struct and reads only its tail field, so both declare the full range.
             // 2 buffers: bucket counters AND the expected[] potentials, because
             // sim_foam_crit is slot-dispatched and no longer visits every particle.
-            { "sim_foam_bin_clear",                 "sim_foam_bin_clear.spv",              2, 40 },
-            { "sim_foam_bin_scatter",               "sim_foam_bin_scatter.spv",            3, 40 },
+            { "sim_foam_bin_clear",                 "sim_foam_bin_clear.spv",              2, 52 },
+            { "sim_foam_bin_scatter",               "sim_foam_bin_scatter.spv",            4, 52 },
             // FoamCritGpuConstants = 21 fields x 4 = 84.
-            { "sim_foam_crit",                      "sim_foam_crit.spv",                   5, 84 },
+            { "sim_foam_crit",                      "sim_foam_crit.spv",                   6, 96 },
             // FoamNeighGpuConstants = 11 fields x 4 = 44. Reads the same bins as
             // sim_foam_crit but iterates foam, not fluid.
-            { "sim_foam_neigh",                     "sim_foam_neigh.spv",                  5, 44 },
+            { "sim_foam_neigh",                     "sim_foam_neigh.spv",                  5, 56 },
             // FluidG2PGpuConstants = 17 fields x 4 = 68 (has use_solid_flip_limiter);
             // buffer 10 = fluid_mask (solid FLIP limiter parity with CUDA).
             { "sim_fluid_g2p",                      "sim_fluid_g2p.spv",                  10, 68 },
@@ -1209,6 +1212,17 @@ private:
             { "sim_fluid_cg_axpy2_dev_window", "sim_fluid_cg_axpy2_dev_window.spv",
               5, 76 },
             { "sim_grid_advect_scalar",             "sim_grid_advect_scalar.spv",          7, 28 },
+            { "sim_inventory_advect_scalar", "sim_inventory_advect_scalar.spv", 7, 28 },
+            { "sim_inventory_maccormack_scalar", "sim_inventory_maccormack_scalar.spv", 7, 28 },
+            { "sim_inventory_conserve", "sim_inventory_conserve.spv", 6, 16 },
+            { "sim_inventory_clear", "sim_inventory_clear.spv", 2, 4 },
+            { "sim_inventory_deposit", "sim_inventory_deposit.spv", 3, 4 },
+            { "sim_inventory_momentum", "sim_inventory_momentum.spv", 7, 20 },
+            { "sim_inventory_summary", "sim_inventory_summary.spv", 4, 36 },
+            { "sim_inventory_surface_exchange", "sim_inventory_surface_exchange.spv", 11, 36 },
+            { "sim_inventory_surface_commit", "sim_inventory_surface_commit.spv", 8, 8 },
+            { "sim_inventory_saturation", "sim_inventory_saturation.spv", 11, 112 },
+            { "sim_inventory_rain_fall", "sim_inventory_rain_fall.spv", 4, 32 },
             { "sim_grid_advect_velocity",           "sim_grid_advect_velocity.spv",       10, 24 },
             { "sim_grid_velocity_dissipate_clamp",  "sim_grid_velocity_dissipate.spv",     3, 20 },
             // MacCormack second pass (limited correction). Same 24B push-constant
@@ -1250,7 +1264,7 @@ private:
             // centers + state + thermal sources + domain ambient zones (4 SSBO,
             // 48B). This is what gives an object outside every domain a defined
             // temperature.
-            { "sim_msf_ambient",                    "sim_msf_ambient.spv",                  4, 48 },
+            { "sim_msf_ambient",                    "sim_msf_ambient.spv",                  5, 48 },
             // Liquid contact -> moisture (Phase 5). Runs per FLUID domain, reads
             // that domain's density splat as liquid occupancy: centers + state +
             // occupancy (3 SSBO, 48B). Pure source; drying is the ambient pass's.

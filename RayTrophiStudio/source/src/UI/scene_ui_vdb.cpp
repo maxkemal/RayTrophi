@@ -9,6 +9,7 @@
  */
 
 #include "scene_ui.h"
+#include "UI/CloudMaterialUI.h"
 #include "VDBVolume.h"
 #include "VolumeShader.h"
 #include "VDBVolumeManager.h"
@@ -468,7 +469,8 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
             bool is_selected = (selection.selected.type == SelectableType::VDBVolume && selection.selected.vdb_volume == vdb);
             
             ImGui::PushID(("vdb_" + std::to_string(i)).c_str());
-            std::string label = "[VDB] " + vdb->name;
+            std::string label = cloud_ui::isWorldCloud(vdb.get()) ?
+                                "[World] Clouds" : "[VDB] " + vdb->name;
             if (vdb->isAnimated()) label += " (Seq)";
             
             if (ImGui::Selectable(label.c_str(), is_selected)) {
@@ -525,6 +527,10 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
 
 void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
     if (!vdb) return;
+    if (cloud_ui::isWorldCloud(vdb)) {
+        cloud_ui::drawWorldCloudProperties(ctx);
+        return;
+    }
     
     // UNIQUE ID SCOPE: Use VDB volume ID to prevent ImGui ID conflicts
     ImGui::PushID(vdb->getVDBVolumeID());

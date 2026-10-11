@@ -1,4 +1,4 @@
-/*
+﻿/*
 * ─────────────────────────────────────────────────────────────────────────────
 * File:          MaterialStateField.cpp
 * Project:       RayTrophi Studio
@@ -295,6 +295,8 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
         {
             SubstanceProfile p;
             p.name = "Iron";
+            p.vapor_molar_mass_kg_mol = 0.05585f;
+            p.thermal_expansion_per_k = 0.00012f;
             // Phase 5 moisture: water beads off and flashes away.
             p.absorbency = 0.0f;  p.dry_rate = 0.30f;
             p.density = 7874.0f; p.specific_heat = 449.0f; p.conductivity = 80.4f;
@@ -315,6 +317,8 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
         {
             SubstanceProfile p;
             p.name = "Steel";
+            p.vapor_molar_mass_kg_mol = 0.05585f;
+            p.thermal_expansion_per_k = 0.00012f;
             // Phase 5 moisture: same as iron.
             p.absorbency = 0.0f;  p.dry_rate = 0.30f;
             p.density = 7850.0f; p.specific_heat = 490.0f; p.conductivity = 45.0f;
@@ -332,6 +336,8 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
         {
             SubstanceProfile p;
             p.name = "Copper";
+            p.vapor_molar_mass_kg_mol = 0.06355f;
+            p.thermal_expansion_per_k = 0.0001f;
             // Phase 5 moisture: same, and sheds heat fastest.
             p.absorbency = 0.0f;  p.dry_rate = 0.35f;
             p.density = 8960.0f; p.specific_heat = 385.0f; p.conductivity = 401.0f;
@@ -399,6 +405,8 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
         {
             SubstanceProfile p;
             p.name = "Wax";
+            p.vapor_molar_mass_kg_mol = 0.35f;
+            p.thermal_expansion_per_k = 0.0007f;
             // Phase 5 moisture: hydrophobic by definition.
             p.absorbency = 0.0f;  p.dry_rate = 0.30f;
             p.density = 900.0f; p.specific_heat = 2100.0f; p.conductivity = 0.25f;
@@ -432,6 +440,8 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
         {
             SubstanceProfile p;
             p.name = "Water";
+            p.vapor_molar_mass_kg_mol = 0.018015f;
+            p.thermal_expansion_per_k = 0.00021f;
             p.category = SubstanceCategory::Liquid;
             p.density = 997.0f; p.liquid_density = 997.0f;
             p.specific_heat = 4180.0f; p.conductivity = 0.60f;
@@ -453,6 +463,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
         {
             SubstanceProfile p;
             p.name = "Honey";
+            p.thermal_expansion_per_k = 0.00048f;
             p.category = SubstanceCategory::Liquid;
             p.density = 1420.0f; p.liquid_density = 1420.0f;
             p.specific_heat = 2500.0f; p.conductivity = 0.5f;
@@ -467,6 +478,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
         {
             SubstanceProfile p;
             p.name = "Chocolate";
+            p.thermal_expansion_per_k = 0.0006f;
             p.category = SubstanceCategory::Liquid;
             // Molten couverture at ~40 C: about half honey's nu, wets everything.
             p.density = 1270.0f; p.liquid_density = 1270.0f;
@@ -482,6 +494,9 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
         {
             SubstanceProfile p;
             p.name = "Mud";
+            p.vapor_molar_mass_kg_mol = 0.018015f;
+            p.thermal_expansion_per_k = 0.0002f;
+            p.boiling_kelvin = 373.15f; p.latent_heat_vaporization = 2.26e6f;
             p.category = SubstanceCategory::Liquid;
             // A heavy slurry. Really a yield-stress (Bingham) material; until the
             // solver has a plastic return mapping, solver_internal_friction stands
@@ -568,6 +583,8 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
         {
             SubstanceProfile p;
             p.name = "Snow";
+            p.vapor_molar_mass_kg_mol = 0.018015f;
+            p.thermal_expansion_per_k = 0.00021f;
             p.category = SubstanceCategory::Granular;
             // Continuum (MPM): snow compacts, clumps and breaks as a body, which
             // grains cannot do (docs/dev/MADDE_UI_TEK_OTORITE.md section 6).
@@ -608,6 +625,8 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
         {
             SubstanceProfile p;
             p.name = "Gasoline";
+            p.vapor_molar_mass_kg_mol = 0.1f;
+            p.thermal_expansion_per_k = 0.00095f;
             p.category = SubstanceCategory::Fuel;
             p.density = 740.0f; p.liquid_density = 740.0f;
             p.specific_heat = 1700.0f; p.conductivity = 0.13f;
@@ -622,6 +641,8 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
         {
             SubstanceProfile p;
             p.name = "Alcohol";
+            p.vapor_molar_mass_kg_mol = 0.04607f;
+            p.thermal_expansion_per_k = 0.0011f;
             p.category = SubstanceCategory::Fuel;
             p.density = 789.0f; p.liquid_density = 789.0f;
             p.specific_heat = 2400.0f; p.conductivity = 0.17f;
@@ -636,6 +657,8 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
         {
             SubstanceProfile p;
             p.name = "Oil";
+            p.vapor_molar_mass_kg_mol = 0.28f;
+            p.thermal_expansion_per_k = 0.0007f;
             p.category = SubstanceCategory::Fuel;
             p.density = 850.0f; p.liquid_density = 850.0f;
             p.specific_heat = 1700.0f; p.conductivity = 0.15f;
@@ -656,6 +679,8 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
         {
             SubstanceProfile p;
             p.name = "Ice";
+            p.vapor_molar_mass_kg_mol = 0.018015f;
+            p.thermal_expansion_per_k = 0.00021f;
             // Phase 5 moisture: meltwater is not "moisture"; Phase 6 owns it.
             p.absorbency = 0.0f;  p.dry_rate = 0.01f;
             p.density = 917.0f; p.specific_heat = 2100.0f; p.conductivity = 2.2f;
@@ -697,6 +722,8 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
         {
             SubstanceProfile p;
             p.name = "Stone";
+            p.vapor_molar_mass_kg_mol = 0.06008f;
+            p.thermal_expansion_per_k = 0.0001f;
             // Phase 5 moisture: porous but slow both ways.
             p.absorbency = 0.25f; p.dry_rate = 0.04f;
             p.density = 2600.0f; p.specific_heat = 840.0f; p.conductivity = 2.5f;
@@ -832,6 +859,25 @@ bool MaterialStateFieldSystem::syncField(const std::string& object_key,
     field.substance_name = substance_name;
     field.overrides = overrides;
     field.topology_generation = generation;
+    {
+        // Divergence-theorem volume about two origins: a closed mesh gives the
+        // same value from any origin, an open one (a plane, a shell with a
+        // hole) does not, and is then treated as a thin sheet.
+        double v0 = 0.0, v1 = 0.0, area = 0.0;
+        const Vec3 shift(1.0f, 1.0f, 1.0f);
+        for (const SurfaceMeshTriangle& t : triangles) {
+            v0 += Vec3::dot(t.p0, Vec3::cross(t.p1, t.p2));
+            const Vec3 a = t.p0 + shift, b = t.p1 + shift, c = t.p2 + shift;
+            v1 += Vec3::dot(a, Vec3::cross(b, c));
+            area += 0.5 * Vec3::cross(t.p1 - t.p0, t.p2 - t.p0).length();
+        }
+        v0 = std::abs(v0) / 6.0;
+        v1 = std::abs(v1) / 6.0;
+        const bool closed = v0 > 0.0 && std::abs(v0 - v1) <= 1e-3 * std::max(v0, v1);
+        field.thermal_depth_m = thermalContactDepth(
+            static_cast<float>(v0), static_cast<float>(area), closed,
+            findSubstance(substance_name).conductivity);
+    }
     field.mask_resolution = resolution;
     field.centers.resize(element_count * 4u);
     field.texel_index.resize(resolution > 0 ? element_count : 0u);
@@ -1202,6 +1248,78 @@ bool MaterialStateFieldSystem::ensureAmbientInputs(
     return true;
 }
 
+bool MaterialStateFieldSystem::gatherThermalContact(
+        const Vec3& origin, float voxel, int nx, int ny, int nz,
+        const MaterialTemperatureScale& scale,
+        std::vector<float>& cell_capacity,
+        std::vector<float>& cell_kelvin) const {
+    const std::size_t cells = static_cast<std::size_t>(nx) * ny * nz;
+    cell_capacity.assign(cells, 0.0f);
+    cell_kelvin.assign(cells, 0.0f);
+    if (cells == 0 || !(voxel > 0.0f)) return false;
+    const float inv = 1.0f / voxel;
+    bool any = false;
+    for (const auto& entry : fields_) {
+        const MaterialStateField& field = entry.second;
+        const std::size_t n = field.elementCount();
+        if (n == 0 || field.state.size() < n * RayTrophiSim::MaterialStateField::kStateStride) continue;  // no host copy yet
+        const SubstanceProfile& profile = findSubstance(field.substance_name);
+        const float rho = profile.density > 0.0f ? profile.density : 1000.0f;
+        const float c = profile.specific_heat > 0.0f ? profile.specific_heat : 1000.0f;
+        for (std::size_t e = 0; e < n; ++e) {
+            const float* ctr = &field.centers[e * 4u];
+            const int i = static_cast<int>(std::floor((ctr[0] - origin.x) * inv));
+            const int j = static_cast<int>(std::floor((ctr[1] - origin.y) * inv));
+            const int k = static_cast<int>(std::floor((ctr[2] - origin.z) * inv));
+            if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
+            const float cap = std::max(0.0f, ctr[3]) * field.thermal_depth_m * rho * c;
+            if (!(cap > 0.0f)) continue;
+            const float kelvin = scale.toKelvin(field.state[e * RayTrophiSim::MaterialStateField::kStateStride]);
+            const std::size_t cell = (static_cast<std::size_t>(k) * ny + j) * nx + i;
+            cell_capacity[cell] += cap;
+            cell_kelvin[cell] += cap * kelvin;
+            any = true;
+        }
+    }
+    for (std::size_t c = 0; c < cells; ++c) {
+        if (cell_capacity[c] > 0.0f) cell_kelvin[c] /= cell_capacity[c];
+    }
+    return any;
+}
+
+void MaterialStateFieldSystem::depositThermalContactHeat(
+        const Vec3& origin, float voxel, int nx, int ny, int nz,
+        const MaterialTemperatureScale& scale,
+        const std::vector<float>& cell_capacity,
+        const std::vector<float>& cell_heat_j) {
+    const std::size_t cells = static_cast<std::size_t>(nx) * ny * nz;
+    if (cell_capacity.size() != cells || cell_heat_j.size() != cells ||
+        !(voxel > 0.0f) || !(scale.kelvin_per_unit > 0.0f)) {
+        return;
+    }
+    const float inv = 1.0f / voxel;
+    for (auto& entry : fields_) {
+        MaterialStateField& field = entry.second;
+        const std::size_t n = field.elementCount();
+        if (n == 0) continue;
+        bool touched = false;
+        for (std::size_t e = 0; e < n; ++e) {
+            const float* ctr = &field.centers[e * 4u];
+            const int i = static_cast<int>(std::floor((ctr[0] - origin.x) * inv));
+            const int j = static_cast<int>(std::floor((ctr[1] - origin.y) * inv));
+            const int k = static_cast<int>(std::floor((ctr[2] - origin.z) * inv));
+            if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
+            const std::size_t cell = (static_cast<std::size_t>(k) * ny + j) * nx + i;
+            if (!(cell_capacity[cell] > 0.0f) || cell_heat_j[cell] == 0.0f) continue;
+            if (field.heat_input.size() != n) field.heat_input.assign(n, 0.0f);
+            field.heat_input[e] +=
+                cell_heat_j[cell] / cell_capacity[cell] / scale.kelvin_per_unit;
+            touched = true;
+        }
+        if (touched) field.heat_input_pending = true;
+    }
+}
+
 bool MaterialStateFieldSystem::stepAmbient(SimulationComputeContext& compute,
                                            const WorldThermalState& world,
                                            const std::vector<ThermalSource>& sources,
@@ -1279,18 +1397,42 @@ bool MaterialStateFieldSystem::stepAmbient(SimulationComputeContext& compute,
         pc.params2[2] = scale.toNormalized(kWaterBoilingKelvin);
         pc.params2[3] = world_ambient_kelvin;
 
-        ComputeBufferHandle bufs[4] = {
+        // Liquid contact heat queued since the last pass (binding 4). The
+        // state buffer stands in as a never-read dummy when there is none.
+        bool heat_in = false;
+        if (field.heat_input_pending && field.heat_input.size() == element_count) {
+            const std::size_t bytes = element_count * sizeof(float);
+            if (!field.gpu_heat_input.valid() ||
+                compute.getBufferSize(field.gpu_heat_input) < bytes) {
+                if (field.gpu_heat_input.valid()) compute.destroyBuffer(field.gpu_heat_input);
+                ComputeBufferDesc desc;
+                desc.debug_name = "MsfHeatInput";
+                desc.size_bytes = bytes;
+                desc.usage = ComputeBufferUsage::Storage | ComputeBufferUsage::Upload |
+                             ComputeBufferUsage::ReadOnly;
+                field.gpu_heat_input = compute.createBuffer(desc);
+            }
+            heat_in = field.gpu_heat_input.valid() &&
+                compute.uploadBuffer(field.gpu_heat_input, field.heat_input.data(), bytes);
+        }
+        pc.counts[3] = heat_in ? 1 : 0;
+        ComputeBufferHandle bufs[5] = {
             field.gpu_centers, field.gpu_state,
-            gpu_thermal_sources_, gpu_ambient_zones_
+            gpu_thermal_sources_, gpu_ambient_zones_,
+            heat_in ? field.gpu_heat_input : field.gpu_state
         };
         ComputeDispatch ambient;
         ambient.kernel = "sim_msf_ambient";
         ambient.buffers = bufs;
-        ambient.buffer_count = 4;
+        ambient.buffer_count = 5;
         ambient.constants = &pc;
         ambient.constants_size = sizeof(pc);
         ambient.groups.groups_x = (static_cast<uint32_t>(element_count) + 255u) / 256u;
         if (!compute.dispatch(ambient)) { all_ok = false; continue; }
+        if (heat_in) {
+            std::fill(field.heat_input.begin(), field.heat_input.end(), 0.0f);
+            field.heat_input_pending = false;
+        }
         stats_.ambient_stepped = true;
     }
 

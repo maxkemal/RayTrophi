@@ -8,6 +8,8 @@
 #include "Fluid/APICFluidSolver.h"
 #include "Fluid/FluidLevelSet.h"
 #include "Fluid/FluidThermalLiquid.h"
+#include "Fluid/GasInventoryGpu.h"
+#include "Fluid/WhitewaterRuntime.h"
 #include "Fluid/FluidFoam.h"
 #include "Fluid/FluidRenderMode.h"
 #include "Fluid/FluidRenderProxy.h"
@@ -972,11 +974,19 @@ struct SimulationGasStats {
     float total_ms = 0.0f;      // whole per-domain gas step, host wall time
     float voxelize_ms = 0.0f;   // collider stamp into grid.solid + face weights
     float inventory_advection_ms = 0.0f; // physical kg/J sidecar transport
+    std::string inventory_transport = "idle";
+    uint64_t inventory_grid_upload_bytes = 0;
+    uint64_t inventory_grid_download_bytes = 0;
+    uint64_t inventory_snapshot_download_bytes = 0;
+    uint64_t inventory_query_download_bytes = 0;
+    bool inventory_step_held = false;
+    std::string inventory_error;
     float analysis_ms = 0.0f;   // the post-step O(cells) field scan below
 
     // Device stages, in execution order.
     float gpu_collider_source_ms = 0.0f;   // collider Gas Interaction injection
     float gpu_msf_ms = 0.0f;               // Material State Field thermal gather
+    float gpu_surface_exchange_ms = 0.0f;
     float gpu_source_upload_ms = 0.0f;     // host scalar sources -> device
     float gpu_fluid_combustion_ms = 0.0f;  // combustible liquid surface deposit
     float gpu_velocity_advect_ms = 0.0f;
@@ -1045,6 +1055,25 @@ struct SimulationGasStats {
     float cfl = 0.0f;
     // Dense host storage for this domain's channels (grid.* vectors).
     std::size_t grid_memory_bytes = 0;
+
+    // ── Fog water (Fluid::adjustGasSaturation), this step ────────────────────
+    // Saturation adjustment between the cell's vapour and its condensate (fog
+    // water), latent heat to/from the air; autoconversion of fog water above
+    // the domain's onset (and everything above its ceiling) into rain water,
+    // which falls and becomes liquid. `saturation_measured` false = it did not
+    // run (no inventory, no condensable substance), not "nothing condensed".
+    bool   saturation_measured = false;
+    std::string condensable_substance;   // whose Tb/L/M saturation used
+    double fog_condensed_kg = 0.0;       // vapour -> fog water
+    double fog_evaporated_kg = 0.0;      // fog water -> vapour
+    double fog_latent_to_air_j = 0.0;    // net latent heat into the air (+ warms)
+    double fog_autoconverted_kg = 0.0;   // fog water -> rain water
+    // Rain water that became liquid this step: born as parcels where it
+    // pooled, plus absorbed by liquid surface parcels it landed on.
+    double rained_kg = 0.0;
+    double rain_absorbed_kg = 0.0;       // the absorbed part of rained_kg
+    std::size_t rain_parcels = 0;
+    float  saturation_ms = 0.0f;
 };
 
 struct SimulationGridDomainState {
@@ -1080,6 +1109,34 @@ struct SimulationGridDomainState {
     // the kg and J deposited by phase exchange without changing that ABI.
     std::vector<float> gas_phase_mass_kg;
     std::vector<float> gas_phase_energy_j;
+    // Condensed water carried by the air (fog/cloud water), kg per gas cell.
+    // gas_phase_mass_kg is VAPOUR only; gas_phase_energy_j is the energy of
+    // ALL the water in the cell (vapour c*T + L per kg, condensate c*T per kg).
+    // Same units as the atmosphere layer: kg/m^3 = kg / cell volume.
+    std::vector<float> gas_phase_condensate_kg;
+    // Rain water: autoconverted fog water falling at its terminal speed (not
+    // carried by the wind), kg per cell, and its OWN sensible energy (J) - it
+    // is not in gas_phase_energy_j, which the wind carries away from it. Rain
+    // that lands on liquid is absorbed; where it pools to a whole liquid
+    // parcel it becomes one.
+    std::vector<float> gas_phase_rain_kg;
+    std::vector<float> gas_phase_rain_energy_j;
+    // Fog or rain water may be present (set by a condensate deposit, refreshed
+    // by the saturation pass). Gates the pass on gas domains without a
+    // thermal chain.
+    bool gas_liquid_water_present = false;
+    // Rain landing cells: the surface exchange marks the air cell above each
+    // liquid surface parcel with the current stamp; the rain fall stops there
+    // and advances the stamp. Transient (per step), not cached.
+    std::vector<uint32_t> gas_rain_landing;
+    uint32_t gas_rain_stamp = 1;
+    // Rain absorbed by liquid surface parcels since the last saturation pass
+    // (the surface exchange runs first in the step), reported by that pass.
+    double gas_rain_absorbed_pending_kg = 0.0;
+    std::weak_ptr<Fluid::GasInventoryDevice> gas_inventory_device;
+    uint64_t gas_inventory_revision = 0;
+    std::string gas_inventory_error;
+    std::map<uint32_t, Fluid::GasPhaseMomentumDeposit> gas_phase_pending_momentum;
     // ★★★ Particles destroyed by COMBUSTION, cumulative for this run.
     //
     // The emitter's capacity gate compares the live particle count against
@@ -1400,6 +1457,10 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle foam_bin_counts;
     ComputeBufferHandle foam_bin_items;
     ComputeBufferHandle foam_expected;
+    ComputeBufferHandle foam_eligible;
+    std::size_t foam_eligible_capacity = 0;
+    int foam_bin_allocated_cells = 0;
+    Fluid::WhitewaterBinWindow foam_bin_window;
     int foam_bin_cell_capacity = 0;   // allocated max_per_cell
     int foam_bin_cell_count = 0;      // allocated cell count
     std::size_t foam_expected_capacity = 0;  // particles the expected buffer holds
@@ -1442,6 +1503,7 @@ struct SimulationGridDomainComputeBuffers {
     // Gas collider coupling (all GPU backends): cell-centred solid occupancy
     // (0=open, 1=solid) plus moving-wall linear velocity components.
     ComputeBufferHandle gas_solid_mask;
+    Fluid::GasInventoryGpuBuffers gas_inventory;
     ComputeBufferHandle gas_solid_vel_x;
     ComputeBufferHandle gas_solid_vel_y;
     ComputeBufferHandle gas_solid_vel_z;
@@ -2143,7 +2205,8 @@ public:
     void restoreSoA(const ParticleSoABuffers& src, std::size_t alive_count);
     ParticleSimulationRuntimeState captureRuntimeState() const;
     void restoreRuntimeState(const ParticleSimulationRuntimeState& state);
-    void releaseComputeResources(SimulationComputeContext& compute);
+    void releaseComputeResources(SimulationComputeContext& compute,
+                                 bool preserve_inventory = true);
     std::size_t spawn(const ParticleSpawnDesc& desc);
     bool kill(std::size_t index);
 
@@ -2374,12 +2437,16 @@ public:
     /// Author and execute one fluid SeedBox on the authoritative grid-domain
     /// particle state. `persistent` controls whether reset/timeline rewind
     /// recreates it; it is independent of replacing the current live particles.
+    // fill_level >= 0 seeds the domain as a resting tank (FillLevel mode,
+    // a persistent recipe) up to that fraction of its height; the box is
+    // ignored then. Negative = Seed Box.
     bool seedFluidDomainParticles(const std::string& domain_name,
                                   const Vec3& seed_min,
                                   const Vec3& seed_max,
                                   int particles_per_cell,
                                   bool replace,
-                                  bool persistent);
+                                  bool persistent,
+                                  float fill_level = -1.0f);
     /// Clear the authoritative live particles. With `clear_seed_recipe`, also
     /// disarm reset-time SeedBox/FillLevel reproduction so emitter-only domains
     /// stay emitter-only after a rewind.

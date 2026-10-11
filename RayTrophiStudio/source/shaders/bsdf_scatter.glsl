@@ -885,8 +885,7 @@ void scatterDiffuse(vec3 hitPos, vec3 normal, vec3 albedo, inout uint seed) {
 
     payload.scatterOrigin = hitPos + normal * RAY_OFFSET;
     payload.scatterDir    = dir;
-    // Cosine-weighted sampling ile PDF = cos/PI, BRDF = albedo/PI
-    // Throughput = BRDF * cos / PDF = albedo → direkt albedo
+    // Cosine PDF cancels the Lambert BRDF and cosine factor.
     payload.attenuation  *= albedo;
     payload.scattered     = true;
     payload.bounceType     = BOUNCE_DIFFUSE;

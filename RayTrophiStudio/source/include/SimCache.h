@@ -82,10 +82,13 @@ constexpr uint32_t kMagic   = 0x43465452u; // 'RTFC'
 // 10: domain-local particle identities and their allocator survive playback.
 // 11: C5 pore mass, capacity, porosity and stored water energy survive playback.
 // 12: positive-zero scalar arrays store their count without a float payload.
-// The reader retains v11 compatibility; other versions remain unsupported.
-constexpr uint32_t kVersion = 12u;
+// 13: gas-phase condensate (fog water, kg per cell) after the kg/J pair.
+// 14: gas-phase rain water (kg per cell) and its energy (J) after the fog water.
+// The reader retains v11-v13 compatibility (missing pools read empty);
+// other versions remain unsupported.
+constexpr uint32_t kVersion = 14u;
 constexpr bool supportsVersion(uint32_t version) {
-    return version == 11u || version == kVersion;
+    return version == 11u || version == 12u || version == 13u || version == kVersion;
 }
 
 // Absolute path of the per-system, per-frame binary file inside cache_dir.

@@ -295,6 +295,8 @@
     <ClInclude Include="source\include\SimFrameCompress.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\LosslessFrameArray.h" />
+    <ClInclude Include="source\include\MatterGridFrameCache.h" />
     <ClInclude Include="source\include\SimFrameCacheMemory.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
@@ -456,6 +458,27 @@
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Fluid\FluidMistPhaseExchange.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\GasSurfaceGeometry.h" />
+    <ClInclude Include="source\include\Fluid\GasSurfaceExchangePlan.h" />
+    <ClInclude Include="source\include\Fluid\GasPhaseMomentum.h" />
+    <ClInclude Include="source\include\Fluid\WhitewaterRuntime.h" />
+    <ClInclude Include="source\include\Fluid\SurfaceWorkTiles.h" />
+    <ClInclude Include="source\include\Fluid\SurfaceParticleBins.h" />
+    <ClInclude Include="source\include\ProjectTimelineReset.h" />
+    <ClInclude Include="source\include\Viewport\ViewportGpuWorkPolicy.h" />
+    <ClInclude Include="source\src\Physics\Fluid\WhitewaterGpuRuntime.inl" />
+    <ClInclude Include="source\include\Fluid\GasInventoryGpu.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\GasSurfaceExchangeGpu.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\GasSaturation.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\GasInventoryFrameCapture.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Fluid\FluidGasMovingBoundary.h">
@@ -865,6 +888,9 @@
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\UI\scene_ui_volume_performance.hpp">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\CloudMaterialUI.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\UI\viewport_realtime_quality_panel.hpp">
@@ -1327,6 +1353,33 @@
     <ClCompile Include="source\src\Physics\Fluid\FluidMistPhaseExchange.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasSurfaceGeometry.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\GasSurfaceExchangePlan.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\GasSurfaceExchangeCpu.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\GasPhaseMomentum.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\WhitewaterRuntime.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\SurfaceWorkTiles.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\SurfaceParticleBins.cpp" />
+    <ClCompile Include="source\src\Core\ProjectTimelineReset.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\FluidMaterialCoordinates.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\GasInventoryGpu.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasInventoryDevice.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasSurfaceExchangeGpu.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasSaturation.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasInventoryDiagnostics.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasInventoryFrameCapture.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\FluidGasMovingBoundary.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
@@ -1427,6 +1480,9 @@
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanDeviceClouds.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanCloudScenePass.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtPythonTemplates.cpp">
@@ -1853,6 +1909,9 @@
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\UI\scene_ui_volume_performance.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\CloudMaterialUI.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp">

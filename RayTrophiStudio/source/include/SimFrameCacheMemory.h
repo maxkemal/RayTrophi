@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ParticleSimulation.h"
+#include "MatterGridFrameCache.h"
 
 #include <cstddef>
 #include <vector>
@@ -17,33 +18,14 @@ std::size_t allocationBytes(const std::vector<T>& values) {
 inline std::size_t metaAllocationBytes(const SimulationGridDomainState& state) {
     const auto& grid = state.grid;
     std::size_t bytes = 0;
-    bytes += allocationBytes(grid.active_tiles);
-    bytes += allocationBytes(grid.tile_active_mask);
-    bytes += allocationBytes(grid.vel_x);
-    bytes += allocationBytes(grid.vel_y);
-    bytes += allocationBytes(grid.vel_z);
-    bytes += allocationBytes(grid.density);
-    bytes += allocationBytes(grid.temperature);
-    bytes += allocationBytes(grid.fuel);
-    bytes += allocationBytes(grid.interaction);
-    bytes += allocationBytes(grid.pressure);
-    bytes += allocationBytes(grid.divergence);
-    bytes += allocationBytes(grid.solid);
-    bytes += allocationBytes(grid.solid_vel);
-    bytes += allocationBytes(grid.solid_cells);
-    bytes += allocationBytes(grid.substance_solid_cells);
-    bytes += allocationBytes(grid.substance_solid_prev_cells);
-    bytes += allocationBytes(grid.substance_solid_prev_vel);
-    bytes += allocationBytes(grid.solid_gas_density);
-    bytes += allocationBytes(grid.solid_gas_temperature);
-    bytes += allocationBytes(grid.solid_gas_fuel);
-    bytes += allocationBytes(grid.solid_gas_flame);
-    bytes += allocationBytes(grid.solid_gas_band);
-    bytes += allocationBytes(grid.u_weight);
-    bytes += allocationBytes(grid.v_weight);
-    bytes += allocationBytes(grid.w_weight);
-    bytes += allocationBytes(grid.fluid_phi);
-    bytes += allocationBytes(grid.surface_dust_supply);
+    bytes += allocationBytes(state.gas_phase_mass_kg);
+    bytes += allocationBytes(state.gas_phase_energy_j);
+    bytes += allocationBytes(state.gas_phase_condensate_kg);
+    bytes += allocationBytes(state.gas_phase_rain_kg);
+    bytes += allocationBytes(state.gas_phase_rain_energy_j);
+    bytes += allocationBytes(state.gas_rain_landing);
+    bytes += SimFrameCache::fluidGridAllocationBytes(grid);
+    bytes += SimFrameCache::fluidGridAllocationBytes(state.matter_liquid_grid);
 
     const auto& particles = state.particles;
     bytes += allocationBytes(particles.particle_id);
@@ -59,6 +41,7 @@ inline std::size_t metaAllocationBytes(const SimulationGridDomainState& state) {
     bytes += allocationBytes(particles.pore_water_energy_j);
     bytes += allocationBytes(particles.temperature);
     bytes += allocationBytes(particles.combustible_fraction);
+    bytes += allocationBytes(particles.fusion_solid_fraction);
     bytes += allocationBytes(particles.substance_tag);
     bytes += allocationBytes(particles.constitutive_model);
     bytes += allocationBytes(particles.granular_deformation_col0);

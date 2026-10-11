@@ -41,6 +41,8 @@
 namespace RayTrophiSim {
 namespace Fluid {
 
+struct APICSolverParams;
+
 enum class FoamType : uint8_t { Spray = 0, Foam = 1, Bubble = 2 };
 
 // SoA foam storage (mirrors FluidParticles' layout philosophy).
@@ -184,21 +186,21 @@ struct FoamStats {
     // is the prime suspect for advect's cost and needs its own number before
     // anything is ported.
     float       advect_neighbour_ms = 0.0f;
+    bool        inputs_current = false;
+    bool        overflow_fallback = false;
+    uint64_t    bin_cells = 0;
+    uint64_t    bin_bytes = 0;
     bool        crit_on_gpu  = false; // potentials came from sim_foam_crit
     bool        neigh_on_gpu = false; // classification counts came from sim_foam_neigh
-    // Wall time the caller spent reading back the PREVIOUS step's neighbour counts.
+    // Legacy separate neighbour timer; current inputs share crit_gpu_ms.
     // Same reason crit_gpu_ms exists: without it advect_neighbour_ms drops to ~0 on
     // the GPU path and the block looks like the work evaporated.
     float       neigh_gpu_ms = 0.0f;
-    // Wall time of the submit+fence that actually RUNS the four foam kernels (bins,
-    // criterion, neighbours). They record without downloading, so before this was
-    // measured their execution was billed to whichever later phase happened to
-    // force the flush — the density readback — and foam looked ~5x cheaper than it
-    // is. This is the real GPU cost of whitewater.
+    // Legacy separate execution timer; no extra timing-only fence is submitted.
+    // Current criterion and neighbour execution/readback share crit_gpu_ms.
     float       gpu_exec_ms  = 0.0f;
-    // Wall time of the GPU criterion pass INCLUDING its readback, measured by the
-    // caller. Without this the CPU crit_ms would drop to ~0 on the GPU path and
-    // the block would claim the work vanished instead of showing where it moved.
+    // Wall time of current bins, criterion, neighbours and their batched readback.
+    // This includes host transfer/wait time, rather than pure GPU kernel time.
     float       crit_gpu_ms  = 0.0f;
 };
 
@@ -227,7 +229,8 @@ void stepFoam(const FluidParticles& fluid,
               uint32_t seed,
               FoamStats* stats = nullptr,
               const float* precomputed_expected = nullptr,
-              const uint32_t* precomputed_neighbours = nullptr);
+              const uint32_t* precomputed_neighbours = nullptr,
+              const APICSolverParams* source_params = nullptr);
 
 // Trilinear-splat whitewater into a dense nx*ny*nz field (x fastest, resized
 // and zeroed). Each particle deposits density_per_particle * type_weight[type]

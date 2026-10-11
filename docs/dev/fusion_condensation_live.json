@@ -1,0 +1,266 @@
+{
+  "freeze": [
+    {
+      "step": 1,
+      "min_kelvin": 293.0,
+      "mean_kelvin": 0.0,
+      "mushy": 0,
+      "frozen": 0,
+      "released_j": 0.0,
+      "ledger_latent_j": 0.0
+    },
+    {
+      "step": 15,
+      "min_kelvin": 263.1669921875,
+      "mean_kelvin": 266.52117919921875,
+      "mushy": 13519,
+      "frozen": 0,
+      "released_j": 18882544.11651737,
+      "ledger_latent_j": 18882544.111312024
+    },
+    {
+      "step": 30,
+      "min_kelvin": 243.4270477294922,
+      "mean_kelvin": 256.5338439941406,
+      "mushy": 15145,
+      "frozen": 13248,
+      "released_j": 78608788.68960282,
+      "ledger_latent_j": 78608788.66431835
+    },
+    {
+      "step": 45,
+      "min_kelvin": 273.1499938964844,
+      "mean_kelvin": 271.17803955078125,
+      "mushy": 32000,
+      "frozen": 32000,
+      "released_j": 261172018.1672157,
+      "ledger_latent_j": 261172018.1176568
+    },
+    {
+      "step": 60,
+      "min_kelvin": 256.201171875,
+      "mean_kelvin": 262.0921936035156,
+      "mushy": 0,
+      "frozen": 32000,
+      "released_j": 332997993.58652735,
+      "ledger_latent_j": 332997993.52846944
+    },
+    {
+      "step": 75,
+      "min_kelvin": 239.2028045654297,
+      "mean_kelvin": 242.80958557128906,
+      "mushy": 0,
+      "frozen": 32000,
+      "released_j": 332997993.58652735,
+      "ledger_latent_j": 332997993.52846944
+    },
+    {
+      "step": 90,
+      "min_kelvin": 228.89280700683594,
+      "mean_kelvin": 231.08041381835938,
+      "mushy": 0,
+      "frozen": 32000,
+      "released_j": 332997993.58652735,
+      "ledger_latent_j": 332997993.52846944
+    },
+    {
+      "step": 105,
+      "min_kelvin": 222.63946533203125,
+      "mean_kelvin": 223.96632385253906,
+      "mushy": 0,
+      "frozen": 32000,
+      "released_j": 332997993.58652735,
+      "ledger_latent_j": 332997993.52846944
+    },
+    {
+      "step": 120,
+      "min_kelvin": 218.84661865234375,
+      "mean_kelvin": 219.6514129638672,
+      "mushy": 0,
+      "frozen": 32000,
+      "released_j": 332997993.58652735,
+      "ledger_latent_j": 332997993.52846944
+    },
+    {
+      "step": 135,
+      "min_kelvin": 216.54615783691406,
+      "mean_kelvin": 217.03428649902344,
+      "mushy": 0,
+      "frozen": 32000,
+      "released_j": 332997993.58652735,
+      "ledger_latent_j": 332997993.52846944
+    },
+    {
+      "step": 150,
+      "min_kelvin": 215.15086364746094,
+      "mean_kelvin": 215.4468994140625,
+      "mushy": 0,
+      "frozen": 32000,
+      "released_j": 332997993.58652735,
+      "ledger_latent_j": 332997993.52846944
+    }
+  ],
+  "condense": [
+    {
+      "step": 1,
+      "particles": 32000,
+      "max_kelvin": 306.109130859375,
+      "min_kelvin": 291.0329284667969,
+      "vaporized_kg": 7.902360721884935e-06,
+      "condensed_ledger_kg": 0.0,
+      "condensed_stats_kg": 0.0,
+      "splits": 0,
+      "gas_phase_mass_kg": 7.902360909602112e-06
+    },
+    {
+      "step": 20,
+      "particles": 32000,
+      "max_kelvin": 373.15032958984375,
+      "min_kelvin": 263.80487060546875,
+      "vaporized_kg": 4.2365388772973915,
+      "condensed_ledger_kg": 0.00036582408269438823,
+      "condensed_stats_kg": 0.00036582408269438823,
+      "splits": 0,
+      "gas_phase_mass_kg": 4.23617294871042
+    },
+    {
+      "step": 40,
+      "particles": 32000,
+      "max_kelvin": 373.1517028808594,
+      "min_kelvin": 248.81468200683594,
+      "vaporized_kg": 10.797065339501486,
+      "condensed_ledger_kg": 0.0013033300334943168,
+      "condensed_stats_kg": 0.0013033300334943168,
+      "splits": 0,
+      "gas_phase_mass_kg": 10.795761527700224
+    },
+    {
+      "step": 60,
+      "particles": 32000,
+      "max_kelvin": 373.1520080566406,
+      "min_kelvin": 241.40658569335938,
+      "vaporized_kg": 16.46501510667729,
+      "condensed_ledger_kg": 0.002166872825793951,
+      "condensed_stats_kg": 0.002166872825793951,
+      "splits": 0,
+      "gas_phase_mass_kg": 16.462847708304377
+    },
+    {
+      "step": 80,
+      "particles": 32000,
+      "max_kelvin": 373.1518249511719,
+      "min_kelvin": 255.28302001953125,
+      "vaporized_kg": 22.030680892526817,
+      "condensed_ledger_kg": 0.00294452895742349,
+      "condensed_stats_kg": 0.00294452895742349,
+      "splits": 0,
+      "gas_phase_mass_kg": 22.027735740195247
+    },
+    {
+      "step": 100,
+      "particles": 32000,
+      "max_kelvin": 373.15155029296875,
+      "min_kelvin": 249.19161987304688,
+      "vaporized_kg": 27.787876506774598,
+      "condensed_ledger_kg": 0.0036777485099069997,
+      "condensed_stats_kg": 0.0036777485099069997,
+      "splits": 0,
+      "gas_phase_mass_kg": 27.784198411291555
+    },
+    {
+      "step": 120,
+      "particles": 32000,
+      "max_kelvin": 373.15179443359375,
+      "min_kelvin": 241.31304931640625,
+      "vaporized_kg": 33.71533801554341,
+      "condensed_ledger_kg": 0.004345515391653407,
+      "condensed_stats_kg": 0.004345515391653407,
+      "splits": 0,
+      "gas_phase_mass_kg": 33.710992159998625
+    },
+    {
+      "step": 140,
+      "particles": 32000,
+      "max_kelvin": 373.1507873535156,
+      "min_kelvin": 237.26792907714844,
+      "vaporized_kg": 39.49978078254323,
+      "condensed_ledger_kg": 0.005034722236180828,
+      "condensed_stats_kg": 0.005034722236180828,
+      "splits": 0,
+      "gas_phase_mass_kg": 39.49474541785915
+    },
+    {
+      "step": 160,
+      "particles": 31999,
+      "max_kelvin": 373.15130615234375,
+      "min_kelvin": 235.1912384033203,
+      "vaporized_kg": 45.16372521103164,
+      "condensed_ledger_kg": 0.005880472667067816,
+      "condensed_stats_kg": 0.005880472667067816,
+      "splits": 0,
+      "gas_phase_mass_kg": 45.162484980409424
+    },
+    {
+      "step": 180,
+      "particles": 31998,
+      "max_kelvin": 373.1514587402344,
+      "min_kelvin": 234.12501525878906,
+      "vaporized_kg": 50.8843246185688,
+      "condensed_ledger_kg": 0.006809877865590909,
+      "condensed_stats_kg": 0.006809877865590909,
+      "splits": 0,
+      "gas_phase_mass_kg": 50.886798036753234
+    },
+    {
+      "step": 200,
+      "particles": 31998,
+      "max_kelvin": 373.15240478515625,
+      "min_kelvin": 233.57760620117188,
+      "vaporized_kg": 56.556845613753616,
+      "condensed_ledger_kg": 0.00791422785819458,
+      "condensed_stats_kg": 0.00791422785819458,
+      "splits": 0,
+      "gas_phase_mass_kg": 56.55821357671805
+    },
+    {
+      "step": 220,
+      "particles": 31995,
+      "max_kelvin": 373.15142822265625,
+      "min_kelvin": 233.2965545654297,
+      "vaporized_kg": 62.35497135257826,
+      "condensed_ledger_kg": 0.00906309337854005,
+      "condensed_stats_kg": 0.00906309337854005,
+      "splits": 0,
+      "gas_phase_mass_kg": 62.36909986150518
+    },
+    {
+      "step": 240,
+      "particles": 31989,
+      "max_kelvin": 373.1520690917969,
+      "min_kelvin": 233.15223693847656,
+      "vaporized_kg": 67.97367971902497,
+      "condensed_ledger_kg": 0.010264095566668987,
+      "condensed_stats_kg": 0.010264095566668987,
+      "splits": 0,
+      "gas_phase_mass_kg": 68.01440874215444
+    }
+  ],
+  "released_j": 332997993.58652735,
+  "ledger_latent_j": 332997993.52846944,
+  "max_mushy": 32000,
+  "vaporized_kg": 67.97367971902497,
+  "condensed_ledger_kg": 0.010264095566668987,
+  "condensed_stats_kg": 0.010264095566668987,
+  "splits": 0,
+  "unbalanced": [],
+  "verdicts": {
+    "mushy_seen": true,
+    "latent_released": true,
+    "water_freezes": true,
+    "freeze_ledger_matches_latent": true,
+    "boils": true,
+    "condenses": true,
+    "condense_stats_match_ledger": true,
+    "exchanges_balanced": true
+  }
+}

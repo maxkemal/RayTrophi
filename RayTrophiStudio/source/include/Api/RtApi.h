@@ -3915,11 +3915,19 @@ struct GasStepStats {
     float total_ms = 0.0f;
     float voxelize_ms = 0.0f;
     float inventory_advection_ms = 0.0f;
+    std::string inventory_transport = "idle";
+    uint64_t inventory_grid_upload_bytes = 0;
+    uint64_t inventory_grid_download_bytes = 0;
+    uint64_t inventory_snapshot_download_bytes = 0;
+    uint64_t inventory_query_download_bytes = 0;
+    bool inventory_step_held = false;
+    std::string inventory_error;
     float analysis_ms = 0.0f;
 
     // Device stages, in execution order.
     float gpu_collider_source_ms = 0.0f;
     float gpu_msf_ms = 0.0f;
+    float gpu_surface_exchange_ms = 0.0f;
     float gpu_source_upload_ms = 0.0f;
     float gpu_fluid_combustion_ms = 0.0f;
     float gpu_velocity_advect_ms = 0.0f;
@@ -4189,6 +4197,26 @@ struct FluidDomainInfo {
     double gas_phase_energy_j = 0.0;
     size_t gas_phase_active_cells = 0;
     Vec3 gas_phase_mass_centroid;
+    // Fog water carried by the air (GasSaturation.h): kg total, cells holding
+    // it, and the mean concentration over those cells in kg/m^3 (the
+    // atmosphere layer's unit). gas_phase_mass_kg above is VAPOUR only.
+    double gas_condensate_kg = 0.0;
+    size_t gas_condensate_cells = 0;
+    double gas_condensate_mean_kg_m3 = 0.0;
+    // Last gas step's saturation adjustment. saturation_measured false = it
+    // did not run (no thermal chain and no fog water, or no vapour data).
+    bool   saturation_measured = false;
+    std::string condensable_substance;
+    double fog_condensed_kg = 0.0;
+    double fog_evaporated_kg = 0.0;
+    double fog_latent_to_air_j = 0.0;
+    double fog_autoconverted_kg = 0.0;   // fog water -> rain water, last step
+    double rained_kg = 0.0;              // rain water -> liquid (parcels + absorbed)
+    double rain_absorbed_kg = 0.0;       // the part absorbed by liquid surface parcels
+    size_t rain_parcels = 0;
+    // Rain water in the air (falling or pooled), kg and cells holding it.
+    double gas_rain_kg = 0.0;
+    size_t gas_rain_cells = 0;
     // ★★★ particle_count is only a MEASUREMENT when this is true.
     //
     // Measured 2026-08-16: fluid.get reported particle_count = 0 for a domain
@@ -4498,16 +4526,25 @@ struct FluidDomainInfo {
     int   surface_grid_dim[3] = {0, 0, 0};
     float surface_voxel = 0.0f;
     float surface_build_ms = 0.0f;
+    float surface_bin_ms = 0.0f;
+    float surface_anisotropy_ms = 0.0f;
+    float surface_schedule_ms = 0.0f;
+    float surface_gather_ms = 0.0f;
+    float surface_smooth_ms = 0.0f;
     uint64_t surface_active_cells = 0;
+    uint64_t surface_work_cells = 0;
+    uint64_t surface_bin_cells = 0;
     // ── Thermal liquid (cooling / ν(T) / freezing) ─────────────────────────
     // See APICSolverParams::thermal_* and FluidThermalLiquid.h. Written through
     // setFluidThermal.
     bool  thermal_liquid_enabled = false;
     float thermal_air_cooling_rate = 0.15f;
     float thermal_contact_cooling_rate = 2.0f;
-    float thermal_freeze_kelvin = 330.0f;
-    float thermal_viscosity_range = 25.0f;
-    float thermal_cold_viscosity = 0.05f;
+    // Fog water microphysics of the domain's air (APICSolverParams::fog_*):
+    // kg/m^3 autoconversion onset, 1/s rate, kg/m^3 hard ceiling.
+    float fog_autoconversion_kg_m3 = 1.0e-3f;
+    float fog_autoconversion_rate = 1.0e-3f;
+    float fog_ceiling_kg_m3 = 5.0e-3f;
     // The temperature parcels cool toward and are born at (domain override or
     // world ambient), resolved — so a script need not repeat that rule.
     float thermal_ambient_kelvin = 293.0f;
@@ -4520,7 +4557,22 @@ struct FluidDomainInfo {
     // Cold enough to set but touching no support. Non-zero with zero frozen is
     // the reading for "the wax touches nothing it can set against".
     uint64_t thermal_cold_unsupported = 0;
+    // Fusion latent heat: parcels part solid/part liquid, held at their melt
+    // point, and the latent heat freezing released / melting absorbed.
+    uint64_t thermal_mushy_particles = 0;
+    double   thermal_fusion_released_j = 0.0;
+    double   thermal_fusion_absorbed_j = 0.0;
     uint64_t thermal_air_cooled_particles = 0;
+    uint64_t thermal_field_heated_particles = 0;  // inside a Thermal force field
+    uint64_t thermal_convecting_particles = 0;  // Boussinesq kick this step
+    uint64_t thermal_conducting_cells = 0;        // liquid cells in the conduction pass
+    uint64_t thermal_gas_exchange_particles = 0; // surface parcels trading heat with gas
+    double   thermal_heat_to_gas_j = 0.0;        // net liquid -> gas heat this step
+    double   thermal_evaporated_kg = 0.0;        // below-boiling evaporation this step
+    double   thermal_condensed_kg = 0.0;         // vapour condensed onto the surface this step
+    uint64_t thermal_condensation_splits = 0;    // parcels grown past 2x mass and split
+    uint64_t thermal_solid_contact_particles = 0; // parcels trading heat with MSF surfaces
+    double   thermal_heat_to_solid_j = 0.0;        // net liquid -> surfaces this step
     uint64_t thermal_contact_cooled_particles = 0;
     float    thermal_min_kelvin = 0.0f;
     float    thermal_mean_kelvin = 0.0f;
@@ -4576,6 +4628,9 @@ struct FluidThermalPatch {
     std::optional<bool>  enabled;
     std::optional<float> air_cooling_rate;       // 1/s
     std::optional<float> contact_cooling_rate;   // 1/s
+    std::optional<float> fog_autoconversion_kg_m3;   // 0..1000 kg/m^3
+    std::optional<float> fog_autoconversion_rate;    // 0..100 1/s
+    std::optional<float> fog_ceiling_kg_m3;          // 0..1000 kg/m^3
     // The freeze point (melt_kelvin), the near-freeze viscosity curve and parcel
     // conduction are the default substance's: edit them with substance.set.
 };
@@ -4719,6 +4774,11 @@ struct SimulationFlowSourceInfo {
     // `temperature` above, which is the gas solver's normalised unit.
     bool  fluid_temperature_override = false;
     float fluid_temperature_kelvin = 353.0f;
+    // Read-only: the Kelvin particles are actually born at, and whether a
+    // meltable solid (Snow, Ice) was lowered under its melt point because the
+    // ambient is warmer (Fluid::substanceAmbientBirthKelvin).
+    float fluid_birth_kelvin = 0.0f;
+    bool  fluid_born_solid = false;
     // Wet-at-birth fraction of the grain substance's water capacity (0..1).
     float grain_birth_saturation = 0.0f;
     bool use_time_limit = false;
@@ -4938,6 +4998,9 @@ struct WhitewaterStats {
     uint64_t alive = 0, spray = 0, foam = 0, bubble = 0, spawned = 0;
     float    gen_ms = 0.0f, advect_ms = 0.0f;
     bool     crit_on_gpu = false, neigh_on_gpu = false;
+    bool     inputs_current = false, overflow_fallback = false;
+    uint64_t bin_cells = 0, bin_bytes = 0;
+    float    input_ms = 0.0f;
     // Resolved view per type ("sdf" | "splat" | "fog" | "hidden"): the answer
     // of the label routes, not live content.
     std::string spray_view, foam_view, bubble_view;
@@ -5010,6 +5073,12 @@ struct MaterialFieldInfo {
     float mass_budget_overflow = 0.0f;
     float mass_negative = 0.0f;
     uint32_t mass_invalid_elements = 0u;
+    // Element temperature (Kelvin) from the last host readback; valid=false
+    // until one has landed, so a missing copy never reads as "293 K".
+    bool temperature_valid = false;
+    float mean_kelvin = 0.0f;
+    float min_kelvin = 0.0f;
+    float max_kelvin = 0.0f;
     std::vector<std::string> semantics;
 };
 
@@ -5061,7 +5130,10 @@ Result listFluidDomains(std::vector<FluidDomainInfo>& out_domains);
 Result seedFluidParticles(const std::string& domain_id_or_name,
                            const Vec3* seed_min, const Vec3* seed_max,
                            int particles_per_cell = 4, bool replace = true,
-                           bool persistent = false);
+                           bool persistent = false, float fill_level = -1.0f);
+// fill_level >= 0: Fill Domain (resting tank up to that fraction of the domain
+// height, a persistent FillLevel recipe; seed_min/max ignored). Seeded parcels
+// are the domain's Default Substance in either mode.
 Result clearFluidParticles(const std::string& domain_id_or_name,
                            bool clear_seed_recipe = false);
 // Assign by material NAME so scripts never depend on unstable registry ids.

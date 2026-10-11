@@ -1,0 +1,89 @@
+{
+  "samples": [
+    {
+      "step": 200,
+      "contact": 2599,
+      "heat_to_solid_j": -16.988886015591984,
+      "max_kelvin": 293.00848388671875,
+      "field_heated": 0
+    },
+    {
+      "step": 250,
+      "contact": 2324,
+      "heat_to_solid_j": -5.0487453277897085,
+      "max_kelvin": 293.0145568847656,
+      "field_heated": 0
+    },
+    {
+      "step": 300,
+      "contact": 2343,
+      "heat_to_solid_j": -3.434394662128734,
+      "max_kelvin": 293.02294921875,
+      "field_heated": 0
+    },
+    {
+      "step": 350,
+      "contact": 2302,
+      "heat_to_solid_j": -2.509687793760033,
+      "max_kelvin": 293.0260314941406,
+      "field_heated": 0
+    },
+    {
+      "step": 400,
+      "contact": 2300,
+      "heat_to_solid_j": -1.895490594402761,
+      "max_kelvin": 293.0284729003906,
+      "field_heated": 0
+    },
+    {
+      "step": 450,
+      "contact": 2307,
+      "heat_to_solid_j": -1.3346109830622797,
+      "max_kelvin": 293.02880859375,
+      "field_heated": 0
+    }
+  ],
+  "shell_before_fill": {
+    "centers_dirty": false,
+    "content_generation": 13,
+    "domain": "surface_uv",
+    "element_count": 99072,
+    "initial_mass": 17.007843017578125,
+    "mask_resolution": 128,
+    "mass_budget_overflow": 0.0,
+    "mass_conservation_error": 0.0,
+    "mass_invalid_elements": 0,
+    "mass_loss": 0.0,
+    "mass_negative": 0.0,
+    "max_kelvin": 371.9931640625,
+    "mean_integrity": 1.0,
+    "mean_kelvin": 335.6138916015625,
+    "min_kelvin": 299.2346496582031,
+    "minimum_integrity": 1.0,
+    "molten_reservoir_mass": 0.0,
+    "object_key": "T_ContactCube",
+    "pyrolyzed_mass": 0.0,
+    "semantics": [
+      "temperature",
+      "moisture",
+      "fuel_remaining",
+      "char",
+      "melt",
+      "mass_loss",
+      "integrity"
+    ],
+    "solid_mass": 17.007843017578125,
+    "substance": "Iron",
+    "temperature_valid": true,
+    "topology_generation": 2,
+    "transferred_mass": 0.0
+  },
+  "verdicts": {
+    "shell_hot_before_fill": true,
+    "liquid_touches_shell": true,
+    "field_misses_water": true,
+    "heat_flows_solid_to_liquid": true,
+    "shell_is_a_body": false,
+    "water_warms_through_cube": false
+  }
+}

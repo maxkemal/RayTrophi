@@ -405,9 +405,11 @@ struct LogEntry {
 };
 
 // Makrolar
-#define SCENE_LOG_INFO(msg) g_sceneLog.add(msg, LogLevel::Info)
-#define SCENE_LOG_WARN(msg) g_sceneLog.add(msg, LogLevel::Warning)
-#define SCENE_LOG_ERROR(msg) g_sceneLog.add(msg, LogLevel::Error)
+void sceneLogMessage(const std::string& msg, LogLevel level);
+void disableSceneLoggingForShutdown();
+#define SCENE_LOG_INFO(msg) sceneLogMessage(msg, LogLevel::Info)
+#define SCENE_LOG_WARN(msg) sceneLogMessage(msg, LogLevel::Warning)
+#define SCENE_LOG_ERROR(msg) sceneLogMessage(msg, LogLevel::Error)
 
 // ★ Edge-triggered diagnostic. Reports only when the state recorded under `key`
 // CHANGES, so a gate evaluated every frame can say "I started dropping this" and
@@ -434,6 +436,7 @@ public:
     }
 
     ~UILogger() {
+        disableSceneLoggingForShutdown();
         if (logFile.is_open()) {
             logFile.flush();
             logFile.close();

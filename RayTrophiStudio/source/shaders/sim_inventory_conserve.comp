@@ -1,0 +1,74 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Constants {
+    uint cells;
+    uint blocks;
+    uint closed;
+    uint phase;
+} pc;
+layout(set = 0, binding = 0) readonly buffer MassBefore { float mass_before[]; };
+layout(set = 0, binding = 1) buffer MassAfter { float mass_after[]; };
+layout(set = 0, binding = 2) readonly buffer EnergyBefore { float energy_before[]; };
+layout(set = 0, binding = 3) buffer EnergyAfter { float energy_after[]; };
+layout(set = 0, binding = 4) buffer Partials { dvec4 partials[]; };
+layout(set = 0, binding = 5) buffer Totals { dvec4 totals; };
+shared dvec4 sums[256];
+
+float clean(float value) {
+    return isnan(value) || isinf(value) ? 0.0 : max(value, 0.0);
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint block_id = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (pc.phase == 0u && block_id >= pc.blocks) {
+        return;
+    }
+    uint id = gl_GlobalInvocationID.x +
+        gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (pc.phase == 2u) {
+        if (id >= pc.cells) {
+            return;
+        }
+        double mass_scale = totals.y > 0.0 && (pc.closed != 0u || totals.y > totals.x)
+            ? totals.x / totals.y : 1.0;
+        double energy_scale = totals.w > 0.0 && (pc.closed != 0u || totals.w > totals.z)
+            ? totals.z / totals.w : 1.0;
+        // A thin parcel can be missed by every backtrace. Closed/periodic
+        // domains may not destroy its inventory when normalization has no
+        // denominator: retain the previous spatial field for this one step.
+        mass_after[id] = pc.closed != 0u && totals.x > 0.0 && totals.y <= 0.0
+            ? clean(mass_before[id])
+            : float(double(clean(mass_after[id])) * mass_scale);
+        energy_after[id] = pc.closed != 0u && totals.z > 0.0 && totals.w <= 0.0
+            ? clean(energy_before[id])
+            : float(double(clean(energy_after[id])) * energy_scale);
+        return;
+    }
+    dvec4 value = dvec4(0.0);
+    if (pc.phase == 0u && id < pc.cells) {
+        mass_after[id] = clean(mass_after[id]);
+        energy_after[id] = clean(energy_after[id]);
+        value = dvec4(mass_before[id], mass_after[id], energy_before[id], energy_after[id]);
+    } else if (pc.phase == 1u) {
+        for (uint block = lane; block < pc.blocks; block += 256u) {
+            value += partials[block];
+        }
+    }
+    sums[lane] = value;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            sums[lane] += sums[lane + stride];
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        if (pc.phase == 0u) {
+            partials[block_id] = sums[0];
+        } else {
+            totals = sums[0];
+        }
+    }
+}

@@ -8,8 +8,9 @@
 // the solid-phase overlay is built, in this order:
 //
 //   coolThermalLiquid      surface/contact parcels lose heat (Newton)
-//   updateThermalFreeze    parcels below the freeze point solidify where
-//                          supported, frozen parcels above it melt
+//   updateThermalFreeze    fusion: parcels below their melt point solidify
+//                          (where nucleated), solid parcels above it melt,
+//                          and either way the latent heat is paid
 //   buildThermalViscosityField   ν(T) per cell, handed to the viscous solve
 //
 // Conduction between parcels is NOT here: diffuseParticleTemperature already
@@ -31,6 +32,7 @@
 #include "APICFluidSolver.h"
 #include "FluidParticles.h"
 #include "../FluidGrid.h"
+#include "../MaterialStateField.h"
 #include <cstddef>
 #include <vector>
 
@@ -50,8 +52,23 @@ struct ThermalLiquidStats {
     // "the wax is cold enough but touches nothing": a missing collider, or a
     // collider the fluid does not collide with.
     std::size_t cold_unsupported = 0;
+    // Parcels part solid, part liquid (0 < fusion_solid_fraction < 1): held
+    // at their melt point while the latent heat crosses.
+    std::size_t mushy_particles = 0;
+    double      fusion_released_j = 0.0;   // latent heat freezing gave back this step
+    double      fusion_absorbed_j = 0.0;   // latent heat melting consumed this step
     std::size_t air_cooled_particles = 0;      // in a surface cell this frame
     std::size_t contact_cooled_particles = 0;  // touching a collider/closed wall
+    std::size_t field_heated_particles = 0;    // inside a Thermal force field
+    std::size_t convecting_particles = 0;      // got a Boussinesq kick this step
+    std::size_t conducting_cells = 0;          // liquid cells in the conduction pass
+    std::size_t gas_exchange_particles = 0;    // surface parcels trading heat with gas
+    double      heat_to_gas_j = 0.0;           // net heat liquid -> gas this step
+    double      evaporated_kg = 0.0;           // below-boiling evaporation this step
+    double      condensed_kg = 0.0;            // vapour condensed onto surface parcels this step
+    std::size_t condensation_splits = 0;       // parcels grown past 2x canonical mass and split
+    std::size_t solid_contact_particles = 0;   // parcels trading heat with a surface (MSF)
+    double      heat_to_solid_j = 0.0;         // net heat liquid -> surfaces this step
     float       min_kelvin = 0.0f;
     float       mean_kelvin = 0.0f;
     float       max_kelvin = 0.0f;
@@ -66,6 +83,13 @@ struct ThermalLiquidStats {
 // a collider or a CLOSED domain wall at thermal_contact_cooling_rate. Both
 // apply when both hold. Exponential form: stable at any dt, never overshoots.
 // Runs for granular domains too (a molten plastic re-stiffens as it cools).
+// `heat_sources` (Thermal force fields, the same list and the same
+// thermalSourceWeight() MSF uses, so one field heats a mesh and the snow on it
+// alike) stack on top of the ambient: every parcel inside a field relaxes toward that local temperature at
+// thermal_contact_cooling_rate, surface or not. Fields act even with the
+// thermal-liquid chain off: a placed heat source is an explicit request, and
+// before 2026-10-09 a Thermal field next to Snow did nothing at all. With the
+// chain off only parcels inside a field change.
 // Reads grid.solid, so call it AFTER the collider voxelize and BEFORE the
 // solid-phase overlay is stamped (the overlay is not a cold surface).
 void coolThermalLiquid(FluidParticles& particles,
@@ -73,18 +97,86 @@ void coolThermalLiquid(FluidParticles& particles,
                        const APICSolverParams& params,
                        float ambient_kelvin,
                        float dt,
-                       ThermalLiquidStats& stats);
+                       ThermalLiquidStats& stats,
+                       const std::vector<MaterialStateFieldSystem::ThermalSource>*
+                           heat_sources = nullptr,
+                       bool air_through_gas = false,
+                       const std::vector<float>* solid_capacity = nullptr);
 
-// Freeze / melt transitions and pinning. Liquid domains only: a granular
-// domain (or a disabled chain) has every frozen flag cleared instead, so
-// switching the feature off can never leave invisible pinned parcels behind.
-// Melting uses a small hysteresis above the freeze point so a parcel sitting
-// on the threshold does not flicker between solid and liquid every frame —
-// each flip would be a step change in grid.solid and a kick to the liquid.
+// Liquid <-> collider surface (MSF shell) contact, per substance, energy
+// conserved: a parcel whose cell or face neighbour holds shell capacity
+// (solid_capacity, J/K, from MaterialStateFieldSystem::gatherThermalContact)
+// relaxes with that shell toward the shared equilibrium through a contact film
+// of 500 W/(m^2 K) (liquid on a solid surface, natural convection) over its
+// share of one cell face. solid_kelvin is updated in place as parcels draw on
+// it; the heat each shell cell gained goes to solid_heat_j for
+// depositThermalContactHeat. Such contacts are NOT also relaxed toward the
+// ambient in coolThermalLiquid (pass the same solid_capacity there).
+void exchangeLiquidSolidContact(FluidParticles& particles,
+                                const FluidSim::FluidGrid& grid,
+                                const APICSolverParams& params,
+                                float dt,
+                                const std::vector<float>& solid_capacity,
+                                std::vector<float>& solid_kelvin,
+                                std::vector<float>& solid_heat_j,
+                                ThermalLiquidStats& stats);
+
+// Heat capacity of one parcel, J/K: its current mass times its OWN substance's
+// specific heat. Mass is rest_mass_kg * mass_fraction when known, else the
+// substance's liquid density times the parcel's share of a cell.
+double parcelHeatCapacity(const FluidParticles& particles, std::size_t p,
+                          const SubstanceProfile& profile, float voxel_size,
+                          int particles_per_cell);
+
+// Fourier conduction between neighbouring liquid cells. Each cell gathers its
+// parcels' heat capacity (m*c, per substance) and energy; the flux across a
+// face is k_face * A * (T_a - T_b) / h with k_face the harmonic mean of the two
+// cells' capacity-weighted conductivities, integrated implicitly per face pair
+// so it never overshoots. Parcels receive their cell's temperature CHANGE
+// (FLIP-style), keeping their own deviation. Energy is conserved exactly.
+// Water at 0.1 m voxels conducts slowly - that is the physics; convection does
+// the mixing.
+void conductThermalLiquid(FluidParticles& particles,
+                          const FluidSim::FluidGrid& grid,
+                          const APICSolverParams& params,
+                          float dt,
+                          ThermalLiquidStats& stats);
+
+// Natural convection (Boussinesq): every fluid-model, unfrozen parcel whose
+// substance has thermal_expansion_per_k > 0 gets dv = -g * beta * (T - Tmean) * dt,
+// Tmean being the mass-free mean temperature of those parcels. Relative to the
+// mean, so the body as a whole is not lifted; warm parcels rise, cold sink.
+// Runs whenever temperatures differ (thermal chain or a heat field), on the
+// HOST velocities: the caller re-uploads them like the frozen-pin path.
+// Returns the number of parcels kicked.
+std::size_t applyThermalConvection(FluidParticles& particles,
+                                   const APICSolverParams& params,
+                                   float dt,
+                                   ThermalLiquidStats& stats);
+
+// Fusion (melting/freezing) with its latent heat, per parcel and per
+// substance (melt_kelvin, latent_heat_fusion, specific_heat).
+// fusion_solid_fraction F is the parcel's solid share. Above the melt point
+// the superheat melts dF = min(F, c (T - Tm) / L) and the parcel holds at Tm;
+// below it the undercooling freezes the same way. So 1 kg of ice at 0 C takes
+// 334 kJ to become water, and a pond does not freeze the moment it touches
+// 0 C. L = 0 (no data) keeps the old free switch at Tm.
+// State follows the majority phase (F >= kFusionSolidThreshold):
+//  * a meltable liquid (Water, Wax) is FROZEN - pinned, stamped into the
+//    solid mask. Freezing needs a nucleus (support below, or crystals already
+//    in the parcel); without one it supercools (cold_unsupported).
+//  * a skeleton carrier (Snow, Ice) changes constitutive model at the next
+//    refreshMatterConstitutiveModels; it never uses the frozen flag.
+// With the chain off and no heat field, liquid parcels are unfrozen and
+// fused back to liquid, so the switch never leaves pinned parcels behind.
+// The half-parcel of latent heat between the two state switches is what keeps
+// a parcel at the threshold from flickering in grid.solid.
 void updateThermalFreeze(FluidParticles& particles,
                          const FluidSim::FluidGrid& grid,
                          const APICSolverParams& params,
-                         ThermalLiquidStats& stats);
+                         ThermalLiquidStats& stats,
+                         bool heat_fields_present = false,
+                         std::vector<float>* solid_change = nullptr);
 
 // Cell-centred ν(T): evaluate each parcel's substance curve using its own
 // melt point, hot/cold viscosity and temperature, then gather with trilinear

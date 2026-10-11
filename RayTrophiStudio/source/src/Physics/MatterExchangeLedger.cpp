@@ -16,6 +16,8 @@ const char* matterExchangeKindName(MatterExchangeKind kind) {
         case MatterExchangeKind::Condensation: return "condensation";
         case MatterExchangeKind::Absorption: return "absorption";
         case MatterExchangeKind::Drainage: return "drainage";
+        case MatterExchangeKind::Precipitation: return "precipitation";
+        case MatterExchangeKind::Autoconversion: return "autoconversion";
     }
     return "unknown";
 }

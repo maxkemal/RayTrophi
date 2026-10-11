@@ -10,6 +10,7 @@
  */
 
 #include "Fluid/FluidFoam.h"
+#include "Fluid/WhitewaterRuntime.h"
 
 #include <algorithm>
 #include <chrono>
@@ -46,7 +47,8 @@ void stepFoam(const FluidParticles& fluid,
               uint32_t seed,
               FoamStats* stats,
               const float* precomputed_expected,
-              const uint32_t* precomputed_neighbours)
+              const uint32_t* precomputed_neighbours,
+              const APICSolverParams* source_params)
 {
     using clock = std::chrono::steady_clock;
     if (stats) *stats = FoamStats{};
@@ -98,8 +100,11 @@ void stepFoam(const FluidParticles& fluid,
     // precomputed from the device there is nothing left to look up, so building it
     // would be 1.33 ms of pure waste — the GPU built its own bucket grid to produce
     // them. Any single consumer still on the host keeps it alive.
-    const bool bin_needed = (precomputed_neighbours == nullptr) ||
-                            (precomputed_expected == nullptr);
+    const bool generation_requested = params.trapped_air_rate > 0.0f ||
+        params.wave_crest_rate > 0.0f;
+    const bool bin_needed = fluid_count > 0 &&
+        ((!foam.empty() && precomputed_neighbours == nullptr) ||
+         (generation_requested && params.max_foam > 0 && precomputed_expected == nullptr));
 
     const auto t_bin0 = clock::now();
     if (bin_needed) {
@@ -109,6 +114,7 @@ void stepFoam(const FluidParticles& fluid,
         else std::fill(cell_count_per.begin(), cell_count_per.begin() + cell_count, 0);
 
         for (std::size_t p = 0; p < fluid_count; ++p) {
+            if (!isWhitewaterFluidParcel(fluid, p, source_params)) continue;
             const Vec3& wp = fluid.position[p];
             if (!std::isfinite(wp.x) || !std::isfinite(wp.y) || !std::isfinite(wp.z)) continue;
             const Vec3 local = (wp - origin) * inv_h;
@@ -138,6 +144,7 @@ void stepFoam(const FluidParticles& fluid,
 
     // Count fluid neighbours of a world point (submersion test for foam).
     auto countFluidNeighbours = [&](const Vec3& x) -> int {
+        if (fluid_count == 0) return 0;
         const Vec3 lp = (x - origin) * inv_h;
         const int ci = static_cast<int>(std::floor(lp.x));
         const int cj = static_cast<int>(std::floor(lp.y));
@@ -325,7 +332,7 @@ void stepFoam(const FluidParticles& fluid,
 
     // ── 3. Generation potentials (Ihmsen) per fluid particle ────────────────
     const auto t_gen0 = clock::now();
-    if (fluid_count > 0 && (params.trapped_air_rate > 0.0f || params.wave_crest_rate > 0.0f)) {
+    if (fluid_count > 0 && foam.size() < params.max_foam && generation_requested) {
         static std::vector<float> expected;     // expected spawn count per particle
         if (expected.size() < fluid_count) expected.resize(fluid_count);
 
@@ -427,6 +434,7 @@ void stepFoam(const FluidParticles& fluid,
         const float jit = params.spawn_jitter_voxels * voxel;
         std::size_t spawned = 0;
         for (std::size_t pi = 0; pi < fluid_count; ++pi) {
+            if (!isWhitewaterFluidParcel(fluid, pi, source_params)) continue;
             float e = expected_src[pi];
             if (e <= 0.0f) continue;
             if (foam.size() >= params.max_foam) break;

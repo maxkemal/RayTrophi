@@ -1,5 +1,7 @@
 #include "Fluid/FluidCombustionExchange.h"
 #include "Fluid/FluidDomainSubstance.h"
+#include "Fluid/GasInventoryGpu.h"
+#include "Fluid/GasPhaseMomentum.h"
 
 #include "Fluid/FluidPhysicalMass.h"
 #include "Fluid/SubstanceTag.h"
@@ -98,8 +100,7 @@ FluidCombustionExchangeStats transferFluidCombustionToGas(
         !(gas.voxel_size > 1.0e-6f)) {
         return stats;
     }
-    gas_state.gas_phase_mass_kg.resize(cell_count, 0.0f);
-    gas_state.gas_phase_energy_j.resize(cell_count, 0.0f);
+    prepareGasInventoryHostProducer(gas_state);
     stats.ran = true;
 
     const float ignition = std::max(0.0f, fluid_domain.fluid_ignition_temperature);
@@ -208,9 +209,9 @@ FluidCombustionExchangeStats transferFluidCombustionToGas(
         gas.temperature[cell] += tracer * visual_heat;
         gas.density[cell] += tracer * visual_smoke;
         gas.interaction[cell] += tracer;
-        gas_state.gas_phase_mass_kg[cell] += mass_kg;
-        gas_state.gas_phase_energy_j[cell] +=
-            static_cast<float>(sensible_energy + latent_energy);
+        depositGasInventory(gas_state, cell, mass_kg,
+                            static_cast<float>(sensible_energy + latent_energy));
+        queueGasPhaseMomentum(gas_state, cell, mass_kg, particles.velocity[particle] * mass_kg);
 
         const std::string substance = profile ? profile->name : "Custom";
         ExchangeAccumulation& exchange = exchanges[substance];
@@ -222,11 +223,18 @@ FluidCombustionExchangeStats transferFluidCombustionToGas(
         stats.transferred_mass_kg += mass_kg;
         stats.transferred_energy_j += sensible_energy + latent_energy;
 
-        if (particle < particles.temperature.size()) {
-            particles.temperature[particle] = std::min(
-                particles.temperature[particle] + visual_heat * 100.0f *
-                    lost_fraction,
-                ambient_kelvin + 1500.0f);
+        // The evaporated fuel's latent heat comes out of the parcel (a pool
+        // fire's surface is cooled by its own evaporation). The flame's heat
+        // returns physically through exchangeLiquidGasSurface (hot gas above
+        // the surface); the old `+visual_heat*100*lost` bump was a look, not
+        // an energy.
+        if (particle < particles.temperature.size() && after > 0.0f) {
+            const double remaining_cap = static_cast<double>(particles.rest_mass_kg[particle]) *
+                after * specific_heat;
+            if (remaining_cap > 0.0) {
+                particles.temperature[particle] = static_cast<float>(std::max(
+                    1.0, particles.temperature[particle] - latent_energy / remaining_cap));
+            }
         }
         if (after <= 0.0f) {
             particles.removeSwap(particle);

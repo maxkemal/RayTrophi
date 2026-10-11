@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -33,6 +33,7 @@
 
 // Forward declarations
 class Transform;
+class Matrix4x4;
 
 namespace Physics {
 
@@ -349,7 +350,7 @@ public:
      * that reads as turbulent wind gusts on the liquid surface.
      */
     Vec3 sampleCurlDetail(const Vec3& world_pos, float time) const;
-
+    Matrix4x4 worldToLocalMatrix() const;
 private:
     // Internal evaluation functions for each type
     Vec3 evaluateWind(const Vec3& local_pos, float time) const;
@@ -365,6 +366,8 @@ private:
     
     // Transform world position to local space
     Vec3 worldToLocal(const Vec3& world_pos) const;
+    // The inverse of the field transform (row-major, transform_point form).
+   
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════

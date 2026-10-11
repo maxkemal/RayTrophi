@@ -27,6 +27,7 @@
 #include "Fluid/MatterConstitutive.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -250,6 +251,15 @@ struct SubstanceProfile {
     bool  meltable           = false;
     float melt_kelvin        = 1811.0f;
     float boiling_kelvin     = 3134.0f;
+    // Molar mass of the vapour (kg/mol). Sizes the steam a boiling liquid puts
+    // into the gas phase (ideal gas at 1 atm); 0 = unknown, the vapour is then
+    // sized as liquid volume like mist.
+    float vapor_molar_mass_kg_mol = 0.0f;
+    // Volumetric thermal expansion of the LIQUID phase (1/K). Drives natural
+    // convection (Boussinesq): a parcel warmer than the liquid's mean is
+    // lighter and rises, so heat entering at a wall or a field reaches the
+    // whole body. 0 = no convection.
+    float thermal_expansion_per_k = 0.0f;
     float latent_heat_fusion = 2.7e5f;   // J/kg
     float melt_viscosity     = 0.5f;     // 0 = runs like water, 1 = barely flows
 
@@ -679,6 +689,13 @@ public:
 
     ComputeBufferHandle gpu_centers;
     ComputeBufferHandle gpu_state;
+    // Heat a liquid put into (or took out of) each element since the last
+    // ambient pass, as a NORMALIZED temperature delta. Added on the device by
+    // sim_msf_ambient (binding 4), so the device-authoritative state is never
+    // overwritten by a lagged host copy. Cleared after upload.
+    std::vector<float> heat_input;
+    ComputeBufferHandle gpu_heat_input;
+    bool heat_input_pending = false;
 
     // Grow-only device buffers: the allocation may be larger than the current
     // element count after a mesh shrinks. Every upload/dispatch MUST be sized by
@@ -687,6 +704,12 @@ public:
     std::size_t elementCount() const { return centers.size() / 4u; }
 
     bool centers_dirty = true;  // world positions changed (moving/animated object)
+    // Body depth behind each surface element for contact heat (m). syncField
+    // sets it from the mesh: volume/area for a closed mesh (sum over elements
+    // = the body's real heat capacity), capped at the Biot = 1 depth
+    // k / h_film so an insulator only gives the layer that can follow its
+    // surface; an open mesh is a 1 mm sheet. See thermalContactDepth().
+    float thermal_depth_m = 0.001f;
     bool state_dirty = false;   // host reset must replace the device-authoritative state
     // ★ Set by refreshHostState, cleared the moment a dispatch makes the device
     // copy authoritative again. Without it the molten debit path issued a SECOND
@@ -804,14 +827,24 @@ public:
     // Thermal force fields — MaterialStateField deliberately does not know what a
     // Physics::ForceField is, so the layering stays one-directional.
     //
-    // 32 bytes, two vec4 in std430. Keep in lockstep with sim_msf_ambient.comp.
+    // 96 bytes, six vec4 in std430. Keep in lockstep with sim_msf_ambient.comp.
+    // Every field is a FLOAT because the shader reads floats: falloff_type and
+    // infinite used to be ints uploaded raw, so int(b.z) read the bit pattern
+    // of 2 as ~3e-45 -> 0 (no falloff) and `infinite` was never seen.
+    // The shape is honoured in the field's local frame (to_local), the same
+    // zone the force evaluator uses: Box = Chebyshev distance, Cylinder =
+    // max(radial, |y|), Cone = inside the cone. Matter parcels use the same
+    // POD and thermalSourceWeight() (FluidThermalLiquid).
     struct ThermalSource {
         float position[3] = {0.0f, 0.0f, 0.0f};
         float inner_radius = 0.0f;
         float falloff_radius = 5.0f;
         float delta_kelvin = 0.0f;   // added on top of ambient at full strength
-        int   falloff_type = 2;      // Physics::FalloffType
-        int   infinite = 0;          // 1 = no falloff, affects everywhere
+        float falloff_type = 2.0f;   // Physics::FalloffType
+        float infinite = 0.0f;       // 1 = no falloff, affects everywhere
+        float to_local[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};  // rows 0..2
+        float shape = 0.0f;          // 0 sphere, 1 box, 2 cylinder, 3 cone
+        float pad[3] = {0.0f, 0.0f, 0.0f};
     };
 
     // A domain's ambient override, as a world-space AABB. Element-granular on
@@ -861,6 +894,38 @@ public:
     // when something actually wants to look (stats panel / debug view) — never
     // per frame by default.
     void requestReadback() { readback_requested_ = true; }
+
+    // ── Liquid <-> surface contact heat (host, sim layer) ─────────────────────
+    // An element stands for area * field.thermal_depth_m of the body, so its
+    // heat capacity is area * depth * density * c of the field's substance.
+    // A hollow 1 mm shell (the old fixed depth) made a solid iron block
+    // dropped in water warm a tonne of it by 0.04 K instead of ~8 K.
+    // gatherThermalContact bins the elements' heat capacity (J/K) and
+    // temperature (K, capacity-weighted) into a grid; it reads the HOST state,
+    // which is one readback behind (the caller requests a readback each frame
+    // while coupling is live). Cells without elements get capacity 0.
+    // depositThermalContactHeat hands heat back: every element of a cell gets
+    // the same temperature change, cell_heat_j / cell_capacity, queued for the
+    // next ambient pass. Energy: what the liquid lost, the shell gained.
+    static constexpr float kMsfOpenShellMeters = 0.001f;
+    // Liquid film on a solid, W/(m^2 K); exchangeLiquidSolidContact uses it too.
+    static constexpr float kMsfContactFilmWm2K = 500.0f;
+    static float thermalContactDepth(float volume_m3, float area_m2, bool closed,
+                                     float conductivity) {
+        const float biot_depth = conductivity > 0.0f
+            ? conductivity / kMsfContactFilmWm2K : kMsfOpenShellMeters;
+        const float body = closed && area_m2 > 0.0f && volume_m3 > 0.0f
+            ? volume_m3 / area_m2 : kMsfOpenShellMeters;
+        return std::max(1e-4f, std::min(body, biot_depth));
+    }
+    bool gatherThermalContact(const Vec3& origin, float voxel, int nx, int ny, int nz,
+                              const MaterialTemperatureScale& scale,
+                              std::vector<float>& cell_capacity,
+                              std::vector<float>& cell_kelvin) const;
+    void depositThermalContactHeat(const Vec3& origin, float voxel, int nx, int ny, int nz,
+                                   const MaterialTemperatureScale& scale,
+                                   const std::vector<float>& cell_capacity,
+                                   const std::vector<float>& cell_heat_j);
     bool readbackPending() const { return readback_requested_; }
     // Called once per frame AFTER every domain has stepped. It used to live at
     // the end of step(), which meant a two-domain scene stalled the pipeline
@@ -1003,5 +1068,51 @@ private:
     // mask is quantized in absolute units rather than guessed at render time.
     MaterialTemperatureScale readback_scale_;
 };
+
+static_assert(sizeof(MaterialStateFieldSystem::ThermalSource) == 96,
+              "ThermalSource is six vec4 in sim_msf_ambient.comp");
+
+// Mirrors falloffAt() in sim_msf_ambient.comp and ForceField::calculateFalloff.
+inline float thermalSourceFalloff(float dist, float inner, float outer, int mode) {
+    if (dist <= inner) return 1.0f;
+    if (dist >= outer) return 0.0f;
+    const float span = std::max(outer - inner, 1e-5f);
+    const float t = (dist - inner) / span;
+    switch (mode) {
+    case 0: return 1.0f;                                    // None
+    case 1: return 1.0f - t;                                // Linear
+    case 2: return 1.0f - t * t * (3.0f - 2.0f * t);        // Smooth
+    case 3: return std::sqrt(std::max(0.0f, 1.0f - t * t)); // Sphere
+    case 4: {                                               // InverseSquare
+        const float r = std::max(inner + t * span, 0.01f);
+        const float ref = std::max(inner, 0.01f);
+        return (ref * ref) / (r * r);
+    }
+    case 5: return std::exp(-3.0f * t);                     // Exponential
+    default: return 1.0f - t;                               // Custom -> linear
+    }
+}
+
+// Weight in [0,1] of a heat source at a world point; mirrors the shader.
+inline float thermalSourceWeight(const MaterialStateFieldSystem::ThermalSource& s,
+                                 float wx, float wy, float wz) {
+    if (s.infinite > 0.5f) return 1.0f;
+    const float* m = s.to_local;
+    const float x = m[0] * wx + m[1] * wy + m[2] * wz + m[3];
+    const float y = m[4] * wx + m[5] * wy + m[6] * wz + m[7];
+    const float z = m[8] * wx + m[9] * wy + m[10] * wz + m[11];
+    const int shape = static_cast<int>(s.shape + 0.5f);
+    float dist = std::sqrt(x * x + y * y + z * z);
+    if (shape == 1) {
+        dist = std::max(std::fabs(x), std::max(std::fabs(y), std::fabs(z)));
+    } else if (shape == 2) {
+        dist = std::max(std::sqrt(x * x + z * z), std::fabs(y));
+    } else if (shape == 3 &&
+               (y < 0.0f || y > s.falloff_radius || std::sqrt(x * x + z * z) > y)) {
+        return 0.0f;
+    }
+    return thermalSourceFalloff(dist, s.inner_radius, s.falloff_radius,
+                                static_cast<int>(s.falloff_type + 0.5f));
+}
 
 } // namespace RayTrophiSim

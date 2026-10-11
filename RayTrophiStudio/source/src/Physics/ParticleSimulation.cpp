@@ -18,6 +18,10 @@
 #include "Fluid/FluidParticleLabelsGpu.h"
 #include "Fluid/FluidMistCoupling.h"
 #include "Fluid/FluidMistPhaseExchange.h"
+#include "Fluid/GasSurfaceExchangeGpu.h"
+#include "Fluid/GasSaturation.h"
+#include "Fluid/WhitewaterRuntime.h"
+#include "Fluid/GasPhaseMomentum.h"
 #include "Fluid/FluidCombustionExchange.h"
 #include "Fluid/FluidPhysicalMass.h"
 #include "Fluid/FluidGasMovingBoundary.h"
@@ -53,6 +57,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 
 #ifdef OPENVDB_ENABLED
@@ -73,6 +78,41 @@ std::atomic<uint64_t> g_next_emitter_timeline_uid{1};
 
 float elapsedMilliseconds(SimulationClock::time_point start, SimulationClock::time_point end) {
     return std::chrono::duration<float, std::milli>(end - start).count();
+}
+
+// Thermal force fields as heat sources, built once for both consumers: MSF
+// (meshes) and matter parcels (coolThermalLiquid). The field's local frame
+// travels with each source, so Box/Cylinder/Cone heat follows the shape the
+// force evaluator uses instead of falling back to a sphere.
+void collectThermalSources(
+    const SimulationForceFieldSnapshot* snapshot,
+    std::vector<MaterialStateFieldSystem::ThermalSource>& out) {
+    out.clear();
+    if (!snapshot) return;
+    for (const Physics::ForceField* field : snapshot->activeFields()) {
+        if (!field || field->type != Physics::ForceFieldType::Thermal) continue;
+        if (!(std::fabs(field->thermal_delta_kelvin) > 1e-3f)) continue;
+        MaterialStateFieldSystem::ThermalSource src;
+        src.position[0] = field->position.x;
+        src.position[1] = field->position.y;
+        src.position[2] = field->position.z;
+        src.inner_radius = std::max(0.0f, field->inner_radius);
+        src.falloff_radius = std::max(src.inner_radius + 1e-4f, field->falloff_radius);
+        src.delta_kelvin = field->thermal_delta_kelvin;
+        src.falloff_type = static_cast<float>(static_cast<int>(field->falloff_type));
+        src.infinite = field->shape == Physics::ForceFieldShape::Infinite ? 1.0f : 0.0f;
+        const Matrix4x4 to_local = field->worldToLocalMatrix();
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 4; ++c)
+                src.to_local[r * 4 + c] = to_local.m[r][c];
+        switch (field->shape) {
+        case Physics::ForceFieldShape::Box: src.shape = 1.0f; break;
+        case Physics::ForceFieldShape::Cylinder: src.shape = 2.0f; break;
+        case Physics::ForceFieldShape::Cone: src.shape = 3.0f; break;
+        default: src.shape = 0.0f; break;
+        }
+        out.push_back(src);
+    }
 }
 
 SimulationFlowSourceDesc::Keyframe captureFlowSourceKey(
@@ -1558,58 +1598,6 @@ struct FluidDensitySplatGpuConstants {
 // criterion kernel take different ranges; both are mirrored field-for-field in
 // sim_foam_bin_*.comp / sim_foam_crit.comp (push constants match by OFFSET, so a
 // shader that declares a shorter prefix still has to declare the SAME prefix).
-struct FoamBinGpuConstants {
-    int nx = 0;
-    int ny = 0;
-    int nz = 0;
-    int particle_count = 0;
-    float origin_x = 0.0f;
-    float origin_y = 0.0f;
-    float origin_z = 0.0f;
-    float voxel_size = 1.0f;
-    int max_per_cell = 0;
-    int cell_count = 0;
-};
-
-struct FoamCritGpuConstants {
-    int nx = 0;
-    int ny = 0;
-    int nz = 0;
-    int particle_count = 0;
-    float origin_x = 0.0f;
-    float origin_y = 0.0f;
-    float origin_z = 0.0f;
-    float voxel_size = 1.0f;
-    float h = 0.0f;
-    int reach = 1;
-    int max_per_cell = 0;
-    float k_ta = 0.0f;
-    float k_wc = 0.0f;
-    float crest_cos = 0.0f;
-    float ta_min = 0.0f;
-    float ta_max = 1.0f;
-    float wc_min = 0.0f;
-    float wc_max = 1.0f;
-    float ke_min = 0.0f;
-    float ke_max = 1.0f;
-    float dt = 0.0f;
-};
-
-// sim_foam_neigh: same grid/bucket prefix as the criterion, minus every Ihmsen
-// coefficient (this kernel only counts). 11 fields x 4 = 44 bytes.
-struct FoamNeighGpuConstants {
-    int nx = 0;
-    int ny = 0;
-    int nz = 0;
-    int foam_count = 0;
-    float origin_x = 0.0f;
-    float origin_y = 0.0f;
-    float origin_z = 0.0f;
-    float voxel_size = 1.0f;
-    float h = 0.0f;
-    int reach = 1;
-    int max_per_cell = 0;
-};
 
 struct FluidParticleIntegrateGpuConstants {
     int particle_count = 0;
@@ -2408,400 +2396,7 @@ bool runGpuFluidDensitySplat(SimulationGridDomainState& state,
     return ok;
 }
 
-// ── GPU whitewater spawn potentials (Ihmsen criteria) ───────────────────────
-// Replaces stepFoam's phase 3, measured at 66.5% of the entire CPU foam cost and
-// insensitive to any foam budget knob because it scales with the FLUID particle
-// count. Fills `expected_out` with one fractional spawn count per fluid particle;
-// the host still runs the stochastic emit, so the result stays directly
-// comparable against the CPU reference (which remains the oracle).
-//
-// Returns false on any allocation/dispatch failure — the caller then simply runs
-// the untouched CPU path, so this can never make foam disappear.
-bool runGpuFoamCriteria(SimulationGridDomainState& state,
-                        const Fluid::FoamParams& fparams,
-                        float dt,
-                        SimulationComputeContext* compute,
-                        SimulationGridDomainComputeBuffers& gpu_buffers,
-                        std::vector<float>& expected_out) {
-    auto& grid = state.grid;
-    const std::size_t particle_count = state.particles.size();
-    if (!compute || !compute->supportsDispatch() || particle_count == 0 ||
-        !fparams.enabled || dt <= 0.0f ||
-        (fparams.trapped_air_rate <= 0.0f && fparams.wave_crest_rate <= 0.0f) ||
-        grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 || grid.voxel_size <= 0.0f) {
-        return false;
-    }
-
-    // Positions AND velocities: the criterion needs relative velocity, unlike the
-    // density splat which uploads positions only.
-    if (!ensureGpuFluidParticleBuffers(state, compute, gpu_buffers,
-                                       /*upload_positions_only=*/false)) {
-        return false;
-    }
-
-    const std::size_t cell_count = static_cast<std::size_t>(grid.nx) *
-                                   static_cast<std::size_t>(grid.ny) *
-                                   static_cast<std::size_t>(grid.nz);
-    if (cell_count == 0) return false;
-
-    // Bucket capacity. A cell normally holds ~particles_per_cell particles; the
-    // 4x headroom is what lets us skip a prefix scan entirely. The kernel counts
-    // anything above the cap instead of silently biasing the result, and the
-    // tally below turns that into a visible warning rather than a mystery.
-    const int max_per_cell = 32;
-    const ComputeBufferUsage usage = ComputeBufferUsage::Storage |
-                                     ComputeBufferUsage::Upload |
-                                     ComputeBufferUsage::Download |
-                                     ComputeBufferUsage::ReadWrite;
-    const bool layout_changed =
-        gpu_buffers.foam_bin_cell_count != static_cast<int>(cell_count) ||
-        gpu_buffers.foam_bin_cell_capacity != max_per_cell;
-    if (layout_changed || !gpu_buffers.foam_bin_counts.valid()) {
-        if (gpu_buffers.foam_bin_counts.valid()) {
-            compute->destroyBuffer(gpu_buffers.foam_bin_counts);
-            gpu_buffers.foam_bin_counts = {};
-        }
-        if (gpu_buffers.foam_bin_items.valid()) {
-            compute->destroyBuffer(gpu_buffers.foam_bin_items);
-            gpu_buffers.foam_bin_items = {};
-        }
-        ComputeBufferDesc desc;
-        desc.usage = usage;
-        // +1 counter slot: the trailing overflow tally.
-        desc.debug_name = "FoamBinCounts";
-        desc.size_bytes = (cell_count + 1) * sizeof(uint32_t);
-        gpu_buffers.foam_bin_counts = compute->createBuffer(desc);
-        desc.debug_name = "FoamBinItems";
-        desc.size_bytes = cell_count * static_cast<std::size_t>(max_per_cell) *
-                          sizeof(uint32_t);
-        gpu_buffers.foam_bin_items = compute->createBuffer(desc);
-        gpu_buffers.foam_bin_cell_count = static_cast<int>(cell_count);
-        gpu_buffers.foam_bin_cell_capacity = max_per_cell;
-    }
-    if (!gpu_buffers.foam_bin_counts.valid() || !gpu_buffers.foam_bin_items.valid()) {
-        return false;
-    }
-
-    if (!gpu_buffers.foam_expected.valid() ||
-        gpu_buffers.foam_expected_capacity < particle_count) {
-        if (gpu_buffers.foam_expected.valid()) {
-            compute->destroyBuffer(gpu_buffers.foam_expected);
-            gpu_buffers.foam_expected = {};
-        }
-        // Grow with the same geometric headroom the particle streams use, so
-        // emitter-driven count changes do not reallocate every step.
-        std::size_t capacity = std::max<std::size_t>(particle_count, 4096u);
-        capacity += capacity / 2u;
-        ComputeBufferDesc desc;
-        desc.debug_name = "FoamExpected";
-        desc.size_bytes = capacity * sizeof(float);
-        desc.usage = usage;
-        gpu_buffers.foam_expected = compute->createBuffer(desc);
-        gpu_buffers.foam_expected_capacity =
-            gpu_buffers.foam_expected.valid() ? capacity : 0;
-        // The buffer the pending dispatch wrote into is gone.
-        gpu_buffers.foam_expected_pending = false;
-    }
-    if (!gpu_buffers.foam_expected.valid()) return false;
-
-    const int reach = std::max(1, static_cast<int>(
-        std::ceil(fparams.neighbor_radius_voxels)));
-
-    FoamBinGpuConstants bin_c;
-    bin_c.nx = grid.nx;
-    bin_c.ny = grid.ny;
-    bin_c.nz = grid.nz;
-    bin_c.particle_count = static_cast<int>(std::min<std::size_t>(
-        particle_count, static_cast<std::size_t>(std::numeric_limits<int>::max())));
-    bin_c.origin_x = grid.origin.x;
-    bin_c.origin_y = grid.origin.y;
-    bin_c.origin_z = grid.origin.z;
-    bin_c.voxel_size = grid.voxel_size;
-    bin_c.max_per_cell = max_per_cell;
-    bin_c.cell_count = static_cast<int>(cell_count);
-
-    // ── Read the PREVIOUS step's result before queueing this one ────────────
-    // Downloading right after the dispatch measured 17.29 ms, of which the kernel
-    // is ~1-2 ms and the 400 KB transfer ~0.1 ms: the rest was the host waiting
-    // for the whole pending fluid step to drain. Deferring the read by one step
-    // removes the wait entirely without shrinking the payload.
-    //
-    // The cost is that potentials are one step old, and that particle indices may
-    // have shifted (emitters append, culling compacts) so a few particles read a
-    // neighbour's potential. For a stochastic spawner emitting ~435 of 100k
-    // particles per step that is invisible; a stall on every step is not.
-    bool have_previous = false;
-    if (gpu_buffers.foam_expected_pending) {
-        const std::size_t prev = std::min(gpu_buffers.foam_expected_pending_count,
-                                          particle_count);
-        if (expected_out.size() < particle_count) expected_out.resize(particle_count);
-        // Particles that did not exist in the pending dispatch get no potential
-        // rather than a stale neighbour's.
-        if (prev < particle_count) {
-            std::fill(expected_out.begin() + static_cast<std::ptrdiff_t>(prev),
-                      expected_out.begin() + static_cast<std::ptrdiff_t>(particle_count),
-                      0.0f);
-        }
-        compute->beginTransferBatch();
-        bool read_ok = compute->downloadBuffer(gpu_buffers.foam_expected,
-                                               expected_out.data(),
-                                               prev * sizeof(float));
-        // Bucket overflow tally rides the same batch, so watching the cap costs
-        // no extra sync. Reported once — the cap is what buys us "no prefix scan",
-        // so a silent breach must not stay silent.
-        uint32_t overflow = 0;
-        static bool s_warned = false;
-        const bool ov_ok =
-            s_warned ? false
-                     : compute->downloadBuffer(
-                           gpu_buffers.foam_bin_counts, &overflow, sizeof(uint32_t),
-                           /*src_offset_bytes=*/cell_count * sizeof(uint32_t));
-        read_ok = compute->endTransferBatch() && read_ok;
-        if (ov_ok && overflow > 0u && !s_warned) {
-            s_warned = true;
-            SCENE_LOG_WARN("[FoamGPU] neighbour bucket cap (" +
-                           std::to_string(max_per_cell) +
-                           "/cell) exceeded by " + std::to_string(overflow) +
-                           " particles; spawn potentials will differ slightly from "
-                           "the CPU reference. Raise max_per_cell in runGpuFoamCriteria.");
-        }
-        have_previous = read_ok;
-        gpu_buffers.foam_expected_pending = false;
-    }
-
-    constexpr uint32_t threads = 256;
-    ComputeBufferHandle clear_buffers[2] = {
-        gpu_buffers.foam_bin_counts,
-        gpu_buffers.foam_expected
-    };
-    ComputeDispatch cmd;
-    cmd.kernel = "sim_foam_bin_clear";
-    cmd.buffers = clear_buffers;
-    cmd.buffer_count = 2;
-    cmd.constants = &bin_c;
-    cmd.constants_size = sizeof(bin_c);
-    // Clears two ranges of different length (cells+overflow, and particles), each
-    // bounded inside the kernel, so cover whichever is larger.
-    cmd.groups.groups_x =
-        (static_cast<uint32_t>(std::max(cell_count + 1, particle_count)) + threads - 1u) / threads;
-    bool ok = compute->dispatch(cmd);
-
-    ComputeBufferHandle scatter_buffers[3] = {
-        gpu_buffers.fluid_positions,
-        gpu_buffers.foam_bin_counts,
-        gpu_buffers.foam_bin_items
-    };
-    cmd.kernel = "sim_foam_bin_scatter";
-    cmd.buffers = scatter_buffers;
-    cmd.buffer_count = 3;
-    cmd.groups.groups_x =
-        (static_cast<uint32_t>(bin_c.particle_count) + threads - 1u) / threads;
-    ok = ok && compute->dispatch(cmd);
-
-    FoamCritGpuConstants crit_c;
-    crit_c.nx = grid.nx;
-    crit_c.ny = grid.ny;
-    crit_c.nz = grid.nz;
-    crit_c.particle_count = bin_c.particle_count;
-    crit_c.origin_x = grid.origin.x;
-    crit_c.origin_y = grid.origin.y;
-    crit_c.origin_z = grid.origin.z;
-    crit_c.voxel_size = grid.voxel_size;
-    crit_c.h = std::max(1e-4f, fparams.neighbor_radius_voxels * grid.voxel_size);
-    crit_c.reach = reach;
-    crit_c.max_per_cell = max_per_cell;
-    crit_c.k_ta = fparams.trapped_air_rate;
-    crit_c.k_wc = fparams.wave_crest_rate;
-    crit_c.crest_cos = fparams.crest_cos;
-    crit_c.ta_min = fparams.ta_min;
-    crit_c.ta_max = fparams.ta_max;
-    crit_c.wc_min = fparams.wc_min;
-    crit_c.wc_max = fparams.wc_max;
-    crit_c.ke_min = fparams.ke_min;
-    crit_c.ke_max = fparams.ke_max;
-    crit_c.dt = dt;
-
-    ComputeBufferHandle crit_buffers[5] = {
-        gpu_buffers.fluid_positions,
-        gpu_buffers.fluid_velocities,
-        gpu_buffers.foam_bin_counts,
-        gpu_buffers.foam_bin_items,
-        gpu_buffers.foam_expected
-    };
-    cmd.kernel = "sim_foam_crit";
-    cmd.buffers = crit_buffers;
-    cmd.buffer_count = 5;
-    cmd.constants = &crit_c;
-    cmd.constants_size = sizeof(crit_c);
-    // One thread per BUCKET SLOT, not per particle: consecutive lanes then land on
-    // consecutive cells and share a neighbourhood instead of scattering across the
-    // domain in emission order. Costs idle lanes in partly-filled cells — with
-    // ~4 particles per cell against a cap of 32 that is most of them, which is
-    // exactly what this measurement is meant to settle.
-    cmd.groups.groups_x =
-        (static_cast<uint32_t>(cell_count * static_cast<std::size_t>(max_per_cell)) +
-         threads - 1u) / threads;
-    ok = ok && compute->dispatch(cmd);
-    if (!ok) return have_previous;
-
-    // In flight; its result is collected at the top of the next call. No wait here
-    // — that wait was the whole 17.29 ms.
-    gpu_buffers.foam_expected_pending = true;
-    gpu_buffers.foam_expected_pending_count = particle_count;
-    // Bins are current for this step's liquid: the neighbour pass may now reuse
-    // them. Cleared by its dispatch so one build is never consumed twice.
-    gpu_buffers.foam_bin_ready_this_step = true;
-
-    // First step after a (re)start has nothing queued yet, so the caller runs the
-    // untouched CPU path for exactly one step.
-    return have_previous;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Foam classification gather (sim_foam_neigh), split into consume + dispatch.
-//
-// The criterion pass could dispatch and collect in one call because its result is
-// stochastic: reading a neighbour's spawn potential after an index shift is
-// invisible. This one is not — the count picks each particle's integration rule —
-// so it is pinned to the only window where foam indices are stable: dispatch after
-// stepFoam has finished mutating the array, consume before the next step touches
-// it. Nothing runs in between, so index i means the same particle on both sides.
-//
-// What can still slip in is a cache scrub or a sim reset. Those replace the array
-// wholesale, possibly at the same length, so the length check cannot see them —
-// FoamParticles::topology_generation can, and a mismatch drops the result and
-// spends one step on the CPU path rather than classifying against a dead array.
-//
-// The FOAM positions are not stale at all — end of step N is start of step N+1 —
-// but the bins they are measured against hold step N's liquid, so the submersion
-// test lags the fluid by one dt. For a count inside a ~2-voxel radius that is the
-// same order as the CPU path's own discretisation, and it is the price of not
-// stalling; a same-step readback here would cost the queue drain all over again.
-// ─────────────────────────────────────────────────────────────────────────────
-bool consumeGpuFoamNeighbours(const Fluid::FoamParticles& foam,
-                              SimulationComputeContext* compute,
-                              SimulationGridDomainComputeBuffers& gpu_buffers,
-                              std::vector<uint32_t>& neigh_out) {
-    if (!gpu_buffers.foam_neigh_pending) return false;
-    gpu_buffers.foam_neigh_pending = false;   // one dispatch, one read, always
-
-    if (!compute || !compute->supportsDispatch() || !gpu_buffers.foam_neigh.valid())
-        return false;
-
-    const std::size_t count = foam.size();
-    if (count == 0 ||
-        count != gpu_buffers.foam_neigh_pending_count ||
-        foam.topology_generation != gpu_buffers.foam_neigh_pending_generation) {
-        return false;
-    }
-
-    if (neigh_out.size() < count) neigh_out.resize(count);
-    return compute->downloadBuffer(gpu_buffers.foam_neigh, neigh_out.data(),
-                                   count * sizeof(uint32_t));
-}
-
-void dispatchGpuFoamNeighbours(SimulationGridDomainState& state,
-                               const Fluid::FoamParams& fparams,
-                               SimulationComputeContext* compute,
-                               SimulationGridDomainComputeBuffers& gpu_buffers) {
-    const bool bins_ready = gpu_buffers.foam_bin_ready_this_step;
-    gpu_buffers.foam_bin_ready_this_step = false;  // consumed either way
-
-    auto& grid = state.grid;
-    const std::size_t foam_count = state.foam.size();
-    if (!bins_ready || !compute || !compute->supportsDispatch() || foam_count == 0 ||
-        !fparams.enabled || grid.voxel_size <= 0.0f ||
-        grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 ||
-        !gpu_buffers.foam_bin_counts.valid() || !gpu_buffers.foam_bin_items.valid() ||
-        !gpu_buffers.fluid_positions.valid()) {
-        return;
-    }
-
-    const ComputeBufferUsage usage = ComputeBufferUsage::Storage |
-                                     ComputeBufferUsage::Upload |
-                                     ComputeBufferUsage::Download |
-                                     ComputeBufferUsage::ReadWrite;
-    // Foam is hard-capped by max_foam, so after the first few steps this stops
-    // reallocating entirely; grow geometrically anyway so ramp-up does not
-    // destroy/recreate on every step.
-    if (!gpu_buffers.foam_positions.valid() ||
-        gpu_buffers.foam_positions_capacity < foam_count) {
-        if (gpu_buffers.foam_positions.valid()) {
-            compute->destroyBuffer(gpu_buffers.foam_positions);
-            gpu_buffers.foam_positions = {};
-        }
-        std::size_t capacity = std::max<std::size_t>(foam_count, 4096u);
-        capacity += capacity / 2u;
-        ComputeBufferDesc desc;
-        desc.debug_name = "FoamPositions";
-        desc.size_bytes = capacity * sizeof(Vec3);
-        desc.usage = usage;
-        gpu_buffers.foam_positions = compute->createBuffer(desc);
-        gpu_buffers.foam_positions_capacity =
-            gpu_buffers.foam_positions.valid() ? capacity : 0;
-    }
-    if (!gpu_buffers.foam_neigh.valid() ||
-        gpu_buffers.foam_neigh_capacity < foam_count) {
-        if (gpu_buffers.foam_neigh.valid()) {
-            compute->destroyBuffer(gpu_buffers.foam_neigh);
-            gpu_buffers.foam_neigh = {};
-        }
-        std::size_t capacity = std::max<std::size_t>(foam_count, 4096u);
-        capacity += capacity / 2u;
-        ComputeBufferDesc desc;
-        desc.debug_name = "FoamNeighbourCounts";
-        desc.size_bytes = capacity * sizeof(uint32_t);
-        desc.usage = usage;
-        gpu_buffers.foam_neigh = compute->createBuffer(desc);
-        gpu_buffers.foam_neigh_capacity =
-            gpu_buffers.foam_neigh.valid() ? capacity : 0;
-    }
-    if (!gpu_buffers.foam_positions.valid() || !gpu_buffers.foam_neigh.valid()) return;
-
-    if (!compute->uploadBuffer(gpu_buffers.foam_positions,
-                               state.foam.position.data(),
-                               foam_count * sizeof(Vec3))) {
-        return;
-    }
-
-    FoamNeighGpuConstants c;
-    c.nx = grid.nx;
-    c.ny = grid.ny;
-    c.nz = grid.nz;
-    c.foam_count = static_cast<int>(std::min<std::size_t>(
-        foam_count, static_cast<std::size_t>(std::numeric_limits<int>::max())));
-    c.origin_x = grid.origin.x;
-    c.origin_y = grid.origin.y;
-    c.origin_z = grid.origin.z;
-    c.voxel_size = grid.voxel_size;
-    c.h = std::max(1e-4f, fparams.neighbor_radius_voxels * grid.voxel_size);
-    c.reach = std::max(1, static_cast<int>(std::ceil(fparams.neighbor_radius_voxels)));
-    c.max_per_cell = gpu_buffers.foam_bin_cell_capacity;
-
-    constexpr uint32_t threads = 256;
-    ComputeBufferHandle buffers[5] = {
-        gpu_buffers.foam_positions,
-        gpu_buffers.fluid_positions,
-        gpu_buffers.foam_bin_counts,
-        gpu_buffers.foam_bin_items,
-        gpu_buffers.foam_neigh
-    };
-    ComputeDispatch cmd;
-    cmd.kernel = "sim_foam_neigh";
-    cmd.buffers = buffers;
-    cmd.buffer_count = 5;
-    cmd.constants = &c;
-    cmd.constants_size = sizeof(c);
-    // One thread per foam particle. Slot-dispatch was measured here and did not pay
-    // — see the kernel's header comment before trying it again.
-    cmd.groups.groups_x =
-        (static_cast<uint32_t>(c.foam_count) + threads - 1u) / threads;
-    if (!compute->dispatch(cmd)) return;
-
-    gpu_buffers.foam_neigh_pending = true;
-    gpu_buffers.foam_neigh_pending_count = foam_count;
-    gpu_buffers.foam_neigh_pending_generation = state.foam.topology_generation;
-}
+#include "Fluid/WhitewaterGpuRuntime.inl"
 
 // GPU free-surface pressure projection (SOR variant).
 // Uploads the pre-computed fluid_mask (float, 0=air / 1=fluid), runs
@@ -6131,7 +5726,8 @@ bool ParticleSimulationSystem::hasActiveGridSimulation() const {
         if (simulationDomainHasLiquid(state.type) && !state.particles.empty()) {
             return true;
         }
-        if (simulationDomainHasGas(state.type) && state.active_density_cells > 0) {
+        if (simulationDomainHasGas(state.type) &&
+            (state.active_density_cells > 0 || Fluid::gasInventoryHasContent(state))) {
             return true;
         }
     }
@@ -6253,13 +5849,19 @@ void ParticleSimulationSystem::restoreRuntimeState(const ParticleSimulationRunti
     emitter_spawn_serial_ = state.emitter_spawn_serial;
 }
 
-void ParticleSimulationSystem::releaseComputeResources(SimulationComputeContext& compute) {
+void ParticleSimulationSystem::releaseComputeResources(SimulationComputeContext& compute,
+                                                       bool preserve_inventory) {
     // Whatever only the device knows comes home before its buffers go.
     if (residency_ == ParticleKinematicResidency::Device && residentBuffersValidFor(compute)) {
         downloadResidentKinematics(compute, "release", /*in_step=*/false);
     }
     releaseResidentBuffers(compute);
 
+    for (auto& state : grid_domain_states_) {
+        if (preserve_inventory && !Fluid::materializeGasInventoryForBackendChange(state)) {
+            throw std::runtime_error("cannot release current gas inventory device state");
+        }
+    }
     for (auto& buffers : grid_domain_compute_buffers_) {
         releaseGridDomainComputeBuffers(compute, buffers);
     }
@@ -6466,6 +6068,9 @@ ParticleSimulationSystem::captureGridDomainStatesForCache(
     for (std::size_t i = 0; i < count; ++i) {
         auto& state = snapshot[i];
         const auto& buffers = grid_domain_compute_buffers_[i];
+        if (!Fluid::snapshotGasInventory(state)) {
+            throw std::runtime_error("cannot capture current gas inventory for cache");
+        }
         // ***** THE GATE ASKS THE LEDGER NOW, NOT gpu_resident_fields_valid.
         //
         // That flag means "the RENDER fields are device-authoritative", which
@@ -6512,11 +6117,9 @@ ParticleSimulationSystem::captureGridDomainStatesForCache(
             download(CacheField::Interaction, buffers.interaction, state.grid.interaction);
         ok = compute.endTransferBatch() && ok;
         if (!ok) {
-            // Preserve the pre-existing snapshot as a safe fallback. Its
-            // occupied-content gate is left unchanged rather than publishing
-            // a partially downloaded mixture of frames.
-            snapshot[i] = grid_domain_states_[i];
-            continue;
+            // Reject the cache entry if the current carrier cannot be read.
+            // Never publish a partially downloaded mixture of frames.
+            throw std::runtime_error("cache gas carrier readback failed");
         }
 
         state.active_density_cells = 0;
@@ -6936,6 +6539,7 @@ void ParticleSimulationSystem::setGridDomainStates(std::vector<SimulationGridDom
     // still in flight belongs to a future that has just been undone.
     discardMoltenMassTransferState();
     kinematic_collider_discontinuity_ = true;
+    Fluid::prepareGasInventoryRestore(states);
     Fluid::prepareFluidCacheRestore(states, grid_domain_states_, grid_domains_,
                                    grid_domain_compute_buffers_, matter_liquid_compute_buffers_);
     grid_domain_states_ = std::move(states);
@@ -7849,33 +7453,11 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         msf_fields_live = !material_state_fields_.fields().empty();
 
         {
-            // Thermal force fields -> local heat sources. This is the only place
-            // that knows Physics::ForceField exists; MaterialStateField takes a
-            // plain POD list so the sim layer never depends on the scene layer.
+            // Thermal force fields -> local heat sources. MaterialStateField
+            // takes a plain POD list so the sim layer never depends on the scene
+            // layer; matter parcels get the same list (FluidDomainStep.inl).
             std::vector<MaterialStateFieldSystem::ThermalSource> thermal_sources;
-            if (context.force_snapshot) {
-                for (const Physics::ForceField* field :
-                     context.force_snapshot->activeFields()) {
-                    if (!field || field->type != Physics::ForceFieldType::Thermal) continue;
-                    if (!(std::fabs(field->thermal_delta_kelvin) > 1e-3f)) continue;
-                    MaterialStateFieldSystem::ThermalSource src;
-                    src.position[0] = field->position.x;
-                    src.position[1] = field->position.y;
-                    src.position[2] = field->position.z;
-                    src.inner_radius = std::max(0.0f, field->inner_radius);
-                    src.falloff_radius =
-                        std::max(src.inner_radius + 1e-4f, field->falloff_radius);
-                    src.delta_kelvin = field->thermal_delta_kelvin;
-                    src.falloff_type = static_cast<int>(field->falloff_type);
-                    // Box/Cylinder/Cone heat sources fall back to the radial
-                    // profile in this phase. Stated rather than silently wrong:
-                    // a heat source is naturally radial, and honouring the box
-                    // shape needs the field's full local transform on the GPU.
-                    src.infinite =
-                        (field->shape == Physics::ForceFieldShape::Infinite) ? 1 : 0;
-                    thermal_sources.push_back(src);
-                }
-            }
+            collectThermalSources(context.force_snapshot, thermal_sources);
 
             // Domain ambient overrides, as world AABBs. Element-granular in the
             // shader, because one object can straddle a domain wall.
@@ -7981,6 +7563,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         // this gate. Read the gas-owned snapshot instead; otherwise any liquid
         // body wakes an entirely empty gas solver and pays a second projection.
         const bool has_content =
+            Fluid::gasInventoryHasContent(state) ||
             state.gas_stats.active_density_cells > 0 ||
             state.gas_stats.max_density > 1e-5f ||
             state.gas_stats.active_fuel_cells > 0 ||
@@ -7997,9 +7580,11 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             simulationDomainHasGas(grid_domains_[i].type)) {
             const auto& gas_domain=grid_domains_[i];
             for(const auto& candidate:grid_domains_) {
-                if(!candidate.enabled || !candidate.fluid_flammable ||
-                   !simulationDomainHasLiquid(candidate.type) ||
-                   (!candidate.fluid_auto_ignite && !has_content)) continue;
+                // A thermally active liquid under this gas needs it as its air.
+                const bool thermal_air = candidate.fluid_params.thermal_liquid_enabled;
+                if(!candidate.enabled || !simulationDomainHasLiquid(candidate.type) ||
+                   (!thermal_air && (!candidate.fluid_flammable ||
+                    (!candidate.fluid_auto_ignite && !has_content)))) continue;
                 const Vec3 overlap_min=
                     Vec3::max(candidate.bounds_min,gas_domain.bounds_min);
                 const Vec3 overlap_max=
@@ -8012,7 +7597,13 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 }
             }
         }
-        if (!has_source && !has_content && !has_pending_mist &&
+        // A thermally active liquid needs its air: the surface exchange and
+        // evaporation run in this gas step.
+        const bool has_pending_boil = matter_domain && i < grid_domains_.size() &&
+            (Fluid::hasBoilingParcel(grid_domains_[i], state) ||
+             (grid_domains_[i].fluid_params.thermal_liquid_enabled &&
+              !state.particles.empty()));
+        if (!has_source && !has_content && !has_pending_mist && !has_pending_boil &&
             alive_count_ == 0) {
             // Nothing ran, so nothing may be reported. Leaving the previous
             // step's timings in place makes an idle domain look like it is
@@ -8284,6 +7875,19 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             sink += elapsedMilliseconds(gas_gpu_cursor, now);
             gas_gpu_cursor = now;
         };
+        std::vector<std::size_t> gpu_surface_targets;
+        if (!state.gas_inventory_error.empty()) {
+            Fluid::holdGasInventory(state, "gas inventory remains held; reset required");
+            continue;
+        }
+        if (!gpu_grid_ready && !Fluid::materializeGasInventoryForBackendChange(state)) {
+            Fluid::holdGasInventory(state, "gas inventory recovery failed; reset required");
+            continue;
+        }
+        if (gpu_grid_ready && !Fluid::beginGasInventoryDevice(state, *context.compute, *gpu_buffers)) {
+            Fluid::holdGasInventory(state, "gas inventory device initialization failed; reset required");
+            continue;
+        }
         auto transferFluidPhasesToGas = [&]() {
             bool host_fields_changed = false;
             for (std::size_t fluid_index = 0;
@@ -8312,8 +7916,42 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                         grid_domains_[i], state,
                         event_id_base ^ (uint64_t{1} << 63u),
                         matter_exchange_ledger_);
-                if (!combustion.ran && !mist.ran) {
+                const Fluid::FluidBoilingExchangeStats boiling =
+                    Fluid::transferBoilingToGas(
+                        grid_domains_[fluid_index],
+                        grid_domain_states_[fluid_index],
+                        grid_domains_[i], state, world_thermal_.scale(), dt,
+                        event_id_base ^ (uint64_t{1} << 62u),
+                        matter_exchange_ledger_);
+                // Surface heat + evaporation with the gas grid as the air. Only
+                // with the thermal chain on: that switch is what "the liquid
+                // exchanges heat with its surroundings" means.
+                if (gpu_grid_ready &&
+                    grid_domains_[fluid_index].fluid_params.thermal_liquid_enabled) {
+                    gpu_surface_targets.push_back(fluid_index);
+                }
+                if (!gpu_grid_ready &&
+                    grid_domains_[fluid_index].fluid_params.thermal_liquid_enabled) {
+                    Fluid::exchangeLiquidGasSurface(
+                        grid_domains_[fluid_index], grid_domain_states_[fluid_index],
+                        grid_domains_[i], state, world_thermal_.scale(),
+                        fluidDomainAmbientKelvin(grid_domains_[fluid_index], world_thermal_),
+                        world_thermal_.ambientNormalized(),
+                        world_thermal_.dryingScale(), dt,
+                        event_id_base ^ (uint64_t{1} << 61u),
+                        matter_exchange_ledger_);
+                    if (grid_domain_states_[fluid_index].thermal_stats.gas_exchange_particles > 0) {
+                        host_fields_changed = true;
+                    }
+                }
+                if (!combustion.ran && !mist.ran && !boiling.ran) {
                     continue;
+                }
+                if (boiling.boiling_particles > 0) {
+                    host_fields_changed = true;
+                    noteCoupling("boiling_to_gas", "fluid", "gas",
+                                 grid_domains_[fluid_index].name,
+                                 grid_domains_[i].name);
                 }
                 fluid_phase_transferred[fluid_index] = 1u;
                 if (combustion.particles_changed > 0) {
@@ -8336,8 +7974,33 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 gpu_buffers->markHostWrote(GasGridField::Interaction);
             }
         };
+        // Fog water: vapour <-> condensate equilibrium with the air, after the
+        // phase producers and the surface exchange have deposited this step.
+        const MaterialTemperatureScale saturation_scale = world_thermal_.scale();
+        auto adjustSaturation = [&]() {
+            Fluid::GasSaturationInputs saturation;
+            saturation.scale = &saturation_scale;
+            saturation.ambient_kelvin = fluidDomainAmbientKelvin(grid_domains_[i], world_thermal_);
+            saturation.gas_ambient_normalized = world_thermal_.ambientNormalized();
+            saturation.humidity = std::clamp(1.0f - world_thermal_.dryingScale(), 0.0f, 1.0f);
+            saturation.world_ambient_kelvin = world_thermal_.ambientKelvin();
+            saturation.dt = dt;
+            saturation.event_id_base = (matter_exchange_step_ << 32u) |
+                (static_cast<uint64_t>(i & 0xffffu) << 16u) | (uint64_t{1} << 60u) | 0xE000u;
+            return Fluid::adjustGasSaturation(grid_domains_[i], state, saturation,
+                gpu_grid_ready ? context.compute : nullptr,
+                gpu_grid_ready ? gpu_buffers : nullptr, matter_exchange_ledger_);
+        };
         if (!gpu_grid_ready) {
             transferFluidPhasesToGas();
+            if (!Fluid::flushGasPhaseMomentum(
+                    state, grid_domains_[i], world_thermal_.scale(),
+                    fluidDomainAmbientKelvin(grid_domains_[i], world_thermal_),
+                    world_thermal_.ambientNormalized())) {
+                Fluid::holdGasInventory(state, "CPU phase momentum failed; reset required");
+                continue;
+            }
+            adjustSaturation();
         }
         if (gpu_grid_ready) {
             gas_collider_source_pre_run =
@@ -8402,6 +8065,18 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 context.compute->endTransferBatch();
             }
             gas_gpu_mark(state.gas_stats.gpu_source_upload_ms);
+            if (!Fluid::exchangeGasSurfaceGpuDomains(
+                    gpu_surface_targets, grid_domains_, grid_domain_states_, i,
+                    *gpu_buffers, *context.compute, world_thermal_, dt,
+                    matter_exchange_step_, matter_exchange_ledger_)) {
+                gas_gpu_mark(state.gas_stats.gpu_surface_exchange_ms);
+                Fluid::holdGasInventory(state, "gas surface exchange failed; reset required");
+                continue;
+            }
+            gas_gpu_mark(state.gas_stats.gpu_surface_exchange_ms);
+            if (!adjustSaturation()) {
+                continue;   // adjustGasSaturation held the inventory with its reason
+            }
             // ── Material State Field: pyrolysis ──────────────────────────────
             // MSF is the sole owner of surface burning since Phase 2b; the voxel
             // surface_state path it used to shadow is gone. Placed AFTER the host
@@ -8856,17 +8531,32 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             }
         }
 
-        // Physical kg/J sidecars are host-owned. Carry them after the gas solve,
-        // when both CPU and Vulkan paths expose the same final carrier velocity.
-        // A failed Vulkan readback leaves that velocity untrustworthy, so keep
-        // the inventory stationary for this frame instead of transporting it
-        // with a stale field.
+        // GPU kg/J uses the final device carrier. CPU transport is confined to
+        // the CPU backend; a failed device step holds playback until reset.
         const auto inventory_advection_begin = SimulationClock::now();
         if (gas_tail_sync_ok) {
-            Fluid::advectGasPhaseInventory(state, params, dt);
+            state.gas_stats.inventory_transport = "cpu";
+            if (gpu_grid_ready) {
+                if (!Fluid::advectGasInventoryGpu(
+                        state, params, dt, *context.compute, *gpu_buffers, gpu_projection_ok)) {
+                    Fluid::holdGasInventory(state, "gas inventory transport failed; reset required");
+                    continue;
+                }
+            } else {
+                Fluid::advectGasPhaseInventory(state, params, dt);
+            }
+        } else {
+            Fluid::holdGasInventory(state, "gas carrier readback failed; reset required");
+            continue;
         }
         state.gas_stats.inventory_advection_ms = elapsedMilliseconds(
             inventory_advection_begin, SimulationClock::now());
+        if (const auto inventory = Fluid::gasInventoryDevice(state)) {
+            state.gas_stats.inventory_grid_upload_bytes = inventory->grid_upload_bytes;
+            state.gas_stats.inventory_grid_download_bytes = inventory->grid_download_bytes;
+            state.gas_stats.inventory_snapshot_download_bytes = inventory->snapshot_download_bytes;
+            state.gas_stats.inventory_query_download_bytes = inventory->query_download_bytes;
+        }
 
         // Where each stage ended up. These pair with the timings: a 0 ms row
         // with the flag clear means the stage never ran, which is a different
@@ -10064,6 +9754,10 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.foam_bin_counts);
     destroy(buffers.foam_bin_items);
     destroy(buffers.foam_expected);
+    destroy(buffers.foam_eligible);
+    buffers.foam_eligible_capacity = 0;
+    buffers.foam_bin_allocated_cells = 0;
+    buffers.foam_bin_window = {};
     buffers.foam_bin_cell_count = 0;
     buffers.foam_bin_cell_capacity = 0;
     buffers.foam_expected_capacity = 0;
@@ -10088,6 +9782,7 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     buffers.gas_majorant_dim[2] = 0;
     buffers.gas_majorant_valid = false;
     destroy(buffers.gas_solid_mask);
+    Fluid::releaseGasInventoryGpu(compute, buffers.gas_inventory);
     destroy(buffers.gas_solid_vel_x);
     destroy(buffers.gas_solid_vel_y);
     destroy(buffers.gas_solid_vel_z);

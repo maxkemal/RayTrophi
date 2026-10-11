@@ -64,20 +64,9 @@ bool resolveDomainSubstancePhysics(APICSolverParams& params, float voxel_size,
     params.granular_tack_peak = s->granular_tack_peak;
     params.granular_thermal_conductivity = s->parcel_conduction;
 
-    // Freezing is the substance's own melt point. A substance that cannot melt
-    // never freezes (its melt_kelvin field keeps an inert default).
-    params.thermal_freeze_kelvin = s->meltable ? s->melt_kelvin : 1.0f;
-    params.thermal_viscosity_range = s->liquid_freeze_viscosity_range;
-    params.thermal_cold_viscosity = s->liquid_cold_viscosity;
-
     params.applySubstanceProfile(*s, scale);
     params.sanitizeGranularMaterial();
     params.sanitizeThermalLiquid();
-    if (s->meltable) {
-        // sanitizeThermalLiquid floors the freeze point at 1 K; the inert value
-        // above relies on that floor, a real melt point must pass through.
-        params.thermal_freeze_kelvin = std::clamp(s->melt_kelvin, 1.0f, 5000.0f);
-    }
     error.clear();
     return true;
 }
@@ -305,17 +294,22 @@ bool migrateLegacyDomainMaterial(const json& f, const std::string& domain_name,
         compare("granular_thermal_conductivity", resolved.granular_thermal_conductivity,
                 "parcel_conduction");
     }
-    if (resolved.thermal_liquid_enabled) {
+    // Old files stored a domain copy of the freeze curve; the base substance
+    // holds it now, so a differing stored value becomes an override.
+    const SubstanceProfile* fusion_base = tryFindSubstance(base);
+    if (resolved.thermal_liquid_enabled && fusion_base) {
         if (f.contains("thermal_freeze_kelvin") && f["thermal_freeze_kelvin"].is_number()) {
             const double stored = f["thermal_freeze_kelvin"].get<double>();
-            if (!nearlyEqual(stored, resolved.thermal_freeze_kelvin)) {
+            const double base_melt = fusion_base->meltable ? fusion_base->melt_kelvin : 1.0;
+            if (!nearlyEqual(stored, base_melt)) {
                 overrides["meltable"] = true;
                 overrides["melt_kelvin"] = stored;
             }
         }
-        compare("thermal_viscosity_range", resolved.thermal_viscosity_range,
+        compare("thermal_viscosity_range", fusion_base->liquid_freeze_viscosity_range,
                 "liquid_freeze_viscosity_range");
-        compare("thermal_cold_viscosity", resolved.thermal_cold_viscosity, "liquid_cold_viscosity");
+        compare("thermal_cold_viscosity", fusion_base->liquid_cold_viscosity,
+                "liquid_cold_viscosity");
     }
     // "Oil physics + Gasoline chemistry": the fuel half of a different
     // substance. Inert/Custom chemistry carried nothing to keep.

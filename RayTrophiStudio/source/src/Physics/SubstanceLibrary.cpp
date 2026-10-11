@@ -66,6 +66,8 @@ const std::vector<FieldAccess>& fieldTable() {
         RT_BOOL(meltable, "Phase change"),
         RT_FLOAT(melt_kelvin, 0.0f, 10000.0f, "K", "Phase change"),
         RT_FLOAT(boiling_kelvin, 0.0f, 10000.0f, "K", "Phase change"),
+        RT_FLOAT(vapor_molar_mass_kg_mol, 0.0f, 1.0f, "kg/mol", "Phase change"),
+        RT_FLOAT(thermal_expansion_per_k, 0.0f, 0.01f, "1/K", "Liquid"),
         RT_FLOAT(latent_heat_fusion, 0.0f, 1.0e8f, "J/kg", "Phase change"),
         RT_FLOAT(melt_viscosity, 0.0f, 1.0f, "", "Phase change"),
         // Granular ranges match the solver's own clamps (sanitizeGranularMaterial)

@@ -574,6 +574,20 @@ int VDBVolumeManager::registerOrUpdateLiveVolume(int existing_id, const std::str
             // sampling (sampleTemperatureCPU reads internal_openvdb_temperature).
             if (vol.internal_openvdb_temperature) delete static_cast<openvdb::FloatGrid::Ptr*>(vol.internal_openvdb_temperature);
             vol.internal_openvdb_temperature = new openvdb::FloatGrid::Ptr(temp_grid);
+        } else {
+            // No temperature this publish: drop the previous one. Keeping it
+            // re-uploaded a stale field forever - a liquid surface's foam
+            // channel kept the last run's foam after a reset, drawn as
+            // cell-sized white blocks on clear water.
+            if (vol.internal_nano_temperature_handle) {
+                delete static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(
+                    vol.internal_nano_temperature_handle);
+                vol.internal_nano_temperature_handle = nullptr;
+            }
+            if (vol.internal_openvdb_temperature) {
+                delete static_cast<openvdb::FloatGrid::Ptr*>(vol.internal_openvdb_temperature);
+                vol.internal_openvdb_temperature = nullptr;
+            }
         }
 
         // Update bounds
@@ -955,7 +969,9 @@ void* VDBVolumeManager::getGPUGrid(int volume_id) const {
 
 void* VDBVolumeManager::getGPUTemperatureGrid(int volume_id) const {
     const VDBVolumeData* vol = getVolume(volume_id);
-    if (!vol) return nullptr;
+    // The device buffer outlives the field it held; the flag says whether
+    // there is a current one.
+    if (!vol || !vol->has_temperature) return nullptr;
     return vol->d_nano_temperature;
 }
 

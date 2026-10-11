@@ -9,6 +9,8 @@
 
 #include "RtApiInternal.h"
 #include "Fluid/MatterGrain.h"
+#include "Fluid/GasInventoryGpu.h"
+#include <exception>
 #include "Fluid/MatterSubstanceState.h"
 #include "Fluid/MatterEmissionBudget.h"
 #include "Fluid/FluidObject.h"
@@ -26,6 +28,7 @@
 #include "MaterialManager.h"
 #include "VolumeShader.h"
 #include <algorithm>
+#include <limits>
 #include <cctype>
 #include <cmath>     // std::sqrt, for the material-coordinate drift measurement
 #include <sstream>   // locale-independent numbers in the seed-overlap refusal
@@ -101,9 +104,9 @@ void fillFluidRheology(const RayTrophiSim::Fluid::APICSolverParams& params,
     info.thermal_liquid_enabled = params.thermal_liquid_enabled;
     info.thermal_air_cooling_rate = params.thermal_air_cooling_rate;
     info.thermal_contact_cooling_rate = params.thermal_contact_cooling_rate;
-    info.thermal_freeze_kelvin = params.thermal_freeze_kelvin;
-    info.thermal_viscosity_range = params.thermal_viscosity_range;
-    info.thermal_cold_viscosity = params.thermal_cold_viscosity;
+    info.fog_autoconversion_kg_m3 = params.fog_autoconversion_kg_m3;
+    info.fog_autoconversion_rate = params.fog_autoconversion_rate;
+    info.fog_ceiling_kg_m3 = params.fog_ceiling_kg_m3;
 }
 
 // Surface reconstruction controls (descriptor) plus the last build's measured
@@ -131,7 +134,14 @@ void fillFluidSurfaceDetail(const RayTrophiSim::SimulationGridDomainDesc& d,
         info.surface_grid_dim[2] = sdf->eff_nz;
         info.surface_voxel = sdf->eff_voxel;
         info.surface_build_ms = sdf->build_ms;
+        info.surface_bin_ms = sdf->bin_ms;
+        info.surface_anisotropy_ms = sdf->anisotropy_ms;
+        info.surface_schedule_ms = sdf->schedule_ms;
+        info.surface_gather_ms = sdf->gather_ms;
+        info.surface_smooth_ms = sdf->smooth_ms;
         info.surface_active_cells = static_cast<uint64_t>(sdf->active_cells);
+        info.surface_work_cells = static_cast<uint64_t>(sdf->work_cells);
+        info.surface_bin_cells = static_cast<uint64_t>(sdf->bin_cells);
     }
 }
 
@@ -419,7 +429,20 @@ void fillFluidSolidPhase(const RayTrophiSim::SimulationGridDomainState& state,
     info.thermal_froze_this_frame = static_cast<uint64_t>(ts.froze_this_frame);
     info.thermal_melted_this_frame = static_cast<uint64_t>(ts.melted_this_frame);
     info.thermal_cold_unsupported = static_cast<uint64_t>(ts.cold_unsupported);
+    info.thermal_mushy_particles = static_cast<uint64_t>(ts.mushy_particles);
+    info.thermal_fusion_released_j = ts.fusion_released_j;
+    info.thermal_fusion_absorbed_j = ts.fusion_absorbed_j;
     info.thermal_air_cooled_particles = static_cast<uint64_t>(ts.air_cooled_particles);
+    info.thermal_field_heated_particles = static_cast<uint64_t>(ts.field_heated_particles);
+    info.thermal_convecting_particles = static_cast<uint64_t>(ts.convecting_particles);
+    info.thermal_conducting_cells = static_cast<uint64_t>(ts.conducting_cells);
+    info.thermal_gas_exchange_particles = static_cast<uint64_t>(ts.gas_exchange_particles);
+    info.thermal_heat_to_gas_j = ts.heat_to_gas_j;
+    info.thermal_evaporated_kg = ts.evaporated_kg;
+    info.thermal_condensed_kg = ts.condensed_kg;
+    info.thermal_condensation_splits = static_cast<uint64_t>(ts.condensation_splits);
+    info.thermal_solid_contact_particles = static_cast<uint64_t>(ts.solid_contact_particles);
+    info.thermal_heat_to_solid_j = ts.heat_to_solid_j;
     info.thermal_contact_cooled_particles = static_cast<uint64_t>(ts.contact_cooled_particles);
     info.thermal_min_kelvin = ts.min_kelvin;
     info.thermal_mean_kelvin = ts.mean_kelvin;
@@ -432,7 +455,7 @@ void fillFluidSolidPhase(const RayTrophiSim::SimulationGridDomainState& state,
 // The splatted density grid is what the Volume (fog) render mode draws; a
 // liquid that shows no fog with active_density_cells > 0 is a render problem,
 // with 0 it is a producer problem.
-void fillFluidDensityStats(const RayTrophiSim::SimulationGridDomainState& state,
+Result fillFluidDensityStats(const RayTrophiSim::SimulationGridDomainState& state,
                            FluidDomainInfo& info) {
     info.active_density_cells = state.active_density_cells;
     info.max_density = state.max_density;
@@ -440,39 +463,37 @@ void fillFluidDensityStats(const RayTrophiSim::SimulationGridDomainState& state,
     info.gas_phase_energy_j = 0.0;
     info.gas_phase_active_cells = 0;
     info.gas_phase_mass_centroid = Vec3();
-    double weighted_x = 0.0;
-    double weighted_y = 0.0;
-    double weighted_z = 0.0;
-    if (state.gas_phase_mass_kg.size() == state.grid.getCellCount()) {
-        for (int k = 0; k < state.grid.nz; ++k) {
-            for (int j = 0; j < state.grid.ny; ++j) {
-                for (int i = 0; i < state.grid.nx; ++i) {
-                    const float value = state.gas_phase_mass_kg[
-                        state.grid.cellIndex(i, j, k)];
-                    if (!std::isfinite(value) || !(value > 0.0f)) {
-                        continue;
-                    }
-                    const Vec3 position = state.grid.gridToWorld(i, j, k);
-                    info.gas_phase_mass_kg += value;
-                    weighted_x += static_cast<double>(position.x) * value;
-                    weighted_y += static_cast<double>(position.y) * value;
-                    weighted_z += static_cast<double>(position.z) * value;
-                    ++info.gas_phase_active_cells;
-                }
-            }
-        }
+    RayTrophiSim::Fluid::GasInventorySummary inventory;
+    try {
+        inventory = RayTrophiSim::Fluid::readGasInventorySummary(state);
+    } catch (const std::exception& error) {
+        return Result::fail(error.what());
     }
-    if (info.gas_phase_mass_kg > 0.0) {
-        const double inv_mass = 1.0 / info.gas_phase_mass_kg;
-        info.gas_phase_mass_centroid = Vec3(
-            static_cast<float>(weighted_x * inv_mass),
-            static_cast<float>(weighted_y * inv_mass),
-            static_cast<float>(weighted_z * inv_mass));
+    info.gas_phase_mass_kg = inventory.mass_kg;
+    info.gas_phase_energy_j = inventory.energy_j;
+    info.gas_phase_active_cells = inventory.active_cells;
+    info.gas_phase_mass_centroid = inventory.centroid;
+    info.gas_condensate_kg = inventory.condensate_kg;
+    info.gas_condensate_cells = inventory.condensate_cells;
+    {
+        const auto& gas = RayTrophiSim::Fluid::gasGrid(state);
+        const double volume = static_cast<double>(gas.voxel_size) * gas.voxel_size * gas.voxel_size;
+        info.gas_condensate_mean_kg_m3 = inventory.condensate_cells > 0 && volume > 0.0
+            ? inventory.condensate_kg / (volume * static_cast<double>(inventory.condensate_cells))
+            : 0.0;
     }
-    for (float value : state.gas_phase_energy_j) {
-        if (std::isfinite(value) && value > 0.0f)
-            info.gas_phase_energy_j += value;
-    }
+    const auto& gs = state.gas_stats;
+    info.saturation_measured = gs.saturation_measured;
+    info.condensable_substance = gs.condensable_substance;
+    info.fog_condensed_kg = gs.fog_condensed_kg;
+    info.fog_evaporated_kg = gs.fog_evaporated_kg;
+    info.fog_latent_to_air_j = gs.fog_latent_to_air_j;
+    info.rained_kg = gs.rained_kg;
+    info.rain_parcels = gs.rain_parcels;
+    info.fog_autoconverted_kg = gs.fog_autoconverted_kg;
+    info.rain_absorbed_kg = gs.rain_absorbed_kg;
+    info.gas_rain_kg = inventory.rain_kg;
+    info.gas_rain_cells = inventory.rain_cells;
     // 0 K marks an unwritten parcel, not a cold one (FluidParticles::temperature).
     const auto& temps = state.particles.temperature;
     float t_min = 0.0f, t_max = 0.0f;
@@ -486,6 +507,7 @@ void fillFluidDensityStats(const RayTrophiSim::SimulationGridDomainState& state,
     info.particle_kelvin_measured = any;
     info.particle_min_kelvin = t_min;
     info.particle_max_kelvin = t_max;
+    return Result::success();
 }
 
 void fillFluidMaterialCoords(const RayTrophiSim::SimulationGridDomainState& state,
@@ -843,6 +865,12 @@ Result setFluidThermal(const std::string& domain_id_or_name,
         return Result::fail("air_cooling_rate must be in [0, 100] 1/s");
     if (!finiteIn(patch.contact_cooling_rate, 0.0f, 100.0f))
         return Result::fail("contact_cooling_rate must be in [0, 100] 1/s");
+    if (!finiteIn(patch.fog_autoconversion_kg_m3, 0.0f, 1000.0f))
+        return Result::fail("fog_autoconversion_kg_m3 must be in [0, 1000] kg/m^3");
+    if (!finiteIn(patch.fog_autoconversion_rate, 0.0f, 100.0f))
+        return Result::fail("fog_autoconversion_rate must be in [0, 100] 1/s");
+    if (!finiteIn(patch.fog_ceiling_kg_m3, 0.0f, 1000.0f))
+        return Result::fail("fog_ceiling_kg_m3 must be in [0, 1000] kg/m^3");
 
     Result found;
     auto* dom = findLiquidDomainDesc(domain_id_or_name, found);
@@ -855,6 +883,9 @@ Result setFluidThermal(const std::string& domain_id_or_name,
     if (patch.enabled) p.thermal_liquid_enabled = *patch.enabled;
     if (patch.air_cooling_rate) p.thermal_air_cooling_rate = *patch.air_cooling_rate;
     if (patch.contact_cooling_rate) p.thermal_contact_cooling_rate = *patch.contact_cooling_rate;
+    if (patch.fog_autoconversion_kg_m3) p.fog_autoconversion_kg_m3 = *patch.fog_autoconversion_kg_m3;
+    if (patch.fog_autoconversion_rate) p.fog_autoconversion_rate = *patch.fog_autoconversion_rate;
+    if (patch.fog_ceiling_kg_m3) p.fog_ceiling_kg_m3 = *patch.fog_ceiling_kg_m3;
     // The freeze point, the near-freeze viscosity curve and conduction are the
     // substance's (substance.set); this switches the chain and sets its rates.
     p.sanitizeThermalLiquid();
@@ -865,6 +896,9 @@ Result setFluidThermal(const std::string& domain_id_or_name,
         fo.params.thermal_liquid_enabled = p.thermal_liquid_enabled;
         fo.params.thermal_air_cooling_rate = p.thermal_air_cooling_rate;
         fo.params.thermal_contact_cooling_rate = p.thermal_contact_cooling_rate;
+        fo.params.fog_autoconversion_kg_m3 = p.fog_autoconversion_kg_m3;
+        fo.params.fog_autoconversion_rate = p.fog_autoconversion_rate;
+        fo.params.fog_ceiling_kg_m3 = p.fog_ceiling_kg_m3;
     }
     return Result::success();
 }
@@ -914,6 +948,26 @@ Result listMaterialFields(std::vector<MaterialFieldInfo>& out_fields) {
             info.mass_budget_overflow = budget.budget_overflow_mass;
             info.mass_negative = budget.negative_mass;
             info.mass_invalid_elements = budget.invalid_elements;
+        }
+        {
+            const std::size_t n = field.elementCount();
+            const std::size_t stride = RayTrophiSim::MaterialStateField::kStateStride;
+            if (n > 0 && field.state.size() >= n * stride) {
+                const auto scale = runtime.materialTemperatureScale();
+                double sum = 0.0;
+                float lo = std::numeric_limits<float>::max();
+                float hi = std::numeric_limits<float>::lowest();
+                for (std::size_t e = 0; e < n; ++e) {
+                    const float k = scale.toKelvin(field.state[e * stride]);
+                    sum += k;
+                    lo = std::min(lo, k);
+                    hi = std::max(hi, k);
+                }
+                info.temperature_valid = true;
+                info.mean_kelvin = static_cast<float>(sum / static_cast<double>(n));
+                info.min_kelvin = lo;
+                info.max_kelvin = hi;
+            }
         }
         info.semantics = {
             RayTrophiSim::fieldSemanticName(RayTrophiSim::FieldSemantic::Temperature),
@@ -1364,6 +1418,11 @@ Result getFluidWhitewater(const std::string& domain_id_or_name,
         stats.advect_ms = fs.advect_ms;
         stats.crit_on_gpu = fs.crit_on_gpu;
         stats.neigh_on_gpu = fs.neigh_on_gpu;
+        stats.inputs_current = fs.inputs_current;
+        stats.overflow_fallback = fs.overflow_fallback;
+        stats.bin_cells = fs.bin_cells;
+        stats.bin_bytes = fs.bin_bytes;
+        stats.input_ms = fs.crit_gpu_ms;
     }
     return Result::success();
 }
@@ -1691,7 +1750,10 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
                 out_info.particle_count = states[gd_index].particles.size();
                 out_info.live_state = true;  // only now is the count a measurement
                 fillFluidMaterialCoords(states[gd_index], out_info);
-                fillFluidDensityStats(states[gd_index], out_info);
+                const auto inventory_result = fillFluidDensityStats(states[gd_index], out_info);
+                if (!inventory_result.ok) {
+                    return inventory_result;
+                }
                 fillFluidSolidPhase(states[gd_index], out_info);
             }
         }
@@ -1792,7 +1854,10 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
             out_info.particle_count = states[index].particles.size();
             out_info.live_state = true;   // only now is the count a measurement
             fillFluidMaterialCoords(states[index], out_info);
-            fillFluidDensityStats(states[index], out_info);
+            const auto inventory_result = fillFluidDensityStats(states[index], out_info);
+            if (!inventory_result.ok) {
+                return inventory_result;
+            }
             fillFluidSolidPhase(states[index], out_info);
         }
         finalizeFluidRenderProxyStats(*grid_dom, out_info);
@@ -1865,7 +1930,10 @@ Result listFluidDomains(std::vector<rtapi::FluidDomainInfo>& out_domains) {
                     info.particle_count = states[index].particles.size();
                     info.live_state = true;   // only now is the count a measurement
                     fillFluidMaterialCoords(states[index], info);
-                    fillFluidDensityStats(states[index], info);
+                    const auto inventory_result = fillFluidDensityStats(states[index], info);
+                    if (!inventory_result.ok) {
+                        return inventory_result;
+                    }
                     fillFluidSolidPhase(states[index], info);
                 }
             }
@@ -1914,8 +1982,10 @@ Result removeFluidDomain(const std::string& domain_id_or_name) {
 
 Result seedFluidParticles(const std::string& domain_id_or_name,
                            const Vec3* in_seed_min, const Vec3* in_seed_max,
-                           int particles_per_cell, bool replace, bool persistent) {
+                           int particles_per_cell, bool replace, bool persistent,
+                           float fill_level) {
     if (!g_ctx) return notBound();
+    if (fill_level > 1.0f) return Result::fail("fill_level must be 0..1");
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
 
     rtapi::FluidDomainInfo info;
@@ -1928,7 +1998,12 @@ Result seedFluidParticles(const std::string& domain_id_or_name,
     // the domain that was actually resolved above, so it is right for every
     // domain instead of for the one the old hardcoded box happened to fit.
     Vec3 seed_min, seed_max;
-    if (in_seed_min && in_seed_max) {
+    if (fill_level >= 0.0f) {
+        // Fill Domain derives its own footprint; the box only has to pass
+        // the overlap check below.
+        seed_min = info.domain_min;
+        seed_max = info.domain_max;
+    } else if (in_seed_min && in_seed_max) {
         seed_min = *in_seed_min;
         seed_max = *in_seed_max;
     } else {
@@ -1990,13 +2065,13 @@ Result seedFluidParticles(const std::string& domain_id_or_name,
     bool grid_seeded = active_runtime &&
         active_runtime->seedFluidDomainParticles(
             info.name, seed_min, seed_max, particles_per_cell, replace,
-            persistent);
+            persistent, fill_level);
     for (auto& system : g_ctx->scene.particle_systems) {
         if (!grid_seeded && system.runtime &&
             system.runtime != active_runtime &&
             system.runtime->seedFluidDomainParticles(
                 info.name, seed_min, seed_max, particles_per_cell, replace,
-                persistent)) {
+                persistent, fill_level)) {
             grid_seeded = true;
             break;
         }
@@ -3047,6 +3122,16 @@ SimulationFlowSourceInfo flowInfoFromDesc(
     out.fluid_substance = source.fluid_substance;
     out.fluid_temperature_override = source.fluid_temperature_override;
     out.fluid_temperature_kelvin = source.fluid_temperature_kelvin;
+    // The emitter's own rule (MatterDomainSources.inl), not a re-derivation.
+    out.fluid_birth_kelvin = source.fluid_temperature_kelvin;
+    if (g_ctx && !source.fluid_temperature_override && source.domain_index >= 0 &&
+        source.domain_index < static_cast<int>(domains.size())) {
+        const auto& domain = domains[static_cast<std::size_t>(source.domain_index)];
+        const auto& world = g_ctx->scene.ensureParticleSimulationSystem().worldThermal();
+        out.fluid_birth_kelvin = RayTrophiSim::Fluid::substanceAmbientBirthKelvin(
+            RayTrophiSim::Fluid::substanceTag(source.fluid_substance), domain.fluid_params,
+            RayTrophiSim::fluidDomainAmbientKelvin(domain, world), &out.fluid_born_solid);
+    }
     out.grain_birth_saturation = source.grain_birth_saturation;
     out.use_time_limit = source.use_time_limit;
     out.start_time = source.start_time;
@@ -3495,6 +3580,10 @@ Result stepFluidSimulation(float dt) {
     g_ctx->scene.simulation_world.stepOnce(dt);
     if (previousMode == RayTrophiSim::SimulationMode::Paused)
         g_ctx->scene.simulation_world.setMode(previousMode);
+    const std::string inventory_error = RayTrophiSim::Fluid::gasInventoryStepError(g_ctx->scene);
+    if (!inventory_error.empty()) {
+        return Result::fail(inventory_error);
+    }
     return Result::success();
 }
 

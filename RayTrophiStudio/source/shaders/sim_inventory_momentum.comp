@@ -1,0 +1,40 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Constants {
+    uint count;
+    float volume;
+    float ambient;
+    float gas_ambient;
+    float kelvin_per_unit;
+} pc;
+layout(set=0,binding=0) buffer VelX { float vx[]; };
+layout(set=0,binding=1) buffer VelY { float vy[]; };
+layout(set=0,binding=2) buffer VelZ { float vz[]; };
+layout(set=0,binding=3) readonly buffer Mass { float mass[]; };
+layout(set=0,binding=4) readonly buffer Temperature { float temperature[]; };
+layout(set=0,binding=5) readonly buffer Solid { float solid[]; };
+struct Face { uint axis; uint face; float mass; float momentum; uint left; uint right; vec2 pad; };
+layout(set=0,binding=6) readonly buffer Records { Face records[]; };
+void main() {
+    uint id = gl_GlobalInvocationID.x +
+        gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (id >= pc.count) return;
+    Face f = records[id];
+    float gas_mass = 0.0, air_mass = 0.0;
+    uint cells[2] = uint[2](f.left, f.right);
+    for (int n = 0; n < 2; ++n) {
+        uint c = cells[n];
+        if (c == 0xffffffffu) continue;
+        if (solid[c] > 0.5) return; // No impulse through a solid/moving liquid wall.
+        float t = max(1.0, pc.ambient +
+            (temperature[c] - pc.gas_ambient) * pc.kelvin_per_unit);
+        air_mass += 0.5 * pc.volume * 101325.0 * 0.028965 / (8.314462 * t);
+        gas_mass += 0.5 * max(mass[c], 0.0);
+    }
+    float before = air_mass + max(0.0, gas_mass - f.mass);
+    float v = f.axis == 0u ? vx[f.face] : (f.axis == 1u ? vy[f.face] : vz[f.face]);
+    float result = (before * v + f.momentum) / (before + f.mass);
+    if (f.axis == 0u) vx[f.face] = result;
+    else if (f.axis == 1u) vy[f.face] = result;
+    else vz[f.face] = result;
+}

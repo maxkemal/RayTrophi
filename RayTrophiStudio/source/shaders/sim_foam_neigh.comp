@@ -25,6 +25,7 @@ layout(push_constant) uniform PC {
     float h;            // neighbour radius in world units
     int   reach;        // cell radius covering h
     int   max_per_cell;
+    int offset_x; int offset_y; int offset_z;
 } pc;
 
 layout(set = 0, binding = 0) readonly buffer FoamPos    { float foam_pos[];   };
@@ -44,7 +45,8 @@ void main() {
     // The measurement that settled it: at under 10k foam particles kernel exec only
     // fell from ~12.8 to ~9 ms, so this pass was never the expensive half — the
     // fluid-side bins + criterion are.
-    int fi = int(gl_GlobalInvocationID.x);
+    int fi = int(gl_GlobalInvocationID.x +
+        gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x);
     if (fi >= pc.foam_count) return;
     neigh[fi] = 0u;
     if (pc.voxel_size <= 1e-6 || pc.h <= 1e-6) return;
@@ -54,9 +56,9 @@ void main() {
     if (isinf(x.x) || isinf(x.y) || isinf(x.z)) return;
 
     float inv_h = 1.0 / pc.voxel_size;
-    int ci = int(floor((x.x - pc.origin_x) * inv_h));
-    int cj = int(floor((x.y - pc.origin_y) * inv_h));
-    int ck = int(floor((x.z - pc.origin_z) * inv_h));
+    int ci = int(floor((x.x - pc.origin_x) * inv_h)) - pc.offset_x;
+    int cj = int(floor((x.y - pc.origin_y) * inv_h)) - pc.offset_y;
+    int ck = int(floor((x.z - pc.origin_z) * inv_h)) - pc.offset_z;
     // Host's cheap x-only reject, kept so the two paths agree exactly. Far-out y/z
     // needs no test: the clamps below collapse the loop range to empty on their own.
     if (ci < -pc.reach || ci > pc.nx + pc.reach) return;
@@ -78,7 +80,7 @@ void main() {
         // position reads. Exact: every particle this skips would have failed the
         // d2 < h_sq test below, so results are unchanged.
         vec3 cmin = vec3(pc.origin_x, pc.origin_y, pc.origin_z) +
-                    vec3(ii, jj, kk) * pc.voxel_size;
+                    vec3(ii + pc.offset_x, jj + pc.offset_y, kk + pc.offset_z) * pc.voxel_size;
         vec3 cd = max(max(cmin - x, x - (cmin + vec3(pc.voxel_size))), vec3(0.0));
         if (dot(cd, cd) >= h_sq) continue;
 

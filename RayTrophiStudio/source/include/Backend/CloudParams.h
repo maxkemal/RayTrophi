@@ -17,6 +17,7 @@
 
 #include "Atmosphere/AtmosphereClouds.h"
 #include "Vec3.h"
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -43,8 +44,12 @@ struct CloudLayerGPU {
     float a[4];   // base_altitude_m, thickness_m, coverage, type
     float b[4];   // extinction_per_m, droplet_diameter_um, erosion, enabled (0/1)
     float c[4];   // 1/cell_size_m, 1/detail_size_m, weather_offset_u, weather_offset_v
+    float d[4];   // inverse yaw cos, sin; formation role, group
+    float e[4];   // effective layer RGB albedo, phase override (2 = droplet fit)
+    float f[4];   // effective layer emission RGB, reserved
+    float g[4];   // group base, height, inverse footprint period, reserved
 };
-static_assert(sizeof(CloudLayerGPU) == 48, "CloudLayerGPU std430 layout");
+static_assert(sizeof(CloudLayerGPU) == 112, "CloudLayerGPU std430 layout");
 
 struct CloudParamsGPU {
     CloudLayerGPU layers[atmosphere::kMaxCloudLayers];
@@ -60,22 +65,39 @@ struct CloudParamsGPU {
                       // (slant = horizontal metres per metre of fall)
     float precip2[4]; // snow (0/1), ground_fraction, shear_x, shear_z
                       // (shear = horizontal metres per metre of height, Faz 3e)
+    float scatterAlbedo[4]; // linear RGB albedo, HG g override (2 = droplet fit)
+    float emissionSource[4]; // linear RGB source radiance, reserved
+    float cirrusDirection[4]; // authored along-wind direction x,z; reserved
 };
-static_assert(sizeof(CloudParamsGPU) == 240, "CloudParamsGPU std430 layout (cloud_common.glsl)");
+static_assert(sizeof(CloudParamsGPU) == 480, "CloudParamsGPU std430 layout (cloud_common.glsl)");
 
 inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float time_seconds,
                                          const Vec3& drift_m, const Vec3& wind_mps,
                                          float planet_radius_m,
                                          float altitude_offset_m) {
     CloudParamsGPU p{};
+    const atmosphere::CloudMaterial& m = c.material;
+    const float total = m.scattering_coefficient + m.absorption_coefficient;
+    const float extinctionScale = m.density_multiplier * total;
+    const float albedo = total > 0.0f ? m.scattering_coefficient / total : 0.0f;
+    p.scatterAlbedo[0] = m.scattering_color.x * albedo;
+    p.scatterAlbedo[1] = m.scattering_color.y * albedo;
+    p.scatterAlbedo[2] = m.scattering_color.z * albedo;
+    p.scatterAlbedo[3] = m.override_anisotropy ? m.anisotropy : 2.0f;
+    p.emissionSource[0] = m.emission_color.x * m.emission_strength;
+    p.emissionSource[1] = m.emission_color.y * m.emission_strength;
+    p.emissionSource[2] = m.emission_color.z * m.emission_strength;
     for (int i = 0; i < atmosphere::kMaxCloudLayers; ++i) {
         const atmosphere::CloudLayer& l = c.layers[i];
         CloudLayerGPU& g = p.layers[i];
+        const atmosphere::CloudMaterial lm = atmosphere::layerMaterial(c, i);
+        const float lt = lm.scattering_coefficient + lm.absorption_coefficient;
+        const float la = lt > 0.0f ? lm.scattering_coefficient / lt : 0.0f;
         g.a[0] = l.base_altitude_m;
         g.a[1] = l.thickness_m;
         g.a[2] = l.coverage;
         g.a[3] = l.type;
-        g.b[0] = l.extinction_per_m;
+        g.b[0] = l.extinction_per_m * lm.density_multiplier * lt;
         // Diameter, not g: the full phase (HG + Draine blend) needs all four
         // fit parameters, and they all derive from the diameter.
         g.b[1] = l.droplet_diameter_um;
@@ -85,8 +107,42 @@ inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float 
         g.c[1] = 1.0f / (l.detail_size_m > 1.0f ? l.detail_size_m : 1.0f);
         // Each layer reads the shared weather map at its own offset, so two
         // layers are not the same pattern stacked (golden-ratio spread).
-        g.c[2] = 0.6180339f * static_cast<float>(i);
-        g.c[3] = 0.3819660f * static_cast<float>(i);
+        const int fieldIndex = l.formation_group > 0 ? l.formation_group - 1 : i;
+        g.c[2] = 0.6180339f * static_cast<float>(fieldIndex);
+        g.c[3] = 0.3819660f * static_cast<float>(fieldIndex);
+        const float yaw = -l.rotation_degrees * 0.017453292519943295f;
+        g.d[0] = std::cos(yaw);
+        g.d[1] = std::sin(yaw);
+        g.d[2] = static_cast<float>(l.formation_role);
+        g.d[3] = static_cast<float>(l.formation_group);
+        g.e[0] = lm.scattering_color.x * la;
+        g.e[1] = lm.scattering_color.y * la;
+        g.e[2] = lm.scattering_color.z * la;
+        g.e[3] = lm.override_anisotropy ? lm.anisotropy : 2.0f;
+        g.f[0] = lm.emission_color.x * lm.emission_strength;
+        g.f[1] = lm.emission_color.y * lm.emission_strength;
+        g.f[2] = lm.emission_color.z * lm.emission_strength;
+        float groupBase = l.base_altitude_m;
+        float groupTop = l.base_altitude_m + l.thickness_m;
+        float groupPeriod = l.cell_size_m;
+        int firstMember = i;
+        if (l.formation_group > 0) {
+            for (int j = 0; j < atmosphere::kMaxCloudLayers; ++j) {
+                const auto& member = c.layers[j];
+                if (!member.enabled || member.formation_group != l.formation_group) {
+                    continue;
+                }
+                groupBase = (std::min)(groupBase, member.base_altitude_m);
+                groupTop = (std::max)(groupTop, member.base_altitude_m + member.thickness_m);
+                if (j < firstMember) {
+                    firstMember = j;
+                    groupPeriod = member.cell_size_m;
+                }
+            }
+        }
+        g.g[0] = groupBase;
+        g.g[1] = (std::max)(groupTop - groupBase, 1.0f);
+        g.g[2] = 1.0f / (std::max)(groupPeriod, 1.0f);
     }
     p.weather[0] = 1.0f / (c.weather.extent_m > 1.0f ? c.weather.extent_m : 1.0f);
     p.weather[1] = c.weather.type_variation;
@@ -99,7 +155,13 @@ inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float 
     p.cirrus[0] = c.cirrus.enabled ? 1.0f : 0.0f;
     p.cirrus[1] = c.cirrus.altitude_m;
     p.cirrus[2] = c.cirrus.coverage;
-    p.cirrus[3] = c.cirrus.opacity;
+    p.cirrus[3] = c.cirrus.opacity * extinctionScale;
+    const float windLength = std::sqrt(wind_mps.x * wind_mps.x + wind_mps.z * wind_mps.z);
+    const float wx = windLength > 1e-5f ? wind_mps.x / windLength : 1.0f;
+    const float wz = windLength > 1e-5f ? wind_mps.z / windLength : 0.0f;
+    const float cirrusYaw = c.cirrus.rotation_degrees * 0.017453292519943295f;
+    p.cirrusDirection[0] = wx * std::cos(cirrusYaw) - wz * std::sin(cirrusYaw);
+    p.cirrusDirection[1] = wx * std::sin(cirrusYaw) + wz * std::cos(cirrusYaw);
     p.misc[0] = 1.0f / (c.cirrus.scale_m > 1.0f ? c.cirrus.scale_m : 1.0f);
     p.misc[1] = static_cast<float>(c.weather.seed % 65536u);
     p.misc[2] = static_cast<float>(c.quality.rt_max_bounces);

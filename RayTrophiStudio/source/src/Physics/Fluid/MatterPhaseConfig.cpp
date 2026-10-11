@@ -255,6 +255,16 @@ void synchronizePhaseStorage(SimulationGridDomainState& state,
         state.type != domain.type) {
         state.gas_phase_mass_kg.clear();
         state.gas_phase_energy_j.clear();
+        state.gas_phase_condensate_kg.clear();
+        state.gas_phase_rain_kg.clear();
+        state.gas_phase_rain_energy_j.clear();
+        state.gas_rain_landing.clear();
+        state.gas_rain_absorbed_pending_kg = 0.0;
+        state.gas_liquid_water_present = false;
+        state.gas_inventory_device.reset();
+        state.gas_inventory_revision = 0;
+        state.gas_inventory_error.clear();
+        state.gas_phase_pending_momentum.clear();
     }
     if (primary_changed || secondary_changed) {
         ++state.version;

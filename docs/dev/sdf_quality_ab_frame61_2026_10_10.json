@@ -1,0 +1,116 @@
+[
+  {
+    "label": "m1_default",
+    "control": {
+      "driver": "none",
+      "dropped_seeds": [
+        "Physics Domain 1"
+      ],
+      "epoch": 0,
+      "frame": 61,
+      "playing": false,
+      "script_driving": false,
+      "script_sim_seconds": 0.0
+    },
+    "surface": {
+      "anisotropy_enabled": false,
+      "particle_count": 25416,
+      "smoothing_iterations": 2,
+      "surface_active_cells": 78767,
+      "surface_anisotropy_ms": 0.0003000000142492354,
+      "surface_bin_cells": 262144,
+      "surface_bin_ms": 1.5807000398635864,
+      "surface_build_ms": 8.563799858093262,
+      "surface_gather_ms": 3.0703001022338867,
+      "surface_grid_dim": [
+        128,
+        128,
+        128
+      ],
+      "surface_material": "",
+      "surface_measured": true,
+      "surface_offset_voxels": 0.6499999761581421,
+      "surface_resolution_multiplier": 1,
+      "surface_schedule_ms": 1.865399956703186,
+      "surface_smooth_ms": 1.5292999744415283,
+      "surface_voxel": 0.0390625,
+      "surface_work_cells": 224256
+    }
+  },
+  {
+    "label": "m2_default",
+    "control": {
+      "driver": "none",
+      "dropped_seeds": [
+        "Physics Domain 1"
+      ],
+      "epoch": 0,
+      "frame": 61,
+      "playing": false,
+      "script_driving": false,
+      "script_sim_seconds": 0.0
+    },
+    "surface": {
+      "anisotropy_enabled": false,
+      "particle_count": 25416,
+      "smoothing_iterations": 2,
+      "surface_active_cells": 502337,
+      "surface_anisotropy_ms": 0.0008999999845400453,
+      "surface_bin_cells": 262144,
+      "surface_bin_ms": 1.4853999614715576,
+      "surface_build_ms": 43.04100036621094,
+      "surface_gather_ms": 16.787799835205078,
+      "surface_grid_dim": [
+        256,
+        256,
+        256
+      ],
+      "surface_material": "",
+      "surface_measured": true,
+      "surface_offset_voxels": 0.6499999761581421,
+      "surface_resolution_multiplier": 2,
+      "surface_schedule_ms": 4.047999858856201,
+      "surface_smooth_ms": 7.761000156402588,
+      "surface_voxel": 0.01953125,
+      "surface_work_cells": 1145856
+    }
+  },
+  {
+    "label": "m1_aniso",
+    "control": {
+      "driver": "none",
+      "dropped_seeds": [
+        "Physics Domain 1"
+      ],
+      "epoch": 0,
+      "frame": 61,
+      "playing": false,
+      "script_driving": false,
+      "script_sim_seconds": 0.0
+    },
+    "surface": {
+      "anisotropy_enabled": true,
+      "particle_count": 25416,
+      "smoothing_iterations": 2,
+      "surface_active_cells": 78739,
+      "surface_anisotropy_ms": 6.03879976272583,
+      "surface_bin_cells": 262144,
+      "surface_bin_ms": 1.4357000589370728,
+      "surface_build_ms": 94.70559692382812,
+      "surface_gather_ms": 77.92939758300781,
+      "surface_grid_dim": [
+        128,
+        128,
+        128
+      ],
+      "surface_material": "",
+      "surface_measured": true,
+      "surface_offset_voxels": 0.6499999761581421,
+      "surface_resolution_multiplier": 1,
+      "surface_schedule_ms": 6.118299961090088,
+      "surface_smooth_ms": 2.6856000423431396,
+      "surface_voxel": 0.0390625,
+      "surface_work_cells": 347648
+    }
+  }
+]

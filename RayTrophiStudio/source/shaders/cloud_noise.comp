@@ -112,20 +112,29 @@ void main() {
         if (id.z >= N) return;
         vec3 u = (vec3(id) + 0.5) / float(N);
         vec4 c;
+        // Bake a smooth, periodic vector warp into the noise texture. This
+        // breaks concentric cellular contours without adding runtime reads.
+        vec3 warp = vec3(perlin3(u * 3.0, 3, 301u),
+                         perlin3(u * 3.0, 3, 311u),
+                         perlin3(u * 3.0, 3, 321u)) * 0.045;
+        vec3 warped = u + warp;
         if (pc.mode == 0u) {
-            float pf = perlinFbm(u, 4, 4, 11u) * 0.5 + 0.5;
-            pf = abs(pf * 2.0 - 1.0);                      // billowy
-            pf = mix(1.0, pf, 0.5);
-            float w4 = worleyFbm(u, 4, 21u);
+            // Keep signed gradient structure instead of folding its zero
+            // crossings into repeated absolute-value ridges.
+            float pf = 0.45 + 0.45 * smoothstep(-0.45, 0.45,
+                                               perlinFbm(warped, 4, 4, 11u));
+            float w4 = worleyFbm(warped, 4, 21u);
             c.r = clamp(w4 + (pf - 0.0) * (1.0 - w4), 0.0, 1.0);   // Perlin-Worley
             c.g = w4;
-            c.b = worleyFbm(u, 8, 31u);
-            c.a = worleyFbm(u, 16, 41u);
+            c.b = worleyFbm(warped, 8, 31u);
+            // Independent gradient modulation for formation lean/taper,
+            // rather than another nested distance-to-cell contour.
+            c.a = clamp(perlinFbm(warped, 13, 3, 41u) * 0.65 + 0.5, 0.0, 1.0);
             imageStore(baseImg, ivec3(id), c);
         } else {
-            c.r = worleyFbm(u, 2, 51u);
-            c.g = worleyFbm(u, 4, 61u);
-            c.b = worleyFbm(u, 8, 71u);
+            c.r = worleyFbm(warped, 2, 51u);
+            c.g = worleyFbm(warped, 4, 61u);
+            c.b = worleyFbm(warped, 8, 71u);
             c.a = 1.0;
             imageStore(detailImg, ivec3(id), c);
         }

@@ -99,17 +99,26 @@ struct LevelSetParams {
     // Below this neighbour count a particle is isolated spray and is kept
     // spherical (no reliable covariance from too few samples).
     int   anisotropy_neighbor_min = 6;
-    // Position smoothing lambda: x~ = (1-lambda)*x + lambda*neighbour_mean.
-    // Removes per-particle jitter before surfacing. 0 = raw, 1 = fully smoothed.
+    // Temporary render-centre smoothing for BOTH spherical and anisotropic
+    // kernels: x~ = (1-lambda)*x + lambda*neighbour_mean. Canonical positions
+    // are not modified. Below anisotropy_neighbor_min, keep the original centre.
+    // 0 restores the raw-centre producer; 1 fully follows the local mean.
     float position_smoothing = 0.9f;
 };
 
 struct LevelSetStats {
+    std::size_t work_cells = 0;         // scheduled tile lanes, including halo/padding
+    std::size_t bin_cells = 0;          // physical-support bins; independent of refinement
     std::size_t active_cells = 0;       // cells inside the narrow band
     std::size_t surface_cells = 0;      // cells whose |phi| < voxel
     std::size_t particle_count = 0;
     std::size_t grid_cell_count = 0;    // cell count of the (refined) SDF grid
     float       build_ms = 0.0f;
+    float       bin_ms = 0.0f;
+    float       anisotropy_ms = 0.0f; // legacy name: centre filtering + optional covariance
+    float       schedule_ms = 0.0f;
+    float       gather_ms = 0.0f;
+    float       smooth_ms = 0.0f;
 
     // Effective grid the SDF was actually built on. Equals the sim grid when
     // surface_resolution_multiplier == 1, otherwise refined. Consumers must use

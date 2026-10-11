@@ -5,6 +5,7 @@
 #include "Fluid/FluidFogDensity.h"
 #include "PostProcess/PostService.h"
 #include "ProjectManager.h"
+#include "ProjectTimelineReset.h"
 #include "ProjectSimulationCache.h"
 #include "globals.h"
 #include "Renderer.h"
@@ -1293,6 +1294,7 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer, bool defer
     // silent while hunting the domain-edge black band).
     sceneLogOnChangeReset();
     SCENE_LOG_INFO("New project created. Subsystems and animation caches cleared.");
+    requestProjectTimelineReset();
 }
 
 // ============================================================================
@@ -2339,6 +2341,9 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 if (progress_callback) progress_callback(70, "Loading render settings...");
                 deserializeRenderSettings(sjsonToNlohmann(rs_el), settings);
             }
+            settings.animation_current_frame = 0;
+            settings.animation_playback_frame = 0;
+            settings.animation_is_playing = false;
             // Post-Process / Color Grading
             simdjson::dom::element postfx_el;
             if (!root["postfx"].get(postfx_el)) {
@@ -2688,6 +2693,8 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             if (!root["timeline"].get(timeline_el)) {
                 scene.timeline.deserialize(sjsonToNlohmann(timeline_el));
             }
+            // Open at the authored initial state, without replaying a saved scrub frame.
+            scene.timeline.current_frame = 0;
 
             // Animation Graphs
             simdjson::dom::element anim_graphs_el;
@@ -3081,6 +3088,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     
     if (progress_callback) progress_callback(91, "Project data loaded, finalizing...");
     SCENE_LOG_INFO("Project loaded with turbo parser: " + filepath);
+    requestProjectTimelineReset();
     return true;
 }
 
@@ -5898,6 +5906,9 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"granular_max_solver_substeps", domain.fluid_params.granular_max_solver_substeps},
             {"thermal_liquid_enabled", domain.fluid_params.thermal_liquid_enabled},
             {"thermal_air_cooling_rate", domain.fluid_params.thermal_air_cooling_rate},
+            {"fog_autoconversion_kg_m3", domain.fluid_params.fog_autoconversion_kg_m3},
+            {"fog_autoconversion_rate", domain.fluid_params.fog_autoconversion_rate},
+            {"fog_ceiling_kg_m3", domain.fluid_params.fog_ceiling_kg_m3},
             {"thermal_contact_cooling_rate", domain.fluid_params.thermal_contact_cooling_rate},
             {"flammable", domain.fluid_flammable},
             {"extinguishing", domain.fluid_extinguishing},
@@ -6464,6 +6475,9 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.granular_max_solver_substeps = f.value("granular_max_solver_substeps", domain.fluid_params.granular_max_solver_substeps);
             domain.fluid_params.thermal_liquid_enabled = f.value("thermal_liquid_enabled", domain.fluid_params.thermal_liquid_enabled);
             domain.fluid_params.thermal_air_cooling_rate = f.value("thermal_air_cooling_rate", domain.fluid_params.thermal_air_cooling_rate);
+            domain.fluid_params.fog_autoconversion_kg_m3 = f.value("fog_autoconversion_kg_m3", domain.fluid_params.fog_autoconversion_kg_m3);
+            domain.fluid_params.fog_autoconversion_rate = f.value("fog_autoconversion_rate", domain.fluid_params.fog_autoconversion_rate);
+            domain.fluid_params.fog_ceiling_kg_m3 = f.value("fog_ceiling_kg_m3", domain.fluid_params.fog_ceiling_kg_m3);
             domain.fluid_params.thermal_contact_cooling_rate = f.value("thermal_contact_cooling_rate", domain.fluid_params.thermal_contact_cooling_rate);
             domain.fluid_params.sanitizeThermalLiquid();
             // ★ The material. A file written before 2026-10-07 has no

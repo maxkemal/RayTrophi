@@ -19,16 +19,20 @@ layout(push_constant) uniform PC {
     float voxel_size;
     int   max_per_cell;
     int   cell_count;
+    int offset_x; int offset_y; int offset_z;
 } pc;
 
 layout(set = 0, binding = 0) readonly buffer Positions { float pos_data[]; };
 layout(set = 0, binding = 1) buffer          Counts    { uint  counts[];   };
 layout(set = 0, binding = 2) buffer          Items     { uint  items[];    };
+layout(set = 0, binding = 3) readonly buffer Eligible { uint eligible[]; };
 
 void main() {
-    int id = int(gl_GlobalInvocationID.x);
+    int id = int(gl_GlobalInvocationID.x +
+        gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x);
     if (id >= pc.particle_count || pc.voxel_size <= 1e-6) return;
 
+    if (eligible[id] == 0u) return;
     vec3 p = vec3(pos_data[id * 3], pos_data[id * 3 + 1], pos_data[id * 3 + 2]);
     // Matches the CPU bin exactly: non-finite or out-of-domain particles are not
     // binned at all (they keep expected == 0 and never spawn foam).
@@ -36,9 +40,9 @@ void main() {
     if (isinf(p.x) || isinf(p.y) || isinf(p.z)) return;
 
     float inv_h = 1.0 / pc.voxel_size;
-    int i = int(floor((p.x - pc.origin_x) * inv_h));
-    int j = int(floor((p.y - pc.origin_y) * inv_h));
-    int k = int(floor((p.z - pc.origin_z) * inv_h));
+    int i = int(floor((p.x - pc.origin_x) * inv_h)) - pc.offset_x;
+    int j = int(floor((p.y - pc.origin_y) * inv_h)) - pc.offset_y;
+    int k = int(floor((p.z - pc.origin_z) * inv_h)) - pc.offset_z;
     if (i < 0 || i >= pc.nx || j < 0 || j >= pc.ny || k < 0 || k >= pc.nz) return;
 
     int ci = i + j * pc.nx + k * pc.nx * pc.ny;

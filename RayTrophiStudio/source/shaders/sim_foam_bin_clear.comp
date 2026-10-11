@@ -19,6 +19,7 @@ layout(push_constant) uniform PC {
     float voxel_size;
     int   max_per_cell;
     int   cell_count;      // number of real cells; slot [cell_count] is the overflow tally
+    int offset_x; int offset_y; int offset_z;
 } pc;
 
 layout(set = 0, binding = 0) buffer Counts { uint counts[]; };
@@ -33,7 +34,8 @@ layout(set = 0, binding = 0) buffer Counts { uint counts[]; };
 layout(set = 0, binding = 1) buffer ClearOut { uint clear_out[]; };
 
 void main() {
-    int id = int(gl_GlobalInvocationID.x);
+    int id = int(gl_GlobalInvocationID.x +
+        gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x);
     // The two ranges differ in length, so this is dispatched over whichever is
     // larger and each write is bounded on its own.
     if (id <= pc.cell_count)    counts[id] = 0u;   // '<=': also clears the overflow slot

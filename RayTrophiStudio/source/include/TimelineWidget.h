@@ -14,6 +14,7 @@
 #include "KeyframeSystem.h"
 #include <string>
 #include <vector>
+#include <algorithm>
 #include <map>
 #include <set>
 #include <cstdint>
@@ -132,6 +133,19 @@ public:
     int getEndFrame() const { return end_frame; }
     bool isPlaying() const { return is_playing; }
     void pausePlayback() { is_playing = false; }
+    void resetForProjectLoad() {
+        is_playing = false;
+        current_frame = 0;
+        last_frame_time = 0.0f;
+        project_rest_frame_ = true;
+    }
+    void clampCurrentFrameToRange() {
+        if (project_rest_frame_ && current_frame == 0 && !is_playing) {
+            return;
+        }
+        project_rest_frame_ = false;
+        current_frame = std::clamp(current_frame, start_frame, end_frame);
+    }
 
     // Set each frame while the timeline window (dope sheet OR graph editor — they share
     // one window) has keyboard focus. Both of those claim Delete/X for keyframe deletion,
@@ -221,6 +235,7 @@ private:
     
     // Playback
     bool is_playing = false;
+    bool project_rest_frame_ = false;
     // Loop playback. Default OFF: playback stops at end_frame. When the timeline
     // drives a simulation, looping forced a full re-bake + sim-cache wipe every
     // wrap (memory thrash), so looping is opt-in via the timeline toolbar.

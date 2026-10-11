@@ -133,6 +133,15 @@ const uint BOUNCE_GLASS_REFLECT = 6u;
 // The photon pass treats it like SPECULAR/TRANSPARENT: keep walking.
 const uint BOUNCE_MEDIUM_PASS = 7u;
 
+// Shared classification before/after a finite atmosphere segment is added.
+bool plIsTransparentPass(RayPayload p, vec3 direction) {
+    float radianceLuma = dot(abs(p.radiance), vec3(0.2126, 0.7152, 0.0722));
+    return p.scattered && dot(p.scatterDir, direction) > 0.9999 &&
+           ((radianceLuma < 1e-6 &&
+             all(greaterThanEqual(p.attenuation, vec3(0.9999)))) ||
+            (p.bounceType == BOUNCE_TRANSPARENT && radianceLuma < 5e-4));
+}
+
 // Shared tracing constants. Same reasoning as the bounce codes above: both
 // closest-hit shaders and the shared BSDF module need identical values, and a
 // per-shader copy of a shadow epsilon is how two paths start showing different

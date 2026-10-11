@@ -16155,6 +16155,11 @@ bool VulkanBackendAdapter::ensureCloudPipelines(const std::string& shaderDir) {
                                                                                 : std::vector<std::uint32_t>{};
         if (shadow.empty() || !m_device->createCloudShadowPipeline(shadow))
             SCENE_LOG_WARN("[Vulkan] cloud_shadow pipeline unavailable: RayFusion clouds cast no shadow.");
+        const std::string scenePath = shaderDir + "/cloud_scene.spv";
+        if (!std::filesystem::exists(scenePath) ||
+            !m_device->createCloudScenePipeline(loadSPV(scenePath))) {
+            SCENE_LOG_WARN("[Vulkan] cloud_scene pipeline unavailable: no clouds over geometry.");
+        }
     }
     // Re-publish the last state: the render flag can only turn on now that
     // the textures can be generated, and a static world sends no new sync.

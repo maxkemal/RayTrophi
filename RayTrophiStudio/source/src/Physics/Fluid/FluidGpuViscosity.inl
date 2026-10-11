@@ -5,7 +5,8 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
                           SimulationGridDomainComputeBuffers& gpu_buffers,
                           const std::vector<float>& fluid_mask_cpu,
                           int* out_sweeps_run,
-                          Fluid::APICSolverStats* sparse_stats = nullptr) {
+                          Fluid::APICSolverStats* sparse_stats = nullptr,
+                          bool velocity_input_on_device = false) {
     if (out_sweeps_run) *out_sweeps_run = 0;
     auto& grid = state.grid;
     if (sparse_stats) {
@@ -105,23 +106,23 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
 
     compute->beginTransferBatch();
     bool ok =
-        (gpu_buffers.matter_model.enabled ||
+        (gpu_buffers.matter_model.enabled || velocity_input_on_device ||
          compute->uploadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), vx_bytes)) &&
-        (gpu_buffers.matter_model.enabled ||
+        (gpu_buffers.matter_model.enabled || velocity_input_on_device ||
          compute->uploadBuffer(gpu_buffers.vel_y, grid.vel_y.data(), vy_bytes)) &&
-        (gpu_buffers.matter_model.enabled ||
+        (gpu_buffers.matter_model.enabled || velocity_input_on_device ||
          compute->uploadBuffer(gpu_buffers.vel_z, grid.vel_z.data(), vz_bytes)) &&
         // The RHS is the same field: GS starts from the pre-diffusion state and
         // relaxes in place, so both copies begin identical.
-        (sparse || (gpu_buffers.matter_model.enabled
+        (sparse || ((gpu_buffers.matter_model.enabled || velocity_input_on_device)
             ? Fluid::copyMatterGpuFloat(*compute, gpu_buffers.vel_x,
                 gpu_buffers.scratch2_vel_x, static_cast<uint32_t>(grid.vel_x.size()))
             : compute->uploadBuffer(gpu_buffers.scratch2_vel_x, grid.vel_x.data(), vx_bytes))) &&
-        (sparse || (gpu_buffers.matter_model.enabled
+        (sparse || ((gpu_buffers.matter_model.enabled || velocity_input_on_device)
             ? Fluid::copyMatterGpuFloat(*compute, gpu_buffers.vel_y,
                 gpu_buffers.scratch2_vel_y, static_cast<uint32_t>(grid.vel_y.size()))
             : compute->uploadBuffer(gpu_buffers.scratch2_vel_y, grid.vel_y.data(), vy_bytes))) &&
-        (sparse || (gpu_buffers.matter_model.enabled
+        (sparse || ((gpu_buffers.matter_model.enabled || velocity_input_on_device)
             ? Fluid::copyMatterGpuFloat(*compute, gpu_buffers.vel_z,
                 gpu_buffers.scratch2_vel_z, static_cast<uint32_t>(grid.vel_z.size()))
             : compute->uploadBuffer(gpu_buffers.scratch2_vel_z, grid.vel_z.data(), vz_bytes))) &&

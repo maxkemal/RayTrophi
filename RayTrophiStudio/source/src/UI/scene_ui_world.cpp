@@ -3,6 +3,7 @@
 // Part of SceneUI - extracted for maintainability
 
 #include "scene_ui.h"
+#include "UI/CloudMaterialUI.h"
 #include "renderer.h"
 #include "OptixWrapper.h"
 #include "ColorProcessingParams.h"
@@ -1209,6 +1210,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         // is derived from it and never edited here.
         atmosphere::CloudState clouds = world.getClouds();
         bool cloudsChanged = false;
+        cloudsChanged |= cloud_ui::drawMaterialControls(clouds);
         static std::string cloudError;
 
         const bool cloudsKeyed = isWorldKeyed(WorldProp::Clouds);
@@ -1229,6 +1231,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             atmosphere::CloudState preset;
             if (atmosphere::cloudPreset(presets[static_cast<size_t>(presetIndex)], preset)) {
                 preset.quality = clouds.quality;   // a look preset does not change quality
+                preset.material = clouds.material;
                 clouds = preset;
                 cloudsChanged = true;
             }
@@ -1270,6 +1273,9 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 cloudsChanged |= ImGui::SliderFloat("Erosion", &l.erosion, 0.0f, 1.0f, "%.2f");
                 cloudsChanged |= ImGui::DragFloat("Cell size (m)", &l.cell_size_m, 10.0f, 50.0f, 50000.0f, "%.0f");
                 cloudsChanged |= ImGui::DragFloat("Detail size (m)", &l.detail_size_m, 1.0f, 5.0f, 5000.0f, "%.0f");
+                cloudsChanged |= ImGui::SliderFloat("Direction (deg)", &l.rotation_degrees,
+                                                  -360.0f, 360.0f, "%.1f");
+                cloudsChanged |= cloud_ui::drawLayerControls(l);
                 ImGui::TreePop();
             }
             ImGui::PopID();
@@ -1291,6 +1297,9 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             cloudsChanged |= ImGui::SliderFloat("Coverage##cirrus", &clouds.cirrus.coverage, 0.0f, 1.0f, "%.2f");
             cloudsChanged |= ImGui::SliderFloat("Optical depth##cirrus", &clouds.cirrus.opacity, 0.0f, 5.0f, "%.2f");
             cloudsChanged |= ImGui::DragFloat("Streak scale (m)##cirrus", &clouds.cirrus.scale_m, 50.0f, 100.0f, 100000.0f, "%.0f");
+            cloudsChanged |= ImGui::SliderFloat("Direction (deg)##cirrus",
+                                              &clouds.cirrus.rotation_degrees,
+                                              -360.0f, 360.0f, "%.1f");
             ImGui::TextDisabled("Rendered from Faz 3c.");
             ImGui::TreePop();
         }

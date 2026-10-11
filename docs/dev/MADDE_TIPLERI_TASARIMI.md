@@ -199,7 +199,7 @@ yetki + descriptor overlay) taşır. Panel ile script aynı alanları düzenler.
 | **T0** ◐ ilk sonuç §6b | **Ölçüm, kod yok.** Aynı gaz sahnesi: eski Gas domain'i vs yalnız gaz taşıyan Matter domain'i; aynı şekilde sıvı. ms/kare (`rt.perf`), GPU bellek, sonuç farkı. | Tablo `docs/dev/`'de. Karar 1'in kapısı bu sayılar; fark büyükse önce o kapatılır. |
 | **T1** ◐ BUILD + HIZLI IPC PASS 2026-10-08, save/open açık | `category` + türetme (`based_on`/overrides), proje serializer (`substances` dizisi), `substance.list/get/derive/set/remove` (eski `msf.substances`/`msf.substance` söküldü), `rt.substance`. Kütüphane kilitsiz okunan anlık görüntü (`SubstanceLibrary.cpp`). Panel: flow source ve collider seçicilerinin altında madde editörü; seçici kategoriye göre **gruplu** (filtre yok: Wax/Plastic bugün sıvı olarak dökülüyor, filtre T2'deki başlangıç sıcaklığına kadar bekler). | `rt_test_substance_profiles_ipc.py` PASS; türetilmiş madde kaydedilir/yüklenir; IPC'den okunan değer panelle aynı. Tabanı bulunamayan proje hata verir. |
 | **T2 ön koşulu (karar)** | Etiketsiz parçacıklar bugün "domain'in tek malzemesi"ni, yani FluidPreset'i kullanıyor. Hal maddeden türeyecekse etiketsiz parçacığın da bir maddesi olmalı: domain'e **Varsayılan Madde** (FluidPreset combo'sunun yerine). Bu, T2 ile T3'ü birbirine bağlar; ikisi aynı partide ya da T3 önce. | — |
-| **T2** ◐ KISMİ 2026-10-08 | Hal türetme tek fonksiyon: `hal + madde → model`. Ice → Water eşlemesi. Bağlamadaki Phase/Constitutive ve kaynaktaki Initial Model kalkar; kaynakta başlangıç sıcaklığı. | Su 263 K'de doğar → katı; ısınınca sıvı. Donma/erime maddenin `melt_kelvin`'inden (domain `thermal_freeze_kelvin` sökülür). Frozen bayrağı ile solid mask tek "katı" yoluna iner. Aynı madde iki halde, tek tanım. |
+| **T2** ✔ CANLI PASS 2026-10-11 (§6f) | Hal türetme tek fonksiyon: `hal + madde → model`. ~~Ice → Water eşlemesi~~ (BUZ_MODEL_KARARI ile iptal: Ice ayrı madde). Bağlamadaki Phase/Constitutive ve kaynaktaki Initial Model kalktı (10-08). Domain `thermal_freeze_kelvin` aynası söküldü; erime/donma GİZLİ ISI öder (`fusion_solid_fraction`). | Su 263 K'de doğar → katı; ısınınca sıvı. Donma/erime maddenin `melt_kelvin`'inden. Frozen bayrağı ile solid mask tek "katı" yoluna iner (`isMatterObstacle`). Aynı madde iki halde, tek tanım. `rt_test_fusion_condensation_ipc.py`. |
 | **T3** ◐ BUILD + HIZLI IPC PASS 2026-10-08, legacy/görsel kabul açık | FluidPreset + FluidChemistryPreset sökülür; eski projeler yükleyicide §5 tablosuyla eşlenir (alan adları da değişir, kural 5). | Eski bir Honey/Lava sahnesi aynı ν ile açılır; domain'in sayısal ayarları değişmez. |
 | **T4** | H1 B11: `granular_transport` ile üç sahip (sıvı + DEM + MPM) ve MPM↔tane teması. | B11 kabul matrisi. |
 | **T5** | Elastik MPM'i karma yola almak; gaz↔tane bağlantısı. | Ayrı notlar. |
@@ -318,6 +318,47 @@ durumudur; güncel durum bu bölüm ve sıra tablosudur. T1 save/open ve T3 eski
 proje göçü/Wax görsel kabulü açık; T2 kalan yarısı başlanacak kaynak partisidir.
 Devam noktası ve dosyalar: [MADDE_T2_T3_HANDOFF.md](MADDE_T2_T3_HANDOFF.md).
 Kanıt: [madde_t1_t3_live_2026-10-08.json](madde_t1_t3_live_2026-10-08.json).
+
+## 6f. T2 kapanışı: gizli ısı + ayna sökümü — 2026-10-11 (CANLI PASS)
+
+Kullanıcı build'i; `rt_test_fusion_condensation_ipc.py` 8/8 ve mum/kar/kaynama/ısı
+alışverişi regresyonları PASS. Kanıt: [fusion_condensation_live.json](fusion_condensation_live.json).
+
+Okuma bulguları (kodda zaten yapılmış, plan tablosu bayattı): Initial Model ve
+bağlama `constitutive_model` 10-08'de söküldü; bağlama `phase` artık yalnız
+"Static solid block"; `isMatterObstacle` frozen + statik etiketi tek engelde
+topluyor; donma eşiği parçacığın maddesinden. Ice→Water göçü BUZ_MODEL_KARARI
+ile **iptal** (Ice ayrı, DEM taşıyıcı madde).
+
+★★★ Asıl açık: **erime ve donma bedavaydı.** `updateThermalFreeze` eşikte bayrak
+çeviriyordu; `updateThermalFreezeAndRecord` defterde `latent_accounted_j =
+m·L` yazıyor ama hiçbir sıcaklıktan düşmüyordu. Defter, ödenmemiş ısıyı
+"ödendi" diye raporluyordu (CLAUDE.md "panelin yalan söylemesi" sınıfı).
+
+Bu parti:
+- `FluidParticles::fusion_solid_fraction` (F, 0 sıvı … 1 katı; NaN = henüz
+  çözülmedi). Her doğumda itilir; karışık adımın emit+copy yeniden kurulumunda
+  da taşınır (aksi halde karışık domain'de kısmi erime her adım sıfırlanırdı).
+- `updateThermalFreeze` = füzyon: Tm üstünde `dF = min(F, c(T−Tm)/L)` erir ve
+  parsel Tm'de bekler; altında aynı şekilde donar. Hal = çoğunluk fazı
+  (`F ≥ 0.5`): sıvı madde (Water/Wax) FROZEN (çivili), iskeletli madde
+  (Snow/Ice) bir sonraki `refreshMatterConstitutiveModels`'da model değiştirir.
+  Sıvı donması çekirdek ister (destek veya parselde zaten kristal); yoksa
+  aşırı soğur (`cold_unsupported`). L = 0 maddelerde eski bedava eşik.
+- Eski `substanceMeltReleaseKelvin` histerezisi söküldü: yarım parselin gizli
+  ısısı iki eşiği zaten ayırıyor.
+- Defter: freezing/melting kaydı artık o adımda faz değiştiren `m·ΔF` ve
+  sıcaklıktan GERÇEKTEN geçen gizli ısı.
+- Domain aynaları `thermal_freeze_kelvin / thermal_viscosity_range /
+  thermal_cold_viscosity` söküldü (APICSolverParams, FluidDomainInfo, IPC,
+  Python, panel). Madde yoksa donma noktası yok (−∞). Eski proje göçü baz
+  maddeyle karşılaştırır. IPC set reddi yönlendirme ile kalır.
+- Ölçüm: `thermal_mushy_particles`, `thermal_fusion_released_j/absorbed_j`.
+- Yoğuşma (yüzey) aynı partide: BIRLESIK §4.7.
+
+Açık (T2 sonrası): latent ısının karışık GPU yolunda (`MatterGpuStep`) frozen
+parçacığı reddetmesi ("frozen … need an accepting transport lane") — karışık
+domain'de su donarsa GPU adımı tutulur; ölçülmedi.
 
 ## 6e. Ortak state ve sahiplik koruması — 2026-10-08 kaynak checkpoint
 

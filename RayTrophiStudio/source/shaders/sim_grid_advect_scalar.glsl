@@ -1,0 +1,109 @@
+// sim_grid_advect_scalar.comp — semi-Lagrangian scalar advection.
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    float voxel_size;
+    float dt;
+    int boundary;      // 0 = open, 1 = closed, 2 = periodic
+    float background;  // what lies beyond an OPEN wall for this field
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer VelX      { float vel_x[];     };
+layout(set = 0, binding = 1) readonly buffer VelY      { float vel_y[];     };
+layout(set = 0, binding = 2) readonly buffer VelZ      { float vel_z[];     };
+layout(set = 0, binding = 3) readonly buffer ScalarIn  { float scalar_in[]; };
+layout(set = 0, binding = 4) buffer          ScalarOut { float scalar_out[];};
+layout(set = 0, binding = 6) readonly buffer SolidMask { float solid_mask[]; };
+
+int wrapi(int v,int n){ return ((v%n)+n)%n; }
+
+// Boundary-aware cell fetch. An OPEN wall must return the field's background
+// (0 for density/fuel, ambient for temperature) so content can actually leave
+// the domain; clamping instead copies the edge cell back in and the domain
+// reads as CLOSED regardless of the user's choice.
+float fetchCell(int i,int j,int k){
+    if (pc.boundary==2) {
+        return scalar_in[wrapi(i,pc.nx)+wrapi(j,pc.ny)*pc.nx+wrapi(k,pc.nz)*pc.nx*pc.ny];
+    }
+    if (i<0||i>=pc.nx||j<0||j>=pc.ny||k<0||k>=pc.nz) {
+        if (pc.boundary==0) return pc.background;
+        i=clamp(i,0,pc.nx-1); j=clamp(j,0,pc.ny-1); k=clamp(k,0,pc.nz-1);
+    }
+    return scalar_in[i+j*pc.nx+k*pc.nx*pc.ny];
+}
+
+float trilinear(int i0,int j0,int k0,float fx,float fy,float fz) {
+    float c00=mix(fetchCell(i0,j0,k0),fetchCell(i0+1,j0,k0),fx);
+    float c10=mix(fetchCell(i0,j0+1,k0),fetchCell(i0+1,j0+1,k0),fx);
+    float c01=mix(fetchCell(i0,j0,k0+1),fetchCell(i0+1,j0,k0+1),fx);
+    float c11=mix(fetchCell(i0,j0+1,k0+1),fetchCell(i0+1,j0+1,k0+1),fx);
+    return mix(mix(c00,c10,fy),mix(c01,c11,fy),fz);
+}
+float sample_vx(float fi,float fj,float fk){
+    // Clamp the sample coordinate, not only the integer indices. When a hot
+    // plume backtraces beyond an open domain wall, clamping i0 while retaining
+    // the original fi makes (fi-i0) leave [0,1] and turns interpolation into
+    // unbounded velocity extrapolation.
+    fi=clamp(fi,0.0,float(pc.nx));
+    fj=clamp(fj,0.0,float(pc.ny-1));
+    fk=clamp(fk,0.0,float(pc.nz-1));
+    int i0=int(floor(fi)),j0=int(floor(fj)),k0=int(floor(fk));
+    i0=clamp(i0,0,pc.nx); j0=clamp(j0,0,pc.ny-1); k0=clamp(k0,0,pc.nz-1);
+    int i1=min(i0+1,pc.nx),j1=min(j0+1,pc.ny-1),k1=min(k0+1,pc.nz-1);
+    #define V(a,b,c) vel_x[a+b*(pc.nx+1)+c*(pc.nx+1)*pc.ny]
+    float c00=mix(V(i0,j0,k0),V(i1,j0,k0),fi-i0),c10=mix(V(i0,j1,k0),V(i1,j1,k0),fi-i0);
+    float c01=mix(V(i0,j0,k1),V(i1,j0,k1),fi-i0),c11=mix(V(i0,j1,k1),V(i1,j1,k1),fi-i0);
+    #undef V
+    return mix(mix(c00,c10,fj-j0),mix(c01,c11,fj-j0),fk-k0);
+}
+float sample_vy(float fi,float fj,float fk){
+    fi=clamp(fi,0.0,float(pc.nx-1));
+    fj=clamp(fj,0.0,float(pc.ny));
+    fk=clamp(fk,0.0,float(pc.nz-1));
+    int i0=int(floor(fi)),j0=int(floor(fj)),k0=int(floor(fk));
+    i0=clamp(i0,0,pc.nx-1); j0=clamp(j0,0,pc.ny); k0=clamp(k0,0,pc.nz-1);
+    int i1=min(i0+1,pc.nx-1),j1=min(j0+1,pc.ny),k1=min(k0+1,pc.nz-1);
+    #define V(a,b,c) vel_y[a+b*pc.nx+c*pc.nx*(pc.ny+1)]
+    float c00=mix(V(i0,j0,k0),V(i1,j0,k0),fi-i0),c10=mix(V(i0,j1,k0),V(i1,j1,k0),fi-i0);
+    float c01=mix(V(i0,j0,k1),V(i1,j0,k1),fi-i0),c11=mix(V(i0,j1,k1),V(i1,j1,k1),fi-i0);
+    #undef V
+    return mix(mix(c00,c10,fj-j0),mix(c01,c11,fj-j0),fk-k0);
+}
+float sample_vz(float fi,float fj,float fk){
+    fi=clamp(fi,0.0,float(pc.nx-1));
+    fj=clamp(fj,0.0,float(pc.ny-1));
+    fk=clamp(fk,0.0,float(pc.nz));
+    int i0=int(floor(fi)),j0=int(floor(fj)),k0=int(floor(fk));
+    i0=clamp(i0,0,pc.nx-1); j0=clamp(j0,0,pc.ny-1); k0=clamp(k0,0,pc.nz);
+    int i1=min(i0+1,pc.nx-1),j1=min(j0+1,pc.ny-1),k1=min(k0+1,pc.nz);
+    #define V(a,b,c) vel_z[a+b*pc.nx+c*pc.nx*pc.ny]
+    float c00=mix(V(i0,j0,k0),V(i1,j0,k0),fi-i0),c10=mix(V(i0,j1,k0),V(i1,j1,k0),fi-i0);
+    float c01=mix(V(i0,j0,k1),V(i1,j0,k1),fi-i0),c11=mix(V(i0,j1,k1),V(i1,j1,k1),fi-i0);
+    #undef V
+    return mix(mix(c00,c10,fj-j0),mix(c01,c11,fj-j0),fk-k0);
+}
+
+void main() {
+#ifdef INVENTORY_SCALAR
+    uint linear_id = gl_GlobalInvocationID.x +
+        gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (linear_id >= uint(pc.nx * pc.ny * pc.nz)) return;
+    int id = int(linear_id);
+#else
+    int id = int(gl_GlobalInvocationID.x);
+#endif
+    if (id >= pc.nx*pc.ny*pc.nz) return;
+#ifndef INVENTORY_SCALAR
+    if (solid_mask[id] > 0.5) { scalar_out[id] = pc.background; return; }
+#endif
+    int i=id%pc.nx, j=(id/pc.nx)%pc.ny, k=id/(pc.nx*pc.ny);
+    float lx=float(i)+0.5, ly=float(j)+0.5, lz=float(k)+0.5;
+    float inv_h = pc.voxel_size>1e-6 ? 1.0/pc.voxel_size : 1.0;
+    float vx=sample_vx(lx,ly-0.5,lz-0.5), vy=sample_vy(lx-0.5,ly,lz-0.5), vz=sample_vz(lx-0.5,ly-0.5,lz);
+    float bx=lx-vx*pc.dt*inv_h, by=ly-vy*pc.dt*inv_h, bz=lz-vz*pc.dt*inv_h;
+    bx-=0.5; by-=0.5; bz-=0.5;
+    // Boundary-aware fetch, matching the CPU advectScalar reference.
+    int i0=int(floor(bx)), j0=int(floor(by)), k0=int(floor(bz));
+    scalar_out[id]=trilinear(i0,j0,k0,bx-float(i0),by-float(j0),bz-float(k0));
+}

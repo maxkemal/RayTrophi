@@ -995,7 +995,9 @@ void drawSimulationDomainControls(
                                 &domain.fluid_seed_max,
                                 domain.fluid_seed_particles_per_cell,
                                 domain.fluid_replace_on_seed,
-                                domain.fluid_reseed_on_reset).ok) {
+                                domain.fluid_reseed_on_reset,
+                                domain.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel
+                                    ? domain.fluid_fill_level : -1.0f).ok) {
                             ui_ctx.start_render = true;
                         }
                     }
@@ -1927,12 +1929,20 @@ void drawSimulationDomainControls(
                         }
                     }
                     if (!material_error.empty()) ImGui::TextWrapped("%s", material_error.c_str());
-                    ImGui::TextDisabled("Resolved: nu %.3g m^2/s%s | %s | freeze %.1f K | %s",
+                    const float default_melt = RayTrophiSim::Fluid::substanceFreezeKelvin(
+                        RayTrophiSim::Fluid::kSubstanceUntagged, fp);
+                    char melt_text[48];
+                    if (std::isfinite(default_melt)) {
+                        std::snprintf(melt_text, sizeof(melt_text), "melts at %.1f K", default_melt);
+                    } else {
+                        std::snprintf(melt_text, sizeof(melt_text), "does not melt");
+                    }
+                    ImGui::TextDisabled("Resolved: nu %.3g m^2/s%s | %s | %s | %s",
                         fp.kinematic_viscosity,
                         fp.kinematic_viscosity == 0.0f && !fp.granular_enabled
                             ? " (below voxel resolution: solve skipped)" : "",
                         fp.granular_enabled ? "granular skeleton" : "liquid",
-                        fp.thermal_freeze_kelvin,
+                        melt_text,
                         fp.fuel_profile.flammable ? "flammable"
                             : fp.fuel_profile.extinguishing ? "extinguishes fire" : "inert");
 
@@ -3617,18 +3627,18 @@ void drawSimulationDomainControls(
                                               "and droplet 'necks' are cleaned, and close drops merge smoothly\n"
                                               "(metaball-like) instead of bumpy sphere unions. OFF = plain isotropic.");
                         }
+                        ImGui::Indent();
+                        sdf_changed |= ImGui::DragFloat("Neighbour Radius (vx)##AnisoNeighbourRadius", &domain.fluid_level_set_params.anisotropy_radius_voxels, 0.05f, 1.0f, 6.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Physical neighbourhood for render-centre smoothing and anisotropic shape.");
                         if (domain.fluid_level_set_params.anisotropy_enabled) {
-                            ImGui::Indent();
-                            sdf_changed |= ImGui::DragFloat("Neighbour Radius (vx)##AnisoNeighbourRadius", &domain.fluid_level_set_params.anisotropy_radius_voxels, 0.05f, 1.0f, 6.0f, "%.2f");
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Radius (sim voxels) used to estimate each particle's local shape. ~2-3.");
                             sdf_changed |= ImGui::DragFloat("Max Stretch", &domain.fluid_level_set_params.anisotropy_max_stretch, 0.05f, 1.0f, 8.0f, "%.2f");
                             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Max ellipsoid axis ratio. 1 = isotropic, 4 = strong sheet flattening.\nHigher widens the stencil (cost up).");
-                            sdf_changed |= ImGui::DragFloat("Position Smoothing", &domain.fluid_level_set_params.position_smoothing, 0.01f, 0.0f, 1.0f, "%.2f");
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pull particles toward their neighbour mean before surfacing.\n0 = raw (bumpy), 1 = fully smoothed.");
-                            sdf_changed |= ImGui::SliderInt("Isolated Min Neighbours", &domain.fluid_level_set_params.anisotropy_neighbor_min, 1, 24);
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Below this neighbour count a particle is treated as isolated spray\nand kept spherical (round droplets).");
-                            ImGui::Unindent();
                         }
+                        sdf_changed |= ImGui::DragFloat("Position Smoothing", &domain.fluid_level_set_params.position_smoothing, 0.01f, 0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Smooth temporary render centres with spherical or anisotropic kernels.\n0 = raw. Simulation positions stay unchanged; isolated droplets stay round.");
+                        sdf_changed |= ImGui::SliderInt("Isolated Min Neighbours", &domain.fluid_level_set_params.anisotropy_neighbor_min, 1, 24);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Below this neighbour count render centres remain unchanged and spherical.");
+                        ImGui::Unindent();
 
                         if (sdf_changed) {
                             scene.requestSimulationTimelineRenderResync();
@@ -4303,6 +4313,7 @@ void drawSimulationDomainControls(
                     // the sum of the rows whenever it fails to account for them.
                     const float gpu_sum =
                         gs.gpu_collider_source_ms + gs.gpu_source_upload_ms +
+                        gs.gpu_surface_exchange_ms +
                         gs.gpu_fluid_combustion_ms + gs.gpu_velocity_advect_ms +
                         gs.gpu_scalar_advect_ms + gs.gpu_combustion_ms +
                         gs.gpu_body_forces_ms + gs.gpu_dissipation_ms +
@@ -4358,6 +4369,8 @@ void drawSimulationDomainControls(
                             blk.Time("collider gas source", gs.gpu_collider_source_ms, "GPU", 1);
                         if (gs.gpu_msf_ms > 0.0f)
                             blk.Time("material state field (thermal)", gs.gpu_msf_ms, "GPU", 1);
+                        if (gs.gpu_surface_exchange_ms > 0.0f)
+                            blk.Time("surface heat / evaporation", gs.gpu_surface_exchange_ms, "GPU", 1);
                         if (gs.gpu_source_upload_ms > 0.0f)
                             blk.Time("source upload (host -> device)", gs.gpu_source_upload_ms, "GPU", 1);
                         if (gs.fluid_combustion_on_gpu || gs.gpu_fluid_combustion_ms > 0.0f)
@@ -4391,6 +4404,28 @@ void drawSimulationDomainControls(
                                  "GPU", 1);
                         blk.Time("grid readback (for host solver)", gs.gpu_host_sync_ms,
                                  "GPU->CPU", 1);
+                    }
+                    blk.Section("Physical gas inventory");
+                    blk.Time("kg/J advection + conservation", gs.inventory_advection_ms,
+                             gs.inventory_transport.c_str(), 1);
+                    blk.Value("kg/J grid upload / download", "%llu / %llu bytes",
+                              static_cast<unsigned long long>(gs.inventory_grid_upload_bytes),
+                              static_cast<unsigned long long>(gs.inventory_grid_download_bytes));
+                    if (gs.inventory_step_held) {
+                        ImGui::TextWrapped("%s", gs.inventory_error.c_str());
+                    }
+                    // Fog water: what the saturation pass did this step. The
+                    // totals (kg in the air) are in fluid.get; these are rates.
+                    if (gs.saturation_measured) {
+                        blk.Time("saturation (vapour <-> fog water)", gs.saturation_ms,
+                                 gs.condensable_substance.c_str(), 1);
+                        blk.Value("fog condensed / evaporated", "%.3g / %.3g kg",
+                                  gs.fog_condensed_kg, gs.fog_evaporated_kg);
+                        blk.Value("latent heat into air", "%.3g J", gs.fog_latent_to_air_j);
+                        blk.Value("fog -> rain (autoconversion)", "%.3g kg",
+                                  gs.fog_autoconverted_kg);
+                        blk.Value("rain -> liquid", "%.3g kg (%.3g absorbed, %zu parcels)",
+                                  gs.rained_kg, gs.rain_absorbed_kg, gs.rain_parcels);
                     }
                     blk.Section(gs.cpu.sparse_vdb ? "Host solver (sparse VDB)"
                                                   : "Host solver (dense)");

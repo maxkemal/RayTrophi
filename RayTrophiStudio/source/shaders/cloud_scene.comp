@@ -1,0 +1,58 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+// Finite cloud transport over opaque scene pixels, after raster geometry and
+// before HDR post/DoF. Sky pixels retain the existing temporal sky cloud pass.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+#include "cloud_raster_frame.glsl"
+#define CLOUD_SET 0
+#define CLOUD_BINDING_BASE 0
+#define CLOUD_MAJORANT_BINDING 5
+#define CLOUD_RT_LIGHTING
+#include "cloud_rt.glsl"
+
+layout(set = 0, binding = 12) uniform sampler2D sceneDepth;
+layout(set = 0, binding = 13, rgba16f) uniform image2D sceneHDR;
+layout(push_constant) uniform CloudScenePush {
+    uint width;
+    uint height;
+    float depthA;
+    float depthB;
+    float depthC;
+    uint steps;
+} pc;
+
+vec3 cloudSkyAmbient(vec3 direction) {
+    if (worldData.w._pad5 == 0) return vec3(0.0);
+    float u = atan(direction.z, direction.x) / (2.0 * CLOUD_PI);
+    if (u < 0.0) u += 1.0;
+    float v = (1.0 - clamp(direction.y, -1.0, 1.0)) * 0.5;
+    return textureLod(atmosphereLUTs[1], vec2(u, v), 0.0).rgb;
+}
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= int(pc.width) || px.y >= int(pc.height) || !cloudRtEnabled()) return;
+    float depth = texelFetch(sceneDepth, px, 0).r;
+    if (depth >= 1.0) return;
+    vec2 ndc = (vec2(px) + vec2(0.5)) / vec2(pc.width, pc.height) * 2.0 - 1.0;
+    float tanH = worldData.camPos.w;
+    vec3 direction = normalize(worldData.camFwd.xyz +
+        worldData.camRight.xyz * (ndc.x * worldData.camRight.w * tanH) -
+        worldData.camUp.xyz * (ndc.y * tanH));
+    float denominator = depth * pc.depthB + pc.depthC;
+    if (denominator <= 0.0) return;
+    float viewDepth = pc.depthA / denominator;
+    float distance = min(viewDepth / max(dot(direction, worldData.camFwd.xyz), 1e-4),
+                         CLOUD_RT_MAX_DIST);
+    if (!cloudSegmentMayContain(worldData.camPos.xyz, direction, distance)) return;
+    vec3 inscatter;
+    float T, cloudDepth;
+    // Stable per-pixel stratification. This pass precedes post/DoF, not the
+    // sky temporal history; a changing seed would flicker on opaque surfaces.
+    uint seed = uint(px.x) * 1973u ^ uint(px.y) * 9277u ^ 0x68bc21ebu;
+    cloudMarchLimited(worldData.camPos.xyz, direction, distance, int(pc.steps), seed,
+                      inscatter, T, cloudDepth);
+    vec4 surface = imageLoad(sceneHDR, px);
+    imageStore(sceneHDR, px, vec4(surface.rgb * T + inscatter, surface.a));
+}

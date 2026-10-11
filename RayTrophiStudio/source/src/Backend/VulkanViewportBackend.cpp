@@ -703,6 +703,7 @@ void VulkanBackendAdapter::updateMaterialPreviewSceneLightBindings() {
 
 void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPipeline) {
     if (!m_device) return;
+    m_device->invalidateCloudSceneDescriptors();
     destroyMaterialPreviewTransmissionResources();
     if (!keepPipeline) {
         destroyMaterialPreviewSdfSurfaceResources();
@@ -8827,6 +8828,8 @@ void VulkanViewportBackend::recordRasterPostPass(VkCommandBuffer cmd,
     pc.aerialEnabled = (m_aerialFroxelActive && m_interactiveViewport.postFroxelBound &&
                         !m_camera.orthographic) ? 1u : 0u;
     pc.fogDistance = m_cachedWorld.nishita.fog_distance;
+
+    recordCloudScenePass(cmd, width, height, pc.depthA, pc.depthB, pc.depthC);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_interactiveViewport.postPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
