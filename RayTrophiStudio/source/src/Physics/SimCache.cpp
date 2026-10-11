@@ -403,6 +403,7 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
         writeFloatArray(os, inventory.condensate);
         writeFloatArray(os, inventory.rain);
         writeFloatArray(os, inventory.rain_energy);
+        writeFloatArray(os, inventory.foreign);
 
         // Fluid particles — position + material coordinate. Both are render
         // source of truth: position places the surface, uvw anchors what is
@@ -602,7 +603,7 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
 
         std::vector<float> density, temperature, fuel, interaction;
         std::vector<float> gas_phase_mass_kg, gas_phase_energy_j, gas_phase_condensate_kg,
-            gas_phase_rain_kg, gas_phase_rain_energy_j;
+            gas_phase_rain_kg, gas_phase_rain_energy_j, gas_phase_foreign_kg;
         {
             RTPERF_FRAME_SCOPE("sim.cache.disk.scalar_fields");
             if (!readFloatArray(is, density, version)) return false;
@@ -616,6 +617,8 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
             if (version >= 14u &&
                 (!readFloatArray(is, gas_phase_rain_kg, version) ||
                  !readFloatArray(is, gas_phase_rain_energy_j, version))) return false;
+            if (version >= 15u &&
+                !readFloatArray(is, gas_phase_foreign_kg, version)) return false;
         }
         if (!density.empty())     d.grid.density     = std::move(density);
         if (!temperature.empty()) d.grid.temperature = std::move(temperature);
@@ -626,6 +629,7 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         d.gas_phase_condensate_kg = std::move(gas_phase_condensate_kg);
         d.gas_phase_rain_kg = std::move(gas_phase_rain_kg);
         d.gas_phase_rain_energy_j = std::move(gas_phase_rain_energy_j);
+        d.gas_phase_foreign_kg = std::move(gas_phase_foreign_kg);
 
         // Fluid particles — positions restored; velocity/affine/flags zeroed to
         // match the count so any consumer iterating them in lockstep stays valid.

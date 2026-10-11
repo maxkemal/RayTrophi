@@ -2,6 +2,7 @@
 #include "Fluid/GasSurfaceGeometry.h"
 #include "Fluid/GasInventoryGpu.h"
 #include "Fluid/GasPhaseMomentum.h"
+#include "Fluid/GasSaturation.h"
 #include "Fluid/FluidDomainSubstance.h"
 #include "Fluid/FluidPhysicalMass.h"
 #include "Fluid/FluidThermalLiquid.h"
@@ -93,6 +94,8 @@ GasSurfaceExchangePlan buildGasSurfaceExchangePlan(
                                  liquid_domain.fluid_params.particles_per_cell,
                                  liquid_domain.fluid_params.granular_enabled);
     particles.mass_fraction.resize(particles.size(), 1.0f);
+    const CondensableVapour vapour = resolveCondensableVapour(gas_domain);
+    const std::string condensable_name = vapour.valid() ? vapour.substance : std::string();
     GasSurfaceGeometry geometry(liquid, grid,
         gas_domain.boundary_mode == SimulationGridDomainBoundaryMode::Periodic,
         &liquid_domain.fluid_params);
@@ -136,13 +139,21 @@ GasSurfaceExchangePlan buildGasSurfaceExchangePlan(
             plan.error = "non-finite gas surface source velocity";
             return plan;
         }
+        // Evaporation and condensation only for the air's condensable vapour:
+        // the vapour pool is that one species. Another liquid exchanges heat
+        // and takes rain but does not evaporate here (a combustible one
+        // vaporizes through the combustion exchange, into the
+        // non-condensable pool). ★ Before 2026-10-11 part 4 any substance with
+        // vapour data evaporated INTO the water vapour pool.
+        const bool condensable = condensable_name == profile->name;
         for (uint32_t f = 0; f < faces.count; ++f) {
             plan.records.push_back({
                 static_cast<uint32_t>(p), faces.air[f], particles.temperature[p],
                 particles.rest_mass_kg[p] * split, particles.mass_fraction[p],
                 profile->specific_heat > 0.0f ? profile->specific_heat : 1000.0f,
-                profile->boiling_kelvin, profile->latent_heat_vaporization,
-                profile->vapor_molar_mass_kg_mol,
+                condensable ? profile->boiling_kelvin : 0.0f,
+                condensable ? profile->latent_heat_vaporization : 0.0f,
+                condensable ? profile->vapor_molar_mass_kg_mol : 0.0f,
                 static_cast<float>(area / std::max(1u, geometry.parcelsInCell(cell))),
                 capacity * split, {v.x, v.y, v.z, 0.0f}
             });

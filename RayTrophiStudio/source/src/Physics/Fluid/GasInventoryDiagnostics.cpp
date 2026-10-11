@@ -26,7 +26,7 @@ GasInventoryHostImage captureGasInventoryHostImage(const SimulationGridDomainSta
     if (state.gas_inventory_revision == 0) {
         return {state.gas_phase_mass_kg, state.gas_phase_energy_j,
                 state.gas_phase_condensate_kg, state.gas_phase_rain_kg,
-                state.gas_phase_rain_energy_j};
+                state.gas_phase_rain_energy_j, state.gas_phase_foreign_kg};
     }
     SimulationGridDomainState snapshot;
     snapshot.gas_inventory_device = state.gas_inventory_device;
@@ -36,7 +36,8 @@ GasInventoryHostImage captureGasInventoryHostImage(const SimulationGridDomainSta
     }
     return {std::move(snapshot.gas_phase_mass_kg), std::move(snapshot.gas_phase_energy_j),
             std::move(snapshot.gas_phase_condensate_kg), std::move(snapshot.gas_phase_rain_kg),
-            std::move(snapshot.gas_phase_rain_energy_j)};
+            std::move(snapshot.gas_phase_rain_energy_j),
+            std::move(snapshot.gas_phase_foreign_kg)};
 }
 bool captureGasInventoryHostImages(const std::vector<SimulationGridDomainState>& states,
                                    std::vector<GasInventoryHostImage>& images) {

@@ -1,0 +1,63 @@
+{
+  "samples": [
+    {
+      "step": 30,
+      "combusted_kg": 461.02364977356046,
+      "fog_condensed_kg": 0.0,
+      "domains": {
+        "Burning Fuel Matter": {
+          "vapour_kg": 0.0,
+          "foreign_kg": 461.0236524631471,
+          "fog_kg": 0.0
+        }
+      }
+    },
+    {
+      "step": 60,
+      "combusted_kg": 1022.0582100134343,
+      "fog_condensed_kg": 0.0,
+      "domains": {
+        "Burning Fuel Matter": {
+          "vapour_kg": 0.0,
+          "foreign_kg": 1022.058253037034,
+          "fog_kg": 0.0
+        }
+      }
+    },
+    {
+      "step": 90,
+      "combusted_kg": 1513.2833952493966,
+      "fog_condensed_kg": 0.0,
+      "domains": {
+        "Burning Fuel Matter": {
+          "vapour_kg": 0.0,
+          "foreign_kg": 1513.2834806487115,
+          "fog_kg": 0.0
+        }
+      }
+    },
+    {
+      "step": 120,
+      "combusted_kg": 2065.527643989306,
+      "fog_condensed_kg": 0.0,
+      "domains": {
+        "Burning Fuel Matter": {
+          "vapour_kg": 0.0,
+          "foreign_kg": 2065.527750326032,
+          "fog_kg": 0.0
+        }
+      }
+    }
+  ],
+  "seeded_particles": 100000,
+  "combusted_kg": 2065.527643989306,
+  "foreign_kg": 2065.527750326032,
+  "vapour_kg": 0.0,
+  "fog_condensed_kg": 0.0,
+  "verdicts": {
+    "combustion_ran": true,
+    "fuel_in_foreign_pool": true,
+    "fuel_not_vapour": true,
+    "no_fuel_fog": true
+  }
+}

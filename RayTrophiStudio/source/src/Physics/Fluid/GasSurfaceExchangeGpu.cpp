@@ -1,6 +1,7 @@
 #include "Fluid/GasSurfaceExchangeGpu.h"
 #include "Fluid/GasInventoryGpu.h"
 #include "Fluid/GasSurfaceExchangePlan.h"
+#include "Fluid/GasSaturation.h"
 #include "Fluid/GasPhaseMomentum.h"
 #include "Fluid/FluidDomainSubstance.h"
 #include "Fluid/FluidPhysicalMass.h"
@@ -34,8 +35,9 @@ struct Constants {
     float dt;
     uint32_t inventory;
     uint32_t stamp;
+    float vapour_molar;     // inventory vapour M for the virtual temperature (0: none)
 };
-static_assert(sizeof(Constants) == 36);
+static_assert(sizeof(Constants) == 40);
 
 struct CommitConstants {
     uint32_t count;
@@ -118,11 +120,13 @@ bool exchangeGasSurfaceGpu(
     if (!ok) {
         return fail("gas surface parcel upload failed; reset required");
     }
+    const CondensableVapour vapour = resolveCondensableVapour(gas_domain);
     const Constants pc{static_cast<uint32_t>(groups.size()),
                        grid.voxel_size * grid.voxel_size * grid.voxel_size,
                        ambient_kelvin, gas_ambient_normalized, scale.kelvin_per_unit,
                        std::clamp(1.0f - drying_scale, 0.0f, 1.0f), dt,
-                       owner->storage_initialized ? 1u : 0u, gas.gas_rain_stamp};
+                       owner->storage_initialized ? 1u : 0u, gas.gas_rain_stamp,
+                       vapour.valid() ? vapour.molar_kg_mol : 0.0f};
     ComputeBufferHandle bindings[11] = {
         work[0], work[1], work[2], inventory_inputs[0], inventory_inputs[1],
         gas_buffers.temperature, gas_buffers.density, work[3],

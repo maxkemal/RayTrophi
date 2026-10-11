@@ -1497,6 +1497,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["rain_absorbed_kg"] = info.rain_absorbed_kg;
         d["gas_rain_kg"] = info.gas_rain_kg;
         d["gas_rain_cells"] = info.gas_rain_cells;
+        d["gas_foreign_kg"] = info.gas_foreign_kg;
+        d["gas_foreign_cells"] = info.gas_foreign_cells;
+        d["gas_rain_centroid"] = vec3ToPython(info.gas_rain_centroid);
         d["gas_phase_mass_centroid"] = vec3ToPython(info.gas_phase_mass_centroid);
         d["live_state"] = info.live_state;
         d["render_mode"] = info.render_mode;
@@ -1779,6 +1782,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["rain_absorbed_kg"] = info.rain_absorbed_kg;
             d["gas_rain_kg"] = info.gas_rain_kg;
             d["gas_rain_cells"] = info.gas_rain_cells;
+            d["gas_foreign_kg"] = info.gas_foreign_kg;
+            d["gas_foreign_cells"] = info.gas_foreign_cells;
+            d["gas_rain_centroid"] = vec3ToPython(info.gas_rain_centroid);
             d["gas_phase_mass_centroid"] = vec3ToPython(info.gas_phase_mass_centroid);
             d["live_state"] = info.live_state;
             d["render_mode"] = info.render_mode;
@@ -2043,6 +2049,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["rain_absorbed_kg"] = info.rain_absorbed_kg;
         d["gas_rain_kg"] = info.gas_rain_kg;
         d["gas_rain_cells"] = info.gas_rain_cells;
+        d["gas_foreign_kg"] = info.gas_foreign_kg;
+        d["gas_foreign_cells"] = info.gas_foreign_cells;
+        d["gas_rain_centroid"] = vec3ToPython(info.gas_rain_centroid);
         d["gas_phase_mass_centroid"] = vec3ToPython(info.gas_phase_mass_centroid);
         d["live_state"] = info.live_state;
         d["render_mode"] = info.render_mode;

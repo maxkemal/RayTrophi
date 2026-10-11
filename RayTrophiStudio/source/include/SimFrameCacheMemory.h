@@ -23,6 +23,7 @@ inline std::size_t metaAllocationBytes(const SimulationGridDomainState& state) {
     bytes += allocationBytes(state.gas_phase_condensate_kg);
     bytes += allocationBytes(state.gas_phase_rain_kg);
     bytes += allocationBytes(state.gas_phase_rain_energy_j);
+    bytes += allocationBytes(state.gas_phase_foreign_kg);
     bytes += allocationBytes(state.gas_rain_landing);
     bytes += SimFrameCache::fluidGridAllocationBytes(grid);
     bytes += SimFrameCache::fluidGridAllocationBytes(state.matter_liquid_grid);

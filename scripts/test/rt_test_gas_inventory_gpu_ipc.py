@@ -38,8 +38,9 @@ def main():
                 returned = sum(r['target_mass_kg'] for r in ledger['exchanges']
                                if (r['source'] == current[0] and r['kind'] == 'condensation') or
                                r['kind'] == 'precipitation')
+                # A non-water boil goes to the non-condensable pool (part 4).
                 in_air = (mass + domain.get('gas_condensate_kg', 0.0) +
-                          domain.get('gas_rain_kg', 0.0))
+                          domain.get('gas_rain_kg', 0.0) + domain.get('gas_foreign_kg', 0.0))
                 assert in_air + 1e-8 >= .95 * (deposited - returned), (in_air, deposited, ledger)
 
                 assert stats.get('inventory_transport') in ('gpu_resident', 'gpu_resident_idle'), stats

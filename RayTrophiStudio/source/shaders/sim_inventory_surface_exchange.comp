@@ -11,6 +11,7 @@ layout(push_constant) uniform Constants {
     float dt;
     uint inventory;
     uint stamp;             // rain landing stamp of this step
+    float vapour_molar;     // inventory vapour M (kg/mol) for Tv; 0 = none
 } pc;
 struct Parcel {
     uint particle;
@@ -60,6 +61,31 @@ double hkCoefficient(double vapour_pressure, double atmosphere) {
     return min(0.04, 4.0e-5 / air_share);
 }
 
+// Virtual temperature <-> air temperature (CPU reference: GasSaturation.cpp,
+// virtualKelvinFromAir / airKelvinFromVirtual). The temperature field holds Tv.
+const float kTvGas = 8.314462;
+const float kTvAtm = 101325.0;
+const float kTvAir = 0.028965;
+float virtualFromAir(float air, float m) {
+    float t = max(air, 1.0);
+    if (!(pc.vapour_molar > 0.0) || !(m > 0.0)) return t;
+    float k = m * kTvGas / (pc.vapour_molar * kTvAtm * pc.cell_volume);
+    float x = min(k * t, 1.0);
+    return t * kTvAir / (x * pc.vapour_molar + (1.0 - x) * kTvAir);
+}
+float airFromVirtual(float tv_in, float m) {
+    float tv = max(tv_in, 1.0);
+    if (!(pc.vapour_molar > 0.0) || !(m > 0.0)) return tv;
+    float k = m * kTvGas / (pc.vapour_molar * kTvAtm * pc.cell_volume);
+    float denominator = kTvAir + tv * k * (kTvAir - pc.vapour_molar);
+    float t = tv * pc.vapour_molar / kTvAir;
+    if (denominator > 1.0e-12) {
+        float mixed = tv * kTvAir / denominator;
+        if (k * mixed < 1.0) t = mixed;
+    }
+    return max(t, min(tv, pc.ambient));
+}
+
 void main() {
     uint id = gl_GlobalInvocationID.x +
         gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
@@ -72,6 +98,11 @@ void main() {
     float e = gas_energy[inventory_cell];
     float t = gas_temperature[group.cell];
     float density = gas_density[group.cell];
+    // Air temperature behind the field's Tv; no inventory yet means no vapour.
+    float m0 = pc.inventory != 0u ? m : 0.0;
+    float air0 = airFromVirtual(
+        pc.ambient + (t - pc.gas_ambient) * pc.kelvin_per_unit, m0);
+    double air = double(air0);
     const double gas_constant = 8.314462;
     const double atmosphere = 101325.0;
     const double air_molar = 0.028965;
@@ -98,8 +129,7 @@ void main() {
             results[r] = parcel_result;
             continue;
         }
-        double ta = max(double(pc.ambient) +
-            (double(t) - double(pc.gas_ambient)) * double(pc.kelvin_per_unit), 1.0);
+        double ta = max(air, 1.0);
         double cp = p.capacity;
         double rho_air = atmosphere * air_molar / (gas_constant * ta);
         double ca = rho_air * double(pc.cell_volume) * 1005.0;
@@ -109,7 +139,7 @@ void main() {
             // Equal/opposite heat, independent of the two capacities' scale.
             double q = (tp - ta) * (cp * ca / (cp + ca)) * decay;
             tp -= q / cp;
-            t += float(q / ca / double(pc.kelvin_per_unit));
+            air += q / ca;
             parcel_result.energy.x = q;
             parcel_result.state.z = 1.0;
         }
@@ -196,6 +226,9 @@ void main() {
         parcel_result.state.x = float(tp);
         results[r] = parcel_result;
     }
+    // Tv difference back into the field (the field's own offset stays).
+    float m1 = pc.inventory != 0u ? m : 0.0;
+    t += (virtualFromAir(float(air), m1) - virtualFromAir(air0, m0)) / pc.kelvin_per_unit;
     vec4 value = vec4(m, e, t, density);
     bool invalid = any(isnan(value)) || any(isinf(value)) || m < 0.0 || e < 0.0;
     if (invalid) {

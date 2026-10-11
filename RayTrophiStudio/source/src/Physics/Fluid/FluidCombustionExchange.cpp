@@ -209,8 +209,10 @@ FluidCombustionExchangeStats transferFluidCombustionToGas(
         gas.temperature[cell] += tracer * visual_heat;
         gas.density[cell] += tracer * visual_smoke;
         gas.interaction[cell] += tracer;
-        depositGasInventory(gas_state, cell, mass_kg,
-                            static_cast<float>(sensible_energy + latent_energy));
+        // Fuel vapour (and, once it burns, its products) is non-condensable
+        // gas: it must never condense into the domain's fog water.
+        depositGasForeign(gas_state, cell, mass_kg,
+                          static_cast<float>(sensible_energy + latent_energy));
         queueGasPhaseMomentum(gas_state, cell, mass_kg, particles.velocity[particle] * mass_kg);
 
         const std::string substance = profile ? profile->name : "Custom";

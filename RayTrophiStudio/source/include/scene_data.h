@@ -2243,7 +2243,7 @@ struct SceneData {
         // material flags) stay exact, collapsing only when uniform.
         RayTrophiSim::SimFrameCache::MatterGridFrameCache matter_grid_cache;
         RayTrophiSim::SimFrameCache::LosslessArray<float> gas_mass_cache, gas_energy_cache,
-            gas_condensate_cache, gas_rain_cache, gas_rain_energy_cache;
+            gas_condensate_cache, gas_rain_cache, gas_rain_energy_cache, gas_foreign_cache;
         bool granular_dropped = false;
         RayTrophiSim::SimFrameCompress::ConstScalar<float> k_g_softening, k_g_bond,
             k_g_hardening, k_g_yield, k_g_damage;
@@ -2253,7 +2253,7 @@ struct SceneData {
                    sizeof(CachedGridDomain) + matter_grid_cache.bytes() +
                    gas_mass_cache.bytes() + gas_energy_cache.bytes() +
                    gas_condensate_cache.bytes() + gas_rain_cache.bytes() +
-                   gas_rain_energy_cache.bytes() +
+                   gas_rain_energy_cache.bytes() + gas_foreign_cache.bytes() +
                    RayTrophiSim::SimFrameCacheMemory::metaAllocationBytes(meta) +
                    density.bytes() + temperature.bytes() +
                    fuel.bytes() + interaction.bytes() +
@@ -2434,6 +2434,7 @@ struct SceneData {
             c.gas_condensate_cache.captureAndRelease(c.meta.gas_phase_condensate_kg);
             c.gas_rain_cache.captureAndRelease(c.meta.gas_phase_rain_kg);
             c.gas_rain_energy_cache.captureAndRelease(c.meta.gas_phase_rain_energy_j);
+            c.gas_foreign_cache.captureAndRelease(c.meta.gas_phase_foreign_kg);
             // Landing stamps are per step, not state.
             std::vector<uint32_t>().swap(c.meta.gas_rain_landing);
             const int nx = st.grid.nx, ny = st.grid.ny, nz = st.grid.nz;
@@ -2521,6 +2522,7 @@ struct SceneData {
             c.gas_condensate_cache.restore(st.gas_phase_condensate_kg);
             c.gas_rain_cache.restore(st.gas_phase_rain_kg);
             c.gas_rain_energy_cache.restore(st.gas_phase_rain_energy_j);
+            c.gas_foreign_cache.restore(st.gas_phase_foreign_kg);
             st.fluid_transfer_stats = {};
             const int nx = st.grid.nx, ny = st.grid.ny, nz = st.grid.nz;
             const std::size_t cells =

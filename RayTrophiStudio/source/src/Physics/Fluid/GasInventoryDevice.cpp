@@ -37,11 +37,11 @@ static_assert(sizeof(SummaryConstants) == 36);
 
 // Device slots that hold state (the rest is advection scratch), with their
 // host image. Every snapshot, upload and backend switch walks this one list.
-constexpr std::size_t kPersistentSlots[] = {0, 3, 6, 9, 10};
-std::array<std::vector<float>*, 5> persistentImages(SimulationGridDomainState& state) {
+constexpr std::size_t kPersistentSlots[] = {0, 3, 6, 9, 10, 11};
+std::array<std::vector<float>*, 6> persistentImages(SimulationGridDomainState& state) {
     return {&state.gas_phase_mass_kg, &state.gas_phase_energy_j,
             &state.gas_phase_condensate_kg, &state.gas_phase_rain_kg,
-            &state.gas_phase_rain_energy_j};
+            &state.gas_phase_rain_energy_j, &state.gas_phase_foreign_kg};
 }
 
 bool create(SimulationComputeContext& compute, ComputeBufferHandle& handle,
@@ -58,7 +58,7 @@ bool materialize(SimulationGridDomainState& state) {
         return state.gas_inventory_revision == 0;
     }
     if (!owner->pending.empty() || !owner->pending_condensate.empty() ||
-        !owner->pending_momentum.empty()) {
+        !owner->pending_foreign.empty() || !owner->pending_momentum.empty()) {
         return false; // A snapshot cannot silently discard uncommitted phase deposits.
     }
     const auto images = persistentImages(state);
@@ -70,7 +70,7 @@ bool materialize(SimulationGridDomainState& state) {
         state.gas_inventory_revision = 0;
         return true;
     }
-    std::array<std::vector<float>, 5> values;
+    std::array<std::vector<float>, 6> values;
     auto& compute = *owner->compute;
     const std::size_t bytes = owner->cells * sizeof(float);
     compute.beginTransferBatch();
@@ -134,6 +134,7 @@ void releaseGasInventoryGpu(SimulationComputeContext& compute, GasInventoryGpuBu
     destroy(owner.zero);
     destroy(owner.deposits);
     destroy(owner.condensate_deposits);
+    destroy(owner.foreign_deposits);
     destroy(owner.phase_momentum);
     destroy(owner.summary_partials);
     destroy(owner.summary_totals);
@@ -271,11 +272,12 @@ bool ensureGasInventoryStorage(SimulationGridDomainState& state) {
     command.constants_size = sizeof(count);
     command.groups = gasInventoryDispatch(owner->cells);
     bool cleared = compute.dispatch(command);
-    // The clear kernel takes two fields: condensate + rain, then rain energy.
+    // The clear kernel takes two fields: condensate + rain, then rain energy +
+    // non-condensable gas.
     ComputeBufferHandle water[2] = {owner->fields[6], owner->fields[9]};
     command.buffers = water;
     cleared = cleared && compute.dispatch(command);
-    ComputeBufferHandle rain_energy[2] = {owner->fields[10], owner->fields[10]};
+    ComputeBufferHandle rain_energy[2] = {owner->fields[10], owner->fields[11]};
     command.buffers = rain_energy;
     cleared = cleared && compute.dispatch(command);
     owner->storage_initialized = cleared;
@@ -386,6 +388,7 @@ void prepareGasInventoryHostProducer(SimulationGridDomainState& state) {
     state.gas_phase_condensate_kg.resize(cells, 0.0f);
     state.gas_phase_rain_kg.resize(cells, 0.0f);
     state.gas_phase_rain_energy_j.resize(cells, 0.0f);
+    state.gas_phase_foreign_kg.resize(cells, 0.0f);
 }
 
 void depositGasInventory(SimulationGridDomainState& state, std::size_t cell,
@@ -437,6 +440,30 @@ void depositGasCondensate(SimulationGridDomainState& state, std::size_t cell,
     }
 }
 
+void depositGasForeign(SimulationGridDomainState& state, std::size_t cell,
+                       float mass_kg, float energy_j) {
+    if (cell >= gasGrid(state).getCellCount() || !std::isfinite(mass_kg) ||
+        !std::isfinite(energy_j) || mass_kg < 0.0f || energy_j < 0.0f) {
+        throw std::runtime_error("invalid non-condensable gas deposit");
+    }
+    if (mass_kg == 0.0f && energy_j == 0.0f) {
+        return;
+    }
+    if (auto owner = gasInventoryDevice(state)) {
+        auto& value = owner->pending_foreign[static_cast<uint32_t>(cell)];
+        const float mass = value.first + mass_kg;
+        const float energy = value.second + energy_j;
+        if (!std::isfinite(mass) || !std::isfinite(energy)) {
+            throw std::runtime_error("non-condensable gas deposit overflow");
+        }
+        value = {mass, energy};
+    } else {
+        prepareGasInventoryHostProducer(state);
+        state.gas_phase_foreign_kg[cell] += mass_kg;
+        state.gas_phase_energy_j[cell] += energy_j;
+    }
+}
+
 namespace {
 // One sorted unique-cell deposit batch into (mass_field, energy_field).
 bool dispatchDeposits(GasInventoryDevice& owner, ComputeBufferHandle& buffer,
@@ -478,14 +505,15 @@ bool flushGasInventoryDeposits(SimulationGridDomainState& state) {
     if (!owner) {
         return false;
     }
-    if (owner->pending.empty() && owner->pending_condensate.empty()) {
+    if (owner->pending.empty() && owner->pending_condensate.empty() &&
+        owner->pending_foreign.empty()) {
         return true;
     }
     if (!ensureGasInventoryStorage(state)) {
         return false;
     }
-    // Two batches, two upload buffers: an upload is not ordered after a
-    // recorded dispatch, so reusing one buffer could overwrite the first batch.
+    // One upload buffer per batch: an upload is not ordered after a recorded
+    // dispatch, so reusing one buffer could overwrite the earlier batch.
     if (!owner->pending.empty() &&
         !dispatchDeposits(*owner, owner->deposits, owner->pending,
                           owner->fields[0], owner->fields[3])) {
@@ -496,8 +524,14 @@ bool flushGasInventoryDeposits(SimulationGridDomainState& state) {
                           owner->fields[6], owner->fields[3])) {
         return false;
     }
+    if (!owner->pending_foreign.empty() &&
+        !dispatchDeposits(*owner, owner->foreign_deposits, owner->pending_foreign,
+                          owner->fields[11], owner->fields[3])) {
+        return false;
+    }
     owner->pending.clear();
     owner->pending_condensate.clear();
+    owner->pending_foreign.clear();
     owner->populated = true;
     markGasInventoryDeviceChanged(state);
     return true;
@@ -546,6 +580,7 @@ void releaseGasInventoryDomainsForBackendChange(
         states[index].gas_phase_condensate_kg.swap(mirrors[index].condensate);
         states[index].gas_phase_rain_kg.swap(mirrors[index].rain);
         states[index].gas_phase_rain_energy_j.swap(mirrors[index].rain_energy);
+        states[index].gas_phase_foreign_kg.swap(mirrors[index].foreign);
         states[index].gas_inventory_device.reset();
         states[index].gas_inventory_revision = 0;
     }
@@ -594,10 +629,32 @@ GasInventorySummary readGasInventorySummary(const SimulationGridDomainState& sta
                 ++summary.condensate_cells;
             }
         }
-        for (const float rain : state.gas_phase_rain_kg) {
+        double rain_weighted[3]{};
+        for (std::size_t cell = 0; cell < state.gas_phase_rain_kg.size(); ++cell) {
+            const float rain = state.gas_phase_rain_kg[cell];
             if (std::isfinite(rain) && rain > 0.0f) {
                 summary.rain_kg += rain;
                 ++summary.rain_cells;
+                if (layout_valid) {
+                    const int x = static_cast<int>(cell % grid.nx);
+                    const int y = static_cast<int>((cell / grid.nx) % grid.ny);
+                    const int z = static_cast<int>(cell / (std::size_t(grid.nx) * grid.ny));
+                    const Vec3 position = grid.gridToWorld(x, y, z);
+                    rain_weighted[0] += static_cast<double>(position.x) * rain;
+                    rain_weighted[1] += static_cast<double>(position.y) * rain;
+                    rain_weighted[2] += static_cast<double>(position.z) * rain;
+                }
+            }
+        }
+        if (summary.rain_kg > 0.0) {
+            summary.rain_centroid = Vec3(static_cast<float>(rain_weighted[0] / summary.rain_kg),
+                                         static_cast<float>(rain_weighted[1] / summary.rain_kg),
+                                         static_cast<float>(rain_weighted[2] / summary.rain_kg));
+        }
+        for (const float foreign : state.gas_phase_foreign_kg) {
+            if (std::isfinite(foreign) && foreign > 0.0f) {
+                summary.foreign_kg += foreign;
+                ++summary.foreign_cells;
             }
         }
         if (summary.mass_kg > 0.0) {
@@ -607,7 +664,8 @@ GasInventorySummary readGasInventorySummary(const SimulationGridDomainState& sta
         }
         return summary;
     }
-    if (!owner->pending.empty() || !owner->pending_condensate.empty()) {
+    if (!owner->pending.empty() || !owner->pending_condensate.empty() ||
+        !owner->pending_foreign.empty()) {
         throw std::runtime_error("gas inventory summary requested before deposit commit");
     }
     const auto& grid = gasGrid(state);
@@ -664,10 +722,10 @@ GasInventorySummary readGasInventorySummary(const SimulationGridDomainState& sta
                                        static_cast<float>(totals[4] / totals[0]),
                                        static_cast<float>(totals[5] / totals[0]));
     }
-    // Fog water and rain water: the same reduction over their mass slots (the
-    // "energy" binding reads the same field and is ignored).
+    // Fog water, rain water and non-condensable gas: the same reduction over
+    // their mass slots (the "energy" binding reads the same field, ignored).
     if (owner->storage_initialized) {
-        for (const std::size_t slot : {std::size_t{6}, std::size_t{9}}) {
+        for (const std::size_t slot : {std::size_t{6}, std::size_t{9}, std::size_t{11}}) {
             ComputeBufferHandle water[4] = {owner->fields[slot], owner->fields[slot],
                                             owner->summary_partials, owner->summary_totals};
             pc.phase = 0;
@@ -691,16 +749,27 @@ GasInventorySummary readGasInventorySummary(const SimulationGridDomainState& sta
             if (slot == 6) {
                 owner->summary.condensate_kg = water_totals[0];
                 owner->summary.condensate_cells = static_cast<uint64_t>(water_totals[2]);
-            } else {
+            } else if (slot == 9) {
                 owner->summary.rain_kg = water_totals[0];
                 owner->summary.rain_cells = static_cast<uint64_t>(water_totals[2]);
+                // The reduction weights positions by the bound mass slot.
+                if (water_totals[0] > 0.0) {
+                    owner->summary.rain_centroid = Vec3(
+                        static_cast<float>(water_totals[3] / water_totals[0]),
+                        static_cast<float>(water_totals[4] / water_totals[0]),
+                        static_cast<float>(water_totals[5] / water_totals[0]));
+                }
+            } else {
+                owner->summary.foreign_kg = water_totals[0];
+                owner->summary.foreign_cells = static_cast<uint64_t>(water_totals[2]);
             }
             owner->query_download_bytes += sizeof(water_totals);
         }
     }
     owner->summary_valid = true;
     owner->populated = totals[0] > 0.0 || totals[1] > 0.0 ||
-        owner->summary.condensate_kg > 0.0 || owner->summary.rain_kg > 0.0;
+        owner->summary.condensate_kg > 0.0 || owner->summary.rain_kg > 0.0 ||
+        owner->summary.foreign_kg > 0.0;
     owner->summary_origin = grid.origin;
     owner->summary_voxel = grid.voxel_size;
     owner->query_download_bytes += sizeof(totals);
@@ -712,7 +781,8 @@ bool gasInventoryHasContent(const SimulationGridDomainState& state) {
     }
     if (state.gas_inventory_revision != 0) {
         const auto owner = gasInventoryDevice(state);
-        return !owner || owner->populated || !owner->pending.empty();
+        return !owner || owner->populated || !owner->pending.empty() ||
+               !owner->pending_condensate.empty() || !owner->pending_foreign.empty();
     }
     const auto positive = [](float value) { return std::isfinite(value) && value > 0.0f; };
     return std::any_of(state.gas_phase_mass_kg.begin(), state.gas_phase_mass_kg.end(), positive) ||
@@ -721,6 +791,8 @@ bool gasInventoryHasContent(const SimulationGridDomainState& state) {
                        state.gas_phase_condensate_kg.end(), positive) ||
            std::any_of(state.gas_phase_rain_kg.begin(), state.gas_phase_rain_kg.end(), positive) ||
            std::any_of(state.gas_phase_rain_energy_j.begin(),
-                       state.gas_phase_rain_energy_j.end(), positive);
+                       state.gas_phase_rain_energy_j.end(), positive) ||
+           std::any_of(state.gas_phase_foreign_kg.begin(),
+                       state.gas_phase_foreign_kg.end(), positive);
 }
 } // namespace RayTrophiSim::Fluid

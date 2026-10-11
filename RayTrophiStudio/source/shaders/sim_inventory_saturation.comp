@@ -66,6 +66,28 @@ float saturatedMass(float kelvin) {
     return psat * pc.cell_volume * pc.molar / (kGasConstant * t);
 }
 
+// Virtual temperature <-> air temperature (CPU reference: virtualKelvinFromAir
+// / airKelvinFromVirtual in GasSaturation.cpp). The temperature field holds Tv.
+float virtualFromAir(float air, float m) {
+    float t = max(air, 1.0);
+    if (!(m > 0.0)) return t;
+    float k = m * kGasConstant / (pc.molar * kAtmosphere * pc.cell_volume);
+    float x = min(k * t, 1.0);
+    return t * kAirMolar / (x * pc.molar + (1.0 - x) * kAirMolar);
+}
+float airFromVirtual(float tv_in, float m) {
+    float tv = max(tv_in, 1.0);
+    if (!(m > 0.0)) return tv;
+    float k = m * kGasConstant / (pc.molar * kAtmosphere * pc.cell_volume);
+    float denominator = kAirMolar + tv * k * (kAirMolar - pc.molar);
+    float t = tv * pc.molar / kAirMolar;
+    if (denominator > 1.0e-12) {
+        float mixed = tv * kAirMolar / denominator;
+        if (k * mixed < 1.0) t = mixed;
+    }
+    return max(t, min(tv, pc.ambient));
+}
+
 void main() {
     uint id = gl_GlobalInvocationID.x +
         gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
@@ -80,8 +102,11 @@ void main() {
     float condensed = 0.0;
     float evaporated = 0.0;
     float autoconverted = 0.0;
+    float air = 0.0;
     if ((m > 0.0 || w > 0.0) && t_valid) {
-        float t0 = max(pc.ambient + (t - pc.gas_ambient) * pc.kelvin_per_unit, 1.0);
+        float m0 = m;
+        float t0 = airFromVirtual(pc.ambient + (t - pc.gas_ambient) * pc.kelvin_per_unit, m);
+        air = t0;
         float rho_air = kAtmosphere * kAirMolar / (kGasConstant * t0);
         float capacity = rho_air * pc.cell_volume * 1005.0 + (m + w) * pc.specific_heat;
         float heat_per_kg = pc.latent / capacity;
@@ -115,7 +140,9 @@ void main() {
             m = max(m - d, 0.0);
             w = max(w + d, 0.0);
             energy[id] = max(energy[id] - d * pc.latent, 0.0);
-            t = t + d * heat_per_kg / pc.kelvin_per_unit;
+            air = t0 + d * heat_per_kg;
+            // Tv difference: the field's own offset from this conversion stays.
+            t = t + (virtualFromAir(air, m) - virtualFromAir(t0, m0)) / pc.kelvin_per_unit;
             temperature[id] = t;
             condensed = max(d, 0.0);
             evaporated = max(-d, 0.0);
@@ -129,7 +156,7 @@ void main() {
             converted = w - pc.ceiling;
         }
         if (converted > 0.0) {
-            float ta = max(pc.ambient + (t - pc.gas_ambient) * pc.kelvin_per_unit, 1.0);
+            float ta = max(air, 1.0);
             float e = energy[id];
             float sensible = min(e, converted * pc.specific_heat * ta);
             energy[id] = e - sensible;

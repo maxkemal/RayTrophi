@@ -2795,6 +2795,9 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"rain_absorbed_kg", info.rain_absorbed_kg},
                         {"gas_rain_kg", info.gas_rain_kg},
                         {"gas_rain_cells", info.gas_rain_cells},
+                        {"gas_foreign_kg", info.gas_foreign_kg},
+                        {"gas_foreign_cells", info.gas_foreign_cells},
+                        {"gas_rain_centroid", json::array({info.gas_rain_centroid.x, info.gas_rain_centroid.y, info.gas_rain_centroid.z})},
                         {"gas_phase_mass_centroid", json::array({
                             info.gas_phase_mass_centroid.x,
                             info.gas_phase_mass_centroid.y,
@@ -2834,6 +2837,9 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"rain_absorbed_kg", info.rain_absorbed_kg},
                         {"gas_rain_kg", info.gas_rain_kg},
                         {"gas_rain_cells", info.gas_rain_cells},
+                        {"gas_foreign_kg", info.gas_foreign_kg},
+                        {"gas_foreign_cells", info.gas_foreign_cells},
+                        {"gas_rain_centroid", json::array({info.gas_rain_centroid.x, info.gas_rain_centroid.y, info.gas_rain_centroid.z})},
                         {"gas_phase_mass_centroid", json::array({
                             info.gas_phase_mass_centroid.x,
                             info.gas_phase_mass_centroid.y,
@@ -3049,6 +3055,9 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"rain_absorbed_kg", info.rain_absorbed_kg},
                     {"gas_rain_kg", info.gas_rain_kg},
                     {"gas_rain_cells", info.gas_rain_cells},
+                    {"gas_foreign_kg", info.gas_foreign_kg},
+                    {"gas_foreign_cells", info.gas_foreign_cells},
+                    {"gas_rain_centroid", json::array({info.gas_rain_centroid.x, info.gas_rain_centroid.y, info.gas_rain_centroid.z})},
                     {"gas_phase_mass_centroid", json::array({
                         info.gas_phase_mass_centroid.x,
                         info.gas_phase_mass_centroid.y,
