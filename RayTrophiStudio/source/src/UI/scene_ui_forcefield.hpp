@@ -4127,7 +4127,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
     ImGui::EndTabBar();
 
     if (ff_changed) {
-        scene.invalidateSimCacheAfterCurrentFrame();  // live field edit: keep the run
+        scene.invalidateSimCacheAfterCurrentFrame("force field edit");  // live field edit: keep the run
         ui_ctx.renderer.resetCPUAccumulation();
         if (ui_ctx.backend_ptr) {
             ui_ctx.backend_ptr->resetAccumulation();

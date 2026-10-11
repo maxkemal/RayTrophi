@@ -2011,6 +2011,26 @@ Result setViewportAf(bool enabled, int area_mode, int focus_mode, int selected_p
 ViewportAfInfo viewportAf();
 ViewportDepthOfFieldInfo viewportDepthOfField();
 
+// Scene gizmo occlusion (UI/GizmoOcclusion.h): domain/collider/force-field
+// lines tested against the scene BVH; parts behind geometry draw at
+// hidden_alpha. enabled=false is x-ray (all gizmos on top). The counters are
+// the LAST drawn frame's: rays (cache misses), segments, hidden_pieces,
+// budget_exhausted (ran out of rays; the rest drew unoccluded).
+struct ViewportGizmoOcclusionInfo {
+    bool enabled = true;
+    float hidden_alpha = 0.25f;
+    bool active = false;
+    std::string inactive_reason;
+    uint64_t rays = 0;
+    uint64_t segments = 0;
+    uint64_t hidden_pieces = 0;
+    uint64_t cache_entries = 0;
+    bool budget_exhausted = false;
+};
+// hidden_alpha outside [0, 1] is rejected, not clamped.
+Result setViewportGizmoOcclusion(bool enabled, float hidden_alpha);
+ViewportGizmoOcclusionInfo viewportGizmoOcclusion();
+
 // ---------------------------------------------------------------------------
 // Material preview lighting preset.
 //
@@ -2657,6 +2677,11 @@ struct SimCacheStatus {
     int      last_frame = 0;
     bool     has_range = false;      // false when ram_frames == 0
     uint64_t config_signature = 0;   // authored config hash the cache was built from
+    // Cached frames up to this one were simulated before a live edit that kept
+    // the past (a force field changed mid-run): replaying them shows the OLD
+    // setup. -1 = none. predates_edit_reason names the edit.
+    int      predates_edit_frame = -1;
+    std::string predates_edit_reason;
     // ★★★ MEASURED SIZE, and the reason the cap is now in bytes. The scrub
     // cache used to be bounded by a FRAME COUNT, which bounds memory only if a
     // frame has a fixed size — at 64^3 a frame is ~4 MiB and 600 frames is

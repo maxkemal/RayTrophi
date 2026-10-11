@@ -1277,6 +1277,10 @@ Result simCacheStatus(SimCacheStatus& out) {
     out.ram_frames = static_cast<uint32_t>(g_ctx->scene.simFrameCacheCount());
     out.has_range = g_ctx->scene.simFrameCacheRange(out.first_frame, out.last_frame);
     out.config_signature = g_ctx->scene.simConfigSignature();
+    out.predates_edit_frame = g_ctx->scene.simCachePredatesEditFrame();
+    if (out.predates_edit_frame >= 0) {
+        out.predates_edit_reason = g_ctx->scene.simCachePredatesEditReason();
+    }
     out.ram_bytes = static_cast<uint64_t>(g_ctx->scene.simFrameCacheBytes());
     out.budget_bytes = static_cast<uint64_t>(SceneData::simFrameCacheBudgetBytes());
     out.budget_reached = out.ram_bytes >= out.budget_bytes;

@@ -5968,6 +5968,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["first_frame"] = s.first_frame;
         d["last_frame"] = s.last_frame;
         d["config_signature"] = s.config_signature;
+        d["predates_edit_frame"] = s.predates_edit_frame;
+        d["predates_edit_reason"] = s.predates_edit_reason;
         d["ram_bytes"] = s.ram_bytes;
         d["budget_bytes"] = s.budget_bytes;
         d["budget_reached"] = s.budget_reached;
@@ -6260,6 +6262,25 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         },
         py::arg("enabled") = true, py::arg("max_coc_pixels") = 24.0f,
         py::arg("max_taps") = 32);
+    viewport.def("set_gizmo_occlusion", [](bool enabled, float hidden_alpha) {
+        requireResult(rtapi::setViewportGizmoOcclusion(enabled, hidden_alpha));
+    }, py::arg("enabled") = true, py::arg("hidden_alpha") = 0.25f,
+       "Scene gizmos (domains, colliders, force fields) tested against the scene: "
+       "parts behind geometry draw at hidden_alpha. enabled=False is x-ray.");
+    viewport.def("get_gizmo_occlusion", []() {
+        const rtapi::ViewportGizmoOcclusionInfo g = rtapi::viewportGizmoOcclusion();
+        py::dict out;
+        out["enabled"] = g.enabled;
+        out["hidden_alpha"] = g.hidden_alpha;
+        out["active"] = g.active;
+        out["inactive_reason"] = g.inactive_reason;
+        out["rays"] = g.rays;
+        out["segments"] = g.segments;
+        out["hidden_pieces"] = g.hidden_pieces;
+        out["cache_entries"] = g.cache_entries;
+        out["budget_exhausted"] = g.budget_exhausted;
+        return out;
+    });
     viewport.def("get_depth_of_field", []() {
         const rtapi::ViewportDepthOfFieldInfo d = rtapi::viewportDepthOfField();
         py::dict out;

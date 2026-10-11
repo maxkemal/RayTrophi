@@ -720,6 +720,11 @@ public:
          // ImGui rects per frame and that serializes with the raytrace on the
          // GPU queue — costs ~half the framerate on dense selections.
          bool show_selection_outline = true;
+         // Scene gizmos (domains, colliders, ...) tested against the scene
+         // BVH: parts behind geometry draw faint (UI/GizmoOcclusion.h).
+         // false = x-ray, every gizmo on top (the pre-2026-10-11 look).
+         bool gizmo_occlusion = true;
+         float gizmo_hidden_alpha = 0.25f;   // alpha scale of occluded parts, 0..1
 
          // Camera HUD (viewport lens controls)
          bool show_camera_hud = false;      // Master toggle for camera HUD

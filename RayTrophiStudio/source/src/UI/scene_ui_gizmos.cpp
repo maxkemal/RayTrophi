@@ -28,6 +28,7 @@
 #include "MeshEdit/ProfileSplinePointGizmo.h"
 #include "UI/ParticleEmitterGizmo.h"
 #include "UI/KinematicColliderOverlay.h"
+#include "UI/GizmoOcclusion.h"
 #include "Backend/IViewportBackend.h"
 #include <Backend/VulkanBackend.h>
 #include <Backend/OptixBackend.h>
@@ -161,6 +162,14 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
     ParticleEmitterGizmo::ScopedViewportClip viewport_clip(
         draw_list, nullptr, viewport_min, viewport_max);
 
+    // Scene gizmo lines below are tested against the scene BVH so they sit
+    // in perspective instead of floating in front of everything (the frame
+    // was begun in SceneUI's draw, before the light/force-field gizmos).
+    const GizmoOcclusion::ProjectFn projectScreen = [&](const Vec3& point, ImVec2& out) {
+        float depth = 0.0f;
+        return projectPoint(point, out, depth);
+    };
+
     auto selectedSourceName = [&]() -> std::string {
         if (ctx.selection.selected.type == SelectableType::Object &&
             ctx.selection.selected.object &&
@@ -210,12 +219,8 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
             {0, 4}, {1, 5}, {2, 6}, {3, 7}
         };
         for (const auto& edge : edges) {
-            ImVec2 a, b;
-            float da = 0.0f;
-            float db = 0.0f;
-            if (projectPoint(c[edge[0]], a, da) && projectPoint(c[edge[1]], b, db)) {
-                draw_list->AddLine(a, b, color, thickness);
-            }
+            GizmoOcclusion::drawSegment(draw_list, c[edge[0]], c[edge[1]], color, thickness,
+                                        projectScreen);
         }
     };
 
@@ -255,12 +260,8 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
             {0, 4}, {1, 5}, {2, 6}, {3, 7}
         };
         for (const auto& edge : edges) {
-            ImVec2 a, b;
-            float da = 0.0f;
-            float db = 0.0f;
-            if (projectPoint(corners[edge[0]], a, da) && projectPoint(corners[edge[1]], b, db)) {
-                draw_list->AddLine(a, b, color, thickness);
-            }
+            GizmoOcclusion::drawSegment(draw_list, corners[edge[0]], corners[edge[1]], color,
+                                        thickness, projectScreen);
         }
     };
 
@@ -276,12 +277,8 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
             Vec3(min_bound.x, y, max_bound.z)
         };
         for (int i = 0; i < 4; ++i) {
-            ImVec2 a, b;
-            float da = 0.0f;
-            float db = 0.0f;
-            if (projectPoint(corners[i], a, da) && projectPoint(corners[(i + 1) % 4], b, db)) {
-                draw_list->AddLine(a, b, color, thickness);
-            }
+            GizmoOcclusion::drawSegment(draw_list, corners[i], corners[(i + 1) % 4], color,
+                                        thickness, projectScreen);
         }
     };
 
@@ -289,26 +286,13 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
         const float r = std::max(0.001f, radius);
         constexpr int segments = 48;
         auto drawCircle = [&](const Vec3& axis_a, const Vec3& axis_b) {
-            ImVec2 previous_screen;
-            float previous_depth = 0.0f;
-            bool has_previous = false;
-            for (int i = 0; i <= segments; ++i) {
+            Vec3 previous = center + axis_a * r;
+            for (int i = 1; i <= segments; ++i) {
                 const float t = (static_cast<float>(i) / static_cast<float>(segments)) * 6.28318530718f;
                 const Vec3 p = center + axis_a * (std::cos(t) * r) + axis_b * (std::sin(t) * r);
-                ImVec2 screen;
-                float depth = 0.0f;
-                if (projectPoint(p, screen, depth)) {
-                    if (has_previous) {
-                        draw_list->AddLine(previous_screen, screen, color, thickness);
-                    }
-                    previous_screen = screen;
-                    previous_depth = depth;
-                    has_previous = true;
-                } else {
-                    has_previous = false;
-                }
+                GizmoOcclusion::drawSegment(draw_list, previous, p, color, thickness, projectScreen);
+                previous = p;
             }
-            (void)previous_depth;
         };
         drawCircle(Vec3(1.0f, 0.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
         drawCircle(Vec3(1.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 1.0f));
@@ -335,12 +319,8 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
         drawSphere(b, r, color, thickness);
         const Vec3 offsets[4] = { side * r, side * -r, side_b * r, side_b * -r };
         for (const auto& offset : offsets) {
-            ImVec2 pa, pb;
-            float da = 0.0f;
-            float db = 0.0f;
-            if (projectPoint(a + offset, pa, da) && projectPoint(b + offset, pb, db)) {
-                draw_list->AddLine(pa, pb, color, thickness);
-            }
+            GizmoOcclusion::drawSegment(draw_list, a + offset, b + offset, color, thickness,
+                                        projectScreen);
         }
     };
 
@@ -4766,6 +4746,10 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
             return ImVec2(-10000, -10000);
         return out;
     };
+    const GizmoOcclusion::ProjectFn projectScreen = [&](const Vec3& p, ImVec2& out) {
+        return projectGizmoWorldPoint(cam, gizmoOrtho, aspect, io.DisplaySize.x,
+                                      io.DisplaySize.y, p, out);
+    };
 
     for (const auto& ff : ctx.scene.force_field_manager.force_fields) {
         if (!ff->enabled || !ff->visible) continue;
@@ -4840,18 +4824,12 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
             if (arrow_len > 15.0f) arrow_len = 15.0f; // Cap max length
             
             Vec3 arrow_end = ff->position + world_dir * arrow_len;
-            ImVec2 screen_end = Project(arrow_end);
-            if (screen_end.x > -5000) {
-                draw_list->AddLine(screen_pos, screen_end, color, 2.0f);
-                // Simple arrow head
-                Vec3 right = world_dir.cross(cam_up).normalize() * 0.2f;
-                ImVec2 h1 = Project(arrow_end - world_dir * 0.3f + right);
-                ImVec2 h2 = Project(arrow_end - world_dir * 0.3f - right);
-                if (h1.x > -5000 && h2.x > -5000) {
-                    draw_list->AddLine(screen_end, h1, color, 2.0f);
-                    draw_list->AddLine(screen_end, h2, color, 2.0f);
-                }
-            }
+            const Vec3 right = world_dir.cross(cam_up).normalize() * 0.2f;
+            GizmoOcclusion::drawSegment(draw_list, ff->position, arrow_end, color, 2.0f, projectScreen);
+            GizmoOcclusion::drawSegment(draw_list, arrow_end, arrow_end - world_dir * 0.3f + right,
+                                        color, 2.0f, projectScreen);
+            GizmoOcclusion::drawSegment(draw_list, arrow_end, arrow_end - world_dir * 0.3f - right,
+                                        color, 2.0f, projectScreen);
         }
 
         // Show name and strength for ALL force fields in the viewport
@@ -4869,31 +4847,28 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
                                            Matrix4x4::rotationZ(ff->rotation.z * 0.0174533f) * 
                                            Matrix4x4::scaling(ff->scale);
 
-                auto TransformAndProject = [&](const Vec3& local_pos) -> ImVec2 {
-                    Vec3 world_pos = local_to_world.transform_point(local_pos);
-                    return Project(world_pos);
-                };
-
                 const ImU32 boundary_color = IM_COL32(255, 0, 255, 120);
                 const float thickness = 1.5f;
+                // Local edge -> world segment, tested against the scene.
+                auto edge = [&](const Vec3& la, const Vec3& lb) {
+                    GizmoOcclusion::drawSegment(draw_list, local_to_world.transform_point(la),
+                                                local_to_world.transform_point(lb),
+                                                boundary_color, thickness, projectScreen);
+                };
 
                 if (ff->shape == Physics::ForceFieldShape::Sphere) {
                     float r = ff->falloff_radius;
                     for (int plane = 0; plane < 3; ++plane) {
                         const int segs = 32;
-                        ImVec2 last_p;
+                        Vec3 last_p;
                         for (int i = 0; i <= segs; ++i) {
                             float a = i * (6.2831853f / segs);
                             Vec3 local_p;
                             if (plane == 0)      local_p = Vec3(cosf(a)*r, sinf(a)*r, 0.0f);
                             else if (plane == 1) local_p = Vec3(cosf(a)*r, 0.0f, sinf(a)*r);
                             else                 local_p = Vec3(0.0f, cosf(a)*r, sinf(a)*r);
-                            
-                            ImVec2 p_screen = TransformAndProject(local_p);
-                            if (i > 0 && p_screen.x > -5000 && last_p.x > -5000) {
-                                draw_list->AddLine(last_p, p_screen, boundary_color, thickness);
-                            }
-                            last_p = p_screen;
+                            if (i > 0) edge(last_p, local_p);
+                            last_p = local_p;
                         }
                     }
                 }
@@ -4910,66 +4885,43 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
                         {4, 5}, {5, 6}, {6, 7}, {7, 4}, // front face
                         {0, 4}, {1, 5}, {2, 6}, {3, 7}  // connections
                     };
-                    for (const auto& edge : edges) {
-                        ImVec2 a = TransformAndProject(local_corners[edge[0]]);
-                        ImVec2 b = TransformAndProject(local_corners[edge[1]]);
-                        if (a.x > -5000 && b.x > -5000) {
-                            draw_list->AddLine(a, b, boundary_color, thickness);
-                        }
+                    for (const auto& e : edges) {
+                        edge(local_corners[e[0]], local_corners[e[1]]);
                     }
                 }
                 else if (ff->shape == Physics::ForceFieldShape::Cylinder) {
                     float r = ff->falloff_radius;
                     const int segs = 32;
-                    ImVec2 last_p_top, last_p_bottom;
+                    Vec3 last_top, last_bottom;
                     for (int i = 0; i <= segs; ++i) {
                         float a = i * (6.2831853f / segs);
                         Vec3 local_top(cosf(a)*r, r, sinf(a)*r);
                         Vec3 local_bottom(cosf(a)*r, -r, sinf(a)*r);
-                        
-                        ImVec2 p_top = TransformAndProject(local_top);
-                        ImVec2 p_bottom = TransformAndProject(local_bottom);
-                        
                         if (i > 0) {
-                            if (p_top.x > -5000 && last_p_top.x > -5000) {
-                                draw_list->AddLine(last_p_top, p_top, boundary_color, thickness);
-                            }
-                            if (p_bottom.x > -5000 && last_p_bottom.x > -5000) {
-                                draw_list->AddLine(last_p_bottom, p_bottom, boundary_color, thickness);
-                            }
+                            edge(last_top, local_top);
+                            edge(last_bottom, local_bottom);
                         }
                         // Draw 4 connecting lines
-                        if (i % (segs / 4) == 0) {
-                            if (p_top.x > -5000 && p_bottom.x > -5000) {
-                                draw_list->AddLine(p_top, p_bottom, boundary_color, thickness);
-                            }
+                        if (i % (segs / 4) == 0 && i < segs) {
+                            edge(local_top, local_bottom);
                         }
-                        last_p_top = p_top;
-                        last_p_bottom = p_bottom;
+                        last_top = local_top;
+                        last_bottom = local_bottom;
                     }
                 }
                 else if (ff->shape == Physics::ForceFieldShape::Cone) {
                     float r = ff->falloff_radius;
                     const int segs = 32;
-                    ImVec2 last_p_base;
-                    ImVec2 tip = TransformAndProject(Vec3(0.0f, 0.0f, 0.0f));
-                    
+                    Vec3 last_base;
                     for (int i = 0; i <= segs; ++i) {
                         float a = i * (6.2831853f / segs);
                         Vec3 local_base(cosf(a)*r, r, sinf(a)*r);
-                        ImVec2 p_base = TransformAndProject(local_base);
-                        
-                        if (i > 0 && p_base.x > -5000 && last_p_base.x > -5000) {
-                            draw_list->AddLine(last_p_base, p_base, boundary_color, thickness);
-                        }
-                        
+                        if (i > 0) edge(last_base, local_base);
                         // Draw 4 connecting lines from tip to base
-                        if (i % (segs / 4) == 0) {
-                            if (tip.x > -5000 && p_base.x > -5000) {
-                                draw_list->AddLine(tip, p_base, boundary_color, thickness);
-                            }
+                        if (i % (segs / 4) == 0 && i < segs) {
+                            edge(Vec3(0.0f, 0.0f, 0.0f), local_base);
                         }
-                        last_p_base = p_base;
+                        last_base = local_base;
                     }
                 }
             }

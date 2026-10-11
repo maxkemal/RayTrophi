@@ -9164,7 +9164,7 @@ static const MethodRegistration reg_sim_cache_clear(desc_sim_cache_clear);
 static const MethodDescriptor desc_sim_cache_status = {
     "sim_cache.status", "sim_cache",
     "Report the simulation cache: valid range, frames in RAM, cache directory and the config signature",
-    "The config signature is what decides whether a bake is still valid; when it changes, cached frames belong to a different setup.",
+    "The config signature is what decides whether a bake is still valid; when it changes, cached frames belong to a different setup. A live force-field edit keeps the past on purpose (only frames after the current one are dropped): predates_edit_frame >= 0 says cached frames up to it were simulated with the OLD setup and replaying from 0 shows it; predates_edit_reason names the edit. -1 = none. A full reset clears it.",
     "read", "Read", false, "any",
     "sim_cache|sim|cache|status|simulation|bake|verify",
     nullptr,
@@ -10859,6 +10859,19 @@ static const MethodDescriptor desc_viewport_get_depth_of_field = {
 };
 static const MethodRegistration reg_viewport_get_depth_of_field(desc_viewport_get_depth_of_field);
 
+static const MethodDescriptor desc_viewport_get_gizmo_occlusion = {
+    "viewport.get_gizmo_occlusion", "viewport",
+    "Report gizmo depth testing: setting, whether it ran, and last frame's ray/segment counts",
+    "Counters are the LAST drawn frame's: rays are BVH casts (cache misses; a still camera costs ~0), segments drawn, hidden_pieces drawn faint. budget_exhausted=true means the per-frame ray budget ran out and the remaining segments drew unoccluded. active=false names the gate (setting off, no camera, no BVH, gizmos hidden).",
+    "render", "Render", false, "any",
+    "viewport|get|gizmo|occlusion|depth|diagnostics",
+    "viewport.set_gizmo_occlusion",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_viewport_get_gizmo_occlusion(desc_viewport_get_gizmo_occlusion);
+
 static const MethodDescriptor desc_viewport_get_screenshot = {
     "viewport.get_screenshot", "viewport",
     "Return the captured viewport frame as a base64 JPEG, for a vision-capable model to look at",
@@ -11031,6 +11044,23 @@ static const MethodDescriptor desc_viewport_set_depth_of_field = {
     true
 };
 static const MethodRegistration reg_viewport_set_depth_of_field(desc_viewport_set_depth_of_field);
+
+static const MethodParam params_viewport_set_gizmo_occlusion[] = {
+    {"enabled", "bool", true, "", nullptr, nullptr},
+    {"hidden_alpha", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_viewport_set_gizmo_occlusion = {
+    "viewport.set_gizmo_occlusion", "viewport",
+    "Turn scene gizmo depth testing on/off and set how faint occluded parts draw",
+    "Domain, collider, seed-box and force-field gizmo lines are tested against the scene BVH (volumes ignored): parts behind geometry draw at hidden_alpha (0..1, rejected outside, not clamped). enabled=false is x-ray: every gizmo on top. Transform handles stay on top either way.",
+    "render", "Render", false, "any",
+    "viewport|set|gizmo|occlusion|depth|xray|overlay",
+    "viewport.get_gizmo_occlusion",
+    nullptr, nullptr, nullptr, nullptr,
+    params_viewport_set_gizmo_occlusion, 2,
+    true
+};
+static const MethodRegistration reg_viewport_set_gizmo_occlusion(desc_viewport_set_gizmo_occlusion);
 
 static const MethodParam params_viewport_set_preview_lighting[] = {
     {"preset", "string", true, "Canonical mode name. Realtime/real_lights aliases map to scene; legacy classic/studio/outdoor aliases map to three_point.", nullptr, "three_point|scene"},
@@ -11242,7 +11272,7 @@ static const MethodParam params_world_apply_cloud_preset[] = {
 static const MethodDescriptor desc_world_apply_cloud_preset = {
     "world.apply_cloud_preset", "world",
     "Replace cloud formations with a named preset (keeps common material and quality)",
-    "Names are listed by world.get_clouds presets. The storm preset uses three linked base/tower/anvil regions with local optical modifiers. The preset replaces layer modifiers and angles but preserves the common material and quality.",
+    "Names are listed by world.get_clouds presets, including towering_cumulus and storm. These two presets use three linked base/tower/anvil regions with local optical modifiers. The preset replaces layer modifiers and angles but preserves the common material and quality.",
     "write", "SceneWrite", false, "any",
     "world|apply|cloud|preset|environment|sky|clouds",
     "world.get_clouds|world.set_clouds",
