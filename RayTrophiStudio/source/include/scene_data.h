@@ -2588,6 +2588,8 @@ struct SceneData {
     // Live sim state (per-step positions) is deliberately excluded so the
     // signature is stable while a sim is running.
     uint64_t last_sim_config_sig_ = 0;
+    int sim_cache_predates_edit_frame_ = -1;
+    std::string sim_cache_predates_edit_reason_;
     // Sub-signature of only the fluid-bake inputs (grid/emitter/collider config +
     // fluid-coupled rigid bodies). When the global signature changes but THIS one
     // doesn't, the change was a non-coupling rigid edit/move: the cheap rigid
@@ -3764,6 +3766,8 @@ struct SceneData {
     void clearSimFrameCache() {
         sim_frame_cache_.clear();
         sim_frame_cache_bytes_ = 0;
+        sim_cache_predates_edit_frame_ = -1;   // nothing cached, nothing stale
+        sim_cache_predates_edit_reason_.clear();
         sim_live_velocity_valid_ = true;
         rigid_frame_cache_.clear();  // rigid is cached in lockstep; never outlive the fluid cache
         soft_frame_cache_.clear();   // soft deformation cache, same lockstep
@@ -3793,11 +3797,21 @@ struct SceneData {
     // adopt the new setup. invalidateRigidBodySimulationCache() instead
     // rewinds everything to frame 0 - editing a heater mid-run used to reseed
     // the tank, so "turn the stove off and watch it cool" was impossible.
-    void invalidateSimCacheAfterCurrentFrame() {
+    void invalidateSimCacheAfterCurrentFrame(const char* reason = "force field edit") {
         const int keep = sim_timeline_frame_;
         if (keep < 0) {
             invalidateRigidBodySimulationCache();
             return;
+        }
+        // The kept frames were simulated with the setup BEFORE this edit. That
+        // is the intent (the stove turned off mid-run keeps its hot past), but
+        // replaying from frame 0 then shows the old setup - a heater turned to
+        // -15 K still boils in frames 0..keep - and nothing said so (user
+        // report 2026-10-11). Remember the boundary; the viewport HUD and
+        // sim_cache.status report it while the cache holds those frames.
+        if (keep >= sim_cache_predates_edit_frame_) {
+            sim_cache_predates_edit_frame_ = keep;
+            sim_cache_predates_edit_reason_ = reason ? reason : "";
         }
         for (auto it = sim_frame_cache_.upper_bound(keep); it != sim_frame_cache_.end(); ++it) {
             for (const auto& per_system : it->second)
@@ -4974,6 +4988,17 @@ struct SceneData {
     const std::string& simCacheDir() const { return sim_cache_dir_; }
     bool simBakeActive() const { return sim_bake_active_; }
     uint64_t simConfigSignature() const { return last_sim_config_sig_; }
+    // Cached frames up to this one were simulated BEFORE a live edit that kept
+    // the past (invalidateSimCacheAfterCurrentFrame); -1 = none. Only reported
+    // while the cache still holds a frame at or before it.
+    int simCachePredatesEditFrame() const {
+        if (sim_cache_predates_edit_frame_ < 0 || sim_frame_cache_.empty() ||
+            sim_frame_cache_.begin()->first > sim_cache_predates_edit_frame_) {
+            return -1;
+        }
+        return sim_cache_predates_edit_frame_;
+    }
+    const std::string& simCachePredatesEditReason() const { return sim_cache_predates_edit_reason_; }
     std::size_t simFrameCacheCount() const { return sim_frame_cache_.size(); }
     // Compressed size of the grid scrub cache, and the ceiling capture stops at.
     std::size_t simFrameCacheBytes() const { return sim_frame_cache_bytes_; }

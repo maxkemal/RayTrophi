@@ -5392,6 +5392,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"first_frame", s.first_frame},
                         {"last_frame", s.last_frame},
                         {"config_signature", s.config_signature},
+                        {"predates_edit_frame", s.predates_edit_frame},
+                        {"predates_edit_reason", s.predates_edit_reason},
                         {"ram_bytes", s.ram_bytes},
                         {"budget_bytes", s.budget_bytes},
                         {"budget_reached", s.budget_reached}};
@@ -5617,6 +5619,29 @@ json dispatchMethod(const std::string& method, const json& params) {
         const int point = requireInt(params, "selected_point");
         return enqueueResult([enabled, area, focus, point](UIContext&) {
             return rtapi::setViewportAf(enabled, area, focus, point);
+        });
+    }
+    if (method == "viewport.set_gizmo_occlusion") {
+        const bool enabled = requireBool(params, "enabled");
+        const float alpha = params.contains("hidden_alpha")
+            ? params["hidden_alpha"].get<float>() : 0.25f;
+        return enqueueResult([enabled, alpha](UIContext&) {
+            return rtapi::setViewportGizmoOcclusion(enabled, alpha);
+        });
+    }
+    if (method == "viewport.get_gizmo_occlusion") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::ViewportGizmoOcclusionInfo g = rtapi::viewportGizmoOcclusion();
+            return json{
+                {"enabled", g.enabled},
+                {"hidden_alpha", g.hidden_alpha},
+                {"active", g.active},
+                {"inactive_reason", g.inactive_reason},
+                {"rays", g.rays},
+                {"segments", g.segments},
+                {"hidden_pieces", g.hidden_pieces},
+                {"cache_entries", g.cache_entries},
+                {"budget_exhausted", g.budget_exhausted}};
         });
     }
     if (method == "viewport.get_af") {

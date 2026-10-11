@@ -447,6 +447,8 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                                      {"shading_mode", viewport_settings.shading_mode},
                                      {"show_gizmos", viewport_settings.show_gizmos},
                                      {"show_selection_outline", viewport_settings.show_selection_outline},
+                                     {"gizmo_occlusion", viewport_settings.gizmo_occlusion},
+                                     {"gizmo_hidden_alpha", viewport_settings.gizmo_hidden_alpha},
                                      {"show_camera_hud", viewport_settings.show_camera_hud},
                                      {"show_focus_ring", viewport_settings.show_focus_ring},
                                      {"show_zoom_ring", viewport_settings.show_zoom_ring}
@@ -509,6 +511,8 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                                          {"shading_mode", viewport_settings.shading_mode},
                                          {"show_gizmos", viewport_settings.show_gizmos},
                                      {"show_selection_outline", viewport_settings.show_selection_outline},
+                                     {"gizmo_occlusion", viewport_settings.gizmo_occlusion},
+                                     {"gizmo_hidden_alpha", viewport_settings.gizmo_hidden_alpha},
                                          {"show_camera_hud", viewport_settings.show_camera_hud},
                                          {"show_focus_ring", viewport_settings.show_focus_ring},
                                          {"show_zoom_ring", viewport_settings.show_zoom_ring}
@@ -581,6 +585,8 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                                      {"shading_mode", viewport_settings.shading_mode},
                                      {"show_gizmos", viewport_settings.show_gizmos},
                                      {"show_selection_outline", viewport_settings.show_selection_outline},
+                                     {"gizmo_occlusion", viewport_settings.gizmo_occlusion},
+                                     {"gizmo_hidden_alpha", viewport_settings.gizmo_hidden_alpha},
                                      {"show_camera_hud", viewport_settings.show_camera_hud},
                                      {"show_focus_ring", viewport_settings.show_focus_ring},
                                      {"show_zoom_ring", viewport_settings.show_zoom_ring}

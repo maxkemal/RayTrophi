@@ -15,6 +15,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "UI/GizmoOcclusion.h"
 #include "PerfProfile.h"
 #include "Autosave.h"
 #include <thread>
@@ -5696,6 +5697,12 @@ bool SceneUI::drawOverlays(UIContext& ctx)
     // Draw Viewport HUDs
     // Render status is now integrated into drawViewportMessages
 
+    // Once per frame, before every gizmo that draws through it.
+    GizmoOcclusion::beginFrame(ctx.scene, viewport_settings.gizmo_occlusion,
+                               viewport_settings.gizmo_hidden_alpha,
+                               ctx.scene.camera && ctx.scene.camera->orthographic &&
+                                   viewport_settings.shading_mode != 2,
+                               timeline.getCurrentFrame());
     if (!(ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active) && ctx.scene.camera && ctx.selection.show_gizmo) {
         drawLightGizmos(ctx, gizmo_hit);
         drawForceFieldGizmos(ctx, gizmo_hit);
@@ -8576,6 +8583,8 @@ void SceneUI::drawExitConfirmation(UIContext& ctx) {
                      rootJson["viewport_settings"] = {
                         {"show_gizmos", viewport_settings.show_gizmos},
                         {"show_selection_outline", viewport_settings.show_selection_outline},
+                        {"gizmo_occlusion", viewport_settings.gizmo_occlusion},
+                        {"gizmo_hidden_alpha", viewport_settings.gizmo_hidden_alpha},
                         {"show_camera_hud", viewport_settings.show_camera_hud},
                         {"show_focus_ring", viewport_settings.show_focus_ring},
                         {"show_zoom_ring", viewport_settings.show_zoom_ring}
@@ -8911,6 +8920,8 @@ void SceneUI::performOpenProject(UIContext& ctx) {
                                         auto& vs = rootJson["viewport_settings"];
                                         viewport_settings.show_gizmos = vs.value("show_gizmos", true);
                                         viewport_settings.show_selection_outline = vs.value("show_selection_outline", true);
+                                        viewport_settings.gizmo_occlusion = vs.value("gizmo_occlusion", true);
+                                        viewport_settings.gizmo_hidden_alpha = std::clamp(vs.value("gizmo_hidden_alpha", 0.25f), 0.0f, 1.0f);
                                         viewport_settings.show_camera_hud = vs.value("show_camera_hud", true);
                                         viewport_settings.show_focus_ring = vs.value("show_focus_ring", true);
                                         viewport_settings.show_zoom_ring = vs.value("show_zoom_ring", true);

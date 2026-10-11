@@ -162,7 +162,7 @@ Physics::ForceFieldManager& manager() { return g_ctx->scene.force_field_manager;
 // cannot be dropped.
 void touchForceFields() {
     // Live edit: keep the run, re-simulate only what comes next.
-    g_ctx->scene.invalidateSimCacheAfterCurrentFrame();
+    g_ctx->scene.invalidateSimCacheAfterCurrentFrame("force field edit (script)");
     g_ctx->renderer.resetCPUAccumulation();
     if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
 }

@@ -36,6 +36,7 @@
 #include "Backend/IViewportBackend.h"
 #include "globals.h"
 #include "InstanceManager.h"
+#include "UI/GizmoOcclusion.h"
 
 #include <algorithm>
 #include <atomic>
@@ -813,6 +814,40 @@ ViewportTaaInfo viewportTaa() {
 //   seciliyken 9 nokta" gibi kendi icinde celisen bir rapor cikardi.
 //   (Overlay 3x3 cizer, mod 2 ise 5x5.)
 static int afPointCount(int area_mode) { return (area_mode == 2) ? 25 : 9; }
+
+Result setViewportGizmoOcclusion(bool enabled, float hidden_alpha) {
+    if (!g_ctx) return Result::fail("Engine context not bound");
+    if (!g_ctx->scene_ui_ptr) return Result::fail("UI is not available");
+    if (!(hidden_alpha >= 0.0f && hidden_alpha <= 1.0f))
+        return Result::fail("hidden_alpha must be in [0, 1]");
+    auto& vs = g_ctx->scene_ui_ptr->viewport_settings;
+    vs.gizmo_occlusion = enabled;
+    vs.gizmo_hidden_alpha = hidden_alpha;
+    return Result::success();
+}
+
+ViewportGizmoOcclusionInfo viewportGizmoOcclusion() {
+    ViewportGizmoOcclusionInfo info;
+    if (!g_ctx || !g_ctx->scene_ui_ptr) {
+        info.inactive_reason = "UI is not available";
+        return info;
+    }
+    const auto& vs = g_ctx->scene_ui_ptr->viewport_settings;
+    info.enabled = vs.gizmo_occlusion;
+    info.hidden_alpha = vs.gizmo_hidden_alpha;
+    // The draw's own report (last frame): same gates, same order.
+    const GizmoOcclusion::Stats& s = GizmoOcclusion::stats();
+    info.active = s.active;
+    info.inactive_reason = s.inactive_reason;
+    if (!vs.show_gizmos && info.inactive_reason.empty())
+        info.inactive_reason = "gizmos are hidden (viewport gizmo toggle)";
+    info.rays = s.rays;
+    info.segments = s.segments;
+    info.hidden_pieces = s.hidden_pieces;
+    info.cache_entries = s.cache_entries;
+    info.budget_exhausted = s.budget_exhausted;
+    return info;
+}
 
 Result setViewportAf(bool enabled, int area_mode, int focus_mode, int selected_point) {
     if (!g_ctx) return Result::fail("Engine context not bound");

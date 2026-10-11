@@ -226,6 +226,22 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Per-mesh silhouette around the selected object.\nDisable for a large viewport perf win on dense selections.");
             }
+            if (ImGui::MenuItem("Gizmo Depth (hide behind geometry)", nullptr,
+                                viewport_settings.gizmo_occlusion)) {
+                viewport_settings.gizmo_occlusion = !viewport_settings.gizmo_occlusion;
+                ProjectManager::getInstance().markModified();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Domain, collider and field gizmos are tested against the scene:\n"
+                                  "parts behind geometry draw faint. Off = x-ray (all on top).");
+            }
+            if (viewport_settings.gizmo_occlusion) {
+                ImGui::SetNextItemWidth(140.0f);
+                if (ImGui::SliderFloat("Hidden Alpha", &viewport_settings.gizmo_hidden_alpha,
+                                       0.0f, 1.0f, "%.2f")) {
+                    ProjectManager::getInstance().markModified();
+                }
+            }
             ImGui::EndPopup();
         }
 
@@ -2100,6 +2116,22 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
             } else {
                 drawHudLine(status_text, text_col);
                 if (!rt_pipeline_line.empty()) drawHudLine(rt_pipeline_line, rt_pipeline_col);
+            }
+
+            // Cached frames from before a live edit (SceneData::
+            // invalidateSimCacheAfterCurrentFrame keeps the past on purpose).
+            // Shown only while the playhead is inside them: that is when the
+            // viewport is showing the OLD setup.
+            {
+                const int stale = ctx.scene.simCachePredatesEditFrame();
+                if (stale >= 0 && timeline.getCurrentFrame() <= stale) {
+                    char line[256];
+                    std::snprintf(line, sizeof(line),
+                                  "Cached frames up to %d predate the %s at frame %d. "
+                                  "Reset the simulation to rerun them with the new setup.",
+                                  stale, ctx.scene.simCachePredatesEditReason().c_str(), stale);
+                    drawHudLine(line, IM_COL32(245, 170, 70, 230));
+                }
             }
 
             if (ctx.render_settings.show_scene_stats_hud) {

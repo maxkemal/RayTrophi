@@ -347,6 +347,7 @@
     <ClInclude Include="source\include\KinematicColliderVoxelizer.h" />
     <ClInclude Include="source\include\UI\KinematicColliderAuthoringUI.h" />
     <ClInclude Include="source\include\UI\KinematicColliderOverlay.h" />
+    <ClInclude Include="source\include\UI\GizmoOcclusion.h" />
     <ClInclude Include="source\src\Api\RtIpcKinematicCollider.h" />
     <ClInclude Include="source\src\Api\RtPythonKinematicCollider.h" />
     <ClInclude Include="source\include\TimelineWidget.h" />
@@ -1831,6 +1832,7 @@
     <ClCompile Include="source\src\Physics\KinematicColliderVoxelizer.cpp" />
     <ClCompile Include="source\src\UI\KinematicColliderAuthoringUI.cpp" />
     <ClCompile Include="source\src\UI\KinematicColliderOverlay.cpp" />
+    <ClCompile Include="source\src\UI\GizmoOcclusion.cpp" />
     <ClCompile Include="source\src\Physics\ParticleRenderBridge.cpp" />
     <ClCompile Include="source\src\Physics\SimCache.cpp" />
     <ClCompile Include="source\src\MeshEdit\HalfEdgeMesh.cpp" />

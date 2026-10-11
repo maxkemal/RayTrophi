@@ -2693,7 +2693,7 @@
   },
   "sim_cache.status": {
     "summary": "Report the simulation cache: valid range, frames in RAM, cache directory and the config signature",
-    "notes": "The config signature is what decides whether a bake is still valid; when it changes, cached frames belong to a different setup.",
+    "notes": "The config signature is what decides whether a bake is still valid; when it changes, cached frames belong to a different setup. A live force-field edit keeps the past on purpose (only frames after the current one are dropped): predates_edit_frame >= 0 says cached frames up to it were simulated with the OLD setup and replaying from 0 shows it; predates_edit_reason names the edit. -1 = none. A full reset clears it.",
     "tags": "simulation|cache|bake|verify"
   },
   "sim_cache.bake": {
@@ -4318,6 +4318,18 @@
     "notes": "NOT a monitoring overlay: AF WRITES the camera. In AF-C (focus_mode 2) the selected point re-measures the scene every frame and overwrites camera.focus_distance, so a focus distance you set over IPC will be reverted while it is on - set focus_mode 0 (MF) first if you want to own the value. area_mode 0=Single 1=Zone9 2=Zone21 3=Wide 4=CenterWeighted; the grid is 3x3 for every mode except Zone21, which is 5x5, so selected_point is in [0,8] or [0,24] and an out-of-range index is REJECTED, not clamped. Nothing is drawn unless the Camera HUD is on; read viewport.get_af 'active' and 'inactive_reason' rather than inferring from an unchanged image.",
     "tags": "viewport|camera|focus|af|autofocus|viewfinder",
     "related": "viewport.get_af|camera.set_focus_distance|camera.set_depth_of_field|viewport.get_depth_of_field"
+  },
+  "viewport.set_gizmo_occlusion": {
+    "summary": "Turn scene gizmo depth testing on/off and set how faint occluded parts draw",
+    "notes": "Domain, collider, seed-box and force-field gizmo lines are tested against the scene BVH (volumes ignored): parts behind geometry draw at hidden_alpha (0..1, rejected outside, not clamped). enabled=false is x-ray: every gizmo on top. Transform handles stay on top either way.",
+    "tags": "viewport|gizmo|occlusion|depth|xray|overlay",
+    "related": "viewport.get_gizmo_occlusion"
+  },
+  "viewport.get_gizmo_occlusion": {
+    "summary": "Report gizmo depth testing: setting, whether it ran, and last frame's ray/segment counts",
+    "notes": "Counters are the LAST drawn frame's: rays are BVH casts (cache misses; a still camera costs ~0), segments drawn, hidden_pieces drawn faint. budget_exhausted=true means the per-frame ray budget ran out and the remaining segments drew unoccluded. active=false names the gate (setting off, no camera, no BVH, gizmos hidden).",
+    "tags": "viewport|gizmo|occlusion|depth|diagnostics",
+    "related": "viewport.set_gizmo_occlusion"
   },
   "viewport.get_af": {
     "summary": "Report the AF grid state, its point count, and why it is inactive if it is",

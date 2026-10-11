@@ -2620,6 +2620,7 @@
     <ClInclude Include="source\include\Animation\RootMotionUnroll.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\include\UI\KinematicColliderAuthoringUI.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\include\UI\KinematicColliderOverlay.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\UI\GizmoOcclusion.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\include\Api\RtApiKinematicCollider.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\src\Api\RtIpcKinematicCollider.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\src\Api\RtPythonKinematicCollider.h"><Filter>Header Files</Filter></ClInclude>
@@ -2629,6 +2630,7 @@
     <ClCompile Include="source\src\Physics\KinematicColliderVoxelizer.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\UI\KinematicColliderAuthoringUI.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\UI\KinematicColliderOverlay.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\GizmoOcclusion.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\Api\RtApiKinematicCollider.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\Api\RtIpcKinematicCollider.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\Api\RtPythonKinematicCollider.cpp"><Filter>Source Files</Filter></ClCompile>
