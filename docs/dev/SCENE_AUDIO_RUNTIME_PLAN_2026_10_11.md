@@ -1,22 +1,24 @@
 # Sahne sesi, timeline miks ve çalıştırılabilir çıktı planı
 
-> **Durum:** AKTIF — sahne sesi / timeline miks / EXE çıktı planı; 1. aşama kaynakta, derlenmedi
+> **Durum:** AKTIF — temel sahne sesi ve timeline transport kullanıcı tarafından doğrulandı; bus mikseri kaynakta, yeni derleme/kabul bekliyor.
 
-Tarih: 2026-10-11. Durum: PLANLANDI; uygulama teslimi değildir.
+Tarih: 2026-10-11; uygulama durumu 2026-10-12 güncellendi. Tam plan henüz tamamlanmadı.
 
-1. aşamanın ilk kaynak uygulaması eklendi; derleme ve görsel/işitsel kabul bekliyor.
+Temel ses/asset sahne bağlantıları ve timeline Play/Pause/Stop kullanıcıyla doğrulandı.
+Taşınabilir proje, parent ve diğer ayrıntılı kabul maddeleri ayrı izlenir.
 Kapsam, mevcut sınırlar, script/IPC sözleşmesi ve kullanıcı doğrulama listesi:
-[SCENE_AUDIO_STAGE1_API.md](SCENE_AUDIO_STAGE1_API.md). Aşama kabulü tamamlanmış değildir.
+[SCENE_AUDIO_STAGE1_API.md](SCENE_AUDIO_STAGE1_API.md). Ayrıntılı kontroller ilgili belgededir.
 
 2026-10-12: sürekli rüzgâr/yağmur tepkisi ve dış domain temas sinyali girişi için ilk
 kaynak uygulaması eklendi; derleme/canlı kabul bekliyor. Sözleşme ve sınırlar:
-[SCENE_AUDIO_REACTIONS.md](SCENE_AUDIO_REACTIONS.md). Otomatik domain telemetrisi,
-yerel bulut yağışı ve lightning/thunder olay adaptörü henüz bağlanmış değildir.
+[SCENE_AUDIO_REACTIONS.md](SCENE_AUDIO_REACTIONS.md). Sonraki teslimlerde otomatik
+domain temas adaptörü ve thunder bağlandı; yerel yağış ve malzeme çifti hâlâ açık.
 
 Devam: [SCENE_AUDIO_AUTOMATION.md](SCENE_AUDIO_AUTOMATION.md) ile otomatik kaynak
 başlatma/sönme, hazır atmosfer bağlantısı ve mevcut karma temas enerji raporunu okuyan
 ilk domain adaptörü eklendi; derleme/canlı kabul bekliyor. Malzeme çifti ve kesin temas
-konumu telemetrisi, kuru DEM dökülme sesi, yerel yağış ve thunder olayları hâlâ açık.
+konumu telemetrisi, kuru DEM dökülme sesi ve yerel yağış hâlâ açık. Thunder bağlantısı
+ve mesafe gecikmesi kullanıcıyla doğrulandı.
 
 ## Ürün hedefi
 
@@ -28,7 +30,7 @@ ama tamamlanmış bir oyun/simülasyon ses altyapısıdır; tam bir DAW veya aku
 simülatör ilk teslim kapsamı değildir.
 
 Kullanıcı doğrulaması: EXE simülasyon çıktısı şu an yok, ileride geliştirilecek.
-Mevcut kaynak incelemesinde miniaudio tabanlı ses motoru da doğrulanmadı.
+Miniaudio tabanlı ses motoru eklendi ve kullanıcı derlemesinde çalışıyor.
 EXE paketleme ayrı gelecek iş paketi ve bağımlılıktır; yalnız ses
 motorunun eklenmesi EXE export özelliğini tamamlamaz.
 
@@ -211,3 +213,8 @@ gereksiz test scripti üretilmez. Zaman/örnek hesabı, serialization ve event t
 gibi kritik mantık için gerekli dar doğrulamalar planlanır; canlı IPC dış süreçten
 yürütülür. Hiçbir aşama yalnız kaynak yazıldığı için kullanıcı kabulü tamamlandı
 olarak işaretlenmez.
+
+2026-10-12: gerçek Master/Weather/Effects/Ambience/Music bus grafiği, gain/mute/solo,
+PCM peak/RMS göstergeleri ve kayıt/undo/UI/script/IPC sözleşmesi kaynakta eklendi:
+[SCENE_AUDIO_MIXER.md](SCENE_AUDIO_MIXER.md). Yeni mixer derlemesi ve canlı kabul
+bekliyor; waveform/trim/split/fade ve klip seek çalışmaları henüz başlamadı.

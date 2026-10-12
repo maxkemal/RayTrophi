@@ -4,6 +4,7 @@
 #include "Audio/AudioWeatherBridge.h"
 #include "UI/AudioReactionUI.h"
 #include "UI/AudioThunderUI.h"
+#include "UI/AudioMixerUI.h"
 #include "Audio/AudioThunderBridge.h"
 #include "scene_ui.h"
 #include "scene_data.h"
@@ -162,6 +163,7 @@ void drawProperties(UIContext& ctx) {
         ImGui::EndCombo();
     }
     drawThunderAudio(ctx);
+    drawMixer(ctx);
     if (ImGui::Button("Connect starter wind / rain")) {
         connectEnvironment(ctx);
     }

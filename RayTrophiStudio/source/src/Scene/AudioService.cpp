@@ -8,6 +8,8 @@
 #define MA_NO_GENERATION
 #define MINIAUDIO_IMPLEMENTATION
 #include "../../../external/miniaudio/miniaudio.h"
+#undef MINIAUDIO_IMPLEMENTATION
+#include "Audio/AudioMixerRuntime.h"
 
 #include <algorithm>
 #include <array>
@@ -95,7 +97,7 @@ json emitter(const json& p) {
             "Automatic continuous audio requires loop=true");
     e["spatial"] = p.value("spatial", true);
     e["bus"] = p.value("bus", std::string("Effects"));
-    const std::array<std::string, 5> buses = {"Master", "Weather", "Effects", "Ambience", "Music"};
+    const auto& buses = AudioMixer::names();
     require(std::find(buses.begin(), buses.end(), e["bus"].get<std::string>()) != buses.end(),
             "Unknown audio bus");
     return e;
@@ -105,8 +107,11 @@ json emitter(const json& p) {
 struct AudioService::Impl {
     json data = {{"version", 1}, {"next_id", 1}, {"assets", json::array()},
                  {"emitters", json::array()}, {"thunder", AudioThunder::validate(json::object())},
-                 {"playback_mode", "timeline"}, {"playback_mode_explicit", false}};
+                 {"playback_mode", "timeline"}, {"playback_mode_explicit", false},
+                 {"mixer", AudioMixer::validate(json::object())}};
     ma_engine engine{};
+    AudioMixerRuntime mixer;
+    std::map<std::string, std::string> routedBuses;
     bool initialized = false;
     bool muted = false;
     std::string status = "not_initialized";
@@ -173,12 +178,14 @@ struct AudioService::Impl {
 
     ~Impl() {
         stopAll();
+        mixer.shutdown();
         if (initialized) {
             ma_engine_uninit(&engine);
         }
     }
 
     void stopAll() {
+        routedBuses.clear();
         transportHeld.clear();
         stopThunder();
         thunder.reset(true);
@@ -204,6 +211,14 @@ struct AudioService::Impl {
         if (result != MA_SUCCESS) {
             status = "device_unavailable";
             throw std::runtime_error("device_unavailable: " + std::to_string(result));
+        }
+        try {
+            mixer.initialize(engine);
+            mixer.apply(data.at("mixer"));
+        } catch (...) {
+            ma_engine_uninit(&engine);
+            status = "mixer_unavailable";
+            throw;
         }
         initialized = true;
         status = "ready";
@@ -241,11 +256,18 @@ struct AudioService::Impl {
     }
 
     void apply(ma_sound& sound, const json& e) {
+        const std::string id = e.at("id");
+        const std::string bus = e.at("bus");
+        if (!routedBuses.contains(id) || routedBuses.at(id) != bus) {
+            mixer.route(sound, bus);
+            routedBuses[id] = bus;
+        }
         const auto control = controls.find(e.at("id").get<std::string>());
         const auto modulation = control == controls.end() ? ReactionOutput{} : control->second;
         const bool reactive = e.at("reaction").at("driver") != "manual";
         const float gain = reactive && control == controls.end() ? 0 : modulation.gain;
-        ma_sound_set_volume(&sound, e.at("gain").get<float>() * gain);
+        const float direct = bus == "Master" ? AudioMixer::directMasterGain(data.at("mixer")) : 1;
+        ma_sound_set_volume(&sound, e.at("gain").get<float>() * gain * direct);
         ma_sound_set_pitch(&sound, std::clamp(e.at("pitch").get<float>() * modulation.pitch,
                                             0.125f, 8.0f));
         ma_sound_set_looping(&sound, e.at("loop").get<bool>());
@@ -264,7 +286,7 @@ struct AudioService::Impl {
                           e.at("cone_outer").get<float>() * radians, e.at("cone_gain"));
     }
 
-    std::unique_ptr<ma_sound> load(const json& asset) {
+    std::unique_ptr<ma_sound> load(const json& asset, const std::string& bus = "") {
         AudioService probe;
         const auto actual = probe.invoke("asset_import", {{"path", asset.at("path")}});
         require(actual.at("channels") == asset.at("channels"),
@@ -292,7 +314,8 @@ struct AudioService::Impl {
         #else
         const ma_result result = ma_sound_init_from_file(&engine, path.c_str(),
         #endif
-            MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_NO_SPATIALIZATION, nullptr, nullptr, sound.get());
+            MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_NO_SPATIALIZATION,
+            bus.empty() ? nullptr : mixer.group(bus), nullptr, sound.get());
         if (result != MA_SUCCESS) {
             throw std::runtime_error("audio_file_unavailable: " + std::to_string(result));
         }
@@ -312,18 +335,22 @@ const std::vector<std::string>& AudioService::operations() {
         "duplicate", "remove", "play", "pause", "stop", "stop_all", "preview", "preview_stop",
         "preview_mute", "preview_file", "append", "signal_set", "signals_clear",
         "environment_setup", "resume_automatic", "domains", "thunder_setup", "thunder_update",
-        "thunder_event", "playback_update"};
+        "thunder_event", "playback_update", "mixer_get", "mixer_update", "mixer_reset_peaks"};
     return names;
 }
 
 bool AudioService::isAuthoring(const std::string& op) {
-    return op == "playback_update" || op == "thunder_setup" || op == "thunder_update" ||
+    return op == "mixer_update" || op == "playback_update" ||
+           op == "thunder_setup" || op == "thunder_update" ||
            op == "environment_setup" || op == "append" || op == "asset_import" ||
            op == "asset_relink" || op == "asset_remove" ||
            op == "create" || op == "update" || op == "duplicate" || op == "remove";
 }
 
 std::vector<std::string> AudioService::parameters(const std::string& op) {
+    if (op == "mixer_update") {
+        return {"bus", "gain", "muted", "solo"};
+    }
     if (op == "playback_update") {
         return {"mode"};
     }
@@ -367,7 +394,8 @@ std::vector<std::string> AudioService::parameters(const std::string& op) {
         return {"key", "position", "intensity", "age_seconds"};
     }
     if (op == "list" || op == "status" || op == "stop_all" || op == "preview_stop" ||
-        op == "signals_clear" || op == "domains" || op == "resume_automatic") {
+        op == "signals_clear" || op == "domains" || op == "resume_automatic" ||
+        op == "mixer_get" || op == "mixer_reset_peaks") {
         return {};
     }
     return {"id"};
@@ -382,6 +410,36 @@ json AudioService::invoke(const std::string& op, const json& p) {
     for (auto it = p.begin(); it != p.end(); ++it) {
         require(std::find(allowed.begin(), allowed.end(), it.key()) != allowed.end(),
                 "Unknown audio parameter: " + it.key());
+    }
+    if (op == "mixer_get") {
+        json buses = json::array();
+        const auto meters = s.mixer.meters();
+        for (const auto& name : AudioMixer::names()) {
+            auto settings = s.data.at("mixer").at(name);
+            settings["name"] = name;
+            settings["effective_gain"] = AudioMixer::effectiveGain(s.data.at("mixer"), name);
+            settings["output_gain"] = settings.at("effective_gain").get<float>() *
+                (name == "Master" ? 1 : AudioMixer::effectiveGain(s.data.at("mixer"), "Master"));
+            settings["meter"] = meters.at(name);
+            buses.push_back(settings);
+        }
+        return {{"buses", buses}, {"output_muted", s.muted},
+                {"direct_master_gain", AudioMixer::directMasterGain(s.data.at("mixer"))},
+                {"meter_stage", "post_bus_fader_before_preview_mute"},
+                {"audition_bypasses_mixer", true}};
+    }
+    if (op == "mixer_reset_peaks") {
+        s.mixer.resetPeaks();
+        return {{"ok", true}};
+    }
+    if (op == "mixer_update") {
+        const auto settings = AudioMixer::update(s.data.at("mixer"), p);
+        s.data["mixer"] = settings;
+        s.mixer.apply(settings);
+        for (auto& [id, sound] : s.sounds) {
+            s.apply(*sound, s.find("emitters", id));
+        }
+        return settings.at(p.at("bus").get<std::string>());
     }
     if (op == "playback_update") {
         const auto mode = AudioTransport::validateMode(p.at("mode"));
@@ -672,6 +730,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
     }
     if (op == "remove") {
         const std::string id = p.at("id");
+        s.routedBuses.erase(id);
         s.transportHeld.erase(id);
         s.find("emitters", id);
         s.poses.erase(id);
@@ -745,7 +804,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
                 }
                 require(s.sounds.size() + s.thunderVoices.size() < 32,
                         "Stage 1 resident voice limit reached (32)");
-                auto sound = s.load(s.find("assets", e.at("asset_id")));
+                auto sound = s.load(s.find("assets", e.at("asset_id")), e.at("bus"));
                 s.apply(*sound, e);
                 voice = s.sounds.emplace(id, std::move(sound)).first;
             }
@@ -801,7 +860,10 @@ void AudioService::clear() {
     impl_->data = {{"version", 1}, {"next_id", 1}, {"assets", json::array()},
                    {"emitters", json::array()},
                    {"thunder", AudioThunder::validate(json::object())},
-                   {"playback_mode", "timeline"}, {"playback_mode_explicit", false}};
+                   {"playback_mode", "timeline"}, {"playback_mode_explicit", false},
+                   {"mixer", AudioMixer::validate(json::object())}};
+    impl_->mixer.apply(impl_->data.at("mixer"));
+    impl_->mixer.resetPeaks();
     impl_->transport.configure("timeline");
     impl_->thunder.clock(true, 0);
     impl_->reactions.clock(true, 0);
@@ -865,6 +927,7 @@ void AudioService::restore(const json& input, const std::filesystem::path& base)
         candidate.validateAsset(e);
     }
     candidate.data["thunder"] = AudioThunder::validate(input.value("thunder", json::object()));
+    candidate.data["mixer"] = AudioMixer::validate(input.value("mixer", json::object()));
     const auto mode = AudioTransport::validateMode(input.value("playback_mode", json("timeline")));
     const bool explicitMode = input.value("playback_mode_explicit", false);
     candidate.data["playback_mode"] = explicitMode ? mode : "timeline";
@@ -880,6 +943,8 @@ void AudioService::restore(const json& input, const std::filesystem::path& base)
     impl_->autoErrors.clear();
     ++impl_->generation;
     impl_->data = std::move(candidate.data);
+    impl_->mixer.apply(impl_->data.at("mixer"));
+    impl_->mixer.resetPeaks();
     impl_->transport.configure(impl_->data.at("playback_mode"));
     impl_->thunder.clock(impl_->transport.timeline(), 0);
     impl_->reactions.clock(impl_->transport.timeline(), 0);
@@ -1017,7 +1082,7 @@ void AudioService::tickThunder() {
             require(s.thunderVoices.size() < 8 && s.sounds.size() + s.thunderVoices.size() < 32,
                     "Thunder voice budget reached (8 thunder / 32 total)");
             const auto asset = s.find("assets", event.at("asset_id"));
-            auto sound = s.load(asset);
+            auto sound = s.load(asset, "Weather");
             ma_sound_set_looping(sound.get(), false);
             ma_sound_set_volume(sound.get(), event.at("gain"));
             ma_sound_set_pitch(sound.get(), event.at("pitch"));
