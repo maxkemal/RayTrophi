@@ -105,7 +105,7 @@ json emitter(const json& p) {
 struct AudioService::Impl {
     json data = {{"version", 1}, {"next_id", 1}, {"assets", json::array()},
                  {"emitters", json::array()}, {"thunder", AudioThunder::validate(json::object())},
-                 {"playback_mode", "continuous"}};
+                 {"playback_mode", "timeline"}, {"playback_mode_explicit", false}};
     ma_engine engine{};
     bool initialized = false;
     bool muted = false;
@@ -300,7 +300,10 @@ struct AudioService::Impl {
     }
 };
 
-AudioService::AudioService() : impl_(std::make_unique<Impl>()) {}
+AudioService::AudioService() : impl_(std::make_unique<Impl>()) {
+    impl_->thunder.clock(true, 0);
+    impl_->reactions.clock(true, 0);
+}
 AudioService::~AudioService() = default;
 
 const std::vector<std::string>& AudioService::operations() {
@@ -382,6 +385,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
     }
     if (op == "playback_update") {
         const auto mode = AudioTransport::validateMode(p.at("mode"));
+        s.data["playback_mode_explicit"] = true;
         if (s.data.at("playback_mode") != mode) {
             const auto previous = s.transport.status();
             s.stopAll();
@@ -797,10 +801,10 @@ void AudioService::clear() {
     impl_->data = {{"version", 1}, {"next_id", 1}, {"assets", json::array()},
                    {"emitters", json::array()},
                    {"thunder", AudioThunder::validate(json::object())},
-                   {"playback_mode", "continuous"}};
-    impl_->transport.configure("continuous");
-    impl_->thunder.clock(false, 0);
-    impl_->reactions.clock(false, 0);
+                   {"playback_mode", "timeline"}, {"playback_mode_explicit", false}};
+    impl_->transport.configure("timeline");
+    impl_->thunder.clock(true, 0);
+    impl_->reactions.clock(true, 0);
     impl_->thunder.configure(impl_->data.at("thunder"));
     impl_->thunderError.clear();
 }
@@ -861,8 +865,10 @@ void AudioService::restore(const json& input, const std::filesystem::path& base)
         candidate.validateAsset(e);
     }
     candidate.data["thunder"] = AudioThunder::validate(input.value("thunder", json::object()));
-    candidate.data["playback_mode"] = AudioTransport::validateMode(
-        input.value("playback_mode", json("continuous")));
+    const auto mode = AudioTransport::validateMode(input.value("playback_mode", json("timeline")));
+    const bool explicitMode = input.value("playback_mode_explicit", false);
+    candidate.data["playback_mode"] = explicitMode ? mode : "timeline";
+    candidate.data["playback_mode_explicit"] = explicitMode;
     candidate.validateThunderAssets(candidate.data.at("thunder"));
     // Validate the complete candidate before replacing live data. Missing files are retained.
     impl_->stopAll();

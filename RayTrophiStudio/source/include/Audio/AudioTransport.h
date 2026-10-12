@@ -29,7 +29,7 @@ public:
     }
     nlohmann::json status() const;
 private:
-    std::string mode_ = "continuous";
+    std::string mode_ = "timeline";
     bool initialized_ = false;
     bool playing_ = false;
     double time_ = 0;

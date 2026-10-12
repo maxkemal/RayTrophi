@@ -25,7 +25,7 @@ void tickCloudThunder(UIContext& ctx) {
     const double time = static_cast<float>(std::max(0, ctx.scene.timeline.current_frame)) / fps;
     const float rate = Backend::lightningEffectiveRate(clouds.lightning);
     const double period = rate > 0 ? 240.0 / rate : 0;
-    const bool playing = ctx.render_settings.animation_is_playing;
+    const bool playing = ctx.scene_ui_ptr && ctx.scene_ui_ptr->timeline.isPlaying();
     const bool stoppedScrub = !playing && !previousPlaying && time != previousTime;
     previousPlaying = playing;
     if (!std::isfinite(time) || !ctx.scene.camera) {
