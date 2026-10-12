@@ -53,8 +53,13 @@ struct CloudLayerGPU {
 };
 static_assert(sizeof(CloudLayerGPU) == 112, "CloudLayerGPU std430 layout");
 
+// GPU layer slots: the authored layers, then the storm column shell
+// (ATMOSPHERE_CELL_CLOUDS.md §1, cloud_common.glsl cloudShellDensity).
+constexpr int kCloudGpuLayers = atmosphere::kMaxCloudLayers + 1;
+constexpr int kCloudStormShellLayer = atmosphere::kMaxCloudLayers;
+
 struct CloudParamsGPU {
-    CloudLayerGPU layers[atmosphere::kMaxCloudLayers];
+    CloudLayerGPU layers[kCloudGpuLayers];
     float weather[4]; // 1/extent_m, type_variation, evolution (s * speed), rt_steps
     float wind[4];    // drift_x_m, drift_z_m, planet_radius_m, altitude_offset_m
     float cirrus[4];  // enabled, altitude_m, coverage, optical depth
@@ -66,39 +71,44 @@ struct CloudParamsGPU {
     float precip[4];  // rate_mm_h, extinction_per_m at that rate, trail_x, trail_z
                       // (trail = upwind lag behind the drifting cloud, metres
                       //  per metre of fall, at the ground; see makeCloudParamsGPU)
-    float precip2[4]; // snow (0/1), ground_fraction, shear_x, shear_z
+    float precip2[4]; // reserved, ground_fraction, shear_x, shear_z
                       // (shear = horizontal metres per metre of height, Faz 3e)
     float scatterAlbedo[4]; // linear RGB albedo, HG g override (2 = droplet fit)
     float emissionSource[4]; // linear RGB source radiance, reserved
     float cirrusDirection[4]; // authored wind x,z; camera weather time, reserved
     float storms[4];   // cell map centre x, z, 1/size (m), enabled (0/1)
-    float storms2[4];  // stratiform rain share, reserved
+    float storms2[4];  // stratiform rain share, tropopause height fraction in the
+                       // storm column, wall-cloud allowance m, mammatus 0..1
+    float precip3[4];  // sea-level air temperature C, lapse K/m, forced form (0 auto),
+                       // reserved (ATMOSPHERE_PRECIP_TYPES.md)
     CloudLightningGPU lightning[kCloudLightningEvents];
     CloudFlashLightGPU flash[kCloudLightningEvents];   // lit cloud base per event
     // Channel network per event (kCloudBoltSegments each; count in color[3]).
     CloudBoltSegmentGPU bolt[kCloudLightningEvents * kCloudBoltSegments];
 };
-static_assert(sizeof(CloudParamsGPU) == 6016, "CloudParamsGPU std430 layout (cloud_common.glsl)");
+static_assert(sizeof(CloudParamsGPU) == 6144, "CloudParamsGPU std430 layout (cloud_common.glsl)");
 
 // ── Storm cells (docs/dev/ATMOSPHERE_STORMS.md) ─────────────────────────────
-// Input of cloud_cells.comp, which paints the cell map every update: two
-// 256^2 fields stacked in one 256 x 512 image (cells, then cell structure).
+// Input of cloud_cells.comp, which paints the cell map every update: three
+// 256^2 fields stacked in one 256 x 768 image (cells, cell structure, storm
+// column).
 constexpr uint32_t kCloudCellMapSize = 256;
-constexpr uint32_t kCloudCellMapRows = 2 * kCloudCellMapSize;
+constexpr uint32_t kCloudCellMapRows = 3 * kCloudCellMapSize;
 
 struct CloudCellGPU {
     float a[4];   // world x, z, radius m, cover floor
     float b[4];   // tower, convective rain, stratiform rain, lightning weight
     float c[4];   // id (0..65535), age s, rotation (signed), turret detail
+    float d[4];   // life 0..1, peak, anvil spread, wall cloud
 };
-static_assert(sizeof(CloudCellGPU) == 48, "CloudCellGPU std430 layout");
+static_assert(sizeof(CloudCellGPU) == 64, "CloudCellGPU std430 layout");
 
 struct CloudCellsGPU {
     float header[4];   // count, map centre x, z, map size m
     float wind[4];     // wind direction x, z (forward flank), majorant dilation m, reserved
     CloudCellGPU cells[atmosphere::kMaxStormCells];
 };
-static_assert(sizeof(CloudCellsGPU) == 32 + 48 * atmosphere::kMaxStormCells,
+static_assert(sizeof(CloudCellsGPU) == 32 + 64 * atmosphere::kMaxStormCells,
               "CloudCellsGPU std430 layout (cloud_cells.comp)");
 
 // Square the cell map covers: the domain plus how far a cell drifts in
@@ -137,6 +147,10 @@ inline CloudCellsGPU makeCloudCellsGPU(const atmosphere::CloudState& c, float ti
         o.c[1] = s.age_s;
         o.c[2] = c.storms.rotation;
         o.c[3] = c.storms.turrets;
+        o.d[0] = s.life;
+        o.d[1] = s.peak;
+        o.d[2] = c.storms.column ? c.storms.anvil : 0.0f;
+        o.d[3] = c.storms.column ? c.storms.wall_cloud : 0.0f;
     }
     return g;
 }
@@ -151,6 +165,40 @@ inline void clearTransientCloudKey(CloudParamsGPU& key) {
     for (auto& segment : key.bolt) {
         segment = {};
     }
+}
+
+// Storm column shell (ATMOSPHERE_CELL_CLOUDS.md §1): layer slot 3, from the
+// lowest cloud base (minus the wall-cloud allowance) to the tropopause plus
+// the overshooting tops. Its look (noise scales, erosion, material, phase)
+// is the host layer's -- the lowest enabled one, whose base is the LCL. The
+// layers must already be packed. Off (enabled 0) without a host or with
+// storms.column off; the cells then paint into the layers.
+constexpr float kStormOvershootM = 800.0f;
+constexpr float kStormWallCloudM = 300.0f;
+inline void packStormColumn(const atmosphere::CloudState& c, CloudParamsGPU& p) {
+    CloudLayerGPU& s = p.layers[kCloudStormShellLayer];
+    s = CloudLayerGPU{};
+    float hostBase = 0.0f, tropo = 0.0f;
+    const int host = stormColumnSpan(c, hostBase, tropo);
+    if (host < 0 || p.layers[host].b[0] <= 0.0f) return;
+    const atmosphere::CloudLayer& hl = c.layers[host];
+    s = p.layers[host];
+    const float wall = kStormWallCloudM * c.storms.wall_cloud;
+    const float base = hl.base_altitude_m - wall;
+    const float top = tropo + kStormOvershootM;
+    s.a[0] = base;
+    s.a[1] = top - base;
+    s.a[2] = 1.0f;   // coverage is the cells'; > 0 keeps the shell in the interval tests
+    s.a[3] = 1.0f;
+    s.b[3] = 1.0f;
+    s.d[2] = 0.0f;
+    s.d[3] = 0.0f;
+    s.f[3] = 1.0f;   // the column flag (cloudShellActive)
+    s.g[0] = base;
+    s.g[1] = top - base;
+    p.storms2[1] = (tropo - base) / (top - base);
+    p.storms2[2] = wall;
+    p.storms2[3] = c.storms.mammatus;
 }
 
 inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float time_seconds,
@@ -250,30 +298,30 @@ inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float 
     p.misc[2] = static_cast<float>(c.quality.rt_max_bounces);
     p.misc[3] = (c.quality.rt_secondary_full_march ? 2.0f : 0.0f) +
                 (c.quality.rt_reference_path_trace ? 4.0f : 0.0f);
-    // Precipitation (ATMOSPHERE_WEATHER.md §3.1). Optical extinction of the
-    // drop population: Marshall-Palmer rain sigma ~ R^0.63 (2.5e-4 /m at
-    // 1 mm/h -> ~4 km visibility at 10 mm/h); snow scatters far more per mm of
-    // water (sigma ~ R^0.7, ~1.5 km at 1 mm/h). Terminal fall speed: rain
-    // ~6.5 m/s, snow ~1 m/s; the wind carries the drops while they fall.
+    // Precipitation (ATMOSPHERE_WEATHER.md §3.1, ATMOSPHERE_PRECIP_TYPES.md).
+    // The form -- and with it the optics (Marshall-Palmer rain sigma ~ R^0.63,
+    // snow far more per mm of water, hail far less) and the fall speed -- is
+    // decided per point in the shader from the climate's temperature
+    // profile. precip[1] is only an upper bound of the extinction over every
+    // form (snow), for the cheap segment reject.
     const float rate = c.layers[0].enabled ? c.precipitation.rate_mm_h : 0.0f;
-    const bool snow = c.precipitation.snow;
     p.precip[0] = rate;
-    p.precip[1] = rate > 0.0f ? (snow ? 2.6e-3f * std::pow(rate, 0.7f) : 2.5e-4f * std::pow(rate, 0.63f)) : 0.0f;
+    p.precip[1] = rate > 0.0f ? 2.6e-3f * (std::max)(std::pow(rate, 0.6f), std::pow(rate, 0.7f)) : 0.0f;
+    p.precip3[0] = c.precipitation.air_temperature_c;
+    p.precip3[1] = c.precipitation.lapse_rate_k_per_m;
+    p.precip3[2] = static_cast<float>(c.precipitation.form);
     // precip[2..3] = how far the drops TRAIL their cloud per metre of fall,
-    // at the ground (cloudPrecipSample). The weather map drifts with the
-    // wind and the drops leave the base at that speed, so uniform wind gives
-    // a vertical shaft in the cloud frame; only the slower near-surface air
-    // (~60% of the cloud-level wind, linear deficit) drags the foot back.
-    // Capped at ~56 degrees so snow in a gale still reads as a fall.
-    const float fall = snow ? 1.0f : 6.5f;
+    // at the ground, for a 1 m/s faller (cloudPrecipSample divides by the
+    // local form's fall speed and caps it at ~56 degrees: snow in a gale
+    // still reads as a fall, hail falls nearly straight). The weather map
+    // drifts with the wind and the drops leave the base at that speed, so
+    // uniform wind gives a vertical shaft in the cloud frame; only the slower
+    // near-surface air (~60% of the cloud-level wind, linear deficit) drags
+    // the foot back.
     const float kSurfaceWindFraction = 0.6f;
-    float tx = -wind_mps.x * (1.0f - kSurfaceWindFraction) / fall;
-    float tz = -wind_mps.z * (1.0f - kSurfaceWindFraction) / fall;
-    const float tl = std::sqrt(tx * tx + tz * tz);
-    if (tl > 1.5f) { tx *= 1.5f / tl; tz *= 1.5f / tl; }
-    p.precip[2] = tx;
-    p.precip[3] = tz;
-    p.precip2[0] = snow ? 1.0f : 0.0f;
+    p.precip[2] = -wind_mps.x * (1.0f - kSurfaceWindFraction);
+    p.precip[3] = -wind_mps.z * (1.0f - kSurfaceWindFraction);
+    p.precip2[0] = 0.0f;   // reserved
     p.precip2[1] = c.precipitation.ground_fraction;
     // Wind shear: crowns lean downwind ~0.015 m/m per m/s at the top (quadratic
     // in height and position-modulated in cloudShear),
@@ -293,6 +341,7 @@ inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float 
         p.storms[2] = 1.0f / size;
         p.storms[3] = 1.0f;
         p.storms2[0] = c.storms.stratiform_rain;
+        packStormColumn(c, p);
     }
     return p;
 }

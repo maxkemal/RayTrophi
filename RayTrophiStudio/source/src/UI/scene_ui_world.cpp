@@ -1294,10 +1294,34 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         if (ImGui::TreeNodeEx("Precipitation", clouds.precipitation.rate_mm_h > 0.0f ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
             ImGui::BeginDisabled(clouds.derive_from_climate);
             cloudsChanged |= ImGui::DragFloat("Rate (mm/h)##precip", &clouds.precipitation.rate_mm_h, 0.1f, 0.0f, 200.0f, "%.1f");
-            cloudsChanged |= ImGui::Checkbox("Snow##precip", &clouds.precipitation.snow);
             cloudsChanged |= ImGui::SliderFloat("Reaches ground##precip", &clouds.precipitation.ground_fraction, 0.0f, 1.0f, "%.2f");
             UIWidgets::HelpMarker("Share of the base-to-ground column the shaft survives;\nbelow 1 it evaporates on the way down (virga).");
             ImGui::EndDisabled();
+            // The form is authored even while deriving: Auto follows the climate.
+            static const char* kForms[] = {"Auto (from temperature)", "Rain", "Drizzle", "Snow", "Sleet",
+                                           "Graupel", "Hail", "Freezing rain", "Ice pellets"};
+            int form = clouds.precipitation.form;
+            if (ImGui::Combo("Form##precip", &form, kForms, IM_ARRAYSIZE(kForms))) {
+                clouds.precipitation.form = form;
+                cloudsChanged = true;
+            }
+            UIWidgets::HelpMarker("Auto: each shaft follows the air temperature down its column -\n"
+                                  "snow above the freezing level, a sleet band, rain below; freezing\n"
+                                  "rain / ice pellets under an inversion (negative lapse rate);\n"
+                                  "graupel and hail in strong storm-cell updrafts; drizzle from\n"
+                                  "shallow stratiform cloud.");
+            {
+                const atmosphere::CloudPrecipitation& pr = clouds.precipitation;
+                const float lapse = pr.lapse_rate_k_per_m;
+                if (lapse > 1e-5f) {
+                    ImGui::TextDisabled("Air %.1f C at sea level, freezing level %.0f m%s",
+                                        pr.air_temperature_c, pr.air_temperature_c / lapse,
+                                        pr.snow ? "  (frozen at the ground)" : "");
+                } else {
+                    ImGui::TextDisabled("Air %.1f C at sea level, inversion / isothermal%s",
+                                        pr.air_temperature_c, pr.snow ? "  (frozen at the ground)" : "");
+                }
+            }
             ImGui::TreePop();
         }
         if (ImGui::TreeNodeEx("Cirrus (high)", clouds.cirrus.enabled ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {

@@ -129,11 +129,30 @@ struct CloudQuality {
 // Derived from the climate while derive_from_climate is on; set directly
 // (script / panel) otherwise. Rendered as shafts under the base, where the
 // weather map's B channel (cluster cores) is.
+// Precipitation forms (docs/dev/ATMOSPHERE_PRECIP_TYPES.md). Ids shared with
+// cloud_common.glsl (PRECIP_*) and IPC world.sample_clouds precipitation_form.
+enum PrecipForm : int {
+    kPrecipAuto = 0, kPrecipRain = 1, kPrecipDrizzle = 2, kPrecipSnow = 3, kPrecipSleet = 4,
+    kPrecipGraupel = 5, kPrecipHail = 6, kPrecipFreezingRain = 7, kPrecipIcePellets = 8,
+};
+const char* precipFormName(int form);
+int precipFormFromName(const std::string& name);   // -1 unknown
+
 struct CloudPrecipitation {
     float rate_mm_h = 0.0f;        // peak rate under a core, water equivalent
-    bool  snow = false;            // frozen at the ground (slower fall, denser veil)
+    // kPrecipAuto: each point's form follows its column through the climate's
+    // temperature profile (snow line, melting band, freezing rain under an
+    // inversion, hail / graupel from updrafts, drizzle from shallow
+    // stratiform cloud). Otherwise forced everywhere.
+    int   form = kPrecipAuto;
     float ground_fraction = 1.0f;  // share of the base->ground column a shaft
                                    // survives before evaporating (< 1: virga)
+    // DERIVED, read-only (World::rederiveClouds, every climate sync): the
+    // profile the forms follow, and whether it reaches the scene ground
+    // frozen (audio, panel).
+    float air_temperature_c = 15.0f;     // at sea level
+    float lapse_rate_k_per_m = 0.0065f;
+    bool  snow = false;
 };
 
 // Deterministic timeline events, rendered through the shared Vulkan cloud path.
@@ -200,6 +219,15 @@ struct CloudStorms {
     // column (0).
     float rotation = 0.4f;
     float turrets = 0.8f;
+    // Storm column (ATMOSPHERE_CELL_CLOUDS.md §1): each cell is drawn as its
+    // own column from the cloud base to the tropopause (towers, overshooting
+    // tops, anvil, wall cloud, mammatus) instead of raising the cover of the
+    // layers it sits in. Off = the cells paint into the layers (old look).
+    bool column = true;
+    float column_top_m = 11000.0f;  // tropopause, above sea level: the anvil level
+    float anvil = 0.7f;             // anvil spread downwind, 0..1
+    float wall_cloud = 0.5f;        // lowered base under the main updraft, 0..1
+    float mammatus = 0.5f;          // pouches under the anvil, 0..1
     std::vector<StormCell> cells;   // authored, <= kMaxManualStormCells
 };
 

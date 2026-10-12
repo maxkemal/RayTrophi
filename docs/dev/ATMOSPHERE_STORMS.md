@@ -224,9 +224,9 @@ compute'u aynı gönderimde koşar, kare kayıt noktalarına dokunulmaz.
 | Sıra | Faz | Not | Kapsam |
 |---|---|---|---|
 | ✔ | 5a | bu not | hücreler, kuleler, girdap, gizmo, dondurma, basıncın ilk adımı |
-| 1 | 6 | `ATMOSPHERE_CELL_CLOUDS.md` | hücre tam sütun "fırtına kabuğu" (LCL → tropopoz, örs, duvar bulutu, mamatus) + yoğunluk ve faza bağlı optik |
+| 1 (parti 13 yazıldı) | 6 | `ATMOSPHERE_CELL_CLOUDS.md` | hücre tam sütun "fırtına kabuğu" (LCL → tropopoz, örs, duvar bulutu, mamatus) + yoğunluk ve faza bağlı optik |
 | 2 | 5b | `ATMOSPHERE_LOCAL_WINDS_FOG.md` §1 | giriş, updraft, downdraft ve hamle cephesi rüzgârı → bulut şekli, yağış eğimi, `sampleWind` |
-| 3 | 8 | `ATMOSPHERE_PRECIP_TYPES.md` | tipler (çisentiden doluya), kar çizgisi, görsel tablo |
+| 3 (parti 14 yazıldı; rüzgârlardan önce alındı) | 8 | `ATMOSPHERE_PRECIP_TYPES.md` | tipler (çisentiden doluya), kar çizgisi, görsel tablo |
 | 4 | 7 | `ATMOSPHERE_LOCAL_WINDS_FOG.md` §2–4 | hava uygunluğu (orografi, ısınma), son yağış, yerel sis |
 | 5 | 5c | bu not §5 | sinoptik merkez ve cepheler, gün içi döngü, senaryolar |
 | 6 | ayrı | `ATMOSPHERE_SURFACE_COUPLING.md` | yer yağış haritası → ıslaklık, kar, sıçrama, akış, dolu |

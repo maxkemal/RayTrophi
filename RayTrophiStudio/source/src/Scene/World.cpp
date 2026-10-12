@@ -843,6 +843,27 @@ bool World::rederiveClouds() {
             lightningChanged = true;
         }
     }
+    // The precipitation form follows the climate's temperature profile
+    // whatever owns layer 0 (ATMOSPHERE_PRECIP_TYPES.md): sea-level
+    // temperature and lapse rate, as sampleClimate uses them, and whether the
+    // scene ground is at or below freezing (the audio and the panel read it).
+    {
+        atmosphere::CloudPrecipitation& pr = clouds.precipitation;
+        const float tc = climate.surface_temperature_k - atmosphere::kKelvinOffset;
+        const float lapse = climate.lapse_rate_k_per_m;
+        const float groundC = atmosphere::sampleClimate(climate, data.nishita.altitude).temperature_k -
+                              atmosphere::kKelvinOffset;
+        const int f = pr.form;
+        const bool frozen = f == atmosphere::kPrecipAuto ? groundC <= 0.5f :
+            (f == atmosphere::kPrecipSnow || f == atmosphere::kPrecipSleet || f == atmosphere::kPrecipGraupel ||
+             f == atmosphere::kPrecipHail || f == atmosphere::kPrecipIcePellets);
+        if (pr.air_temperature_c != tc || pr.lapse_rate_k_per_m != lapse || pr.snow != frozen) {
+            pr.air_temperature_c = tc;
+            pr.lapse_rate_k_per_m = lapse;
+            pr.snow = frozen;
+            lightningChanged = true;
+        }
+    }
     if (!clouds.derive_from_climate) {
         if (lightningChanged) {
             ++cloud_revision;
@@ -860,7 +881,6 @@ bool World::rederiveClouds() {
     const float rh = climate.surface_relative_humidity;
     const float wet = std::min(1.0f, std::max(0.0f, (rh - 0.45f) / 0.35f));
     c.precipitation.rate_mm_h = w.precipitation_mm_h;
-    c.precipitation.snow = w.snow;
     c.precipitation.ground_fraction = 0.3f + 0.7f * wet * wet * (3.0f - 2.0f * wet);
     for (int i = 1; i < atmosphere::kMaxCloudLayers; ++i) {
         atmosphere::CloudLayer& l = c.layers[i];

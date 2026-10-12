@@ -11,8 +11,8 @@
 //                       +2 curl (sampler2D), +3 weather map (sampler2D),
 //                       +4 CloudParams (std430 buffer)
 //   CLOUD_CELL_BINDING  storm cell map (sampler2D, cloud_cells.comp;
-//                       docs/dev/ATMOSPHERE_STORMS.md): two fields stacked,
-//                       upper half cells, lower half cell structure
+//                       docs/dev/ATMOSPHERE_STORMS.md): three 256^2 fields
+//                       stacked -- cells, cell structure, storm column
 //
 // Units: world metres (scene Y up), extinction 1/m. Altitude above sea level
 // = distance from the planet centre - planet radius; the scene sits at
@@ -49,18 +49,22 @@ layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 1) uniform sampler3D clou
 layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 2) uniform sampler2D cloudCurlNoise;
 layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 3) uniform sampler2D cloudWeatherMap;
 layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 4, std430) readonly buffer CloudParamsBlock {
-    CloudLayerG layers[3];
+    // 0..2 the authored layers; 3 the storm column shell (f.w = 1 when on,
+    // ATMOSPHERE_CELL_CLOUDS.md): troposphere-deep, dense only in cells.
+    CloudLayerG layers[4];
     vec4 weather;   // 1/extent_m, type_variation, evolution, rt_steps
     vec4 wind;      // drift_x_m, drift_z_m, planet_radius_m, altitude_offset_m
     vec4 cirrus;    // enabled, altitude_m, coverage, optical depth
     vec4 misc;      // 1/cirrus_scale_m, seed, rt_max_bounces, rt_flags (cloud_rt.glsl)
-    vec4 precip;    // rate_mm_h, extinction_per_m at that rate, trail_x, trail_z (upwind lag per m of fall at the ground)
-    vec4 precip2;   // snow (0/1), ground_fraction, shear_x, shear_z (m per m of height)
+    vec4 precip;    // rate_mm_h, extinction bound at that rate (any form), trail_x, trail_z
+                    // (upwind lag per m of fall at the ground for a 1 m/s faller)
+    vec4 precip2;   // reserved, ground_fraction, shear_x, shear_z (m per m of height)
     vec4 scatterAlbedo; // RGB albedo, HG g override (2 = droplet fit)
     vec4 emissionSource; // RGB source radiance, reserved
     vec4 cirrusDirection; // along-wind x,z; camera weather time, reserved
     vec4 storms;    // cell map centre x, z, 1/size, enabled
-    vec4 storms2;   // stratiform rain share, reserved
+    vec4 storms2;   // stratiform rain share, tropopause fraction, wall allowance m, mammatus
+    vec4 precip3;   // sea-level air temperature C, lapse K/m, forced form (0 auto), reserved
     CloudLightningG lightning[4];
     CloudFlashLightG flash[4];   // lit cloud base per event (CPU-built)
     CloudBoltSegG bolt[160];     // channel network, 40 per event (CPU-built)
@@ -70,16 +74,28 @@ layout(set = CLOUD_SET, binding = CLOUD_CELL_BINDING) uniform sampler2D cloudCel
 
 const float CLOUD_PI = 3.14159265358979;
 
-// The cell map stacks two fields (cloud_cells.comp); `sheet` 0 = cells,
-// 1 = structure. v is clamped half a texel inside its half so the linear
-// filter never blends the two.
+// The cell map stacks square fields (cloud_cells.comp); `sheet` 0 = cells,
+// 1 = structure, 2 = storm column. v is clamped half a texel inside its
+// sheet so the linear filter never blends two of them.
 vec4 cloudStormMapAt(vec3 p, float sheet) {
     if (cloudParams.storms.w < 0.5) return vec4(0.0);
     vec2 uv = (p.xz - cloudParams.storms.xy) * cloudParams.storms.z + 0.5;
     if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return vec4(0.0);
-    float texel = 1.0 / float(textureSize(cloudCellMap, 0).y);
-    uv.y = sheet * 0.5 + clamp(uv.y * 0.5, 0.5 * texel, 0.5 - 0.5 * texel);
+    ivec2 size = textureSize(cloudCellMap, 0);
+    float sheets = float(size.y / size.x);
+    float texel = 1.0 / float(size.x);
+    uv.y = (sheet + clamp(uv.y, 0.5 * texel, 1.0 - 0.5 * texel)) / sheets;
     return textureLod(cloudCellMap, uv, 0.0);
+}
+
+// Storm column fields at p: R anvil cover, G wall cloud (lowered base under
+// the main updraft), B reserved (gust front, Faz 5b), A dilated anvil majorant.
+vec4 cloudStormColumnAt(vec3 p) {
+    return cloudStormMapAt(p, 2.0);
+}
+
+bool cloudShellActive() {
+    return cloudParams.layers[3].b.w > 0.5 && cloudParams.layers[3].f.w > 0.5;
 }
 
 // Storm cells at p (world): R cover floor, G tower (genus floor), B convective
@@ -125,7 +141,7 @@ bool cloudSegmentMayContain(vec3 origin, vec3 direction, float distance) {
     // (indoor bounces, contact segments) and skips the whole march.
     if (cloudParams.precip.x > 0.0 && distance * cloudParams.precip.y * 2.0 > 1e-3) return true;
     float lowest = 1e30;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {   // 3 = the storm column (base lowered by the wall cloud)
         CloudLayerG L = cloudParams.layers[i];
         if (L.b.w >= 0.5 && L.b.x > 0.0 && L.a.z > 0.0) {
             lowest = min(lowest, L.a.x);
@@ -310,12 +326,13 @@ vec4 cloudWeatherAt(CloudLayerG L, vec3 p) {
     return textureLod(cloudWeatherMap, cloudWeatherUV(L, p), 0.0);
 }
 
-// Extinction (1/m) of one layer at world point p. `alt` = cloudAltitude(p),
-// passed in so a caller summing layers computes it once. `detail` = false
-// gives the cheap base shape (majorant, light-march, empty-space skip).
+// Extinction (1/m) of one AUTHORED layer (0..2) at world point p, without
+// the storm column. `alt` = cloudAltitude(p), passed in so a caller summing
+// layers computes it once. `detail` = false gives the cheap base shape
+// (majorant, light-march, empty-space skip).
 // Bound kept for the RT majorant: result <= local coverage * extinction.
-float cloudLayerDensityResolved(int li, vec3 p, float alt, bool detail,
-                               out float baseDensity) {
+float cloudLayerOwnDensity(int li, vec3 p, float alt, bool detail,
+                           out float baseDensity) {
     baseDensity = 0.0;
     if (cloudParams.layers[li].b.w < 0.5 || cloudParams.layers[li].b.x <= 0.0) return 0.0;
     CloudLayerG L = cloudStormLayerAt(li, alt);
@@ -329,6 +346,13 @@ float cloudLayerDensityResolved(int li, vec3 p, float alt, bool detail,
     // Storm cells raise cover, genus and development locally; the weather
     // noise still shapes their edges (ATMOSPHERE_STORMS.md §3).
     vec4 cell = cloudStormCellAt(p);
+    // With the storm column on, the cells are drawn by the column; the layer
+    // steps aside inside them (no double density) and keeps its own cover.
+    float shellMask = 0.0;
+    if (cloudShellActive()) {
+        shellMask = smoothstep(0.05, 0.4, cell.r);
+        cell = vec4(0.0);
+    }
     // Cell structure (turrets, rotation): read only inside a cell's reach.
     vec4 flow = cell.a > 0.0 ? cloudStormFlowAt(p) : vec4(0.0);
     float cellW = smoothstep(0.05, 0.35, cell.r);
@@ -344,6 +368,7 @@ float cloudLayerDensityResolved(int li, vec3 p, float alt, bool detail,
     // generator), so thresholding it at 1 - coverage covers ~coverage of sky.
     float cov = clamp(cloudRemap(w.r, 1.0 - L.a.z, 1.0, 0.0, 1.0), 0.0, 1.0);
     cov = max(cov, cell.r * mix(0.7, 1.0, w.r));   // <= cell.a: the majorant holds
+    cov *= 1.0 - shellMask;
     if (cov <= 0.0) return 0.0;
     float type = clamp(L.a.w + (w.g - 0.5) * cloudParams.weather.y, 0.0, 1.0);
     type = max(type, cell.g);
@@ -519,6 +544,186 @@ float cloudLayerDensityResolved(int li, vec3 p, float alt, bool detail,
     return dens * covScale * L.b.x;
 }
 
+// ── Storm column (ATMOSPHERE_CELL_CLOUDS.md §1) ────────────────────────────
+// A cell is its own column from the cloud base (lowered into a wall cloud
+// under the main updraft) to the tropopause, with overshooting turrets above
+// it, an anvil spreading downwind at the tropopause and mammatus pouches
+// under the anvil. Layer 3 carries the shell: a = base, depth (to the
+// overshoot top); the rest is the host layer's look (noise scales, erosion,
+// material). storms2 = (stratiform share, tropopause height fraction in the
+// shell, wall-cloud allowance m, mammatus strength).
+//
+// Bound for the majorant: density <= max(cell cover envelope, anvil cover)
+// x extinction, i.e. <= max(cell.a, column.a) x extinction.
+
+// Wind shear for the column: the crowns lean like a layer's, but the lean is
+// capped at 3 km of height -- a troposphere-deep quadratic lean laid the
+// tower flat.
+vec3 cloudShellShear(vec3 p, float alt) {
+    vec2 sh = cloudParams.precip2.zw;
+    if (dot(sh, sh) <= 0.0) return p;
+    CloudLayerG L = cloudParams.layers[3];
+    float above = clamp(alt - L.a.x, 0.0, 3000.0);
+    vec2 v = textureLod(cloudCurlNoise, (p.xz - cloudParams.wind.xy) * cloudParams.weather.x * 6.0, 0.0).rg;
+    float k = 0.4 + 1.2 * v.x;
+    float a = (v.y - 0.5) * 0.9;
+    vec2 rsh = vec2(sh.x * cos(a) - sh.y * sin(a), sh.x * sin(a) + sh.y * cos(a)) * k;
+    float disp = above * (above / 3000.0) * 1.6;
+    return p - vec3(rsh.x, 0.0, rsh.y) * disp;
+}
+
+float cloudShellMajorant(vec3 p) {
+    if (!cloudShellActive()) return 0.0;
+    p = cloudShellShear(p, cloudAltitude(p));
+    return max(cloudStormCellAt(p).a, cloudStormColumnAt(p).a) * cloudParams.layers[3].b.x;
+}
+
+float cloudShellTop(float tower, float anvilH) {
+    return tower < 0.75 ? tower / 0.75 * anvilH : mix(anvilH, 1.0, (tower - 0.75) / 0.25);
+}
+
+// Tower = a SURFACE, not a cover-scaled noise volume. Reference (towering
+// cumulus / congestus): near-vertical walls, rounded stepped crowns, every
+// part of the surface covered in hard cauliflower billows at several
+// scales, a dense interior and a flat base. "cover x noise" (the layer
+// model) drew soft cotton cones without a surface; batch 16 tried it again
+// as a stretched layer generator and drew mountains (2026-10-12, reverted).
+// Here the turret dome field (cloud_cells.comp, sqrt domes) is the top
+// height; billow noise pushes that surface UP (crowns) and, through a
+// displaced lookup of the dome field, SIDEWAYS (walls); density = the depth
+// below the surface over a few tens of metres. The detail pass only dents it
+// (smaller billows), so the cheap shape stays an upper bound.
+const float kTowerBillowScaleM = 1800.0;   // big lobes ~ 0.5-1 km
+const float kTowerBubbleScaleM = 320.0;    // small cauliflower bubbles
+// Orthonormal rotation for the bubble octave (Quilez): it no longer lines up
+// with the billow octave of the same tiled texture.
+const mat3 kCloudOctaveRotation = mat3(0.00, 0.80, 0.60,
+                                       -0.80, 0.36, -0.48,
+                                       -0.60, -0.48, 0.64);
+float cloudShellDensity(vec3 p, float alt, bool detail, out float baseDensity) {
+    baseDensity = 0.0;
+    if (!cloudShellActive()) return 0.0;
+    CloudLayerG L = cloudParams.layers[3];
+    float depth = max(L.a.y, 1.0);
+    float h = (alt - L.a.x) / depth;
+    if (h <= 0.0 || h >= 1.0) return 0.0;
+    p = cloudShellShear(p, alt);
+    vec4 cell = cloudStormCellAt(p);
+    vec4 column = cloudStormColumnAt(p);
+    if (cell.r <= 0.0 && column.r <= 0.0) return 0.0;
+    vec4 flow = cloudStormFlowAt(p);
+    float anvilH = cloudParams.storms2.y;
+    // Local base: the host layer's base, lowered by up to the allowance into
+    // a wall cloud under the main updraft.
+    float baseM = cloudParams.storms2.z * (1.0 - column.g);
+    float aboveBase = alt - L.a.x - baseM;
+    if (aboveBase <= 0.0) return 0.0;
+    float lift = flow.w;
+
+    vec3 drift = vec3(cloudParams.wind.x, 0.0, cloudParams.wind.y);
+    float evo = cloudParams.weather.z;
+    vec3 sp = p;
+    sp.xz += flow.xy * mix(0.55, 1.0, smoothstep(0.0, 0.5, h));
+    vec3 rel = cloudShapeCoordinates(3, sp - drift);
+    rel.y = alt - L.a.x;
+    vec3 phase = cloudShapePhase(0);
+    // Break the texture period. One noise tile is 0.3-2 km, a tower ten:
+    // read straight, the same billows marched up the tower in rows. A slow
+    // 3D warp (~7 km) shifts every tile differently. Shape lookups only --
+    // `rel.y` stays the true height.
+    vec3 relW = rel + (textureLod(cloudBaseNoise, rel / 7300.0 + phase.zxy, 0.0).gba - 0.5) * 1800.0;
+
+    // ── Tower ──
+    float towerD = 0.0;
+    float inside = -1.0;
+    if (cell.r > 0.0) {
+        // Rising turrets boil faster.
+        vec3 qb = relW / kTowerBillowScaleM + phase + vec3(evo * 0.37, evo * (0.11 + 0.2 * lift), evo * 0.53);
+        vec4 n = textureLod(cloudBaseNoise, qb, 0.0);
+        float billow = n.g * 0.55 + n.b * 0.3 + n.a * 0.15;   // Worley octaves: rounded lobes
+        // Walls: read the dome field a few hundred metres off, along a
+        // noise vector -- the wall bulges in and out.
+        vec2 side = (n.gb - 0.5) * 2.0 * 380.0;
+        float towerTop = cloudStormFlowAt(p + vec3(side.x, 0.0, side.y)).z;
+        float surfaceM = cloudShellTop(towerTop, anvilH) * depth + (billow - 0.5) * 2.0 * 320.0;
+        inside = surfaceM - rel.y;
+        // Dense below the surface, a flat (slightly soft) condensation base.
+        towerD = smoothstep(0.0, 70.0, inside) * smoothstep(0.0, 120.0, aboveBase) * cell.r;
+    }
+
+    // ── Anvil: a WEDGE under the tropopause ──
+    // Thick (~1.5 km) over the tower it grows out of, thinning toward its
+    // downwind edge -- the underside rises with the distance, the top stays
+    // flat (domed a little over the core). A constant-thickness band drew a
+    // flying-saucer disc with vertical rims. Mammatus pouches hang from the
+    // underside. Fibrous ice: squashed, stretched noise, cover-thresholded.
+    float anvilD = 0.0;
+    if (column.r > 0.0 && h > anvilH - 0.22 && h < anvilH + 0.04) {
+        float a = smoothstep(0.0, 0.7, column.r);
+        float thick = mix(0.015, 0.14, a);
+        float pouch = 0.0;
+        if (cloudParams.storms2.w > 0.0 && a > 0.2) {
+            vec4 m = textureLod(cloudBaseNoise, vec3(relW.x, 0.0, relW.z) * L.c.x * 2.2 + phase.zxy, 0.0);
+            pouch = smoothstep(0.45, 0.8, m.r) * cloudParams.storms2.w * a;
+        }
+        float bottom = anvilH - thick - 0.04 * pouch;
+        float topA = anvilH + 0.02 * smoothstep(0.5, 1.0, a);
+        float band = smoothstep(bottom, bottom + 0.3 * thick, h) *
+                     (1.0 - smoothstep(topA - 0.015, topA + 0.01, h));
+        float cov = column.r * band;
+        if (cov > 0.0) {
+            vec3 q = relW * L.c.x * vec3(1.0, 2.2, 1.0) + phase + vec3(evo * 0.37, evo * 0.11, evo * 0.53);
+            vec4 n = textureLod(cloudBaseNoise, q, 0.0);
+            float lowFbm = n.g * 0.625 + n.b * 0.25 + n.a * 0.125;
+            float shape = clamp(cloudRemap(n.r, -(1.0 - lowFbm), 1.0, 0.0, 1.0), 0.0, 1.0);
+            anvilD = clamp(cloudRemap(shape, 1.0 - cov, 1.0, 0.0, 1.0), 0.0, 1.0) * cov;
+        }
+    }
+    // Both terms are <= the cover read at p (cell.r, column.r): the majorant holds.
+    float base = max(towerD, anvilD);
+    if (base <= 0.0) return 0.0;
+    baseDensity = base * L.b.x;
+    if (!detail) return baseDensity;
+
+    // Detail: only removes. Tower: dents between small bubbles (the surface
+    // moves in by up to ~90 m where the inverted Worley is low). Anvil:
+    // fibrous erosion.
+    vec3 dq = (kCloudOctaveRotation * relW) / kTowerBubbleScaleM + phase + vec3(evo * 1.3);
+    vec4 d = textureLod(cloudDetailNoise, dq, 0.0);
+    float bubbles = d.r * 0.6 + d.g * 0.3 + d.b * 0.1;
+    float towerDetail = towerD;
+    if (towerD > 0.0) {
+        float dent = (1.0 - bubbles) * mix(90.0, 60.0, lift);
+        towerDetail = smoothstep(0.0, 70.0, inside - dent) * smoothstep(0.0, 120.0, aboveBase) * cell.r;
+    }
+    float anvilDetail = anvilD;
+    if (anvilD > 0.0) {
+        vec4 f = textureLod(cloudDetailNoise, (kCloudOctaveRotation * relW) * L.c.y * vec3(1.0, 0.4, 1.0) +
+                            phase + vec3(evo * 1.3), 0.0);
+        float dfbm = f.r * 0.625 + f.g * 0.25 + f.b * 0.125;
+        float erosion = dfbm * L.b.z * 1.2;
+        anvilDetail = clamp(cloudRemap(anvilD / max(column.r, 1e-4), erosion, 1.0, 0.0, 1.0), 0.0, 1.0) *
+                      column.r;
+        anvilDetail = min(anvilDetail, anvilD);
+    }
+    return max(towerDetail, anvilDetail) * L.b.x;
+}
+
+// Density a march interval of layer `li` sees: the authored layer plus the
+// storm column inside its altitude range. Layer 3 = the column alone: its
+// intervals cover only the altitudes no authored layer covers
+// (cloudIntervals), so nothing is counted twice.
+float cloudLayerDensityResolved(int li, vec3 p, float alt, bool detail,
+                               out float baseDensity) {
+    if (li == 3) return cloudShellDensity(p, alt, detail, baseDensity);
+    float own = cloudLayerOwnDensity(li, p, alt, detail, baseDensity);
+    if (!cloudShellActive()) return own;
+    float shellBase;
+    float shell = cloudShellDensity(p, alt, detail, shellBase);
+    baseDensity += shellBase;
+    return own + shell;
+}
+
 float cloudLayerDensity(int li, vec3 p, float alt, bool detail) {
     float baseDensity;
     return cloudLayerDensityResolved(li, p, alt, detail, baseDensity);
@@ -549,8 +754,127 @@ float cloudLayerDensity(int li, vec3 p, float alt, bool detail) {
 // a valley below y = 0 still gets rain). The scene-ground floor for rays that
 // meet NOTHING is cloudPrecipMarch's job: a camera under y = 0 used to look
 // down 40 km of uninterrupted rain.
-float cloudPrecipSample(vec3 p, out vec3 fallLine) {
+// ── Precipitation forms (docs/dev/ATMOSPHERE_PRECIP_TYPES.md §1) ──────────
+// The form at a point follows the hydrometeor down its column through the
+// climate's temperature profile (linear: precip3.x C at sea level, precip3.y
+// K/m): ice aloft melts by the degree-metres of above-zero air it has fallen
+// through (snow -> sleet -> rain: the snow line and the melting band come
+// out of the profile, no terrain read); liquid falling into sub-zero air is
+// supercooled (freezing rain) and refreezes into ice pellets after enough
+// cold degree-metres (an inversion's cold surface layer); updrafts make
+// graupel and hail (hail survives a long fall); stratiform, shallow cloud
+// drizzles. Ids: CPU atmosphere::PrecipForm and IPC precipitation_form.
+const int PRECIP_RAIN = 1, PRECIP_DRIZZLE = 2, PRECIP_SNOW = 3, PRECIP_SLEET = 4,
+          PRECIP_GRAUPEL = 5, PRECIP_HAIL = 6, PRECIP_FREEZING_RAIN = 7, PRECIP_ICE_PELLETS = 8;
+
+struct CloudPrecipForm {
+    vec4 a;   // rain, drizzle, snow, sleet
+    vec4 b;   // graupel, hail, freezing rain, ice pellets
+};
+
+float cloudAirTempC(float altitude) {
+    return cloudParams.precip3.x - cloudParams.precip3.y * min(altitude, 11000.0);
+}
+
+// Integral over [z1, z2] of max(sign * T(z), 0) dz, in C*m (linear profile).
+float cloudDegreeMetres(float z1, float z2, float sign) {
+    if (z2 <= z1) return 0.0;
+    float fa = sign * cloudAirTempC(z1), fb = sign * cloudAirTempC(z2);
+    if (fa <= 0.0 && fb <= 0.0) return 0.0;
+    if (fa >= 0.0 && fb >= 0.0) return 0.5 * (fa + fb) * (z2 - z1);
+    float zc = z1 + (z2 - z1) * fa / (fa - fb);   // the 0 C crossing
+    return fa > 0.0 ? 0.5 * fa * (zc - z1) : 0.5 * fb * (z2 - zc);
+}
+
+CloudPrecipForm cloudPrecipFormAt(float alt, float baseAlt, float drizzleShare, float lift) {
+    CloudPrecipForm f;
+    f.a = vec4(0.0);
+    f.b = vec4(0.0);
+    int forced = int(cloudParams.precip3.z + 0.5);
+    if (forced > 0) {
+        if (forced <= 4) f.a[forced - 1] = 1.0; else f.b[min(forced - 5, 3)] = 1.0;
+        return f;
+    }
+    // Ice aloft: a cold cloud base, or any convective updraft (its upper
+    // part is far below zero). A warm shallow cloud rains liquid throughout.
+    bool iceAloft = cloudAirTempC(baseAlt) <= 0.0 || lift > 0.05;
+    float melt = cloudDegreeMetres(alt, baseAlt, 1.0);
+    float liquid = iceAloft ? smoothstep(30.0, 400.0, melt) : 1.0;
+    // Supercooled liquid in sub-zero air: freezing rain, or ice pellets once
+    // the cold layer it has fallen through is deep enough. The warm layer it
+    // melted in is above the cold one (an inversion).
+    float freezing = 0.0, pellets = 0.0;
+    if (cloudAirTempC(alt) < 0.0 && liquid > 0.0) {
+        float refreeze = cloudDegreeMetres(alt, baseAlt, -1.0);
+        if (iceAloft) {
+            // Count only the cold air BELOW the melting layer.
+            float zc = cloudParams.precip3.y < 0.0 ? cloudParams.precip3.x / cloudParams.precip3.y : alt;
+            refreeze = cloudDegreeMetres(alt, max(zc, alt), -1.0);
+        }
+        pellets = liquid * smoothstep(1500.0, 3000.0, refreeze);
+        freezing = liquid - pellets;
+        liquid = 0.0;
+    }
+    float sleet = 4.0 * liquid * (1.0 - liquid);
+    float snow = (1.0 - liquid - freezing - pellets) * (1.0 - sleet);
+    float rain = liquid * (1.0 - sleet);
+    // A SHARE of the mass, not the whole of it: rain or snow still carries
+    // most of a core's precipitation (live 2026-10-12: as exclusive weights
+    // graupel won under every mature core, even at -5 C and under an
+    // inversion that should give freezing rain).
+    float hail = 0.6 * smoothstep(0.55, 0.85, lift);
+    float graupel = 0.4 * smoothstep(0.3, 0.6, lift) * (1.0 - hail);
+    if (iceAloft) {
+        // Graupel melts within ~1 km below the freezing level; hail survives.
+        graupel *= 1.0 - smoothstep(200.0, 1500.0, melt);
+        hail *= 1.0 - smoothstep(4000.0, 12000.0, melt);
+    } else {
+        hail = 0.0;
+        graupel = 0.0;
+    }
+    float rest = 1.0 - hail - graupel;
+    float drizzle = rain * drizzleShare;
+    f.a = vec4(rain - drizzle, drizzle, snow, sleet) * rest;
+    f.b = vec4(graupel, hail, freezing * rest, pellets * rest);
+    return f;
+}
+
+int cloudPrecipDominantForm(CloudPrecipForm f) {
+    int best = 0;
+    float w = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        if (f.a[i] > w) { w = f.a[i]; best = i + 1; }
+        if (f.b[i] > w) { w = f.b[i]; best = i + 5; }
+    }
+    return best;
+}
+
+// Optics per form (ATMOSPHERE_PRECIP_TYPES.md §2): extinction (1/m) at
+// 1 mm/h and its rate exponent (Marshall-Palmer rain sigma ~ R^0.63; snow
+// and graupel scatter far more per mm of water; hail far less), terminal
+// fall speed m/s (the lean), forward-lobe share and streak contrast.
+const vec4 kPrecipSigmaA = vec4(2.5e-4, 1.2e-3, 2.6e-3, 1.4e-3);
+const vec4 kPrecipSigmaB = vec4(1.2e-3, 1.5e-4, 2.5e-4, 8.0e-4);
+const vec4 kPrecipExpA   = vec4(0.63, 0.6, 0.7, 0.67);
+const vec4 kPrecipExpB   = vec4(0.7, 0.6, 0.63, 0.7);
+const vec4 kPrecipFallA  = vec4(6.5, 1.5, 1.0, 3.0);
+const vec4 kPrecipFallB  = vec4(3.0, 15.0, 6.5, 4.0);
+const vec4 kPrecipFwdA   = vec4(0.5, 0.3, 0.0, 0.2);
+const vec4 kPrecipFwdB   = vec4(0.1, 0.5, 0.5, 0.1);
+const vec4 kPrecipStreakA = vec4(1.0, 0.15, 0.6, 0.8);
+const vec4 kPrecipStreakB = vec4(0.8, 1.0, 1.0, 0.8);
+
+// Altitude-only form (no updraft, no drizzle split): the fall speed that
+// sets the lean, decided before the release point is known.
+float cloudPrecipFallSpeed(float alt, float baseAlt) {
+    CloudPrecipForm f = cloudPrecipFormAt(alt, baseAlt, 0.0, 0.0);
+    return max(dot(f.a, kPrecipFallA) + dot(f.b, kPrecipFallB), 0.5);
+}
+
+float cloudPrecipSampleForm(vec3 p, out vec3 fallLine, out CloudPrecipForm form) {
     fallLine = p;
+    form.a = vec4(0.0);
+    form.b = vec4(0.0);
     float rate = cloudParams.precip.x;
     CloudLayerG L = cloudParams.layers[0];
     if (rate <= 0.0 || L.b.w < 0.5) return 0.0;
@@ -564,7 +888,12 @@ float cloudPrecipSample(vec3 p, out vec3 fallLine) {
     // precip.zw points upwind (where the foot trails), so the release point
     // of the drop at p is back downwind, under the cloud that has moved on.
     float fl = min(f, 1.0);
-    vec3 src = p - vec3(cloudParams.precip.z, 0.0, cloudParams.precip.w) * (below * fl * 0.5);
+    // The lag scales with 1 / fall speed: snow trails far behind its cloud,
+    // hail falls nearly straight (capped ~56 degrees).
+    float alt = cloudAltitude(p);
+    vec2 trail = cloudParams.precip.zw / cloudPrecipFallSpeed(alt, L.a.x);
+    if (length(trail) > 1.5) trail *= 1.5 / length(trail);
+    vec3 src = p - vec3(trail.x, 0.0, trail.y) * (below * fl * 0.5);
     // Drops fan out on the way down (turbulence, size sorting): wobble the
     // lookup by a cloud-frame curl field, growing with the fall distance, so
     // a shaft widens and frays toward the ground instead of a straight prism.
@@ -584,9 +913,18 @@ float cloudPrecipSample(vec3 p, out vec3 fallLine) {
     // (and their wide dissipating rain), plus a stratiform share of the dense
     // cover elsewhere. Without them, every dense cluster core (weather B).
     float potential = w.b;
-    if (cloudParams.storms.w > 0.5)
-        potential = max(cloudStormCellAt(src).b, cloudParams.storms2.x * w.b);
+    float convective = 0.0, lift = 0.0;
+    if (cloudParams.storms.w > 0.5) {
+        convective = cloudStormCellAt(src).b;
+        potential = max(convective, cloudParams.storms2.x * w.b);
+        if (convective > 0.0) lift = cloudStormFlowAt(src).w;
+    }
     if (potential <= 0.0) return 0.0;
+    // Drizzle: the rain that does not come from a convective core, out of a
+    // shallow / stratiform layer (genus below cumulus).
+    float stratiformShare = 1.0 - clamp(convective / max(potential, 1e-4), 0.0, 1.0);
+    float drizzleShare = stratiformShare * (1.0 - smoothstep(0.25, 0.5, L.a.w));
+    form = cloudPrecipFormAt(alt, L.a.x, drizzleShare, lift);
     float baseShape;
     cloudLayerDensityResolved(0, src, L.a.x + min(0.1 * L.a.y, 300.0), false, baseShape);
     float footprint = smoothstep(0.06, 0.45, baseShape / max(L.b.x, 1e-6));
@@ -596,9 +934,22 @@ float cloudPrecipSample(vec3 p, out vec3 fallLine) {
     return rate * potential * footprint * fade * top;
 }
 
+float cloudPrecipSample(vec3 p, out vec3 fallLine) {
+    CloudPrecipForm form;
+    return cloudPrecipSampleForm(p, fallLine, form);
+}
+
 float cloudPrecipAt(vec3 p) {
     vec3 fallLine;
     return cloudPrecipSample(p, fallLine);
+}
+
+// Dominant form id at p (0 = no precipitation): IPC precipitation_form.
+float cloudPrecipFormIdAt(vec3 p) {
+    vec3 fallLine;
+    CloudPrecipForm form;
+    if (cloudPrecipSampleForm(p, fallLine, form) <= 0.0) return 0.0;
+    return float(cloudPrecipDominantForm(form));
 }
 
 // Extinction (1/m) of the falling drops at p. Fall streaks: drop bundles
@@ -606,10 +957,16 @@ float cloudPrecipAt(vec3 p) {
 // fall line so they bend with the trailing foot. Mean ~1, so the Marshall-
 // Palmer optical depth over a long path is kept. `detail` 0..1 fades the
 // streaks to their mean (far shafts: a veil, not sub-pixel aliasing).
-float cloudPrecipDensityLod(vec3 p, float detail) {
+// `forward` = share of the forward lobe in the form mix (0 isotropic snow).
+float cloudPrecipDensityLod(vec3 p, float detail, out float forward) {
     vec3 fallLine;
-    float r = cloudPrecipSample(p, fallLine);
+    CloudPrecipForm form;
+    forward = 0.0;
+    float r = cloudPrecipSampleForm(p, fallLine, form);
     if (r <= 0.0) return 0.0;
+    forward = dot(form.a, kPrecipFwdA) + dot(form.b, kPrecipFwdB);
+    // Drizzle is a homogeneous mist, hail sharp streaks.
+    detail *= dot(form.a, kPrecipStreakA) + dot(form.b, kPrecipStreakB);
     float streak = 1.0;
     if (detail > 0.0) {
         vec2 s = fallLine.xz - cloudParams.wind.xy;
@@ -619,19 +976,21 @@ float cloudPrecipDensityLod(vec3 p, float detail) {
         float fine = mix(0.15, 1.85, smoothstep(0.25, 0.75, n1 * 0.65 + n2 * 0.35));
         streak = mix(1.0, fine, detail);
     }
-    float exponent = cloudParams.precip2.x > 0.5 ? 0.7 : 0.63;
-    return cloudParams.precip.y * pow(r / cloudParams.precip.x, exponent) * streak;
+    vec4 sa = kPrecipSigmaA * pow(vec4(r), kPrecipExpA);
+    vec4 sb = kPrecipSigmaB * pow(vec4(r), kPrecipExpB);
+    return (dot(form.a, sa) + dot(form.b, sb)) * streak;
 }
 
 float cloudPrecipDensity(vec3 p) {
-    return cloudPrecipDensityLod(p, 1.0);
+    float forward;
+    return cloudPrecipDensityLod(p, 1.0, forward);
 }
 
 float cloudDensity(vec3 p, bool detail) {
     float alt = cloudAltitude(p);
-    float s = 0.0;
-    for (int i = 0; i < 3; ++i) s += cloudLayerDensity(i, p, alt, detail);
-    return s;
+    float s = 0.0, b;
+    for (int i = 0; i < 3; ++i) s += cloudLayerOwnDensity(i, p, alt, detail, b);
+    return s + cloudShellDensity(p, alt, detail, b);
 }
 
 // ── Phase: Jendersie & d'Eon 2023, HG + Draine blend from droplet diameter ──
