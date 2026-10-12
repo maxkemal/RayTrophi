@@ -9,6 +9,9 @@
 
 namespace audio {
 void tickWeatherReactions(UIContext& ctx) {
+    if (ctx.scene.audio->transportPaused()) {
+        return;
+    }
     const auto weather = ctx.renderer.world.getWeatherParams();
     const float wind = ctx.renderer.world.getClimate().wind_speed_mps;
     float rain = weather.enabled && weather.type == WEATHER_RAIN ?

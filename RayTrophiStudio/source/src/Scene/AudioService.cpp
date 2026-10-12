@@ -2,6 +2,7 @@
 #include "Audio/AudioReaction.h"
 #include "Audio/AudioEnvironment.h"
 #include "Audio/AudioThunder.h"
+#include "Audio/AudioTransport.h"
 
 #define MA_NO_ENCODING
 #define MA_NO_GENERATION
@@ -103,7 +104,8 @@ json emitter(const json& p) {
 
 struct AudioService::Impl {
     json data = {{"version", 1}, {"next_id", 1}, {"assets", json::array()},
-                 {"emitters", json::array()}, {"thunder", AudioThunder::validate(json::object())}};
+                 {"emitters", json::array()}, {"thunder", AudioThunder::validate(json::object())},
+                 {"playback_mode", "continuous"}};
     ma_engine engine{};
     bool initialized = false;
     bool muted = false;
@@ -113,22 +115,45 @@ struct AudioService::Impl {
     std::map<std::string, json> poses;
     AudioReaction reactions;
     std::map<std::string, ReactionOutput> controls;
-    std::chrono::steady_clock::time_point lastTick = std::chrono::steady_clock::now();
     std::uint64_t generation = 1;
     std::set<std::string> suspended;
     std::set<std::string> managed;
     std::map<std::string, std::chrono::steady_clock::time_point> failedAt;
     std::map<std::string, std::string> autoErrors;
     AudioThunder thunder;
+    AudioTransport transport;
+    std::set<std::string> transportHeld;
     json listenerPosition = json::array({0, 0, 0});
     std::array<float, 9> listenerPose = {0, 0, 0, 0, 0, -1, 0, 1, 0};
     struct ThunderVoice {
         std::unique_ptr<ma_sound> sound;
         json event;
         double bytes = 0;
+        bool held = false;
     };
     std::vector<ThunderVoice> thunderVoices;
     std::string thunderError;
+
+    void holdTransport() {
+        for (auto& [id, sound] : sounds) {
+            if (transport.paused() && ma_sound_is_playing(sound.get())) {
+                ma_sound_stop(sound.get());
+                transportHeld.insert(id);
+            } else if (!transport.paused() && transportHeld.erase(id) != 0 &&
+                       !suspended.contains(id)) {
+                ma_sound_start(sound.get());
+            }
+        }
+        for (auto& voice : thunderVoices) {
+            if (transport.paused() && ma_sound_is_playing(voice.sound.get())) {
+                ma_sound_stop(voice.sound.get());
+                voice.held = true;
+            } else if (!transport.paused() && voice.held) {
+                ma_sound_start(voice.sound.get());
+                voice.held = false;
+            }
+        }
+    }
 
     void stopThunder() {
         for (auto& voice : thunderVoices) {
@@ -154,6 +179,7 @@ struct AudioService::Impl {
     }
 
     void stopAll() {
+        transportHeld.clear();
         stopThunder();
         thunder.reset(true);
         for (auto& item : sounds) {
@@ -283,18 +309,21 @@ const std::vector<std::string>& AudioService::operations() {
         "duplicate", "remove", "play", "pause", "stop", "stop_all", "preview", "preview_stop",
         "preview_mute", "preview_file", "append", "signal_set", "signals_clear",
         "environment_setup", "resume_automatic", "domains", "thunder_setup", "thunder_update",
-        "thunder_event"};
+        "thunder_event", "playback_update"};
     return names;
 }
 
 bool AudioService::isAuthoring(const std::string& op) {
-    return op == "thunder_setup" || op == "thunder_update" ||
+    return op == "playback_update" || op == "thunder_setup" || op == "thunder_update" ||
            op == "environment_setup" || op == "append" || op == "asset_import" ||
            op == "asset_relink" || op == "asset_remove" ||
            op == "create" || op == "update" || op == "duplicate" || op == "remove";
 }
 
 std::vector<std::string> AudioService::parameters(const std::string& op) {
+    if (op == "playback_update") {
+        return {"mode"};
+    }
     if (op == "create" || op == "update") {
         std::vector<std::string> keys = {
             "name", "asset_id", "parent", "position", "direction", "gain", "pitch", "loop",
@@ -351,6 +380,23 @@ json AudioService::invoke(const std::string& op, const json& p) {
         require(std::find(allowed.begin(), allowed.end(), it.key()) != allowed.end(),
                 "Unknown audio parameter: " + it.key());
     }
+    if (op == "playback_update") {
+        const auto mode = AudioTransport::validateMode(p.at("mode"));
+        if (s.data.at("playback_mode") != mode) {
+            const auto previous = s.transport.status();
+            s.stopAll();
+            s.data["playback_mode"] = mode;
+            s.transport.configure(mode);
+            s.transport.advance(previous.at("time_seconds"), previous.at("playing"));
+            s.thunder.clock(s.transport.timeline(), s.transport.time());
+            s.reactions.clear();
+            s.controls.clear();
+            s.reactions.clock(s.transport.timeline(), s.transport.time());
+            s.thunder.resume();
+            s.suspended.clear();
+        }
+        return {{"mode", mode}};
+    }
     if (op == "resume_automatic") {
         if (s.preview) {
             ma_sound_uninit(s.preview.get());
@@ -361,6 +407,17 @@ json AudioService::invoke(const std::string& op, const json& p) {
         s.autoErrors.clear();
         s.thunderError.clear();
         s.thunder.resume();
+        if (!s.transport.paused()) {
+            for (auto& [id, sound] : s.sounds) {
+                if (s.find("emitters", id).at("reaction").at("automatic").get<bool>() &&
+                    !ma_sound_is_playing(sound.get())) {
+                    const auto result = ma_sound_start(sound.get());
+                    if (result != MA_SUCCESS) {
+                        s.autoErrors[id] = "Could not resume automatic audio";
+                    }
+                }
+            }
+        }
         return {{"ok", true}};
     }
     if (op == "thunder_setup") {
@@ -443,19 +500,28 @@ json AudioService::invoke(const std::string& op, const json& p) {
     if (op == "status") {
         json voices = json::array();
         for (const auto& item : s.sounds) {
-            voices.push_back({{"id", item.first}, {"playing", bool(ma_sound_is_playing(item.second.get()))}});
+            ma_uint64 cursor = 0;
+            ma_sound_get_cursor_in_pcm_frames(item.second.get(), &cursor);
+            voices.push_back({{"id", item.first},
+                {"playing", bool(ma_sound_is_playing(item.second.get()))},
+                {"timeline_held", s.transportHeld.contains(item.first)}, {"cursor_frames", cursor}});
         }
         json thunderVoices = json::array();
         for (const auto& voice : s.thunderVoices) {
             auto event = voice.event;
             event["playing"] = bool(ma_sound_is_playing(voice.sound.get()));
+            event["timeline_held"] = voice.held;
+            ma_uint64 cursor = 0;
+            ma_sound_get_cursor_in_pcm_frames(voice.sound.get(), &cursor);
+            event["cursor_frames"] = cursor;
             thunderVoices.push_back(event);
         }
         return {{"device", s.status}, {"sample_rate", 48000}, {"preview_muted", s.muted},
                 {"voices", voices}, {"voice_limit", 32}, {"resolved_poses", s.poses},
                 {"reaction_runtime", s.reactions.status()}, {"automatic_errors", s.autoErrors},
                 {"automatic_suspended", s.suspended}, {"thunder_runtime", s.thunder.status()},
-                {"thunder_voices", thunderVoices}, {"thunder_error", s.thunderError}};
+                {"thunder_voices", thunderVoices}, {"thunder_error", s.thunderError},
+                {"playback_runtime", s.transport.status()}, {"transport_held_sources", s.transportHeld}};
     }
     if (op == "asset_import" || op == "asset_relink") {
         const auto path = std::filesystem::absolute(pathFromUtf8(p.at("path").get<std::string>()));
@@ -602,6 +668,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
     }
     if (op == "remove") {
         const std::string id = p.at("id");
+        s.transportHeld.erase(id);
         s.find("emitters", id);
         s.poses.erase(id);
         s.reactions.forget(id);
@@ -681,7 +748,12 @@ json AudioService::invoke(const std::string& op, const json& p) {
             if (ma_sound_at_end(voice->second.get())) {
                 ma_sound_seek_to_pcm_frame(voice->second.get(), 0);
             }
-            require(ma_sound_start(voice->second.get()) == MA_SUCCESS, "Could not start audio source");
+            if (s.transport.paused()) {
+                s.transportHeld.insert(id);
+            } else {
+                require(ma_sound_start(voice->second.get()) == MA_SUCCESS,
+                        "Could not start audio source");
+            }
             s.suspended.erase(id);
             s.failedAt.erase(id);
             s.autoErrors.erase(id);
@@ -689,6 +761,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
                 s.managed.insert(id);
             }
         } else if (voice != s.sounds.end()) {
+            s.transportHeld.erase(id);
             if (e.at("reaction").at("automatic").get<bool>()) {
                 s.suspended.insert(id);
             }
@@ -704,6 +777,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
             }
         }
     }
+    s.holdTransport();
     return {{"ok", true}};
 }
 
@@ -722,7 +796,11 @@ void AudioService::clear() {
     ++impl_->generation;
     impl_->data = {{"version", 1}, {"next_id", 1}, {"assets", json::array()},
                    {"emitters", json::array()},
-                   {"thunder", AudioThunder::validate(json::object())}};
+                   {"thunder", AudioThunder::validate(json::object())},
+                   {"playback_mode", "continuous"}};
+    impl_->transport.configure("continuous");
+    impl_->thunder.clock(false, 0);
+    impl_->reactions.clock(false, 0);
     impl_->thunder.configure(impl_->data.at("thunder"));
     impl_->thunderError.clear();
 }
@@ -783,6 +861,8 @@ void AudioService::restore(const json& input, const std::filesystem::path& base)
         candidate.validateAsset(e);
     }
     candidate.data["thunder"] = AudioThunder::validate(input.value("thunder", json::object()));
+    candidate.data["playback_mode"] = AudioTransport::validateMode(
+        input.value("playback_mode", json("continuous")));
     candidate.validateThunderAssets(candidate.data.at("thunder"));
     // Validate the complete candidate before replacing live data. Missing files are retained.
     impl_->stopAll();
@@ -794,6 +874,9 @@ void AudioService::restore(const json& input, const std::filesystem::path& base)
     impl_->autoErrors.clear();
     ++impl_->generation;
     impl_->data = std::move(candidate.data);
+    impl_->transport.configure(impl_->data.at("playback_mode"));
+    impl_->thunder.clock(impl_->transport.timeline(), 0);
+    impl_->reactions.clock(impl_->transport.timeline(), 0);
     impl_->thunder.configure(impl_->data.at("thunder"));
     impl_->thunderError.clear();
 }
@@ -852,10 +935,11 @@ void AudioService::resolvedPose(const std::string& id, const json& position,
 }
 
 void AudioService::tickReactions(float windMps, float rain) {
+    if (impl_->transport.paused()) {
+        return;
+    }
     const auto now = std::chrono::steady_clock::now();
-    const float dt = std::clamp(std::chrono::duration<float>(now - impl_->lastTick).count(),
-                                0.0f, 0.25f);
-    impl_->lastTick = now;
+    const float dt = impl_->transport.dt();
     std::vector<std::string> starts;
     for (const auto& e : impl_->data.at("emitters")) {
         const std::string id = e.at("id");
@@ -910,6 +994,9 @@ void AudioService::resetThunder() {
 
 void AudioService::tickThunder() {
     auto& s = *impl_;
+    if (s.transport.paused()) {
+        return;
+    }
     for (auto it = s.thunderVoices.begin(); it != s.thunderVoices.end();) {
         if (ma_sound_at_end(it->sound.get())) {
             ma_sound_uninit(it->sound.get());
@@ -948,5 +1035,28 @@ void AudioService::tickThunder() {
 }
 std::uint64_t AudioService::generation() const {
     return impl_->generation;
+}
+
+bool AudioService::transportPaused() const {
+    return impl_->transport.paused();
+}
+
+void AudioService::syncTransport(double seconds, bool playing) {
+    auto& s = *impl_;
+    const auto step = s.transport.advance(seconds, playing);
+    if (s.transport.timeline() && step.seek) {
+        s.stopAll();
+        s.reactions.clear();
+        s.controls.clear();
+        s.suspended.clear();
+        s.thunder.resume();
+        ++s.generation;
+    }
+    s.thunder.clock(s.transport.timeline(), s.transport.time());
+    s.reactions.clock(s.transport.timeline(), s.transport.time());
+    if (step.resumed) {
+        invoke("resume_automatic", json::object());
+    }
+    s.holdTransport();
 }
 } // namespace audio

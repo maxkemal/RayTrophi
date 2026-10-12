@@ -1,6 +1,7 @@
 # Scene audio: lightning and delayed thunder
 
-Implemented source contract, 2026-10-12. Build and live listening acceptance are
+Implemented source contract, 2026-10-12. Transport extension:
+[SCENE_AUDIO_TRANSPORT.md](SCENE_AUDIO_TRANSPORT.md). Build and live listening acceptance are
 pending the user's build. No application launch, project/shader compilation or
 new test script was performed by Codex.
 
@@ -69,7 +70,7 @@ between frames. No second storm simulation or geometry/particle scan is added.
 Update this adapter if the producer's onset clock changes. Other agent's cloud
 and storm files were not modified.
 
-Key = weather seed / lane / cycle. Closest point on the trunk approximates the
+Key = weather seed / effective period / lane / cycle. Closest point on the trunk approximates the
 first audible wavefront; its onset position is frozen after removing wind drift.
 Intensity amplitude = `gain * min(4, sqrt(intensity / 30))`. Current camera drives
 inverse-distance attenuation and pan while playing. Distance/closest point use
@@ -85,9 +86,11 @@ Distinct near/far assets use identity hash selection, immediate-repeat avoidance
 when possible, and small pitch variation (0.94..1.06). Sound duration/decay and
 arrival survive the flash's visual lifetime; thunder never loops.
 
-Pause emits no new events but pending thunder still arrives. Backward time,
-stopped-timeline scrubbing, forward gaps over 2 s, seed/rate changes and scene
-generation changes clear thunder. Playback advances <=2 s enumerate onsets;
+Continuous preview pause emits no new events but pending thunder still arrives.
+Follow timeline freezes voices/pending delays; see the transport contract.
+Backward time, stopped-timeline scrubbing, forward gaps over 2 s and scene
+generation changes clear thunder. Seed/rate changes preserve emitted thunder.
+Playback advances <=2 s enumerate onsets;
 smaller forward seeks during active playback are indistinguishable from advances
 with the current timeline API. Timeline looping permits replayed events without
 old tails. Render-output jobs suppress new automatic events. Offline audio export

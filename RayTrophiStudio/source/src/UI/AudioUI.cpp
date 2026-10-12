@@ -149,6 +149,18 @@ void drawProperties(UIContext& ctx) {
         }
     }
     auto data = ctx.scene.audio->snapshot();
+    const std::string playbackMode = data.at("playback_mode");
+    if (ImGui::BeginCombo("Audio playback", playbackMode == "timeline" ?
+        "Follow timeline (Play / Pause)" : "Continuous preview")) {
+        for (const char* mode : {"timeline", "continuous"}) {
+            const char* label = std::strcmp(mode, "timeline") == 0 ?
+                "Follow timeline (Play / Pause)" : "Continuous preview";
+            if (ImGui::Selectable(label, playbackMode == mode)) {
+                call(ctx, "playback_update", {{"mode", mode}});
+            }
+        }
+        ImGui::EndCombo();
+    }
     drawThunderAudio(ctx);
     if (ImGui::Button("Connect starter wind / rain")) {
         connectEnvironment(ctx);
@@ -174,6 +186,10 @@ void drawProperties(UIContext& ctx) {
         addSource(ctx);
     }
     auto status = ctx.scene.audio->invoke("status", json::object());
+    if (status.at("playback_runtime").at("paused").get<bool>()) {
+        ImGui::TextWrapped("Timeline audio is paused. Press timeline Play to hear connected "
+                           "sources. Asset audition remains available.");
+    }
     bool mute = status.at("preview_muted");
     if (ImGui::Checkbox("Mute preview", &mute)) {
         call(ctx, "preview_mute", {{"muted", mute}});
@@ -331,6 +347,10 @@ void drawProperties(UIContext& ctx) {
 }
 
 void updateListener(UIContext& ctx) {
+    const float fps = static_cast<float>(std::max(1, ctx.render_settings.animation_fps));
+    const double time = static_cast<float>(std::max(0, ctx.scene.timeline.current_frame)) / fps;
+    ctx.scene.audio->syncTransport(time, ctx.render_settings.animation_is_playing &&
+                                  !rtapi::renderOutputPending());
     audio::syncScene(ctx);
     if (!ctx.scene.camera) {
         audio::tickCloudThunder(ctx);

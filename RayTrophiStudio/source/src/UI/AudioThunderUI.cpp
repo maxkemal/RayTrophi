@@ -72,7 +72,8 @@ void drawThunderAudio(UIContext& ctx) {
                            "audio or restart timeline Play.");
     }
     static int previewId = 0;
-    ImGui::BeginDisabled(!ctx.scene.camera || !enabled || runtime.at("suspended").get<bool>());
+    ImGui::BeginDisabled(!ctx.scene.camera || !enabled || runtime.at("suspended").get<bool>() ||
+                        ctx.scene.audio->transportPaused());
     if (ImGui::Button("Test thunder at 1 km (about 2.9 s)")) {
         const auto position = ctx.scene.camera->lookfrom;
         call("thunder_event", {{"key", "preview/" + std::to_string(++previewId)},

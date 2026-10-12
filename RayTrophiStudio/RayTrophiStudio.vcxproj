@@ -2388,4 +2388,11 @@
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Audio\AudioTransport.h" />
+    <ClCompile Include="source\src\Scene\AudioTransport.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+  </ItemGroup>
 </Project>

@@ -23,14 +23,18 @@ public:
     void clear();
     void forget(const std::string& id);
     void invalidateSignal(const std::string& key);
+    void clock(bool timeline, double seconds);
 private:
     struct Signal {
         nlohmann::json data;
-        std::chrono::steady_clock::time_point expires;
+        double expires = 0;
     };
     std::map<std::string, Signal> signals_;
     std::map<std::string, float> envelopes_;
     std::map<std::string, nlohmann::json> lastPositions_;
     std::map<std::string, nlohmann::json> outputs_;
+    bool timeline_ = false;
+    double sceneTime_ = 0;
+    double now() const;
 };
 }

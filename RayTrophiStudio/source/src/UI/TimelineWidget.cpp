@@ -30,6 +30,7 @@
 #include "Animation/RigSelection.h"
 #include "Animation/RigTimelineProjection.h"
 #include "Api/RtApi.h"
+#include "Audio/AudioService.h"
 
 #include <thread>
 
@@ -1546,6 +1547,9 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     if (UIWidgets::IconActionButton("TimelineStop", UIWidgets::IconType::Stop, "",
                                     false, ImVec4(1.0f, 0.46f, 0.46f, 1.0f), ImVec2(28.0f, 22.0f),
                                     "Stop")) {
+        if (ctx.scene.audio->snapshot().at("playback_mode") == "timeline") {
+            ctx.scene.audio->invoke("stop_all", nlohmann::json::object());
+        }
         if (ctx.scene.anySimulationRuntimeEnabled()) {
             drainTimelineMutationBackends(ctx);
             ctx.scene.requestSimulationTimelineRenderResync();
