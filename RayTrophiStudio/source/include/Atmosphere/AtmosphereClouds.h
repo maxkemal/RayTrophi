@@ -215,6 +215,7 @@ struct StormCellState {
     float stratiform_rain = 0.0f;   // wide light rain potential, 0..1
     float lightning = 0.0f;         // flash weight, 0..1
     float age_s = 0.0f;             // since birth (turret cycles)
+    float peak = 0.0f;              // peak strength the phase curves scale
     uint32_t id = 0;                // stable for the cell's life (turret seeds)
     bool manual = false;
     int manual_index = -1;          // index in CloudStorms::cells, or -1
@@ -225,6 +226,13 @@ struct StormCellState {
 struct CloudState;
 int evaluateStormCells(const CloudState& clouds, float time_s, const Vec3& wind_mps,
                        StormCellState* out);
+
+// Turns the automatic cells alive at `time_s` into authored cells (same
+// birth, position, radius, peak and life: the sky does not change), up to the
+// authored limit, and stops the automatic lanes (max_cells 0, storms no
+// longer derived). `first`: index in evaluateStormCells' list to keep first
+// (-1 none). Returns how many were added; they are appended to storms.cells.
+int freezeStormCells(CloudState& clouds, float time_s, const Vec3& wind_mps, int first = -1);
 
 struct CloudState {
     // Layer 0 follows the climate (docs/dev/ATMOSPHERE_WEATHER.md §2): base =

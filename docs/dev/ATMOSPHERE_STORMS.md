@@ -206,6 +206,14 @@ compute'u aynı gönderimde koşar, kare kayıt noktalarına dokunulmaz.
 - Sürüklenen (ömürlü) bir hücrenin tutamağı onun ŞİMDİKİ konumundadır.
   Bırakınca doğum konumu, rüzgâr kayması geri çıkarılarak yazılır.
 - "Show cells in viewport" yalnızca bir görüntü tercihidir.
+- **Otomatik hücreler tek tek düzenlenmez** (şeritlerin saf fonksiyonu,
+  saklanan hali yok). Kullanıcı bunları seçmeye çalıştı ve takıldı.
+  Çözüm dondurmadır: `freezeStormCells` o an canlı otomatik hücreleri aynı
+  doğum, konum, yarıçap, tepe değeri ve ömürle elle konmuş hücreye çevirir.
+  Gök değişmez; otomatik şeritler durur. Bunu üç yol tetikler:
+  - viewport'ta otomatik bir hücreye tıklamak (tıklanan seçili kalır)
+  - paneldeki "Convert live automatic cells to authored" düğmesi
+  - IPC: `world.set_clouds {storms:{freeze_automatic:true}}`
 
 ## 8. Alt partiler
 

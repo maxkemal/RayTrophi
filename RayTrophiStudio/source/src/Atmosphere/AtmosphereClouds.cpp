@@ -638,6 +638,7 @@ float stormSmooth(float a, float b, float x) {
 // Phase curves of a cell over its life s = age / lifetime (ATMOSPHERE_STORMS.md §3).
 void stormPhase(float s, float peak, StormCellState& c) {
     c.life = s;
+    c.peak = peak;
     const float grow = stormSmooth(0.0f, 0.25f, s);
     c.coverage = peak * grow * (1.0f - 0.4f * stormSmooth(0.7f, 1.0f, s));   // anvil remnant
     c.tower = peak * stormSmooth(0.1f, 0.3f, s) * (1.0f - stormSmooth(0.65f, 0.95f, s));
@@ -646,6 +647,33 @@ void stormPhase(float s, float peak, StormCellState& c) {
     c.lightning = peak * stormSmooth(0.25f, 0.32f, s) * (1.0f - stormSmooth(0.62f, 0.7f, s));
 }
 } // namespace
+
+int freezeStormCells(CloudState& clouds, float time_s, const Vec3& wind_mps, int first) {
+    StormCellState live[kMaxStormCells];
+    const int n = evaluateStormCells(clouds, time_s, wind_mps, live);
+    int order[kMaxStormCells];
+    int m = 0;
+    if (first >= 0 && first < n && !live[first].manual) order[m++] = first;
+    for (int i = 0; i < n; ++i)
+        if (!live[i].manual && i != first) order[m++] = i;
+    CloudStorms& s = clouds.storms;
+    int added = 0;
+    for (int k = 0; k < m && s.cells.size() < static_cast<size_t>(kMaxManualStormCells); ++k) {
+        const StormCellState& c = live[order[k]];
+        StormCell cell;
+        // Authored cells store the birth position and drift from there.
+        cell.position_m = Vec3(c.x - wind_mps.x * c.age_s, 0.0f, c.z - wind_mps.z * c.age_s);
+        cell.radius_m = std::clamp(c.radius_m, 200.0f, 30000.0f);
+        cell.intensity = std::clamp(c.peak, 0.0f, 1.0f);
+        cell.birth_s = time_s - c.age_s;
+        cell.lifetime_s = c.life > 1e-3f ? std::clamp(c.age_s / c.life, 1.0f, 14400.0f) : s.lifetime_s;
+        s.cells.push_back(cell);
+        ++added;
+    }
+    s.max_cells = 0;
+    s.derive_from_climate = false;
+    return added;
+}
 
 int evaluateStormCells(const CloudState& clouds, float time_s, const Vec3& wind_mps,
                        StormCellState* out) {
