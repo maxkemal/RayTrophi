@@ -12,6 +12,8 @@ are later stages. No build, application launch or generated test script was perf
 Add > Audio Source creates an unbound non-geometric scene object. Scene hierarchy has
 an Audio Sources group. The existing Scene properties dock contains a Scene Audio
 section for imports, asset preview/relink/removal, source properties and playback.
+Import and Relink open the existing native file chooser with WAV/FLAC/MP3 filters;
+canceling leaves the scene unchanged. The selected path is shown read-only.
 Assets discovers WAV/FLAC/MP3, displays an AUDIO badge and metadata, supports audition
 and Append To Scene / viewport drop. Existing license/source/author/tags are retained
 on append. Audition does not add an asset to the scene.
@@ -122,6 +124,21 @@ No sound library files were downloaded or bundled.
 
 ## User build and acceptance checklist
 
+Live IPC check, 2026-10-12: user-built Studio, initially empty scene. Twenty targeted
+checks passed through the external scripts/test/rt_ipc.py client: mono/stereo WAV
+metadata, source update, undo/redo, invalid distance/direction/property/id rejection,
+referenced-asset removal rejection, positional-stereo rejection, device initialization,
+play/pause/resume, preview mute with advancing playback, voice release on stop, stereo
+ambience, audition exclusivity, duplication and undo of deletion. Temporary silent WAV
+files and scene assets/sources were removed; final assets and emitters were empty,
+voices stopped, mute disabled. The allocation counter advanced to 6 and authoring
+history/modified state were affected by these checks. No test script was created.
+These checks confirm device/service behavior, not audible quality, gizmo visuals,
+parent movement, project portability, FLAC playback or remote-token permissions.
+A subsequent stereo MP3 check decoded 44.1 kHz audio, bound it to the existing source
+with spatial=false, and started playback. The user confirmed hearing it successfully.
+The initial silence was an unbound source (empty asset_id), not a path encoding failure.
+
 1. Build the existing VS x64 configuration. New Scene, UI and API translation units
    are registered in vcxproj/filters; CMake already discovers them through existing globs.
 2. Import a short mono WAV, FLAC and MP3; inspect duration/channels/sample rate.
@@ -144,5 +161,5 @@ No sound library files were downloaded or bundled.
 8. Verify Read-only IPC credentials cannot mutate audio or read audio files through
    audition, and SceneWrite without FilesRead cannot import/relink/play/audition.
 
-These are pending manual checks, not reported passing tests. Stage 1 acceptance stays
+Remaining checklist items are pending manual checks. Stage 1 acceptance stays
 open until the user completes the build and visual/aural verification.
