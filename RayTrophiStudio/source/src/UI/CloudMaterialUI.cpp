@@ -10,6 +10,7 @@
 #include "scene_ui.h"
 #include "imgui.h"
 
+#include <cstdio>
 #include <string>
 
 namespace cloud_ui {
@@ -50,6 +51,7 @@ static bool drawOpticalControls(atmosphere::CloudMaterial& m) {
 }
 
 // Storm cells (docs/dev/ATMOSPHERE_STORMS.md): where it rains and flashes.
+static bool freezeRequested = false;
 static bool drawStormControls(atmosphere::CloudState& clouds) {
     bool changed = false;
     if (!ImGui::TreeNodeEx("Storms / convective cells", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -78,7 +80,14 @@ static bool drawStormControls(atmosphere::CloudState& clouds) {
     ImGui::TextWrapped("Cells grow, mature (heavy rain, lightning) and dissipate (light, wide "
                        "rain), drifting with the climate wind. Stratiform rain = broad light "
                        "rain under dense cover outside the cells.");
-    if (ImGui::TreeNode("Authored cells")) {
+    ImGui::TextWrapped("Automatic cells cannot be edited one by one: convert the live ones "
+                       "into authored cells (the sky stays the same, the automatic lanes stop), "
+                       "or click a cell in the viewport.");
+    if (ImGui::Button("Convert live automatic cells to authored")) freezeRequested = true;
+    char authoredLabel[64];
+    std::snprintf(authoredLabel, sizeof(authoredLabel), "Authored cells (%d)###AuthoredCells",
+                  static_cast<int>(s.cells.size()));
+    if (ImGui::TreeNodeEx(authoredLabel, ImGuiTreeNodeFlags_DefaultOpen)) {
         int remove = -1;
         for (size_t i = 0; i < s.cells.size(); ++i) {
             atmosphere::StormCell& c = s.cells[i];
@@ -171,8 +180,15 @@ bool drawMaterialControls(atmosphere::CloudState& clouds) {
 
 bool drawWeatherLightningControls(UIContext& ctx) {
     atmosphere::CloudState clouds = ctx.renderer.world.getClouds();
-    const bool changed = drawLightningControls(clouds);
+    bool changed = drawLightningControls(clouds);
     static std::string error;
+    if (freezeRequested) {
+        freezeRequested = false;
+        // Same action as IPC world.set_clouds {storms:{freeze_automatic:true}}.
+        const rtapi::Result result = rtapi::setCloudsJson(R"({"storms":{"freeze_automatic":true}})");
+        error = result.error;
+        return result.ok;
+    }
     if (changed) {
         nlohmann::json json;
         atmosphere::cloudsToJson(clouds, json);

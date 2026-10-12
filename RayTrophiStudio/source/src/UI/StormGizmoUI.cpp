@@ -24,6 +24,7 @@ namespace {
 
 constexpr int kNone = -2;
 constexpr int kDomain = -1;
+constexpr int kAutoBase = -100;   // kAutoBase - i: automatic cell i (click converts)
 int selected = kNone;   // kDomain, an authored cell index, or kNone
 std::string error;
 
@@ -162,12 +163,27 @@ void drawViewport(UIContext& ctx, bool ortho, bool showGizmos, bool& hit) {
                           permanent ? "permanent" : phaseName(c.life));
             handle(Vec3(c.x, groundY, c.z), c.manual_index, colour, label);
         } else {
-            ImVec2 s;
-            if (project(Vec3(c.x, baseY, c.z), s)) {
-                std::snprintf(label, sizeof(label), "storm cell (%s)", phaseName(c.life));
-                draw->AddText(ImVec2(s.x + 6, s.y - 8), colour, label);
-            }
+            std::snprintf(label, sizeof(label), "auto cell (%s)", phaseName(c.life));
+            handle(Vec3(c.x, groundY, c.z), kAutoBase - i, colour, label);
         }
+    }
+
+    // Clicking an automatic cell converts the live automatic cells into
+    // authored ones (atmosphere::freezeStormCells: the sky stays the same) and
+    // selects the clicked one, so it can be dragged, edited and deleted.
+    if (selected <= kAutoBase) {
+        const int autoIndex = kAutoBase - selected;
+        atmosphere::CloudState edited = clouds;
+        const int first = static_cast<int>(edited.storms.cells.size());
+        const int added = atmosphere::freezeStormCells(edited, world.getCloudTime(), wind, autoIndex);
+        selected = kNone;
+        if (added > 0) {
+            apply(edited);
+            if (error.empty()) selected = first;
+        } else {
+            error = "authored cell limit reached (8)";
+        }
+        return;
     }
 
     if (viewportInput && ImGui::IsMouseClicked(0) && !overHandle &&

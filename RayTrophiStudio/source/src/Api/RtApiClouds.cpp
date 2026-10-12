@@ -107,12 +107,29 @@ Result setCloudsJson(const std::string& patch_json) {
         patch.erase(ro);
     patch.erase("lightning_effective_rate_per_minute");
 
+    // storms.freeze_automatic: an action, not a field -- the live automatic
+    // cells become authored ones (atmosphere::freezeStormCells), after the
+    // rest of the patch is applied.
+    bool freeze = false;
+    if (patch.contains("storms") && patch["storms"].is_object() &&
+        patch["storms"].contains("freeze_automatic")) {
+        const auto& f = patch["storms"]["freeze_automatic"];
+        if (!f.is_boolean()) return Result::fail("storms.freeze_automatic must be a boolean");
+        freeze = f.get<bool>();
+        patch["storms"].erase("freeze_automatic");
+    }
+
     nlohmann::json cur;
     atmosphere::cloudsToJson(g_ctx->renderer.world.getClouds(), cur);
     mergeCloudPatch(cur, patch);
     atmosphere::CloudState next;
     std::string error;
     if (!atmosphere::cloudsFromJson(cur, next, &error)) return Result::fail(error);
+    if (freeze) {
+        const World& world = g_ctx->renderer.world;
+        atmosphere::freezeStormCells(next, world.getCloudTime(), world.cloudWindVelocity());
+        if (!atmosphere::validateClouds(next, &error)) return Result::fail(error);
+    }
     return commit(next);
 }
 
