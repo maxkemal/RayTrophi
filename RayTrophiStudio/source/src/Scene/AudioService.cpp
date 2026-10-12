@@ -403,7 +403,12 @@ json AudioService::invoke(const std::string& op, const json& p) {
             e["name"] = e.at("name").get<std::string>() + " Copy";
         } else {
             require(!p.contains("id"), "Emitter ids are allocated by the service");
-            e = emitter(p);
+            json settings = p;
+            const auto assetId = p.value("asset_id", std::string());
+            if (!p.contains("spatial") && !assetId.empty()) {
+                settings["spatial"] = s.find("assets", assetId).at("channels") == 1;
+            }
+            e = emitter(settings);
         }
         s.validateAsset(e);
         e["id"] = s.id("audio_source_");
@@ -414,6 +419,12 @@ json AudioService::invoke(const std::string& op, const json& p) {
         auto& old = s.find("emitters", p.at("id"));
         json combined = old;
         combined.update(p);
+        if (p.contains("asset_id") && !p.contains("spatial")) {
+            const auto assetId = p.at("asset_id").get<std::string>();
+            if (!assetId.empty() && p.at("asset_id") != old.at("asset_id")) {
+                combined["spatial"] = s.find("assets", assetId).at("channels") == 1;
+            }
+        }
         json e = emitter(combined);
         s.validateAsset(e);
         if (e.at("reaction") != old.at("reaction")) {
@@ -475,6 +486,8 @@ json AudioService::invoke(const std::string& op, const json& p) {
         const std::string id = p.at("id");
         const auto e = s.find("emitters", id);
         if (op == "play") {
+            require(!e.at("asset_id").get<std::string>().empty(),
+                    "No audio asset is bound. Import a file, then choose it in the Asset field.");
             const auto pose = s.poses.find(id);
             require(pose == s.poses.end() || pose->second.at("valid").get<bool>(),
                     "Audio parent is unavailable");

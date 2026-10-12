@@ -1,0 +1,28 @@
+{
+  "id": "rt_cc0_wind_gust_mono",
+  "name": "Wind Gust Mono",
+  "type": "asset",
+  "assetKind": "audio",
+  "category": "audio",
+  "subcategory": "cc0_starter",
+  "format": "wav",
+  "entry": "wind_gust_mono.wav",
+  "description": "Mono derivative for positional wind-gust tests; not a seamless loop.",
+  "license": "CC0-1.0",
+  "source": "https://opengameart.org/content/short-wind-sound",
+  "author": "remaxim",
+  "tags": [
+    "audio",
+    "cc0",
+    "starter",
+    "wind",
+    "gust",
+    "mono",
+    "positional"
+  ],
+  "version": 1,
+  "duration": 4.235306122448979,
+  "channels": 1,
+  "sampleRate": 44100,
+  "loopSuitable": false
+}

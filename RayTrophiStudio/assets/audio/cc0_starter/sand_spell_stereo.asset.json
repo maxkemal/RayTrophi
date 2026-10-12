@@ -1,0 +1,30 @@
+{
+  "id": "rt_cc0_sand_spell_stereo",
+  "name": "Sand Spell Stereo",
+  "type": "asset",
+  "assetKind": "audio",
+  "category": "audio",
+  "subcategory": "cc0_starter",
+  "format": "flac",
+  "entry": "sand_spell_stereo.flac",
+  "description": "Mouth-made sand-spell hiss; synthetic proxy, not actual sand pouring.",
+  "license": "CC0-1.0",
+  "source": "https://opengameart.org/content/sand-spell",
+  "author": "qubodup",
+  "tags": [
+    "audio",
+    "cc0",
+    "starter",
+    "sand",
+    "hiss",
+    "synthetic",
+    "oneshot",
+    "stereo",
+    "ambience"
+  ],
+  "version": 1,
+  "duration": 1.1793541666666667,
+  "channels": 2,
+  "sampleRate": 96000,
+  "loopSuitable": false
+}

@@ -1,0 +1,30 @@
+{
+  "id": "rt_cc0_sand_hiss_mono",
+  "name": "Sand Hiss Mono",
+  "type": "asset",
+  "assetKind": "audio",
+  "category": "audio",
+  "subcategory": "cc0_starter",
+  "format": "wav",
+  "entry": "sand_hiss_mono.wav",
+  "description": "Mono synthetic sand-hiss proxy for positional contact tests; not a seamless loop.",
+  "license": "CC0-1.0",
+  "source": "https://opengameart.org/content/sand-spell",
+  "author": "qubodup",
+  "tags": [
+    "audio",
+    "cc0",
+    "starter",
+    "sand",
+    "hiss",
+    "synthetic",
+    "oneshot",
+    "mono",
+    "positional"
+  ],
+  "version": 1,
+  "duration": 1.1793541666666667,
+  "channels": 1,
+  "sampleRate": 96000,
+  "loopSuitable": false
+}

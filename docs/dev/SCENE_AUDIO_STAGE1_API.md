@@ -12,6 +12,9 @@ are later stages. No build, application launch or generated test script was perf
 Add > Audio Source creates an unbound non-geometric scene object. Scene hierarchy has
 an Audio Sources group. The existing Scene properties dock contains a Scene Audio
 section for imports, asset preview/relink/removal, source properties and playback.
+The bundled CC0 starter files live in RayTrophiStudio/assets/audio/cc0_starter with
+per-file metadata, provenance hashes and the license text. Assets can append these
+directly; see the pack README for mono/stereo variants and loop suitability.
 Import and Relink open the existing native file chooser with WAV/FLAC/MP3 filters;
 canceling leaves the scene unchanged. The selected path is shown read-only.
 Assets discovers WAV/FLAC/MP3, displays an AUDIO badge and metadata, supports audition
@@ -77,6 +80,11 @@ for stage 2; stage 1 plays through the master engine without bus gain/solo contr
 Unknown emitter properties, invalid ids, malformed vectors, NaN/Infinity and invalid
 ranges fail before the source record changes. Mono is required for spatial sources;
 stereo ambience uses spatial=False. Empty sources can be authored but cannot play.
+When creating a bound source or changing its asset binding without an explicit
+spatial parameter, the service selects mono spatial / stereo ambience automatically.
+Explicit spatial=True with stereo still fails. UI shows a stereo ambience notice,
+disables positional mode for a stereo binding, and highlights errors above controls.
+An unbound source shows an explanation and its Play button is disabled.
 
 ```python
 asset = rt.audio.asset_import(path=r"D:\Sounds\rain.flac", license="CC0")

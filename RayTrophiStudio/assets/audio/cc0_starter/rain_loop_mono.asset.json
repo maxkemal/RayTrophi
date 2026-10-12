@@ -1,0 +1,29 @@
+{
+  "id": "rt_cc0_rain_loop_mono",
+  "name": "Rain Loop Mono",
+  "type": "asset",
+  "assetKind": "audio",
+  "category": "audio",
+  "subcategory": "cc0_starter",
+  "format": "wav",
+  "entry": "rain_loop_mono.wav",
+  "description": "Mono rain-loop derivative for positional tests.",
+  "license": "CC0-1.0",
+  "source": "https://opengameart.org/content/40-cc0-water-splash-slime-sfx",
+  "author": "rubberduck",
+  "tags": [
+    "audio",
+    "cc0",
+    "starter",
+    "rain",
+    "weather",
+    "loop",
+    "mono",
+    "positional"
+  ],
+  "version": 1,
+  "duration": 6.8265416666666665,
+  "channels": 1,
+  "sampleRate": 48000,
+  "loopSuitable": true
+}

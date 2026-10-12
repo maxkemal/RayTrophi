@@ -1,0 +1,29 @@
+{
+  "id": "rt_cc0_water_splash_mono",
+  "name": "Water Splash Mono",
+  "type": "asset",
+  "assetKind": "audio",
+  "category": "audio",
+  "subcategory": "cc0_starter",
+  "format": "wav",
+  "entry": "water_splash_mono.wav",
+  "description": "Water splash one-shot; not a flowing loop.",
+  "license": "CC0-1.0",
+  "source": "https://opengameart.org/content/40-cc0-water-splash-slime-sfx",
+  "author": "rubberduck",
+  "tags": [
+    "audio",
+    "cc0",
+    "starter",
+    "water",
+    "splash",
+    "oneshot",
+    "mono",
+    "positional"
+  ],
+  "version": 1,
+  "duration": 1.3810833333333334,
+  "channels": 1,
+  "sampleRate": 48000,
+  "loopSuitable": false
+}

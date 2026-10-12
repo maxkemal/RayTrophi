@@ -1,0 +1,29 @@
+{
+  "id": "rt_cc0_slime_squelch_mono",
+  "name": "Slime Squelch Mono",
+  "type": "asset",
+  "assetKind": "audio",
+  "category": "audio",
+  "subcategory": "cc0_starter",
+  "format": "wav",
+  "entry": "slime_squelch_mono.wav",
+  "description": "Slime squelch used as a mud-contact test proxy; not a mud field recording.",
+  "license": "CC0-1.0",
+  "source": "https://opengameart.org/content/40-cc0-water-splash-slime-sfx",
+  "author": "rubberduck",
+  "tags": [
+    "audio",
+    "cc0",
+    "starter",
+    "slime",
+    "mud-proxy",
+    "oneshot",
+    "mono",
+    "positional"
+  ],
+  "version": 1,
+  "duration": 0.47310416666666666,
+  "channels": 1,
+  "sampleRate": 48000,
+  "loopSuitable": false
+}

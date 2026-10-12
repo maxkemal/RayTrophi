@@ -2119,6 +2119,15 @@
           DestinationFiles="@(RayTrophiScript->'$(OutDir)scripts\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
+  <Target Name="CopyAudioStarterAssets" AfterTargets="Build"
+          Condition="Exists('$(ProjectDir)assets\audio\cc0_starter')">
+    <ItemGroup>
+      <RayTrophiAudioStarter Include="$(ProjectDir)assets\audio\cc0_starter\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(RayTrophiAudioStarter)"
+          DestinationFiles="@(RayTrophiAudioStarter->'$(OutDir)assets\audio\cc0_starter\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
   <Target Name="CopyTemplatePackages" AfterTargets="Build"
           Condition="Exists('$(ProjectDir)assets\templates')">
     <ItemGroup>
