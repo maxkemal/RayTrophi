@@ -10,6 +10,9 @@
 //                       +0 base noise (sampler3D), +1 detail noise (sampler3D),
 //                       +2 curl (sampler2D), +3 weather map (sampler2D),
 //                       +4 CloudParams (std430 buffer)
+//   CLOUD_CELL_BINDING  storm cell map (sampler2D, cloud_cells.comp;
+//                       docs/dev/ATMOSPHERE_STORMS.md): two fields stacked,
+//                       upper half cells, lower half cell structure
 //
 // Units: world metres (scene Y up), extinction 1/m. Altitude above sea level
 // = distance from the planet centre - planet radius; the scene sits at
@@ -25,6 +28,9 @@
 #ifndef CLOUD_BINDING_BASE
 #error "cloud_common.glsl: define CLOUD_BINDING_BASE"
 #endif
+#ifndef CLOUD_CELL_BINDING
+#error "cloud_common.glsl: define CLOUD_CELL_BINDING"
+#endif
 
 struct CloudLayerG {
     vec4 a;   // base_altitude_m, thickness_m, coverage, type
@@ -33,15 +39,10 @@ struct CloudLayerG {
     vec4 d;   // inverse yaw cos, sin; formation role, group
     vec4 e;   // effective RGB albedo, phase override (2 = droplet fit)
     vec4 f;   // effective emission RGB, reserved
-    vec4 g;   // group base, height, inverse footprint period, reserved
+    vec4 g;   // group base, height, inverse footprint period, base raggedness
 };
 
-struct CloudLightningG {
-    vec4 start;
-    vec4 end;
-    vec4 color;
-    vec4 stage;
-};
+#include "cloud_lightning_light.glsl"   // CloudLightningG, CloudFlashLightG
 
 layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 0) uniform sampler3D cloudBaseNoise;
 layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 1) uniform sampler3D cloudDetailNoise;
@@ -58,10 +59,41 @@ layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 4, std430) readonly buffe
     vec4 scatterAlbedo; // RGB albedo, HG g override (2 = droplet fit)
     vec4 emissionSource; // RGB source radiance, reserved
     vec4 cirrusDirection; // along-wind x,z; camera weather time, reserved
+    vec4 storms;    // cell map centre x, z, 1/size, enabled
+    vec4 storms2;   // stratiform rain share, reserved
     CloudLightningG lightning[4];
+    CloudFlashLightG flash[4];   // lit cloud base per event (CPU-built)
+    CloudBoltSegG bolt[160];     // channel network, 40 per event (CPU-built)
 } cloudParams;
 
+layout(set = CLOUD_SET, binding = CLOUD_CELL_BINDING) uniform sampler2D cloudCellMap;
+
 const float CLOUD_PI = 3.14159265358979;
+
+// The cell map stacks two fields (cloud_cells.comp); `sheet` 0 = cells,
+// 1 = structure. v is clamped half a texel inside its half so the linear
+// filter never blends the two.
+vec4 cloudStormMapAt(vec3 p, float sheet) {
+    if (cloudParams.storms.w < 0.5) return vec4(0.0);
+    vec2 uv = (p.xz - cloudParams.storms.xy) * cloudParams.storms.z + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return vec4(0.0);
+    float texel = 1.0 / float(textureSize(cloudCellMap, 0).y);
+    uv.y = sheet * 0.5 + clamp(uv.y * 0.5, 0.5 * texel, 0.5 - 0.5 * texel);
+    return textureLod(cloudCellMap, uv, 0.0);
+}
+
+// Storm cells at p (world): R cover floor, G tower (genus floor), B convective
+// rain potential, A dilated cover majorant. Zero outside the map or with the
+// storm system off. One fetch; the cell loop lives in cloud_cells.comp.
+vec4 cloudStormCellAt(vec3 p) {
+    return cloudStormMapAt(p, 0.0);
+}
+
+// Cell structure at p: RG swirl displacement of the shape lookup (m), B local
+// top as a share of the layer, A updraft (turret core). ATMOSPHERE_STORMS §3.1.
+vec4 cloudStormFlowAt(vec3 p) {
+    return cloudStormMapAt(p, 1.0);
+}
 
 float cloudRemap(float v, float lo, float hi, float nlo, float nhi) {
     return nlo + (v - lo) * (nhi - nlo) / max(hi - lo, 1e-5);
@@ -294,9 +326,16 @@ float cloudLayerDensityResolved(int li, vec3 p, float alt, bool detail,
     p = cloudShear(L, p, alt);
 
     vec4 w = cloudWeatherAt(L, p);
+    // Storm cells raise cover, genus and development locally; the weather
+    // noise still shapes their edges (ATMOSPHERE_STORMS.md §3).
+    vec4 cell = cloudStormCellAt(p);
+    // Cell structure (turrets, rotation): read only inside a cell's reach.
+    vec4 flow = cell.a > 0.0 ? cloudStormFlowAt(p) : vec4(0.0);
+    float cellW = smoothstep(0.05, 0.35, cell.r);
+    float lift = flow.w;
     // Per-cell development (weather A): shallow cells sit a little higher
     // (no perfectly flat base across the field) and stop lower.
-    float dev = w.a;
+    float dev = max(w.a, cell.g);
     if (!stormRegion) {
         h = (h - (1.0 - dev) * 0.04) / (1.0 - (1.0 - dev) * 0.04);
     }
@@ -304,11 +343,17 @@ float cloudLayerDensityResolved(int li, vec3 p, float alt, bool detail,
     // Local coverage: the weather channel is ~uniform (CDF-flattened in the
     // generator), so thresholding it at 1 - coverage covers ~coverage of sky.
     float cov = clamp(cloudRemap(w.r, 1.0 - L.a.z, 1.0, 0.0, 1.0), 0.0, 1.0);
+    cov = max(cov, cell.r * mix(0.7, 1.0, w.r));   // <= cell.a: the majorant holds
     if (cov <= 0.0) return 0.0;
     float type = clamp(L.a.w + (w.g - 0.5) * cloudParams.weather.y, 0.0, 1.0);
+    type = max(type, cell.g);
     vec3 drift = vec3(cloudParams.wind.x, 0.0, cloudParams.wind.y);
     float evo = cloudParams.weather.z;
-    vec3 relativePosition = cloudShapeCoordinates(li, p - drift);
+    // The cell's rotation winds the SHAPE lookup (never the weather or the
+    // coverage: the majorant holds). Strongest at mid levels.
+    vec3 shapeP = p;
+    shapeP.xz += flow.xy * mix(0.55, 1.0, smoothstep(0.0, 0.5, h));
+    vec3 relativePosition = cloudShapeCoordinates(li, shapeP - drift);
     int group = int(L.d.w + 0.5);
     vec3 phase = cloudShapePhase(group > 0 ? group - 1 : li);
     float stormEnvelope = 1.0;
@@ -349,6 +394,10 @@ float cloudLayerDensityResolved(int li, vec3 p, float alt, bool detail,
     // has a floor; cell aspect stays ~1 (fair-weather cumulus are as tall as wide).
     float topFrac = mix(1.0, mix(0.45, 1.0, sqrt(cov)) *
                         mix(0.55, 1.0, development), convective);
+    // Inside a storm cell the top is the cell's own: rising turrets reach
+    // their heights, the body between them stays lower (cloud_cells.comp).
+    // Without this the cell's full cover made one flat slab of the layer.
+    if (flow.z > 0.0) topFrac = mix(topFrac, max(flow.z, 0.25), cellW);
     if (stormRegion) topFrac = 1.0;
     float hh = h / topFrac;
     if (stormRegion) hh = (alt - L.g.x) / max(L.g.y, 1.0);
@@ -370,6 +419,8 @@ float cloudLayerDensityResolved(int li, vec3 p, float alt, bool detail,
     float verticalScale = mix(1.0, mix(0.42, 0.85, cellGrowth), convective);
     verticalScale = mix(verticalScale, mix(0.8, 1.4, cellGrowth), towering);
     if (stormRegion) verticalScale = 0.75;
+    // Rising turrets: taller billows.
+    verticalScale *= mix(1.0, 0.75, lift);
     float shapeBase = stormRegion ? L.g.x : L.a.x;
     vec3 q = vec3(relativePosition.x, alt - shapeBase, relativePosition.z) *
              L.c.x * vec3(1.0, verticalScale, 1.0) + phase +
@@ -421,7 +472,12 @@ float cloudLayerDensityResolved(int li, vec3 p, float alt, bool detail,
     float verticalDetail = max(1.0 - smoothstep(0.04, 0.16, hh),
                                smoothstep(0.78, 0.94, hh));
     float detailWeight = stormRegion ? max(boundaryDetail, verticalDetail) : 1.0;
-    if (detailWeight <= 0.0) return shapeN * covScale * L.b.x;
+    // Ragged base band (CloudLayer::base_raggedness): the bottom 120-600 m.
+    float rag = L.g.w;
+    float bandM = clamp((stormRegion ? L.g.y : L.a.y) * 0.1, 120.0, 600.0) * mix(0.5, 1.0, rag);
+    float hb = (stormRegion ? alt - L.g.x : h * L.a.y) / bandM;
+    bool inBand = rag > 0.0 && hb < 1.0;
+    if (detailWeight <= 0.0 && !inBand) return shapeN * covScale * L.b.x;
 
     // Curl-distorted erosion: protect the flat convective base, expose
     // cauliflower crowns and keep stratiform edges softer. The cheap shape
@@ -434,13 +490,32 @@ float cloudLayerDensityResolved(int li, vec3 p, float alt, bool detail,
               formationWarp * 0.35 + vec3(evo * 1.3);
     vec4 d = textureLod(cloudDetailNoise, dq, 0.0);
     float dfbm = d.r * 0.625 + d.g * 0.25 + d.b * 0.125;
-    float crown = smoothstep(0.15, 0.65, hh) * convective;
+    float crown = max(smoothstep(0.15, 0.65, hh) * convective,
+                      lift * smoothstep(0.3, 0.8, hh));
     float dmod = mix(dfbm, 1.0 - dfbm, crown);
     float erosionHeight = mix(0.65, mix(0.2, 1.0, baseProtection), convective);
+    // An updraft core is hard-edged cauliflower, not wisps: less erosion.
     float erosionThreshold = dmod * L.b.z * mix(0.45, 0.72, towering) *
-                             erosionHeight * detailWeight;
+                             erosionHeight * detailWeight * mix(1.0, 0.5, lift);
     float dens = clamp(cloudRemap(shapeN, erosionThreshold, 1.0, 0.0, 1.0),
                        0.0, 1.0);
+    if (inBand) {
+        // A flat condensation base cut by one plane read as a sheet. Large
+        // hanging lobes stay where the formation field peaks (km scale, the
+        // same read that organises the towers); between them the base
+        // retreats up to 75% of the band, and the lobe undersides billow
+        // with the base texture's mid octave. Detail pass only: it removes
+        // density, so the cheap shape stays the majorant, the light-march
+        // bound and the rain footprint.
+        float lobes = smoothstep(0.38, 0.72, nL.g);
+        float retreat = (1.0 - lobes) * 0.75 * rag;
+        float underside = (n.a - 0.5) * 0.3 * rag;
+        float body = smoothstep(retreat - 0.1, retreat + 0.15, hb + underside);
+        // Fractus: small detached pieces in the retreated gap, from the
+        // detail octaves (independent of the lobe field, so they float free).
+        float pieces = smoothstep(0.6, 0.82, d.g * 0.6 + d.b * 0.4) * (1.0 - body) * rag;
+        dens *= max(body, pieces * 0.85);
+    }
     return dens * covScale * L.b.x;
 }
 
@@ -505,14 +580,20 @@ float cloudPrecipSample(vec3 p, out vec3 fallLine) {
         if (fade <= 0.0) return 0.0;
     }
     vec4 w = cloudWeatherAt(L, src);
-    if (w.b <= 0.0) return 0.0;
+    // Where it rains at all: with storm cells, under their convective cores
+    // (and their wide dissipating rain), plus a stratiform share of the dense
+    // cover elsewhere. Without them, every dense cluster core (weather B).
+    float potential = w.b;
+    if (cloudParams.storms.w > 0.5)
+        potential = max(cloudStormCellAt(src).b, cloudParams.storms2.x * w.b);
+    if (potential <= 0.0) return 0.0;
     float baseShape;
     cloudLayerDensityResolved(0, src, L.a.x + min(0.1 * L.a.y, 300.0), false, baseShape);
     float footprint = smoothstep(0.06, 0.45, baseShape / max(L.b.x, 1e-6));
     if (footprint <= 0.0) return 0.0;
     // Fringed top: bundles leave the base over 60..450 m, staggered per column.
     float top = smoothstep(0.0, mix(60.0, 450.0, tassel), below);
-    return rate * w.b * footprint * fade * top;
+    return rate * potential * footprint * fade * top;
 }
 
 float cloudPrecipAt(vec3 p) {

@@ -68,6 +68,11 @@ struct CloudLayer {
     float droplet_diameter_um = 10.0f;
     // How much the detail noise eats the edges, 0..1.
     float erosion = 0.5f;
+    // Ragged base, 0..1: 0 = flat condensation base; higher = the base breaks
+    // into large hanging lobes with small detached fractus pieces between
+    // them (cloud_common.glsl). Carved by the detail pass only, so it never
+    // adds density: the authored base altitude is the lowest lobe.
+    float base_raggedness = 0.6f;
     // Characteristic cloud size (base-shape noise period) and detail size, m.
     float cell_size_m = 1800.0f;
     float detail_size_m = 180.0f;
@@ -111,6 +116,10 @@ struct CloudQuality {
     // RayFusion (Faz 3c).
     int realtime_steps = 128;
     int realtime_resolution_divisor = 1;   // 2 shook under wind drift in play, 4 blurred detail (by eye)
+    // Marched pixels per frame = 1 / (N x N) of the cloud target; the rest
+    // are carried by a full-resolution history (cloud_resolve.comp). 2 costs
+    // what divisor 2 cost, at full resolution. 1 = every pixel every frame.
+    int realtime_interleave = 2;
     // RT secondary rays: false = cloud-aware sky panorama (decision 2),
     // true = full march (slow, unbiased).
     bool rt_secondary_full_march = false;
@@ -134,15 +143,88 @@ struct CloudLightning {
     float rate_per_minute = 6.0f;
     float intensity = 30.0f;
     Vec3 color = Vec3(0.65f, 0.78f, 1.0f);
-    Vec3 center_m = Vec3(0.0f);  // world x/z; y is unused
-    float extent_m = 20000.0f;
+    // Where: only from mature storm cells (CloudStorms). The old authored
+    // centre/extent square moved there as the storm domain.
     float ground_altitude_m = 0.0f;
     float ground_strike_fraction = 0.15f;
+    // Share of the ground strikes that are UPWARD lightning: the leader
+    // starts on the ground (a peak, a tower) and branches up into the cloud.
+    float upward_fraction = 0.1f;
     float bolt_radius_m = 2.0f;
     float duration_s = 0.8f;
     float horizontal_span_m = 12000.0f;
     float branching = 0.75f;
+    // Camera exposure the flash is averaged over, s (0 = instantaneous).
+    // ~1/30: what a video frame integrates; removes re-stroke strobing.
+    float shutter_s = 1.0f / 30.0f;
+    // Radiance of the channel core relative to the lit cloud (`intensity`).
+    // A real channel is far brighter than the cloud it lights.
+    float channel_brightness = 8.0f;
 };
+
+// Storm systems (docs/dev/ATMOSPHERE_STORMS.md). Convective cells that are a
+// pure function of (seed, time): born in the storm domain, carried by the
+// wind like the weather map under them, growing -> mature -> dissipating.
+// They raise the local cloud cover and genus, place the convective rain and
+// are the only source of lightning.
+constexpr int kMaxAutoStormCells = 16;
+constexpr int kMaxManualStormCells = 8;
+constexpr int kMaxStormCells = kMaxAutoStormCells + kMaxManualStormCells;
+
+// An authored cell. lifetime_s <= 0: permanently mature (art direction).
+struct StormCell {
+    Vec3 position_m = Vec3(0.0f);   // world x/z at birth; y unused
+    float radius_m = 3500.0f;
+    float intensity = 1.0f;         // peak 0..1
+    float birth_s = 0.0f;           // cloud time
+    float lifetime_s = 0.0f;
+};
+
+struct CloudStorms {
+    bool enabled = false;
+    // max_cells, intensity, stratiform_rain and enabled follow the climate
+    // (instability, humidity, genus); the panel shows them read-only.
+    bool derive_from_climate = true;
+    Vec3 center_m = Vec3(0.0f);     // storm domain, world x/z; y unused
+    float extent_m = 40000.0f;
+    int max_cells = 6;              // concurrent automatic cells, 0..16
+    float cell_radius_m = 3500.0f;  // mean mature radius
+    float lifetime_s = 2400.0f;     // mean cell life
+    float intensity = 0.8f;         // mean peak strength 0..1
+    // Broad light rain under dense cover OUTSIDE the cells, as a share of
+    // the peak rate (stratiform / frontal rain). 0 = only cells rain.
+    float stratiform_rain = 0.1f;
+    // Cell structure (ATMOSPHERE_STORMS.md §3.1). rotation: mesocyclone
+    // strength, signed (+ = counter-clockwise seen from above). turrets: how
+    // much the cell is a few rising updraft towers (1) instead of one uniform
+    // column (0).
+    float rotation = 0.4f;
+    float turrets = 0.8f;
+    std::vector<StormCell> cells;   // authored, <= kMaxManualStormCells
+};
+
+// One cell evaluated at a time: what the GPU cell map, the lightning and
+// world.cloud_stats all read (one definition).
+struct StormCellState {
+    float x = 0.0f, z = 0.0f;       // world, current (drifted)
+    float radius_m = 0.0f;
+    float life = 0.0f;              // age / lifetime, 0..1 (0.5 for permanent)
+    float coverage = 0.0f;          // cover floor at the core, 0..1
+    float tower = 0.0f;             // genus floor (towering), 0..1
+    float convective_rain = 0.0f;   // core rain potential, 0..1
+    float stratiform_rain = 0.0f;   // wide light rain potential, 0..1
+    float lightning = 0.0f;         // flash weight, 0..1
+    float age_s = 0.0f;             // since birth (turret cycles)
+    uint32_t id = 0;                // stable for the cell's life (turret seeds)
+    bool manual = false;
+    int manual_index = -1;          // index in CloudStorms::cells, or -1
+};
+
+// Live cells at `time_s` (cloud time) moving with `wind_mps`. Writes at most
+// kMaxStormCells, returns the count. Pure: same inputs, same cells.
+struct CloudState;
+int evaluateStormCells(const CloudState& clouds, float time_s, const Vec3& wind_mps,
+                       StormCellState* out);
 
 struct CloudState {
     // Layer 0 follows the climate (docs/dev/ATMOSPHERE_WEATHER.md §2): base =
@@ -158,6 +240,7 @@ struct CloudState {
     CloudMaterial material;
 
     CloudLightning lightning;
+    CloudStorms storms;
 
     bool anyEnabled() const;
 };

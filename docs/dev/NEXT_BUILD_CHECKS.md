@@ -1,78 +1,128 @@
-# 2026-10-11 parti 6: yağış perdeleri — zemin tabanı, bulut çerçevesinde eğim, hücre ayak izi, salkım, arazi önü
+# 2026-10-12 parti 11: hücre içi yapı (kuleler + girdap) · basınç → hava · fırtına gizmosu · yukarı yönlü yıldırım
 
-Önceki parti (gizmo derinlik testi) commit'li (`c23169d`). Bu parti iki turda
-yazıldı, ikisi de DERLENMEDİ.
+Parti 10 derlendi; kullanıcı elle konan hücrenin doğru çalıştığını gördü.
+Parti 9 ve 10'un geri kalan maddeleri ölçülmedi; listenin sonunda kısaca
+duruyorlar. Parti 7–11 commit edilmedi.
 
-**Belirti (kullanıcı, canlı sahne):** RT ve RayFusion'da kamera y < 0'a inince
-güneş yönünden bağımsız, çapraz gelen "god ray" benzeri şeritler; y > 0'da
-neredeyse yok; yağış açılınca artıyor. Yağış perdeleri de kaba.
+Tasarım: `docs/dev/ATMOSPHERE_STORMS.md` §3.1, §5, §7.
 
-**Ölçüm (IPC, düzeltme öncesi):** kamera y = -3693, katman 0 tabanı 1200 m,
-rüzgâr 33.9 m/s, yağış 0.5 mm/h. `rate_mm_h = 0` yapınca ufkun altındaki
-şeritler tamamen kayboldu → kaynak yağış perdesi march'ı.
+## Özet
+- **Hücre haritası 256×512.** Üst yarı eski alanlar. Alt yarı yeni:
+  - RG: girdap kayması
+  - B: yerel tepe
+  - A: updraft
+  Ayrı binding yok, iki yarı arası filtre sızıntısı yarım texel kıskacıyla
+  önleniyor. `CloudCellGPU` 48 B oldu (id, yaş, dönüş, kule).
+- **Kuleler:** Hücre başına 5 updraft. Her biri kendi ~15 dk döngüsünde
+  doğuyor, yükseliyor ve çöküyor. Kuleler arasında gövde katmanın yarısı
+  kadar; örtü orada %70.
+- **Girdap:** Şekil okuması hücre merkezi etrafında döndürülüyor
+  (spiral bantlar).
+- **Updraft:** Kule çekirdeğinde erozyon yarıya iniyor, kabarmalar daha uzun.
+- **Yeni alanlar:**
+  - `storms.turrets` (0..1, varsayılan 0.8)
+  - `storms.rotation` (−1..1, varsayılan 0.4)
+  - `lightning.upward_fraction` (0..1, varsayılan 0.1)
+- **Basınç:** `deriveWeather`, deniz seviyesi basınç sapmasını okuyor.
+  Alçak basınç örtüyü, konveksiyonu, hücreleri ve geniş yağmuru artırıyor.
+  Yüksek basınç örtüyü siliyor, tepeleri kesiyor ve fırtınayı bastırıyor.
+  `world.get_weather.derived.synoptic_lift` alanı eklendi.
+- **Gizmo:** Yeni `StormGizmoUI.cpp`.
+  - Hücreler kolon olarak çiziliyor, renk evreyi gösteriyor.
+  - Elle konan hücreler ve alan merkezi XZ'de sürüklenebiliyor.
+  - Yazma `rtapi::setCloudsJson` üzerinden yapılıyor.
+- **Yukarı yönlü yıldırım:**
+  - Kanal yerden başlıyor, çatallar buluta doğru açılıyor, örümcek ağı
+    bulutun içinde.
+  - Dallar dönüş vuruşunda sönmüyor.
+  - `cloud_stats.lightning[].kind` = `upward`.
+- Yeni `.cpp` dosyası vcxproj ve filters'a eklendi.
 
-**Kök nedenler:**
-1. Gök ışını için zemin tabanı yoktu (yalnız deniz seviyesi küresi). Zemin altındaki
-   kamera aşağı bakınca 40 km kesintisiz yağmur görüyordu.
-2. Eğim = rüzgâr / düşüş hızı ≈ 5.2 m/m → perde ~80° yatık. Hava haritası zaten
-   rüzgârla sürükleniyor; düzgün rüzgârda perde bulut çerçevesinde DİKEY olmalı.
-3. Ayak izi 12 km'lik hava lekesi, çizgiler 1 km × 18 km → kaba levhalar.
-
-**Değişiklik:**
-- `cloud_common.glsl` `cloudPrecipSample`:
-  - düşüş çizgisi bulut çerçevesinde geriye izlenir (karesel, sürüklenen ayak);
-  - ayak izi = katman 0'ın taban şekli, curl ile aşağı doğru açılıp saçaklanır;
-  - salkım: sütun başına kademeli kopma derinliği (60–450 m) ve virga ucu
-    (gf × 0.55–1.3);
-  - çizgiler düşüş çizgisi boyunca iki oktav (420 / 110 m, ortalama ~1).
-- `cloudSegmentMayContain`: optik derinliği 1e-3'e ulaşamayacak kısa segmentler
-  (iç mekân sekmeleri) yağış march'ını atlar.
-- `cloud_rt.glsl` `cloudPrecipMarch`:
-  - yüzeye çarpan ışında perde yüzeyde biter (y < 0 vadiler dahil); y = 0 tabanı
-    yalnız hiçbir şeye çarpmayan ışına uygulanır;
-  - çizgi detayı adım boyuna göre söner (120–600 m).
-- `CloudParams.h`: `precip[2..3]` = rüzgâra karşı gecikme / m düşüş, zeminde =
-  0.4·U / düşüş hızı, ≤ 1.5.
-- Arazi önündeki perde zaten iki yolda çağrılıyordu (`cloud_hit_segment.glsl`,
-  `cloud_scene.comp`); "yalnız gök ışını" yorumu bayattı, düzeltildi.
-
-Shader değişti → **`compile_shaders.bat` + C++ derlemesi** (CloudParams.h).
+---
 
 ## Kontrol listesi (sırayla)
 
-1. **Shader derleniyor mu** — `compile_shaders.bat` hatasız; özellikle `cloud_raster`,
-   `cloud_scene`, `cloud_shadow`, `cloud_sample`, `miss`, `raygen`, `closesthit`.
-   Bozuksa: hata satırını bildir.
+1. **Derleme + shader'lar.**
+   - Görmen gereken: hata yok. Log'da `cloud_cells pipeline unavailable` YOK.
+   - Bozuksa: `StormGizmoUI.cpp` link hatası verirse vcxproj satırı eksik
+     demektir.
 
-2. **Zemin altı, yağış açık (ana belirti)** — kamera y ≈ -3700, sahnede arazi yok,
-   RT ve RayFusion. Ufkun ALTINDA şerit olmamalı.
-   Bozuksa: önce exe/spv zaman damgası, sonra `world.get_atmosphere` altitude.
+2. **Basınç (IPC, görüntüden önce).**
+   - Yap: `world.set_climate {surface_pressure_pa: 98300}`, ardından
+     `world.get_weather`. Sonra `103800` ile tekrarla.
+   - Görmen gereken:
+     - Alçakta `synoptic_lift` ≈ +1; örtü, `storm_cells` ve
+       `stratiform_rain` artar.
+     - Yüksekte ≈ −1; örtü ×0.3, kalınlık ≤ 1500 m, `storm_cells` 0'a yakın.
+     - 101325'te değerler eskisiyle aynı.
+   - Bozuksa: değerler değişmiyorsa `rederiveClouds` çağrılmıyor demektir;
+     panelde "Derive from climate" kapalı olabilir.
+   - ★ Sinsi olan: elle kurulmuş (türetilmemiş) bir katman basınçtan
+     ETKİLENMEZ. Bu beklenen davranış, bug değil.
 
-3. **Zemin altı, yağış KAPALI** — ufkun altında güneş yönünde hafif ışık kalırsa
-   AYRI konu (aerial/froxel). Bu partide dokunulmadı; bana söyle.
+3. **Hücre listesi yeni alanlarla.**
+   - Bak: `world.cloud_stats.storms.cells`.
+   - Görmen gereken: `age_s` artıyor. Elle konan hücrede `manual_index`
+     0, 1, …; otomatik hücrelerde −1.
 
-4. **Arazi önü (asıl istek)** — dağlı sahne, yağış 3–5 mm/h, kamera dağlara bakıyor;
-   RayFusion VE RT final render. Görmen gereken:
-   - perde dağın ÖNÜNDE asılı, yamaca değdiği yerde bitiyor;
-   - perdenin arkasındaki yamaç soluklaşıyor;
-   - tabandan sarkan tabanı saçaklı salkımlar;
-   - neredeyse dik, aşağı doğru genişleyen perdeler, ince lifler.
-   Bozuksa: perde yalnız gökte, dağın önünde yoksa RayFusion'da `cloud_scene`
-   geçişinin çalıştığını doğrula (bulutlar dağa çöküyorsa çalışıyor) ve
-   `rate_mm_h` > 0 olsun.
+4. **Gizmo.** Fırtına açık, elle bir hücre ekle.
+   - Görmen gereken:
+     - Yerden bulut tabanına halkalı kolonlar; renk evreye göre (büyüyen
+       mavi, olgun turuncu, dağılan gri, kalıcı sarı).
+     - Alan karesi ve "Storm domain" tutamağı.
+     - Hücre tutamağına tıklayınca XZ okları çıkar; sürükleyince hücre ve
+       bulut birlikte kayar, panel değerleri güncellenir.
+     - Boş yere tıklayınca seçim kalkar.
+   - Bozuksa:
+     - Tutamak nesne seçimini de tetikliyorsa `hit` yayılmıyor.
+     - Bırakınca hücre geri zıplıyorsa sürüklenme düzeltmesi yanlış
+       (ömrü > 0 olan hücre).
+   - ★ Sinsi olan: kolonlar sahne ölçeğinde çok büyük (km). Kamera yakınken
+     ekran dışında kalabilirler. Uzaklaşıp bak.
 
-5. **Virga salkımı** — `precipitation.ground_fraction = 0.5`. Perdeler yarı yolda,
-   FARKLI yüksekliklerde bitmeli (püsküllü uç). Hepsi aynı düz çizgide bitiyorsa
-   salkım gürültüsü etkisiz.
+5. **Hücre içi yapı (asıl istek).** Elle kalıcı hücre (ömür 0), RT.
+   - Görmen gereken:
+     - Tek düze blok yerine farklı yüksekliklerde 3–5 kule; aralarında daha
+       alçak gövde.
+     - Kule tepeleri sert karnabahar; spiral bant izi.
+     - Timeline oynarken kuleler dakikalar içinde yükselip çöker.
+   - Karşılaştır: `storms.turrets 0` eski düz kolonu, `rotation 0` girdapsız
+     hali vermeli.
+   - Bozuksa:
+     - Hücre kenarında yatay bir dikiş varsa iki yarı birbirine sızıyor
+       (uv kıskacı, `cloudStormMapAt`).
+     - Kulelerin yerine delikler varsa `flow.z` 0 okunuyor; topFrac 0.25'e
+       düşüyor.
+   - ★ Sinsi olan: katman ince ise (stratokümülüs, ~1–2 km) kuleler yine
+     alçak kalır, çünkü kule katmanı aşamaz. Kalın katmanla (türetilmiş
+     kararsız iklim) bak.
 
-6. **Kar** — `snow:true`, 1 mm/h. Daha eğik (≤ 56°) ama yere paralel değil.
+6. **Yukarı yönlü yıldırım.** `upward_fraction 1`, ground strike 1, gece.
+   - Görmen gereken:
+     - Kanal yerden yukarı büyür; çatallar yukarı ve buluta doğru açılır;
+       bulut içinde yatay ağ en son çıkar.
+     - Bağlandıktan sonra dallar parlak kalır.
+     - `cloud_stats.lightning[i].kind = "upward"`.
+     - `segments[0].a` yerde (y düşük), `appear` 0.
+   - Bozuksa: dallar hâlâ aşağı açılıyorsa start/end takası yapılmıyor.
 
-7. **★ Sessizce makul görünen sonuç:** rüzgâr yönünü 180° çevir (`world.set_climate`,
-   wind_direction [-1,0,0]). Ayak yine rüzgâra karşı tarafta kalmalı, yani yönle
-   birlikte dönmeli. Aynı tarafta kalıyorsa işaret ters: perde yine "makul" görünür
-   ama ayak bulutun önünde koşar.
+7. **Kare süresi (kule yükü).** Dünkü sahne, hücreler açık.
+   - Görmen gereken: parti 10'a göre fark küçük. Hücre içindeki örneklerde
+     ek bir doku okuması var; dışarıda yok.
+   - Bozuksa: belirgin artış varsa `cell.a > 0` kapısı çok geniş demektir;
+     dilation, majorant segmenti kadar.
 
-8. **Perf** — yağışlı/yağışsız RT ve RayFusion kare süresi. İç mekân + yağış açık
-   sahnede fark ~0 olmalı (kısa segment atlama). Açık arazide belirgin kayıp
-   (> %15) varsa bildir. Adım başına maliyet arttı: taban şekli + salkım + 2 çizgi
-   fetch'i.
+## Önceki partilerden ölçülmeyenler (kısa)
+- **Parti 10:**
+  - Yağış yalnızca hücre altında mı (`stratiform_rain 0`)?
+  - Şimşek yalnızca olgun hücreden mi çıkıyor?
+  - Oynatırken kare süresi (bekleme kaldırma).
+- **Parti 9:**
+  - Kanal ağı `segments`.
+  - Bulut içi ışık dalları izliyor mu?
+  - Play → durdur sonrası bloklaşma.
+
+## Bilinen
+- `scripts/audit_ipc_capabilities.py`, `audio.*` metotlarında FAIL veriyor.
+  Bunlar paralel ajanın ses işi, bu partiyle ilgisiz. Tarif tablosu
+  yeniden üretildi.

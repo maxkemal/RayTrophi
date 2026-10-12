@@ -1,0 +1,145 @@
+#version 460
+// Storm cell map (docs/dev/ATMOSPHERE_STORMS.md §3).
+//
+// Paints the live storm cells (CPU: atmosphere::evaluateStormCells, packed
+// by Backend::makeCloudCellsGPU) into a map around the storm domain. Every
+// cloud density sample then reads it instead of looping over the cells
+// (cloud_common.glsl: cloudStormCellAt / cloudStormFlowAt).
+//
+// The image is 256 x 512: two 256^2 fields stacked (one binding, no array
+// view). Rows 0..255, the cell fields:
+//   R  cover floor          (the layer is at least this covered)
+//   G  tower                (genus / development floor: towering)
+//   B  rain potential       (convective core on the forward flank, plus the
+//                            wide light rain of a dissipating cell)
+//   A  cover MAJORANT       R's cell envelope maximum over a disc of
+//                            `dilation` metres. The envelope falls
+//                            monotonically with the distance, so that maximum
+//                            is the envelope at d - dilation: analytic, no
+//                            second pass. R <= envelope everywhere (turrets
+//                            only remove cover), so A still bounds it.
+// Rows 256..511, the cell structure (§3.1):
+//   RG swirl              horizontal displacement (m) of the SHAPE lookup:
+//                          the cell's rotation winds its noise into spiral
+//                          bands (never the coverage, so the majorant holds)
+//   B  top fraction       local cloud top as a share of the layer: rising
+//                          turrets reach it, the body between them is lower
+//   A  updraft            turret core weight: crisp, less eroded towers
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct CloudCellG {
+    vec4 a;   // world x, z, radius m, cover floor
+    vec4 b;   // tower, convective rain, stratiform rain, lightning weight
+    vec4 c;   // id (0..65535), age s, rotation (signed 0..1), turret detail 0..1
+};
+
+layout(set = 0, binding = 0, std430) readonly buffer CloudCells {
+    vec4 header;   // count, map centre x, z, map size m
+    vec4 wind;     // wind direction x, z, majorant dilation m, reserved
+    CloudCellG cells[24];
+} cloudCells;
+
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D cellMap;
+
+const int kTurrets = 5;
+
+float cellCover(float d) {   // d = distance / radius
+    return 1.0 - smoothstep(0.55, 1.15, d);
+}
+
+uint cellHash(uint v) {
+    v ^= v >> 16u;
+    v *= 0x7feb352du;
+    v ^= v >> 15u;
+    v *= 0x846ca68bu;
+    return v ^ (v >> 16u);
+}
+
+float cellRandom(inout uint s) {
+    s = cellHash(s + 0x9e3779b9u);
+    return float(s & 0x00ffffffu) / 16777216.0;
+}
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 full = imageSize(cellMap);
+    ivec2 size = ivec2(full.x, full.y / 2);
+    if (px.x >= size.x || px.y >= size.y) return;
+    vec2 q = cloudCells.header.yz +
+             ((vec2(px) + 0.5) / vec2(size) - 0.5) * cloudCells.header.w;
+    vec2 windDir = cloudCells.wind.xy;
+    float dilation = cloudCells.wind.z;
+    vec4 o = vec4(0.0);
+    vec4 flow = vec4(0.0);
+    int count = min(int(cloudCells.header.x + 0.5), 24);
+    for (int i = 0; i < count; ++i) {
+        CloudCellG c = cloudCells.cells[i];
+        float r = max(c.a.z, 1.0);
+        float dist = length(q - c.a.xy);
+        float d = dist / r;
+        float envelope = cellCover(d);
+        o.a = max(o.a, c.a.w * cellCover(max(dist - dilation, 0.0) / r));
+        o.g = max(o.g, c.b.x * (1.0 - smoothstep(0.25, 0.9, d)));
+        // Heaviest rain on the forward flank: the core sits 0.3 r downwind.
+        float df = length(q - (c.a.xy + windDir * 0.3 * r)) / r;
+        float rain = max(c.b.y * (1.0 - smoothstep(0.0, 0.55, df)),
+                         c.b.z * (1.0 - smoothstep(0.3, 1.2, d)));
+        o.b = max(o.b, rain);
+        if (d >= 1.3) {
+            o.r = max(o.r, c.a.w * envelope);
+            continue;
+        }
+
+        // Updraft turrets: a mature cell is not one uniform column but a few
+        // updrafts, each born, rising to its own height and collapsing on its
+        // own cycle (~15 min), new ones replacing them on the inflow side.
+        // Pure function of (id, age): the same frame twice paints the same map.
+        float tower = c.b.x;
+        float detail = c.c.w;
+        float age = max(c.c.y, 0.0);
+        float spin = c.c.z;
+        uint id = uint(c.c.x + 0.5);
+        // The ring of turrets turns with the cell (bounded: positions only).
+        float spinAngle = spin * age * 0.0015;
+        float top = 0.0, lift = 0.0, mass = 0.0;
+        for (int t = 0; t < kTurrets; ++t) {
+            uint s0 = cellHash(id * 7919u + uint(t) * 104729u + 17u);
+            float period = 900.0 * (0.75 + 0.5 * cellRandom(s0));
+            float cycle = age / period + float(t) / float(kTurrets) + cellRandom(s0);
+            float generation = floor(cycle);
+            float u = cycle - generation;
+            uint s = cellHash(s0 ^ (uint(generation) * 2654435761u));
+            float angle = cellRandom(s) * 6.28318530718 + spinAngle;
+            float ring = r * (0.06 + 0.42 * sqrt(cellRandom(s)));
+            vec2 centre = c.a.xy + vec2(cos(angle), sin(angle)) * ring - windDir * 0.12 * r;
+            float turretRadius = r * (0.16 + 0.14 * cellRandom(s));
+            float height = mix(0.62, 1.0, cellRandom(s));
+            float k = 1.0 - smoothstep(0.25, 1.0, length(q - centre) / turretRadius);
+            if (k <= 0.0) continue;
+            float rise = smoothstep(0.0, 0.35, u) * (1.0 - 0.45 * smoothstep(0.6, 1.0, u));
+            float strength = smoothstep(0.0, 0.12, u) * (1.0 - smoothstep(0.65, 1.0, u));
+            top = max(top, height * rise * k);
+            lift = max(lift, strength * k);
+            mass = max(mass, k * mix(0.5, 1.0, rise));
+        }
+        // The body between the turrets: a lower, broad mass.
+        float body = 1.0 - smoothstep(0.3, 1.0, d);
+        top = max(top, 0.5 * body);
+        float cellTop = tower * mix(1.0, top, detail);
+        // Cover dips between turrets (<= envelope: A still bounds R).
+        o.r = max(o.r, c.a.w * envelope * mix(1.0, mix(0.7, 1.0, max(mass, 0.6 * body)), detail));
+
+        // Rotation (mesocyclone): rotate the shape lookup about the cell
+        // centre by an angle that peaks in the core and fades outward, so the
+        // noise winds into spiral bands. It grows and relaxes with the tower.
+        vec2 rel = q - c.a.xy;
+        float theta = spin * tower * 1.4 * (1.0 - smoothstep(0.15, 1.2, d));
+        float cs = cos(theta), sn = sin(theta);
+        flow.xy += vec2(cs * rel.x - sn * rel.y, sn * rel.x + cs * rel.y) - rel;
+        flow.z = max(flow.z, cellTop * step(0.0, 1.2 - d));
+        flow.w = max(flow.w, lift * tower * detail);
+    }
+    imageStore(cellMap, px, o);
+    imageStore(cellMap, px + ivec2(0, size.y), flow);
+}

@@ -15,6 +15,7 @@ layout(local_size_x = 64) in;
 
 #define CLOUD_SET 0
 #define CLOUD_BINDING_BASE 0
+#define CLOUD_CELL_BINDING 7
 #include "cloud_common.glsl"
 
 struct CloudQuery { vec4 a; vec4 b; };

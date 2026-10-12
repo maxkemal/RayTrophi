@@ -829,6 +829,20 @@ bool World::rederiveClouds() {
         clouds.lightning.rate_per_minute = w.lightning_per_minute;
         lightningChanged = true;
     }
+    // Storm cells follow the climate independently of layer 0's derivation
+    // (a hand-set layer can still host derived storms).
+    if (clouds.storms.derive_from_climate) {
+        atmosphere::CloudStorms& s = clouds.storms;
+        const bool enabled = w.storm_cells > 0;
+        if (s.enabled != enabled || s.max_cells != w.storm_cells ||
+            s.intensity != w.storm_intensity || s.stratiform_rain != w.stratiform_rain) {
+            s.enabled = enabled;
+            s.max_cells = w.storm_cells;
+            s.intensity = w.storm_intensity;
+            s.stratiform_rain = w.stratiform_rain;
+            lightningChanged = true;
+        }
+    }
     if (!clouds.derive_from_climate) {
         if (lightningChanged) {
             ++cloud_revision;

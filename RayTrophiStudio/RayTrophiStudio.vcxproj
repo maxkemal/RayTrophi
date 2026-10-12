@@ -701,6 +701,7 @@
     <ClInclude Include="source\include\Backend\VulkanVolumeTemporal.h" />
     <ClInclude Include="source\include\UI\scene_ui_volume_performance.hpp" />
     <ClInclude Include="source\include\UI\CloudMaterialUI.h" />
+    <ClInclude Include="source\include\UI\StormGizmoUI.h" />
     <ClInclude Include="source\include\UI\viewport_realtime_quality_panel.hpp" />
     <ClInclude Include="source\include\UI\HierarchyLiveObjectView.h" />
     <ClInclude Include="source\include\UI\TemplateHubUI.h" />
@@ -1820,6 +1821,7 @@
     <ClCompile Include="source\src\UI\scene_ui_viewport.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_volume_performance.cpp" />
     <ClCompile Include="source\src\UI\CloudMaterialUI.cpp" />
+    <ClCompile Include="source\src\UI\StormGizmoUI.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_world.cpp" />
     <ClCompile Include="source\src\UI\SequencerAdapter.cpp" />
     <ClCompile Include="source\src\UI\SplashScreen.cpp" />

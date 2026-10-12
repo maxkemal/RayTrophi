@@ -154,6 +154,42 @@ Result cloudStatsJson(std::string& out_json) {
             // non-Nishita world, or with every layer off.
             r["rt_rendering"] = vk->cloudRtRendering();
             r["scene_depth_pipeline_available"] = vk->cloudSceneDepthAvailable();
+            // Lightning as the shaders receive it at this instant: channel,
+            // growth, pulse radiance, and the lit cloud base that lights the
+            // ground and rain (flash_*; radius 0 = not lighting anything,
+            // e.g. during the stepped leader). Events are time-driven, so
+            // poll repeatedly to catch one.
+            const Backend::CloudParamsGPU params = vk->cloudParamsGPU();
+            nlohmann::json events = nlohmann::json::array();
+            for (int i = 0; i < Backend::kCloudLightningEvents; ++i) {
+                const auto& e = params.lightning[i];
+                const auto& f = params.flash[i];
+                // Channel network: [a xyz, b xyz, weight (1 main), leader
+                // progress at which it starts to grow].
+                nlohmann::json segments = nlohmann::json::array();
+                const int count = (std::min)(static_cast<int>(e.color[3] + 0.5f),
+                                             Backend::kCloudBoltSegments);
+                for (int k = 0; k < count; ++k) {
+                    const auto& s = params.bolt[i * Backend::kCloudBoltSegments + k];
+                    segments.push_back({{s.a[0], s.a[1], s.a[2]}, {s.b[0], s.b[1], s.b[2]},
+                                        s.a[3], s.b[3]});
+                }
+                events.push_back({
+                    {"active", e.start[3] > 0.0f},
+                    {"pulse_radiance", e.start[3]},
+                    {"start", {e.start[0], e.start[1], e.start[2]}},
+                    {"end", {e.end[0], e.end[1], e.end[2]}},
+                    {"growth", e.stage[0]},
+                    {"ground_strike", e.stage[2] < 0.5f || e.stage[2] > 1.5f},
+                    {"kind", e.stage[2] > 1.5f ? "upward" : (e.stage[2] < 0.5f ? "ground" : "cloud")},
+                    {"glow_radius_m", e.stage[3]},
+                    {"flash_position", {f.position[0], f.position[1], f.position[2]}},
+                    {"flash_radius_m", f.position[3]},
+                    {"flash_radiance", {f.radiance[0], f.radiance[1], f.radiance[2]}},
+                    {"channel_brightness", e.stage[1]},
+                    {"segments", segments}});
+            }
+            r["lightning"] = events;
         }
         rows.push_back(r);
     };
@@ -163,6 +199,28 @@ Result cloudStatsJson(std::string& out_json) {
     j["backends"] = rows;
     j["revision"] = g_ctx->renderer.world.cloudRevision();
     j["any_enabled"] = g_ctx->renderer.world.getClouds().anyEnabled();
+    {
+        // Live storm cells (ATMOSPHERE_STORMS.md): exactly what the GPU cell
+        // map and the lightning placement read at this cloud time.
+        const World& world = g_ctx->renderer.world;
+        atmosphere::StormCellState cells[atmosphere::kMaxStormCells];
+        const int n = atmosphere::evaluateStormCells(world.getClouds(), world.getCloudTime(),
+                                                     world.cloudWindVelocity(), cells);
+        nlohmann::json list = nlohmann::json::array();
+        for (int i = 0; i < n; ++i) {
+            const auto& c = cells[i];
+            const char* phase = c.life < 0.25f ? "growing" : (c.life < 0.7f ? "mature" : "dissipating");
+            list.push_back({{"position_m", {c.x, 0.0f, c.z}}, {"radius_m", c.radius_m},
+                            {"life", c.life}, {"phase", phase}, {"coverage", c.coverage},
+                            {"tower", c.tower}, {"convective_rain", c.convective_rain},
+                            {"stratiform_rain", c.stratiform_rain}, {"lightning", c.lightning},
+                            {"manual", c.manual}, {"manual_index", c.manual_index},
+                            {"age_s", c.age_s}});
+        }
+        j["storms"] = {{"enabled", world.getClouds().storms.enabled},
+                       {"cloud_time_s", world.getCloudTime()},
+                       {"cells", list}};
+    }
     // Stated, not implied: Vulkan RT path-traces the cloud field (Faz 3b);
     // the frozen OptiX path still draws the legacy procedural volume fed by
     // the derived nishita.cloud_* packet (decision a).

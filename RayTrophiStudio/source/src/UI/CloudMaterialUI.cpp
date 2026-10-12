@@ -1,4 +1,5 @@
 #include "UI/CloudMaterialUI.h"
+#include "UI/StormGizmoUI.h"
 
 #include "Api/RtApi.h"
 #include "Atmosphere/AtmosphereClouds.h"
@@ -48,8 +49,75 @@ static bool drawOpticalControls(atmosphere::CloudMaterial& m) {
     return changed;
 }
 
-static bool drawLightningControls(atmosphere::CloudState& clouds) {
+// Storm cells (docs/dev/ATMOSPHERE_STORMS.md): where it rains and flashes.
+static bool drawStormControls(atmosphere::CloudState& clouds) {
     bool changed = false;
+    if (!ImGui::TreeNodeEx("Storms / convective cells", ImGuiTreeNodeFlags_DefaultOpen)) {
+        return false;
+    }
+    atmosphere::CloudStorms& s = clouds.storms;
+    changed |= ImGui::Checkbox("Storms from climate", &s.derive_from_climate);
+    ImGui::BeginDisabled(s.derive_from_climate);
+    changed |= ImGui::Checkbox("Enable storm cells", &s.enabled);
+    changed |= ImGui::SliderInt("Concurrent cells", &s.max_cells, 0, atmosphere::kMaxAutoStormCells);
+    changed |= ImGui::SliderFloat("Peak intensity", &s.intensity, 0.0f, 1.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Stratiform rain", &s.stratiform_rain, 0.0f, 1.0f, "%.2f");
+    ImGui::EndDisabled();
+    float centerXZ[2] = {s.center_m.x, s.center_m.z};
+    if (ImGui::DragFloat2("Storm domain centre X/Z (m)", centerXZ, 10.0f, -1000000.0f, 1000000.0f, "%.0f")) {
+        s.center_m.x = centerXZ[0];
+        s.center_m.z = centerXZ[1];
+        changed = true;
+    }
+    changed |= ImGui::DragFloat("Storm domain extent (m)", &s.extent_m, 100.0f, 1000.0f, 500000.0f, "%.0f");
+    changed |= ImGui::DragFloat("Cell radius (m)", &s.cell_radius_m, 10.0f, 500.0f, 20000.0f, "%.0f");
+    changed |= ImGui::DragFloat("Cell lifetime (s)", &s.lifetime_s, 10.0f, 120.0f, 14400.0f, "%.0f");
+    changed |= ImGui::SliderFloat("Updraft turrets", &s.turrets, 0.0f, 1.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Rotation", &s.rotation, -1.0f, 1.0f, "%.2f");
+    ImGui::Checkbox("Show cells in viewport", &StormGizmoUI::visible);
+    ImGui::TextWrapped("Cells grow, mature (heavy rain, lightning) and dissipate (light, wide "
+                       "rain), drifting with the climate wind. Stratiform rain = broad light "
+                       "rain under dense cover outside the cells.");
+    if (ImGui::TreeNode("Authored cells")) {
+        int remove = -1;
+        for (size_t i = 0; i < s.cells.size(); ++i) {
+            atmosphere::StormCell& c = s.cells[i];
+            ImGui::PushID(static_cast<int>(i));
+            float xz[2] = {c.position_m.x, c.position_m.z};
+            if (ImGui::DragFloat2("Position X/Z (m)", xz, 10.0f, -1000000.0f, 1000000.0f, "%.0f")) {
+                c.position_m.x = xz[0];
+                c.position_m.z = xz[1];
+                changed = true;
+            }
+            changed |= ImGui::DragFloat("Radius (m)", &c.radius_m, 10.0f, 200.0f, 30000.0f, "%.0f");
+            changed |= ImGui::SliderFloat("Intensity", &c.intensity, 0.0f, 1.0f, "%.2f");
+            changed |= ImGui::DragFloat("Birth (s)", &c.birth_s, 1.0f, -100000.0f, 100000.0f, "%.0f");
+            changed |= ImGui::DragFloat("Lifetime (s, 0 = always mature)", &c.lifetime_s,
+                                        10.0f, 0.0f, 14400.0f, "%.0f");
+            if (ImGui::SmallButton("Remove")) remove = static_cast<int>(i);
+            ImGui::Separator();
+            ImGui::PopID();
+        }
+        if (remove >= 0) {
+            s.cells.erase(s.cells.begin() + remove);
+            changed = true;
+        }
+        if (s.cells.size() < static_cast<size_t>(atmosphere::kMaxManualStormCells) &&
+            ImGui::Button("Add cell at domain centre")) {
+            atmosphere::StormCell c;
+            c.position_m = s.center_m;
+            c.radius_m = s.cell_radius_m;
+            s.cells.push_back(c);
+            changed = true;
+        }
+        ImGui::TreePop();
+    }
+    ImGui::TreePop();
+    return changed;
+}
+
+static bool drawLightningControls(atmosphere::CloudState& clouds) {
+    bool changed = drawStormControls(clouds);
     if (ImGui::TreeNodeEx("Lightning / Storm flashes", ImGuiTreeNodeFlags_DefaultOpen)) {
         atmosphere::CloudLightning& lightning = clouds.lightning;
         changed |= ImGui::Checkbox("Enable lightning", &lightning.enabled);
@@ -64,6 +132,9 @@ static bool drawLightningControls(atmosphere::CloudState& clouds) {
         changed |= ImGui::DragFloat("Horizontal flash span (m)", &lightning.horizontal_span_m,
                                     100.0f, 100.0f, 50000.0f, "%.0f");
         changed |= ImGui::SliderFloat("Branching", &lightning.branching, 0.0f, 1.0f, "%.2f");
+        changed |= ImGui::SliderFloat("Exposure (s)", &lightning.shutter_s, 0.0f, 0.25f, "%.3f");
+        changed |= ImGui::DragFloat("Channel brightness", &lightning.channel_brightness,
+                                    0.1f, 0.0f, 1000.0f, "%.1f");
         const float effectiveRate = Backend::lightningEffectiveRate(lightning);
         if (effectiveRate + 0.1f < lightning.rate_per_minute) {
             ImGui::TextWrapped("At this duration: up to %.0f flashes/min. "
@@ -73,28 +144,22 @@ static bool drawLightningControls(atmosphere::CloudState& clouds) {
                                     0.1f, 0.0f, 10000.0f, "%.1f");
         changed |= ImGui::ColorEdit3("Flash colour", &lightning.color.x,
                                      ImGuiColorEditFlags_Float);
-        float centerXZ[2] = {lightning.center_m.x, lightning.center_m.z};
-        if (ImGui::DragFloat2("Storm centre X/Z (m)", centerXZ,
-                             10.0f, -1000000.0f, 1000000.0f, "%.0f")) {
-            lightning.center_m.x = centerXZ[0];
-            lightning.center_m.z = centerXZ[1];
-            changed = true;
-        }
-        changed |= ImGui::DragFloat("Storm extent (m)", &lightning.extent_m,
-                                    100.0f, 100.0f, 200000.0f, "%.0f");
         changed |= ImGui::DragFloat("Strike ground altitude (m)", &lightning.ground_altitude_m,
                                     10.0f, -500.0f, 20000.0f, "%.0f");
         changed |= ImGui::SliderFloat("Ground strike fraction", &lightning.ground_strike_fraction,
                                       0.0f, 1.0f, "%.2f");
+        changed |= ImGui::SliderFloat("Upward share of ground strikes", &lightning.upward_fraction,
+                                      0.0f, 1.0f, "%.2f");
         ImGui::TextWrapped("Lower ground strike fraction produces more wide, horizontal "
-                           "cloud-to-cloud flashes. Longer flashes develop their branches over time.");
+                           "cloud-to-cloud flashes. Longer flashes develop their branches over time. "
+                           "Downward strikes branch toward the ground; upward ones (from peaks and "
+                           "towers) start on the ground and branch up into the cloud.");
         changed |= ImGui::DragFloat("Bolt radius (m)", &lightning.bolt_radius_m,
                                     0.1f, 0.1f, 30.0f, "%.1f");
         ImGui::TextWrapped("Vulkan RT and RayFusion share seeded timeline flashes. "
-                           "Requires a convective cloud layer. Use timeline Play to see flashes. "
-                           "Realtime Weather Preview animates rain/snow, not lightning. "
-                           "Try 30-60 flashes/min while adjusting the storm footprint; "
-                           "events outside the camera or clear cloud areas may remain invisible.");
+                           "Flashes come only from MATURE storm cells (Storms below): "
+                           "no cells, no lightning. Use timeline Play to see flashes. "
+                           "Realtime Weather Preview animates rain/snow, not lightning.");
         ImGui::TreePop();
     }
     return changed;
@@ -112,7 +177,7 @@ bool drawWeatherLightningControls(UIContext& ctx) {
         nlohmann::json json;
         atmosphere::cloudsToJson(clouds, json);
         const rtapi::Result result = rtapi::setCloudsJson(
-            nlohmann::json{{"lightning", json["lightning"]}}.dump());
+            nlohmann::json{{"lightning", json["lightning"]}, {"storms", json["storms"]}}.dump());
         error = result.error;
         if (!result.ok) {
             ImGui::TextWrapped("%s", error.c_str());
@@ -203,6 +268,8 @@ void drawWorldCloudProperties(UIContext& ctx) {
                                  1.0f, 1, 1024);
         changed |= ImGui::DragInt("Realtime steps", &clouds.quality.realtime_steps,
                                  1.0f, 8, 512);
+        changed |= ImGui::SliderInt("Realtime interleave", &clouds.quality.realtime_interleave,
+                                   1, 4);
         ImGui::TreePop();
     }
     static std::string error;

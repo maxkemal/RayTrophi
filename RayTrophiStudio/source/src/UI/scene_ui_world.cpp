@@ -1,4 +1,4 @@
-// scene_ui_world.cpp
+﻿// scene_ui_world.cpp
 // World/Environment settings UI implementation
 // Part of SceneUI - extracted for maintainability
 
@@ -1063,7 +1063,10 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             edit.surface_pressure_pa = pressureHpa * 100.0f;
             climateChanged = true;
         }
-        ImGui::SameLine(); UIWidgets::HelpMarker("Surface pressure (sea level 1013 hPa).");
+        ImGui::SameLine(); UIWidgets::HelpMarker("Sea-level pressure (1013 hPa normal). Besides the air density it sets the\n"
+                                                 "large-scale weather: a LOW (~985) lifts the air -> more cloud, deeper\n"
+                                                 "convection, storms and broad rain; a HIGH (~1035) subsides -> clouds\n"
+                                                 "capped and thinned, storms suppressed. Acts through 'Derive from climate'.");
 
         if (SceneUI::DrawSmartFloat("cwsp", "Wind Speed", &edit.wind_speed_mps, 0.0f, 60.0f, "%.1f m/s", climateKeyed, keyClimate, 16)) {
             climateChanged = true;
@@ -1275,6 +1278,8 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 cloudsChanged |= ImGui::SliderFloat("Droplet (um)", &l.droplet_diameter_um, 5.0f, 50.0f, "%.1f");
                 UIWidgets::HelpMarker("Droplet diameter. Drives the phase function:\nlarger drops -> brighter silver lining toward the sun.");
                 cloudsChanged |= ImGui::SliderFloat("Erosion", &l.erosion, 0.0f, 1.0f, "%.2f");
+                cloudsChanged |= ImGui::SliderFloat("Base raggedness", &l.base_raggedness, 0.0f, 1.0f, "%.2f");
+                UIWidgets::HelpMarker("0 = flat condensation base. Higher: large hanging lobes with\nsmall detached pieces between them.");
                 cloudsChanged |= ImGui::DragFloat("Cell size (m)", &l.cell_size_m, 10.0f, 50.0f, 50000.0f, "%.0f");
                 cloudsChanged |= ImGui::DragFloat("Detail size (m)", &l.detail_size_m, 1.0f, 5.0f, 5000.0f, "%.0f");
                 cloudsChanged |= ImGui::SliderFloat("Direction (deg)", &l.rotation_degrees,
@@ -1330,6 +1335,8 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             cloudsChanged |= ImGui::DragInt("RT max bounces", &clouds.quality.rt_max_bounces, 1.0f, 1, 1024);
             cloudsChanged |= ImGui::DragInt("Realtime steps", &clouds.quality.realtime_steps, 1.0f, 8, 512);
             cloudsChanged |= ImGui::SliderInt("Realtime res divisor", &clouds.quality.realtime_resolution_divisor, 1, 8);
+            cloudsChanged |= ImGui::SliderInt("Realtime interleave", &clouds.quality.realtime_interleave, 1, 4);
+            UIWidgets::HelpMarker("RayFusion marches 1 of N x N cloud pixels per frame and carries therest in a full-resolution history. 1 = every pixel every frame.");
             cloudsChanged |= ImGui::Checkbox("RT secondary rays: full march", &clouds.quality.rt_secondary_full_march);
             UIWidgets::HelpMarker("Off (default): reflected/bounce rays see the cloud-aware sky\npanorama (fast, measured bias). On: full march (slow, unbiased).");
             ImGui::TreePop();

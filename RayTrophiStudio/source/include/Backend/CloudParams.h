@@ -49,7 +49,7 @@ struct CloudLayerGPU {
     float d[4];   // inverse yaw cos, sin; formation role, group
     float e[4];   // effective layer RGB albedo, phase override (2 = droplet fit)
     float f[4];   // effective layer emission RGB, reserved
-    float g[4];   // group base, height, inverse footprint period, reserved
+    float g[4];   // group base, height, inverse footprint period, base raggedness
 };
 static_assert(sizeof(CloudLayerGPU) == 112, "CloudLayerGPU std430 layout");
 
@@ -71,13 +71,85 @@ struct CloudParamsGPU {
     float scatterAlbedo[4]; // linear RGB albedo, HG g override (2 = droplet fit)
     float emissionSource[4]; // linear RGB source radiance, reserved
     float cirrusDirection[4]; // authored wind x,z; camera weather time, reserved
+    float storms[4];   // cell map centre x, z, 1/size (m), enabled (0/1)
+    float storms2[4];  // stratiform rain share, reserved
     CloudLightningGPU lightning[kCloudLightningEvents];
+    CloudFlashLightGPU flash[kCloudLightningEvents];   // lit cloud base per event
+    // Channel network per event (kCloudBoltSegments each; count in color[3]).
+    CloudBoltSegmentGPU bolt[kCloudLightningEvents * kCloudBoltSegments];
 };
-static_assert(sizeof(CloudParamsGPU) == 736, "CloudParamsGPU std430 layout (cloud_common.glsl)");
+static_assert(sizeof(CloudParamsGPU) == 6016, "CloudParamsGPU std430 layout (cloud_common.glsl)");
+
+// ── Storm cells (docs/dev/ATMOSPHERE_STORMS.md) ─────────────────────────────
+// Input of cloud_cells.comp, which paints the cell map every update: two
+// 256^2 fields stacked in one 256 x 512 image (cells, then cell structure).
+constexpr uint32_t kCloudCellMapSize = 256;
+constexpr uint32_t kCloudCellMapRows = 2 * kCloudCellMapSize;
+
+struct CloudCellGPU {
+    float a[4];   // world x, z, radius m, cover floor
+    float b[4];   // tower, convective rain, stratiform rain, lightning weight
+    float c[4];   // id (0..65535), age s, rotation (signed), turret detail
+};
+static_assert(sizeof(CloudCellGPU) == 48, "CloudCellGPU std430 layout");
+
+struct CloudCellsGPU {
+    float header[4];   // count, map centre x, z, map size m
+    float wind[4];     // wind direction x, z (forward flank), majorant dilation m, reserved
+    CloudCellGPU cells[atmosphere::kMaxStormCells];
+};
+static_assert(sizeof(CloudCellsGPU) == 32 + 48 * atmosphere::kMaxStormCells,
+              "CloudCellsGPU std430 layout (cloud_cells.comp)");
+
+// Square the cell map covers: the domain plus how far a cell drifts in
+// half a life (cells are born upwind by that much) and two radii, capped so
+// a texel stays well under a cell radius.
+inline float cloudCellMapSize(const atmosphere::CloudStorms& s, const Vec3& wind_mps) {
+    const float wind = std::sqrt(wind_mps.x * wind_mps.x + wind_mps.z * wind_mps.z);
+    const float reach = wind * s.lifetime_s * 0.5f * 1.3f + 2.0f * s.cell_radius_m * 1.3f;
+    return (std::min)(s.extent_m + 2.0f * reach, 400000.0f);
+}
+
+inline CloudCellsGPU makeCloudCellsGPU(const atmosphere::CloudState& c, float time_seconds,
+                                       const Vec3& wind_mps) {
+    CloudCellsGPU g{};
+    if (!c.storms.enabled) return g;
+    atmosphere::StormCellState cells[atmosphere::kMaxStormCells];
+    const int n = atmosphere::evaluateStormCells(c, time_seconds, wind_mps, cells);
+    const float size = cloudCellMapSize(c.storms, wind_mps);
+    g.header[0] = static_cast<float>(n);
+    g.header[1] = c.storms.center_m.x;
+    g.header[2] = c.storms.center_m.z;
+    g.header[3] = size;
+    const float wind = std::sqrt(wind_mps.x * wind_mps.x + wind_mps.z * wind_mps.z);
+    g.wind[0] = wind > 1e-3f ? wind_mps.x / wind : 0.0f;
+    g.wind[1] = wind > 1e-3f ? wind_mps.z / wind : 0.0f;
+    // A majorant fetch must bound a whole segment (<= one weather-majorant
+    // tile, cloudSegmentLen) plus the linear filter of two cell texels.
+    g.wind[2] = c.weather.extent_m / static_cast<float>(kCloudMajorantSize) +
+                2.0f * size / static_cast<float>(kCloudCellMapSize);
+    for (int i = 0; i < n; ++i) {
+        const auto& s = cells[i];
+        CloudCellGPU& o = g.cells[i];
+        o.a[0] = s.x; o.a[1] = s.z; o.a[2] = s.radius_m; o.a[3] = s.coverage;
+        o.b[0] = s.tower; o.b[1] = s.convective_rain; o.b[2] = s.stratiform_rain; o.b[3] = s.lightning;
+        o.c[0] = static_cast<float>(s.id & 0xffffu);
+        o.c[1] = s.age_s;
+        o.c[2] = c.storms.rotation;
+        o.c[3] = c.storms.turrets;
+    }
+    return g;
+}
 
 inline void clearTransientCloudKey(CloudParamsGPU& key) {
     for (auto& event : key.lightning) {
         event = {};
+    }
+    for (auto& light : key.flash) {
+        light = {};
+    }
+    for (auto& segment : key.bolt) {
+        segment = {};
     }
 }
 
@@ -153,6 +225,7 @@ inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float 
         g.g[0] = groupBase;
         g.g[1] = (std::max)(groupTop - groupBase, 1.0f);
         g.g[2] = 1.0f / (std::max)(groupPeriod, 1.0f);
+        g.g[3] = l.base_raggedness;
     }
     p.weather[0] = 1.0f / (c.weather.extent_m > 1.0f ? c.weather.extent_m : 1.0f);
     p.weather[1] = c.weather.type_variation;
@@ -211,7 +284,16 @@ inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float 
     if (sl > 0.5f) { sx *= 0.5f / sl; sz *= 0.5f / sl; }
     p.precip2[2] = sx;
     p.precip2[3] = sz;
-    makeCloudLightningGPU(c, time_seconds, planet_radius_m, altitude_offset_m, p.lightning);
+    makeCloudLightningGPU(c, time_seconds, wind_mps, planet_radius_m, altitude_offset_m,
+                          p.lightning, p.flash, p.bolt);
+    if (c.storms.enabled) {
+        const float size = cloudCellMapSize(c.storms, wind_mps);
+        p.storms[0] = c.storms.center_m.x;
+        p.storms[1] = c.storms.center_m.z;
+        p.storms[2] = 1.0f / size;
+        p.storms[3] = 1.0f;
+        p.storms2[0] = c.storms.stratiform_rain;
+    }
     return p;
 }
 
@@ -236,6 +318,9 @@ inline CloudParamsGPU makeSharedCloudParamsGPU(const atmosphere::CloudState& clo
         p.precip[0] = p.precip[1] = 0.0f;
         for (auto& event : p.lightning) {
             event.start[3] = 0.0f;
+        }
+        for (auto& light : p.flash) {
+            light = {};
         }
     }
     return p;
@@ -286,8 +371,11 @@ struct CloudRasterFrameGPU {
     float prevFwd[4];
     uint32_t info[4];     // width, height, frame index, steps
     WeatherRenderGPU weatherEffects;
+    // Copy of CloudParamsGPU::flash: the RayFusion surface pass has no cloud
+    // field bound but must be lit by the same flash (material_preview_frag).
+    CloudFlashLightGPU flash[kCloudLightningEvents];
 };
-static_assert(sizeof(CloudRasterFrameGPU) == 256, "CloudRasterFrameGPU std430 layout (cloud_raster.comp)");
+static_assert(sizeof(CloudRasterFrameGPU) == 384, "CloudRasterFrameGPU std430 layout (cloud_raster.comp)");
 
 // One query for world.sample_clouds. mode 0: density at `a`; mode 1:
 // transmittance along a -> b.
