@@ -1,0 +1,28 @@
+{
+  "id": "cc0_thunder_02_mono",
+  "name": "Thunder - Muffled rumble (mono)",
+  "type": "asset",
+  "assetKind": "audio",
+  "category": "audio",
+  "subcategory": "thunder",
+  "format": "wav",
+  "entry": "thunder_02_mono.wav",
+  "description": "Muffled rumble CC0 variation; publisher-generated audio, mono positional derivative.",
+  "license": "CC0-1.0",
+  "source": "https://sfxmint.com/sounds/ambience-thunder-02",
+  "author": "SFXMint",
+  "tags": [
+    "weather",
+    "thunder",
+    "one-shot",
+    "mono",
+    "cc0",
+    "generated",
+    "far"
+  ],
+  "version": 1,
+  "duration": 3.994988662131519,
+  "channels": 1,
+  "sampleRate": 44100,
+  "loopSuitable": false
+}

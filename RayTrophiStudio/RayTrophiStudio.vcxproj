@@ -2120,12 +2120,12 @@
           SkipUnchangedFiles="true" />
   </Target>
   <Target Name="CopyAudioStarterAssets" AfterTargets="Build"
-          Condition="Exists('$(ProjectDir)assets\audio\cc0_starter')">
+          Condition="Exists('$(ProjectDir)assets\audio')">
     <ItemGroup>
-      <RayTrophiAudioStarter Include="$(ProjectDir)assets\audio\cc0_starter\**\*" />
+      <RayTrophiAudioStarter Include="$(ProjectDir)assets\audio\**\*" />
     </ItemGroup>
     <Copy SourceFiles="@(RayTrophiAudioStarter)"
-          DestinationFiles="@(RayTrophiAudioStarter->'$(OutDir)assets\audio\cc0_starter\%(RecursiveDir)%(Filename)%(Extension)')"
+          DestinationFiles="@(RayTrophiAudioStarter->'$(OutDir)assets\audio\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
   <Target Name="CopyTemplatePackages" AfterTargets="Build"
@@ -2361,6 +2361,27 @@
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <ClCompile Include="source\src\Scene\AudioEnvironment.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Audio\AudioThunder.h" />
+    <ClInclude Include="source\include\Audio\AudioThunderBridge.h" />
+    <ClInclude Include="source\include\UI\AudioThunderUI.h" />
+    <ClCompile Include="source\src\Scene\AudioThunder.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioThunderAssets.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioThunderBridge.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioThunderUI.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>

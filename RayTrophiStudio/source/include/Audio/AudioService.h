@@ -29,6 +29,8 @@ public:
     void resolvedPose(const std::string& id, const nlohmann::json& position,
                       const nlohmann::json& direction, bool valid);
     void tickReactions(float windMps, float rain);
+    void tickThunder();
+    void resetThunder();
     void invalidateSignal(const std::string& key);
     std::uint64_t generation() const;
     static bool isAuthoring(const std::string& operation);

@@ -1,6 +1,7 @@
 #include "Audio/AudioService.h"
 #include "Audio/AudioReaction.h"
 #include "Audio/AudioEnvironment.h"
+#include "Audio/AudioThunder.h"
 
 #define MA_NO_ENCODING
 #define MA_NO_GENERATION
@@ -102,7 +103,7 @@ json emitter(const json& p) {
 
 struct AudioService::Impl {
     json data = {{"version", 1}, {"next_id", 1}, {"assets", json::array()},
-                 {"emitters", json::array()}};
+                 {"emitters", json::array()}, {"thunder", AudioThunder::validate(json::object())}};
     ma_engine engine{};
     bool initialized = false;
     bool muted = false;
@@ -118,6 +119,32 @@ struct AudioService::Impl {
     std::set<std::string> managed;
     std::map<std::string, std::chrono::steady_clock::time_point> failedAt;
     std::map<std::string, std::string> autoErrors;
+    AudioThunder thunder;
+    json listenerPosition = json::array({0, 0, 0});
+    std::array<float, 9> listenerPose = {0, 0, 0, 0, 0, -1, 0, 1, 0};
+    struct ThunderVoice {
+        std::unique_ptr<ma_sound> sound;
+        json event;
+        double bytes = 0;
+    };
+    std::vector<ThunderVoice> thunderVoices;
+    std::string thunderError;
+
+    void stopThunder() {
+        for (auto& voice : thunderVoices) {
+            ma_sound_uninit(voice.sound.get());
+        }
+        thunderVoices.clear();
+    }
+
+    void validateThunderAssets(const json& config) {
+        for (const char* range : {"near_assets", "far_assets"}) {
+            for (const auto& id : config.at(range)) {
+                require(find("assets", id).at("channels") == 1,
+                        "Positional thunder requires mono assets; convert stereo before binding");
+            }
+        }
+    }
 
     ~Impl() {
         stopAll();
@@ -127,6 +154,8 @@ struct AudioService::Impl {
     }
 
     void stopAll() {
+        stopThunder();
+        thunder.reset(true);
         for (auto& item : sounds) {
             ma_sound_uninit(item.second.get());
         }
@@ -153,6 +182,9 @@ struct AudioService::Impl {
         initialized = true;
         status = "ready";
         ma_engine_set_volume(&engine, muted ? 0.0f : 1.0f);
+        ma_engine_listener_set_position(&engine, 0, listenerPose[0], listenerPose[1], listenerPose[2]);
+        ma_engine_listener_set_direction(&engine, 0, listenerPose[3], listenerPose[4], listenerPose[5]);
+        ma_engine_listener_set_world_up(&engine, 0, listenerPose[6], listenerPose[7], listenerPose[8]);
     }
 
     json& find(const char* collection, const std::string& id) {
@@ -216,6 +248,9 @@ struct AudioService::Impl {
                 "Audio file timing changed; relink the asset before playback");
         double residentBytes = actual.at("duration").get<double>() * 48000 *
                                actual.at("channels").get<unsigned>() * 4;
+        for (const auto& voice : thunderVoices) {
+            residentBytes += voice.bytes;
+        }
         for (const auto& voice : sounds) {
             const auto& e = find("emitters", voice.first);
             const auto& a = find("assets", e.at("asset_id"));
@@ -247,12 +282,13 @@ const std::vector<std::string>& AudioService::operations() {
         "list", "get", "select", "status", "asset_import", "asset_relink", "asset_remove", "create", "update",
         "duplicate", "remove", "play", "pause", "stop", "stop_all", "preview", "preview_stop",
         "preview_mute", "preview_file", "append", "signal_set", "signals_clear",
-        "environment_setup", "domains"};
+        "environment_setup", "domains", "thunder_setup", "thunder_update", "thunder_event"};
     return names;
 }
 
 bool AudioService::isAuthoring(const std::string& op) {
-    return op == "environment_setup" || op == "append" || op == "asset_import" ||
+    return op == "thunder_setup" || op == "thunder_update" ||
+           op == "environment_setup" || op == "append" || op == "asset_import" ||
            op == "asset_relink" || op == "asset_remove" ||
            op == "create" || op == "update" || op == "duplicate" || op == "remove";
 }
@@ -288,8 +324,14 @@ std::vector<std::string> AudioService::parameters(const std::string& op) {
         return {"key", "value", "flow_kg_s", "speed_mps", "position", "source_material",
                 "target_material", "ttl_seconds"};
     }
-    if (op == "environment_setup") {
+    if (op == "environment_setup" || op == "thunder_setup") {
         return {"assets_root"};
+    }
+    if (op == "thunder_update") {
+        return {"config"};
+    }
+    if (op == "thunder_event") {
+        return {"key", "position", "intensity", "age_seconds"};
     }
     if (op == "list" || op == "status" || op == "stop_all" || op == "preview_stop" ||
         op == "signals_clear" || op == "domains") {
@@ -307,6 +349,35 @@ json AudioService::invoke(const std::string& op, const json& p) {
     for (auto it = p.begin(); it != p.end(); ++it) {
         require(std::find(allowed.begin(), allowed.end(), it.key()) != allowed.end(),
                 "Unknown audio parameter: " + it.key());
+    }
+    if (op == "thunder_setup") {
+        AudioService candidate;
+        candidate.restore(s.data);
+        const auto result = installThunder(candidate,
+            pathFromUtf8(p.at("assets_root").get<std::string>()));
+        s.stopThunder();
+        s.data = candidate.snapshot();
+        s.thunder.configure(s.data.at("thunder"));
+        s.thunderError.clear();
+        return result;
+    }
+    if (op == "thunder_update") {
+        json combined = s.data.value("thunder", AudioThunder::validate(json::object()));
+        require(p.at("config").is_object(), "Thunder config must be an object");
+        combined.update(p.at("config"));
+        const auto config = AudioThunder::validate(combined);
+        s.validateThunderAssets(config);
+        s.stopThunder();
+        s.thunder.configure(config);
+        s.data["thunder"] = config;
+        s.thunderError.clear();
+        return config;
+    }
+    if (op == "thunder_event") {
+        if (s.preview) {
+            return {{"queued", false}, {"reason", "asset_preview_active"}};
+        }
+        return s.thunder.publish(p, s.listenerPosition);
     }
     if (op == "domains") {
         throw std::invalid_argument("audio.domains requires a bound scene context");
@@ -361,10 +432,17 @@ json AudioService::invoke(const std::string& op, const json& p) {
         for (const auto& item : s.sounds) {
             voices.push_back({{"id", item.first}, {"playing", bool(ma_sound_is_playing(item.second.get()))}});
         }
+        json thunderVoices = json::array();
+        for (const auto& voice : s.thunderVoices) {
+            auto event = voice.event;
+            event["playing"] = bool(ma_sound_is_playing(voice.sound.get()));
+            thunderVoices.push_back(event);
+        }
         return {{"device", s.status}, {"sample_rate", 48000}, {"preview_muted", s.muted},
                 {"voices", voices}, {"voice_limit", 32}, {"resolved_poses", s.poses},
                 {"reaction_runtime", s.reactions.status()}, {"automatic_errors", s.autoErrors},
-                {"automatic_suspended", s.suspended}};
+                {"automatic_suspended", s.suspended}, {"thunder_runtime", s.thunder.status()},
+                {"thunder_voices", thunderVoices}, {"thunder_error", s.thunderError}};
     }
     if (op == "asset_import" || op == "asset_relink") {
         const auto path = std::filesystem::absolute(pathFromUtf8(p.at("path").get<std::string>()));
@@ -407,6 +485,12 @@ json AudioService::invoke(const std::string& op, const json& p) {
                 require(e.at("asset_id") != old.at("id") || !e.at("spatial").get<bool>() || channels == 1,
                         "Relink would give a positional source a stereo asset");
             }
+            const auto config = s.data.value("thunder", AudioThunder::validate(json::object()));
+            for (const char* range : {"near_assets", "far_assets"}) {
+                const auto& ids = config.at(range);
+                require(channels == 1 || std::find(ids.begin(), ids.end(), old.at("id")) == ids.end(),
+                        "Relink would give positional thunder a stereo asset");
+            }
             asset["id"] = old.at("id");
             for (const char* key : {"license", "author", "source"}) {
                 if (!p.contains(key)) {
@@ -430,6 +514,12 @@ json AudioService::invoke(const std::string& op, const json& p) {
     }
     if (op == "asset_remove") {
         const std::string id = p.at("id");
+        const auto config = s.data.value("thunder", AudioThunder::validate(json::object()));
+        for (const char* range : {"near_assets", "far_assets"}) {
+            const auto& ids = config.at(range);
+            require(std::find(ids.begin(), ids.end(), id) == ids.end(),
+                    "Asset is referenced by thunder; remove its binding first");
+        }
         s.find("assets", id);
         for (const auto& e : s.data["emitters"]) {
             require(e.at("asset_id") != id, "Asset is referenced by an emitter");
@@ -569,7 +659,8 @@ json AudioService::invoke(const std::string& op, const json& p) {
                         ++it;
                     }
                 }
-                require(s.sounds.size() < 32, "Stage 1 resident voice limit reached (32)");
+                require(s.sounds.size() + s.thunderVoices.size() < 32,
+                        "Stage 1 resident voice limit reached (32)");
                 auto sound = s.load(s.find("assets", e.at("asset_id")));
                 s.apply(*sound, e);
                 voice = s.sounds.emplace(id, std::move(sound)).first;
@@ -617,7 +708,10 @@ void AudioService::clear() {
     impl_->autoErrors.clear();
     ++impl_->generation;
     impl_->data = {{"version", 1}, {"next_id", 1}, {"assets", json::array()},
-                   {"emitters", json::array()}};
+                   {"emitters", json::array()},
+                   {"thunder", AudioThunder::validate(json::object())}};
+    impl_->thunder.configure(impl_->data.at("thunder"));
+    impl_->thunderError.clear();
 }
 
 void AudioService::restore(const json& input, const std::filesystem::path& base) {
@@ -675,6 +769,8 @@ void AudioService::restore(const json& input, const std::filesystem::path& base)
         e = emitter(e);
         candidate.validateAsset(e);
     }
+    candidate.data["thunder"] = AudioThunder::validate(input.value("thunder", json::object()));
+    candidate.validateThunderAssets(candidate.data.at("thunder"));
     // Validate the complete candidate before replacing live data. Missing files are retained.
     impl_->stopAll();
     impl_->poses.clear();
@@ -685,6 +781,8 @@ void AudioService::restore(const json& input, const std::filesystem::path& base)
     impl_->autoErrors.clear();
     ++impl_->generation;
     impl_->data = std::move(candidate.data);
+    impl_->thunder.configure(impl_->data.at("thunder"));
+    impl_->thunderError.clear();
 }
 
 json AudioService::save(const std::filesystem::path& project) const {
@@ -712,13 +810,15 @@ json AudioService::save(const std::filesystem::path& project) const {
 
 void AudioService::listener(float x, float y, float z, float dx, float dy, float dz,
                             float ux, float uy, float uz) {
-    if (!impl_->initialized) {
-        return;
-    }
     for (float value : {x, y, z, dx, dy, dz, ux, uy, uz}) {
         if (!std::isfinite(value)) {
             return;
         }
+    }
+    impl_->listenerPosition = json::array({x, y, z});
+    impl_->listenerPose = {x, y, z, dx, dy, dz, ux, uy, uz};
+    if (!impl_->initialized) {
+        return;
     }
     ma_engine_listener_set_position(&impl_->engine, 0, x, y, z);
     ma_engine_listener_set_direction(&impl_->engine, 0, dx, dy, dz);
@@ -786,6 +886,52 @@ void AudioService::tickReactions(float windMps, float rain) {
 
 void AudioService::invalidateSignal(const std::string& key) {
     impl_->reactions.invalidateSignal(key);
+}
+
+void AudioService::resetThunder() {
+    impl_->stopThunder();
+    // Timeline discontinuity clears events without overriding an explicit Stop All suspension.
+    const bool suspended = impl_->thunder.status().at("suspended");
+    impl_->thunder.reset(suspended);
+}
+
+void AudioService::tickThunder() {
+    auto& s = *impl_;
+    for (auto it = s.thunderVoices.begin(); it != s.thunderVoices.end();) {
+        if (ma_sound_at_end(it->sound.get())) {
+            ma_sound_uninit(it->sound.get());
+            it = s.thunderVoices.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (const auto& event : s.thunder.due()) {
+        try {
+            require(!s.preview, "Thunder skipped during asset audition");
+            require(s.thunderVoices.size() < 8 && s.sounds.size() + s.thunderVoices.size() < 32,
+                    "Thunder voice budget reached (8 thunder / 32 total)");
+            const auto asset = s.find("assets", event.at("asset_id"));
+            auto sound = s.load(asset);
+            ma_sound_set_looping(sound.get(), false);
+            ma_sound_set_volume(sound.get(), event.at("gain"));
+            ma_sound_set_pitch(sound.get(), event.at("pitch"));
+            ma_sound_set_spatialization_enabled(sound.get(), true);
+            const auto& position = event.at("position");
+            ma_sound_set_position(sound.get(), position[0], position[1], position[2]);
+            ma_sound_set_min_distance(sound.get(), event.at("min_distance"));
+            ma_sound_set_max_distance(sound.get(), event.at("max_distance"));
+            ma_sound_set_rolloff(sound.get(), 1);
+            const auto result = ma_sound_start(sound.get());
+            if (result != MA_SUCCESS) {
+                ma_sound_uninit(sound.get());
+                throw std::runtime_error("Could not start thunder sound");
+            }
+            const double bytes = asset.at("duration").get<double>() * 48000 * 4;
+            s.thunderVoices.push_back({std::move(sound), event, bytes});
+        } catch (const std::exception& error) {
+            s.thunderError = error.what();
+        }
+    }
 }
 std::uint64_t AudioService::generation() const {
     return impl_->generation;

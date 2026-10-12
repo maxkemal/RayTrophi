@@ -4,4 +4,5 @@
 namespace audio {
 class AudioService;
 nlohmann::json installEnvironment(AudioService& candidate, const std::filesystem::path& assetsRoot);
+nlohmann::json installThunder(AudioService& candidate, const std::filesystem::path& assetsRoot);
 }

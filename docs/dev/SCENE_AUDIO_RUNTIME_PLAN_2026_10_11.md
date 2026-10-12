@@ -194,6 +194,13 @@ sıklıklı bütçeli görünürlük + filtre; tam akustik ray tracing değildir
 6. **Gelişmiş uzamsal ses:** bütçeli occlusion, ortam bölgeleri/yankı ve gerekirse
    HRTF adaptörü. Temel sistem bu aşamayı beklemez; maliyet ölçülmeden varsayılan açılmaz.
 
+Gecikmeli gök gürültüsü için etkileşimli adaptör ve CC0 varyasyon paketi eklendi;
+ortak görsel yıldırım üreticisi, olay tekilleştirmesi, konum/şiddet, uzaklığa bağlı
+gecikme ve UI/script/IPC sözleşmesi:
+[SCENE_AUDIO_THUNDER.md](SCENE_AUDIO_THUNDER.md). Derleme ve canlı dinleme kabulü
+bekliyor. Bu teslim offline ortak olay evaluator'ünü veya 3. aşamanın bütün kabul
+koşullarını tamamlandı olarak işaretlemez.
+
 Her aşama UI/script/IPC, hata semantiği ve dokümantasyonuyla birlikte teslim edilir.
 Görsel ve işitsel kabul kullanıcıyla yapılır. Derlemeleri kullanıcı çalıştırır;
 gereksiz test scripti üretilmez. Zaman/örnek hesabı, serialization ve event tekilleştirme
