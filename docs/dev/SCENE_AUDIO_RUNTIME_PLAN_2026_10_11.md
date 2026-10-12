@@ -8,6 +8,11 @@ Tarih: 2026-10-11. Durum: PLANLANDI; uygulama teslimi değildir.
 Kapsam, mevcut sınırlar, script/IPC sözleşmesi ve kullanıcı doğrulama listesi:
 [SCENE_AUDIO_STAGE1_API.md](SCENE_AUDIO_STAGE1_API.md). Aşama kabulü tamamlanmış değildir.
 
+2026-10-12: sürekli rüzgâr/yağmur tepkisi ve dış domain temas sinyali girişi için ilk
+kaynak uygulaması eklendi; derleme/canlı kabul bekliyor. Sözleşme ve sınırlar:
+[SCENE_AUDIO_REACTIONS.md](SCENE_AUDIO_REACTIONS.md). Otomatik domain telemetrisi,
+yerel bulut yağışı ve lightning/thunder olay adaptörü henüz bağlanmış değildir.
+
 ## Ürün hedefi
 
 RayTrophi açık kaynak kalır. Kullanıcı sesleri assets üzerinden ekler, 3D sahnede

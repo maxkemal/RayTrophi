@@ -1,6 +1,8 @@
 #include "UI/AudioUI.h"
 #include "Audio/AudioService.h"
 #include "Audio/AudioAuthoring.h"
+#include "Audio/AudioWeatherBridge.h"
+#include "UI/AudioReactionUI.h"
 #include "scene_ui.h"
 #include "scene_data.h"
 #include "Camera.h"
@@ -253,6 +255,7 @@ void drawProperties(UIContext& ctx) {
             ImGui::SameLine();
         }
         ImGui::NewLine();
+        AudioReactionUI::draw(ctx, e);
     }
     if (!error.empty()) {
         ImGui::TextWrapped("%s", error.c_str());
@@ -261,6 +264,7 @@ void drawProperties(UIContext& ctx) {
 
 void updateListener(UIContext& ctx) {
     audio::syncScene(ctx);
+    audio::tickWeatherReactions(ctx);
     if (!ctx.scene.camera) {
         return;
     }

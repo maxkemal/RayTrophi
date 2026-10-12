@@ -37,6 +37,10 @@ Deleting a referenced audio asset fails until sources have been unbound/deleted.
 
 ## Shared script and IPC operations
 
+Continuous wind/rain control and external domain-contact signal inputs are described
+in [SCENE_AUDIO_REACTIONS.md](SCENE_AUDIO_REACTIONS.md). Sources accept an optional
+`reaction` configuration; signal_set/signals_clear are transient runtime operations.
+
 Python uses `rt.audio.<operation>(**keyword_parameters)`. IPC uses
 `audio.<operation>` with the same parameter object. UI, Python and IPC route through
 AudioAuthoring and AudioService; asset append is one atomic authoring operation.

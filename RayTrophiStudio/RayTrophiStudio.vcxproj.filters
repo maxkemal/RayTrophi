@@ -2741,4 +2741,12 @@
     <None Include="external\miniaudio\miniaudio.h" />
     <None Include="external\miniaudio\LICENSE" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Audio\AudioReaction.h" />
+    <ClInclude Include="source\include\Audio\AudioWeatherBridge.h" />
+    <ClInclude Include="source\include\UI\AudioReactionUI.h" />
+    <ClCompile Include="source\src\Scene\AudioReaction.cpp" />
+    <ClCompile Include="source\src\Scene\AudioWeatherBridge.cpp" />
+    <ClCompile Include="source\src\UI\AudioReactionUI.cpp" />
+  </ItemGroup>
 </Project>

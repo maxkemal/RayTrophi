@@ -1,4 +1,5 @@
 #include "Audio/AudioService.h"
+#include "Audio/AudioReaction.h"
 
 #define MA_NO_ENCODING
 #define MA_NO_GENERATION
@@ -53,7 +54,7 @@ json emitter(const json& p) {
     static const std::vector<std::string> keys = {
         "id", "name", "asset_id", "position", "direction", "gain", "pitch", "loop",
         "spatial", "min_distance", "max_distance", "rolloff", "cone_inner", "cone_outer",
-        "cone_gain", "bus", "parent"};
+        "cone_gain", "bus", "parent", "reaction"};
     for (auto it = p.begin(); it != p.end(); ++it) {
         require(std::find(keys.begin(), keys.end(), it.key()) != keys.end(),
                 "Unknown emitter property: " + it.key());
@@ -62,6 +63,7 @@ json emitter(const json& p) {
     e["name"] = p.value("name", std::string("Audio Source"));
     e["asset_id"] = p.value("asset_id", std::string());
     e["parent"] = p.value("parent", std::string());
+    e["reaction"] = AudioReaction::validate(p.value("reaction", json::object()));
     e["position"] = vector(p, "position", json::array({0, 0, 0}));
     e["direction"] = vector(p, "direction", json::array({0, 0, -1}));
     float length = 0;
@@ -101,6 +103,9 @@ struct AudioService::Impl {
     std::map<std::string, std::unique_ptr<ma_sound>> sounds;
     std::unique_ptr<ma_sound> preview;
     std::map<std::string, json> poses;
+    AudioReaction reactions;
+    std::map<std::string, ReactionOutput> controls;
+    std::chrono::steady_clock::time_point lastTick = std::chrono::steady_clock::now();
 
     ~Impl() {
         stopAll();
@@ -163,13 +168,18 @@ struct AudioService::Impl {
     }
 
     void apply(ma_sound& sound, const json& e) {
-        ma_sound_set_volume(&sound, e.at("gain").get<float>());
-        ma_sound_set_pitch(&sound, e.at("pitch").get<float>());
+        const auto control = controls.find(e.at("id").get<std::string>());
+        const auto modulation = control == controls.end() ? ReactionOutput{} : control->second;
+        const bool reactive = e.at("reaction").at("driver") != "manual";
+        const float gain = reactive && control == controls.end() ? 0 : modulation.gain;
+        ma_sound_set_volume(&sound, e.at("gain").get<float>() * gain);
+        ma_sound_set_pitch(&sound, std::clamp(e.at("pitch").get<float>() * modulation.pitch,
+                                            0.125f, 8.0f));
         ma_sound_set_looping(&sound, e.at("loop").get<bool>());
         ma_sound_set_spatialization_enabled(&sound, e.at("spatial").get<bool>());
         const auto pose = poses.find(e.at("id").get<std::string>());
         const json& resolved = pose == poses.end() ? e : pose->second;
-        const auto& p = resolved.at("position");
+        const auto& p = modulation.position.is_null() ? resolved.at("position") : modulation.position;
         const auto& d = resolved.at("direction");
         ma_sound_set_position(&sound, p[0], p[1], p[2]);
         ma_sound_set_direction(&sound, d[0], d[1], d[2]);
@@ -221,7 +231,7 @@ const std::vector<std::string>& AudioService::operations() {
     static const std::vector<std::string> names = {
         "list", "get", "select", "status", "asset_import", "asset_relink", "asset_remove", "create", "update",
         "duplicate", "remove", "play", "pause", "stop", "stop_all", "preview", "preview_stop",
-        "preview_mute", "preview_file", "append"};
+        "preview_mute", "preview_file", "append", "signal_set", "signals_clear"};
     return names;
 }
 
@@ -235,7 +245,7 @@ std::vector<std::string> AudioService::parameters(const std::string& op) {
         std::vector<std::string> keys = {
             "name", "asset_id", "parent", "position", "direction", "gain", "pitch", "loop",
             "spatial", "min_distance", "max_distance", "rolloff", "cone_inner", "cone_outer",
-            "cone_gain", "bus"};
+            "cone_gain", "bus", "reaction"};
         if (op == "update") {
             keys.push_back("id");
         }
@@ -257,7 +267,12 @@ std::vector<std::string> AudioService::parameters(const std::string& op) {
     if (op == "preview_mute") {
         return {"muted"};
     }
-    if (op == "list" || op == "status" || op == "stop_all" || op == "preview_stop") {
+    if (op == "signal_set") {
+        return {"key", "value", "flow_kg_s", "speed_mps", "position", "source_material",
+                "target_material", "ttl_seconds"};
+    }
+    if (op == "list" || op == "status" || op == "stop_all" || op == "preview_stop" ||
+        op == "signals_clear") {
         return {};
     }
     return {"id"};
@@ -272,6 +287,14 @@ json AudioService::invoke(const std::string& op, const json& p) {
     for (auto it = p.begin(); it != p.end(); ++it) {
         require(std::find(allowed.begin(), allowed.end(), it.key()) != allowed.end(),
                 "Unknown audio parameter: " + it.key());
+    }
+    if (op == "signal_set") {
+        return s.reactions.publish(p);
+    }
+    if (op == "signals_clear") {
+        s.reactions.clear();
+        s.controls.clear();
+        return {{"ok", true}};
     }
     if (op == "append") {
         AudioService candidate;
@@ -302,7 +325,8 @@ json AudioService::invoke(const std::string& op, const json& p) {
             voices.push_back({{"id", item.first}, {"playing", bool(ma_sound_is_playing(item.second.get()))}});
         }
         return {{"device", s.status}, {"sample_rate", 48000}, {"preview_muted", s.muted},
-                {"voices", voices}, {"voice_limit", 32}, {"resolved_poses", s.poses}};
+                {"voices", voices}, {"voice_limit", 32}, {"resolved_poses", s.poses},
+                {"reaction_runtime", s.reactions.status()}};
     }
     if (op == "asset_import" || op == "asset_relink") {
         const auto path = std::filesystem::absolute(pathFromUtf8(p.at("path").get<std::string>()));
@@ -392,6 +416,10 @@ json AudioService::invoke(const std::string& op, const json& p) {
         combined.update(p);
         json e = emitter(combined);
         s.validateAsset(e);
+        if (e.at("reaction") != old.at("reaction")) {
+            s.reactions.forget(e.at("id"));
+            s.controls.erase(e.at("id").get<std::string>());
+        }
         if (e.at("asset_id") != old.at("asset_id")) {
             const auto voice = s.sounds.find(p.at("id").get<std::string>());
             if (voice != s.sounds.end()) {
@@ -410,6 +438,8 @@ json AudioService::invoke(const std::string& op, const json& p) {
         const std::string id = p.at("id");
         s.find("emitters", id);
         s.poses.erase(id);
+        s.reactions.forget(id);
+        s.controls.erase(id);
         const auto voice = s.sounds.find(id);
         if (voice != s.sounds.end()) {
             ma_sound_uninit(voice->second.get());
@@ -492,6 +522,8 @@ json AudioService::snapshot() const {
 void AudioService::clear() {
     impl_->stopAll();
     impl_->poses.clear();
+    impl_->reactions.clear();
+    impl_->controls.clear();
     impl_->data = {{"version", 1}, {"next_id", 1}, {"assets", json::array()},
                    {"emitters", json::array()}};
 }
@@ -554,6 +586,8 @@ void AudioService::restore(const json& input, const std::filesystem::path& base)
     // Validate the complete candidate before replacing live data. Missing files are retained.
     impl_->stopAll();
     impl_->poses.clear();
+    impl_->reactions.clear();
+    impl_->controls.clear();
     impl_->data = std::move(candidate.data);
 }
 
@@ -604,6 +638,21 @@ void AudioService::resolvedPose(const std::string& id, const json& position,
             impl_->apply(*voice->second, impl_->find("emitters", id));
         } else {
             ma_sound_stop(voice->second.get());
+        }
+    }
+}
+
+void AudioService::tickReactions(float windMps, float rain) {
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = std::clamp(std::chrono::duration<float>(now - impl_->lastTick).count(),
+                                0.0f, 0.25f);
+    impl_->lastTick = now;
+    for (const auto& e : impl_->data.at("emitters")) {
+        const std::string id = e.at("id");
+        impl_->controls[id] = impl_->reactions.evaluate(id, e.at("reaction"), windMps, rain, dt);
+        const auto voice = impl_->sounds.find(id);
+        if (voice != impl_->sounds.end()) {
+            impl_->apply(*voice->second, e);
         }
     }
 }

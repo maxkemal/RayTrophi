@@ -27,6 +27,7 @@ public:
                   float ux, float uy, float uz);
     void resolvedPose(const std::string& id, const nlohmann::json& position,
                       const nlohmann::json& direction, bool valid);
+    void tickReactions(float windMps, float rain);
     static bool isAuthoring(const std::string& operation);
     static const std::vector<std::string>& operations();
     static std::vector<std::string> parameters(const std::string& operation);
