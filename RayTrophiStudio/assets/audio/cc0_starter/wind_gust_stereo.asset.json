@@ -1,0 +1,28 @@
+{
+  "id": "rt_cc0_wind_gust_stereo",
+  "name": "Wind Gust Stereo",
+  "type": "asset",
+  "assetKind": "audio",
+  "category": "audio",
+  "subcategory": "cc0_starter",
+  "format": "wav",
+  "entry": "wind_gust_stereo.wav",
+  "description": "Short wind gust; original stereo WAV. Not guaranteed seamless loop.",
+  "license": "CC0-1.0",
+  "source": "https://opengameart.org/content/short-wind-sound",
+  "author": "remaxim",
+  "tags": [
+    "audio",
+    "cc0",
+    "starter",
+    "wind",
+    "gust",
+    "stereo",
+    "ambience"
+  ],
+  "version": 1,
+  "duration": 4.235306122448979,
+  "channels": 2,
+  "sampleRate": 44100,
+  "loopSuitable": false
+}

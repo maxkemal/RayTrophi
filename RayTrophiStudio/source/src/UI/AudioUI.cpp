@@ -101,7 +101,9 @@ void drawAssetActions(UIContext& ctx, const AssetRecord& asset) {
         call(ctx, "preview_stop");
     }
     if (!error.empty()) {
-        ImGui::TextWrapped("%s", error.c_str());
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
+        ImGui::TextWrapped("Audio: %s", error.c_str());
+        ImGui::PopStyleColor();
     }
 }
 
@@ -129,6 +131,14 @@ void drawProperties(UIContext& ctx) {
     }
     if (!ImGui::CollapsingHeader("Scene Audio")) {
         return;
+    }
+    if (!error.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
+        ImGui::TextWrapped("Audio: %s", error.c_str());
+        ImGui::PopStyleColor();
+        if (ImGui::SmallButton("Dismiss audio error")) {
+            error.clear();
+        }
     }
     auto data = ctx.scene.audio->snapshot();
     ImGui::InputText("Selected audio file", path, sizeof(path), ImGuiInputTextFlags_ReadOnly);
@@ -192,6 +202,19 @@ void drawProperties(UIContext& ctx) {
             continue;
         }
         const auto id = selected;
+        const std::string assetId = e.at("asset_id");
+        bool stereoAsset = false;
+        for (const auto& asset : data.at("assets")) {
+            if (asset.at("id") == assetId) {
+                stereoAsset = asset.at("channels") == 2;
+            }
+        }
+        if (assetId.empty()) {
+            ImGui::TextWrapped("No audio file is linked. Import a file, then choose it in Asset.");
+        } else if (stereoAsset) {
+            ImGui::TextWrapped("Stereo asset: ambience playback is enabled. "
+                               "For 3D positioning, choose a mono asset.");
+        }
         char parent[256]{};
         std::snprintf(parent, sizeof(parent), "%s", e.value("parent", std::string()).c_str());
         if (ImGui::InputText("Parent object", parent, sizeof(parent), ImGuiInputTextFlags_EnterReturnsTrue)) {
@@ -230,9 +253,12 @@ void drawProperties(UIContext& ctx) {
         }
         for (const char* key : {"loop", "spatial"}) {
             bool value = e.at(key);
-            if (ImGui::Checkbox(key, &value)) {
+            const bool spatial = std::strcmp(key, "spatial") == 0;
+            ImGui::BeginDisabled(spatial && stereoAsset);
+            if (ImGui::Checkbox(spatial ? "3D positional (mono)" : "Loop", &value)) {
                 call(ctx, "update", {{"id", id}, {key, value}});
             }
+            ImGui::EndDisabled();
         }
         if (ImGui::BeginCombo("Bus", e.at("bus").get<std::string>().c_str())) {
             for (const char* bus : {"Master", "Weather", "Effects", "Ambience", "Music"}) {
@@ -243,6 +269,7 @@ void drawProperties(UIContext& ctx) {
             ImGui::EndCombo();
         }
         for (const char* op : {"play", "pause", "stop", "duplicate", "remove"}) {
+            ImGui::BeginDisabled(std::strcmp(op, "play") == 0 && assetId.empty());
             if (ImGui::Button(op)) {
                 const auto result = call(ctx, op, {{"id", id}});
                 if (op == std::string("duplicate") && result.contains("id")) {
@@ -252,13 +279,11 @@ void drawProperties(UIContext& ctx) {
                     ctx.selection.clearSelection();
                 }
             }
+            ImGui::EndDisabled();
             ImGui::SameLine();
         }
         ImGui::NewLine();
         AudioReactionUI::draw(ctx, e);
-    }
-    if (!error.empty()) {
-        ImGui::TextWrapped("%s", error.c_str());
     }
 }
 
