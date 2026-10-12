@@ -143,6 +143,10 @@ alan eklendi: 256×512 tek görüntü, alt yarı (ayrı binding yok).
 
 ## 4. Soğuk havuz ve çıkış rüzgârı (5b, TASLAK)
 
+> 2026-10-12: Genişletildi ve `ATMOSPHERE_LOCAL_WINDS_FOG.md`'ye taşındı.
+> Yeni kapsam: giriş, updraft, downdraft ve hamle cephesi; tüm fiziğe taban
+> rüzgâr alanı; hava uygunluğu, son yağış ve yerel sis. Aşağısı ilk taslak.
+
 Olgun ve dağılan hücrenin altında yağışla soğuyan hava → mezo-yüksek
 (+1–3 hPa), dışa doğru akış (10–20 m/s) ve bir hamle cephesi (yay). Yeni
 otomatik hücreler bu yayın üzerinde doğar (çok hücreli/hat organizasyonu).
@@ -214,6 +218,21 @@ compute'u aynı gönderimde koşar, kare kayıt noktalarına dokunulmaz.
   - viewport'ta otomatik bir hücreye tıklamak (tıklanan seçili kalır)
   - paneldeki "Convert live automatic cells to authored" düğmesi
   - IPC: `world.set_clouds {storms:{freeze_automatic:true}}`
+
+## 8. Yol haritası (2026-10-12)
+
+| Sıra | Faz | Not | Kapsam |
+|---|---|---|---|
+| ✔ | 5a | bu not | hücreler, kuleler, girdap, gizmo, dondurma, basıncın ilk adımı |
+| 1 | 6 | `ATMOSPHERE_CELL_CLOUDS.md` | hücre tam sütun "fırtına kabuğu" (LCL → tropopoz, örs, duvar bulutu, mamatus) + yoğunluk ve faza bağlı optik |
+| 2 | 5b | `ATMOSPHERE_LOCAL_WINDS_FOG.md` §1 | giriş, updraft, downdraft ve hamle cephesi rüzgârı → bulut şekli, yağış eğimi, `sampleWind` |
+| 3 | 8 | `ATMOSPHERE_PRECIP_TYPES.md` | tipler (çisentiden doluya), kar çizgisi, görsel tablo |
+| 4 | 7 | `ATMOSPHERE_LOCAL_WINDS_FOG.md` §2–4 | hava uygunluğu (orografi, ısınma), son yağış, yerel sis |
+| 5 | 5c | bu not §5 | sinoptik merkez ve cepheler, gün içi döngü, senaryolar |
+| 6 | ayrı | `ATMOSPHERE_SURFACE_COUPLING.md` | yer yağış haritası → ıslaklık, kar, sıçrama, akış, dolu |
+
+1 ve 2 birbirini besliyor: raf bulutu, rüzgârın hamle cephesinden geliyor.
+İkisi ardışık iki parti olarak yapılmalı.
 
 ## 8. Alt partiler
 
