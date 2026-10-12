@@ -53,6 +53,12 @@ void select(UIContext& ctx, const std::string& id) {
         selected = id;
     }
 }
+void connectEnvironment(UIContext& ctx, const json& params = json::object()) {
+    const auto installed = call(ctx, "environment_setup", params);
+    if (installed.contains("wind_source_id")) {
+        select(ctx, installed.at("wind_source_id"));
+    }
+}
 }
 
 void addSource(UIContext& ctx) {
@@ -141,6 +147,18 @@ void drawProperties(UIContext& ctx) {
         }
     }
     auto data = ctx.scene.audio->snapshot();
+    if (ImGui::Button("Connect starter wind / rain")) {
+        connectEnvironment(ctx);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Choose environment Assets folder")) {
+        const auto folder = SceneUI::selectFolderDialogW(L"Select Assets root containing audio/cc0_starter");
+        if (!folder.empty()) {
+            connectEnvironment(ctx, {{"assets_root", folder}});
+        }
+    }
+    ImGui::TextWrapped("Connect creates automatic weather sources from the CC0 starter pack. "
+                       "For domains, select a sound source and choose Domain Contact in Reactive Audio.");
     ImGui::InputText("Selected audio file", path, sizeof(path), ImGuiInputTextFlags_ReadOnly);
     if (ImGui::Button("Import WAV / FLAC / MP3")) {
         const auto chosen = chooseAudioFile();

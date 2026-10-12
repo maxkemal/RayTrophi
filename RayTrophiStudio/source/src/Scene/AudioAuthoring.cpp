@@ -1,5 +1,7 @@
 #include "Audio/AudioAuthoring.h"
 #include "Audio/AudioService.h"
+#include "Audio/AudioDomainBridge.h"
+#include "AssetRegistry.h"
 #include "scene_ui.h"
 #include "scene_data.h"
 #include "SceneSelection.h"
@@ -114,11 +116,36 @@ void recordEdit(UIContext& ctx, SceneHistory* history, const nlohmann::json& bef
 
 nlohmann::json author(UIContext& ctx, SceneHistory* history, const std::string& operation,
                       const nlohmann::json& params) {
+    if (!params.is_object()) {
+        throw std::invalid_argument("audio params must be an object");
+    }
     if (g_scene_loading_in_progress.load()) {
         throw std::runtime_error("Scene audio is unavailable while a project is loading");
     }
     if (AudioService::isAuthoring(operation) && rtapi::renderOutputPending()) {
         throw std::runtime_error("Scene audio authoring is locked by the render job");
+    }
+    if (operation == "domains") {
+        if (!params.is_object() || !params.empty()) {
+            throw std::invalid_argument("audio.domains takes no parameters");
+        }
+        return domainAudioInputs(ctx);
+    }
+    auto input = params;
+    if (operation == "environment_setup" && !input.contains("assets_root")) {
+        input["assets_root"] = pathUtf8(AssetRegistry::resolveDefaultRoot());
+    }
+    if (input.contains("reaction") && input.at("reaction").value("driver", std::string()) ==
+        "domain_contact") {
+        const auto& reaction = input.at("reaction");
+        bool found = false;
+        for (const auto& domain : domainAudioInputs(ctx)) {
+            found = found || (domain.at("system_id") == reaction.value("system_id", 0) &&
+                domain.at("domain_name") == reaction.value("domain_name", std::string()));
+        }
+        if (!found) {
+            throw std::invalid_argument("Audio domain binding not found; inspect audio.domains");
+        }
     }
     if (params.contains("parent") && !params.at("parent").get<std::string>().empty()) {
         parentMatrix(params);
@@ -134,7 +161,7 @@ nlohmann::json author(UIContext& ctx, SceneHistory* history, const std::string& 
     }
     const bool mutation = AudioService::isAuthoring(operation);
     const auto before = mutation ? ctx.scene.audio->snapshot() : nlohmann::json();
-    auto result = ctx.scene.audio->invoke(operation, params);
+    auto result = ctx.scene.audio->invoke(operation, input);
     if (operation == "select") {
         ctx.selection.clearSelection();
         auto& item = ctx.selection.selected;

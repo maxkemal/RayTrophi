@@ -2,6 +2,12 @@
 
 2026-10-12: source implementation, pending user build and live acceptance.
 
+Follow-up: [SCENE_AUDIO_AUTOMATION.md](SCENE_AUDIO_AUTOMATION.md) adds opt-in automatic
+start/stop, a packaged environment recipe, ground-reaching global cloud rain and the
+first published domain-contact-energy adapter. Its lifecycle/binding description
+supersedes the manual-only behavior below; detailed material-pair telemetry remains
+an external producer contract.
+
 This addition drives existing audio assets from simulation/environment signals.
 It does not synthesize new recordings or simulate acoustic propagation. Wind/rain
 loops and granular, splash or mud textures must be supplied by the user with valid

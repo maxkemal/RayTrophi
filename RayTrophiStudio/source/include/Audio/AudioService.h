@@ -2,6 +2,7 @@
 
 #include "json.hpp"
 #include <filesystem>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,6 +29,8 @@ public:
     void resolvedPose(const std::string& id, const nlohmann::json& position,
                       const nlohmann::json& direction, bool valid);
     void tickReactions(float windMps, float rain);
+    void invalidateSignal(const std::string& key);
+    std::uint64_t generation() const;
     static bool isAuthoring(const std::string& operation);
     static const std::vector<std::string>& operations();
     static std::vector<std::string> parameters(const std::string& operation);

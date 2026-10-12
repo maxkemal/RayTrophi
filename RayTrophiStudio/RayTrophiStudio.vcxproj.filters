@@ -2749,4 +2749,10 @@
     <ClCompile Include="source\src\Scene\AudioWeatherBridge.cpp" />
     <ClCompile Include="source\src\UI\AudioReactionUI.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Audio\AudioDomainBridge.h" />
+    <ClInclude Include="source\include\Audio\AudioEnvironment.h" />
+    <ClCompile Include="source\src\Scene\AudioDomainBridge.cpp" />
+    <ClCompile Include="source\src\Scene\AudioEnvironment.cpp" />
+  </ItemGroup>
 </Project>
