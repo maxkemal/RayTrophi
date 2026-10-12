@@ -1,6 +1,6 @@
 # Sahne sesi, timeline miks ve çalıştırılabilir çıktı planı
 
-> **Durum:** AKTIF — temel sahne sesi ve timeline transport kullanıcı tarafından doğrulandı; bus mikseri kaynakta, yeni derleme/kabul bekliyor.
+> **Durum:** AKTIF — temel sahne sesi ve timeline transport kullanıcı tarafından doğrulandı; bus mikserinin kısa canlı IPC/PCM kabulü kullanıcı derlemesinde geçti. Ayrıntılı kalan kontroller: [SCENE_AUDIO_MIXER.md](SCENE_AUDIO_MIXER.md).
 
 Tarih: 2026-10-11; uygulama durumu 2026-10-12 güncellendi. Tam plan henüz tamamlanmadı.
 
