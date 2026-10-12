@@ -181,6 +181,7 @@ bool stepMixedMatter(FluidParticles& particles, FluidSim::FluidGrid& grid,
                                               : MatterConstitutiveModel::Fluid;
     APICSolverStats aggregate{};
     MatterContactResult contact_stats;
+    MatterMomentum contact_position_sum;
     const double friction = std::tan(std::clamp(
         static_cast<double>(params.granular_friction_angle_degrees), 0.0, 80.0) *
         3.14159265358979323846 / 180.0);
@@ -220,6 +221,10 @@ bool stepMixedMatter(FluidParticles& particles, FluidSim::FluidGrid& grid,
         aggregate.granular_constitutive_ms += batch.model_stats[1].granular_constitutive_ms;
         aggregate.mixed_contact_pairs += contact_stats.pairs;
         aggregate.mixed_contact_energy_loss += contact_stats.kinetic_energy_loss;
+        aggregate.mixed_contact_position_weight += contact_stats.position_weight;
+        contact_position_sum.x += contact_stats.weighted_position.x;
+        contact_position_sum.y += contact_stats.weighted_position.y;
+        contact_position_sum.z += contact_stats.weighted_position.z;
     }
     // UVW is a frame epoch; private common substeps must not age it N times.
     candidate_particles.uvw_step = particles.uvw_step;
@@ -228,6 +233,14 @@ bool stepMixedMatter(FluidParticles& particles, FluidSim::FluidGrid& grid,
     aggregate.particle_count = candidate_particles.size();
     aggregate.grid_cell_count = static_cast<std::size_t>(grid.nx) * grid.ny * grid.nz;
     aggregate.mixed_model_step = true;
+    aggregate.mixed_contact_duration_seconds = dt;
+    if (aggregate.mixed_contact_position_weight > 0.0) {
+        const double weight = aggregate.mixed_contact_position_weight;
+        aggregate.mixed_contact_position = Vec3(
+            static_cast<float>(contact_position_sum.x / weight),
+            static_cast<float>(contact_position_sum.y / weight),
+            static_cast<float>(contact_position_sum.z / weight));
+    }
     aggregate.mixed_common_substeps = substeps;
     aggregate.mixed_working_set_bytes = estimateMixedMatterWorkingSet(particles, grid);
     aggregate.granular_solver_substeps = substeps;

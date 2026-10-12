@@ -382,7 +382,7 @@ std::vector<std::string> AudioService::parameters(const std::string& op) {
     }
     if (op == "signal_set") {
         return {"key", "value", "flow_kg_s", "speed_mps", "position", "source_material",
-                "target_material", "ttl_seconds"};
+                "target_material", "ttl_seconds", "power_w"};
     }
     if (op == "environment_setup" || op == "thunder_setup") {
         return {"assets_root"};

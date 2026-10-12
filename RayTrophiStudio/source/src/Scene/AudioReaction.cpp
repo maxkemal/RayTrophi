@@ -31,12 +31,17 @@ nlohmann::json AudioReaction::validate(const json& p) {
     keys(p, {"driver", "input_min", "input_max", "gain_min", "gain_max", "pitch_min",
              "pitch_max", "response_seconds", "signal_key", "follow_position",
              "source_material", "target_material", "automatic", "start_threshold",
-             "stop_threshold", "system_id", "domain_name"});
+             "stop_threshold", "system_id", "domain_name", "input_metric"});
     json result;
     const std::string driver = p.value("driver", std::string("manual"));
     require(driver == "manual" || driver == "wind" || driver == "rain" || driver == "signal" ||
             driver == "domain_contact", "Unknown reaction driver");
     result["driver"] = driver;
+    const std::string metric = p.value("input_metric", std::string("energy_j"));
+    require(metric == "energy_j" || metric == "power_w", "Unknown domain input_metric");
+    require(driver == "domain_contact" || metric == "energy_j",
+            "power_w input_metric requires domain_contact driver");
+    result["input_metric"] = metric;
     result["input_min"] = field(p, "input_min", 0, 0, 1000000000);
     result["input_max"] = field(p, "input_max", driver == "wind" ? 30 : 1, 0, 1000000000);
     require(result["input_max"].get<float>() > result["input_min"].get<float>(),
@@ -85,7 +90,7 @@ nlohmann::json AudioReaction::validate(const json& p) {
 
 json AudioReaction::publish(const json& p) {
     keys(p, {"key", "value", "flow_kg_s", "speed_mps", "position", "source_material",
-             "target_material", "ttl_seconds"});
+             "target_material", "ttl_seconds", "power_w"});
     const std::string key = p.at("key");
     require(!key.empty() && key.size() <= 256, "Signal key must contain 1..256 characters");
     require(p.contains("value") != (p.contains("flow_kg_s") || p.contains("speed_mps")),
@@ -103,6 +108,9 @@ json AudioReaction::publish(const json& p) {
         require(std::isfinite(value) && value <= 1000000000, "Signal power exceeds limit");
     }
     data["value"] = value;
+    if (p.contains("power_w")) {
+        data["power_w"] = field(p, "power_w", 0, 0, 1000000000);
+    }
     data["source_material"] = p.value("source_material", std::string());
     data["target_material"] = p.value("target_material", std::string());
     require(data["source_material"].get<std::string>().size() <= 128 &&
@@ -148,6 +156,10 @@ ReactionOutput AudioReaction::evaluate(const std::string& id, const json& config
             if ((source.empty() || data.at("source_material") == source) &&
                 (target.empty() || data.at("target_material") == target)) {
                 input = data.at("value");
+                if (driver == "domain_contact" && config.value("input_metric", "energy_j") ==
+                    "power_w") {
+                    input = data.value("power_w", 0.0f);
+                }
                 if (config.at("follow_position").get<bool>() && data.contains("position")) {
                     result.position = data.at("position");
                     lastPositions_[id] = result.position;

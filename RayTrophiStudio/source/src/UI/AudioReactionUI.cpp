@@ -33,6 +33,7 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
         for (const char* driver : {"manual", "wind", "rain", "signal", "domain_contact"}) {
             if (ImGui::Selectable(driver, config.at("driver") == driver)) {
                 config["driver"] = driver;
+                config["input_metric"] = "energy_j";
                 config["input_max"] = std::string(driver) == "wind" ? 30.0f : 1.0f;
                 if (std::string(driver) == "signal" && config.at("signal_key") == "") {
                     config["signal_key"] = "contact";
@@ -75,6 +76,17 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
             }
         }
         if (config.at("driver") == "domain_contact") {
+            const std::string metric = config.at("input_metric");
+            if (ImGui::BeginCombo("Contact magnitude", metric.c_str())) {
+                for (const char* choice : {"energy_j", "power_w"}) {
+                    if (ImGui::Selectable(choice, metric == choice)) {
+                        auto edited = config;
+                        edited["input_metric"] = choice;
+                        call(ctx, "update", {{"id", id}, {"reaction", edited}});
+                    }
+                }
+                ImGui::EndCombo();
+            }
             const auto domains = audio::domainAudioInputs(ctx);
             const std::string label = std::to_string(config.at("system_id").get<int>()) +
                                       "/" + config.at("domain_name").get<std::string>();
@@ -91,15 +103,21 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
                 }
                 ImGui::EndCombo();
             }
-            ImGui::TextWrapped("Measured mixed-contact energy (J per published solver step). "
-                               "Position is the domain center, not the exact impact. "
-                               "No material-pair classification or dry-grain pour sensor yet.");
+            ImGui::TextWrapped("Energy: J per solver step. Power: energy / measured step duration. "
+                               "Unavailable power stays silent. Position uses the measured "
+                               "contact cell centroid when available, otherwise domain center. "
+                               "Material pairs and dry-grain pour are not measured yet.");
             for (const auto& domain : domains) {
                 if (domain.at("system_id") == config.at("system_id") &&
                     domain.at("domain_name") == config.at("domain_name")) {
                     ImGui::Text("Report: %s / %.4f J", domain.at("measured").get<bool>() ?
                                 "measured" : "unavailable", domain.at("contact_energy_j").get<double>());
                     ImGui::TextWrapped("%s", domain.at("reason").get<std::string>().c_str());
+                    ImGui::Text("Power: %s / %.4f W", domain.at("power_measured").get<bool>() ?
+                                "measured" : "unavailable",
+                                domain.at("contact_power_w").get<double>());
+                    ImGui::TextWrapped("Position: %s",
+                        domain.at("position_semantics").get<std::string>().c_str());
                     if (domain.at("audio_error") != "") {
                         ImGui::TextWrapped("Telemetry: %s",
                                            domain.at("audio_error").get<std::string>().c_str());

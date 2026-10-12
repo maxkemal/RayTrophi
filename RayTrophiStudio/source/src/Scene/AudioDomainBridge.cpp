@@ -28,28 +28,47 @@ json domainAudioInputs(UIContext& ctx) {
         for (std::size_t i = 0; i < domains.size(); ++i) {
             const auto* state = i < states.size() && states[i].valid ? &states[i] : nullptr;
             const bool enabled = system.enabled && system.runtime->enabled() && domains[i].enabled;
+            const auto* stats = state ? &state->fluid_stats : nullptr;
+            const double duration = stats ? stats->mixed_contact_duration_seconds : 0;
             const bool measured = enabled && state && state->fluid_stats.mixed_model_step &&
-                                  !state->fluid_stats.mixed_step_held;
+                !state->fluid_stats.mixed_step_held && std::isfinite(duration) && duration > 0;
             const double energy = measured ? state->fluid_stats.mixed_contact_energy_loss : 0;
             const bool finite = std::isfinite(energy) && energy >= 0 && energy <= 1e9;
-            const Vec3 center = state ? (state->bounds_min + state->bounds_max) * 0.5f : Vec3(0);
+            const double power = finite && std::isfinite(duration) && duration > 0
+                ? energy / duration : 0;
+            const bool powerMeasured = measured && finite && std::isfinite(duration) &&
+                duration > 0 && std::isfinite(power) && power >= 0 && power <= 1e9;
+            const bool localized = measured && stats &&
+                std::isfinite(stats->mixed_contact_position_weight) &&
+                stats->mixed_contact_position_weight > 0 &&
+                std::isfinite(stats->mixed_contact_position.x) &&
+                std::isfinite(stats->mixed_contact_position.y) &&
+                std::isfinite(stats->mixed_contact_position.z);
+            const Vec3 center = localized ? stats->mixed_contact_position :
+                (state ? (state->bounds_min + state->bounds_max) * 0.5f : Vec3(0));
             const bool positionValid = std::isfinite(center.x) && std::isfinite(center.y) &&
                                        std::isfinite(center.z);
             const std::string key = keyFor(system.id, domains[i].name);
             const char* reason = !enabled ? "disabled" : (!state ? "not_initialized" :
                 (!state->fluid_stats.mixed_model_step ? "solver_contact_metric_unavailable" :
                  (state->fluid_stats.mixed_step_held ? "mixed_step_held" :
-                  (!finite ? "invalid_contact_energy" : "available"))));
+                  (!std::isfinite(duration) || duration <= 0 ? "contact_energy_not_published" :
+                   (!finite ? "invalid_contact_energy" : "available")))));
             result.push_back({{"system_id", system.id}, {"system_name", system.name},
                 {"domain_name", domains[i].name}, {"signal_key", key},
                 {"enabled", enabled}, {"valid", state != nullptr},
                 {"version", state ? state->version : 0}, {"measured", measured && finite},
                 {"contact_energy_j", finite ? energy : 0},
+                {"contact_power_w", powerMeasured ? power : 0},
+                {"power_measured", powerMeasured},
+                {"measurement_duration_seconds", std::isfinite(duration) ? duration : 0},
                 {"reason", reason},
                 {"audio_error", publicationErrors.contains(key) ? publicationErrors.at(key) : ""},
                 {"contact_pairs", measured ? state->fluid_stats.mixed_contact_pairs : 0},
                 {"position", positionValid ? json::array({center.x, center.y, center.z}) : json()},
-                {"position_semantics", "domain_center"},
+                {"position_semantics", localized && positionValid ?
+                    "impulse_weighted_contact_cell_center" : "domain_center"},
+                {"material_pairs_available", false},
                 {"measurement", "mixed_contact_energy_loss_per_published_solver_step"}});
         }
     }
@@ -111,6 +130,7 @@ void tickDomainAudioInputs(UIContext& ctx) {
         }
         versions[key] = version;
         json signal = {{"key", key}, {"value", input.at("contact_energy_j")}, {"ttl_seconds", 0.3f}};
+        signal["power_w"] = input.at("contact_power_w");
         if (!input.at("position").is_null()) {
             signal["position"] = input.at("position");
         }

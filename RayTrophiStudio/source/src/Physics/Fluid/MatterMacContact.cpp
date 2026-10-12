@@ -149,6 +149,22 @@ bool applyMatterMacContact(const FluidParticles& particles,
     }
     candidate.impulse_norm *= scale;
     candidate.kinetic_energy_loss = -(scale * linear + 0.5 * scale * scale * quadratic);
+    // Reuse the contact frame; no second particle scan or GPU readback.
+    for (const auto& [cell, entry] : frame.cells) {
+        const auto initial = before.at(cell);
+        const auto after = entry.model[0].momentum;
+        const double dx = after.x - initial.x;
+        const double dy = after.y - initial.y;
+        const double dz = after.z - initial.z;
+        const double weight = scale * std::hypot(dx, dy, dz);
+        candidate.position_weight += weight;
+        candidate.weighted_position.x += weight *
+            (liquid.origin.x + (cell[0] + 0.5) * liquid.voxel_size);
+        candidate.weighted_position.y += weight *
+            (liquid.origin.y + (cell[1] + 0.5) * liquid.voxel_size);
+        candidate.weighted_position.z += weight *
+            (liquid.origin.z + (cell[2] + 0.5) * liquid.voxel_size);
+    }
     result = candidate;
     return true;
 }

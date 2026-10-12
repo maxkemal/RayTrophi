@@ -60,6 +60,9 @@ struct MatterContactResult {
     std::size_t pairs = 0;
     double impulse_norm = 0.0;
     double kinetic_energy_loss = 0.0;
+    // MAC contact cell centres weighted by applied impulse magnitude (not impact points).
+    double position_weight = 0.0;
+    MatterMomentum weighted_position;
     MatterMomentum momentum_error;
 };
 

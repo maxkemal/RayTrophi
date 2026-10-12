@@ -22,6 +22,11 @@ ve mesafe gecikmesi kullanıcıyla doğrulandı.
 
 ## Ürün hedefi
 
+2026-10-12 sonraki adım: CPU karma domain temaslarının darbe ağırlıklı hücre merkezi
+ve adım süresine göre güç (W) ses eşlemesi kaynakta eklendi; derleme/kabul bekliyor.
+Sözleşme, GPU sınırı ve kontrol listesi:
+[SCENE_AUDIO_DOMAIN_CONTACTS.md](SCENE_AUDIO_DOMAIN_CONTACTS.md).
+
 RayTrophi açık kaynak kalır. Kullanıcı sesleri assets üzerinden ekler, 3D sahnede
 gizmo ile yerleştirir, timeline üzerinde düzenler ve miksler. Aynı sahne RT,
 RayFusion, material ve solid önizlemede; çevrimdışı render çıktısında ve gelecekteki
