@@ -1,0 +1,28 @@
+{
+  "id": "cc0_thunder_03_mono",
+  "name": "Thunder - Long rumble (mono)",
+  "type": "asset",
+  "assetKind": "audio",
+  "category": "audio",
+  "subcategory": "thunder",
+  "format": "wav",
+  "entry": "thunder_03_mono.wav",
+  "description": "Long rumble CC0 variation; publisher-generated audio, mono positional derivative.",
+  "license": "CC0-1.0",
+  "source": "https://sfxmint.com/sounds/ambience-thunder-03",
+  "author": "SFXMint",
+  "tags": [
+    "weather",
+    "thunder",
+    "one-shot",
+    "mono",
+    "cc0",
+    "generated",
+    "far"
+  ],
+  "version": 1,
+  "duration": 4.95498866213152,
+  "channels": 1,
+  "sampleRate": 44100,
+  "loopSuitable": false
+}

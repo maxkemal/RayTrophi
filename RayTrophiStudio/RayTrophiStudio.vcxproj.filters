@@ -2755,4 +2755,13 @@
     <ClCompile Include="source\src\Scene\AudioDomainBridge.cpp" />
     <ClCompile Include="source\src\Scene\AudioEnvironment.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Audio\AudioThunder.h" />
+    <ClInclude Include="source\include\Audio\AudioThunderBridge.h" />
+    <ClInclude Include="source\include\UI\AudioThunderUI.h" />
+    <ClCompile Include="source\src\Scene\AudioThunder.cpp" />
+    <ClCompile Include="source\src\Scene\AudioThunderAssets.cpp" />
+    <ClCompile Include="source\src\Scene\AudioThunderBridge.cpp" />
+    <ClCompile Include="source\src\UI\AudioThunderUI.cpp" />
+  </ItemGroup>
 </Project>

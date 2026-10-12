@@ -217,7 +217,9 @@ uint32_t requiredCapabilities(const std::string& method) {
         if (method == "audio.append" || method == "audio.asset_import" || method == "audio.asset_relink" ||
             method == "audio.play" || method == "audio.preview" ||
             method == "audio.preview_file" || method == "audio.environment_setup" ||
-            method == "audio.create" || method == "audio.update" || method == "audio.duplicate")
+            method == "audio.create" || method == "audio.update" || method == "audio.duplicate" ||
+            method == "audio.thunder_setup" || method == "audio.thunder_update" ||
+            method == "audio.thunder_event")
             return SceneWrite | FilesRead;
         return SceneWrite;
     }

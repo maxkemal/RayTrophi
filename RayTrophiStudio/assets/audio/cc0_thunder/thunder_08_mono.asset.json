@@ -1,0 +1,28 @@
+{
+  "id": "cc0_thunder_08_mono",
+  "name": "Thunder - Close thunder (mono)",
+  "type": "asset",
+  "assetKind": "audio",
+  "category": "audio",
+  "subcategory": "thunder",
+  "format": "wav",
+  "entry": "thunder_08_mono.wav",
+  "description": "Close thunder CC0 variation; publisher-generated audio, mono positional derivative.",
+  "license": "CC0-1.0",
+  "source": "https://sfxmint.com/sounds/ambience-thunder-08",
+  "author": "SFXMint",
+  "tags": [
+    "weather",
+    "thunder",
+    "one-shot",
+    "mono",
+    "cc0",
+    "generated",
+    "near"
+  ],
+  "version": 1,
+  "duration": 5.924988662131519,
+  "channels": 1,
+  "sampleRate": 44100,
+  "loopSuitable": false
+}

@@ -8,6 +8,7 @@
 #include "SceneHistory.h"
 #include "ProjectManager.h"
 #include "Api/RtApi.h"
+#include "Camera.h"
 #include <cmath>
 #include <stdexcept>
 
@@ -132,7 +133,17 @@ nlohmann::json author(UIContext& ctx, SceneHistory* history, const std::string& 
         return domainAudioInputs(ctx);
     }
     auto input = params;
-    if (operation == "environment_setup" && !input.contains("assets_root")) {
+    if (operation == "thunder_event") {
+        if (!ctx.scene.camera) {
+            throw std::invalid_argument("Thunder needs an active listener camera");
+        }
+        const auto& camera = *ctx.scene.camera;
+        const Vec3 direction = camera.lookat - camera.lookfrom;
+        ctx.scene.audio->listener(camera.lookfrom.x, camera.lookfrom.y, camera.lookfrom.z,
+            direction.x, direction.y, direction.z, camera.vup.x, camera.vup.y, camera.vup.z);
+    }
+    if ((operation == "environment_setup" || operation == "thunder_setup") &&
+        !input.contains("assets_root")) {
         input["assets_root"] = pathUtf8(AssetRegistry::resolveDefaultRoot());
     }
     if (input.contains("reaction") && input.at("reaction").value("driver", std::string()) ==

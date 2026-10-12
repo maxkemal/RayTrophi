@@ -3,6 +3,8 @@
 #include "Audio/AudioAuthoring.h"
 #include "Audio/AudioWeatherBridge.h"
 #include "UI/AudioReactionUI.h"
+#include "UI/AudioThunderUI.h"
+#include "Audio/AudioThunderBridge.h"
 #include "scene_ui.h"
 #include "scene_data.h"
 #include "Camera.h"
@@ -147,6 +149,7 @@ void drawProperties(UIContext& ctx) {
         }
     }
     auto data = ctx.scene.audio->snapshot();
+    drawThunderAudio(ctx);
     if (ImGui::Button("Connect starter wind / rain")) {
         connectEnvironment(ctx);
     }
@@ -307,14 +310,16 @@ void drawProperties(UIContext& ctx) {
 
 void updateListener(UIContext& ctx) {
     audio::syncScene(ctx);
-    audio::tickWeatherReactions(ctx);
     if (!ctx.scene.camera) {
+        audio::tickCloudThunder(ctx);
         return;
     }
     const auto& camera = *ctx.scene.camera;
     const Vec3 direction = camera.lookat - camera.lookfrom;
     ctx.scene.audio->listener(camera.lookfrom.x, camera.lookfrom.y, camera.lookfrom.z,
         direction.x, direction.y, direction.z, camera.vup.x, camera.vup.y, camera.vup.z);
+    audio::tickWeatherReactions(ctx);
+    audio::tickCloudThunder(ctx);
 }
 
 void drawViewport(UIContext& ctx, bool ortho, bool showGizmos, bool& hit) {

@@ -17,6 +17,12 @@ struct RegisterAudioMethods {
             names.push_back("audio." + op);
         }
         static const MethodParam params[] = {
+            {"config", "object", true, "Thunder settings patch including near/far mono asset ids",
+                nullptr, nullptr},
+            {"intensity", "float", false, "Thunder event strength 0..100000; 30 is reference",
+                "30", nullptr},
+            {"age_seconds", "float", false, "Elapsed visual time since event onset, 0..2",
+                "0", nullptr},
             {"id", "string", false, "Persistent asset or source id (operation dependent)", nullptr, nullptr},
             {"path", "string", false, "WAV/FLAC/MP3 file for import/relink", nullptr, nullptr},
             {"asset_id", "string", false, "Asset to bind to a source", nullptr, nullptr},
@@ -72,7 +78,8 @@ struct RegisterAudioMethods {
             const bool readsFile = op == "append" || op == "asset_import" || op == "asset_relink" ||
                                    op == "play" || op == "preview" || op == "preview_file" ||
                                    op == "environment_setup" || op == "create" || op == "update" ||
-                                   op == "duplicate";
+                                   op == "duplicate" || op == "thunder_setup" ||
+                                   op == "thunder_update" || op == "thunder_event";
             descriptor.capability = read ? "Read" : (readsFile ? "SceneWrite|FilesRead" : "SceneWrite");
             descriptor.undoable = audio::AudioService::isAuthoring(op);
             descriptor.return_type = "object";
@@ -83,7 +90,9 @@ struct RegisterAudioMethods {
                 for (const auto& definition : params) {
                     if (key == definition.name) {
                         auto param = definition;
-                        param.required = key == "id" || key == "path" || key == "muted" || key == "key";
+                        param.required = key == "id" || key == "path" || key == "muted" ||
+                            key == "key" || key == "config" ||
+                            (op == "thunder_event" && key == "position");
                         if (param.required) {
                             param.default_value = nullptr;
                         }
