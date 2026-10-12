@@ -130,6 +130,10 @@ json AudioThunder::publish(const json& input, const json& listener) {
     return {{"queued", true}, {"event", event}};
 }
 
+void AudioThunder::resume() {
+    suspended_ = false;
+}
+
 json AudioThunder::due() {
     json result = json::array();
     const auto now = std::chrono::steady_clock::now();

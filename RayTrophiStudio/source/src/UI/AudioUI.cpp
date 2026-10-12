@@ -182,6 +182,15 @@ void drawProperties(UIContext& ctx) {
     if (ImGui::Button("Stop all audio")) {
         call(ctx, "stop_all");
     }
+    ImGui::SameLine();
+    if (ImGui::Button("Resume automatic audio")) {
+        call(ctx, "resume_automatic");
+    }
+    if (status.at("thunder_runtime").at("suspended").get<bool>() ||
+        !status.at("automatic_suspended").empty()) {
+        ImGui::TextWrapped("Automatic audio is suspended. Resume automatic audio or restart "
+                           "timeline Play to re-arm connected sources.");
+    }
     ImGui::Text("Device: %s", status.at("device").get<std::string>().c_str());
     if (ImGui::TreeNode("Audio assets")) {
         for (const auto& asset : data.at("assets")) {
@@ -224,11 +233,22 @@ void drawProperties(UIContext& ctx) {
         }
         const auto id = selected;
         const std::string assetId = e.at("asset_id");
+        const std::string environmentRole = e.value("environment_role", std::string());
+        std::string assetLabel = "Unbound";
         bool stereoAsset = false;
+        bool thunderInEnvironment = false;
         for (const auto& asset : data.at("assets")) {
             if (asset.at("id") == assetId) {
                 stereoAsset = asset.at("channels") == 2;
+                assetLabel = asset.at("name").get<std::string>();
+                for (const auto& tag : asset.value("tags", json::array())) {
+                    thunderInEnvironment = thunderInEnvironment || tag == "thunder";
+                }
             }
+        }
+        if (!environmentRole.empty() && thunderInEnvironment) {
+            ImGui::TextWrapped("This environment source is bound to a thunder variation. "
+                               "Choose a continuous wind/rain file in Asset.");
         }
         if (assetId.empty()) {
             ImGui::TextWrapped("No audio file is linked. Import a file, then choose it in Asset.");
@@ -247,11 +267,13 @@ void drawProperties(UIContext& ctx) {
         if (ImGui::InputText("Source name", name, sizeof(name), ImGuiInputTextFlags_EnterReturnsTrue)) {
             call(ctx, "update", {{"id", id}, {"name", name}});
         }
-        if (ImGui::BeginCombo("Asset", e.at("asset_id").get<std::string>().c_str())) {
+        if (ImGui::BeginCombo("Asset", assetLabel.c_str())) {
             for (const auto& asset : data.at("assets")) {
-                if (ImGui::Selectable(asset.at("name").get<std::string>().c_str())) {
+                const auto label = asset.at("name").get<std::string>() + "##" +
+                                   asset.at("id").get<std::string>();
+                if (ImGui::Selectable(label.c_str(), asset.at("id") == assetId)) {
                     call(ctx, "update", {{"id", id}, {"asset_id", asset.at("id")},
-                                         {"spatial", asset.at("channels") == 1}});
+                        {"spatial", environmentRole.empty() && asset.at("channels") == 1}});
                 }
             }
             if (ImGui::Selectable("Unbound")) {

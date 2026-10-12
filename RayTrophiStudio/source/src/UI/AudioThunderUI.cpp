@@ -54,8 +54,22 @@ void drawThunderAudio(UIContext& ctx) {
     const auto& runtime = status.at("thunder_runtime");
     ImGui::Text("Pending: %zu, voices: %zu", runtime.at("pending").size(),
                 status.at("thunder_voices").size());
+    ImGui::Text("Detected event identities: %zu", runtime.at("seen_count").get<std::size_t>());
+    if (!runtime.at("pending").empty()) {
+        const nlohmann::json* nearestArrival = nullptr;
+        for (const auto& event : runtime.at("pending")) {
+            if (!nearestArrival || event.at("remaining_seconds").get<double>() <
+                nearestArrival->at("remaining_seconds").get<double>()) {
+                nearestArrival = &event;
+            }
+        }
+        ImGui::Text("Next thunder: %.1f km, arrives in %.1f s",
+            nearestArrival->at("distance_m").get<double>() / 1000,
+            nearestArrival->at("remaining_seconds").get<double>());
+    }
     if (runtime.at("suspended").get<bool>()) {
-        ImGui::TextWrapped("Thunder suspended by Stop All / asset preview. Connect re-arms it.");
+        ImGui::TextWrapped("Thunder suspended by Stop All / asset preview. Resume automatic "
+                           "audio or restart timeline Play.");
     }
     static int previewId = 0;
     ImGui::BeginDisabled(!ctx.scene.camera || !enabled || runtime.at("suspended").get<bool>());

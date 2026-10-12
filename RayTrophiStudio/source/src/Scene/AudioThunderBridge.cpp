@@ -19,6 +19,7 @@ void tickCloudThunder(UIContext& ctx) {
     static double previousTime = 0;
     static double previousPeriod = 0;
     static std::uint32_t previousSeed = 0;
+    static bool previousPlaying = false;
     auto service = ctx.scene.audio;
     const auto& world = ctx.renderer.world;
     const auto& clouds = world.getClouds();
@@ -26,6 +27,14 @@ void tickCloudThunder(UIContext& ctx) {
     const double time = static_cast<float>(ctx.scene.timeline.current_frame) / fps;
     const float rate = Backend::lightningEffectiveRate(clouds.lightning);
     const double period = rate > 0 ? 240.0 / rate : 0;
+    const bool playing = ctx.render_settings.animation_is_playing;
+    if (owner.lock() != service) {
+        previousPlaying = false;
+    }
+    if (playing && !previousPlaying && !rtapi::renderOutputPending()) {
+        service->invoke("resume_automatic", nlohmann::json::object());
+    }
+    previousPlaying = playing;
     if (!std::isfinite(time) || !ctx.scene.camera) {
         service->resetThunder();
         owner.reset();

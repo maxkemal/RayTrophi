@@ -13,6 +13,7 @@ All surfaces use `AudioAuthoring` -> `AudioService`.
 | `thunder_setup` | optional `assets_root` | Atomically import CC0 pack and enable near/far groups. Reuse/re-arm existing complete bindings. |
 | `thunder_update` | required `config` object | Merge, validate, stop old thunder, clear queue and re-arm. |
 | `thunder_event` | required `key`, `position`; optional `intensity=30`, `age_seconds=0` | Runtime event using active camera; `queued` plus details or skip reason. |
+| `resume_automatic` | none | End asset audition and re-arm configured automatic sources/thunder. Runtime only; SceneWrite + FilesRead. |
 | `list`, `status` | none | Persistent `thunder` settings; pending events/delay, voices, drop count and last decoder/device error. |
 
 Setup/update are undoable, mark the project modified, and require SceneWrite +
@@ -93,7 +94,11 @@ old tails. Render-output jobs suppress new automatic events. Offline audio expor
 and a shared offline event evaluator remain later-stage work.
 
 Stop All and asset audition clear voices/queue and suspend automatic thunder;
-setup/update re-arm. Mute preserves queue/playback. Limits: 64 pending, 128 recent
+setup/update, `resume_automatic`, or a new timeline Play transition re-arm. The
+Scene Audio panel shows suspension outside the thunder tree; its Resume automatic
+audio button calls the same script/IPC operation. Pending diagnostics show the
+next arrival's distance and remaining delay. Mute preserves queue/playback.
+Limits: 64 pending, 128 recent
 keys, 8 thunder voices, 32 total voices, existing 512 MiB decoded budget. At most
 two queued voices decode per editor update; low editor FPS can delay their start.
 Full queues increment a drop counter. Voice-budget/file/device failures drop the
@@ -125,3 +130,17 @@ VS now copies the full assets/audio tree; CMake already copies all assets.
    referenced asset removal. Relink a missing mono WAV and re-arm.
 6. Audition all seven variations in scene. IPC probes use external
    `scripts/test/rt_ipc.py`, never the embedded script workspace. No new test script.
+
+## Live diagnosis, 2026-10-12
+
+The user-built scene had thunder enabled but runtime suspended after audition/stop.
+Its Environment wind was bound to a thunder asset and set positional; rain was
+not automatic. Repaired wind/rain bindings through the common authoring API and
+re-armed existing thunder through its config operation. External IPC confirmed
+actual visual flashes crossing the timeline produce queued identities and that
+two automatic events at approximately 4.4 km and 6.0 km eventually reported
+`playing=true`, with no decoder/device error. Other observed events had delays of
+9.6..63 s; lack of immediate sound was not proof of missed lightning.
+
+The new Resume button/Play transition and diagnostics are source changes pending
+the next user build. No project build or application launch was performed.

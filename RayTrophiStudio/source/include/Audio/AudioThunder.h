@@ -12,6 +12,7 @@ public:
     static nlohmann::json validate(const nlohmann::json& config);
     void configure(const nlohmann::json& config);
     void reset(bool suspend = false);
+    void resume();
     nlohmann::json publish(const nlohmann::json& event, const nlohmann::json& listener);
     nlohmann::json due();
     nlohmann::json status() const;

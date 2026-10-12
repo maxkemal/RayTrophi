@@ -282,7 +282,8 @@ const std::vector<std::string>& AudioService::operations() {
         "list", "get", "select", "status", "asset_import", "asset_relink", "asset_remove", "create", "update",
         "duplicate", "remove", "play", "pause", "stop", "stop_all", "preview", "preview_stop",
         "preview_mute", "preview_file", "append", "signal_set", "signals_clear",
-        "environment_setup", "domains", "thunder_setup", "thunder_update", "thunder_event"};
+        "environment_setup", "resume_automatic", "domains", "thunder_setup", "thunder_update",
+        "thunder_event"};
     return names;
 }
 
@@ -334,7 +335,7 @@ std::vector<std::string> AudioService::parameters(const std::string& op) {
         return {"key", "position", "intensity", "age_seconds"};
     }
     if (op == "list" || op == "status" || op == "stop_all" || op == "preview_stop" ||
-        op == "signals_clear" || op == "domains") {
+        op == "signals_clear" || op == "domains" || op == "resume_automatic") {
         return {};
     }
     return {"id"};
@@ -349,6 +350,18 @@ json AudioService::invoke(const std::string& op, const json& p) {
     for (auto it = p.begin(); it != p.end(); ++it) {
         require(std::find(allowed.begin(), allowed.end(), it.key()) != allowed.end(),
                 "Unknown audio parameter: " + it.key());
+    }
+    if (op == "resume_automatic") {
+        if (s.preview) {
+            ma_sound_uninit(s.preview.get());
+            s.preview.reset();
+        }
+        s.suspended.clear();
+        s.failedAt.clear();
+        s.autoErrors.clear();
+        s.thunderError.clear();
+        s.thunder.resume();
+        return {{"ok", true}};
     }
     if (op == "thunder_setup") {
         AudioService candidate;
@@ -563,7 +576,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
         }
         json e = emitter(combined);
         s.validateAsset(e);
-        if (e.at("reaction") != old.at("reaction")) {
+        if (e.at("reaction") != old.at("reaction") || e.at("asset_id") != old.at("asset_id")) {
             s.reactions.forget(e.at("id"));
             s.controls.erase(e.at("id").get<std::string>());
             s.suspended.erase(e.at("id").get<std::string>());
