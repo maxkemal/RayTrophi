@@ -42,6 +42,9 @@ void ParticleSimulationSystem::rebaseRestoredGridDomainStates() {
         state.bounds_min += delta;
         state.bounds_max += delta;
         state.grid.origin += delta;
+        if (state.fluid_stats.mixed_contact_position_weight > 0.0) {
+            state.fluid_stats.mixed_contact_position += delta;
+        }
 
         // Fluid particles are world-space and must come along. Velocity is a
         // DIRECTION and is left alone; translating it would inject a phantom

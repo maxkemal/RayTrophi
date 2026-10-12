@@ -75,3 +75,43 @@ Non-build checks passed: source-size limits, API parameter/default/unsupported-p
 guards, diff whitespace, and numeric power-subdivision/centroid translation and
 convex-hull invariants. These checks do not execute the C++ implementation and do
 not replace the build/live acceptance above.
+
+## Short live acceptance — 2026-10-12
+
+On the user's new build, external IPC created a small closed CPU Matter domain
+with opposing Water/Soil MPM sources and a CC0 mono water-flow loop. Twelve fresh
+solver steps reported measured energy, positive duration, power and a moving
+impulse-weighted cell centre. Peak sampled power was 6.3593 W; one report gave
+0.0582105 J over 0.0166667 s, hence 3.49263 W. In continuous test mode, the automatic
+source received 2.02114 W, followed the reported world position, advanced its
+cursor and produced nonzero Effects/Master PCM without automatic errors.
+
+The scene was left available for user review, reset to frame zero, with timeline
+audio restored. This verifies CPU publication and shared playback, not timestep
+invariance, material-pair routing, save/reopen or timeline Play/Pause acceptance.
+Gizmos were disabled by the user after an earlier creation attempt crashed in
+the legacy FluidObject overlay. That overlay crash remains unresolved; this test
+does not establish that a rebuild fixed it.
+
+## RAM cache playback correction — build pending
+
+RAM frame compression keeps APICSolverStats in CachedGridDomain.meta, and
+decompression restores that metadata. prepareFluidCacheRestore publishes a fresh
+domain version; restoreSimFrame sets the simulation clock to the cached frame.
+The contact data was already present, but the audio bridge rejected it because
+cached playback has substeps_last_advance=0.
+
+The bridge now accepts a measured report when simulation time advances and its
+domain version increases, whether from a live solve or RAM cache restoration.
+Repeated redraws or re-restores at the same time do not refresh TTL. Backwards
+seek/loop, scene replacement and audio undo/load still invalidate old signals;
+subsequent forward frames can publish again. Normal timeline Pause/Stop policies
+remain in force. This does not add contact telemetry to older disk bake formats.
+When an existing cache restore rebases a manually translated domain, its measured
+contact centre now translates with the particles; energy and power stay unchanged.
+
+After rebuilding, run the test scene once to populate RAM frames, rewind and Play
+the same range again. Confirm audio.domains still reports measured power/position,
+audio.status reaction input and Effects/Master meters react on both passes, and
+Pause/Stop silence or hold the voices as before. Same-frame waiting must not create
+new publications. Live acceptance of this correction is pending.

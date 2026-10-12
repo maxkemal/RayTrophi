@@ -89,9 +89,12 @@ watts, and not the sum of every substep skipped by the editor. Unsupported solve
 paths report solver_contact_metric_unavailable instead of deriving noise from
 particle count, an authored emission rate or stale host particle arrays.
 
-Publication requires simulation time to advance, substeps_last_advance >0 and a new
-domain state version. Repeated rendering of the same report never refreshes a
-signal. Backwards time/version and scene load/undo invalidate old publications.
+Publication requires simulation time and domain state version to advance.
+RAM cache restores retain contact statistics and publish a new state version,
+so forward cached frames also drive audio without new solver substeps. Repeated
+rendering/restoring of the same frame never refreshes signal TTL. Backwards
+time/version and scene load/undo invalidate old publications. This supersedes the
+original live-substep-only rule; see SCENE_AUDIO_DOMAIN_CONTACTS.md for acceptance.
 Each measured report updates a bounded runtime signal with a 0.3-second TTL; stopped,
 deleted, disabled or unmeasured domains fade to silence. The bridge performs no new
 GPU readback, particle scan, simulation stepping or geometry/facade work.
