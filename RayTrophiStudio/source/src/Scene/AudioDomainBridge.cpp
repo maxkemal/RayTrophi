@@ -83,9 +83,8 @@ void tickDomainAudioInputs(UIContext& ctx) {
     const auto& clock = ctx.scene.getSimulationWorld().getStats();
     const float time = clock.simulated_time_seconds;
     if (owner.lock() != ctx.scene.audio || generation != ctx.scene.audio->generation() ||
-        !std::isfinite(time) || time < lastTime ||
-        (time != lastTime && clock.substeps_last_advance == 0)) {
-        // Reset on scene replacement, undo/load and backwards seek; never replay an old report.
+        !std::isfinite(time) || time < lastTime) {
+        // Reset on scene replacement, undo/load and backwards seek.
         for (const auto& entry : versions) {
             ctx.scene.audio->invalidateSignal(entry.first);
         }
@@ -120,7 +119,11 @@ void tickDomainAudioInputs(UIContext& ctx) {
             continue;
         }
         const auto version = input.at("version").get<std::uint64_t>();
-        if (clock.substeps_last_advance <= 0 || time <= lastTime ||
+        // RAM cache retains fluid_stats and restore publishes a fresh version.
+        // A forward cached frame is a valid report even without a solver substep.
+        // Require both time and version progress so idle redraws/restores cannot
+        // refresh TTL with the same frame's contact indefinitely.
+        if (time <= lastTime ||
             (versions.contains(key) && versions.at(key) >= version)) {
             if (versions.contains(key) && versions.at(key) > version) {
                 ctx.scene.audio->invalidateSignal(key);
