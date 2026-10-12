@@ -22,7 +22,7 @@ void drawThunderAudio(UIContext& ctx) {
             error = e.what();
         }
     };
-    if (ImGui::Button("Connect CC0 thunder variations")) {
+    if (ImGui::Button("Connect scene lightning to thunder")) {
         call("thunder_setup", nlohmann::json::object());
     }
     if (ImGui::Button("Choose thunder Assets folder")) {
@@ -47,9 +47,9 @@ void drawThunderAudio(UIContext& ctx) {
             call("thunder_update", {{"config", {{field.first, value}}}});
         }
     }
-    ImGui::TextWrapped("Uses the scene lightning clock. Distance / sound speed delays each event; "
-        "near and far recordings vary. Paused visual time emits no new flashes. "
-        "Pending thunder continues until Stop All, a seek or scene change.");
+    ImGui::TextWrapped("Connect uses the bundled CC0 variations for actual scene lightning. "
+        "Distance / sound speed delays each event; near and far recordings vary. "
+        "In timeline mode, Play / Pause / Stop also control pending thunder and voices.");
     const auto status = ctx.scene.audio->invoke("status", nlohmann::json::object());
     const auto& runtime = status.at("thunder_runtime");
     ImGui::Text("Pending: %zu, voices: %zu", runtime.at("pending").size(),
@@ -71,16 +71,20 @@ void drawThunderAudio(UIContext& ctx) {
         ImGui::TextWrapped("Thunder suspended by Stop All / asset preview. Resume automatic "
                            "audio or restart timeline Play.");
     }
-    static int previewId = 0;
-    ImGui::BeginDisabled(!ctx.scene.camera || !enabled || runtime.at("suspended").get<bool>() ||
-                        ctx.scene.audio->transportPaused());
-    if (ImGui::Button("Test thunder at 1 km (about 2.9 s)")) {
-        const auto position = ctx.scene.camera->lookfrom;
-        call("thunder_event", {{"key", "preview/" + std::to_string(++previewId)},
-            {"position", nlohmann::json::array({position.x + 1000, position.y, position.z})},
-            {"intensity", 30}});
+    if (ImGui::TreeNode("Diagnostics / sound preview")) {
+        static int previewId = 0;
+        ImGui::BeginDisabled(!ctx.scene.camera || !enabled ||
+                            runtime.at("suspended").get<bool>() ||
+                            ctx.scene.audio->transportPaused());
+        if (ImGui::Button("Test thunder at 1 km (about 2.9 s)")) {
+            const auto position = ctx.scene.camera->lookfrom;
+            call("thunder_event", {{"key", "preview/" + std::to_string(++previewId)},
+                {"position", nlohmann::json::array({position.x + 1000, position.y, position.z})},
+                {"intensity", 30}});
+        }
+        ImGui::EndDisabled();
+        ImGui::TreePop();
     }
-    ImGui::EndDisabled();
     const auto runtimeError = status.at("thunder_error").get<std::string>();
     if (!error.empty() || !runtimeError.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.4f, 0.3f, 1));

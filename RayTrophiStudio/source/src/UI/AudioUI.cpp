@@ -164,7 +164,7 @@ void drawProperties(UIContext& ctx) {
     }
     drawThunderAudio(ctx);
     drawMixer(ctx);
-    if (ImGui::Button("Connect starter wind / rain")) {
+    if (ImGui::Button("Connect atmosphere wind / rain")) {
         connectEnvironment(ctx);
     }
     ImGui::SameLine();
@@ -174,8 +174,11 @@ void drawProperties(UIContext& ctx) {
             connectEnvironment(ctx, {{"assets_root", folder}});
         }
     }
-    ImGui::TextWrapped("Connect creates automatic weather sources from the CC0 starter pack. "
-                       "For domains, select a sound source and choose Domain Contact in Reactive Audio.");
+    ImGui::TextWrapped("Connect links scene wind and rain to automatic sound sources using "
+                       "the bundled CC0 library. Replace their assets with your own recordings. "
+                       "Playback follows the selected audio transport. For a domain, select a "
+                       "sound source, bind its Asset, then choose Domain Contact and a Domain "
+                       "binding in Reactive Audio. Enable Automatic start / stop and Loop.");
     ImGui::InputText("Selected audio file", path, sizeof(path), ImGuiInputTextFlags_ReadOnly);
     if (ImGui::Button("Import WAV / FLAC / MP3")) {
         const auto chosen = chooseAudioFile();
