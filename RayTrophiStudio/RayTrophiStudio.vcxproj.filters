@@ -2771,4 +2771,12 @@
     <ClInclude Include="source\include\Audio\AudioTransport.h" />
     <ClCompile Include="source\src\Scene\AudioTransport.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Audio\AudioMixer.h" />
+    <ClInclude Include="source\include\Audio\AudioMixerRuntime.h" />
+    <ClInclude Include="source\include\UI\AudioMixerUI.h" />
+    <ClCompile Include="source\src\Scene\AudioMixer.cpp" />
+    <ClCompile Include="source\src\Scene\AudioMixerRuntime.cpp" />
+    <ClCompile Include="source\src\UI\AudioMixerUI.cpp" />
+  </ItemGroup>
 </Project>

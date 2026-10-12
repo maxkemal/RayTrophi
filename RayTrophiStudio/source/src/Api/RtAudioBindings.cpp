@@ -17,6 +17,8 @@ struct RegisterAudioMethods {
             names.push_back("audio." + op);
         }
         static const MethodParam params[] = {
+            {"solo", "bool", false, "Solo a child mixer bus; multiple solos combine",
+                nullptr, nullptr},
             {"mode", "string", true, "Scene audio transport policy", nullptr, "continuous|timeline"},
             {"config", "object", true, "Thunder settings patch including near/far mono asset ids",
                 nullptr, nullptr},
@@ -43,7 +45,7 @@ struct RegisterAudioMethods {
             {"cone_inner", "float", false, "Inner angle in degrees 0..360", "360", nullptr},
             {"cone_outer", "float", false, "Outer angle >= inner, <=360", "360", nullptr},
             {"cone_gain", "float", false, "Outer cone amplitude 0..1", "1", nullptr},
-            {"bus", "string", false, "Routing label; mixer arrives in stage 2", "Effects",
+            {"bus", "string", false, "Scene mixer routing / mixer bus identity", "Effects",
                 "Master|Weather|Effects|Ambience|Music"},
             {"license", "string", false, "Asset license metadata", "", nullptr},
             {"author", "string", false, "Asset author metadata", "", nullptr},
@@ -69,7 +71,8 @@ struct RegisterAudioMethods {
         };
         for (std::size_t i = 0; i < names.size(); ++i) {
             const auto& op = audio::AudioService::operations()[i];
-            const bool read = op == "list" || op == "get" || op == "status" || op == "domains";
+            const bool read = op == "list" || op == "get" || op == "status" || op == "domains" ||
+                              op == "mixer_get";
             MethodDescriptor descriptor{};
             descriptor.name = names[i].c_str();
             descriptor.domain = "audio";
@@ -95,6 +98,13 @@ struct RegisterAudioMethods {
                         param.required = key == "id" || key == "path" || key == "muted" ||
                             key == "key" || key == "config" || key == "mode" ||
                             (op == "thunder_event" && key == "position");
+                        if (op == "mixer_update") {
+                            param.required = key == "bus";
+                            param.default_value = nullptr;
+                            if (key == "gain") {
+                                param.description = "Linear mixer gain 0..4; omitted fields stay unchanged";
+                            }
+                        }
                         if (param.required) {
                             param.default_value = nullptr;
                         }

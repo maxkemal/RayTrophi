@@ -213,7 +213,7 @@ bool loadLocked(std::string& error) {
 uint32_t requiredCapabilities(const std::string& method) {
     if (method.rfind("audio.", 0) == 0) {
         if (method == "audio.list" || method == "audio.get" || method == "audio.status" ||
-            method == "audio.domains") return Read;
+            method == "audio.domains" || method == "audio.mixer_get") return Read;
         if (method == "audio.append" || method == "audio.asset_import" || method == "audio.asset_relink" ||
             method == "audio.play" || method == "audio.preview" ||
             method == "audio.preview_file" || method == "audio.environment_setup" ||

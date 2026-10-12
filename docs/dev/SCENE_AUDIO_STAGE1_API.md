@@ -78,8 +78,9 @@ Emitter properties: name, asset_id (empty is unbound), parent (empty is world),
 position[3], direction[3] (nonzero), gain (0..16), pitch (0.125..8), loop, spatial,
 min_distance (0.001..1000000), max_distance (>= min_distance), rolloff (0..10),
 cone_inner (0..360 degrees), cone_outer (>= inner, <=360), cone_gain (0..1),
-bus (Master / Weather / Effects / Ambience / Music). Bus is a routing label reserved
-for stage 2; stage 1 plays through the master engine without bus gain/solo controls.
+bus (Master / Weather / Effects / Ambience / Music). Stage-2 bus routing and
+gain/mute/solo/PCM meters now use the shared mixer service; see
+[SCENE_AUDIO_MIXER.md](SCENE_AUDIO_MIXER.md) for operations and pending acceptance.
 Unknown emitter properties, invalid ids, malformed vectors, NaN/Infinity and invalid
 ranges fail before the source record changes. Mono is required for spatial sources;
 stereo ambience uses spatial=False. Empty sources can be authored but cannot play.
@@ -178,3 +179,7 @@ The initial silence was an unbound source (empty asset_id), not a path encoding 
 
 Remaining checklist items are pending manual checks. Stage 1 acceptance stays
 open until the user completes the build and visual/aural verification.
+
+Mixer extension: audio.mixer_get, audio.mixer_update and audio.mixer_reset_peaks
+are registered through the same Python/IPC audio operation table.
+See [SCENE_AUDIO_MIXER.md](SCENE_AUDIO_MIXER.md).

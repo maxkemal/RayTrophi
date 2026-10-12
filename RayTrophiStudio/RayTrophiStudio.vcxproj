@@ -2395,4 +2395,21 @@
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Audio\AudioMixer.h" />
+    <ClInclude Include="source\include\Audio\AudioMixerRuntime.h" />
+    <ClInclude Include="source\include\UI\AudioMixerUI.h" />
+    <ClCompile Include="source\src\Scene\AudioMixer.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioMixerRuntime.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioMixerUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+  </ItemGroup>
 </Project>
