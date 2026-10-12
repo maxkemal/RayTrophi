@@ -1914,6 +1914,9 @@
     <ClCompile Include="source\src\UI\CloudMaterialUI.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\UI\StormGizmoUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>

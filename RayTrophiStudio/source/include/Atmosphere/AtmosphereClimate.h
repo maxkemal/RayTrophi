@@ -63,6 +63,16 @@ struct DerivedWeather {
     float precipitation_mm_h   = 0.0f;     // peak rate under a cluster core
     bool  snow                 = false;    // precipitation reaches the ground frozen
     float lightning_per_minute = 0.0f;
+    // Storm cells (ATMOSPHERE_STORMS.md §3): how many convective cells live
+    // at once, how strong they peak, and how much broad rain falls outside
+    // them (share of the peak rate).
+    int   storm_cells          = 0;
+    float storm_intensity      = 0.0f;
+    float stratiform_rain      = 0.0f;
+    // Synoptic vertical motion read from the sea-level pressure anomaly:
+    // +1 deep low (~983 hPa: convergence, rising air), -1 strong high
+    // (~1038 hPa: subsidence, capped clouds), 0 at 1013 hPa.
+    float synoptic_lift        = 0.0f;
 };
 
 DerivedWeather deriveWeather(const ClimateState& c, float surface_altitude_m);

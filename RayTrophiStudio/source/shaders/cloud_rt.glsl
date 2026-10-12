@@ -32,6 +32,9 @@
 #ifndef CLOUD_MAJORANT_BINDING
 #define CLOUD_MAJORANT_BINDING 35
 #endif
+#ifndef CLOUD_CELL_BINDING
+#define CLOUD_CELL_BINDING 36
+#endif
 #include "cloud_common.glsl"
 #include "cloud_cirrus_shape.glsl"
 
@@ -156,6 +159,8 @@ float cloudLayerMajorant(int li, vec3 p) {
         }
     }
     float cov = clamp(cloudRemap(m, 1.0 - L.a.z, 1.0, 0.0, 1.0), 0.0, 1.0);
+    // Storm cells raise the cover; their map carries its own dilated bound.
+    cov = max(cov, cloudStormCellAt(p).a);
     return cov * L.b.x;
 }
 
@@ -402,6 +407,14 @@ void cloudCirrus(vec3 o, vec3 d, float tLimit, vec3 sunDir, float mu, vec3 ambTo
 void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout vec3 inscatter, inout float T,
                       inout float depth);
 
+// Work level of the next march. 0 = camera / RayFusion sky (full lighting),
+// 1 = a path's secondary ray (reflections, sky light reaching the ground):
+// its result is averaged over the hemisphere by the surface it lights, so it
+// gets base-shape density, a two-tap light march, sparse ambient occlusion
+// and an earlier cut-off. Under a sky-wide storm every bounce ray climbs into
+// the cloud: that, not the camera ray, was the cost that exploded.
+int cloudMarchLod = 0;
+
 void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                 out vec3 inscatter, out float T, out float depth) {
 #ifdef CLOUD_SEPARATE_FLASH_HISTORY
@@ -436,7 +449,13 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                      cloudTransmittanceLUT(cloudAltitude(o), sunDir.y) * max(sunDir.y, 0.0);
     float jitter = cloudRand(rng);
     float depthW = 0.0, depthSum = 0.0;
-    int budget = steps * 4;
+    bool secondary = cloudMarchLod != 0;
+    int budget = secondary ? steps * 2 : steps * 4;
+    // A sample this deep behind the cloud adds < this fraction of the pixel.
+    float cutoff = secondary ? 0.03 : 0.005;
+    // Night (or the sun below the horizon): the light march has nothing to
+    // carry; the flash and the ambient light the cloud. Skip it outright.
+    bool sunUp = worldData.w.sunIntensity > 1e-5 && sunDir.y > -0.1;
 
     for (int k = 0; k < n && budget > 0; ++k) {
         int li = int(iv[k].z);
@@ -461,6 +480,10 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
         float tEnd = iv[k].y;
         float dt = baseDt * (1.0 + t / 5000.0);
         t += dt * jitter;
+        // Ambient occlusion varies slowly: refreshed every `aoEvery` lit
+        // samples once the view is mostly occluded (and on secondary rays).
+        float tauTop = 0.0, tauBot = 0.0;
+        int aoTick = 0;
         while (t < tEnd && budget > reserve) {
             int remaining = budget - reserve;
             --budget;
@@ -484,33 +507,47 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
             float alt = cloudAltitude(p);
             // Detailed evaluation already rejects empty base shape before
             // erosion. Avoid solving all storm cells twice at the same point.
+            // Detail erosion only shapes edges the viewer can still see: once
+            // T is small the rest of the pixel cannot show it (Nubis LOD).
+            bool wantDetail = !secondary && T > 0.15;
             float cheap;
-            float sigma = cloudLayerDensityResolved(li, p, alt, true, cheap);
+            float sigma = cloudLayerDensityResolved(li, p, alt, wantDetail, cheap);
             if (cheap <= 0.0) {
                 t += min(max(dt, completionStep), tEnd - t);
                 continue;
             }
             // Inside cloud: finer steps (vertical structure), >= 25 m.
-            float stepLen = min(max(max(dt * 0.6, 25.0), completionStep), tEnd - t);
+            // Deep in (low T) the remaining samples matter little: longer
+            // steps, the integration below is energy-conserving per step.
+            float deepGrow = 1.0 + 1.5 * (1.0 - smoothstep(0.05, 0.35, T));
+            if (secondary) deepGrow *= 2.0;
+            float stepLen = min(max(max(dt * 0.6 * deepGrow, 25.0), completionStep), tEnd - t);
             if (sigma > 0.0) {
                 if (Es.r < 0.0) Es = cloudSunIrradiance(p, sunDir);
                 // Light march: 6 samples doubling from 40 m (2.5 km), detail
                 // in the first 3 -- the gaps between turrets are tens of
                 // metres, a thickness-relative first step jumped over them --
                 // plus one far base-shape sample for the rest of a tall tower.
+                // LOD: 6 taps while the sample is clearly visible, fewer as T
+                // falls (secondary: 2). The last tap stretches to the same
+                // 2520 m, so the total path is unchanged -- only resolution.
                 float tau = 0.0;
-                float lt = 0.0;
-                for (int j = 0; j < 6; ++j) {
-                    float seg = 40.0 * pow(2.0, float(j));
-                    // Stratify the existing light samples to soften fixed
-                    // quadrature bands without adding another shaft march.
-                    vec3 q = p + sunDir * (lt + seg * mix(0.2, 0.8, cloudRand(rng)));
-                    tau += cloudDensity(q, j < 3) * seg;
-                    lt += seg;
-                }
-                {
-                    vec3 q = p + sunDir * (lt + 1500.0);
-                    tau += cloudDensity(q, false) * 3000.0;
+                if (sunUp) {
+                    int lightTaps = secondary ? 2 : (T > 0.35 ? 6 : (T > 0.12 ? 4 : 3));
+                    bool lightDetail = !secondary && T > 0.35;
+                    float lt = 0.0;
+                    for (int j = 0; j < lightTaps; ++j) {
+                        float seg = (j == lightTaps - 1) ? 2520.0 - lt : 40.0 * pow(2.0, float(j));
+                        // Stratify the existing light samples to soften fixed
+                        // quadrature bands without adding another shaft march.
+                        vec3 q = p + sunDir * (lt + seg * mix(0.2, 0.8, cloudRand(rng)));
+                        tau += cloudDensity(q, lightDetail && j < 3 && j < lightTaps - 1) * seg;
+                        lt += seg;
+                    }
+                    {
+                        vec3 q = p + sunDir * (lt + 1500.0);
+                        tau += cloudDensity(q, false) * 3000.0;
+                    }
                 }
                 float h = clamp((alt - L.a.x) / thick, 0.0, 1.0);
                 // Sky ambient, occluded by the cloud above / below (two cheap
@@ -522,11 +559,14 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                     dTop = max(L.g.x + L.g.y - alt, 0.0);
                     dBot = max(alt - L.g.x, 0.0);
                 }
-                vec3 qt = p + upN * (dTop * 0.5), qb = p - upN * (dBot * 0.5);
-                float tauTop = (L.d.z > 0.5 ? cloudDensity(qt, false) :
-                                cloudLayerDensity(li, qt, cloudAltitude(qt), false)) * dTop;
-                float tauBot = (L.d.z > 0.5 ? cloudDensity(qb, false) :
-                                cloudLayerDensity(li, qb, cloudAltitude(qb), false)) * dBot;
+                int aoEvery = secondary ? 4 : (T > 0.25 ? 1 : 2);
+                if (aoTick++ % aoEvery == 0) {
+                    vec3 qt = p + upN * (dTop * 0.5), qb = p - upN * (dBot * 0.5);
+                    tauTop = (L.d.z > 0.5 ? cloudDensity(qt, false) :
+                              cloudLayerDensity(li, qt, cloudAltitude(qt), false)) * dTop;
+                    tauBot = (L.d.z > 0.5 ? cloudDensity(qb, false) :
+                              cloudLayerDensity(li, qb, cloudAltitude(qb), false)) * dBot;
+                }
                 // The ground under this cloud sits in the cloud's own shadow:
                 // approximate by the sun transmittance of this column.
                 // The base sees a wide patch of ground, most of it outside
@@ -561,7 +601,7 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                 // the cloud above/below (cheap: height gradient).
                 S += amb;
                 S = S * L.e.rgb + L.f.rgb;
-                vec3 flash = cloudLightningSource(p, lightningActivity);
+                vec3 flash = cloudLightningSource(p, lightningActivity, !secondary);
                 // Energy-conserving integration over the step (Hillaire 2016).
                 float Ts = exp(-sigma * stepLen);
 #ifdef CLOUD_SEPARATE_FLASH_HISTORY
@@ -573,7 +613,7 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                 depthSum += t * T * (1.0 - Ts);
                 depthW += T * (1.0 - Ts);
                 T *= Ts;
-                if (T < 0.005) { T = 0.0; break; }
+                if (T < cutoff) { T = 0.0; break; }
             }
             t += stepLen;
         }
@@ -646,7 +686,18 @@ void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout 
     float ph = snow ? 1.0 / (4.0 * CLOUD_PI) : mix(1.0 / (4.0 * CLOUD_PI), cloudPhaseHG(0.6, mu), 0.5);
     vec3 ambTop = cloudSkyAmbient(normalize(vec3(0.0, 1.0, 0.0) + d * 0.2));
     vec3 Es = vec3(-1.0);
-    int n = max(steps / 3, 16);
+    bool secondary = cloudMarchLod != 0;
+    int n = max(steps / 3, secondary ? 8 : 16);
+    // Lit cloud bases light the curtain during a flash.
+    vec4 flashActivity = cloudFlashAny() ? cloudLightningActivities() : vec4(0.0);
+    bool flashOn = any(greaterThan(flashActivity, vec4(0.0)));
+    // The sun's optical depth through the column above changes slowly along
+    // the ray: one estimate serves `shadeEvery` neighbouring samples while
+    // they are close together (the per-sample 4-step march was the most
+    // expensive part of the curtain).
+    int shadeEvery = secondary ? 4 : 2;
+    int shadeTick = 0;
+    float shade = 1.0;
     // Steps grow with distance: near shafts resolved, far ones a veil.
     float len = tEnd - t0;
     float jitter = cloudRand(rng);
@@ -665,11 +716,15 @@ void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout 
         float sigma = cloudPrecipDensityLod(p, 1.0 - smoothstep(120.0, 600.0, dt));
         if (sigma <= 0.0) continue;
         if (Es.r < 0.0) Es = cloudSunIrradiance(p, sunDir);
-        float tauSun = cloudOpticalDepth(p, sunDir, CLOUD_RT_MAX_DIST, 4, jitter, false);
-        float shade = exp(-tauSun);
+        if (shadeTick++ % shadeEvery == 0 || dt > 400.0) {
+            float tauSun = cloudOpticalDepth(p, sunDir, CLOUD_RT_MAX_DIST, secondary ? 2 : 4,
+                                             jitter, false);
+            shade = exp(-tauSun);
+        }
         // Under a cloud the sky above is mostly blocked (scaled with the sun
         // shade as a proxy); ~0.125 of it comes back off the ground.
         vec3 S = Es * shade * ph + ambTop * (0.275 + 0.35 * shade);
+        if (flashOn) S += cloudFlashMediumLight(p, flashActivity) * (1.0 / (4.0 * CLOUD_PI));
         float Ts = exp(-sigma * dt);
         pin += pT * S * 0.95 * (1.0 - Ts);
         dSum += ta * pT * (1.0 - Ts);
@@ -701,8 +756,10 @@ void cloudRenderLimited(vec3 o, vec3 d, float tLimit, bool cameraRay, uint seed,
     if (!cloudRtReference()) {
         // Secondary rays: half the steps (reflections, sky light on the ground).
         int steps = cloudRtSteps();
+        cloudMarchLod = cameraRay ? 0 : 1;
         cloudMarchLimited(o, d, tLimit, cameraRay ? steps : max(16, steps / 2),
                           seed, inscatter, T, depth);
+        cloudMarchLod = 0;
         return;
     }
     uint rng = cloudSeed(seed, o + d);
@@ -735,7 +792,7 @@ void cloudRenderLimited(vec3 o, vec3 d, float tLimit, bool cameraRay, uint seed,
         // Emission is a source per optical-depth event; absorption reduces
         // the scattering throughput before both NEE and continuation.
         inscatter += thr * (cloudParams.layers[li].f.rgb +
-                           cloudLightningSource(pos, lightningActivity));
+                           cloudLightningSource(pos, lightningActivity, true));
         thr *= cloudParams.layers[li].e.rgb;
         if (max(thr.r, max(thr.g, thr.b)) <= 0.0) break;
         float dUm = cloudParams.layers[li].b.y;

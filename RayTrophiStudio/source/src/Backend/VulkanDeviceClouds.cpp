@@ -5,6 +5,7 @@
 
 #include "Backend/VulkanBackend.h"
 #include "Backend/CloudParams.h"
+#include "Backend/VulkanFailureReporting.h"
 
 #include <algorithm>
 #include <cstring>
@@ -113,12 +114,14 @@ ImageHandle VulkanDevice::createImage3D(uint32_t w, uint32_t h, uint32_t d, VkFo
 void VulkanDevice::destroyCloudResources() {
     destroyCloudRaster();
     destroyCloudPipelines();
-    for (ImageHandle* img : {&m_cloudBase, &m_cloudDetail, &m_cloudCurl, &m_cloudWeather, &m_cloudMajorant}) {
+    destroyCloudUploadRing();
+    for (ImageHandle* img : {&m_cloudBase, &m_cloudDetail, &m_cloudCurl, &m_cloudWeather, &m_cloudMajorant,
+                             &m_cloudCellMap}) {
         if (img->image || img->view) destroyImage(*img);
         *img = {};
     }
     for (BufferHandle* b : {&m_cloudSampleParamsBuffer, &m_cloudQueryBuffer, &m_cloudResultBuffer,
-                            &m_cloudRtParamsBuffer}) {
+                            &m_cloudRtParamsBuffer, &m_cloudCellsBuffer}) {
         if (b->buffer) destroyBuffer(*b);
         *b = {};
     }
@@ -128,7 +131,8 @@ void VulkanDevice::destroyCloudResources() {
 }
 
 bool VulkanDevice::ensureCloudTextures() {
-    if (m_cloudBase.view && m_cloudMajorant.view && m_cloudRtParamsBuffer.buffer) return true;
+    if (m_cloudBase.view && m_cloudMajorant.view && m_cloudRtParamsBuffer.buffer &&
+        m_cloudCellMap.view && m_cloudCellsBuffer.buffer) return true;
     const VkImageUsageFlags use = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     VramCategoryScope vram(VramCategory::RenderTarget);
     // createImage2D / createImage3D leave the images in GENERAL: the storage
@@ -143,8 +147,10 @@ bool VulkanDevice::ensureCloudTextures() {
                                    VK_FORMAT_R8G8B8A8_UNORM, use);
     m_cloudMajorant = createImage2D(Backend::kCloudMajorantSize, Backend::kCloudMajorantSize,
                                     VK_FORMAT_R8G8B8A8_UNORM, use);
+    m_cloudCellMap = createImage2D(Backend::kCloudCellMapSize, Backend::kCloudCellMapRows,
+                                   VK_FORMAT_R16G16B16A16_SFLOAT, use | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     bool ok = m_cloudBase.view && m_cloudDetail.view && m_cloudCurl.view && m_cloudWeather.view &&
-              m_cloudMajorant.view;
+              m_cloudMajorant.view && m_cloudCellMap.view;
     if (ok) {
         for (ImageHandle* img : {&m_cloudBase, &m_cloudDetail, &m_cloudCurl, &m_cloudWeather}) {
             img->sampler = makeRepeatSampler(m_device);
@@ -153,6 +159,36 @@ bool VulkanDevice::ensureCloudTextures() {
         // The majorant is read with texelFetch; any sampler will do.
         m_cloudMajorant.sampler = makeRepeatSampler(m_device);
         ok = ok && m_cloudMajorant.sampler != VK_NULL_HANDLE;
+        // The cell map does NOT tile: linear, clamped (cloudStormCellAt also
+        // returns zero outside it).
+        VkSamplerCreateInfo cs{};
+        cs.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        cs.magFilter = VK_FILTER_LINEAR;
+        cs.minFilter = VK_FILTER_LINEAR;
+        cs.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        cs.addressModeU = cs.addressModeV = cs.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        cs.maxLod = 0.0f;
+        ok = ok && vkCreateSampler(m_device, &cs, nullptr, &m_cloudCellMap.sampler) == VK_SUCCESS;
+    }
+    if (ok) {
+        // No storm until the first cells dispatch: the map must read zero,
+        // not uninitialised memory.
+        VkCommandBuffer cmd = beginSingleTimeCommands();
+        ok = cmd != VK_NULL_HANDLE;
+        if (ok) {
+            const VkClearColorValue zero{};
+            VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCmdClearColorImage(cmd, m_cloudCellMap.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+            endSingleTimeCommands(cmd);
+        }
+    }
+    if (ok) {
+        BufferCreateInfo ci{};
+        ci.size = sizeof(Backend::CloudCellsGPU);
+        ci.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
+        ci.location = MemoryLocation::GPU_ONLY;
+        m_cloudCellsBuffer = createBuffer(ci);
+        ok = m_cloudCellsBuffer.buffer != VK_NULL_HANDLE;
     }
     if (ok) {
         BufferCreateInfo ci{};
@@ -169,23 +205,27 @@ bool VulkanDevice::ensureCloudTextures() {
         uploadBuffer(m_cloudRtParamsBuffer, &zero, sizeof(zero));
         return true;
     }
-    for (ImageHandle* img : {&m_cloudBase, &m_cloudDetail, &m_cloudCurl, &m_cloudWeather, &m_cloudMajorant}) {
+    for (ImageHandle* img : {&m_cloudBase, &m_cloudDetail, &m_cloudCurl, &m_cloudWeather, &m_cloudMajorant,
+                             &m_cloudCellMap}) {
         if (img->image || img->view) destroyImage(*img);
         *img = {};
     }
-    if (m_cloudRtParamsBuffer.buffer) destroyBuffer(m_cloudRtParamsBuffer);
-    m_cloudRtParamsBuffer = {};
+    for (BufferHandle* b : {&m_cloudRtParamsBuffer, &m_cloudCellsBuffer}) {
+        if (b->buffer) destroyBuffer(*b);
+        *b = {};
+    }
     return false;
 }
 
-// RT set bindings 30-35: base, detail, curl, weather, params, majorant.
+// RT set bindings 30-36: base, detail, curl, weather, params, majorant, cell map.
 void VulkanDevice::writeRtCloudDescriptors() {
     if (m_rtDescriptorSet == VK_NULL_HANDLE || !ensureCloudTextures()) return;
-    const ImageHandle* imgs[5] = {&m_cloudBase, &m_cloudDetail, &m_cloudCurl, &m_cloudWeather, &m_cloudMajorant};
-    const uint32_t bindings[5] = {30, 31, 32, 33, 35};
-    VkDescriptorImageInfo ii[5]{};
-    VkWriteDescriptorSet w[6]{};
-    for (uint32_t i = 0; i < 5; ++i) {
+    const ImageHandle* imgs[6] = {&m_cloudBase, &m_cloudDetail, &m_cloudCurl, &m_cloudWeather, &m_cloudMajorant,
+                                  &m_cloudCellMap};
+    const uint32_t bindings[6] = {30, 31, 32, 33, 35, 36};
+    VkDescriptorImageInfo ii[6]{};
+    VkWriteDescriptorSet w[7]{};
+    for (uint32_t i = 0; i < 6; ++i) {
         ii[i].sampler = imgs[i]->sampler;
         ii[i].imageView = imgs[i]->view;
         ii[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -197,20 +237,183 @@ void VulkanDevice::writeRtCloudDescriptors() {
         w[i].pImageInfo = &ii[i];
     }
     VkDescriptorBufferInfo bi{m_cloudRtParamsBuffer.buffer, 0, sizeof(Backend::CloudParamsGPU)};
-    w[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w[5].dstSet = m_rtDescriptorSet;
-    w[5].dstBinding = 34;
-    w[5].descriptorCount = 1;
-    w[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    w[5].pBufferInfo = &bi;
-    vkUpdateDescriptorSets(m_device, 6, w, 0, nullptr);
+    w[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w[6].dstSet = m_rtDescriptorSet;
+    w[6].dstBinding = 34;
+    w[6].descriptorCount = 1;
+    w[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[6].pBufferInfo = &bi;
+    vkUpdateDescriptorSets(m_device, 7, w, 0, nullptr);
 }
 
-void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params) {
+void VulkanDevice::destroyCloudUploadRing() {
+    for (CloudUploadSlot& slot : m_cloudUploadSlots) {
+        if (slot.fence) {
+            vkWaitForFences(m_device, 1, &slot.fence, VK_TRUE, UINT64_MAX);
+            vkDestroyFence(m_device, slot.fence, nullptr);
+        }
+        if (slot.cmd) vkFreeCommandBuffers(m_device, m_commandPool, 1, &slot.cmd);
+        if (slot.staging.buffer) destroyBuffer(slot.staging);
+        slot = {};
+    }
+    m_cloudUploadNext = 0;
+}
+
+// Params + storm cells + the cell map, in queue order and WITHOUT a CPU wait.
+// Every frame is submitted to this same queue, so a frame submitted after
+// this sees the new block; the leading barrier keeps this from overwriting
+// what an earlier, still-running frame reads. The CPU waits only when all
+// ring slots are still in flight (four updates, ~two frames, ahead).
+void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
+                                       const Backend::CloudCellsGPU& cells) {
     if (!ensureCloudTextures()) return;
-    // Ordered transfer (same path as the world buffer): no frame in flight
-    // sees a half-written block.
-    uploadBuffer(m_cloudRtParamsBuffer, &params, sizeof(params));
+    constexpr VkDeviceSize kCellsOffset = (sizeof(Backend::CloudParamsGPU) + 255u) & ~VkDeviceSize(255u);
+    constexpr VkDeviceSize kStagingBytes = kCellsOffset + sizeof(Backend::CloudCellsGPU);
+    CloudUploadSlot& slot = m_cloudUploadSlots[m_cloudUploadNext];
+    m_cloudUploadNext = (m_cloudUploadNext + 1u) % kCloudUploadSlots;
+    if (!slot.fence) {
+        BufferCreateInfo ci{};
+        ci.size = kStagingBytes;
+        ci.usage = BufferUsage::TRANSFER_SRC;
+        ci.location = MemoryLocation::CPU_TO_GPU;
+        slot.staging = createBuffer(ci);
+        VkCommandBufferAllocateInfo ai{};
+        ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        ai.commandPool = m_commandPool;
+        ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        ai.commandBufferCount = 1;
+        VkFenceCreateInfo fi{};
+        fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        if (!slot.staging.buffer ||
+            vkAllocateCommandBuffers(m_device, &ai, &slot.cmd) != VK_SUCCESS ||
+            vkCreateFence(m_device, &fi, nullptr, &slot.fence) != VK_SUCCESS) {
+            // Never lose an update: fall back to the blocking path.
+            uploadBuffer(m_cloudRtParamsBuffer, &params, sizeof(params));
+            uploadBuffer(m_cloudCellsBuffer, &cells, sizeof(cells));
+            if (slot.cmd) vkFreeCommandBuffers(m_device, m_commandPool, 1, &slot.cmd);
+            if (slot.staging.buffer) destroyBuffer(slot.staging);
+            slot = {};
+            return;
+        }
+    }
+    vkWaitForFences(m_device, 1, &slot.fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(m_device, 1, &slot.fence);
+    void* mapped = nullptr;
+    if (vkMapMemory(m_device, slot.staging.memory, 0, kStagingBytes, 0, &mapped) != VK_SUCCESS) return;
+    std::memcpy(mapped, &params, sizeof(params));
+    std::memcpy(static_cast<char*>(mapped) + kCellsOffset, &cells, sizeof(cells));
+    vkUnmapMemory(m_device, slot.staging.memory);
+
+    vkResetCommandBuffer(slot.cmd, 0);
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(slot.cmd, &bi);
+    VkMemoryBarrier before{};
+    before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    before.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(slot.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &before, 0, nullptr, 0, nullptr);
+    const VkBufferCopy paramsCopy{0, 0, sizeof(params)};
+    vkCmdCopyBuffer(slot.cmd, slot.staging.buffer, m_cloudRtParamsBuffer.buffer, 1, &paramsCopy);
+    const VkBufferCopy cellsCopy{kCellsOffset, 0, sizeof(cells)};
+    vkCmdCopyBuffer(slot.cmd, slot.staging.buffer, m_cloudCellsBuffer.buffer, 1, &cellsCopy);
+    VkMemoryBarrier copied{};
+    copied.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    copied.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    copied.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(slot.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         0, 1, &copied, 0, nullptr, 0, nullptr);
+    if (m_cloudCellsPipeline && m_cloudCellsSet) {
+        vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudCellsPipeline);
+        vkCmdBindDescriptorSets(slot.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudCellsLayout, 0, 1,
+                                &m_cloudCellsSet, 0, nullptr);
+        const uint32_t groups = (Backend::kCloudCellMapSize + 7u) / 8u;
+        vkCmdDispatch(slot.cmd, groups, groups, 1);
+        VkMemoryBarrier painted{};
+        painted.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        painted.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        painted.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(slot.cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &painted, 0, nullptr, 0, nullptr);
+    }
+    vkEndCommandBuffer(slot.cmd);
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &slot.cmd;
+    reportVulkanDeviceFailure(vkQueueSubmit(m_computeQueue, 1, &si, slot.fence),
+                              "updateCloudRtParams/vkQueueSubmit");
+}
+
+bool VulkanDevice::createCloudCellsPipeline(const std::vector<uint32_t>& spv) {
+    if (m_cloudCellsPipeline) return true;
+    if (spv.empty() || !ensureCloudTextures()) return false;
+    VkDescriptorSetLayoutBinding b[2]{};
+    b[0].binding = 0;
+    b[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    b[0].descriptorCount = 1;
+    b[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    b[1].binding = 1;
+    b[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    b[1].descriptorCount = 1;
+    b[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutCreateInfo li{};
+    li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    li.bindingCount = 2; li.pBindings = b;
+    bool ok = vkCreateDescriptorSetLayout(m_device, &li, nullptr, &m_cloudCellsDescLayout) == VK_SUCCESS;
+    if (ok) {
+        VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+                                         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}};
+        VkDescriptorPoolCreateInfo pi{};
+        pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        pi.poolSizeCount = 2; pi.pPoolSizes = sizes; pi.maxSets = 1;
+        ok = vkCreateDescriptorPool(m_device, &pi, nullptr, &m_cloudCellsPool) == VK_SUCCESS;
+    }
+    if (ok) {
+        VkDescriptorSetAllocateInfo ai{};
+        ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        ai.descriptorPool = m_cloudCellsPool; ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &m_cloudCellsDescLayout;
+        ok = vkAllocateDescriptorSets(m_device, &ai, &m_cloudCellsSet) == VK_SUCCESS;
+    }
+    if (ok) {
+        VkPipelineLayoutCreateInfo pl{};
+        pl.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pl.setLayoutCount = 1; pl.pSetLayouts = &m_cloudCellsDescLayout;
+        ok = vkCreatePipelineLayout(m_device, &pl, nullptr, &m_cloudCellsLayout) == VK_SUCCESS;
+    }
+    ok = ok && makeComputePipeline(m_device, spv, m_cloudCellsLayout, m_cloudCellsPipeline);
+    if (ok) {
+        VkDescriptorBufferInfo buffer{m_cloudCellsBuffer.buffer, 0, sizeof(Backend::CloudCellsGPU)};
+        VkDescriptorImageInfo image{VK_NULL_HANDLE, m_cloudCellMap.view, VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet w[2]{};
+        for (uint32_t i = 0; i < 2; ++i) {
+            w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w[i].dstSet = m_cloudCellsSet;
+            w[i].dstBinding = i;
+            w[i].descriptorCount = 1;
+        }
+        w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[0].pBufferInfo = &buffer;
+        w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[1].pImageInfo = &image;
+        vkUpdateDescriptorSets(m_device, 2, w, 0, nullptr);
+        return true;
+    }
+    if (m_cloudCellsPipeline) vkDestroyPipeline(m_device, m_cloudCellsPipeline, nullptr);
+    if (m_cloudCellsLayout) vkDestroyPipelineLayout(m_device, m_cloudCellsLayout, nullptr);
+    if (m_cloudCellsPool) vkDestroyDescriptorPool(m_device, m_cloudCellsPool, nullptr);
+    if (m_cloudCellsDescLayout) vkDestroyDescriptorSetLayout(m_device, m_cloudCellsDescLayout, nullptr);
+    m_cloudCellsPipeline = VK_NULL_HANDLE;
+    m_cloudCellsLayout = VK_NULL_HANDLE;
+    m_cloudCellsPool = VK_NULL_HANDLE;
+    m_cloudCellsDescLayout = VK_NULL_HANDLE;
+    m_cloudCellsSet = VK_NULL_HANDLE;
+    return false;
 }
 
 void VulkanDevice::destroyCloudPipelines() {
@@ -226,6 +429,11 @@ void VulkanDevice::destroyCloudPipelines() {
     if (m_cloudDescPool) { vkDestroyDescriptorPool(m_device, m_cloudDescPool, nullptr); m_cloudDescPool = VK_NULL_HANDLE; }
     m_cloudNoiseDescSet = VK_NULL_HANDLE;
     m_cloudSampleDescSet = VK_NULL_HANDLE;
+    kill(m_cloudCellsPipeline);
+    killL(m_cloudCellsLayout);
+    killD(m_cloudCellsDescLayout);
+    if (m_cloudCellsPool) { vkDestroyDescriptorPool(m_device, m_cloudCellsPool, nullptr); m_cloudCellsPool = VK_NULL_HANDLE; }
+    m_cloudCellsSet = VK_NULL_HANDLE;
 }
 
 bool VulkanDevice::createCloudPipelines(const std::vector<uint32_t>& noiseSPV,
@@ -243,26 +451,27 @@ bool VulkanDevice::createCloudPipelines(const std::vector<uint32_t>& noiseSPV,
         nb[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         nb[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
-    // Sample set: 0-3 sampled textures, 4 params, 5 queries, 6 results.
-    VkDescriptorSetLayoutBinding sb[7]{};
-    for (uint32_t i = 0; i < 7; ++i) {
+    // Sample set: 0-3 sampled textures, 4 params, 5 queries, 6 results,
+    // 7 storm cell map.
+    VkDescriptorSetLayoutBinding sb[8]{};
+    for (uint32_t i = 0; i < 8; ++i) {
         sb[i].binding = i;
         sb[i].descriptorCount = 1;
         sb[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        sb[i].descriptorType = i < 4 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
-                                     : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        sb[i].descriptorType = (i < 4 || i == 7) ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                                                 : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     }
     VkDescriptorSetLayoutCreateInfo li{};
     li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     li.bindingCount = 5; li.pBindings = nb;
     bool ok = vkCreateDescriptorSetLayout(m_device, &li, nullptr, &m_cloudNoiseDescLayout) == VK_SUCCESS;
-    li.bindingCount = 7; li.pBindings = sb;
+    li.bindingCount = 8; li.pBindings = sb;
     ok = ok && vkCreateDescriptorSetLayout(m_device, &li, nullptr, &m_cloudSampleDescLayout) == VK_SUCCESS;
 
     if (ok) {
         VkDescriptorPoolSize sizes[3] = {
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5},
-            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4},
+            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5},
             {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3}};
         VkDescriptorPoolCreateInfo pi{};
         pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -342,7 +551,16 @@ bool VulkanDevice::createCloudPipelines(const std::vector<uint32_t>& noiseSPV,
     sw[4].descriptorCount = 1;
     sw[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     sw[4].pBufferInfo = &pinfo;
+    VkDescriptorImageInfo cellInfo{m_cloudCellMap.sampler, m_cloudCellMap.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet cellWrite{};
+    cellWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    cellWrite.dstSet = m_cloudSampleDescSet;
+    cellWrite.dstBinding = 7;
+    cellWrite.descriptorCount = 1;
+    cellWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    cellWrite.pImageInfo = &cellInfo;
     vkUpdateDescriptorSets(m_device, 5, sw, 0, nullptr);
+    vkUpdateDescriptorSets(m_device, 1, &cellWrite, 0, nullptr);
     return true;
 }
 
@@ -490,10 +708,14 @@ void VulkanDevice::destroyCloudRaster() {
     m_cloudSceneSet = VK_NULL_HANDLE;
     m_cloudSceneHdr = m_cloudSceneDepth = VK_NULL_HANDLE;
     m_cloudSceneSampler = VK_NULL_HANDLE;
-    for (ImageHandle* img : {&m_cloudHist[0], &m_cloudHist[1], &m_cloudRasterOut, &m_cloudShadowMap}) {
+    for (ImageHandle* img : {&m_cloudHist[0], &m_cloudHist[1], &m_cloudRasterOut, &m_cloudShadowMap,
+                             &m_cloudFresh, &m_cloudFreshAux}) {
         if (img->image || img->view) destroyImage(*img);
         *img = {};
     }
+    m_cloudFreshW = m_cloudFreshH = 0;
+    if (m_cloudResolvePipeline) vkDestroyPipeline(m_device, m_cloudResolvePipeline, nullptr);
+    m_cloudResolvePipeline = VK_NULL_HANDLE;
     if (m_cloudShadowPipeline) vkDestroyPipeline(m_device, m_cloudShadowPipeline, nullptr);
     m_cloudShadowPipeline = VK_NULL_HANDLE;
     if (m_cloudRasterFrameBuf.buffer) destroyBuffer(m_cloudRasterFrameBuf);
@@ -513,23 +735,26 @@ void VulkanDevice::destroyCloudRaster() {
 bool VulkanDevice::createCloudRasterPipeline(const std::vector<uint32_t>& spv) {
     if (spv.empty() || !ensureCloudTextures()) return false;
     destroyCloudRaster();
-    VkDescriptorSetLayoutBinding b[14]{};
-    for (uint32_t i = 0; i < 14; ++i) {
+    // 14/15: the interleaved march's fresh grid (cloud_raster.comp writes,
+    // cloud_resolve.comp reads).
+    // 16: storm cell map (cloud_common.glsl, ATMOSPHERE_STORMS.md).
+    VkDescriptorSetLayoutBinding b[17]{};
+    for (uint32_t i = 0; i < 17; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = (i == 6) ? 2u : 1u;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         b[i].descriptorType = (i == 4 || i == 7) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
-                            : ((i >= 9 && i <= 11) || i == 13) ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+                            : ((i >= 9 && i <= 11) || (i >= 13 && i <= 15)) ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
                                                  : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     }
     VkDescriptorSetLayoutCreateInfo li{};
     li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    li.bindingCount = 14; li.pBindings = b;
+    li.bindingCount = 17; li.pBindings = b;
     bool ok = vkCreateDescriptorSetLayout(m_device, &li, nullptr, &m_cloudRasterDescLayout) == VK_SUCCESS;
     if (ok) {
-        VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * 10},
+        VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * 11},
                                          {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 * 2},
-                                         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 * 4}};
+                                         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 * 6}};
         VkDescriptorPoolCreateInfo pi{};
         pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         pi.poolSizeCount = 3; pi.pPoolSizes = sizes; pi.maxSets = 3;
@@ -590,7 +815,8 @@ bool VulkanDevice::createCloudScenePipeline(const std::vector<uint32_t>& spv) {
     VkDescriptorImageInfo images[6]{};
     VkDescriptorBufferInfo params{m_cloudRtParamsBuffer.buffer, 0, sizeof(Backend::CloudParamsGPU)};
     VkDescriptorBufferInfo frame{m_cloudRasterFrameBuf.buffer, 0, sizeof(Backend::CloudRasterFrameGPU)};
-    VkWriteDescriptorSet writes[7]{};
+    VkDescriptorImageInfo cellMap{m_cloudCellMap.sampler, m_cloudCellMap.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet writes[8]{};
     uint32_t count = 0;
     for (uint32_t i = 0; i < 8; ++i) {
         if (i == 6) {
@@ -609,6 +835,15 @@ bool VulkanDevice::createCloudScenePipeline(const std::vector<uint32_t>& spv) {
             write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             write.pImageInfo = &images[i];
         }
+    }
+    {
+        auto& write = writes[count++];
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = m_cloudSceneSet;
+        write.dstBinding = 16;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &cellMap;
     }
     vkUpdateDescriptorSets(m_device, count, writes, 0, nullptr);
     writeCloudRasterLutDescriptors();
@@ -678,6 +913,15 @@ void VulkanDevice::recordCloudScene(VkCommandBuffer cmd, VkImageView hdr, VkImag
                          0, nullptr, 0, nullptr);
 }
 
+// Resolve pass of the interleaved RayFusion clouds (cloud_resolve.comp). Same
+// layout and sets as the march; without it the march has no consumer, so
+// ensureCloudRasterTargets() refuses to build targets and no clouds draw.
+bool VulkanDevice::createCloudResolvePipeline(const std::vector<uint32_t>& spv) {
+    if (m_cloudResolvePipeline) return true;
+    if (spv.empty() || !m_cloudRasterLayout) return false;
+    return makeComputePipeline(m_device, spv, m_cloudRasterLayout, m_cloudResolvePipeline);
+}
+
 // Shadow map (binding 11 of the same set): created with its pipeline, fixed
 // size, so the binding is written once for both sets.
 bool VulkanDevice::createCloudShadowPipeline(const std::vector<uint32_t>& spv) {
@@ -741,14 +985,19 @@ void VulkanDevice::writeCloudRasterLutDescriptors() {
     vkUpdateDescriptorSets(m_device, count, w, 0, nullptr);
 }
 
-bool VulkanDevice::ensureCloudRasterTargets(uint32_t w, uint32_t h) {
-    if (!m_cloudRasterPipeline || w == 0 || h == 0) return false;
-    if (w == m_cloudRasterW && h == m_cloudRasterH && m_cloudRasterOut.view) return false;
+bool VulkanDevice::ensureCloudRasterTargets(uint32_t w, uint32_t h, uint32_t interleave) {
+    if (!m_cloudRasterPipeline || !m_cloudResolvePipeline || w == 0 || h == 0) return false;
+    interleave = (std::clamp)(interleave, 1u, 4u);
+    if (w == m_cloudRasterW && h == m_cloudRasterH && interleave == m_cloudInterleave &&
+        m_cloudRasterOut.view && m_cloudFresh.view) return false;
     waitIdle();
-    for (ImageHandle* img : {&m_cloudHist[0], &m_cloudHist[1], &m_cloudRasterOut}) {
+    for (ImageHandle* img : {&m_cloudHist[0], &m_cloudHist[1], &m_cloudRasterOut,
+                             &m_cloudFresh, &m_cloudFreshAux}) {
         if (img->image || img->view) destroyImage(*img);
         *img = {};
     }
+    const uint32_t fw = (w + interleave - 1u) / interleave;
+    const uint32_t fh = (h + interleave - 1u) / interleave;
     const VkImageUsageFlags use = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     {
         VramCategoryScope vram(VramCategory::RenderTarget);
@@ -756,19 +1005,26 @@ bool VulkanDevice::ensureCloudRasterTargets(uint32_t w, uint32_t h) {
             *img = createImage2D(w, h, VK_FORMAT_R16G16B16A16_SFLOAT, use);
             if (img->view) img->sampler = makeClampSampler(m_device);
         }
+        for (ImageHandle* img : {&m_cloudFresh, &m_cloudFreshAux}) {
+            *img = createImage2D(fw, fh, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT);
+        }
     }
-    if (!m_cloudHist[0].sampler || !m_cloudHist[1].sampler || !m_cloudRasterOut.sampler) {
+    if (!m_cloudHist[0].sampler || !m_cloudHist[1].sampler || !m_cloudRasterOut.sampler ||
+        !m_cloudFresh.view || !m_cloudFreshAux.view) {
         m_cloudRasterW = m_cloudRasterH = 0;
         return false;
     }
     m_cloudRasterW = w;
     m_cloudRasterH = h;
+    m_cloudInterleave = interleave;
+    m_cloudFreshW = fw;
+    m_cloudFreshH = fh;
     m_cloudRasterParity = 0;
 
     const ImageHandle* tex[6] = {&m_cloudBase, &m_cloudDetail, &m_cloudCurl, &m_cloudWeather, nullptr, &m_cloudMajorant};
     for (uint32_t s = 0; s < 2; ++s) {
         VkDescriptorImageInfo ti[6]{};
-        VkDescriptorImageInfo prev{}, cur{}, out{};
+        VkDescriptorImageInfo prev{}, cur{}, out{}, fresh{}, freshAux{}, cellMap{};
         VkDescriptorBufferInfo params{m_cloudRtParamsBuffer.buffer, 0, sizeof(Backend::CloudParamsGPU)};
         VkDescriptorBufferInfo frame{m_cloudRasterFrameBuf.buffer, 0, sizeof(Backend::CloudRasterFrameGPU)};
         std::vector<VkWriteDescriptorSet> ws;
@@ -798,6 +1054,12 @@ bool VulkanDevice::ensureCloudRasterTargets(uint32_t w, uint32_t h) {
         add(8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &prev, nullptr);
         add(9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &cur, nullptr);
         add(10, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &out, nullptr);
+        fresh = {VK_NULL_HANDLE, m_cloudFresh.view, VK_IMAGE_LAYOUT_GENERAL};
+        freshAux = {VK_NULL_HANDLE, m_cloudFreshAux.view, VK_IMAGE_LAYOUT_GENERAL};
+        add(14, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &fresh, nullptr);
+        add(15, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &freshAux, nullptr);
+        cellMap = {m_cloudCellMap.sampler, m_cloudCellMap.view, VK_IMAGE_LAYOUT_GENERAL};
+        add(16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &cellMap, nullptr);
         vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(ws.size()), ws.data(), 0, nullptr);
     }
     writeCloudRasterLutDescriptors();
@@ -823,9 +1085,28 @@ void VulkanDevice::recordCloudRaster(VkCommandBuffer cmd, const Backend::CloudRa
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                          0, 1, &up, 0, nullptr, 0, nullptr);
     const uint32_t s = m_cloudRasterParity;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudRasterPipeline);
+    // Interleave phase: a bijection over the N x N cell per N^2 frames that
+    // alternates diagonally (N = 2: (0,0) (1,1) (0,1) (1,0)).
+    const uint32_t n = m_cloudInterleave;
+    const uint32_t k = m_cloudInterleaveFrame++ % (n * n);
+    struct InterleavePush {
+        uint32_t n, phaseX, phaseY, freshW, freshH;
+    } push{n, k % n, (k / n + k % n) % n, m_cloudFreshW, m_cloudFreshH};
+    static_assert(sizeof(InterleavePush) == 20, "cloud_interleave.glsl push ABI");
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudRasterLayout, 0, 1,
                             &m_cloudRasterSets[s], 0, nullptr);
+    vkCmdPushConstants(cmd, m_cloudRasterLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+    // March: one thread per marched pixel (compacted; see cloud_raster.comp).
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudRasterPipeline);
+    vkCmdDispatch(cmd, (m_cloudFreshW + 7u) / 8u, (m_cloudFreshH + 7u) / 8u, 1);
+    VkMemoryBarrier marched{};
+    marched.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    marched.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    marched.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &marched, 0, nullptr, 0, nullptr);
+    // Resolve: every pixel of the target, full-resolution history.
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudResolvePipeline);
     vkCmdDispatch(cmd, (m_cloudRasterW + 7u) / 8u, (m_cloudRasterH + 7u) / 8u, 1);
     if (m_cloudShadowPipeline) {
         // Same set (binding 11 + the frame block); independent of the march.

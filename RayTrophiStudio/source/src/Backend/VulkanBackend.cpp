@@ -16143,6 +16143,12 @@ bool VulkanBackendAdapter::ensureCloudPipelines(const std::string& shaderDir) {
         return false;
     }
     SCENE_LOG_INFO("[Vulkan] Cloud pipelines ready (" + std::string(sceneTextureOwnerScope()) + ").");
+    // Storm cell map (ATMOSPHERE_STORMS.md): without it the map stays zero
+    // and storms add nothing -- clouds and rain still render.
+    const std::string cellsPath = shaderDir + "/cloud_cells.spv";
+    if (!std::filesystem::exists(cellsPath) || !m_device->createCloudCellsPipeline(loadSPV(cellsPath))) {
+        SCENE_LOG_WARN("[Vulkan] cloud_cells pipeline unavailable: storm cells are not drawn.");
+    }
     // RayFusion layer: optional -- RT clouds work without it.
     const std::string rasterPath = shaderDir + "/cloud_raster.spv";
     std::vector<std::uint32_t> raster = std::filesystem::exists(rasterPath) ? loadSPV(rasterPath)
@@ -16150,6 +16156,11 @@ bool VulkanBackendAdapter::ensureCloudPipelines(const std::string& shaderDir) {
     if (raster.empty() || !m_device->createCloudRasterPipeline(raster)) {
         SCENE_LOG_WARN("[Vulkan] cloud_raster pipeline unavailable: RayFusion draws no clouds.");
     } else {
+        const std::string resolvePath = shaderDir + "/cloud_resolve.spv";
+        if (!std::filesystem::exists(resolvePath) ||
+            !m_device->createCloudResolvePipeline(loadSPV(resolvePath))) {
+            SCENE_LOG_WARN("[Vulkan] cloud_resolve pipeline unavailable: RayFusion draws no clouds.");
+        }
         const std::string shadowPath = shaderDir + "/cloud_shadow.spv";
         std::vector<std::uint32_t> shadow = std::filesystem::exists(shadowPath) ? loadSPV(shadowPath)
                                                                                 : std::vector<std::uint32_t>{};
@@ -16193,7 +16204,7 @@ void VulkanBackendAdapter::setCloudState(const atmosphere::CloudState& clouds, f
     const bool render = Backend::sharedWeatherCloudRendering(m_cachedWorld, m_cachedClouds) &&
                         m_device->m_cloudNoiseReady && m_device->m_cloudWeatherHash != 0;
     p.misc[3] += render ? 1.0f : 0.0f;
-    m_device->updateCloudRtParams(p);
+    m_device->updateCloudRtParams(p, Backend::makeCloudCellsGPU(m_cachedClouds, m_cloudTime, m_cloudWind));
     if (render != m_cloudRtRendering) {
         m_cloudRtRendering = render;
         resetAccumulation();
@@ -16211,7 +16222,9 @@ void VulkanBackendAdapter::recordCloudRasterPass(VkCommandBuffer cmd, uint32_t w
         return;
     const uint32_t div = static_cast<uint32_t>(std::clamp(m_cachedClouds.quality.realtime_resolution_divisor, 1, 8));
     const uint32_t w = (std::max)(1u, width / div), h = (std::max)(1u, height / div);
-    const bool targetsRecreated = m_device->ensureCloudRasterTargets(w, h);
+    const uint32_t interleave = static_cast<uint32_t>(
+        std::clamp(m_cachedClouds.quality.realtime_interleave, 1, 4));
+    const bool targetsRecreated = m_device->ensureCloudRasterTargets(w, h, interleave);
     // ★ The material-preview set is REALLOCATED when the viewport pipeline is
     //   rebuilt (a gas/fluid domain entering the scene does it). A new set has
     //   no bindings 25-27: the sky then read an unwritten descriptor and went
@@ -16284,6 +16297,8 @@ void VulkanBackendAdapter::recordCloudRasterPass(VkCommandBuffer cmd, uint32_t w
     // History is dropped when the clouds or the sun change (not for drift:
     // reprojection follows it closely enough between frames).
     Backend::CloudParamsGPU key = cloudParamsGPU();
+    // The surface pass reads the lightning flash lights from this block.
+    std::memcpy(f.flash, key.flash, sizeof(f.flash));
     key.wind[0] = key.wind[1] = 0.0f;
     key.weather[2] = 0.0f;
     key.cirrusDirection[2] = 0.0f;

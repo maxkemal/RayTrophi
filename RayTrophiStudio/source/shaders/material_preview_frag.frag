@@ -203,6 +203,7 @@ uint previewDrawPhase()   { return (pc.materialMeta.y >> 8u) & 0x3u; }
 // adapter bound bindings 26/27). Directional light = the sun (sun rule).
 layout(set = 0, binding = 26) uniform sampler2D cloudShadowMap;
 #include "weather_render_types.glsl"
+#include "cloud_lightning_light.glsl"
 layout(set = 0, binding = 27, std430) readonly buffer CloudShadowFrame {
     vec3  sunDir;
     float sunIntensity;
@@ -220,11 +221,26 @@ layout(set = 0, binding = 27, std430) readonly buffer CloudShadowFrame {
     vec4 prevFwd;
     uvec4 info;
     WeatherRenderData weatherEffects;
+    CloudFlashLightG flash[4];   // lit cloud bases (Backend::CloudRasterFrameGPU)
 } cloudShadowFrame;
 #define WEATHER_DATA cloudShadowFrame.weatherEffects
 #define WEATHER_SURFACE_AVAILABLE ((sceneFlags & 64u) != 0u)
 #include "weather_surface.glsl"
 const float CLOUD_SHADOW_EXTENT_M = 32000.0;   // cloud_shadow.comp
+
+// Lightning flash: the same CPU-built disc lights as the RT surface NEE
+// (closesthit.rchit), unshadowed here (no flash shadow map), and without the
+// RT's cloud-coverage gate (no cloud field bound): a flash the CPU placed in a
+// clear patch of the storm footprint still lights the ground in RayFusion.
+vec3 previewLightningIrradiance(vec3 P, vec3 N) {
+    if ((sceneFlags & 64u) == 0u) return vec3(0.0);
+    vec3 E = vec3(0.0);
+    for (int i = 0; i < 4; ++i) {
+        vec3 wi;
+        E += cloudFlashIrradiance(cloudShadowFrame.flash[i], P, N, wi);
+    }
+    return E;
+}
 
 float previewCloudShadow(vec3 P) {
     if ((sceneFlags & 64u) == 0u) return 1.0;
@@ -1212,6 +1228,17 @@ void main() {
         if (sheenWeight > 0.001) {
             sheenLit += evaluateSheen(N, V, L, sheenColor, roughness) *
                         radiance * baseLayerWeight;
+        }
+    }
+
+    // Lightning flash from the lit cloud base: diffuse lobe only (the disc is
+    // kilometres wide; its specular highlight is the sky reflection's job).
+    if (lightingPreset == 3u) {
+        vec3 flashE = previewLightningIrradiance(vWorldPos, N);
+        if (any(greaterThan(flashE, vec3(0.0)))) {
+            vec3 Favg = F0 + (vec3(1.0) - F0) * (1.0 / 21.0);
+            diffuseLit += (vec3(1.0) - Favg) * (1.0 / PI) * flashE * diffuseSurface *
+                          (1.0 - translucency);
         }
     }
 

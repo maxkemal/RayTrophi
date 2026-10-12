@@ -111,27 +111,56 @@ bool validateClouds(const CloudState& c, std::string* error) {
     const CloudLightning& lightning = c.lightning;
     if (!inRange(lightning.rate_per_minute, 0.0f, 600.0f) ||
         !inRange(lightning.intensity, 0.0f, 10000.0f) ||
-        !inRange(lightning.extent_m, 100.0f, 200000.0f) ||
         !inRange(lightning.ground_altitude_m, -500.0f, 20000.0f) ||
         !inRange(lightning.ground_strike_fraction, 0.0f, 1.0f) ||
+        !inRange(lightning.upward_fraction, 0.0f, 1.0f) ||
         !inRange(lightning.bolt_radius_m, 0.1f, 30.0f) ||
         !inRange(lightning.duration_s, 0.08f, 3.0f) ||
         !inRange(lightning.horizontal_span_m, 100.0f, 50000.0f) ||
-        !inRange(lightning.branching, 0.0f, 1.0f)) {
+        !inRange(lightning.branching, 0.0f, 1.0f) ||
+        !inRange(lightning.shutter_s, 0.0f, 0.25f) ||
+        !inRange(lightning.channel_brightness, 0.0f, 1000.0f)) {
         return fail(error, "lightning requires finite rate_per_minute 0..600, "
-                           "intensity 0..10000, extent_m 100..200000, "
+                           "intensity 0..10000, "
                            "ground_altitude_m -500..20000, ground_strike_fraction 0..1, "
-                           "bolt_radius_m 0.1..30, duration_s 0.08..3, "
-                           "horizontal_span_m 100..50000, branching 0..1");
+                           "upward_fraction 0..1, bolt_radius_m 0.1..30, duration_s 0.08..3, "
+                           "horizontal_span_m 100..50000, branching 0..1, "
+                           "shutter_s 0..0.25, channel_brightness 0..1000");
     }
     for (float v : {lightning.color.x, lightning.color.y, lightning.color.z}) {
         if (!inRange(v, 0.0f, 1.0f)) {
             return fail(error, "lightning.color must be linear RGB within 0..1");
         }
     }
-    for (float v : {lightning.center_m.x, lightning.center_m.y, lightning.center_m.z}) {
-        if (!inRange(v, -1000000.0f, 1000000.0f)) {
-            return fail(error, "lightning.center_m must be finite within +/-1000000 m");
+    const CloudStorms& storms = c.storms;
+    if (!inRange(storms.center_m.x, -1000000.0f, 1000000.0f) ||
+        !inRange(storms.center_m.z, -1000000.0f, 1000000.0f) ||
+        !inRange(storms.extent_m, 1000.0f, 500000.0f) ||
+        storms.max_cells < 0 || storms.max_cells > kMaxAutoStormCells ||
+        !inRange(storms.cell_radius_m, 500.0f, 20000.0f) ||
+        !inRange(storms.lifetime_s, 120.0f, 14400.0f) ||
+        !inRange(storms.intensity, 0.0f, 1.0f) ||
+        !inRange(storms.stratiform_rain, 0.0f, 1.0f) ||
+        !inRange(storms.rotation, -1.0f, 1.0f) ||
+        !inRange(storms.turrets, 0.0f, 1.0f)) {
+        return fail(error, "storms requires center_m x/z within +/-1000000, extent_m 1000..500000, "
+                           "max_cells 0..16, cell_radius_m 500..20000, lifetime_s 120..14400, "
+                           "intensity 0..1, stratiform_rain 0..1, rotation -1..1, turrets 0..1");
+    }
+    if (storms.cells.size() > static_cast<size_t>(kMaxManualStormCells)) {
+        return fail(error, "storms.cells holds at most 8 authored cells");
+    }
+    for (size_t i = 0; i < storms.cells.size(); ++i) {
+        const StormCell& cell = storms.cells[i];
+        if (!inRange(cell.position_m.x, -1000000.0f, 1000000.0f) ||
+            !inRange(cell.position_m.z, -1000000.0f, 1000000.0f) ||
+            !inRange(cell.radius_m, 200.0f, 30000.0f) ||
+            !inRange(cell.intensity, 0.0f, 1.0f) ||
+            !inRange(cell.birth_s, -1.0e7f, 1.0e7f) ||
+            !inRange(cell.lifetime_s, 0.0f, 14400.0f)) {
+            return fail(error, "storms.cells[" + std::to_string(i) + "] requires position_m x/z "
+                               "within +/-1000000, radius_m 200..30000, intensity 0..1, finite "
+                               "birth_s, lifetime_s 0..14400 (0 = permanently mature)");
         }
     }
     for (int i = 0; i < kMaxCloudLayers; ++i) {
@@ -158,6 +187,8 @@ bool validateClouds(const CloudState& c, std::string* error) {
         if (!inRange(l.droplet_diameter_um, 5.0f, 50.0f))
             return fail(error, p + "droplet_diameter_um must be within 5..50 (phase fit range)");
         if (!inRange(l.erosion, 0.0f, 1.0f)) return fail(error, p + "erosion must be within 0..1");
+        if (!inRange(l.base_raggedness, 0.0f, 1.0f))
+            return fail(error, p + "base_raggedness must be within 0..1");
         if (!inRange(l.cell_size_m, 50.0f, 50000.0f)) return fail(error, p + "cell_size_m must be within 50..50000 m");
         if (!inRange(l.detail_size_m, 5.0f, 5000.0f)) return fail(error, p + "detail_size_m must be within 5..5000 m");
         if (!inRange(l.rotation_degrees, -360.0f, 360.0f)) {
@@ -199,6 +230,8 @@ bool validateClouds(const CloudState& c, std::string* error) {
         return fail(error, "quality.realtime_steps must be within 8..512");
     if (c.quality.realtime_resolution_divisor < 1 || c.quality.realtime_resolution_divisor > 8)
         return fail(error, "quality.realtime_resolution_divisor must be within 1..8");
+    if (c.quality.realtime_interleave < 1 || c.quality.realtime_interleave > 4)
+        return fail(error, "quality.realtime_interleave must be within 1..4");
     return true;
 }
 
@@ -224,15 +257,32 @@ void cloudsToJson(const CloudState& c, nlohmann::json& j) {
         {"rate_per_minute", lightning.rate_per_minute},
         {"intensity", lightning.intensity},
         {"color", {lightning.color.x, lightning.color.y, lightning.color.z}},
-        {"center_m", {lightning.center_m.x, lightning.center_m.y, lightning.center_m.z}},
-        {"extent_m", lightning.extent_m},
         {"ground_altitude_m", lightning.ground_altitude_m},
         {"ground_strike_fraction", lightning.ground_strike_fraction},
+        {"upward_fraction", lightning.upward_fraction},
         {"bolt_radius_m", lightning.bolt_radius_m},
         {"duration_s", lightning.duration_s},
         {"horizontal_span_m", lightning.horizontal_span_m},
-        {"branching", lightning.branching}
+        {"branching", lightning.branching},
+        {"shutter_s", lightning.shutter_s},
+        {"channel_brightness", lightning.channel_brightness}
     };
+    {
+        const CloudStorms& s = c.storms;
+        nlohmann::json cells = nlohmann::json::array();
+        for (const StormCell& cell : s.cells) {
+            cells.push_back({{"position_m", {cell.position_m.x, cell.position_m.y, cell.position_m.z}},
+                             {"radius_m", cell.radius_m}, {"intensity", cell.intensity},
+                             {"birth_s", cell.birth_s}, {"lifetime_s", cell.lifetime_s}});
+        }
+        j["storms"] = {
+            {"enabled", s.enabled}, {"derive_from_climate", s.derive_from_climate},
+            {"center_m", {s.center_m.x, s.center_m.y, s.center_m.z}}, {"extent_m", s.extent_m},
+            {"max_cells", s.max_cells}, {"cell_radius_m", s.cell_radius_m},
+            {"lifetime_s", s.lifetime_s}, {"intensity", s.intensity},
+            {"stratiform_rain", s.stratiform_rain}, {"rotation", s.rotation},
+            {"turrets", s.turrets}, {"cells", cells}};
+    }
     nlohmann::json layers = nlohmann::json::array();
     for (const auto& l : c.layers) {
         nlohmann::json material;
@@ -241,7 +291,8 @@ void cloudsToJson(const CloudState& c, nlohmann::json& j) {
             {"enabled", l.enabled}, {"base_altitude_m", l.base_altitude_m},
             {"thickness_m", l.thickness_m}, {"coverage", l.coverage}, {"type", l.type},
             {"extinction_per_m", l.extinction_per_m}, {"droplet_diameter_um", l.droplet_diameter_um},
-            {"erosion", l.erosion}, {"cell_size_m", l.cell_size_m},
+            {"erosion", l.erosion}, {"base_raggedness", l.base_raggedness},
+            {"cell_size_m", l.cell_size_m},
             {"detail_size_m", l.detail_size_m}, {"rotation_degrees", l.rotation_degrees},
             {"formation_role", l.formation_role}, {"formation_group", l.formation_group},
             {"use_custom_material", l.use_custom_material}, {"material", material}});
@@ -263,6 +314,7 @@ void cloudsToJson(const CloudState& c, nlohmann::json& j) {
                     {"rt_max_bounces", c.quality.rt_max_bounces},
                     {"realtime_steps", c.quality.realtime_steps},
                     {"realtime_resolution_divisor", c.quality.realtime_resolution_divisor},
+                    {"realtime_interleave", c.quality.realtime_interleave},
                     {"rt_secondary_full_march", c.quality.rt_secondary_full_march}};
 }
 
@@ -321,6 +373,7 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
             l.extinction_per_m = s.value("extinction_per_m", l.extinction_per_m);
             l.droplet_diameter_um = s.value("droplet_diameter_um", l.droplet_diameter_um);
             l.erosion = s.value("erosion", l.erosion);
+            l.base_raggedness = s.value("base_raggedness", l.base_raggedness);
             l.cell_size_m = s.value("cell_size_m", l.cell_size_m);
             l.detail_size_m = s.value("detail_size_m", l.detail_size_m);
             l.rotation_degrees = s.value("rotation_degrees", l.rotation_degrees);
@@ -348,12 +401,16 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
         }
         for (auto it = s.begin(); it != s.end(); ++it) {
             const bool flag = it.key() == "enabled" || it.key() == "derive_rate_from_climate";
+            // center_m / extent_m: the storm square before 2026-10-12, read
+            // into storms.* below (projects saved before storm cells).
             const bool vector = it.key() == "color" || it.key() == "center_m";
             const bool number = it.key() == "rate_per_minute" || it.key() == "intensity" ||
                 it.key() == "extent_m" || it.key() == "ground_altitude_m" ||
                 it.key() == "ground_strike_fraction" || it.key() == "bolt_radius_m" ||
+                it.key() == "upward_fraction" ||
                 it.key() == "duration_s" || it.key() == "horizontal_span_m" ||
-                it.key() == "branching";
+                it.key() == "branching" || it.key() == "shutter_s" ||
+                it.key() == "channel_brightness";
             if ((!flag && !vector && !number) || (flag && !it.value().is_boolean()) ||
                 (number && !it.value().is_number())) {
                 return fail(error, "invalid lightning field or type: " + it.key());
@@ -365,14 +422,16 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
             "derive_rate_from_climate", lightning.derive_rate_from_climate);
         lightning.rate_per_minute = s.value("rate_per_minute", lightning.rate_per_minute);
         lightning.intensity = s.value("intensity", lightning.intensity);
-        lightning.extent_m = s.value("extent_m", lightning.extent_m);
         lightning.ground_altitude_m = s.value("ground_altitude_m", lightning.ground_altitude_m);
         lightning.ground_strike_fraction = s.value(
             "ground_strike_fraction", lightning.ground_strike_fraction);
+        lightning.upward_fraction = s.value("upward_fraction", lightning.upward_fraction);
         lightning.bolt_radius_m = s.value("bolt_radius_m", lightning.bolt_radius_m);
         lightning.duration_s = s.value("duration_s", lightning.duration_s);
         lightning.horizontal_span_m = s.value("horizontal_span_m", lightning.horizontal_span_m);
         lightning.branching = s.value("branching", lightning.branching);
+        lightning.shutter_s = s.value("shutter_s", lightning.shutter_s);
+        lightning.channel_brightness = s.value("channel_brightness", lightning.channel_brightness);
         for (const char* key : {"color", "center_m"}) {
             if (!s.contains(key)) {
                 continue;
@@ -386,8 +445,55 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
             if (std::string(key) == "color") {
                 lightning.color = vector;
             } else {
-                lightning.center_m = vector;
+                c.storms.center_m = vector;
             }
+        }
+        c.storms.extent_m = s.value("extent_m", c.storms.extent_m);
+    }
+    if (j.contains("storms")) {
+        const auto& s = j["storms"];
+        if (!s.is_object()) {
+            return fail(error, "storms must be an object");
+        }
+        CloudStorms& storms = c.storms;
+        try {
+            storms.enabled = s.value("enabled", storms.enabled);
+            storms.derive_from_climate = s.value("derive_from_climate", storms.derive_from_climate);
+            if (s.contains("center_m")) {
+                const auto& v = s["center_m"];
+                if (!v.is_array() || v.size() != 3) return fail(error, "storms.center_m must be three numbers");
+                storms.center_m = Vec3(v[0].get<float>(), v[1].get<float>(), v[2].get<float>());
+            }
+            storms.extent_m = s.value("extent_m", storms.extent_m);
+            storms.max_cells = s.value("max_cells", storms.max_cells);
+            storms.cell_radius_m = s.value("cell_radius_m", storms.cell_radius_m);
+            storms.lifetime_s = s.value("lifetime_s", storms.lifetime_s);
+            storms.intensity = s.value("intensity", storms.intensity);
+            storms.stratiform_rain = s.value("stratiform_rain", storms.stratiform_rain);
+            storms.rotation = s.value("rotation", storms.rotation);
+            storms.turrets = s.value("turrets", storms.turrets);
+            if (s.contains("cells")) {
+                const auto& arr = s["cells"];
+                if (!arr.is_array()) return fail(error, "storms.cells must be an array");
+                storms.cells.clear();
+                for (const auto& e : arr) {
+                    if (!e.is_object()) return fail(error, "storms.cells entries must be objects");
+                    StormCell cell;
+                    if (e.contains("position_m")) {
+                        const auto& v = e["position_m"];
+                        if (!v.is_array() || v.size() != 3)
+                            return fail(error, "storms.cells[].position_m must be three numbers");
+                        cell.position_m = Vec3(v[0].get<float>(), v[1].get<float>(), v[2].get<float>());
+                    }
+                    cell.radius_m = e.value("radius_m", cell.radius_m);
+                    cell.intensity = e.value("intensity", cell.intensity);
+                    cell.birth_s = e.value("birth_s", cell.birth_s);
+                    cell.lifetime_s = e.value("lifetime_s", cell.lifetime_s);
+                    storms.cells.push_back(cell);
+                }
+            }
+        } catch (const std::exception& e) {
+            return fail(error, std::string("storms: ") + e.what());
         }
     }
     if (j.contains("precipitation") && j["precipitation"].is_object()) {
@@ -421,6 +527,8 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
         c.quality.realtime_steps = s.value("realtime_steps", c.quality.realtime_steps);
         c.quality.realtime_resolution_divisor =
             s.value("realtime_resolution_divisor", c.quality.realtime_resolution_divisor);
+        c.quality.realtime_interleave =
+            s.value("realtime_interleave", c.quality.realtime_interleave);
         c.quality.rt_secondary_full_march =
             s.value("rt_secondary_full_march", c.quality.rt_secondary_full_march);
     }
@@ -465,6 +573,7 @@ CloudState lerpClouds(const CloudState& a, const CloudState& b, float t) {
         l.extinction_per_m = lerpf(la.extinction_per_m, lb.extinction_per_m, t);
         l.droplet_diameter_um = lerpf(la.droplet_diameter_um, lb.droplet_diameter_um, t);
         l.erosion = lerpf(la.erosion, lb.erosion, t);
+        l.base_raggedness = lerpf(la.base_raggedness, lb.base_raggedness, t);
         l.cell_size_m = lerpf(la.cell_size_m, lb.cell_size_m, t);
         l.detail_size_m = lerpf(la.detail_size_m, lb.detail_size_m, t);
         l.rotation_degrees = lerpf(la.rotation_degrees, lb.rotation_degrees, t);
@@ -479,8 +588,15 @@ CloudState lerpClouds(const CloudState& a, const CloudState& b, float t) {
         a.lightning.rate_per_minute, b.lightning.rate_per_minute, t);
     r.lightning.intensity = lerpf(a.lightning.intensity, b.lightning.intensity, t);
     r.lightning.color = a.lightning.color * (1.0f - t) + b.lightning.color * t;
-    r.lightning.center_m = a.lightning.center_m * (1.0f - t) + b.lightning.center_m * t;
-    r.lightning.extent_m = lerpf(a.lightning.extent_m, b.lightning.extent_m, t);
+    r.storms = t < 1.0f ? a.storms : b.storms;
+    r.storms.center_m = a.storms.center_m * (1.0f - t) + b.storms.center_m * t;
+    r.storms.extent_m = lerpf(a.storms.extent_m, b.storms.extent_m, t);
+    r.storms.cell_radius_m = lerpf(a.storms.cell_radius_m, b.storms.cell_radius_m, t);
+    r.storms.intensity = lerpf(a.storms.intensity, b.storms.intensity, t);
+    r.storms.stratiform_rain = lerpf(a.storms.stratiform_rain, b.storms.stratiform_rain, t);
+    r.storms.rotation = lerpf(a.storms.rotation, b.storms.rotation, t);
+    r.storms.turrets = lerpf(a.storms.turrets, b.storms.turrets, t);
+    r.lightning.upward_fraction = lerpf(a.lightning.upward_fraction, b.lightning.upward_fraction, t);
     r.lightning.ground_altitude_m = lerpf(
         a.lightning.ground_altitude_m, b.lightning.ground_altitude_m, t);
     r.lightning.ground_strike_fraction = lerpf(
@@ -505,6 +621,87 @@ CloudState lerpClouds(const CloudState& a, const CloudState& b, float t) {
     // extent_m, seed and quality are not interpolated: changing them re-lays
     // the whole map, which a blend cannot express.
     return r;
+}
+
+namespace {
+uint32_t stormHash(uint32_t v) {
+    v ^= v >> 16; v *= 0x7feb352du; v ^= v >> 15; v *= 0x846ca68bu; return v ^ (v >> 16);
+}
+float stormRandom(uint32_t& seed) {
+    seed = stormHash(seed + 0x9e3779b9u);
+    return static_cast<float>(seed & 0x00ffffffu) / 16777216.0f;
+}
+float stormSmooth(float a, float b, float x) {
+    const float t = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+// Phase curves of a cell over its life s = age / lifetime (ATMOSPHERE_STORMS.md §3).
+void stormPhase(float s, float peak, StormCellState& c) {
+    c.life = s;
+    const float grow = stormSmooth(0.0f, 0.25f, s);
+    c.coverage = peak * grow * (1.0f - 0.4f * stormSmooth(0.7f, 1.0f, s));   // anvil remnant
+    c.tower = peak * stormSmooth(0.1f, 0.3f, s) * (1.0f - stormSmooth(0.65f, 0.95f, s));
+    c.convective_rain = peak * stormSmooth(0.22f, 0.35f, s) * (1.0f - stormSmooth(0.6f, 0.85f, s));
+    c.stratiform_rain = peak * 0.35f * stormSmooth(0.6f, 0.75f, s) * (1.0f - stormSmooth(0.9f, 1.0f, s));
+    c.lightning = peak * stormSmooth(0.25f, 0.32f, s) * (1.0f - stormSmooth(0.62f, 0.7f, s));
+}
+} // namespace
+
+int evaluateStormCells(const CloudState& clouds, float time_s, const Vec3& wind_mps,
+                       StormCellState* out) {
+    const CloudStorms& s = clouds.storms;
+    if (!s.enabled || !std::isfinite(time_s)) return 0;
+    int n = 0;
+    // Automatic lanes, staggered like the lightning lanes: lane k cycles a
+    // cell every `period`; a gap between lives keeps the count near max_cells.
+    const double period = static_cast<double>(s.lifetime_s) * 1.4;
+    for (int k = 0; k < s.max_cells && n < kMaxStormCells; ++k) {
+        const double offset = period * static_cast<double>(k) / (std::max)(s.max_cells, 1);
+        const double slot = std::floor((static_cast<double>(time_s) - offset) / period);
+        const double wrapped = slot - std::floor(slot / 4294967296.0) * 4294967296.0;
+        uint32_t seed = stormHash(static_cast<uint32_t>(wrapped) ^ (clouds.weather.seed * 0x2c1b3c6du) ^
+                                  stormHash(static_cast<uint32_t>(k + 101)));
+        const uint32_t id = seed;
+        const float life = s.lifetime_s * (0.7f + 0.6f * stormRandom(seed));
+        const double birth = offset + slot * period + period * 0.15 * stormRandom(seed);
+        const float age = static_cast<float>(static_cast<double>(time_s) - birth);
+        if (age < 0.0f || age >= life) continue;
+        // Born upwind of the domain centre by half a life of drift, so cells
+        // cross the domain instead of all leaving it on one side.
+        const float bx = s.center_m.x + (stormRandom(seed) - 0.5f) * s.extent_m - wind_mps.x * life * 0.5f;
+        const float bz = s.center_m.z + (stormRandom(seed) - 0.5f) * s.extent_m - wind_mps.z * life * 0.5f;
+        StormCellState& c = out[n++];
+        c.x = bx + wind_mps.x * age;
+        c.z = bz + wind_mps.z * age;
+        c.radius_m = s.cell_radius_m * (0.7f + 0.6f * stormRandom(seed));
+        stormPhase(age / life, s.intensity * (0.6f + 0.4f * stormRandom(seed)), c);
+        c.age_s = age;
+        c.id = id;
+        c.manual = false;
+        c.manual_index = -1;
+    }
+    for (size_t m = 0; m < s.cells.size(); ++m) {
+        const StormCell& cell = s.cells[m];
+        if (n >= kMaxStormCells) break;
+        const float age = time_s - cell.birth_s;
+        float lifeFraction = 0.45f;   // permanent: held mid-maturity
+        if (cell.lifetime_s > 0.0f) {
+            if (age < 0.0f || age >= cell.lifetime_s) continue;
+            lifeFraction = age / cell.lifetime_s;
+        }
+        StormCellState& c = out[n++];
+        const float drift = cell.lifetime_s > 0.0f ? age : 0.0f;
+        c.x = cell.position_m.x + wind_mps.x * drift;
+        c.z = cell.position_m.z + wind_mps.z * drift;
+        c.radius_m = cell.radius_m;
+        stormPhase(lifeFraction, cell.intensity, c);
+        // A permanent cell still cycles its turrets: wrap the age to a day.
+        c.age_s = cell.lifetime_s > 0.0f ? age : age - 86400.0f * std::floor(age / 86400.0f);
+        c.id = stormHash(static_cast<uint32_t>(m) * 0x9e3779b9u ^ 0x51ed270bu);
+        c.manual = true;
+        c.manual_index = static_cast<int>(m);
+    }
+    return n;
 }
 
 float cloudPhaseForwardG(float d) {

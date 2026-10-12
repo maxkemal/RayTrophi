@@ -2494,6 +2494,66 @@ if (emissionTexID > 0 && (mpWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
     }                       // ← direct lighting scope
 
     // ----------------------------------------------------------
+    // Lightning: the cloud base lit by a flash is a downward-facing disc
+    // light (cloud_lightning_light.glsl, built on the CPU). One event is
+    // picked by its unshadowed irradiance, its analytic irradiance is shadowed
+    // by one ray to a random point of the disc (soft flash shadows). RayFusion
+    // applies the same irradiance, unshadowed (material_preview_frag.frag).
+    // ----------------------------------------------------------
+    if (worldData.w.mode == 2 && cloudRtEnabled() && cloudFlashAny()) {
+        vec4 flashActivity = cloudLightningActivities();
+        vec3 flashE[4];
+        vec3 flashWi[4];
+        float flashW[4];
+        float flashSum = 0.0;
+        for (int fi = 0; fi < 4; ++fi) {
+            CloudFlashLightG f = cloudParams.flash[fi];
+            float a = f.position.w > 0.0 ? flashActivity[int(f.radiance.w + 0.5) & 3] : 0.0;
+            flashE[fi] = a > 0.0 ? cloudFlashIrradiance(f, hitPos, worldNormal, flashWi[fi]) * a
+                                 : vec3(0.0);
+            flashW[fi] = dot(flashE[fi], vec3(0.2126, 0.7152, 0.0722));
+            flashSum += flashW[fi];
+        }
+        if (flashSum > 1e-6) {
+            float pick = rnd(payload.seed) * flashSum;
+            int fi = 0;
+            for (; fi < 3; ++fi) {
+                if (pick < flashW[fi]) break;
+                pick -= flashW[fi];
+            }
+            float prob = flashW[fi] / flashSum;
+            CloudFlashLightG f = cloudParams.flash[fi];
+            float rr = f.position.w * sqrt(rnd(payload.seed));
+            float ra = 6.28318530718 * rnd(payload.seed);
+            vec3 target = f.position.xyz + vec3(cos(ra) * rr, 0.0, sin(ra) * rr);
+            const uint FLAG_TERRAIN_FLASH = (1u << 16);
+            vec3 flashNormal = (mat.flags & FLAG_TERRAIN_FLASH) != 0u
+                ? safeNormalize(geomNormal, vec3(0.0, 1.0, 0.0))
+                : safeNormalize(worldNormal, vec3(0.0, 1.0, 0.0));
+            vec3 flashOrigin = hitPos + flashNormal * SHADOW_TMIN;
+            vec3 toTarget = target - flashOrigin;
+            float flashDist = length(toTarget);
+            vec3 flashDir = toTarget / max(flashDist, 1e-4);
+            shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
+            traceRayEXT(topLevelAS, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                        RT_MASK_DIRECT_SHADOW, 0, 1, 1, flashOrigin, SHADOW_TMIN, flashDir,
+                        max(flashDist - 1.0, SHADOW_TMIN * 2.0), 1);
+            vec3 flashVis = (shadowPayload.w > 0.5) ? shadowPayload.rgb : vec3(0.0);
+            if (any(greaterThan(flashVis, vec3(1e-4)))) {
+                vec3 V = normalize(-rayDir);
+                // flashE already carries cos(N, wi); the BRDF here excludes it.
+                vec3 brdf = evaluate_brdf_gl(worldNormal, V, flashWi[fi], albedo, roughness,
+                                             metallic, specular, transmission);
+                vec3 contrib = brdf * flashE[fi] / prob * flashVis;
+                contrib = clamp(contrib, vec3(0.0), vec3(1e4));
+                if (all(equal(contrib, contrib))) {
+                    payload.radiance += clamp(directAttenuation, vec3(0.0), vec3(1e2)) * contrib;
+                }
+            }
+        }
+    }
+
+    // ----------------------------------------------------------
     // Nishita direct sun lighting is intentionally disabled here.
     // Direct sun contribution must come from scene Directional lights only;
     // sky sun intensity remains handled by the miss/sky path.

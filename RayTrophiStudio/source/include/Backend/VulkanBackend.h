@@ -1467,7 +1467,8 @@ public:
     // so every binding is valid while the clouds are still off.
     bool ensureCloudTextures();
     void writeRtCloudDescriptors();
-    void updateCloudRtParams(const Backend::CloudParamsGPU& params);
+    void updateCloudRtParams(const Backend::CloudParamsGPU& params,
+                             const Backend::CloudCellsGPU& cells);
     void destroyCloudPipelines();
     // RayFusion cloud layer (Faz 3c, cloud_raster.comp). Reduced-resolution
     // march + temporal history (ping-pong) + a stable output the sky pass
@@ -1478,14 +1479,44 @@ public:
     void recordCloudScene(VkCommandBuffer cmd, VkImageView hdr, VkImageView depth,
                           VkSampler sampler, uint32_t width, uint32_t height,
                           float depthA, float depthB, float depthC, uint32_t steps);
-    bool ensureCloudRasterTargets(uint32_t w, uint32_t h);   // true = (re)created
+    bool ensureCloudRasterTargets(uint32_t w, uint32_t h, uint32_t interleave);   // true = (re)created
     void writeCloudRasterLutDescriptors();
     void recordCloudRaster(VkCommandBuffer cmd, const Backend::CloudRasterFrameGPU& frame);
+    bool createCloudResolvePipeline(const std::vector<uint32_t>& spv);
+    // Storm cells (ATMOSPHERE_STORMS.md): cell list SSBO -> cloud_cells.comp
+    // -> 256^2 cell map bound at RT 36 / raster 16 / sample 7.
+    bool createCloudCellsPipeline(const std::vector<uint32_t>& spv);
+    VkPipeline m_cloudCellsPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_cloudCellsLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_cloudCellsDescLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_cloudCellsPool = VK_NULL_HANDLE;
+    VkDescriptorSet m_cloudCellsSet = VK_NULL_HANDLE;
+    ImageHandle m_cloudCellMap;
+    BufferHandle m_cloudCellsBuffer;
+    // Per-update cloud upload WITHOUT a CPU wait: a ring of persistent
+    // staging buffers + command buffers, submitted in queue order. The old
+    // uploadBuffer path allocated a staging buffer and waited on a fence on
+    // every call (every frame while playing, both backends).
+    struct CloudUploadSlot {
+        BufferHandle staging;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+    };
+    static constexpr uint32_t kCloudUploadSlots = 4;   // two calls per frame, two frames ahead
+    CloudUploadSlot m_cloudUploadSlots[kCloudUploadSlots];
+    uint32_t m_cloudUploadNext = 0;
+    void destroyCloudUploadRing();
     void destroyCloudRaster();
     bool createCloudShadowPipeline(const std::vector<uint32_t>& spv);
     VkPipeline m_cloudShadowPipeline = VK_NULL_HANDLE;
     ImageHandle m_cloudShadowMap;   // 512^2, y = 0 plane around the camera
-    VkPipeline m_cloudRasterPipeline = VK_NULL_HANDLE;
+    VkPipeline m_cloudRasterPipeline = VK_NULL_HANDLE;    // march, 1 of N x N pixels
+    VkPipeline m_cloudResolvePipeline = VK_NULL_HANDLE;   // full-resolution history resolve
+    ImageHandle m_cloudFresh;      // marched samples: rgb in-scatter, a T
+    ImageHandle m_cloudFreshAux;   // rgb flash, a cloud depth
+    uint32_t m_cloudInterleave = 1;
+    uint32_t m_cloudFreshW = 0, m_cloudFreshH = 0;
+    uint32_t m_cloudInterleaveFrame = 0;
     VkPipeline m_cloudScenePipeline = VK_NULL_HANDLE;
     VkDescriptorSet m_cloudSceneSet = VK_NULL_HANDLE;
     VkImageView m_cloudSceneHdr = VK_NULL_HANDLE;

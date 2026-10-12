@@ -19,7 +19,8 @@ void VulkanBackendAdapter::setWeatherTime(float time) {
     if (m_device && m_device->isInitialized() && m_cloudStateSet) {
         CloudParamsGPU params = cloudParamsGPU();
         params.misc[3] += m_cloudRtRendering ? 1.0f : 0.0f;
-        m_device->updateCloudRtParams(params);
+        m_device->updateCloudRtParams(params,
+                                      makeCloudCellsGPU(m_cachedClouds, m_cloudTime, m_cloudWind));
     }
     resetAccumulation();
 }

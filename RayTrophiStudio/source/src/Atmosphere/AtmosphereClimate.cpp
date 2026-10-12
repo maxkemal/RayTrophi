@@ -152,17 +152,32 @@ DerivedWeather deriveWeather(const ClimateState& c, float surface_altitude_m) {
     const float lcl = std::max(0.0f, 125.0f * (Tc - TdC));
     w.cloud_base_m = surface_altitude_m + std::max(150.0f, lcl);
 
-    const float I = c.instability;
+    // Synoptic pressure (ATMOSPHERE_STORMS.md §5): the sea-level pressure
+    // anomaly stands in for the large-scale system the scene sits in. A low
+    // converges and lifts the air (more cloud, deeper convection, storms); a
+    // high subsides, warms and dries it aloft (an inversion caps the clouds,
+    // convection is suppressed, the sky clears).
+    const float anomalyHpa = (c.surface_pressure_pa - 101325.0f) / 100.0f;
+    const float low = smooth01(0.0f, 30.0f, -anomalyHpa);
+    const float high = smooth01(0.0f, 25.0f, anomalyHpa);
+    w.synoptic_lift = low - high;
+    const float I = std::min(1.0f, std::max(0.0f, c.instability + 0.3f * low - 0.6f * high));
     // Genus: stable air -> stratiform; unstable + moist -> convective. Dry air
     // cannot build towers however unstable it is.
     w.cloud_type = std::min(1.0f, std::max(0.0f, I * mixf(0.45f, 1.05f, smooth01(0.35f, 0.8f, rh))));
     // Coverage from humidity (RH >= ~0.95: overcast); convection leaves gaps.
     w.cloud_coverage = smooth01(0.5f, 0.95f, rh) * mixf(1.0f, 0.75f, smooth01(0.5f, 0.9f, w.cloud_type));
+    // Lifting saturates air a little drier than the surface reading; sinking
+    // air evaporates the cloud.
+    w.cloud_coverage = std::min(1.0f, w.cloud_coverage + 0.3f * low * smooth01(0.35f, 0.75f, rh));
+    w.cloud_coverage *= mixf(1.0f, 0.3f, high);
     // Depth: a stratus sheet ~400 m, cumulus ~2 km, a cumulonimbus to the
     // tropopause.
     const float tropo = kTropopauseAltitudeM;
     float thick = mixf(400.0f, 2000.0f, smooth01(0.0f, 0.6f, w.cloud_type));
     thick = mixf(thick, std::max(2000.0f, tropo - w.cloud_base_m), smooth01(0.65f, 1.0f, w.cloud_type));
+    // Subsidence inversion: a high caps the tops ~1.5 km above the base.
+    thick = mixf(thick, std::min(thick, 1500.0f), high);
     w.cloud_thickness_m = std::max(100.0f, std::min(thick, tropo - w.cloud_base_m));
 
     // Freezing level from the lapse rate (isothermal/inverted: never, or at
@@ -182,6 +197,17 @@ DerivedWeather deriveWeather(const ClimateState& c, float surface_altitude_m) {
     w.precipitation_mm_h = convective + drizzle;
     // Flashes per minute from a mature cumulonimbus.
     w.lightning_per_minute = 10.0f * smooth01(0.75f, 1.0f, w.cloud_type) * smooth01(0.6f, 1.0f, I);
+    // Organised convection needs deep, moist, unstable air; a stable moist
+    // sky rains broadly instead (stratiform / frontal).
+    const float convectiveAir = smooth01(0.55f, 1.0f, w.cloud_type) * smooth01(0.6f, 0.95f, rh);
+    w.storm_cells = static_cast<int>(16.0f * convectiveAir * smooth01(0.4f, 1.0f, I) *
+                                     (1.0f + 0.5f * low) * (1.0f - high) + 0.5f);
+    w.storm_cells = std::min(w.storm_cells, 16);
+    w.storm_intensity = w.storm_cells > 0 ? mixf(0.5f, 1.0f, smooth01(0.6f, 1.0f, I)) : 0.0f;
+    // A low rains broadly as well (frontal / stratiform shield).
+    w.stratiform_rain = std::min(1.0f, std::max(0.05f, (1.0f - w.cloud_type) * smooth01(0.85f, 1.0f, rh) +
+                                                       0.4f * low * smooth01(0.6f, 0.9f, rh)));
+    w.precipitation_mm_h *= mixf(1.0f, 0.2f, high);
     return w;
 }
 
@@ -195,6 +221,10 @@ void derivedWeatherToJson(const DerivedWeather& w, nlohmann::json& j) {
     j["precipitation_mm_h"]   = w.precipitation_mm_h;
     j["snow"]                 = w.snow;
     j["lightning_per_minute"] = w.lightning_per_minute;
+    j["storm_cells"]          = w.storm_cells;
+    j["storm_intensity"]      = w.storm_intensity;
+    j["stratiform_rain"]      = w.stratiform_rain;
+    j["synoptic_lift"]        = w.synoptic_lift;
 }
 
 void climateToJson(const ClimateState& c, nlohmann::json& j) {

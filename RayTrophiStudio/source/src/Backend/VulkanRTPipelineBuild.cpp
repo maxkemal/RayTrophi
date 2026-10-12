@@ -332,7 +332,7 @@ bool VulkanDevice::ensureRTPipelineLayouts() {
     // Binding 18: Foam sphere SSBO (intersection + closest-hit)
     // Binding 19: Photon caustic hash grid SSBO (photon raygen writes, camera
     //             raygen debug-reads, closesthit gathers in Dilim 2)
-    VkDescriptorSetLayoutBinding bindings[36] = {};
+    VkDescriptorSetLayoutBinding bindings[37] = {};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[0].descriptorCount = 1;
@@ -514,9 +514,17 @@ bool VulkanDevice::ensureRTPipelineLayouts() {
                                  VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     }
 
+    // Binding 36: storm cell map (cloud_cells.comp; ATMOSPHERE_STORMS.md),
+    // read by cloud_common.glsl wherever the cloud field is.
+    bindings[36].binding = 36;
+    bindings[36].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[36].descriptorCount = 1;
+    bindings[36].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+                              VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
     VkDescriptorSetLayoutCreateInfo dslCI{};
     dslCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslCI.bindingCount =  36;
+    dslCI.bindingCount =  37;
     dslCI.pBindings = bindings;
     // A layout left from an attempt whose pipeline-layout step failed is kept:
     // bindRTDescriptors may already have allocated m_rtDescriptorSet from it.

@@ -18,6 +18,7 @@
 #include "UI/GizmoOcclusion.h"
 #include "PerfProfile.h"
 #include "UI/AudioUI.h"
+#include "UI/StormGizmoUI.h"
 #include "Autosave.h"
 #include <thread>
 #include <filesystem>
@@ -3967,6 +3968,9 @@ void SceneUI::draw(UIContext& ctx)
     AudioUI::updateListener(ctx);
     if (!(ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active)) {
         AudioUI::drawViewport(ctx, ctx.scene.camera && ctx.scene.camera->orthographic &&
+            viewport_settings.shading_mode != 2,
+            viewport_settings.show_gizmos && ctx.selection.show_gizmo, gizmo_hit);
+        StormGizmoUI::drawViewport(ctx, ctx.scene.camera && ctx.scene.camera->orthographic &&
             viewport_settings.shading_mode != 2,
             viewport_settings.show_gizmos && ctx.selection.show_gizmo, gizmo_hit);
     }
