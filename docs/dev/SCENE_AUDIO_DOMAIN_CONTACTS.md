@@ -1,5 +1,26 @@
 # Domain contact position and power
 
+## Connect an existing scene sound
+
+Select the scene Audio Source, choose its imported sound in Asset, and open
+Reactive Audio. Set Driver=domain_contact, choose Domain binding, enable Loop and
+Automatic start / stop, select power_w, and set input_max in watts. Enable Follow
+position for a mono positional source. Timeline Play drives the configured source.
+Importing a sound into assets alone does not bind it to the scene Audio Source.
+
+A configured binding is separate from an available measurement. A pure fluid
+domain does not publish mixed contact energy; water flow rate/splash sensing is
+not implemented by this driver. Current production requires a CPU mixed liquid /
+granular report. The inspector explicitly explains this when input is unavailable.
+
+Scene Audio's Connect atmosphere wind / rain and Connect scene lightning to
+thunder are general scene connections, with the existing shared
+audio.environment_setup and audio.thunder_setup script/IPC operations. They use
+the bundled licensed library; wind/rain sources accept replacement assets.
+The synthetic thunder preview is grouped under Diagnostics / sound preview.
+These UI wording/layout changes require a new build; core setup semantics and
+validation remain unchanged.
+
 2026-10-12. Source implementation; user build and live acceptance pending.
 Continues [SCENE_AUDIO_AUTOMATION.md](SCENE_AUDIO_AUTOMATION.md).
 

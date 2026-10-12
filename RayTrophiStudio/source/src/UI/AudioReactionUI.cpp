@@ -113,6 +113,12 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
                     ImGui::Text("Report: %s / %.4f J", domain.at("measured").get<bool>() ?
                                 "measured" : "unavailable", domain.at("contact_energy_j").get<double>());
                     ImGui::TextWrapped("%s", domain.at("reason").get<std::string>().c_str());
+                    if (!domain.at("measured").get<bool>()) {
+                        ImGui::TextWrapped("Binding is configured, but this domain has no measured "
+                                           "contact input. Current support requires a CPU mixed "
+                                           "liquid / granular step. Fluid-only flow and GPU "
+                                           "contact energy are not measured by this driver.");
+                    }
                     ImGui::Text("Power: %s / %.4f W", domain.at("power_measured").get<bool>() ?
                                 "measured" : "unavailable",
                                 domain.at("contact_power_w").get<double>());
