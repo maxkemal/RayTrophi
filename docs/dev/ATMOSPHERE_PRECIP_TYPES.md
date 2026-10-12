@@ -1,6 +1,8 @@
 # Yağış tipleri, yerleşimi ve görsel tanımları (Atmosfer Faz 8)
 
-> **Durum:** TASLAK — 2026-10-12. Yol haritası: `ATMOSPHERE_STORMS.md` §8.
+> **Durum:** AKTİF — 2026-10-12. Parti 14 YAZILDI, derlenmedi: uzak perde
+> tipleri (§6). Yakın parçacıklar ve arazi okuması (kar çizgisi zeminde)
+> sonra. Yol haritası: `ATMOSPHERE_STORMS.md` §8.
 
 ## 0. Bugün
 
@@ -70,3 +72,52 @@ kopya).
 - `lapse_rate` < 0 ve yer < 0 °C iken `type = freezing_rain`.
 - Yer 0 m'de 5 °C, zirve 2500 m: vadide `rain`, zirvede `snow`.
 - Dolu yalnız eşiği aşan hücrede ve çekirdeğin 0.3 r içinde.
+
+## 6. Parti 14 uygulaması (uzak perde)
+
+**Profil.** `precip3` = deniz seviyesi °C, lapse K/m ve zorlanmış tip.
+`World::rederiveClouds` bunları HER senkronda iklimden yazar; katman 0
+türetilmese de yazılır. `CloudPrecipitation.air_temperature_c`,
+`lapse_rate_k_per_m` ve `snow` salt okunur türetilmiş alanlardır. `snow`
+artık "sahne zemininde donmuş mu" demek; ses köprüsü bunu okur, anlamı
+eskisiyle aynı.
+
+**Sınıflandırma** (`cloudPrecipFormAt`). Her nokta, sütunu boyunca
+izlenir:
+- **Erime:** bulut tabanından noktaya kadar sıfırın üstünde geçen
+  derece·metre. 30–400 °C·m arasında kar → sulu sepken → yağmur.
+- **Sıcak bulut:** taban 0 °C'nin üstünde ve updraft yok. Baştan sıvı
+  yağar.
+- **Sıfır altında sıvı:** donan yağmur. Erime katmanının altındaki soğuk
+  katmanda 1500–3000 °C·m'yi geçince buz peleti.
+- **Updraft** (`flow.w`): 0.2–0.45 graupel, 0.45–0.8 dolu. Graupel
+  donma seviyesinin ~1 km altında erir; dolu uzun düşüşte bile yaşar.
+- **Çisenti:** konvektif çekirdekten gelmeyen pay × sığ tür
+  (katman tipi < 0.25–0.5).
+
+**Optik** (tip başına sabit tablo). Karışımın ağırlıklı toplamı
+kullanılır:
+- sönüm katsayısı ve hız üssü
+- düşüş hızı: eğim buna göre ölçeklenir (`precip.zw` artık 1 m/s'lik bir
+  düşen için verilir, shader yerel hıza böler)
+- ileri lob payı (faz)
+- çizgi kontrastı: çisenti homojen pus, dolu keskin çizgi
+
+**IPC:** `world.sample_clouds {mode:"precipitation_form"}` → `values`
+(kimlikler) ve `forms` (adlar).
+
+**Panel:** "Snow" kutusu yerine "Form" seçicisi (Auto + 8 tip). Altında
+türetilmiş hava sıcaklığı ve donma seviyesi gösterilir.
+
+**Canlı ölçüm (2026-10-12, parti 14 derlendi):** Olgun çekirdek altında
+15 °C'de `rain` ✓. Ama −5 °C'de ve inversiyonda (yer −3 °C, lapse −0.004)
+baskın tip **graupel** çıktı; beklenen kar ve donan yağmurdu. Sebep:
+updraft ağırlıkları dışlayıcıydı, çekirdeğin bütün kütlesini graupel ve
+dolu alıyordu. Düzeltme (parti 15): dolu ≤ %60 (updraft 0.55–0.85),
+graupel ≤ %40 (0.3–0.6). Kütle payı olarak.
+
+**Henüz yok:**
+- yakın alan parçacıkları (WeatherParams Rain/Snow, ayrı sistem)
+- zemindeki arazi yüksekliği: kar çizgisi şimdilik perdenin kendi
+  yüksekliğinden çıkıyor, arazi okunmuyor
+- erime bandının parlaklığı

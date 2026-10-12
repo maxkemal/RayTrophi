@@ -13,7 +13,8 @@ struct CloudLightningGPU {
     float start[4];   // scene xyz, pulse radiance
     float end[4];     // scene xyz, bolt radius m
     float color[4];   // linear RGB, channel segment count (CloudBoltSegmentGPU)
-    float stage[4];   // growth 0..1, channel brightness, kind (0 ground / 1 cloud / 2 upward), glow radius m
+    float stage[4];   // growth 0..1, channel brightness, kind (0 ground / 1 cloud horizontal /
+                      // 2 upward / 3 cloud vertical), glow radius m
 };
 static_assert(sizeof(CloudLightningGPU) == 64, "CloudLightningGPU std430 layout");
 
@@ -73,6 +74,23 @@ inline bool lightningSceneHeight(float x, float z, float altitude, float planetR
     return std::isfinite(y);
 }
 
+// The storm column's span (ATMOSPHERE_CELL_CLOUDS.md §1; CloudParams.h
+// packStormColumn): from the lowest enabled layer's base (the LCL) to the
+// tropopause. Returns the host layer, or -1 when there is no column.
+inline int stormColumnSpan(const atmosphere::CloudState& c, float& base, float& tropopause) {
+    if (!c.storms.enabled || !c.storms.column) return -1;
+    int host = -1;
+    for (int i = 0; i < atmosphere::kMaxCloudLayers; ++i) {
+        const atmosphere::CloudLayer& l = c.layers[i];
+        if (!l.enabled || l.extinction_per_m <= 0.0f) continue;
+        if (host < 0 || l.base_altitude_m < c.layers[host].base_altitude_m) host = i;
+    }
+    if (host < 0) return -1;
+    base = c.layers[host].base_altitude_m;
+    tropopause = (std::max)(c.storms.column_top_m, base + 1500.0f);
+    return host;
+}
+
 // ── Channel network ─────────────────────────────────────────────────────────
 // ONE geometry per event, built here and read by every consumer: the drawn
 // bolt (cloudApplyLightning), the in-cloud flash source (cloudLightningSource)
@@ -127,7 +145,11 @@ inline void boltDisplacedPath(BoltP3 a, BoltP3 b, int levels, float amplitude,
 // downward strike (cloud -> ground) is a tree hanging from the cloud, an
 // `upward` one (ground -> cloud, from a peak or a tower) a tree standing on
 // the ground whose crown spreads into the cloud.
-inline int buildCloudBolt(BoltP3 start, BoltP3 end, bool ground, bool upward, float branching,
+// `vertical`: an in-cloud channel between the charge regions of a storm
+// column (up to the anvil, or down to the base): it zig-zags in 3D like a
+// ground strike, forks along its way and spreads a spider at both ends.
+inline int buildCloudBolt(BoltP3 start, BoltP3 end, bool ground, bool upward, bool vertical,
+                          float branching,
                           float spiderSpan, uint32_t seed, CloudBoltSegmentGPU* out,
                           BoltP3& centroid) {
     int count = 0;
@@ -143,9 +165,9 @@ inline int buildCloudBolt(BoltP3 start, BoltP3 end, bool ground, bool upward, fl
         centroid = boltAdd(centroid, boltMul(boltAdd(a, b), 0.5f * weight));
         weightSum += weight;
     };
-    const float vertical = ground ? 1.0f : 0.3f;
+    const float verticalScale = (ground || vertical) ? 1.0f : 0.3f;
     BoltP3 main[kCloudBoltMainSegments + 1];
-    boltDisplacedPath(start, end, 4, 0.09f, vertical, seed, main);
+    boltDisplacedPath(start, end, 4, 0.09f, verticalScale, seed, main);
     for (int k = 0; k < kCloudBoltMainSegments; ++k)
         emit(main[k], main[k + 1], 1.0f, float(k) / kCloudBoltMainSegments);
 
@@ -168,10 +190,14 @@ inline int buildCloudBolt(BoltP3 start, BoltP3 end, bool ground, bool upward, fl
         const int next = upward ? kCloudBoltMainSegments - 1 : 1;
         roots[nRoots++] = {top, true};
         if (branching > 0.3f) roots[nRoots++] = {next, true};
+    } else if (vertical) {
+        // Both charge regions spread horizontally.
+        roots[nRoots++] = {0, true};
+        roots[nRoots++] = {kCloudBoltMainSegments, true};
     }
     const int forks = static_cast<int>(branching * 4.0f + 0.5f);
     for (int f = 0; f < forks && nRoots < 6; ++f)
-        roots[nRoots++] = {2 + static_cast<int>(lightningRandom(seed) * 11.0f), !ground};
+        roots[nRoots++] = {2 + static_cast<int>(lightningRandom(seed) * 11.0f), !ground && !vertical};
     for (int r = 0; r < nRoots; ++r) {
         const Root root = roots[r];
         const BoltP3 origin = main[root.index];
@@ -255,6 +281,15 @@ inline void makeCloudLightningGPU(const atmosphere::CloudState& clouds, float ti
         return;
     }
     const auto& layer = clouds.layers[source];
+    // In a storm column the flashes live in its charge regions, not inside
+    // the (often thin) host layer: main negative charge ~30-45 % up the
+    // column, upper positive under the anvil, a lower positive pocket near
+    // the base.
+    float columnBase = 0.0f, columnTop = 0.0f;
+    const bool column = stormColumnSpan(clouds, columnBase, columnTop) >= 0;
+    const float spanBase = column ? columnBase : layer.base_altitude_m;
+    const float spanDepth = column ? columnTop - columnBase : layer.thickness_m;
+    const float windLength = std::sqrt(wind_mps.x * wind_mps.x + wind_mps.z * wind_mps.z);
     const auto sourceMaterial = atmosphere::layerMaterial(clouds, source);
     const float layerExtinction = layer.extinction_per_m * sourceMaterial.density_multiplier *
         (sourceMaterial.scattering_coefficient + sourceMaterial.absorption_coefficient);
@@ -316,23 +351,45 @@ inline void makeCloudLightningGPU(const atmosphere::CloudState& clouds, float ti
         CloudLightningGPU& event = events[i];
         event.start[0] = cell.x + std::cos(coreAngle) * coreRadius + wind_mps.x * age;
         event.start[2] = cell.z + std::sin(coreAngle) * coreRadius + wind_mps.z * age;
-        const float startAltitude = layer.base_altitude_m + layer.thickness_m *
-            (0.35f + lightningRandom(seed) * 0.3f);
+        float startAltitude = spanBase + spanDepth *
+            (column ? 0.3f + lightningRandom(seed) * 0.15f : 0.35f + lightningRandom(seed) * 0.3f);
         event.start[3] = lightning.intensity * pulse;
         const bool ground = lightningRandom(seed) < lightning.ground_strike_fraction;
+        // In-cloud kind in a column (own hash, the draw sequence above is
+        // unchanged): 1 vertical, negative -> upper positive (the most common
+        // flash in a thunderstorm); 2 down to the base; 3 anvil crawler,
+        // long and horizontal downwind. 0 = horizontal inside the layer.
+        uint32_t kindSeed = lightningHash(seed ^ 0x68e31da4u);
+        int icKind = 0;
+        if (column && !ground) {
+            const float k = lightningRandom(kindSeed);
+            icKind = k < 0.5f ? 1 : (k < 0.7f ? 2 : 3);
+        }
+        if (icKind == 3) startAltitude = spanBase + spanDepth * (0.72f + 0.1f * lightningRandom(kindSeed));
         // Own hash: the existing draw sequence (and so every other flash)
         // stays the same when upward_fraction changes.
         uint32_t upwardSeed = lightningHash(seed ^ 0x2545f491u);
         const bool upward = ground && lightningRandom(upwardSeed) < lightning.upward_fraction;
         const float angle = lightningRandom(seed) * 6.28318530718f;
-        const float span = ground ? layer.thickness_m * 0.18f :
-                                   lightning.horizontal_span_m * size;
-        event.end[0] = event.start[0] + std::cos(angle) * span;
-        event.end[2] = event.start[2] + std::sin(angle) * span;
-        const float endAltitude = ground ? lightning.ground_altitude_m :
+        float span = ground ? (std::min)(spanDepth * 0.18f, 2500.0f) :
+                              lightning.horizontal_span_m * size;
+        if (icKind == 1) span = cell.radius_m * (0.15f + 0.35f * lightningRandom(kindSeed));
+        if (icKind == 2) span = cell.radius_m * (0.3f + 0.5f * lightningRandom(kindSeed));
+        float dirX = std::cos(angle), dirZ = std::sin(angle);
+        if (icKind == 3 && windLength > 0.5f) {   // the anvil spreads downwind
+            dirX = wind_mps.x / windLength;
+            dirZ = wind_mps.z / windLength;
+        }
+        event.end[0] = event.start[0] + dirX * span;
+        event.end[2] = event.start[2] + dirZ * span;
+        float endAltitude = ground ? lightning.ground_altitude_m :
             (std::clamp)(startAltitude + (lightningRandom(seed) - 0.5f) *
                          layer.thickness_m * 0.12f, layer.base_altitude_m,
                          layer.base_altitude_m + layer.thickness_m);
+        if (icKind == 1) endAltitude = spanBase + spanDepth * (0.72f + 0.15f * lightningRandom(kindSeed));
+        if (icKind == 2) endAltitude = spanBase + spanDepth * (0.01f + 0.05f * lightningRandom(kindSeed));
+        if (icKind == 3) endAltitude = spanBase + spanDepth * (0.82f + 0.06f * lightningRandom(kindSeed));
+        const bool verticalCloud = icKind == 1 || icKind == 2;
         if (!lightningSceneHeight(event.start[0], event.start[2], startAltitude,
                                   planetRadius, altitudeOffset, event.start[1]) ||
             !lightningSceneHeight(event.end[0], event.end[2], endAltitude,
@@ -346,7 +403,7 @@ inline void makeCloudLightningGPU(const atmosphere::CloudState& clouds, float ti
         const BoltP3 groundPoint{event.end[0], event.end[1], event.end[2]};
         const int segments = buildCloudBolt(
             upward ? groundPoint : cloudPoint, upward ? cloudPoint : groundPoint,
-            ground, upward, lightning.branching,
+            ground, upward, verticalCloud, lightning.branching,
             lightning.horizontal_span_m * size * 0.5f, geometrySeed,
             &bolt[i * kCloudBoltSegments], centroid);
         event.end[3] = lightning.bolt_radius_m;
@@ -357,7 +414,7 @@ inline void makeCloudLightningGPU(const atmosphere::CloudState& clouds, float ti
         event.stage[0] = (std::min)(life / kCloudLeaderLife, 1.0f);
         // Channel core radiance relative to the cloud flash.
         event.stage[1] = lightning.channel_brightness;
-        event.stage[2] = upward ? 2.0f : (ground ? 0.0f : 1.0f);
+        event.stage[2] = upward ? 2.0f : (ground ? 0.0f : (verticalCloud ? 3.0f : 1.0f));
         const float length = std::sqrt(span * span +
             (event.end[1] - event.start[1]) * (event.end[1] - event.start[1]));
         // In-cloud glow radius around each lit segment: the flash diffuses
@@ -371,18 +428,18 @@ inline void makeCloudLightningGPU(const atmosphere::CloudState& clouds, float ti
         float cx, cz, depth;
         if (ground) {
             const float drop = (std::max)(startAltitude - endAltitude, 1.0f);
-            const float u = (std::clamp)((startAltitude - layer.base_altitude_m) / drop, 0.0f, 1.0f);
+            const float u = (std::clamp)((startAltitude - spanBase) / drop, 0.0f, 1.0f);
             cx = event.start[0] + (event.end[0] - event.start[0]) * u;
             cz = event.start[2] + (event.end[2] - event.start[2]) * u;
             depth = 0.0f;
         } else {
             cx = centroid.x;
             cz = centroid.z;
-            depth = (std::max)(0.5f * (startAltitude + endAltitude) - layer.base_altitude_m, 0.0f);
+            depth = (std::max)(0.5f * (startAltitude + endAltitude) - spanBase, 0.0f);
         }
         float baseY = 0.0f;
         CloudFlashLightGPU& light = flash[i];
-        if (lightningSceneHeight(cx, cz, layer.base_altitude_m, planetRadius, altitudeOffset, baseY)) {
+        if (lightningSceneHeight(cx, cz, spanBase, planetRadius, altitudeOffset, baseY)) {
             // Mean coverage ~0.5 along the climb to the base.
             const float exitTau = layerExtinction * depth * 0.5f;
             const float exitScale = cloudFlashProfile(depth, event.stage[3]) /

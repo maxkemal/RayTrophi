@@ -42,7 +42,9 @@ layout(set = CLOUD_SET, binding = CLOUD_MAJORANT_BINDING) uniform sampler2D clou
 
 const float CLOUD_RT_MAX_DIST = 1000000.0; // tall storm/cirrus horizons exceed 200 km
 const int   CLOUD_RT_TRACK_BUDGET = 2048;   // tentative collisions + segments per tracking
-const int   CLOUD_RT_MAX_INTERVALS = 6;     // 3 layers x (up to) 2 shell pieces
+// 3 layers x (up to) 2 shell pieces, plus the storm column in the (up to 4)
+// altitude gaps between them, 2 pieces each.
+const int   CLOUD_RT_MAX_INTERVALS = 14;
 
 bool cloudRtEnabled()        { return (int(cloudParams.misc.w + 0.5) & 1) != 0; }
 bool cloudRtSecondaryFull()  { return (int(cloudParams.misc.w + 0.5) & 2) != 0; }
@@ -82,30 +84,62 @@ vec2 cloudSphere(vec3 o, vec3 d, float r) {
     return vec2(min(tBig, tSmall), max(tBig, tSmall));
 }
 
+// Pieces of [0, tLimit] between the spheres at altitudes lo and hi.
+void cloudShellPieces(vec3 o, vec3 d, float tLimit, float lo, float hi, int li,
+                      inout vec3 iv[CLOUD_RT_MAX_INTERVALS], inout int n) {
+    float R = cloudParams.wind.z;
+    vec2 a = cloudSphere(o, d, R + hi);
+    if (a.x > a.y || a.y <= 0.0) return;
+    float s0 = max(a.x, 0.0);
+    float s1 = min(a.y, tLimit);
+    vec2 b = cloudSphere(o, d, R + lo);
+    bool inner = b.x <= b.y && b.y > 0.0;
+    if (!inner) {
+        if (s1 > s0 && n < CLOUD_RT_MAX_INTERVALS) iv[n++] = vec3(s0, s1, float(li));
+    } else {
+        float e0 = min(b.x, s1);
+        if (e0 > s0 && n < CLOUD_RT_MAX_INTERVALS) iv[n++] = vec3(s0, e0, float(li));
+        float e1 = max(b.y, s0);
+        if (s1 > e1 && n < CLOUD_RT_MAX_INTERVALS) iv[n++] = vec3(e1, s1, float(li));
+    }
+}
+
 // Segments of [0, tLimit] inside each enabled layer's shell, sorted by start.
-// .x = t0, .y = t1, .z = layer index.
+// .x = t0, .y = t1, .z = layer index. The storm column (layer 3) spans the
+// troposphere and overlaps the authored layers; it gets intervals only in
+// the altitude gaps between them, and inside a layer's interval that layer's
+// density carries the column too (cloudLayerDensityResolved). The intervals
+// never overlap: tracking and front-to-back compositing stay exact.
 int cloudIntervals(vec3 o, vec3 d, float tLimit, out vec3 iv[CLOUD_RT_MAX_INTERVALS]) {
     int n = 0;
     float R = cloudParams.wind.z;
     // The ground occludes the shell behind it.
     vec2 g = cloudSphere(o, d, R);
     if (g.x <= g.y && g.x > 0.0) tLimit = min(tLimit, g.x);
+    vec2 ranges[3];
+    int nr = 0;
     for (int li = 0; li < 3; ++li) {
         CloudLayerG L = cloudParams.layers[li];
         if (L.b.w < 0.5 || L.b.x <= 0.0 || L.a.z <= 0.0) continue;
-        vec2 a = cloudSphere(o, d, R + L.a.x + L.a.y);
-        if (a.x > a.y || a.y <= 0.0) continue;
-        float s0 = max(a.x, 0.0);
-        float s1 = min(a.y, tLimit);
-        vec2 b = cloudSphere(o, d, R + L.a.x);
-        bool inner = b.x <= b.y && b.y > 0.0;
-        if (!inner) {
-            if (s1 > s0) iv[n++] = vec3(s0, s1, float(li));
-        } else {
-            float e0 = min(b.x, s1);
-            if (e0 > s0) iv[n++] = vec3(s0, e0, float(li));
-            float e1 = max(b.y, s0);
-            if (s1 > e1) iv[n++] = vec3(e1, s1, float(li));
+        ranges[nr++] = vec2(L.a.x, L.a.x + L.a.y);
+        cloudShellPieces(o, d, tLimit, L.a.x, L.a.x + L.a.y, li, iv, n);
+    }
+    if (cloudShellActive()) {
+        // Layers never overlap each other (validateClouds): sort by base and
+        // walk the gaps of the column's span.
+        for (int i = 1; i < nr; ++i) {
+            vec2 k = ranges[i];
+            int j = i - 1;
+            while (j >= 0 && ranges[j].x > k.x) { ranges[j + 1] = ranges[j]; --j; }
+            ranges[j + 1] = k;
+        }
+        CloudLayerG S = cloudParams.layers[3];
+        float lo = S.a.x;
+        float top = S.a.x + S.a.y;
+        for (int i = 0; i <= nr; ++i) {
+            float hi = i < nr ? min(ranges[i].x, top) : top;
+            if (hi > lo) cloudShellPieces(o, d, tLimit, lo, hi, 3, iv, n);
+            if (i < nr) lo = max(lo, ranges[i].y);
         }
     }
     for (int i = 1; i < n; ++i) {
@@ -141,6 +175,9 @@ float cloudSegmentLen(vec3 p, vec3 d) {
 // density <= local coverage * extinction (cloud_common.glsl), and the map
 // holds the max coverage input over the 3x3-tile neighbourhood.
 float cloudLayerMajorant(int li, vec3 p) {
+    // The column alone (layer 3), or inside a layer's interval added to it.
+    float shellMaj = cloudShellMajorant(p);
+    if (li == 3) return shellMaj;
     CloudLayerG L = cloudParams.layers[li];
     p = cloudShear(L, p, cloudAltitude(p));
     vec2 uv = cloudWeatherUV(L, p);
@@ -160,8 +197,9 @@ float cloudLayerMajorant(int li, vec3 p) {
     }
     float cov = clamp(cloudRemap(m, 1.0 - L.a.z, 1.0, 0.0, 1.0), 0.0, 1.0);
     // Storm cells raise the cover; their map carries its own dilated bound.
-    cov = max(cov, cloudStormCellAt(p).a);
-    return cov * L.b.x;
+    // With the column on they do not (the column draws them instead).
+    if (!cloudShellActive()) cov = max(cov, cloudStormCellAt(p).a);
+    return cov * L.b.x + shellMaj;
 }
 
 // Delta tracking. True = a real collision at distance tHit in layer layerHit.
@@ -466,9 +504,11 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
         // unprocessed tail as clear sky. The global step budget is unchanged.
         int reserve = (n - k - 1) * 8;
         float thick = max(L.a.y, 1.0);
+        bool column = li == 3;
         // Fine step: the shell in `steps` samples; it grows with distance so
-        // horizon clouds do not eat the budget.
-        float baseDt = thick / float(steps) * 2.0;
+        // horizon clouds do not eat the budget. The storm column is
+        // troposphere-deep: step it like a 3 km layer, not like 12 km.
+        float baseDt = min(thick, column ? 3000.0 : thick) / float(steps) * 2.0;
         // Phase lobes for this layer.
         float ph[CLOUD_MS_OCTAVES];
         float pIso = 1.0 / (4.0 * CLOUD_PI);
@@ -559,12 +599,28 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                     dTop = max(L.g.x + L.g.y - alt, 0.0);
                     dBot = max(alt - L.g.x, 0.0);
                 }
+                // The column crosses every layer: occlusion from all of them,
+                // over the column's own span -- also for a column sample met
+                // inside a layer's interval. Measured over the layer alone,
+                // the part of a tower inside the low layer saw nothing of
+                // the tower above it and was drawn as a bright white skirt
+                // with a hard line at the layer top.
+                bool inColumn = column ||
+                                (cloudShellActive() && cloudStormCellAt(p).r > 0.2);
+                if (inColumn) {
+                    CloudLayerG S = cloudParams.layers[3];
+                    // One tap each way; capped so a single dense tap kilometres
+                    // up does not black out the tower's sunlit flank.
+                    dTop = min(max(S.a.x + S.a.y * cloudParams.storms2.y - alt, 0.0), 3000.0);
+                    dBot = min(max(alt - S.a.x, 0.0), 3000.0);
+                }
+                bool allLayers = L.d.z > 0.5 || inColumn;
                 int aoEvery = secondary ? 4 : (T > 0.25 ? 1 : 2);
                 if (aoTick++ % aoEvery == 0) {
                     vec3 qt = p + upN * (dTop * 0.5), qb = p - upN * (dBot * 0.5);
-                    tauTop = (L.d.z > 0.5 ? cloudDensity(qt, false) :
+                    tauTop = (allLayers ? cloudDensity(qt, false) :
                               cloudLayerDensity(li, qt, cloudAltitude(qt), false)) * dTop;
-                    tauBot = (L.d.z > 0.5 ? cloudDensity(qb, false) :
+                    tauBot = (allLayers ? cloudDensity(qb, false) :
                               cloudLayerDensity(li, qb, cloudAltitude(qb), false)) * dBot;
                 }
                 // The ground under this cloud sits in the cloud's own shadow:
@@ -682,8 +738,10 @@ void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout 
     uint rng = cloudSeed(seed ^ 0x2c1b3c6du, o + d * 3.0);
     vec3 sunDir = normalize(worldData.w.sunDir);
     float mu = dot(d, sunDir);
-    bool snow = cloudParams.precip2.x > 0.5;
-    float ph = snow ? 1.0 / (4.0 * CLOUD_PI) : mix(1.0 / (4.0 * CLOUD_PI), cloudPhaseHG(0.6, mu), 0.5);
+    // Phase per sample from the form mix: isotropic snow .. half forward lobe
+    // (rain, hail).
+    float pIso = 1.0 / (4.0 * CLOUD_PI);
+    float pFwd = cloudPhaseHG(0.6, mu);
     vec3 ambTop = cloudSkyAmbient(normalize(vec3(0.0, 1.0, 0.0) + d * 0.2));
     vec3 Es = vec3(-1.0);
     bool secondary = cloudMarchLod != 0;
@@ -713,8 +771,10 @@ void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout 
         // Streaks only where the step resolves them (~110 m fine octave):
         // a short segment in front of a nearby slope keeps them at any
         // distance, a long sky ray turns far shafts into their mean veil.
-        float sigma = cloudPrecipDensityLod(p, 1.0 - smoothstep(120.0, 600.0, dt));
+        float forward;
+        float sigma = cloudPrecipDensityLod(p, 1.0 - smoothstep(120.0, 600.0, dt), forward);
         if (sigma <= 0.0) continue;
+        float ph = mix(pIso, pFwd, forward);
         if (Es.r < 0.0) Es = cloudSunIrradiance(p, sunDir);
         if (shadeTick++ % shadeEvery == 0 || dt > 400.0) {
             float tauSun = cloudOpticalDepth(p, sunDir, CLOUD_RT_MAX_DIST, secondary ? 2 : 4,

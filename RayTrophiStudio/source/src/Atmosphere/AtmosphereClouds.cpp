@@ -142,10 +142,15 @@ bool validateClouds(const CloudState& c, std::string* error) {
         !inRange(storms.intensity, 0.0f, 1.0f) ||
         !inRange(storms.stratiform_rain, 0.0f, 1.0f) ||
         !inRange(storms.rotation, -1.0f, 1.0f) ||
-        !inRange(storms.turrets, 0.0f, 1.0f)) {
+        !inRange(storms.turrets, 0.0f, 1.0f) ||
+        !inRange(storms.column_top_m, 2000.0f, 20000.0f) ||
+        !inRange(storms.anvil, 0.0f, 1.0f) ||
+        !inRange(storms.wall_cloud, 0.0f, 1.0f) ||
+        !inRange(storms.mammatus, 0.0f, 1.0f)) {
         return fail(error, "storms requires center_m x/z within +/-1000000, extent_m 1000..500000, "
                            "max_cells 0..16, cell_radius_m 500..20000, lifetime_s 120..14400, "
-                           "intensity 0..1, stratiform_rain 0..1, rotation -1..1, turrets 0..1");
+                           "intensity 0..1, stratiform_rain 0..1, rotation -1..1, turrets 0..1, "
+                           "column_top_m 2000..20000, anvil/wall_cloud/mammatus 0..1");
     }
     if (storms.cells.size() > static_cast<size_t>(kMaxManualStormCells)) {
         return fail(error, "storms.cells holds at most 8 authored cells");
@@ -211,6 +216,8 @@ bool validateClouds(const CloudState& c, std::string* error) {
     }
     if (!inRange(c.precipitation.rate_mm_h, 0.0f, 200.0f)) return fail(error, "precipitation.rate_mm_h must be within 0..200");
     if (!inRange(c.precipitation.ground_fraction, 0.0f, 1.0f)) return fail(error, "precipitation.ground_fraction must be within 0..1");
+    if (c.precipitation.form < kPrecipAuto || c.precipitation.form > kPrecipIcePellets)
+        return fail(error, "precipitation.form must be auto|rain|drizzle|snow|sleet|graupel|hail|freezing_rain|ice_pellets");
     if (!inRange(c.cirrus.altitude_m, 3000.0f, 20000.0f)) return fail(error, "cirrus.altitude_m must be within 3000..20000 m");
     if (!inRange(c.cirrus.coverage, 0.0f, 1.0f)) return fail(error, "cirrus.coverage must be within 0..1");
     if (!inRange(c.cirrus.opacity, 0.0f, 5.0f)) return fail(error, "cirrus.opacity (optical depth) must be within 0..5");
@@ -281,7 +288,9 @@ void cloudsToJson(const CloudState& c, nlohmann::json& j) {
             {"max_cells", s.max_cells}, {"cell_radius_m", s.cell_radius_m},
             {"lifetime_s", s.lifetime_s}, {"intensity", s.intensity},
             {"stratiform_rain", s.stratiform_rain}, {"rotation", s.rotation},
-            {"turrets", s.turrets}, {"cells", cells}};
+            {"turrets", s.turrets}, {"column", s.column}, {"column_top_m", s.column_top_m},
+            {"anvil", s.anvil}, {"wall_cloud", s.wall_cloud}, {"mammatus", s.mammatus},
+            {"cells", cells}};
     }
     nlohmann::json layers = nlohmann::json::array();
     for (const auto& l : c.layers) {
@@ -299,8 +308,12 @@ void cloudsToJson(const CloudState& c, nlohmann::json& j) {
     }
     j["layers"] = layers;
     j["derive_from_climate"] = c.derive_from_climate;
-    j["precipitation"] = {{"rate_mm_h", c.precipitation.rate_mm_h}, {"snow", c.precipitation.snow},
-                          {"ground_fraction", c.precipitation.ground_fraction}};
+    j["precipitation"] = {{"rate_mm_h", c.precipitation.rate_mm_h},
+                          {"form", precipFormName(c.precipitation.form)},
+                          {"ground_fraction", c.precipitation.ground_fraction},
+                          {"air_temperature_c", c.precipitation.air_temperature_c},
+                          {"lapse_rate_k_per_m", c.precipitation.lapse_rate_k_per_m},
+                          {"snow", c.precipitation.snow}};
     j["cirrus"] = {{"enabled", c.cirrus.enabled}, {"altitude_m", c.cirrus.altitude_m},
                    {"coverage", c.cirrus.coverage}, {"opacity", c.cirrus.opacity},
                    {"scale_m", c.cirrus.scale_m},
@@ -472,6 +485,11 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
             storms.stratiform_rain = s.value("stratiform_rain", storms.stratiform_rain);
             storms.rotation = s.value("rotation", storms.rotation);
             storms.turrets = s.value("turrets", storms.turrets);
+            storms.column = s.value("column", storms.column);
+            storms.column_top_m = s.value("column_top_m", storms.column_top_m);
+            storms.anvil = s.value("anvil", storms.anvil);
+            storms.wall_cloud = s.value("wall_cloud", storms.wall_cloud);
+            storms.mammatus = s.value("mammatus", storms.mammatus);
             if (s.contains("cells")) {
                 const auto& arr = s["cells"];
                 if (!arr.is_array()) return fail(error, "storms.cells must be an array");
@@ -499,8 +517,22 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
     if (j.contains("precipitation") && j["precipitation"].is_object()) {
         const auto& s = j["precipitation"];
         c.precipitation.rate_mm_h = s.value("rate_mm_h", c.precipitation.rate_mm_h);
-        c.precipitation.snow = s.value("snow", c.precipitation.snow);
         c.precipitation.ground_fraction = s.value("ground_fraction", c.precipitation.ground_fraction);
+        // air_temperature_c / lapse_rate_k_per_m / snow are derived from the
+        // climate (World::rederiveClouds): read back, but every sync rewrites them.
+        c.precipitation.air_temperature_c = s.value("air_temperature_c", c.precipitation.air_temperature_c);
+        c.precipitation.lapse_rate_k_per_m = s.value("lapse_rate_k_per_m", c.precipitation.lapse_rate_k_per_m);
+        if (s.contains("form")) {
+            if (!s["form"].is_string()) return fail(error, "precipitation.form must be a string");
+            const int form = precipFormFromName(s["form"].get<std::string>());
+            if (form < 0)
+                return fail(error, "precipitation.form must be auto|rain|drizzle|snow|sleet|graupel|hail|"
+                                   "freezing_rain|ice_pellets");
+            c.precipitation.form = form;
+        } else if (s.value("snow", false)) {
+            // Before 2026-10-12 `snow` was the authored form switch.
+            c.precipitation.form = kPrecipSnow;
+        }
     }
     if (j.contains("cirrus") && j["cirrus"].is_object()) {
         const auto& s = j["cirrus"];
@@ -596,6 +628,10 @@ CloudState lerpClouds(const CloudState& a, const CloudState& b, float t) {
     r.storms.stratiform_rain = lerpf(a.storms.stratiform_rain, b.storms.stratiform_rain, t);
     r.storms.rotation = lerpf(a.storms.rotation, b.storms.rotation, t);
     r.storms.turrets = lerpf(a.storms.turrets, b.storms.turrets, t);
+    r.storms.column_top_m = lerpf(a.storms.column_top_m, b.storms.column_top_m, t);
+    r.storms.anvil = lerpf(a.storms.anvil, b.storms.anvil, t);
+    r.storms.wall_cloud = lerpf(a.storms.wall_cloud, b.storms.wall_cloud, t);
+    r.storms.mammatus = lerpf(a.storms.mammatus, b.storms.mammatus, t);
     r.lightning.upward_fraction = lerpf(a.lightning.upward_fraction, b.lightning.upward_fraction, t);
     r.lightning.ground_altitude_m = lerpf(
         a.lightning.ground_altitude_m, b.lightning.ground_altitude_m, t);
@@ -607,6 +643,9 @@ CloudState lerpClouds(const CloudState& a, const CloudState& b, float t) {
         a.lightning.horizontal_span_m, b.lightning.horizontal_span_m, t);
     r.lightning.branching = lerpf(a.lightning.branching, b.lightning.branching, t);
     r.precipitation.snow = t < 1.0f ? a.precipitation.snow : b.precipitation.snow;
+    r.precipitation.form = t < 1.0f ? a.precipitation.form : b.precipitation.form;
+    r.precipitation.air_temperature_c = lerpf(a.precipitation.air_temperature_c, b.precipitation.air_temperature_c, t);
+    r.precipitation.lapse_rate_k_per_m = lerpf(a.precipitation.lapse_rate_k_per_m, b.precipitation.lapse_rate_k_per_m, t);
     r.precipitation.ground_fraction = lerpf(a.precipitation.ground_fraction, b.precipitation.ground_fraction, t);
     r.cirrus.enabled = t < 1.0f ? a.cirrus.enabled : b.cirrus.enabled;
     r.cirrus.altitude_m = lerpf(a.cirrus.altitude_m, b.cirrus.altitude_m, t);
@@ -647,6 +686,21 @@ void stormPhase(float s, float peak, StormCellState& c) {
     c.lightning = peak * stormSmooth(0.25f, 0.32f, s) * (1.0f - stormSmooth(0.62f, 0.7f, s));
 }
 } // namespace
+
+namespace {
+const char* const kPrecipFormNames[] = {"auto", "rain", "drizzle", "snow", "sleet", "graupel",
+                                        "hail", "freezing_rain", "ice_pellets"};
+}
+
+const char* precipFormName(int form) {
+    return form >= kPrecipAuto && form <= kPrecipIcePellets ? kPrecipFormNames[form] : "auto";
+}
+
+int precipFormFromName(const std::string& name) {
+    for (int i = kPrecipAuto; i <= kPrecipIcePellets; ++i)
+        if (name == kPrecipFormNames[i]) return i;
+    return -1;
+}
 
 int freezeStormCells(CloudState& clouds, float time_s, const Vec3& wind_mps, int first) {
     StormCellState live[kMaxStormCells];

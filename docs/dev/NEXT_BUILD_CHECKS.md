@@ -1,63 +1,69 @@
-# 2026-10-12 parti 12: otomatik fırtına hücrelerini düzenlenebilir yapma (dondurma)
+# 2026-10-12 parti 16b: fırtına kabuğu parti 14'e geri alındı
 
-Parti 7–11 derlendi ve `ce1c7a6` olarak commitlendi. Parti 11'in ölçülmemiş
-maddeleri (basınç, kuleler, yukarı yönlü yıldırım, kare süresi) aşağıda,
-bu partinin maddelerinden sonra.
-
-## Neden
-Kullanıcı "sahnedeki 2 hücreye UI'dan ulaşılamıyor" dedi. IPC ile bakıldı:
-`storms.cells` BOŞ. Görünen hücreler otomatikti (`max_cells 15`, alan
-1000 m, türetme kapalı). Otomatik hücreler şeritlerin saf fonksiyonu
-olduğu için saklanan bir halleri yok, tek tek düzenlenemezler.
+Parti 16 canlıda kötü çıktı: kule dağ gibiydi, detay kaybolmuştu ve RT
+maliyeti arttı. Parti 14 kabuğu geri geldi. Gerekçe:
+`docs/dev/ATMOSPHERE_CELL_CLOUDS.md` §8.1. Parti 13–16b henüz commit
+edilmedi. Bu derleme parti 14 görünümünü verirse hepsi birlikte
+commitlenecek.
 
 ## Özet
-- `atmosphere::freezeStormCells(state, t, wind, first)`: o an canlı
-  otomatik hücreleri elle konmuş hücreye çevirir. Doğum, doğum konumu,
-  yarıçap, tepe değeri ve ömür aynen korunur, yani gök değişmez. En fazla
-  8 hücre çevrilir. Ardından `max_cells 0` ve `derive_from_climate false`
-  yapılır. `StormCellState.peak` alanı eklendi.
-- **IPC:** `world.set_clouds {storms:{freeze_automatic:true}}`. Bu bir eylem;
-  yamanın geri kalanı uygulandıktan sonra çalışır.
-- **Panel:**
-  - "Convert live automatic cells to authored" düğmesi (aynı IPC yolunu
-    kullanır).
-  - "Authored cells (N)" artık varsayılan olarak açık.
-- **Gizmo:** Otomatik hücrelerin de tutamağı var. Tıklayınca hepsi
-  dondurulur ve tıklanan seçili kalır, hemen sürüklenebilir.
+- `cloud_cells.comp`: parti 14 hali (bükme yok, uydu halkası yok).
+- `CloudCellsGPU`: 32 B başlık (`frame` yok).
+- Kabuk: 13c yüzey modeli (kubbe, billow ve duvar itmesi, kabarcık
+  oyması), tepe bükme ile birlikte.
+- Katman üreticisi: sütun modu ve nem halkası yok.
+  - `cloud_rt.glsl` katman majorantı yine `column.a` okumuyor.
+- `storms2.z`: yeniden duvar bulutu payı (300 m × wall_cloud).
+- Korunan: 15b döşeme bükmesi (yalnız şekil okumaları, ±900 m) ve
+  döndürülmüş kabarcık oktavı (320 m); yağış tipleri; graupel payı.
+
+---
 
 ## Kontrol listesi (sırayla)
 
-1. **IPC ile dondurma (görüntüden önce).**
-   - Yap: `world.cloud_stats`, sonra
-     `world.set_clouds {storms:{freeze_automatic:true}}`, sonra yine
-     `world.cloud_stats` ve `world.get_clouds`.
-   - Görmen gereken:
-     - Hücre konumları, yarıçapları ve `life` değerleri AYNI kalır, ama
-       `manual: true` olur ve `manual_index` 0..n−1 sıralanır.
-     - `get_clouds.storms.cells` dolar; `max_cells` 0 olur.
-   - Bozuksa: konumlar kaydıysa doğum konumundan rüzgâr kayması yanlış
-     çıkarılıyor (`c.age_s` ile `wind × age`).
-   - ★ Sinsi olan: 8'den fazla canlı otomatik hücre varsa fazlası kaybolur.
-     Bu beklenen davranış (elle konan hücre sınırı), ama gökte görünür bir
-     değişiklik yaratır.
+1. **Derleme ve shader'lar.**
+   - Görmen gereken: hata yok.
+   - Bozuksa:
+     - `CloudCellsGPU std430 layout` static_assert patlıyorsa bir yerde
+       hâlâ `frame` yazılıyor.
+     - Shader'da `cloudShellShear` tanımsız diyorsa sıra bozulmuş.
+       Tanımı `cloudShellDensity`'den önce olmalı.
 
-2. **Panel.** Storms bölümü.
-   - Görmen gereken: düğme dondurur, ardından "Authored cells (N)" listesi
-     dolar. "Remove" bir hücreyi siler; konum ve yarıçap değiştirilebilir.
+2. **Kare süresi (önce bu, bağımsız).** RT modda, yol izleyici kapalı,
+   aynı sahne ve açı.
+   - Görmen gereken: parti 14 derlemesindeki süre, yani parti 16'dan
+     belirgin hızlı.
+   - Bozuksa: hâlâ yavaşsa sebep kabuk değil. O zaman
+     `rt.perf` / `gpu_kernel_timings` ile ölçülür.
 
-3. **Gizmo.** Önce dondurma yapmamış bir sahne aç.
-   - Görmen gereken: "auto cell (…)" tutamağına tıklayınca liste dondurulur,
-     tıklanan hücre seçili kalır ve XZ okları çıkar. Sürükleyince hücre
-     kayar.
-   - Bozuksa: tıklayınca seçim hemen kalkıyorsa, aynı tıklamada boş alan
-     seçimi kaldırıyor demektir.
+3. **Ana kule (asıl istek).** Kullanıcının "baya güzel oldu" dediği
+   parti 14 görünümü:
+   - karnabahar yüzeyli kule ve dik duvarlar
+   - basamaklı tepeler
+   - örs kama şeklinde
+   - Bozuksa: kule düz bir koni ya da dağ gibiyse yüzey modeli
+     çalışmıyor demektir. Bak: `cloudShellDensity` → `inside` /
+     `kTowerBillowScaleM`.
+   - ★ Sinsi olan: parti 14'e çok benzer ama kabarcıklar biraz kaymış ve
+     dönmüş görünür. Bu beklenen; döşeme düzeltmesi korundu. Sıra halinde
+     tekrar eden desen OLMAMALI.
 
-4. **Parti 11 kalanları:**
-   - basınç (`synoptic_lift`)
-   - hücre kuleleri ve girdap (`turrets 0` / `rotation 0` karşılaştırması)
-   - yukarı yönlü yıldırım (`kind: "upward"`, çatallar yukarı açılıyor mu)
-   - kare süresi
+4. **Hücre dışındaki katman.**
+   - Görmen gereken: Fair weather cumulus parti 14'teki gibi. Hücrenin
+     içinde katman kenara çekilmiş, çevrede kendi örtüsünde.
+   - Bozuksa: hücre çevresinde kare kare kesik varsa majorant
+     tutarsızdır. 15b'nin `column.a` satırı tamamen silinmeli.
+
+5. **Graupel payı (IPC, parti 15'ten bekliyor).**
+   - Yap: `world.set_climate {surface_temperature_k: 268.15}` ve
+     `world.sample_clouds {mode:"precipitation_form", backend:"viewport"}`.
+   - Görmen gereken: olgun çekirdek altında `snow`.
+   - Yap: inversiyon (270.15 K, lapse −0.004).
+   - Görmen gereken: yere yakın `freezing_rain`.
 
 ## Bilinen
-- `scripts/audit_ipc_capabilities.py`, `audio.*` metotlarında FAIL veriyor.
-  Bunlar paralel ajanın ses işi. Tarif tablosu yeniden üretildi.
+- Devin altındaki küçük bulutlar, üst katmana bağlantı ve ince stratus
+  hâlâ yok. Kabuğun yüzeyine dokunmadan, açılıp kapatılabilir ayrı
+  adımlarla yapılacak.
+- `scripts/audit_ipc_capabilities.py`, `audio.*` metotlarında FAIL veriyor
+  (paralel ajan).

@@ -76,6 +76,18 @@ static bool drawStormControls(atmosphere::CloudState& clouds) {
     changed |= ImGui::DragFloat("Cell lifetime (s)", &s.lifetime_s, 10.0f, 120.0f, 14400.0f, "%.0f");
     changed |= ImGui::SliderFloat("Updraft turrets", &s.turrets, 0.0f, 1.0f, "%.2f");
     changed |= ImGui::SliderFloat("Rotation", &s.rotation, -1.0f, 1.0f, "%.2f");
+    changed |= ImGui::Checkbox("Storm column (cloud base to tropopause)", &s.column);
+    ImGui::BeginDisabled(!s.column);
+    changed |= ImGui::DragFloat("Tropopause / anvil altitude (m)", &s.column_top_m,
+                                10.0f, 2000.0f, 20000.0f, "%.0f");
+    changed |= ImGui::SliderFloat("Anvil spread", &s.anvil, 0.0f, 1.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Wall cloud", &s.wall_cloud, 0.0f, 1.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Mammatus", &s.mammatus, 0.0f, 1.0f, "%.2f");
+    ImGui::EndDisabled();
+    ImGui::TextWrapped("Storm column: each cell is its own cloud from the lowest layer's base "
+                       "to the tropopause (towers, overshooting tops, anvil downwind, wall cloud, "
+                       "mammatus); the layers step aside inside the cells. Off: the cells only "
+                       "raise the cover of the layers they sit in.");
     ImGui::Checkbox("Show cells in viewport", &StormGizmoUI::visible);
     ImGui::TextWrapped("Cells grow, mature (heavy rain, lightning) and dissipate (light, wide "
                        "rain), drifting with the climate wind. Stratiform rain = broad light "

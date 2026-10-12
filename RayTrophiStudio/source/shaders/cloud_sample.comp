@@ -9,6 +9,9 @@
 //         `steps` midpoint samples with full detail
 // mode 2: base-shape density (no detail) at query.a
 // mode 3: precipitation rate (mm/h) at query.a (cloudPrecipAt)
+// mode 4: dominant precipitation form id at query.a (0 none, 1 rain,
+//         2 drizzle, 3 snow, 4 sleet, 5 graupel, 6 hail, 7 freezing rain,
+//         8 ice pellets; cloudPrecipFormIdAt)
 
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
@@ -40,6 +43,8 @@ void main() {
         results[i] = cloudDensity(a, false);
     } else if (pc.mode == 3u) {
         results[i] = cloudPrecipAt(a);
+    } else if (pc.mode == 4u) {
+        results[i] = cloudPrecipFormIdAt(a);
     } else {
         uint n = max(pc.steps, 1u);
         float len = length(b - a);

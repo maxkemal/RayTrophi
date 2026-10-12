@@ -197,8 +197,9 @@ Result cloudStatsJson(std::string& out_json) {
                     {"start", {e.start[0], e.start[1], e.start[2]}},
                     {"end", {e.end[0], e.end[1], e.end[2]}},
                     {"growth", e.stage[0]},
-                    {"ground_strike", e.stage[2] < 0.5f || e.stage[2] > 1.5f},
-                    {"kind", e.stage[2] > 1.5f ? "upward" : (e.stage[2] < 0.5f ? "ground" : "cloud")},
+                    {"ground_strike", e.stage[2] < 0.5f || (e.stage[2] > 1.5f && e.stage[2] < 2.5f)},
+                    {"kind", e.stage[2] > 2.5f ? "cloud_vertical" :
+                             (e.stage[2] > 1.5f ? "upward" : (e.stage[2] < 0.5f ? "ground" : "cloud"))},
                     {"glow_radius_m", e.stage[3]},
                     {"flash_position", {f.position[0], f.position[1], f.position[2]}},
                     {"flash_radius_m", f.position[3]},
@@ -260,7 +261,8 @@ Result sampleCloudsJson(const std::string& request_json, std::string& out_json) 
     else if (mode == "transmittance") modeId = 1;
     else if (mode == "base_density") modeId = 2;
     else if (mode == "precipitation") modeId = 3;   // mm/h at points
-    else return Result::fail("mode must be density|transmittance|base_density|precipitation");
+    else if (mode == "precipitation_form") modeId = 4;   // dominant form id at points
+    else return Result::fail("mode must be density|transmittance|base_density|precipitation|precipitation_form");
     const int steps = req.value("steps", 256);
     if (steps < 1 || steps > 100000) return Result::fail("steps must be within 1..100000");
 
@@ -315,6 +317,15 @@ Result sampleCloudsJson(const std::string& request_json, std::string& out_json) 
     j["mode"] = mode;
     j["backend"] = role;
     j["values"] = values;
+    if (modeId == 4) {
+        // The ids by name (ATMOSPHERE_PRECIP_TYPES.md); 0 = no precipitation.
+        nlohmann::json forms = nlohmann::json::array();
+        for (float v : values) {
+            const int id = static_cast<int>(v + 0.5f);
+            forms.push_back(id <= 0 ? "none" : atmosphere::precipFormName(id));
+        }
+        j["forms"] = forms;
+    }
     out_json = j.dump();
     return Result::success();
 }
