@@ -79,7 +79,8 @@ struct RegisterAudioMethods {
                                    op == "play" || op == "preview" || op == "preview_file" ||
                                    op == "environment_setup" || op == "create" || op == "update" ||
                                    op == "duplicate" || op == "thunder_setup" ||
-                                   op == "thunder_update" || op == "thunder_event";
+                                   op == "thunder_update" || op == "thunder_event" ||
+                                   op == "resume_automatic";
             descriptor.capability = read ? "Read" : (readsFile ? "SceneWrite|FilesRead" : "SceneWrite");
             descriptor.undoable = audio::AudioService::isAuthoring(op);
             descriptor.return_type = "object";

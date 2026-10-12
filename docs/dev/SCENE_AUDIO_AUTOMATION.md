@@ -53,7 +53,11 @@ Device/decode/budget failures are reported in audio.status.automatic_errors and 
 inspector, with a five-second retry backoff. No failure is allowed to abort rendering.
 
 Pause/Stop suspend that source's automation; Stop All suspends all automatic sources.
-Play or editing the reaction configuration re-arms it. An opted-in source still
+Play, editing the reaction configuration or changing its asset re-arms it. The
+`audio.resume_automatic` / `rt.audio.resume_automatic()` runtime operation re-arms
+all configured automatic sources and thunder, and ends asset audition; it requires
+SceneWrite + FilesRead. Scene Audio exposes a Resume automatic audio button and
+timeline Play transitions call the same service operation. An opted-in source still
 stops if its driver is inactive, even after Play. Asset audition owns the engine and
 blocks automatic starts until preview ends. Disabling automatic releases an
 automatically managed voice. Preview mute silences output while activity/cursors

@@ -186,6 +186,25 @@
       "duration_seconds": 1.1793541666666667,
       "rms": 0.13439168880616517,
       "loop_suitable": false
+    },
+    {
+      "file": "wind_loop_mono.wav",
+      "author": "Luke.RUSTLTD",
+      "source_page": "https://opengameart.org/content/wind1",
+      "download_url": "https://opengameart.org/sites/default/files/wind1.wav",
+      "original_file": "wind1.wav",
+      "original_sha256": "a2856f794fbf77e05f8241dc4adeade7f62fa21c3c9dc49f7725b6c6218060c3",
+      "license": "CC0-1.0",
+      "license_evidence": "Source page lists CC0, explains PureData synthesis and one-minute loop intent",
+      "license_verified_date": "2026-10-12",
+      "transformation": "PCM16 mono; native rate; 1-second cosine tail/head overlap for circular loop; constant gain to -30 dBFS RMS with -3 dBFS peak ceiling",
+      "gain_db": 9.186678783906707,
+      "sha256": "0a092ee80755d282f66fe34b60018f642ba7825e5807d1c82096573ef6ec629c",
+      "channels": 1,
+      "sample_rate": 44100,
+      "duration_seconds": 58.99891156462585,
+      "rms": 0.03162277660168379,
+      "loop_suitable": true
     }
   ]
 }

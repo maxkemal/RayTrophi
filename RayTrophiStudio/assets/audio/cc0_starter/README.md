@@ -1,13 +1,14 @@
 # CC0 audio starter
 
-Ten small audio assets for RayTrophi playback and reactive-audio checks, approximately
-4.9 MB total. Each file has its own .asset.json sidecar for the existing Assets browser.
+Eleven audio assets for RayTrophi playback and reactive-audio checks, approximately
+10 MB total. Each file has its own .asset.json sidecar for the existing Assets browser.
 Choose the audio / cc0_starter category or search for rain, wind, water, slime or sand.
 Append To Scene selects ambience for stereo and positional playback for mono.
 
 | Files | Intended use | Loop |
 |---|---|---|
 | wind_gust_stereo.wav, wind_gust_mono.wav | Short wind gust, original stereo and mono derivative | Not seamless |
+| wind_loop_mono.wav | ~59 s continuous synthesized wind ambience, Luke.RUSTLTD / CC0 | One-second circular cosine overlap |
 | rain_loop_stereo.wav, rain_loop_mono.wav | Rain ambience / positional rain test | Source-labeled loop |
 | water_flow_stereo.wav, water_flow_mono.wav | Water ambience / continuous contact-position test | Source-labeled loop |
 | water_splash_mono.wav | Positional splash | One-shot |
@@ -53,5 +54,13 @@ Suggested acceptance: audition rain_loop_stereo, append rain_loop_mono and move 
 gizmo, decode sand_spell_stereo.flac, verify source creation/binding without an
 explicit spatial flag selects stereo ambience, and verify an explicit positional
 stereo request reports a useful error. For sand/water/mud reactions use the signal
-preview described in docs/dev/SCENE_AUDIO_REACTIONS.md; true domain telemetry is
-not automatically connected yet.
+preview described in docs/dev/SCENE_AUDIO_REACTIONS.md. Published domain contact
+telemetry uses the adapter described in SCENE_AUDIO_AUTOMATION.md.
+
+The environment recipe now defaults to `wind_loop_mono.wav`, with spatialization
+off and gain 0.7. The short gusts remain one-shot test assets; they are not suitable
+for continuous wind. Source and CC0 license: https://opengameart.org/content/wind1.
+The upstream author describes PureData synthesis, not a field recording. The
+manifest records source/packaged hashes, one-second circular overlap and constant
+gain to -30 dBFS RMS. The user auditioned the replacement in the live scene on
+2026-10-12 and reported it better than the previous wind.

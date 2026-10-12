@@ -1,0 +1,30 @@
+{
+  "id": "cc0_starter_wind_loop_mono",
+  "name": "Wind ambience - continuous (mono)",
+  "type": "asset",
+  "assetKind": "audio",
+  "category": "audio",
+  "subcategory": "weather",
+  "format": "wav",
+  "entry": "wind_loop_mono.wav",
+  "description": "Long PureData-synthesized wind ambience by Luke.RUSTLTD; one-second cosine wrap crossfade. Non-positional environment use recommended.",
+  "license": "CC0-1.0",
+  "source": "https://opengameart.org/content/wind1",
+  "author": "Luke.RUSTLTD",
+  "tags": [
+    "audio",
+    "cc0",
+    "starter",
+    "wind",
+    "weather",
+    "loop",
+    "mono",
+    "ambience",
+    "synthesized"
+  ],
+  "version": 1,
+  "duration": 58.99891156462585,
+  "channels": 1,
+  "sampleRate": 44100,
+  "loopSuitable": true
+}
