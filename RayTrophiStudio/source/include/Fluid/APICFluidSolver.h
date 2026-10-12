@@ -507,6 +507,9 @@ struct APICSolverStats {
     std::size_t mixed_contact_pairs = 0;
     std::size_t mixed_working_set_bytes = 0;
     double mixed_contact_energy_loss = 0.0;
+    double mixed_contact_duration_seconds = 0.0;
+    double mixed_contact_position_weight = 0.0;
+    Vec3 mixed_contact_position = Vec3(0);
     MatterGrainStepReport grain_report; // dry grain candidate only
     float total_ms = 0.0f;
     float forces_ms = 0.0f;
