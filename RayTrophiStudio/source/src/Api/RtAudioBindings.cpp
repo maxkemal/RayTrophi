@@ -40,7 +40,20 @@ struct RegisterAudioMethods {
             {"license", "string", false, "Asset license metadata", "", nullptr},
             {"author", "string", false, "Asset author metadata", "", nullptr},
             {"source", "string", false, "Asset source metadata", "", nullptr},
-            {"tags", "array", false, "Asset category tags (strings)", "[]", nullptr}
+            {"tags", "array", false, "Asset category tags (strings)", "[]", nullptr},
+            {"reaction", "object", false, "Continuous driver mapping; see audio reaction contract",
+                "{}", nullptr},
+            {"key", "string", true, "Runtime signal identity, including domain/contact region",
+                nullptr, nullptr},
+            {"value", "float", false, "Nonnegative signal magnitude; alternative to flow/speed",
+                nullptr, nullptr},
+            {"flow_kg_s", "float", false, "Mass flow; requires speed_mps, excludes value",
+                nullptr, nullptr},
+            {"speed_mps", "float", false, "Contact speed; requires flow_kg_s, excludes value",
+                nullptr, nullptr},
+            {"source_material", "string", false, "Producer material label", "", nullptr},
+            {"target_material", "string", false, "Receiver material label", "", nullptr},
+            {"ttl_seconds", "float", false, "Signal expires after 0.01..10 seconds", "0.5", nullptr}
         };
         for (std::size_t i = 0; i < names.size(); ++i) {
             const auto& op = audio::AudioService::operations()[i];
@@ -63,7 +76,7 @@ struct RegisterAudioMethods {
                 for (const auto& definition : params) {
                     if (key == definition.name) {
                         auto param = definition;
-                        param.required = key == "id" || key == "path" || key == "muted";
+                        param.required = key == "id" || key == "path" || key == "muted" || key == "key";
                         if (param.required) {
                             param.default_value = nullptr;
                         }
