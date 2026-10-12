@@ -117,17 +117,16 @@ json AudioReaction::publish(const json& p) {
         }
     }
     const float ttl = field(p, "ttl_seconds", 0.5f, 0.01f, 10);
-    const auto now = std::chrono::steady_clock::now();
+    const double current = now();
     for (auto it = signals_.begin(); it != signals_.end();) {
-        if (now >= it->second.expires) {
+        if (current >= it->second.expires) {
             it = signals_.erase(it);
         } else {
             ++it;
         }
     }
     require(signals_.contains(key) || signals_.size() < 256, "Audio signal budget reached (256)");
-    signals_[key] = {data, now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-        std::chrono::duration<float>(ttl))};
+    signals_[key] = {data, current + ttl};
     return data;
 }
 
@@ -142,7 +141,7 @@ ReactionOutput AudioReaction::evaluate(const std::string& id, const json& config
     float input = driver == "wind" ? windMps : (driver == "rain" ? rain : 0);
     if (driver == "signal" || driver == "domain_contact") {
         const auto signal = signals_.find(config.at("signal_key").get<std::string>());
-        if (signal != signals_.end() && std::chrono::steady_clock::now() < signal->second.expires) {
+        if (signal != signals_.end() && now() < signal->second.expires) {
             const auto& data = signal->second.data;
             const auto source = config.at("source_material").get<std::string>();
             const auto target = config.at("target_material").get<std::string>();
@@ -185,9 +184,9 @@ ReactionOutput AudioReaction::evaluate(const std::string& id, const json& config
 
 json AudioReaction::status() const {
     json signals = json::object();
-    const auto now = std::chrono::steady_clock::now();
+    const double current = now();
     for (const auto& [key, signal] : signals_) {
-        if (now < signal.expires) {
+        if (current < signal.expires) {
             signals[key] = signal.data;
         }
     }
@@ -198,6 +197,16 @@ void AudioReaction::clear() {
     envelopes_.clear();
     lastPositions_.clear();
     outputs_.clear();
+}
+
+void AudioReaction::clock(bool timeline, double seconds) {
+    timeline_ = timeline;
+    sceneTime_ = seconds;
+}
+
+double AudioReaction::now() const {
+    return timeline_ ? sceneTime_ :
+        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 void AudioReaction::forget(const std::string& id) {
     envelopes_.erase(id);

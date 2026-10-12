@@ -202,6 +202,10 @@ bekliyor. Bu teslim offline ortak olay evaluator'ünü veya 3. aşamanın bütü
 koşullarını tamamlandı olarak işaretlemez.
 
 Her aşama UI/script/IPC, hata semantiği ve dokümantasyonuyla birlikte teslim edilir.
+Sürekli önizleme / timeline kontrolü seçimi, duraklayan ses cursor'ları, sahne
+zamanına bağlı thunder/signal süreleri ve ortak kayıt/UI/script/IPC sözleşmesi
+[SCENE_AUDIO_TRANSPORT.md](SCENE_AUDIO_TRANSPORT.md) içinde belgelenmiştir.
+Yeni transport davranışının kullanıcı derlemesi ve canlı kabulü beklemektedir.
 Görsel ve işitsel kabul kullanıcıyla yapılır. Derlemeleri kullanıcı çalıştırır;
 gereksiz test scripti üretilmez. Zaman/örnek hesabı, serialization ve event tekilleştirme
 gibi kritik mantık için gerekli dar doğrulamalar planlanır; canlı IPC dış süreçten

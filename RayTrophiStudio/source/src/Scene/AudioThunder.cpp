@@ -124,9 +124,7 @@ json AudioThunder::publish(const json& input, const json& listener) {
     event["pitch"] = 0.94f + float((seed >> 16) % 101) * 0.0012f;
     event["min_distance"] = config_.at("reference_distance_m");
     event["max_distance"] = config_.at("max_distance_m");
-    const auto wait = std::chrono::duration<double>(std::max(0.0, delay - age));
-    pending_.push_back({event, std::chrono::steady_clock::now() +
-        std::chrono::duration_cast<std::chrono::steady_clock::duration>(wait)});
+    pending_.push_back({event, now() + std::max(0.0, delay - age)});
     return {{"queued", true}, {"event", event}};
 }
 
@@ -134,11 +132,21 @@ void AudioThunder::resume() {
     suspended_ = false;
 }
 
+void AudioThunder::clock(bool timeline, double seconds) {
+    timeline_ = timeline;
+    sceneTime_ = seconds;
+}
+
+double AudioThunder::now() const {
+    return timeline_ ? sceneTime_ :
+        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 json AudioThunder::due() {
     json result = json::array();
-    const auto now = std::chrono::steady_clock::now();
+    const double current = now();
     for (auto it = pending_.begin(); it != pending_.end();) {
-        if (it->arrival <= now && result.size() < 2) {
+        if (it->arrival <= current && result.size() < 2) {
             result.push_back(it->event);
             it = pending_.erase(it);
         } else {
@@ -150,10 +158,10 @@ json AudioThunder::due() {
 
 json AudioThunder::status() const {
     json pending = json::array();
-    const auto now = std::chrono::steady_clock::now();
+    const double current = now();
     for (const auto& p : pending_) {
         auto event = p.event;
-        event["remaining_seconds"] = std::max(0.0, std::chrono::duration<double>(p.arrival - now).count());
+        event["remaining_seconds"] = std::max(0.0, p.arrival - current);
         pending.push_back(event);
     }
     return {{"pending", pending}, {"suspended", suspended_}, {"seen_count", seen_.size()},

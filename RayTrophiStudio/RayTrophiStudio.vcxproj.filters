@@ -2767,4 +2767,8 @@
     <ClCompile Include="source\src\Scene\AudioThunderBridge.cpp" />
     <ClCompile Include="source\src\UI\AudioThunderUI.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Audio\AudioTransport.h" />
+    <ClCompile Include="source\src\Scene\AudioTransport.cpp" />
+  </ItemGroup>
 </Project>

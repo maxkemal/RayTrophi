@@ -17,23 +17,16 @@ void tickCloudThunder(UIContext& ctx) {
     static std::weak_ptr<AudioService> owner;
     static std::uint64_t generation = 0;
     static double previousTime = 0;
-    static double previousPeriod = 0;
-    static std::uint32_t previousSeed = 0;
     static bool previousPlaying = false;
     auto service = ctx.scene.audio;
     const auto& world = ctx.renderer.world;
     const auto& clouds = world.getClouds();
     const float fps = static_cast<float>(std::max(1, ctx.render_settings.animation_fps));
-    const double time = static_cast<float>(ctx.scene.timeline.current_frame) / fps;
+    const double time = static_cast<float>(std::max(0, ctx.scene.timeline.current_frame)) / fps;
     const float rate = Backend::lightningEffectiveRate(clouds.lightning);
     const double period = rate > 0 ? 240.0 / rate : 0;
     const bool playing = ctx.render_settings.animation_is_playing;
-    if (owner.lock() != service) {
-        previousPlaying = false;
-    }
-    if (playing && !previousPlaying && !rtapi::renderOutputPending()) {
-        service->invoke("resume_automatic", nlohmann::json::object());
-    }
+    const bool stoppedScrub = !playing && !previousPlaying && time != previousTime;
     previousPlaying = playing;
     if (!std::isfinite(time) || !ctx.scene.camera) {
         service->resetThunder();
@@ -42,17 +35,13 @@ void tickCloudThunder(UIContext& ctx) {
     }
     const bool reset = owner.lock() != service || generation != service->generation() ||
         time < previousTime || time - previousTime > 2 ||
-        (!ctx.render_settings.animation_is_playing && time != previousTime) ||
-        period != previousPeriod ||
-        clouds.weather.seed != previousSeed;
+        stoppedScrub;
     if (reset) {
         service->resetThunder();
         owner = service;
         generation = service->generation();
         previousTime = time;
     }
-    previousPeriod = period;
-    previousSeed = clouds.weather.seed;
     const auto config = service->snapshot().at("thunder");
     if (!reset && time > previousTime && period > 0 && clouds.lightning.enabled &&
         config.at("enabled").get<bool>() && world.data.mode == WORLD_MODE_NISHITA &&
@@ -95,7 +84,8 @@ void tickCloudThunder(UIContext& ctx) {
                     std::clamp((camera - start).dot(delta) / squared, 0.0f, 1.0f) : 0;
                 const Vec3 position = start + delta * u;
                 const std::string key = "cloud/" + std::to_string(clouds.weather.seed) + "/" +
-                    std::to_string(lane) + "/" + std::to_string(static_cast<long long>(slot));
+                    std::to_string(period) + "/" + std::to_string(lane) + "/" +
+                    std::to_string(static_cast<long long>(slot));
                 try {
                     service->invoke("thunder_event", {{"key", key},
                         {"position", nlohmann::json::array({position.x, position.y, position.z})},

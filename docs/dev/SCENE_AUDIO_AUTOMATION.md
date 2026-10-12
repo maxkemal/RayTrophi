@@ -1,5 +1,8 @@
 # Automatic environment and measured domain audio
 
+Transport mode selection and Play/Pause behavior:
+[SCENE_AUDIO_TRANSPORT.md](SCENE_AUDIO_TRANSPORT.md).
+
 2026-10-12. Source implementation; user build and live acceptance pending.
 Continues SCENE_AUDIO_REACTIONS.md. No build, Studio launch or generated test script
 was performed. Cloud/simulation solver implementations were not changed.

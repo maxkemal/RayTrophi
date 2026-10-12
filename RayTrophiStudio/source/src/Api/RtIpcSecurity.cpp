@@ -219,7 +219,8 @@ uint32_t requiredCapabilities(const std::string& method) {
             method == "audio.preview_file" || method == "audio.environment_setup" ||
             method == "audio.create" || method == "audio.update" || method == "audio.duplicate" ||
             method == "audio.thunder_setup" || method == "audio.thunder_update" ||
-            method == "audio.thunder_event" || method == "audio.resume_automatic")
+            method == "audio.thunder_event" || method == "audio.resume_automatic" ||
+            method == "audio.playback_update")
             return SceneWrite | FilesRead;
         return SceneWrite;
     }
