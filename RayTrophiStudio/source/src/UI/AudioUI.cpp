@@ -24,6 +24,16 @@ char path[1024]{};
 json dragBefore;
 bool dragging = false;
 
+std::string chooseAudioFile() {
+    const auto chosen = SceneUI::openFileDialogW(
+        L"Audio Files (WAV, FLAC, MP3)\0*.wav;*.flac;*.mp3\0"
+        L"WAV Files\0*.wav\0FLAC Files\0*.flac\0MP3 Files\0*.mp3\0");
+    if (!chosen.empty()) {
+        std::snprintf(path, sizeof(path), "%s", chosen.c_str());
+    }
+    return chosen;
+}
+
 json call(UIContext& ctx, const std::string& op, const json& p = json::object()) {
     try {
         auto result = audio::author(ctx, ctx.scene_ui_ptr ? &ctx.scene_ui_ptr->history : nullptr, op, p);
@@ -119,9 +129,12 @@ void drawProperties(UIContext& ctx) {
         return;
     }
     auto data = ctx.scene.audio->snapshot();
-    ImGui::InputText("Audio file", path, sizeof(path));
+    ImGui::InputText("Selected audio file", path, sizeof(path), ImGuiInputTextFlags_ReadOnly);
     if (ImGui::Button("Import WAV / FLAC / MP3")) {
-        call(ctx, "asset_import", {{"path", path}});
+        const auto chosen = chooseAudioFile();
+        if (!chosen.empty()) {
+            call(ctx, "asset_import", {{"path", chosen}});
+        }
     }
     ImGui::SameLine();
     if (ImGui::Button("Add Audio Source")) {
@@ -153,7 +166,10 @@ void drawProperties(UIContext& ctx) {
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("Relink to file")) {
-                call(ctx, "asset_relink", {{"id", id}, {"path", path}});
+                const auto chosen = chooseAudioFile();
+                if (!chosen.empty()) {
+                    call(ctx, "asset_relink", {{"id", id}, {"path", chosen}});
+                }
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("Remove asset")) {
