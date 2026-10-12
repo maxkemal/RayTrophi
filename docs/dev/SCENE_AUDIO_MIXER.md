@@ -99,3 +99,23 @@ Clip automation, effects/limiting, waveforms and offline rendering remain later 
    SceneWrite can edit levels without FilesRead because no file decode occurs.
 
 Live probes use external scripts/test/rt_ipc.py, never the embedded workspace.
+
+## Live acceptance — 2026-10-12
+
+After the user's build, a short external named-pipe IPC probe verified actual
+Effects PCM, child solo gating, Master gain 0.5 (measured RMS ratio within
+0.45–0.55), muted solo silence, advancing voice cursors during mute, multiple
+child solos, Master mute with child PCM still present, and bus rerouting without
+cursor restart. Unknown bus, gains -1/5, wrong boolean type and Master solo were
+rejected; rejected edits left the mixer snapshot unchanged.
+
+The temporary source was removed and all five authored bus settings and original
+emitters were restored. Playback returned to paused timeline mode with no voices
+and zero current PCM readings. The first 120 ms silence sample was too early;
+a subsequent read confirmed silence, so probes must allow output-buffer settling.
+Switching playback mode through its authoring API marks the timeline preference
+explicit and adds undo history; this probe did not save the scene.
+
+Save/reopen, undo/redo, restricted IPC permissions, asset audition isolation and
+subjective UI/audio review remain separate acceptance checks. No build or new
+test script was run or created by the agent.
