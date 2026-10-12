@@ -13,6 +13,11 @@ kaynak uygulaması eklendi; derleme/canlı kabul bekliyor. Sözleşme ve sınır
 [SCENE_AUDIO_REACTIONS.md](SCENE_AUDIO_REACTIONS.md). Otomatik domain telemetrisi,
 yerel bulut yağışı ve lightning/thunder olay adaptörü henüz bağlanmış değildir.
 
+Devam: [SCENE_AUDIO_AUTOMATION.md](SCENE_AUDIO_AUTOMATION.md) ile otomatik kaynak
+başlatma/sönme, hazır atmosfer bağlantısı ve mevcut karma temas enerji raporunu okuyan
+ilk domain adaptörü eklendi; derleme/canlı kabul bekliyor. Malzeme çifti ve kesin temas
+konumu telemetrisi, kuru DEM dökülme sesi, yerel yağış ve thunder olayları hâlâ açık.
+
 ## Ürün hedefi
 
 RayTrophi açık kaynak kalır. Kullanıcı sesleri assets üzerinden ekler, 3D sahnede

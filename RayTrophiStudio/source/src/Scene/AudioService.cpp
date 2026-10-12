@@ -1,5 +1,6 @@
 #include "Audio/AudioService.h"
 #include "Audio/AudioReaction.h"
+#include "Audio/AudioEnvironment.h"
 
 #define MA_NO_ENCODING
 #define MA_NO_GENERATION
@@ -11,6 +12,7 @@
 #include <cmath>
 #include <cctype>
 #include <map>
+#include <set>
 #include <stdexcept>
 
 namespace audio {
@@ -54,7 +56,7 @@ json emitter(const json& p) {
     static const std::vector<std::string> keys = {
         "id", "name", "asset_id", "position", "direction", "gain", "pitch", "loop",
         "spatial", "min_distance", "max_distance", "rolloff", "cone_inner", "cone_outer",
-        "cone_gain", "bus", "parent", "reaction"};
+        "cone_gain", "bus", "parent", "reaction", "environment_role"};
     for (auto it = p.begin(); it != p.end(); ++it) {
         require(std::find(keys.begin(), keys.end(), it.key()) != keys.end(),
                 "Unknown emitter property: " + it.key());
@@ -64,6 +66,9 @@ json emitter(const json& p) {
     e["asset_id"] = p.value("asset_id", std::string());
     e["parent"] = p.value("parent", std::string());
     e["reaction"] = AudioReaction::validate(p.value("reaction", json::object()));
+    e["environment_role"] = p.value("environment_role", std::string());
+    require(e["environment_role"] == "" || e["environment_role"] == "wind" ||
+            e["environment_role"] == "rain", "Unknown environment role");
     e["position"] = vector(p, "position", json::array({0, 0, 0}));
     e["direction"] = vector(p, "direction", json::array({0, 0, -1}));
     float length = 0;
@@ -84,6 +89,8 @@ json emitter(const json& p) {
             "cone_outer must be >= cone_inner");
     e["cone_gain"] = number(p, "cone_gain", 1, 0, 1);
     e["loop"] = p.value("loop", false);
+    require(!e.at("reaction").at("automatic").get<bool>() || e.at("loop").get<bool>(),
+            "Automatic continuous audio requires loop=true");
     e["spatial"] = p.value("spatial", true);
     e["bus"] = p.value("bus", std::string("Effects"));
     const std::array<std::string, 5> buses = {"Master", "Weather", "Effects", "Ambience", "Music"};
@@ -106,6 +113,11 @@ struct AudioService::Impl {
     AudioReaction reactions;
     std::map<std::string, ReactionOutput> controls;
     std::chrono::steady_clock::time_point lastTick = std::chrono::steady_clock::now();
+    std::uint64_t generation = 1;
+    std::set<std::string> suspended;
+    std::set<std::string> managed;
+    std::map<std::string, std::chrono::steady_clock::time_point> failedAt;
+    std::map<std::string, std::string> autoErrors;
 
     ~Impl() {
         stopAll();
@@ -119,6 +131,7 @@ struct AudioService::Impl {
             ma_sound_uninit(item.second.get());
         }
         sounds.clear();
+        managed.clear();
         if (preview) {
             ma_sound_uninit(preview.get());
             preview.reset();
@@ -160,6 +173,8 @@ struct AudioService::Impl {
 
     void validateAsset(const json& e) {
         if (e.at("asset_id").get<std::string>().empty()) {
+            require(!e.at("reaction").at("automatic").get<bool>(),
+                    "Automatic audio needs a bound asset");
             return;
         }
         auto& asset = find("assets", e.at("asset_id"));
@@ -231,12 +246,14 @@ const std::vector<std::string>& AudioService::operations() {
     static const std::vector<std::string> names = {
         "list", "get", "select", "status", "asset_import", "asset_relink", "asset_remove", "create", "update",
         "duplicate", "remove", "play", "pause", "stop", "stop_all", "preview", "preview_stop",
-        "preview_mute", "preview_file", "append", "signal_set", "signals_clear"};
+        "preview_mute", "preview_file", "append", "signal_set", "signals_clear",
+        "environment_setup", "domains"};
     return names;
 }
 
 bool AudioService::isAuthoring(const std::string& op) {
-    return op == "append" || op == "asset_import" || op == "asset_relink" || op == "asset_remove" ||
+    return op == "environment_setup" || op == "append" || op == "asset_import" ||
+           op == "asset_relink" || op == "asset_remove" ||
            op == "create" || op == "update" || op == "duplicate" || op == "remove";
 }
 
@@ -245,7 +262,7 @@ std::vector<std::string> AudioService::parameters(const std::string& op) {
         std::vector<std::string> keys = {
             "name", "asset_id", "parent", "position", "direction", "gain", "pitch", "loop",
             "spatial", "min_distance", "max_distance", "rolloff", "cone_inner", "cone_outer",
-            "cone_gain", "bus", "reaction"};
+            "cone_gain", "bus", "reaction", "environment_role"};
         if (op == "update") {
             keys.push_back("id");
         }
@@ -271,8 +288,11 @@ std::vector<std::string> AudioService::parameters(const std::string& op) {
         return {"key", "value", "flow_kg_s", "speed_mps", "position", "source_material",
                 "target_material", "ttl_seconds"};
     }
+    if (op == "environment_setup") {
+        return {"assets_root"};
+    }
     if (op == "list" || op == "status" || op == "stop_all" || op == "preview_stop" ||
-        op == "signals_clear") {
+        op == "signals_clear" || op == "domains") {
         return {};
     }
     return {"id"};
@@ -288,8 +308,25 @@ json AudioService::invoke(const std::string& op, const json& p) {
         require(std::find(allowed.begin(), allowed.end(), it.key()) != allowed.end(),
                 "Unknown audio parameter: " + it.key());
     }
+    if (op == "domains") {
+        throw std::invalid_argument("audio.domains requires a bound scene context");
+    }
     if (op == "signal_set") {
         return s.reactions.publish(p);
+    }
+    if (op == "environment_setup") {
+        AudioService candidate;
+        candidate.restore(s.data);
+        const auto result = installEnvironment(candidate,
+            pathFromUtf8(p.at("assets_root").get<std::string>()));
+        s.data = candidate.snapshot();
+        for (const char* role : {"wind_source_id", "rain_source_id"}) {
+            const std::string id = result.at(role);
+            s.suspended.erase(id);
+            s.failedAt.erase(id);
+            s.autoErrors.erase(id);
+        }
+        return result;
     }
     if (op == "signals_clear") {
         s.reactions.clear();
@@ -326,7 +363,8 @@ json AudioService::invoke(const std::string& op, const json& p) {
         }
         return {{"device", s.status}, {"sample_rate", 48000}, {"preview_muted", s.muted},
                 {"voices", voices}, {"voice_limit", 32}, {"resolved_poses", s.poses},
-                {"reaction_runtime", s.reactions.status()}};
+                {"reaction_runtime", s.reactions.status()}, {"automatic_errors", s.autoErrors},
+                {"automatic_suspended", s.suspended}};
     }
     if (op == "asset_import" || op == "asset_relink") {
         const auto path = std::filesystem::absolute(pathFromUtf8(p.at("path").get<std::string>()));
@@ -380,6 +418,13 @@ json AudioService::invoke(const std::string& op, const json& p) {
             }
             s.stopAll();
             old = asset;
+            for (const auto& e : s.data.at("emitters")) {
+                if (e.at("asset_id") == asset.at("id")) {
+                    const std::string id = e.at("id");
+                    s.failedAt.erase(id);
+                    s.autoErrors.erase(id);
+                }
+            }
         }
         return asset;
     }
@@ -400,6 +445,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
         json e;
         if (op == "duplicate") {
             e = s.find("emitters", p.at("id"));
+            e["environment_role"] = "";
             e["name"] = e.at("name").get<std::string>() + " Copy";
         } else {
             require(!p.contains("id"), "Emitter ids are allocated by the service");
@@ -430,12 +476,18 @@ json AudioService::invoke(const std::string& op, const json& p) {
         if (e.at("reaction") != old.at("reaction")) {
             s.reactions.forget(e.at("id"));
             s.controls.erase(e.at("id").get<std::string>());
+            s.suspended.erase(e.at("id").get<std::string>());
+            s.failedAt.erase(e.at("id").get<std::string>());
+            s.autoErrors.erase(e.at("id").get<std::string>());
         }
-        if (e.at("asset_id") != old.at("asset_id")) {
+        if (e.at("asset_id") != old.at("asset_id") ||
+            (s.managed.contains(e.at("id").get<std::string>()) &&
+             !e.at("reaction").at("automatic").get<bool>())) {
             const auto voice = s.sounds.find(p.at("id").get<std::string>());
             if (voice != s.sounds.end()) {
                 ma_sound_uninit(voice->second.get());
                 s.sounds.erase(voice);
+                s.managed.erase(e.at("id").get<std::string>());
             }
         }
         old = e;
@@ -451,6 +503,10 @@ json AudioService::invoke(const std::string& op, const json& p) {
         s.poses.erase(id);
         s.reactions.forget(id);
         s.controls.erase(id);
+        s.suspended.erase(id);
+        s.managed.erase(id);
+        s.failedAt.erase(id);
+        s.autoErrors.erase(id);
         const auto voice = s.sounds.find(id);
         if (voice != s.sounds.end()) {
             ma_sound_uninit(voice->second.get());
@@ -463,6 +519,11 @@ json AudioService::invoke(const std::string& op, const json& p) {
         return {{"ok", true}};
     }
     if (op == "stop_all") {
+        for (const auto& e : s.data.at("emitters")) {
+            if (e.at("reaction").at("automatic").get<bool>()) {
+                s.suspended.insert(e.at("id").get<std::string>());
+            }
+        }
         s.stopAll();
     } else if (op == "preview_mute") {
         s.muted = p.at("muted").get<bool>();
@@ -517,11 +578,25 @@ json AudioService::invoke(const std::string& op, const json& p) {
                 ma_sound_seek_to_pcm_frame(voice->second.get(), 0);
             }
             require(ma_sound_start(voice->second.get()) == MA_SUCCESS, "Could not start audio source");
+            s.suspended.erase(id);
+            s.failedAt.erase(id);
+            s.autoErrors.erase(id);
+            if (e.at("reaction").at("automatic").get<bool>()) {
+                s.managed.insert(id);
+            }
         } else if (voice != s.sounds.end()) {
+            if (e.at("reaction").at("automatic").get<bool>()) {
+                s.suspended.insert(id);
+            }
             ma_sound_stop(voice->second.get());
             if (op == "stop") {
                 ma_sound_uninit(voice->second.get());
                 s.sounds.erase(voice);
+                s.managed.erase(id);
+            }
+        } else if (op == "pause" || op == "stop") {
+            if (e.at("reaction").at("automatic").get<bool>()) {
+                s.suspended.insert(id);
             }
         }
     }
@@ -537,6 +612,10 @@ void AudioService::clear() {
     impl_->poses.clear();
     impl_->reactions.clear();
     impl_->controls.clear();
+    impl_->suspended.clear();
+    impl_->failedAt.clear();
+    impl_->autoErrors.clear();
+    ++impl_->generation;
     impl_->data = {{"version", 1}, {"next_id", 1}, {"assets", json::array()},
                    {"emitters", json::array()}};
 }
@@ -601,6 +680,10 @@ void AudioService::restore(const json& input, const std::filesystem::path& base)
     impl_->poses.clear();
     impl_->reactions.clear();
     impl_->controls.clear();
+    impl_->suspended.clear();
+    impl_->failedAt.clear();
+    impl_->autoErrors.clear();
+    ++impl_->generation;
     impl_->data = std::move(candidate.data);
 }
 
@@ -660,13 +743,51 @@ void AudioService::tickReactions(float windMps, float rain) {
     const float dt = std::clamp(std::chrono::duration<float>(now - impl_->lastTick).count(),
                                 0.0f, 0.25f);
     impl_->lastTick = now;
+    std::vector<std::string> starts;
     for (const auto& e : impl_->data.at("emitters")) {
         const std::string id = e.at("id");
         impl_->controls[id] = impl_->reactions.evaluate(id, e.at("reaction"), windMps, rain, dt);
         const auto voice = impl_->sounds.find(id);
+        const auto& config = e.at("reaction");
+        const bool automatic = config.at("automatic");
+        const auto pose = impl_->poses.find(id);
+        const bool validPose = pose == impl_->poses.end() || pose->second.at("valid").get<bool>();
+        const float activity = impl_->controls.at(id).activity;
+        if (voice != impl_->sounds.end() && impl_->managed.contains(id) &&
+            ((!automatic || !validPose) || (!impl_->suspended.contains(id) &&
+             activity <= config.at("stop_threshold").get<float>()))) {
+            ma_sound_uninit(voice->second.get());
+            impl_->sounds.erase(voice);
+            impl_->managed.erase(id);
+            continue;
+        }
         if (voice != impl_->sounds.end()) {
             impl_->apply(*voice->second, e);
         }
+        if (automatic && validPose && !impl_->preview && !impl_->suspended.contains(id) &&
+            voice == impl_->sounds.end() && activity >= config.at("start_threshold").get<float>()) {
+            const auto failed = impl_->failedAt.find(id);
+            if (failed == impl_->failedAt.end() || now - failed->second >= std::chrono::seconds(5)) {
+                if (starts.size() < 2) {
+                    starts.push_back(id);
+                }
+            }
+        }
     }
+    for (const auto& id : starts) {
+        try {
+            invoke("play", {{"id", id}});
+        } catch (const std::exception& error) {
+            impl_->failedAt[id] = now;
+            impl_->autoErrors[id] = error.what();
+        }
+    }
+}
+
+void AudioService::invalidateSignal(const std::string& key) {
+    impl_->reactions.invalidateSignal(key);
+}
+std::uint64_t AudioService::generation() const {
+    return impl_->generation;
 }
 } // namespace audio

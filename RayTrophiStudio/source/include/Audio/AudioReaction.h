@@ -6,6 +6,7 @@
 
 namespace audio {
 struct ReactionOutput {
+    float activity = 1;
     float gain = 1;
     float pitch = 1;
     nlohmann::json position;
@@ -21,6 +22,7 @@ public:
     nlohmann::json status() const;
     void clear();
     void forget(const std::string& id);
+    void invalidateSignal(const std::string& key);
 private:
     struct Signal {
         nlohmann::json data;

@@ -30,11 +30,12 @@ void keys(const json& data, const std::vector<std::string>& allowed) {
 nlohmann::json AudioReaction::validate(const json& p) {
     keys(p, {"driver", "input_min", "input_max", "gain_min", "gain_max", "pitch_min",
              "pitch_max", "response_seconds", "signal_key", "follow_position",
-             "source_material", "target_material"});
+             "source_material", "target_material", "automatic", "start_threshold",
+             "stop_threshold", "system_id", "domain_name"});
     json result;
     const std::string driver = p.value("driver", std::string("manual"));
-    require(driver == "manual" || driver == "wind" || driver == "rain" || driver == "signal",
-            "Reaction driver must be manual, wind, rain or signal");
+    require(driver == "manual" || driver == "wind" || driver == "rain" || driver == "signal" ||
+            driver == "domain_contact", "Unknown reaction driver");
     result["driver"] = driver;
     result["input_min"] = field(p, "input_min", 0, 0, 1000000000);
     result["input_max"] = field(p, "input_max", driver == "wind" ? 30 : 1, 0, 1000000000);
@@ -52,6 +53,30 @@ nlohmann::json AudioReaction::validate(const json& p) {
             result["target_material"].get<std::string>().size() <= 128,
             "Material labels must not exceed 128 characters");
     result["follow_position"] = p.value("follow_position", false);
+    result["automatic"] = p.value("automatic", false);
+    result["start_threshold"] = field(p, "start_threshold", 0.02f, 0.0001f, 1);
+    result["stop_threshold"] = field(p, "stop_threshold", 0.005f, 0, 1);
+    require(result["stop_threshold"].get<float>() < result["start_threshold"].get<float>(),
+            "stop_threshold must be below start_threshold");
+    require(!result["automatic"].get<bool>() || driver != "manual",
+            "Automatic playback needs an environment/signal/domain driver");
+    if (p.contains("system_id")) {
+        require(p.at("system_id").is_number_integer() &&
+                p.at("system_id").get<double>() >= 0 && p.at("system_id").get<double>() <= 2147483647,
+                "system_id must be a nonnegative 32-bit integer");
+    }
+    result["system_id"] = p.value("system_id", 0);
+    require(result["system_id"].get<int>() >= 0, "system_id must be nonnegative");
+    result["domain_name"] = p.value("domain_name", std::string());
+    require(result["domain_name"].get<std::string>().size() <= 128, "domain_name is too long");
+    if (driver == "domain_contact") {
+        require(result["system_id"].get<int>() > 0 && !result["domain_name"].get<std::string>().empty(),
+                "Domain contact driver needs a system_id and domain_name");
+        require(result["source_material"] == "" && result["target_material"] == "",
+                "Aggregate domain contacts cannot classify material pairs");
+        result["signal_key"] = "@domain/" + std::to_string(result["system_id"].get<int>()) +
+                               "/" + result["domain_name"].get<std::string>();
+    }
     require(driver != "signal" || !result["signal_key"].get<std::string>().empty(),
             "Signal reaction requires signal_key");
     require(result["signal_key"].get<std::string>().size() <= 256, "Signal key is too long");
@@ -115,7 +140,7 @@ ReactionOutput AudioReaction::evaluate(const std::string& id, const json& config
         return result;
     }
     float input = driver == "wind" ? windMps : (driver == "rain" ? rain : 0);
-    if (driver == "signal") {
+    if (driver == "signal" || driver == "domain_contact") {
         const auto signal = signals_.find(config.at("signal_key").get<std::string>());
         if (signal != signals_.end() && std::chrono::steady_clock::now() < signal->second.expires) {
             const auto& data = signal->second.data;
@@ -148,6 +173,7 @@ ReactionOutput AudioReaction::evaluate(const std::string& id, const json& config
     const float blend = response == 0 ? 1 : -std::expm1(-dt / response);
     envelope += (target - envelope) * blend;
     const float perceptual = std::sqrt(envelope);
+    result.activity = envelope;
     result.gain = config.at("gain_min").get<float>() + perceptual *
         (config.at("gain_max").get<float>() - config.at("gain_min").get<float>());
     result.pitch = config.at("pitch_min").get<float>() + envelope *
@@ -177,5 +203,8 @@ void AudioReaction::forget(const std::string& id) {
     envelopes_.erase(id);
     lastPositions_.erase(id);
     outputs_.erase(id);
+}
+void AudioReaction::invalidateSignal(const std::string& key) {
+    signals_.erase(key);
 }
 }

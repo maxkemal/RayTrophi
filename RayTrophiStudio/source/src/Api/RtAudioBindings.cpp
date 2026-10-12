@@ -44,6 +44,10 @@ struct RegisterAudioMethods {
             {"tags", "array", false, "Asset category tags (strings)", "[]", nullptr},
             {"reaction", "object", false, "Continuous driver mapping; see audio reaction contract",
                 "{}", nullptr},
+            {"assets_root", "string", false, "Assets library root; defaults to resolved runtime root",
+                nullptr, nullptr},
+            {"environment_role", "string", false, "Reserved starter environment identity", "",
+                "wind|rain"},
             {"key", "string", true, "Runtime signal identity, including domain/contact region",
                 nullptr, nullptr},
             {"value", "float", false, "Nonnegative signal magnitude; alternative to flow/speed",
@@ -58,7 +62,7 @@ struct RegisterAudioMethods {
         };
         for (std::size_t i = 0; i < names.size(); ++i) {
             const auto& op = audio::AudioService::operations()[i];
-            const bool read = op == "list" || op == "get" || op == "status";
+            const bool read = op == "list" || op == "get" || op == "status" || op == "domains";
             MethodDescriptor descriptor{};
             descriptor.name = names[i].c_str();
             descriptor.domain = "audio";
@@ -66,7 +70,9 @@ struct RegisterAudioMethods {
             descriptor.notes = "See docs/dev/SCENE_AUDIO_STAGE1_API.md for operation parameters and limits.";
             descriptor.access = read ? "read" : "write";
             const bool readsFile = op == "append" || op == "asset_import" || op == "asset_relink" ||
-                                   op == "play" || op == "preview" || op == "preview_file";
+                                   op == "play" || op == "preview" || op == "preview_file" ||
+                                   op == "environment_setup" || op == "create" || op == "update" ||
+                                   op == "duplicate";
             descriptor.capability = read ? "Read" : (readsFile ? "SceneWrite|FilesRead" : "SceneWrite");
             descriptor.undoable = audio::AudioService::isAuthoring(op);
             descriptor.return_type = "object";
