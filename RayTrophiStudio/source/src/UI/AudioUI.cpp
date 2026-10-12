@@ -349,7 +349,8 @@ void drawProperties(UIContext& ctx) {
 void updateListener(UIContext& ctx) {
     const float fps = static_cast<float>(std::max(1, ctx.render_settings.animation_fps));
     const double time = static_cast<float>(std::max(0, ctx.scene.timeline.current_frame)) / fps;
-    ctx.scene.audio->syncTransport(time, ctx.render_settings.animation_is_playing &&
+    const bool playing = ctx.scene_ui_ptr && ctx.scene_ui_ptr->timeline.isPlaying();
+    ctx.scene.audio->syncTransport(time, playing &&
                                   !rtapi::renderOutputPending());
     audio::syncScene(ctx);
     if (!ctx.scene.camera) {

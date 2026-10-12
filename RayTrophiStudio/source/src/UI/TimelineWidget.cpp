@@ -1539,6 +1539,9 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
         // the backward jump replays from the sim cache, it does not re-bake.
         if (is_playing && !loop_enabled && current_frame >= end_frame)
             current_frame = start_frame;
+        ctx.scene.audio->syncTransport(
+            static_cast<double>(std::max(0, current_frame)) /
+                std::max(1, ctx.render_settings.animation_fps), is_playing);
     }
     
     ImGui::SameLine();

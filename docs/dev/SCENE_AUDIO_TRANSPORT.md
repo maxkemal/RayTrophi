@@ -24,7 +24,7 @@ FilesRead is required because automation can decode files. The setting is undoab
 marks the project modified, and is idempotent if unchanged. Switching modes clears
 scene voices/events/signals and re-arms configured automation in the new mode.
 
-Audio schema 1 stores optional playback_mode, default continuous for old scenes.
+Audio schema 1 stores optional playback_mode, default timeline for old scenes.
 Save/load/undo use the common snapshot path. Load/undo resets transient state;
 the next editor tick supplies the actual scene clock/play state.
 
@@ -97,3 +97,15 @@ After the user's build:
 
 Probes use external scripts/test/rt_ipc.py, never the embedded script workspace.
 No new test helper script is required.
+
+## Default and legacy migration
+
+Follow timeline is now the default for new scenes and legacy audio snapshots.
+playback_mode_explicit distinguishes an intentional saved preference from the
+previous implicit continuous default. Old snapshots without this flag load in
+timeline mode. Choosing a mode via UI/script/IPC saves the flag, so explicitly
+chosen continuous preview remains portable. Scene opening starts paused.
+Audio reads TimelineWidget.isPlaying directly and the Play/Pause button syncs the
+service immediately, instead of relying on the delayed render-settings mirror.
+After the next user build: open a legacy scene, confirm timeline mode and silence;
+Play, Pause, Resume and Stop; save/reopen and confirm the explicit selection.
