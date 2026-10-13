@@ -70,13 +70,17 @@ uint cloudSeed(uint a, vec3 p) {
 // b^2 - c form cancel catastrophically in float, so c is formed as
 // (|oc| - r)(|oc| + r) and the roots through the stable quadratic.
 vec2 cloudSphere(vec3 o, vec3 d, float r) {
-    vec3 oc = o - cloudPlanetCenter();
-    float len = length(oc);
-    float b = dot(oc, d);
-    float c = (len - r) * (len + r);
-    vec3 q = oc - b * d;
-    float ql = length(q);
-    float h = (r - ql) * (r + ql);
+    // Planet-scale terms are expanded around the scene origin instead of
+    // forming oc = o - center (components ~6.4e6 m, float step 0.5 m). The
+    // old discriminant r^2 - |oc - b d|^2 turned that 0.5 m into +-2 km of
+    // noise in sqrt(h) for rays grazing a shell, and the shell boundary
+    // flickered row by row: a band of horizontal stripes across the cloud
+    // just above the view direction tangent to the cloud base (2026-10-13).
+    // Here only b*b - c cancels, and c is the same for every pixel of a view.
+    float Rc = -cloudPlanetCenter().y;
+    float b = dot(o, d) + Rc * d.y;
+    float c = dot(o, o) + 2.0 * Rc * o.y + (Rc - r) * (Rc + r);
+    float h = b * b - c;
     if (h < 0.0) return vec2(1.0, -1.0);
     float s = sqrt(h);
     float tBig = (b > 0.0) ? (-b - s) : (-b + s);
@@ -142,6 +146,20 @@ int cloudIntervals(vec3 o, vec3 d, float tLimit, out vec3 iv[CLOUD_RT_MAX_INTERV
             if (i < nr) lo = max(lo, ranges[i].y);
         }
     }
+    // Local fog (slot 4): the map square x the band, an axis-aligned box in
+    // scene coordinates (the fog lies on the flat scene, not the sphere).
+    if (cloudFogActive() && n < CLOUD_RT_MAX_INTERVALS) {
+        CloudLayerG F = cloudParams.layers[4];
+        float size = 1.0 / cloudParams.fog.z;
+        vec3 bmin = vec3(cloudParams.fog.x, F.g.x, cloudParams.fog.y);
+        vec3 bmax = vec3(cloudParams.fog.x + size, F.g.y, cloudParams.fog.y + size);
+        vec3 inv = 1.0 / mix(d, vec3(1e-8), lessThan(abs(d), vec3(1e-8)));
+        vec3 ta = (bmin - o) * inv, tb = (bmax - o) * inv;
+        vec3 tn = min(ta, tb), tf = max(ta, tb);
+        float t0 = max(max(tn.x, tn.y), max(tn.z, 0.0));
+        float t1 = min(min(tf.x, tf.y), min(tf.z, tLimit));
+        if (t1 > t0) iv[n++] = vec3(t0, t1, 4.0);
+    }
     for (int i = 1; i < n; ++i) {
         vec3 k = iv[i];
         int j = i - 1;
@@ -175,6 +193,8 @@ float cloudSegmentLen(vec3 p, vec3 d) {
 // density <= local coverage * extinction (cloud_common.glsl), and the map
 // holds the max coverage input over the 3x3-tile neighbourhood.
 float cloudLayerMajorant(int li, vec3 p) {
+    // Local fog: the map's maximum envelope (cloudFogDensity never exceeds it).
+    if (li == 4) return cloudParams.layers[4].b.x;
     // The column alone (layer 3), or inside a layer's interval added to it.
     float shellMaj = cloudShellMajorant(p);
     if (li == 3) return shellMaj;
@@ -505,10 +525,16 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
         int reserve = (n - k - 1) * 8;
         float thick = max(L.a.y, 1.0);
         bool column = li == 3;
+        bool fogLayer = li == 4;
+        // Fog: a thin band crossed nearly horizontally; >= 20 m steps that
+        // grow faster with distance (a 1 km band at 128 steps would ask for
+        // 15 m steps over kilometres of ground).
+        float growth = fogLayer ? 2000.0 : 5000.0;
         // Fine step: the shell in `steps` samples; it grows with distance so
         // horizon clouds do not eat the budget. The storm column is
         // troposphere-deep: step it like a 3 km layer, not like 12 km.
         float baseDt = min(thick, column ? 3000.0 : thick) / float(steps) * 2.0;
+        if (fogLayer) baseDt = max(baseDt, 20.0);
         // Phase lobes for this layer.
         float ph[CLOUD_MS_OCTAVES];
         float pIso = 1.0 / (4.0 * CLOUD_PI);
@@ -518,7 +544,7 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
 
         float t = iv[k].x;
         float tEnd = iv[k].y;
-        float dt = baseDt * (1.0 + t / 5000.0);
+        float dt = baseDt * (1.0 + t / growth);
         t += dt * jitter;
         // Ambient occlusion varies slowly: refreshed every `aoEvery` lit
         // samples once the view is mostly occluded (and on secondary rays).
@@ -527,7 +553,7 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
         while (t < tEnd && budget > reserve) {
             int remaining = budget - reserve;
             --budget;
-            dt = baseDt * (1.0 + t / 5000.0);
+            dt = baseDt * (1.0 + t / growth);
             float completionStep = (tEnd - t) / float(remaining);
             vec3 p = o + d * t;
             if (cloudLayerMajorant(li, p) <= 0.0) {
@@ -614,7 +640,13 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                     dTop = min(max(S.a.x + S.a.y * cloudParams.storms2.y - alt, 0.0), 3000.0);
                     dBot = min(max(alt - S.a.x, 0.0), 3000.0);
                 }
-                bool allLayers = L.d.z > 0.5 || inColumn;
+                // Fog: the sky light comes through the clouds above it, not
+                // through the fog band: one tap up to the lowest cloud base.
+                if (fogLayer) {
+                    dTop = clamp(2.0 * (cloudParams.layers[0].a.x - alt) + 400.0, 400.0, 1500.0);
+                    dBot = min(max(p.y - cloudFogMapAt(p).w, 0.0), 200.0);
+                }
+                bool allLayers = L.d.z > 0.5 || inColumn || fogLayer;
                 int aoEvery = secondary ? 4 : (T > 0.25 ? 1 : 2);
                 if (aoTick++ % aoEvery == 0) {
                     vec3 qt = p + upN * (dTop * 0.5), qb = p - upN * (dBot * 0.5);
@@ -726,6 +758,8 @@ void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout 
     }
     vec2 b = cloudSphere(o, d, R + L.a.x);
     bool fromAbove = cloudAltitude(o) >= L.a.x;
+    // From above the curtain lies behind the cloud: an opaque cloud hides it.
+    if (fromAbove && T < 0.01) return;
     if (fromAbove) {           // above the base: enter at it
         if (b.x > b.y || b.x <= 0.0) return;
         t0 = b.x;
@@ -745,15 +779,21 @@ void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout 
     vec3 ambTop = cloudSkyAmbient(normalize(vec3(0.0, 1.0, 0.0) + d * 0.2));
     vec3 Es = vec3(-1.0);
     bool secondary = cloudMarchLod != 0;
-    int n = max(steps / 3, secondary ? 8 : 16);
+    // Cost (2026-10-13, storm scene with stratiform rain everywhere): the
+    // curtain took RT from 400 to 1600 ms per sample. Secondary rays (every
+    // bounce segment) only carry the curtain into indirect light: 8 samples,
+    // no streaks, one sun estimate. Camera rays: at most 48 samples (the
+    // jitter is averaged by RT accumulation / RayFusion history).
+    int n = secondary ? 8 : clamp(steps / 3, 16, 48);
     // Lit cloud bases light the curtain during a flash.
     vec4 flashActivity = cloudFlashAny() ? cloudLightningActivities() : vec4(0.0);
     bool flashOn = any(greaterThan(flashActivity, vec4(0.0)));
     // The sun's optical depth through the column above changes slowly along
-    // the ray: one estimate serves `shadeEvery` neighbouring samples while
-    // they are close together (the per-sample 4-step march was the most
-    // expensive part of the curtain).
-    int shadeEvery = secondary ? 4 : 2;
+    // the ray: one estimate serves `shadeEvery` neighbouring samples (the
+    // per-sample 4-step march was the most expensive part of the curtain).
+    // Far samples (dt > 400 m) used to force a fresh 4-step estimate EACH --
+    // with the quadratic spacing that was most of them. Far shafts are a
+    // veil: every 3rd sample, 2 steps.
     int shadeTick = 0;
     float shade = 1.0;
     // Steps grow with distance: near shafts resolved, far ones a veil.
@@ -772,13 +812,15 @@ void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout 
         // a short segment in front of a nearby slope keeps them at any
         // distance, a long sky ray turns far shafts into their mean veil.
         float forward;
-        float sigma = cloudPrecipDensityLod(p, 1.0 - smoothstep(120.0, 600.0, dt), forward);
+        float sigma = cloudPrecipDensityLod(p, secondary ? 0.0 : 1.0 - smoothstep(120.0, 600.0, dt), forward);
         if (sigma <= 0.0) continue;
         float ph = mix(pIso, pFwd, forward);
         if (Es.r < 0.0) Es = cloudSunIrradiance(p, sunDir);
-        if (shadeTick++ % shadeEvery == 0 || dt > 400.0) {
-            float tauSun = cloudOpticalDepth(p, sunDir, CLOUD_RT_MAX_DIST, secondary ? 2 : 4,
-                                             jitter, false);
+        bool far = dt > 400.0;
+        int shadeEvery = secondary ? n : (far ? 3 : 2);
+        if (shadeTick++ % shadeEvery == 0) {
+            float tauSun = cloudOpticalDepth(p, sunDir, CLOUD_RT_MAX_DIST,
+                                             (secondary || far) ? 2 : 4, jitter, false);
             shade = exp(-tauSun);
         }
         // Under a cloud the sky above is mostly blocked (scaled with the sun

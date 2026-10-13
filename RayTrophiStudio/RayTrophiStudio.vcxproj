@@ -364,6 +364,7 @@
     <None Include="source\shaders\foliage_scatter_terrain_accept.comp" />
     <None Include="source\shaders\water_v3.glsl" />
     <None Include="source\shaders\miss.rmiss" />
+    <None Include="source\shaders\cloud_callable.rcall" />
     <None Include="source\shaders\raygen.rgen" />
     <None Include="source\shaders\shadow_anyhit.rchit" />
     <None Include="source\shaders\shadow_miss.rmiss" />
@@ -669,7 +670,11 @@
     <ClInclude Include="source\include\World.h" />
     <ClInclude Include="source\include\Atmosphere\AtmosphereClimate.h" />
     <ClInclude Include="source\include\Atmosphere\AtmosphereClouds.h" />
+    <ClInclude Include="source\include\Atmosphere\AtmosphereLocalWeather.h" />
+    <ClInclude Include="source\include\Atmosphere\LightningStrike.h" />
+    <ClInclude Include="source\include\Atmosphere\LightningStrikeResolver.h" />
     <ClInclude Include="source\include\Backend\CloudParams.h" />
+    <ClInclude Include="source\include\Backend\CloudBoltGeometry.h" />
     <ClInclude Include="source\include\Backend\AtmosphereLutParams.h" />
     <ClInclude Include="source\include\Backend\AerialFroxelParams.h" />
     <ClInclude Include="source\include\TerrainFFT.h" />
@@ -2056,6 +2061,9 @@
     <ClCompile Include="source\src\Scene\World.cpp" />
     <ClCompile Include="source\src\Atmosphere\AtmosphereClimate.cpp" />
     <ClCompile Include="source\src\Atmosphere\AtmosphereClouds.cpp" />
+    <ClCompile Include="source\src\Atmosphere\AtmosphereLocalWeather.cpp" />
+    <ClCompile Include="source\src\Atmosphere\LightningStrike.cpp" />
+    <ClCompile Include="source\src\Atmosphere\LightningStrikeResolver.cpp" />
     <ClCompile Include="source\src\Scene\MaterialManager.cpp" />
     <ClCompile Include="source\src\Scene\MaterialNodesV2.cpp" />
     <ClCompile Include="source\src\Scene\SimulationNodes.cpp" />

@@ -12,15 +12,16 @@ struct CloudLightningG {
     vec4 start;   // xyz, pulse radiance
     vec4 end;     // xyz, bolt radius m
     vec4 color;   // rgb, channel segment count
-    vec4 stage;   // growth, channel brightness, internal (0 ground / 1 cloud), glow radius m
+    vec4 stage;   // growth, brightness, kind (0 ground / 1 cloud / 2 upward / 3 vertical), glow
 };
 
 // One straight piece of an event's channel network (CPU: buildCloudBolt).
 struct CloudBoltSegG {
     vec4 a;   // xyz, weight (1 = main channel, < 1 branch / twig)
     vec4 b;   // xyz, leader progress at which it starts to grow
+    vec4 growth; // completion, parent index (-1 origin), depth, tip weight
 };
-const int CLOUD_BOLT_SEGMENTS = 40;   // per event (kCloudBoltSegments)
+const int CLOUD_BOLT_SEGMENTS = 80;   // per event (kCloudBoltSegments)
 
 // The cloud base lit from inside by one event: a downward-facing disc.
 struct CloudFlashLightG {

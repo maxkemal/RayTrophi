@@ -2338,6 +2338,25 @@ json dispatchMethod(const std::string& method, const json& params) {
             return json::parse(out);
         });
     }
+    if (method == "world.sample_weather_local") {
+        // points -- validated in rtapi.
+        if (!params.contains("points")) throw std::runtime_error("points required");
+        const std::string request = params.dump();
+        return enqueueQuery([request](UIContext&) {
+            std::string out;
+            rtapi::Result r = rtapi::sampleWeatherLocalJson(request, out);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json::parse(out);
+        });
+    }
+    if (method == "world.local_weather_stats") {
+        return enqueueQuery([](UIContext&) {
+            std::string out;
+            rtapi::Result r = rtapi::localWeatherStatsJson(out);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json::parse(out);
+        });
+    }
     if (method == "world.atmosphere_stats") {
         return enqueueQuery([](UIContext&) {
             const rtapi::AtmosphereStatsInfo s = rtapi::atmosphereStats();
@@ -4794,6 +4813,11 @@ json dispatchMethod(const std::string& method, const json& params) {
     if (method == "render.rt_pipeline_status") {
         return enqueueQuery([](UIContext&) {
             const rtapi::RtPipelineStatusInfo s = rtapi::rtPipelineStatus();
+            // null seconds = the driver gave no per-stage feedback.
+            json stages = json::array();
+            for (const auto& st : s.stage_seconds)
+                stages.push_back({{"stage", st.name},
+                                  {"seconds", st.seconds >= 0.0 ? json(st.seconds) : json(nullptr)}});
             return json{{"available", s.available},
                         {"backend", s.backend},
                         {"rt_pipeline_state", s.state},
@@ -4807,6 +4831,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"cache_reject_reason", s.cache_reject_reason},
                         {"deferred_threads", s.deferred_threads},
                         {"build_count", s.build_count},
+                        {"stage_seconds", stages},
                         {"error", s.error}};
         });
     }

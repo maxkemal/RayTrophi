@@ -40,27 +40,28 @@ float cloudFlashMeanExtinction() {
 
 // ── Channel network (CPU: buildCloudBolt) ───────────────────────────────────
 // The visible part of segment k of event i at the current leader progress:
-// it starts growing at its `appear` progress and takes ~1/16 of the leader
-// to reach full length. Returns false while it has not started.
+// Parent-dependent intervals and arc-length travel are built by the CPU.
+// Hold, then extend the tip quickly: a stepped leader rather than uniform wiping.
 bool cloudBoltSegment(int i, int k, CloudLightningG event, out vec3 a, out vec3 b,
                       out float weight) {
     CloudBoltSegG s = cloudParams.bolt[i * CLOUD_BOLT_SEGMENTS + k];
-    float grown = clamp((event.stage.x - s.b.w) * 16.0, 0.0, 1.0);
+    float phase = clamp((event.stage.x - s.b.w) / max(s.growth.x - s.b.w, 1e-6), 0.0, 1.0);
+    float grown = smoothstep(0.35, 0.90, phase);
     a = s.a.xyz;
     b = mix(s.a.xyz, s.b.xyz, grown);
-    weight = s.a.w;
+    weight = mix(s.a.w, s.growth.w, grown);
     return grown > 0.0;
 }
 
 // Brightness of a segment. After a downward ground strike connects (return
-// stroke) the current runs down the main channel only: it dominates and the
-// branches that did not connect fade. An in-cloud flash keeps its network,
+// stroke) the main channel dominates while its unconnected branches still
+// illuminate at reduced strength. An in-cloud flash keeps its network,
 // and so does upward lightning (stage.z 2): its continuous current feeds
 // every branch that reached the cloud.
 float cloudBoltSegmentBrightness(CloudLightningG event, float weight) {
     bool returnStroke = event.stage.z < 0.5 && event.stage.x >= 1.0;
     if (weight >= 0.99) return 1.0;
-    return returnStroke ? weight * 0.35 : weight;
+    return returnStroke ? weight * 0.75 : weight;
 }
 
 vec3 cloudClosestOnSegment(vec3 p, vec3 a, vec3 b) {
@@ -143,9 +144,57 @@ bool cloudFlashAny() {
     return false;
 }
 
-// Ray vs one channel segment: core + halo, as seen along the view ray.
-float cloudBoltRaySegment(vec3 origin, vec3 direction, float limit, vec3 a, vec3 b,
-                          float radius, out float hitDistance) {
+// ── Fine channel structure (view only) ───────────────────────────────────────
+// The CPU tree has 32 main pieces over a channel several kilometres long, so
+// a piece is a 100-300 m straight run: from up close the bolt read as a few
+// ruler strokes (2026-10-13). A piece the view sees large is split here into
+// 2^L sub-pieces by midpoint displacement, continuing the CPU tree's rule one
+// scale down: level l puts a random offset on its new knots, linear between,
+// with a constant knot angle (amplitude halves as spacing halves) -- real
+// channels are equally kinked at every scale. Deterministic per segment, so
+// the shape never changes between frames; a growing segment reveals the same
+// fine path. Only pixels near the coarse piece pay for it.
+const int   CLOUD_BOLT_FINE_MAX_LEVELS = 5;      // up to 32 sub-pieces
+const float CLOUD_BOLT_FINE_AMPLITUDE = 0.15;    // level-1 offset / piece length
+const float CLOUD_BOLT_FINE_PIECE_ANGLE = 0.006; // target sub-piece angular size (rad)
+const float CLOUD_BOLT_FINE_MIN_PIECE_M = 4.0;
+
+uint cloudBoltHash(uint v) {
+    v ^= v >> 16;
+    v *= 0x7feb352du;
+    v ^= v >> 15;
+    v *= 0x846ca68bu;
+    return v ^ (v >> 16);
+}
+
+// Offset of knot j (of n = 2^levels) along a piece, in the piece's frame
+// (s1, s2 perpendicular to it): the sum over levels of each level's hat
+// function. Odd knots of a level carry its random offset, even ones 0.
+vec2 cloudBoltFineOffset(int j, int levels, uint seed) {
+    vec2 o = vec2(0.0);
+    float amp = CLOUD_BOLT_FINE_AMPLITUDE;
+    int n = 1 << levels;
+    for (int l = 1; l <= levels; ++l) {
+        int spacing = n >> l;          // finest-grid knots per level-l step
+        int k0 = j / spacing;
+        float f = float(j - k0 * spacing) / float(spacing);
+        vec2 v0 = vec2(0.0), v1 = vec2(0.0);
+        if ((k0 & 1) == 1) {
+            uint h = cloudBoltHash(seed ^ uint(l * 7919 + k0 * 104729));
+            v0 = vec2(float(h & 0xffffu), float(h >> 16)) / 32767.5 - 1.0;
+        }
+        if (((k0 + 1) & 1) == 1 && f > 0.0) {
+            uint h = cloudBoltHash(seed ^ uint(l * 7919 + (k0 + 1) * 104729));
+            v1 = vec2(float(h & 0xffffu), float(h >> 16)) / 32767.5 - 1.0;
+        }
+        o += mix(v0, v1, f) * amp;
+        amp *= 0.5;
+    }
+    return o;
+}
+
+// Ray vs one channel piece: distance along the ray and closest separation.
+float cloudBoltRaySeparation(vec3 origin, vec3 direction, vec3 a, vec3 b, out float t) {
     vec3 v = b - a;
     vec3 w = origin - a;
     float e = max(dot(v, v), 1e-6);
@@ -153,22 +202,82 @@ float cloudBoltRaySegment(vec3 origin, vec3 direction, float limit, vec3 a, vec3
     float dw = dot(direction, w);
     float vw = dot(v, w);
     float denominator = e - dv * dv;
-    float t = denominator > 1e-6 ? (dv * vw - dw * e) / denominator : -dw;
-    float u = clamp((vw + dv * max(t, 0.0)) / e, 0.0, 1.0);
+    float tr = denominator > 1e-6 ? (dv * vw - dw * e) / denominator : -dw;
+    float u = clamp((vw + dv * max(tr, 0.0)) / e, 0.0, 1.0);
     vec3 closest = a + v * u;
     t = dot(closest - origin, direction);
-    hitDistance = t;
+    return length(origin + direction * t - closest);
+}
+
+// Core + tight sheath of segment k of event i along the view ray, on the fine
+// path when the piece is seen large; the wide faint glow stays on the coarse
+// piece (it is blurrier than the displacement).
+float cloudBoltRayFine(vec3 origin, vec3 direction, float limit, int i, int k,
+                       CloudLightningG event, float radius, out float hitDistance) {
+    CloudBoltSegG s = cloudParams.bolt[i * CLOUD_BOLT_SEGMENTS + k];
+    float phase = clamp((event.stage.x - s.b.w) / max(s.growth.x - s.b.w, 1e-6), 0.0, 1.0);
+    float grown = smoothstep(0.35, 0.90, phase);
+    hitDistance = limit;
+    if (grown <= 0.0) return 0.0;
+    vec3 a = s.a.xyz;
+    vec3 full = s.b.xyz;
+    vec3 b = mix(a, full, grown);
+    float len = length(full - a);
+
+    float t;
+    float separation = cloudBoltRaySeparation(origin, direction, a, b, t);
     if (t <= 0.0 || t >= limit) return 0.0;
-    float separation = length(origin + direction * t - closest);
-    // A minimum angular footprint keeps the bright core visible at distance.
     float width = max(radius, t * 0.00012);
-    float core = 1.0 - smoothstep(width * 0.35, width * 1.5, separation);
-    // Halo: light scattered by the air/rain around the channel. Two scales,
-    // a tight bright sheath and a wide faint glow, so a near bolt reads as
-    // glowing, not as a drawn line.
-    float halo = exp(-separation / max(width * 6.0, 0.001)) * 0.05 +
-                 exp(-separation / max(width * 60.0, 0.01)) * 0.008;
-    return core + halo;
+    float glow = exp(-separation / max(width * 60.0, 0.01)) * 0.008;
+    // The fine path stays within the level sum (2 x the level-1 amplitude)
+    // on each of the two perpendicular axes: sqrt(2) x 2 x amplitude < 3 x.
+    float envelope = 3.0 * CLOUD_BOLT_FINE_AMPLITUDE * len;
+    int levels = 0;
+    float angular = len / max(t, 1.0);
+    while (levels < CLOUD_BOLT_FINE_MAX_LEVELS &&
+           angular / float(1 << levels) > CLOUD_BOLT_FINE_PIECE_ANGLE &&
+           len / float(2 << levels) >= CLOUD_BOLT_FINE_MIN_PIECE_M) ++levels;
+    float near = 0.0;
+    if (levels == 0 || separation > envelope + width * 30.0) {
+        near = 1.0 - smoothstep(width * 0.35, width * 1.5, separation);
+        near += exp(-separation / max(width * 6.0, 0.001)) * 0.05;
+        hitDistance = t;
+        return near + glow;
+    }
+    vec3 axis = (full - a) / max(len, 1e-6);
+    vec3 ref = abs(axis.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 s1 = normalize(cross(axis, ref));
+    vec3 s2 = cross(axis, s1);
+    // Static per segment for the life of the event (its birth/completion
+    // progress come from the geometry seed), not tied to the moving position.
+    uint seed = cloudBoltHash(floatBitsToUint(s.b.w) ^ cloudBoltHash(floatBitsToUint(s.growth.x)) ^
+                              uint(k) * 2654435761u);
+    int n = 1 << levels;
+    float best = 0.0;
+    vec3 prev = a;
+    for (int j = 1; j <= n; ++j) {
+        float u0 = float(j - 1) / float(n);
+        if (u0 >= grown) break;
+        float u1 = min(float(j) / float(n), grown);
+        vec2 o = (j < n) ? cloudBoltFineOffset(j, levels, seed) * len : vec2(0.0);
+        vec3 knot = mix(a, full, float(j) / float(n)) + s1 * o.x + s2 * o.y;
+        // A partially grown last piece reveals its fine path, not a stretch.
+        vec3 next = mix(prev, knot, (u1 - u0) * float(n));
+        float tj;
+        float sj = cloudBoltRaySeparation(origin, direction, prev, next, tj);
+        if (tj > 0.0 && tj < limit) {
+            float wj = max(radius, tj * 0.00012);
+            float v = 1.0 - smoothstep(wj * 0.35, wj * 1.5, sj);
+            v += exp(-sj / max(wj * 6.0, 0.001)) * 0.05;
+            if (v > best) {
+                best = v;
+                hitDistance = tj;
+            }
+        }
+        prev = knot;
+    }
+    if (best <= 0.0) hitDistance = t;
+    return best + glow;
 }
 
 vec3 cloudApplyLightning(vec3 color, vec3 origin, vec3 direction, float limit) {
@@ -194,8 +303,8 @@ vec3 cloudApplyLightning(vec3 color, vec3 origin, vec3 direction, float limit) {
             if (!cloudBoltSegment(i, k, event, a, b, weight)) continue;
             float distance;
             // Branches are thinner and taper toward their twigs.
-            float value = cloudBoltRaySegment(origin, direction, limit, a, b,
-                                              event.end.w * mix(0.35, 1.0, weight), distance) *
+            float value = cloudBoltRayFine(origin, direction, limit, i, k, event,
+                                           event.end.w * mix(0.35, 1.0, weight), distance) *
                           cloudBoltSegmentBrightness(event, weight);
             if (value > brightness) {
                 brightness = value;

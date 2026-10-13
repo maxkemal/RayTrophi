@@ -919,8 +919,11 @@ public:
         std::vector<std::uint32_t> volumeClosestHit, volumeIntersection;
         std::vector<std::uint32_t> hairClosestHit, hairIntersection, hairAnyHit;
         std::vector<std::uint32_t> shadowMiss;
-        std::vector<std::uint32_t> sphereClosestHit, sphereIntersection;
+        // The sphere hit group reuses closestHit (gl_HitKindEXT tells them apart).
+        std::vector<std::uint32_t> sphereIntersection;
         std::vector<std::uint32_t> photonRaygen;
+        // Required: hit and miss stages call it (cloud_callable.rcall).
+        std::vector<std::uint32_t> cloudCallable;
     };
     // Ready     - the installed pipeline was built from these exact shaders; nothing started.
     // Compiling - a worker is compiling them (started now or earlier).
@@ -1272,14 +1275,16 @@ public:
     Backend::RTPipelineStatus m_rtBuildStatus;              // guarded by m_rtBuildStatusMutex
     int64_t m_rtBuildStartTicks = 0;                        // steady_clock ticks; guarded by the same mutex
     VkPipelineCache m_rtPipelineCache = VK_NULL_HANDLE;
+    uint64_t m_rtPipelineCacheShaderHash = 0;               // shaders m_rtPipelineCache was prepared for (0 = none)
     bool m_deferredHostOpsEnabled = false;                  // latched in createLogicalDevice
     bool m_rtCreationFeedbackSupported = false;             // Vulkan 1.3 pipeline creation feedback
     bool startRTPipelineBuild(RTPipelineShaderSet shaders, uint64_t hash);
     void runRTPipelineBuildJob(RTPipelineBuildJob& job);   // worker thread
     bool installRTPipelineBuild(RTPipelineBuildJob& job);  // render thread
     bool ensureRTPipelineLayouts();
-    void loadRTPipelineCache();
-    void saveRTPipelineCache();
+    void loadRTPipelineCache();                             // resolves the path, starts empty
+    void prepareRTPipelineCache(uint64_t shaderHash);      // worker: loads the blob only if saved for these shaders
+    void saveRTPipelineCache(uint64_t shaderHash);
     void shutdownRTPipelineBuild();                        // joins the worker, frees cache
     
     // Skinning Compute Pipeline
@@ -1505,6 +1510,10 @@ public:
     static constexpr uint32_t kCloudUploadSlots = 4;   // two calls per frame, two frames ahead
     CloudUploadSlot m_cloudUploadSlots[kCloudUploadSlots];
     uint32_t m_cloudUploadNext = 0;
+    // Local fog envelope in cell-map sheet 3 (ATMOSPHERE_LOCAL_WINDS_FOG.md
+    // §4): revision of the uploaded map (0 = none) and the upload count.
+    uint64_t m_cloudFogRevision = 0;
+    uint64_t m_cloudFogUploads = 0;
     void destroyCloudUploadRing();
     void destroyCloudRaster();
     bool createCloudShadowPipeline(const std::vector<uint32_t>& spv);
@@ -1669,7 +1678,7 @@ private:
     // Foam point-sphere buffer (binding 18). One combined buffer for the whole
     // sphere cloud: { vec4 centreRadius, uint matId, float objectRandom,
     // uint pad[2] } per sphere,
-    // indexed by gl_PrimitiveID in sphere_intersection.rint / sphere_closesthit.
+    // indexed by gl_PrimitiveID in sphere_intersection.rint / closesthit.rchit.
     // Kept persistently bound (dummy 1-element until foam exists) so binding 18
     // is always valid; the foam consumer re-uploads it each frame.
     BufferHandle m_foamSphereBuffer;     // FoamSphereGPU[] — binding 18
@@ -2349,6 +2358,9 @@ public:
     uint64_t cloudWeatherGenerations() const { return m_device ? m_device->m_cloudWeatherGenerations : 0; }
     uint64_t cloudSampleDispatches() const { return m_device ? m_device->m_cloudSampleDispatches : 0; }
     uint64_t cloudStateRevisionsSeen() const { return m_cloudStateUpdates; }
+    // Local fog envelope in the cell map: uploaded revision (0 = none), uploads.
+    uint64_t cloudFogRevision() const { return m_device ? m_device->m_cloudFogRevision : 0; }
+    uint64_t cloudFogUploads() const { return m_device ? m_device->m_cloudFogUploads : 0; }
     bool cloudRtRendering() const { return m_cloudRtRendering; }
     void setInteractiveViewportMatcap(int64_t textureID);
     void setInteractiveViewportMatcapPreset(int preset);
@@ -2432,6 +2444,7 @@ protected:
     Vec3 m_cloudWind = Vec3(0.0f, 0.0f, 0.0f);
     bool m_cloudStateSet = false;
     uint64_t m_cloudStateUpdates = 0;
+    uint64_t m_cloudFogRevisionSeen = 0;     // local fog map revision of the last setCloudState
     bool m_cloudRtRendering = false;   // last render flag published to the RT params
     // RayFusion cloud layer bookkeeping (recordCloudRasterPass).
     bool m_cloudRasterWritten = false;     // sky pass reads binding 25 this frame

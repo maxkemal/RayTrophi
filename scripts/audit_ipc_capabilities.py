@@ -224,7 +224,8 @@ def required(method, namespaces):
                   "templates.refresh", "templates.validate",
                   "templates.prepare",
                   "world.atmosphere_stats", "world.sample_climate",
-                  "world.cloud_stats", "world.sample_clouds"):
+                  "world.cloud_stats", "world.sample_clouds",
+                  "world.sample_weather_local", "world.local_weather_stats"):
         return "Read"
     # agent.chat_send posts into the user's chat panel under a sender name the
     # caller chooses, and agent.send_prompt queues work for another agent, so

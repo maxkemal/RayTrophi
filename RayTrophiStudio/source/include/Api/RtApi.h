@@ -1645,6 +1645,10 @@ struct RtPipelineStatusInfo {
     uint32_t deferred_threads = 0; // threads that joined the last build; 0 = synchronous
     uint32_t build_count = 0;
     std::string error;
+    // Driver compile time per stage of the last build, in stage order;
+    // seconds < 0 = no value from the driver. Stages compile in parallel.
+    struct StageTime { std::string name; double seconds = -1.0; };
+    std::vector<StageTime> stage_seconds;
 };
 RtPipelineStatusInfo rtPipelineStatus();
 
@@ -3332,6 +3336,18 @@ Result cloudStatsJson(std::string& out_json);
 //           "steps":256, "backend":"render"|"viewport"}
 // Reply: {"values":[...]} -- 1/m for density, 0..1 for transmittance.
 Result sampleCloudsJson(const std::string& request_json, std::string& out_json);
+// Local weather (docs/dev/ATMOSPHERE_LOCAL_WINDS_FOG.md §2-4) at points.
+// Request: {"points":[[x,y,z],...]}. Reply: {"points":[{suitability:{value,
+// orographic, lee, ridge, heating, terrain}, recent_rain, rain_now, ground_y,
+// local_mean_y, on_terrain, in_fog_map, fog:{radiation_per_m, radiation_top_y,
+// mist_per_m, mist_top_y}, extinction_per_m (at the point's y)}],
+// time_quantum_s}. The fog values come from the published map the froxel
+// draws: the answer is the picture.
+Result sampleWeatherLocalJson(const std::string& request_json, std::string& out_json);
+// The published local weather: fog map (placement, revision, drivers,
+// max extinction, fogged fraction), terrain field, and per backend the
+// revision of the fog texels on the GPU and the upload count.
+Result localWeatherStatsJson(std::string& out_json);
 Result setWaterWind(const std::string& surface, const WaterWindPatch& patch);
 Result setScatterWind(const std::string& group_id_or_name, const ScatterWindPatch& patch);
 

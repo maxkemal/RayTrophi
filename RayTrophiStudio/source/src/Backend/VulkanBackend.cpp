@@ -16186,8 +16186,14 @@ void VulkanBackendAdapter::setCloudState(const atmosphere::CloudState& clouds, f
     // Cloud time is not part of WorldData, so a playing timeline changes the
     // sky without changing the world block: progressive accumulation must be
     // reset here, or the RT image keeps the old sky (clouds look frozen).
+    // A new local fog map changes the field too (it is published by the main
+    // thread, not carried in the cloud state).
+    const std::shared_ptr<const atmosphere::LocalFogMap> fogMap = atmosphere::localFogMapSnapshot();
+    const uint64_t fogRevision = fogMap && fogMap->active ? fogMap->revision : 0;
     const bool skyMoved = m_cloudRtRendering &&
-        (time_seconds != m_cloudTime || drift_m.x != m_cloudDrift.x || drift_m.z != m_cloudDrift.z);
+        (time_seconds != m_cloudTime || drift_m.x != m_cloudDrift.x || drift_m.z != m_cloudDrift.z ||
+         fogRevision != m_cloudFogRevisionSeen);
+    m_cloudFogRevisionSeen = fogRevision;
     m_cachedClouds = clouds;
     m_cloudTime = time_seconds;
     m_cloudDrift = drift_m;
@@ -18496,12 +18502,10 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             SCENE_LOG_INFO("[Vulkan] Hair shaders not found — hair rendering disabled.");
         }
 
-        // Load Foam point-sphere shaders (optional — N→1 instance foam path)
-        std::vector<std::uint32_t> sphereChitSPV;
+        // Load Foam point-sphere intersection (optional — N→1 instance foam path).
+        // Its hit group reuses closesthit.spv.
         std::vector<std::uint32_t> sphereIntSPV;
-        if (std::filesystem::exists(shaderDir + "/sphere_closesthit.spv") &&
-            std::filesystem::exists(shaderDir + "/sphere_intersection.spv")) {
-            sphereChitSPV = loadSPV(shaderDir + "/sphere_closesthit.spv");
+        if (std::filesystem::exists(shaderDir + "/sphere_intersection.spv")) {
             sphereIntSPV  = loadSPV(shaderDir + "/sphere_intersection.spv");
         } else {
             SCENE_LOG_INFO("[Vulkan] Foam sphere shaders not found — foam falls back to instanced spheres.");
@@ -18521,6 +18525,15 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             photonRgenSPV = loadSPV(shaderDir + "/photon.spv");
         } else {
             SCENE_LOG_INFO("[Vulkan] photon.spv not found — photon caustics disabled.");
+        }
+
+        // Cloud transport callable (required: the hit and miss stages call it).
+        std::vector<std::uint32_t> cloudCallSPV;
+        if (std::filesystem::exists(shaderDir + "/cloud_callable.spv")) {
+            cloudCallSPV = loadSPV(shaderDir + "/cloud_callable.spv");
+        } else {
+            SCENE_LOG_ERROR("[Vulkan] cloud_callable.spv not found -- the RT pipeline cannot be built. "
+                            "Run compile_shaders.bat.");
         }
 
         // Load Skinning Compute Shader
@@ -18619,9 +18632,9 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             rtShaders.hairIntersection   = std::move(hairIntSPV);
             rtShaders.hairAnyHit         = std::move(hairAhitSPV);
             rtShaders.shadowMiss         = std::move(shadowMissSPV);
-            rtShaders.sphereClosestHit   = std::move(sphereChitSPV);
             rtShaders.sphereIntersection = std::move(sphereIntSPV);
             rtShaders.photonRaygen       = std::move(photonRgenSPV);
+            rtShaders.cloudCallable      = std::move(cloudCallSPV);
             using RtState = Backend::RTPipelineStatus::State;
             const RtState rtState = m_device->requestRTPipelineBuild(std::move(rtShaders));
             if (rtState == RtState::Ready) {

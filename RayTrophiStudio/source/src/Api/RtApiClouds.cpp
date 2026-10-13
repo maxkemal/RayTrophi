@@ -18,10 +18,13 @@
 #include <string>
 
 #include "Atmosphere/AtmosphereClouds.h"
+#include "Atmosphere/AtmosphereLocalWeather.h"
+#include "Atmosphere/LightningStrike.h"
 #include "Backend/VulkanBackend.h"
 #include "ProjectManager.h"
 #include "json.hpp"
 
+#include <algorithm>
 #include <vector>
 
 extern void markWorldDirty();
@@ -181,15 +184,30 @@ Result cloudStatsJson(std::string& out_json) {
             for (int i = 0; i < Backend::kCloudLightningEvents; ++i) {
                 const auto& e = params.lightning[i];
                 const auto& f = params.flash[i];
+                // Attachment of a ground strike, from the evaluation just above.
+                const atmosphere::LightningStrikeTarget strike = atmosphere::lightningStrikeForLane(i);
+                nlohmann::json strikeJson = nullptr;
+                if (strike.found) {
+                    strikeJson = {{"kind", strike.kind}, {"object", strike.object},
+                                  {"position", {strike.x, strike.y, strike.z}},
+                                  {"striking_distance_m", strike.striking_distance_m},
+                                  {"contact_height_m", strike.contact_height_m},
+                                  {"candidates", strike.candidates}};
+                }
                 // Channel network: [a xyz, b xyz, weight (1 main), leader
                 // progress at which it starts to grow].
                 nlohmann::json segments = nlohmann::json::array();
+                nlohmann::json growth = nlohmann::json::array();
                 const int count = (std::min)(static_cast<int>(e.color[3] + 0.5f),
                                              Backend::kCloudBoltSegments);
                 for (int k = 0; k < count; ++k) {
                     const auto& s = params.bolt[i * Backend::kCloudBoltSegments + k];
                     segments.push_back({{s.a[0], s.a[1], s.a[2]}, {s.b[0], s.b[1], s.b[2]},
                                         s.a[3], s.b[3]});
+                    growth.push_back({{"completion", s.growth[0]},
+                        {"parent", static_cast<int>(s.growth[1])},
+                        {"depth", static_cast<int>(s.growth[2])},
+                        {"tip_weight", s.growth[3]}});
                 }
                 events.push_back({
                     {"active", e.start[3] > 0.0f},
@@ -205,6 +223,11 @@ Result cloudStatsJson(std::string& out_json) {
                     {"flash_radius_m", f.position[3]},
                     {"flash_radiance", {f.radiance[0], f.radiance[1], f.radiance[2]}},
                     {"channel_brightness", e.stage[1]},
+                    {"segment_growth", growth},
+                    // null = no scene attachment (not a ground strike, attachment
+                    // off, or nothing under it: ends at ground_altitude_m).
+                    {"strike", strikeJson},
+                    {"geometry_revision", 3},
                     {"segments", segments}});
             }
             r["lightning"] = events;
@@ -326,6 +349,107 @@ Result sampleCloudsJson(const std::string& request_json, std::string& out_json) 
         }
         j["forms"] = forms;
     }
+    out_json = j.dump();
+    return Result::success();
+}
+
+// ── Local weather (ATMOSPHERE_LOCAL_WINDS_FOG.md §2-4) ─────────────────────
+
+Result sampleWeatherLocalJson(const std::string& request_json, std::string& out_json) {
+    if (!g_ctx) return notBound();
+    nlohmann::json req;
+    try {
+        req = nlohmann::json::parse(request_json);
+    } catch (const std::exception& e) {
+        return Result::fail(std::string("request is not valid JSON: ") + e.what());
+    }
+    if (!req.contains("points") || !req["points"].is_array() || req["points"].empty())
+        return Result::fail("points required: [[x,y,z], ...]");
+    if (req["points"].size() > 4096) return Result::fail("at most 4096 points per call");
+    const World& world = g_ctx->renderer.world;
+    nlohmann::json rows = nlohmann::json::array();
+    for (const auto& v : req["points"]) {
+        if (!v.is_array() || v.size() != 3 || !v[0].is_number() || !v[1].is_number() || !v[2].is_number())
+            return Result::fail("each point is [x,y,z]");
+        const Vec3 p(v[0].get<float>(), v[1].get<float>(), v[2].get<float>());
+        const atmosphere::LocalWeatherPoint w = atmosphere::sampleLocalWeather(world, world.getCloudTime(), p);
+        rows.push_back({
+            {"suitability", {{"value", w.suitability.value}, {"orographic", w.suitability.orographic},
+                             {"lee", w.suitability.lee}, {"ridge", w.suitability.ridge},
+                             {"heating", w.suitability.heating}, {"terrain", w.suitability.terrain}}},
+            {"recent_rain", w.recent_rain},
+            {"rain_now", w.rain_now},
+            {"ground_y", w.ground_y},
+            {"local_mean_y", w.local_mean_y},
+            {"on_terrain", w.on_terrain},
+            {"in_fog_map", w.in_fog_map},
+            {"fog", {{"radiation_per_m", w.fog.fog}, {"radiation_top_y", w.fog.fog_top},
+                     {"mist_per_m", w.fog.mist}, {"mist_ground_y", w.fog.ground}}},
+            {"extinction_per_m", w.extinction_at_y}});
+    }
+    nlohmann::json j;
+    j["points"] = rows;
+    const auto map = atmosphere::localFogMapSnapshot();
+    j["time_quantum_s"] = map ? map->time_s : 0.0f;
+    out_json = j.dump();
+    return Result::success();
+}
+
+Result localWeatherStatsJson(std::string& out_json) {
+    if (!g_ctx) return notBound();
+    nlohmann::json j;
+    const auto env = atmosphere::localWeatherEnvironment();
+    if (env) {
+        nlohmann::json terrain = {{"valid", false}};
+        if (env->terrain && env->terrain->valid) {
+            const atmosphere::TerrainField& f = *env->terrain;
+            float lo = 1e30f, hi = -1e30f;
+            size_t covered = 0;
+            for (size_t i = 0; i < f.height.size(); ++i) {
+                if (!f.covered[i]) continue;
+                ++covered;
+                lo = (std::min)(lo, f.height[i]);
+                hi = (std::max)(hi, f.height[i]);
+            }
+            terrain = {{"valid", true}, {"origin_m", {f.origin_x, f.origin_z}}, {"size_m", f.size_m},
+                       {"resolution", f.n}, {"covered_fraction",
+                        static_cast<float>(covered) / static_cast<float>(f.n * f.n)},
+                       {"min_height_y", lo}, {"max_height_y", hi}};
+        }
+        j["environment"] = {{"revision", env->revision},
+                            {"sun_direction", {env->sun_direction.x, env->sun_direction.y,
+                                               env->sun_direction.z}},
+                            {"terrain", terrain}};
+    }
+    if (const auto map = atmosphere::localFogMapSnapshot()) {
+        const atmosphere::LocalFogDrivers& d = map->drivers;
+        j["fog_map"] = {{"active", map->active}, {"revision", map->revision},
+                        {"origin_m", {map->origin_x, map->origin_z}}, {"size_m", map->size_m},
+                        {"resolution", map->n}, {"over_terrain", map->terrain},
+                        {"time_quantum_s", map->time_s},
+                        {"max_extinction_per_m", map->max_extinction},
+                        {"band_y", {map->band_bottom_y, map->band_top_y}},
+                        {"fogged_fraction", map->fogged_fraction},
+                        {"drivers", {{"night", d.night}, {"burn_off", d.burn_off}, {"calm", d.calm},
+                                     {"humidity", d.humidity}, {"layer_cover", d.layer_cover},
+                                     {"cloud_base_y", d.cloud_base_y}}}};
+    }
+    // Per backend: the envelope the cloud march reads (cell-map sheet 3). A
+    // revision behind the map's = this device has not received it yet.
+    nlohmann::json rows = nlohmann::json::array();
+    auto describe = [&](const char* role, Backend::IBackend* backend) {
+        auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(backend);
+        nlohmann::json r = {{"role", role}, {"is_vulkan", vk != nullptr}};
+        if (vk) {
+            r["cloud_rendering"] = vk->cloudRtRendering();
+            r["fog_revision_on_gpu"] = vk->cloudFogRevision();
+            r["fog_uploads"] = vk->cloudFogUploads();
+        }
+        rows.push_back(r);
+    };
+    describe("render", ::g_backend.get());
+    describe("viewport", ::g_viewport_backend.get());
+    j["backends"] = rows;
     out_json = j.dump();
     return Result::success();
 }

@@ -6,6 +6,8 @@
 #include "Backend/VulkanBackend.h"
 #include "Backend/CloudParams.h"
 #include "Backend/VulkanFailureReporting.h"
+#include "Atmosphere/AtmosphereLocalWeather.h"
+#include "SimFrameCompress.h"
 
 #include <algorithm>
 #include <cstring>
@@ -268,7 +270,17 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
                                        const Backend::CloudCellsGPU& cells) {
     if (!ensureCloudTextures()) return;
     constexpr VkDeviceSize kCellsOffset = (sizeof(Backend::CloudParamsGPU) + 255u) & ~VkDeviceSize(255u);
-    constexpr VkDeviceSize kStagingBytes = kCellsOffset + sizeof(Backend::CloudCellsGPU);
+    // Local fog envelope: one RGBA16F cell-map sheet, uploaded only when the
+    // published map changed (its placement is in `params`, same snapshot).
+    constexpr VkDeviceSize kFogOffset =
+        (kCellsOffset + sizeof(Backend::CloudCellsGPU) + 255u) & ~VkDeviceSize(255u);
+    constexpr VkDeviceSize kFogBytes =
+        VkDeviceSize(Backend::kCloudCellMapSize) * Backend::kCloudCellMapSize * 4u * sizeof(uint16_t);
+    constexpr VkDeviceSize kStagingBytes = kFogOffset + kFogBytes;
+    const std::shared_ptr<const atmosphere::LocalFogMap> fog = atmosphere::localFogMapSnapshot();
+    const uint64_t fogRevision = fog && fog->active ? fog->revision : 0;
+    const bool uploadFog = fogRevision != 0 && fogRevision != m_cloudFogRevision &&
+        fog->texels.size() == size_t(Backend::kCloudCellMapSize) * Backend::kCloudCellMapSize;
     CloudUploadSlot& slot = m_cloudUploadSlots[m_cloudUploadNext];
     m_cloudUploadNext = (m_cloudUploadNext + 1u) % kCloudUploadSlots;
     if (!slot.fence) {
@@ -303,6 +315,16 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
     if (vkMapMemory(m_device, slot.staging.memory, 0, kStagingBytes, 0, &mapped) != VK_SUCCESS) return;
     std::memcpy(mapped, &params, sizeof(params));
     std::memcpy(static_cast<char*>(mapped) + kCellsOffset, &cells, sizeof(cells));
+    if (uploadFog) {
+        uint16_t* halfs = reinterpret_cast<uint16_t*>(static_cast<char*>(mapped) + kFogOffset);
+        for (size_t i = 0; i < fog->texels.size(); ++i) {
+            const atmosphere::LocalFogTexel& t = fog->texels[i];
+            halfs[i * 4 + 0] = RayTrophiSim::SimFrameCompress::floatToHalf(t.fog);
+            halfs[i * 4 + 1] = RayTrophiSim::SimFrameCompress::floatToHalf(t.fog_top);
+            halfs[i * 4 + 2] = RayTrophiSim::SimFrameCompress::floatToHalf(t.mist);
+            halfs[i * 4 + 3] = RayTrophiSim::SimFrameCompress::floatToHalf(t.ground);
+        }
+    }
     vkUnmapMemory(m_device, slot.staging.memory);
 
     vkResetCommandBuffer(slot.cmd, 0);
@@ -321,6 +343,17 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
     vkCmdCopyBuffer(slot.cmd, slot.staging.buffer, m_cloudRtParamsBuffer.buffer, 1, &paramsCopy);
     const VkBufferCopy cellsCopy{kCellsOffset, 0, sizeof(cells)};
     vkCmdCopyBuffer(slot.cmd, slot.staging.buffer, m_cloudCellsBuffer.buffer, 1, &cellsCopy);
+    if (uploadFog) {
+        VkBufferImageCopy region{};
+        region.bufferOffset = kFogOffset;
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageOffset = {0, static_cast<int32_t>(Backend::kCloudFogSheet * Backend::kCloudCellMapSize), 0};
+        region.imageExtent = {Backend::kCloudCellMapSize, Backend::kCloudCellMapSize, 1};
+        vkCmdCopyBufferToImage(slot.cmd, slot.staging.buffer, m_cloudCellMap.image,
+                               VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+        m_cloudFogRevision = fogRevision;
+        ++m_cloudFogUploads;
+    }
     VkMemoryBarrier copied{};
     copied.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     copied.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
