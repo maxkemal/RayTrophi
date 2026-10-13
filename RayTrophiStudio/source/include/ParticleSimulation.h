@@ -1,4 +1,5 @@
 #pragma once
+#include "Fluid/MatterAudioTelemetry.h"
 
 #include "Matrix4x4.h"
 #include "FluidGrid.h"
@@ -1182,6 +1183,7 @@ struct SimulationGridDomainState {
     // Fluid-only runtime state. Empty for Gas domains.
     Fluid::FluidParticles particles;
     Fluid::APICSolverStats fluid_stats;
+    Fluid::MatterAudioStats audio_stats;
     Fluid::ParticleLabelStepStats particle_label_stats;
     // Thermal-liquid readout (cooling / freezing / ν(T)). Kept beside
     // fluid_stats rather than inside it: Fluid::step resets its stats on entry,

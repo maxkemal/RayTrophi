@@ -1,0 +1,32 @@
+{
+  "id": "rt_cc0_storm_deep_roll_b_mono",
+  "name": "Storm deep long-distance thunder roll B (derived pitch variation)",
+  "type": "asset",
+  "assetKind": "audio",
+  "category": "audio",
+  "subcategory": "storm_thunder",
+  "format": "wav",
+  "entry": "storm_deep_roll_b_mono.wav",
+  "description": "Storm deep long-distance thunder roll B (derived pitch variation)",
+  "license": "CC0-1.0",
+  "source": "https://freesound.org/people/davidhrivnak/sounds/328391/",
+  "author": "davidhrivnak",
+  "tags": [
+    "weather",
+    "thunder",
+    "field-recording",
+    "mono",
+    "cc0",
+    "far"
+  ],
+  "version": 1,
+  "duration": 20.0938125,
+  "channels": 1,
+  "sampleRate": 48000,
+  "loopSuitable": false,
+  "upstream_download": "https://cdn.freesound.org/previews/328/328391_817470-hq.mp3",
+  "processing": "Same trimmed recording; 850Hz low-pass, duration x8/7 and corresponding lower pitch; peak scaled to 0.60; 1ms/1s edge fades",
+  "packaged_sha256": "3e69d3ca624bcd21fa4523375d135313783c26680f303da7eba8687e2f8398c0",
+  "peak_dbfs": -4.436974992327128,
+  "rms_dbfs": -19.96155398845007
+}

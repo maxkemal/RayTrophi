@@ -1,5 +1,6 @@
 #include "ParticleSimulation.h"
 #include "Fluid/MatterPhaseConfig.h"
+#include "Fluid/MatterAudioTelemetry.h"
 #include "Fluid/FluidCacheRestore.h"
 #include "Fluid/FluidDomainSubstance.h"
 #include "Fluid/MatterGpuRuntime.h"
@@ -7503,6 +7504,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         if (!state.valid) {
             continue;
         }
+        Fluid::MatterAudioFrame audio_frame(state, grid_domains_[i], dt);
 
         const bool matter_domain =
             state.type == SimulationDomainType::Matter;
@@ -7532,6 +7534,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
 #define RT_FLUID_DOMAIN_STEP_CONTEXT
 #include "Fluid/FluidDomainStep.inl"
 #undef RT_FLUID_DOMAIN_STEP_CONTEXT
+                audio_frame.publishLiquid();
             }
             if (matter_domain) {
                 liquid_scope.restore();
@@ -8632,6 +8635,8 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     "; combustible liquid surface GPU";
             }
         }
+        audio_frame.publishGas(context.compute,
+            i < grid_domain_compute_buffers_.size() ? &grid_domain_compute_buffers_[i] : nullptr);
     }
 
     // ★ Indexed, not a range-for: the analysis scan needs this domain's compute

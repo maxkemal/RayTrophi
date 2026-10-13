@@ -38,17 +38,21 @@ nlohmann::json AudioMixer::validate(const json& input) {
         const auto settings = input.value(name, json::object());
         require(settings.is_object(), "Mixer bus settings must be an object");
         for (auto it = settings.begin(); it != settings.end(); ++it) {
-            require(it.key() == "gain" || it.key() == "muted" || it.key() == "solo",
+            require(it.key() == "gain" || it.key() == "pan" ||
+                    it.key() == "muted" || it.key() == "solo",
                     "Unknown mixer property: " + it.key());
         }
         const float gain = settings.value("gain", 1.0f);
         require(std::isfinite(gain) && gain >= 0 && gain <= 4,
                 "Mixer gain must be finite and in 0..4");
+        const float pan = settings.value("pan", 0.0f);
+        require(std::isfinite(pan) && pan >= -1 && pan <= 1,
+                "Mixer pan must be finite and in -1..1");
         const auto muted = settings.value("muted", json(false));
         const auto solo = settings.value("solo", json(false));
         require(muted.is_boolean() && solo.is_boolean(), "Mixer mute/solo must be boolean");
         require(name != "Master" || !solo.get<bool>(), "Master has no solo; solo child buses");
-        result[name] = {{"gain", gain}, {"muted", muted}, {"solo", solo}};
+        result[name] = {{"gain", gain}, {"pan", pan}, {"muted", muted}, {"solo", solo}};
     }
     return result;
 }

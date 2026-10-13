@@ -2294,7 +2294,7 @@ struct SimNodeInfo {
 // the UI as an authority. If a button does something, that something needs its
 // own API — which is rule 1, not an exception to it.
 struct EditorState {
-    // "none" | "dope_sheet" | "graph_editor" | "console" | "assets" |
+    // "none" | "dope_sheet" | "graph_editor" | "audio" | "audio_mixer" | "console" | "assets" |
     // "simulation" | "geometry" | "material" | "terrain" | "anim_graph"
     std::string bottom_editor;
     // "simulation" | "geometry" | "material" | "terrain" | "animation"

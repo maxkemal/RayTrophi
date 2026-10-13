@@ -36,8 +36,13 @@ void drawThunderAudio(UIContext& ctx) {
     if (ImGui::Checkbox("Automatic thunder", &enabled)) {
         call("thunder_update", {{"config", {{"enabled", enabled}}}});
     }
-    for (const auto& field : {std::pair{"gain", "Thunder gain"},
-        std::pair{"sound_speed_mps", "Sound speed (m/s)"},
+    float gain = config.at("gain");
+    ImGui::DragFloat("Thunder gain", &gain, 0.01f, 0.0f, 4.0f, "%.2f",
+                     ImGuiSliderFlags_AlwaysClamp);
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        call("thunder_update", {{"config", {{"gain", gain}}}});
+    }
+    for (const auto& field : {std::pair{"sound_speed_mps", "Sound speed (m/s)"},
         std::pair{"reference_distance_m", "Reference distance (m)"},
         std::pair{"max_distance_m", "Audible range (m)"},
         std::pair{"crossover_m", "Near / far transition (m)"}}) {

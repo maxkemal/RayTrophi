@@ -18,6 +18,7 @@
 #include "UI/GizmoOcclusion.h"
 #include "PerfProfile.h"
 #include "UI/AudioUI.h"
+#include "UI/AudioWorkspaceUI.h"
 #include "UI/StormGizmoUI.h"
 #include "Autosave.h"
 #include <thread>
@@ -2121,7 +2122,7 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
 // ─────────────────────────────────────────────────────────────────────────────
 static bool isPoppablePropertyTab(int tab)
 {
-    return tab >= 0 && tab <= 13; // every sidebar tab index
+    return (tab >= 0 && tab <= 13) || tab == 15;
 }
 
 static const char* poppablePropertyTabName(int tab)
@@ -2141,6 +2142,7 @@ static const char* poppablePropertyTabName(int tab)
         case 11: return "Scatter";
         case 12: return "Stylize";
         case 13: return "Sculpting";
+        case 15: return "Audio";
         default: return "Panel";
     }
 }
@@ -2196,6 +2198,7 @@ void SceneUI::drawPoppedTabContent(UIContext& ctx, int tab)
         case 11: if (show_scatter_tab) drawScatterBrushPanel(ctx); break;
         case 12: if (show_stylize_tab) drawStylizePanel(ctx); break;
         case 13: drawSculptPanel(ctx); break;
+        case 15: AudioUI::drawWorkspace(ctx); break;
         default: break;
     }
     rtui::drawRegion(propertyTabRegionId(tab));  // addon-injected sections
@@ -2559,6 +2562,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (tab_to_focus == "Modifiers" || tab_to_focus == "Modeling")  { active_properties_tab = 7; tab_to_focus = ""; }
         if (tab_to_focus == "Paint")      { active_properties_tab = 10; tab_to_focus = ""; }
         if (tab_to_focus == "System")     { active_properties_tab = 9; tab_to_focus = ""; }
+        if (tab_to_focus == "Audio")      { active_properties_tab = 15; tab_to_focus = ""; }
 
         static float s_sidebar_width = 44.0f;
         float sidebar_width = s_sidebar_width;
@@ -2820,6 +2824,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         // 4. Dynamics, Effects & Styling
         if (show_forcefield_tab) drawTabButton(5, UIWidgets::IconType::Force,      "Physics");
         if (show_volumetric_tab) drawTabButton(4, UIWidgets::IconType::Volumetric, "Volumetrics");
+        drawTabButton(15, UIWidgets::IconType::Audio, "Audio");
         if (show_stylize_tab)    drawTabButton(12, UIWidgets::IconType::Brush,     "Stylize Mode");
         
         ImGui::Dummy(ImVec2(0.0f, 4.0f));
@@ -2907,6 +2912,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         // so skip the in-panel switch (avoids double-rendering side effects).
         if (!tab_is_popped)
         switch (active_properties_tab) {
+            case 15: AudioUI::drawWorkspace(ctx); break;
             case 0: drawSceneHierarchy(ctx); AudioUI::drawProperties(ctx); break;
             case 1:
                 {
@@ -4510,6 +4516,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             show_node_editor    = (keep_index == 7) ? show_node_editor : false;
         };
         
+        AudioUI::drawAudioBottomTabs(ctx);
         bool active_dope = show_animation_panel && (timeline.getEditorMode() == TimelineEditorMode::DopeSheet);
         if (UIWidgets::HorizontalTab("Dope Sheet", UIWidgets::IconType::Timeline, active_dope))
         {

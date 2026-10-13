@@ -31,6 +31,7 @@
 #include "Animation/RigTimelineProjection.h"
 #include "Api/RtApi.h"
 #include "Audio/AudioService.h"
+#include "UI/AudioWorkspaceUI.h"
 
 #include <thread>
 
@@ -553,15 +554,25 @@ void TimelineWidget::draw(UIContext& ctx) {
     
     // --- PLAYBACK CONTROLS ---
     drawPlaybackControls(ctx);
-    drawSelectedAnimGraphInspector(ctx);
+    if (editor_mode == TimelineEditorMode::DopeSheet ||
+        editor_mode == TimelineEditorMode::GraphEditor) {
+        drawSelectedAnimGraphInspector(ctx);
+    }
     
     ImGui::Separator();
     
     // Calculate remaining height dynamically so we don't need hardcoded layout offsets
     float canvas_height = ImGui::GetContentRegionAvail().y;
+    ctx.render_settings.animation_start_frame = start_frame;
+    ctx.render_settings.animation_end_frame = std::max(end_frame, start_frame);
     
     // --- MAIN TIMELINE AREA ---
     // Split into track list (left) and canvas (right)
+    if (editor_mode == TimelineEditorMode::Audio) {
+        AudioUI::drawAudioTimeline(ctx, zoom, pan_offset, legend_width);
+    } else if (editor_mode == TimelineEditorMode::Mixer) {
+        AudioUI::drawMixerContent(ctx);
+    } else {
     ImGui::BeginChild("TimelineArea", ImVec2(0, canvas_height), false, ImGuiWindowFlags_NoScrollbar);
     
     // Left panel: Track list (dope sheet) or channel list (graph editor)
@@ -610,6 +621,7 @@ void TimelineWidget::draw(UIContext& ctx) {
 
     ImGui::EndChild();
     
+    }
     // --- PLAYBACK UPDATE ---
     // --- PLAYBACK TIMER ---
     // last_time must be reset every time playback starts to prevent accumulated
@@ -1412,10 +1424,12 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     }
     
     // --- TOOLBAR BUTTONS ---
-    bool has_selection = !selected_track.empty();
+    const bool animationEditor = editor_mode == TimelineEditorMode::DopeSheet ||
+        editor_mode == TimelineEditorMode::GraphEditor;
+    bool has_selection = animationEditor && !selected_track.empty();
     bool has_keyframe_selected = has_selection && selected_keyframe_frame >= 0;
     const auto& pose = ctx.scene.rigView.pose;
-    const bool pose_key_target = pose.active && !pose.character.empty() &&
+    const bool pose_key_target = animationEditor && pose.active && !pose.character.empty() &&
         (!pose.control.empty() || !RigAuthoring::selectedBones(ctx.scene).empty());
 
     // Keyframe buttons
@@ -3006,6 +3020,9 @@ void TimelineWidget::handleSelectionSync(UIContext& ctx) {
     // Publish the claim so the three global Delete listeners stand down. RootAndChildWindows
     // covers the graph editor canvas too — it lives inside this same window.
     panel_focused = timeline_focused;
+    if (editor_mode == TimelineEditorMode::Audio || editor_mode == TimelineEditorMode::Mixer) {
+        return;
+    }
     ImGuiIO& io = ImGui::GetIO();
     
     // I key - Insert keyframe (global shortcut)

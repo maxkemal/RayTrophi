@@ -17,6 +17,32 @@ struct RegisterAudioMethods {
             names.push_back("audio." + op);
         }
         static const MethodParam params[] = {
+            {"selected_clip", "string", false, "Existing clip id, or empty to clear selection", "", nullptr},
+            {"snap", "bool", false, "Snap audio timeline edits to scene frames", "true", nullptr},
+            {"waveforms", "bool", false, "Display waveform envelopes on timeline clips", "true", nullptr},
+            {"inspector_open", "bool", false, "Open or close the optional audio inspector", "false", nullptr},
+            {"max_seconds", "float", false, "Capture limit in seconds 1..600", "120", nullptr},
+            {"pitch_curve", "array", false, "Ordered [time,pitch multiplier] knots", "[]", nullptr},
+            {"pan_curve", "array", false, "Ordered [time,stereo balance] knots", "[]", nullptr},
+            {"points", "int", false, "Waveform envelope bins 16..4096", "512", nullptr},
+            {"start_seconds", "float", false, "Clip start / trim start in timeline seconds", "0", nullptr},
+            {"end_seconds", "float", true, "Trim end in timeline seconds", nullptr, nullptr},
+            {"time_seconds", "float", true, "Split position strictly inside the clip", nullptr, nullptr},
+            {"source_in_seconds", "float", false, "Asset source-in offset in seconds", "0", nullptr},
+            {"source_out_seconds", "float", false, "Source-out; defaults to asset duration", nullptr, nullptr},
+            {"duration_seconds", "float", false, "Clip duration; defaults to nonloop source range", nullptr, nullptr},
+            {"phase_seconds", "float", false, "Initial source phase in the selected range", "0", nullptr},
+            {"pan", "float", false, "Stereo balance -1..1", "0", nullptr},
+            {"fade_in_seconds", "float", false, "Clip fade-in duration", "0", nullptr},
+            {"fade_out_seconds", "float", false, "Clip fade-out duration", "0", nullptr},
+            {"gain_curve", "array", false, "Up to 4096 ordered [time,gain] envelope knots", "[]", nullptr},
+            {"envelope_offset_seconds", "float", false, "Preserved envelope offset after trim/split", "0", nullptr},
+            {"envelope_duration_seconds", "float", false, "Envelope horizon; defaults to clip duration", nullptr, nullptr},
+            {"start_frame", "int", false, "Offline range start frame, inclusive", "0", nullptr},
+            {"end_frame_exclusive", "int", true, "Offline range end frame, exclusive", nullptr, nullptr},
+            {"fps_num", "int", false, "Rational frames-per-second numerator", "24", nullptr},
+            {"fps_den", "int", false, "Rational frames-per-second denominator", "1", nullptr},
+            {"overwrite", "bool", false, "Atomically replace an existing completed WAV", "false", nullptr},
             {"solo", "bool", false, "Solo a child mixer bus; multiple solos combine",
                 nullptr, nullptr},
             {"mode", "string", true, "Scene audio transport policy", nullptr, "continuous|timeline"},
@@ -52,8 +78,8 @@ struct RegisterAudioMethods {
             {"source", "string", false, "Asset source metadata", "", nullptr},
             {"tags", "array", false, "Asset category tags (strings)", "[]", nullptr},
             {"reaction", "object", false,
-                "Driver mapping; domain_channel: mixed_contact|dem_contact|fluid_flow|gas_flow|"
-                "mpm_deformation; input_metric: energy_j|power_w",
+                "Driver mapping; domain_channel: mixed_contact|dem_contact|dem_friction|dem_rolling|"
+                "fluid_flow|gas_flow|mpm_deformation|mpm_fracture; input_metric: energy_j|power_w|value",
                 "{}", nullptr},
             {"assets_root", "string", false, "Assets library root; defaults to resolved runtime root",
                 nullptr, nullptr},
@@ -65,6 +91,7 @@ struct RegisterAudioMethods {
                 nullptr, nullptr},
             {"power_w", "float", false, "Optional measured power metadata 0..1e9 W",
                 nullptr, nullptr},
+            {"activity_value", "float", false, "Optional nonnegative physical activity metadata", nullptr, nullptr},
             {"flow_kg_s", "float", false, "Mass flow; requires speed_mps, excludes value",
                 nullptr, nullptr},
             {"speed_mps", "float", false, "Contact speed; requires flow_kg_s, excludes value",
@@ -76,20 +103,27 @@ struct RegisterAudioMethods {
         for (std::size_t i = 0; i < names.size(); ++i) {
             const auto& op = audio::AudioService::operations()[i];
             const bool read = op == "list" || op == "get" || op == "status" || op == "domains" ||
-                              op == "mixer_get";
+                              op == "mixer_get" || op == "clip_list" || op == "export_status" ||
+                              op == "waveform" || op == "capture_status" || op == "workspace_get";
             MethodDescriptor descriptor{};
             descriptor.name = names[i].c_str();
             descriptor.domain = "audio";
             descriptor.summary = "Scene audio service operation";
-            descriptor.notes = "See docs/dev/SCENE_AUDIO_STAGE1_API.md for operation parameters and limits.";
+            descriptor.notes = "See docs/dev/AUDIO_PRE_UI_DELIVERY.md and SCENE_AUDIO_STAGE1_API.md.";
             descriptor.access = read ? "read" : "write";
             const bool readsFile = op == "append" || op == "asset_import" || op == "asset_relink" ||
                                    op == "play" || op == "preview" || op == "preview_file" ||
                                    op == "environment_setup" || op == "create" || op == "update" ||
                                    op == "duplicate" || op == "thunder_setup" ||
                                    op == "thunder_update" || op == "thunder_event" ||
-                                   op == "resume_automatic" || op == "playback_update";
-            descriptor.capability = read ? "Read" : (readsFile ? "SceneWrite|FilesRead" : "SceneWrite");
+                                   op == "resume_automatic" || op == "playback_update" ||
+                                   op == "clip_create" || op == "clip_update" || op == "clip_duplicate" ||
+                                   op == "clip_trim" || op == "clip_split" ||
+                                   op == "capture_start" || op == "capture_finish";
+            descriptor.capability = op == "export_cancel" ? "Read|FilesWrite" :
+                (op == "export_start" ? "Read|FilesRead|FilesWrite" :
+                (op == "waveform" ? "Read|FilesRead" :
+                 (read ? "Read" : (readsFile ? "SceneWrite|FilesRead" : "SceneWrite"))));
             descriptor.undoable = audio::AudioService::isAuthoring(op);
             descriptor.return_type = "object";
             descriptor.tags = "audio|scene|assets";
@@ -99,8 +133,11 @@ struct RegisterAudioMethods {
                 for (const auto& definition : params) {
                     if (key == definition.name) {
                         auto param = definition;
-                        param.required = key == "id" || key == "path" || key == "muted" ||
+                        param.required = key == "id" || key == "path" ||
+                            (op == "preview_mute" && key == "muted") ||
                             key == "key" || key == "config" || key == "mode" ||
+                            key == "end_frame_exclusive" || key == "end_seconds" || key == "time_seconds" ||
+                            (op == "clip_create" && key == "asset_id") ||
                             (op == "thunder_event" && key == "position");
                         if (op == "mixer_update") {
                             param.required = key == "bus";
@@ -108,6 +145,9 @@ struct RegisterAudioMethods {
                             if (key == "gain") {
                                 param.description = "Linear mixer gain 0..4; omitted fields stay unchanged";
                             }
+                        }
+                        if (op == "clip_trim" && key == "start_seconds") {
+                            param.required = true;
                         }
                         if (param.required) {
                             param.default_value = nullptr;

@@ -301,7 +301,8 @@ namespace UIWidgets {
         LightPoint, LightDir, LightSpot, LightArea,
         HairAddTool, HairRemoveTool, HairCutTool, HairCombTool, HairLengthTool, 
         HairDensityTool, HairClumpTool, HairPuffTool, HairWaveTool, HairFrizzTool, 
-        HairSmoothTool, HairPinchTool, HairSpreadTool, HairBraidTool
+        HairSmoothTool, HairPinchTool, HairSpreadTool, HairBraidTool,
+        Audio
     };
 
     void DrawIcon(IconType type, ImVec2 pos, float size, ImU32 color, float thickness = 1.5f);

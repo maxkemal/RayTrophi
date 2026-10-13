@@ -2397,6 +2397,67 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Audio\AudioMixer.h" />
+    <ClInclude Include="source\include\Audio\AudioClips.h" />
+    <ClInclude Include="source\include\Audio\AudioClipRuntime.h" />
+    <ClInclude Include="source\include\Audio\AudioPcm.h" />
+    <ClInclude Include="source\include\Audio\AudioOffline.h" />
+    <ClInclude Include="source\include\Audio\AudioCapture.h" />
+    <ClInclude Include="source\include\Audio\AudioWorkspaceState.h" />
+    <ClInclude Include="source\include\UI\AudioWorkspaceUI.h" />
+    <ClInclude Include="source\include\UI\AudioIcon.h" />
+    <None Include="external\imgui-knobs\LICENSE" />
+    <None Include="external\imgui-knobs\UPSTREAM.txt" />
+    <None Include="external\imgui-knobs\COMPATIBILITY.md" />
+    <ClInclude Include="external\imgui-knobs\imgui-knobs.h" />
+    <ClCompile Include="external\imgui-knobs\imgui-knobs.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioWorkspaceState.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioWorkspaceUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioTimelineUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioMixerStripUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\Fluid\MatterAudioTelemetry.h" />
+    <None Include="source\shaders\sim_audio_gas_flow.comp" />
+    <ClCompile Include="source\src\Scene\AudioClips.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioClipRuntime.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioPcm.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioOffline.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioCapture.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterAudioTelemetry.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterAudioGasGpu.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
     <ClInclude Include="source\include\Audio\AudioMixerRuntime.h" />
     <ClInclude Include="source\include\UI\AudioMixerUI.h" />
     <ClCompile Include="source\src\Scene\AudioMixer.cpp">

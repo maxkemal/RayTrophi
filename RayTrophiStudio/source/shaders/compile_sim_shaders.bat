@@ -84,6 +84,8 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 glslc "%SHADER_DIR%sim_inventory_summary.comp" -o "%SHADER_DIR%sim_inventory_summary.spv" --target-env=vulkan1.2
 if errorlevel 1 exit /b 1
+glslc "%SHADER_DIR%sim_audio_gas_flow.comp" -o "%SHADER_DIR%sim_audio_gas_flow.spv" --target-env=vulkan1.2
+if errorlevel 1 exit /b 1
 glslc "%SHADER_DIR%sim_inventory_surface_exchange.comp" -o "%SHADER_DIR%sim_inventory_surface_exchange.spv" --target-env=vulkan1.2
 if errorlevel 1 exit /b 1
 glslc "%SHADER_DIR%sim_inventory_surface_commit.comp" -o "%SHADER_DIR%sim_inventory_surface_commit.spv" --target-env=vulkan1.2

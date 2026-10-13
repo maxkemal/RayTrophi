@@ -5,6 +5,7 @@
  */
 
 #include "ui_modern.h"
+#include "UI/AudioIcon.h"
 #include "globals.h"
 #include <fstream>
 #include <algorithm>
@@ -3145,6 +3146,9 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
         case UIWidgets::IconType::Timeline:
             for(int i=0; i<3; i++) dl->AddLine(ImVec2(p.x, p.y + is*0.3f*i + 2), ImVec2(p.x + is, p.y + is*0.3f*i + 2), col, thickness);
             dl->AddRectFilled(ImVec2(cp.x-1, p.y), ImVec2(cp.x+1, p.y+is), col); // Needle
+            break;
+        case UIWidgets::IconType::Audio:
+            AudioUI::drawAudioIcon(dl, p, is, col, thickness);
             break;
         case UIWidgets::IconType::Console:
             dl->AddLine(ImVec2(p.x, p.y+2), ImVec2(p.x + is*0.4f, cp.y), col, thickness*1.2f);

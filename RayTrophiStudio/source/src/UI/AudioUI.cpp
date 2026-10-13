@@ -5,6 +5,7 @@
 #include "UI/AudioReactionUI.h"
 #include "UI/AudioThunderUI.h"
 #include "UI/AudioMixerUI.h"
+#include "UI/AudioWorkspaceUI.h"
 #include "Audio/AudioThunderBridge.h"
 #include "scene_ui.h"
 #include "scene_data.h"
@@ -54,6 +55,10 @@ void select(UIContext& ctx, const std::string& id) {
     const auto result = call(ctx, "select", {{"id", id}});
     if (result.contains("id")) {
         selected = id;
+        ctx.scene.audio->invoke("workspace_update", {{"selected_clip", ""}});
+        if (ctx.scene_ui_ptr) {
+            ctx.scene_ui_ptr->tab_to_focus = "Audio";
+        }
     }
 }
 void connectEnvironment(UIContext& ctx, const json& params = json::object()) {
@@ -109,6 +114,14 @@ void drawAssetActions(UIContext& ctx, const AssetRecord& asset) {
     if (ImGui::Button("Stop audio preview")) {
         call(ctx, "preview_stop");
     }
+    if (ImGui::Button("Add timeline clip")) {
+        const auto imported = call(ctx, "asset_import", {
+            {"path", audio::pathUtf8(asset.entry_path)}, {"license", asset.license},
+            {"author", asset.author}, {"source", asset.source}, {"tags", asset.tags}});
+        if (imported.contains("id")) {
+            addTimelineAsset(ctx, imported.at("id"));
+        }
+    }
     if (!error.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
         ImGui::TextWrapped("Audio: %s", error.c_str());
@@ -133,13 +146,18 @@ void drawHierarchy(UIContext& ctx) {
 }
 
 void drawProperties(UIContext& ctx) {
+    if (ImGui::Button("Open Audio workspace")) {
+        if (ctx.scene_ui_ptr) {
+            ctx.scene_ui_ptr->tab_to_focus = "Audio";
+        }
+    }
+}
+
+void drawSourceInspector(UIContext& ctx) {
     if (ctx.selection.selected.type == SelectableType::AudioSource) {
         selected = ctx.selection.selected.audio_source_id;
     } else {
         selected.clear();
-    }
-    if (!ImGui::CollapsingHeader("Scene Audio")) {
-        return;
     }
     if (!error.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
@@ -150,104 +168,6 @@ void drawProperties(UIContext& ctx) {
         }
     }
     auto data = ctx.scene.audio->snapshot();
-    const std::string playbackMode = data.at("playback_mode");
-    if (ImGui::BeginCombo("Audio playback", playbackMode == "timeline" ?
-        "Follow timeline (Play / Pause)" : "Continuous preview")) {
-        for (const char* mode : {"timeline", "continuous"}) {
-            const char* label = std::strcmp(mode, "timeline") == 0 ?
-                "Follow timeline (Play / Pause)" : "Continuous preview";
-            if (ImGui::Selectable(label, playbackMode == mode)) {
-                call(ctx, "playback_update", {{"mode", mode}});
-            }
-        }
-        ImGui::EndCombo();
-    }
-    drawThunderAudio(ctx);
-    drawMixer(ctx);
-    if (ImGui::Button("Connect atmosphere wind / rain")) {
-        connectEnvironment(ctx);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Choose environment Assets folder")) {
-        const auto folder = SceneUI::selectFolderDialogW(L"Select Assets root containing audio/cc0_starter");
-        if (!folder.empty()) {
-            connectEnvironment(ctx, {{"assets_root", folder}});
-        }
-    }
-    ImGui::TextWrapped("Connect links scene wind and rain to automatic sound sources using "
-                       "the bundled CC0 library. Replace their assets with your own recordings. "
-                       "Playback follows the selected audio transport. For a domain, select a "
-                       "sound source, bind its Asset, then choose Domain Contact and a Domain "
-                       "binding in Reactive Audio. Enable Automatic start / stop and Loop.");
-    ImGui::InputText("Selected audio file", path, sizeof(path), ImGuiInputTextFlags_ReadOnly);
-    if (ImGui::Button("Import WAV / FLAC / MP3")) {
-        const auto chosen = chooseAudioFile();
-        if (!chosen.empty()) {
-            call(ctx, "asset_import", {{"path", chosen}});
-        }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Add Audio Source")) {
-        addSource(ctx);
-    }
-    auto status = ctx.scene.audio->invoke("status", json::object());
-    if (status.at("playback_runtime").at("paused").get<bool>()) {
-        ImGui::TextWrapped("Timeline audio is paused. Press timeline Play to hear connected "
-                           "sources. Asset audition remains available.");
-    }
-    bool mute = status.at("preview_muted");
-    if (ImGui::Checkbox("Mute preview", &mute)) {
-        call(ctx, "preview_mute", {{"muted", mute}});
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Stop all audio")) {
-        call(ctx, "stop_all");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Resume automatic audio")) {
-        call(ctx, "resume_automatic");
-    }
-    if (status.at("thunder_runtime").at("suspended").get<bool>() ||
-        !status.at("automatic_suspended").empty()) {
-        ImGui::TextWrapped("Automatic audio is suspended. Resume automatic audio or restart "
-                           "timeline Play to re-arm connected sources.");
-    }
-    ImGui::Text("Device: %s", status.at("device").get<std::string>().c_str());
-    if (ImGui::TreeNode("Audio assets")) {
-        for (const auto& asset : data.at("assets")) {
-            const std::string id = asset.at("id");
-            ImGui::PushID(id.c_str());
-            ImGui::Text("%s (%.2fs, %d ch, %d Hz)", asset.at("name").get<std::string>().c_str(),
-                        asset.at("duration").get<double>(), asset.at("channels").get<int>(),
-                        asset.at("sample_rate").get<int>());
-            if (ImGui::SmallButton("Preview")) {
-                call(ctx, "preview", {{"id", id}});
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Stop preview")) {
-                call(ctx, "preview_stop");
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Relink to file")) {
-                const auto chosen = chooseAudioFile();
-                if (!chosen.empty()) {
-                    call(ctx, "asset_relink", {{"id", id}, {"path", chosen}});
-                }
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Remove asset")) {
-                call(ctx, "asset_remove", {{"id", id}});
-            }
-            ImGui::PopID();
-        }
-        ImGui::TreePop();
-    }
-    for (const auto& e : data.at("emitters")) {
-        const std::string id = e.at("id");
-        if (ImGui::Selectable((e.at("name").get<std::string>() + "##" + id).c_str(), selected == id)) {
-            select(ctx, id);
-        }
-    }
     for (const auto& e : data.at("emitters")) {
         if (e.at("id") != selected) {
             continue;
@@ -302,16 +222,26 @@ void drawProperties(UIContext& ctx) {
             }
             ImGui::EndCombo();
         }
-        for (const char* key : {"position", "direction"}) {
-            float v[3] = {e.at(key)[0], e.at(key)[1], e.at(key)[2]};
-            if (ImGui::InputFloat3(key, v, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue)) {
-                call(ctx, "update", {{"id", id}, {key, json::array({v[0], v[1], v[2]})}});
+        if (ImGui::CollapsingHeader("Spatial settings")) {
+            for (const char* key : {"position", "direction"}) {
+                float v[3] = {e.at(key)[0], e.at(key)[1], e.at(key)[2]};
+                if (ImGui::InputFloat3(key, v, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    call(ctx, "update", {{"id", id}, {key, json::array({v[0], v[1], v[2]})}});
+                }
+            }
+            for (const char* key : {"min_distance", "max_distance", "rolloff",
+                                    "cone_inner", "cone_outer", "cone_gain"}) {
+                float value = e.at(key);
+                if (ImGui::InputFloat(key, &value, 0, 0, "%.3f",
+                                      ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    call(ctx, "update", {{"id", id}, {key, value}});
+                }
             }
         }
-        for (const char* key : {"gain", "pitch", "min_distance", "max_distance", "rolloff",
-                                "cone_inner", "cone_outer", "cone_gain"}) {
+        for (const char* key : {"gain", "pitch"}) {
             float value = e.at(key);
-            if (ImGui::InputFloat(key, &value, 0, 0, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue)) {
+            if (ImGui::InputFloat(key, &value, 0, 0, "%.3f",
+                                  ImGuiInputTextFlags_EnterReturnsTrue)) {
                 call(ctx, "update", {{"id", id}, {key, value}});
             }
         }
