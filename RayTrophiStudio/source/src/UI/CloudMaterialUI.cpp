@@ -3,6 +3,7 @@
 
 #include "Api/RtApi.h"
 #include "Atmosphere/AtmosphereClouds.h"
+#include "Atmosphere/AtmosphereLocalWeather.h"
 #include "Backend/IBackend.h"
 #include "Backend/CloudLightningParams.h"
 #include "VDBVolume.h"
@@ -137,8 +138,39 @@ static bool drawStormControls(atmosphere::CloudState& clouds) {
     return changed;
 }
 
+// Local weather (docs/dev/ATMOSPHERE_LOCAL_WINDS_FOG.md §2-4). The switches
+// are cloud state; the readout is the published map (what is drawn).
+static bool drawLocalWeatherControls(atmosphere::CloudState& clouds) {
+    bool changed = false;
+    if (!ImGui::TreeNodeEx("Local weather / fog", ImGuiTreeNodeFlags_DefaultOpen)) {
+        return false;
+    }
+    atmosphere::CloudLocalWeather& lw = clouds.local_weather;
+    changed |= ImGui::Checkbox("Storm births follow the terrain", &lw.terrain_suitability);
+    ImGui::TextWrapped("Windward slopes, ridges and sun-facing slopes raise the odds of a new "
+                       "cell; the lee lowers them. Without a terrain, births stay uniform.");
+    changed |= ImGui::Checkbox("Local fog", &lw.fog_enabled);
+    ImGui::BeginDisabled(!lw.fog_enabled);
+    changed |= ImGui::DragFloat("Fog strength", &lw.fog_strength, 0.01f, 0.0f, 10.0f, "%.2f");
+    ImGui::EndDisabled();
+    ImGui::TextWrapped("Radiation fog forms on calm, humid, clear nights and pools in hollows; "
+                       "it lifts and burns off after sunrise. Mist follows rain: inside rain "
+                       "shafts and over ground that has just been rained on.");
+    if (const auto map = atmosphere::localFogMapSnapshot()) {
+        const atmosphere::LocalFogDrivers& d = map->drivers;
+        ImGui::Text("Night %.2f  calm %.2f  RH %.2f  layer cover %.2f",
+                    d.night, d.calm, d.humidity, d.layer_cover);
+        ImGui::Text("Fog over %.0f%% of a %.1f km map (%s), peak %.4f 1/m",
+                    map->fogged_fraction * 100.0f, map->size_m / 1000.0f,
+                    map->terrain ? "terrain" : "flat", map->max_extinction);
+    }
+    ImGui::TreePop();
+    return changed;
+}
+
 static bool drawLightningControls(atmosphere::CloudState& clouds) {
     bool changed = drawStormControls(clouds);
+    changed |= drawLocalWeatherControls(clouds);
     if (ImGui::TreeNodeEx("Lightning / Storm flashes", ImGuiTreeNodeFlags_DefaultOpen)) {
         atmosphere::CloudLightning& lightning = clouds.lightning;
         changed |= ImGui::Checkbox("Enable lightning", &lightning.enabled);
@@ -150,6 +182,11 @@ static bool drawLightningControls(atmosphere::CloudState& clouds) {
         ImGui::EndDisabled();
         changed |= ImGui::SliderFloat("Flash duration (s)", &lightning.duration_s,
                                       0.08f, 3.0f, "%.2f");
+        changed |= ImGui::SliderFloat("Leader formation fraction", &lightning.leader_fraction,
+                                      0.05f, 0.65f, "%.2f");
+        ImGui::TextWrapped("Leader formation: %.0f ms before the bright stroke. "
+                           "This time scale can slow formation for scene presentation.",
+                           lightning.duration_s * lightning.leader_fraction * 1000.0f);
         changed |= ImGui::DragFloat("Horizontal flash span (m)", &lightning.horizontal_span_m,
                                     100.0f, 100.0f, 50000.0f, "%.0f");
         changed |= ImGui::SliderFloat("Branching", &lightning.branching, 0.0f, 1.0f, "%.2f");
@@ -165,8 +202,16 @@ static bool drawLightningControls(atmosphere::CloudState& clouds) {
                                     0.1f, 0.0f, 10000.0f, "%.1f");
         changed |= ImGui::ColorEdit3("Flash colour", &lightning.color.x,
                                      ImGuiColorEditFlags_Float);
-        changed |= ImGui::DragFloat("Strike ground altitude (m)", &lightning.ground_altitude_m,
+        changed |= ImGui::Checkbox("Strikes attach to the scene", &lightning.attach_to_scene);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Ground strikes hit terrain, meshes and scattered trees: of what lies "
+                              "within the striking distance, the point a descending sphere touches "
+                              "first (rolling sphere).");
+        changed |= ImGui::DragFloat("Fallback strike altitude (m)", &lightning.ground_altitude_m,
                                     10.0f, -500.0f, 20000.0f, "%.0f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Where a strike ends when nothing in the scene lies under it "
+                              "(or attachment is off).");
         changed |= ImGui::SliderFloat("Ground strike fraction", &lightning.ground_strike_fraction,
                                       0.0f, 1.0f, "%.2f");
         changed |= ImGui::SliderFloat("Upward share of ground strikes", &lightning.upward_fraction,
@@ -204,8 +249,11 @@ bool drawWeatherLightningControls(UIContext& ctx) {
     if (changed) {
         nlohmann::json json;
         atmosphere::cloudsToJson(clouds, json);
+        // Every block drawLightningControls edits must be in the patch: a
+        // block left out snaps back next frame (local_weather did).
         const rtapi::Result result = rtapi::setCloudsJson(
-            nlohmann::json{{"lightning", json["lightning"]}, {"storms", json["storms"]}}.dump());
+            nlohmann::json{{"lightning", json["lightning"]}, {"storms", json["storms"]},
+                           {"local_weather", json["local_weather"]}}.dump());
         error = result.error;
         if (!result.ok) {
             ImGui::TextWrapped("%s", error.c_str());

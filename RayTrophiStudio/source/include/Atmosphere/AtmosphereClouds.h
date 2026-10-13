@@ -164,6 +164,11 @@ struct CloudLightning {
     Vec3 color = Vec3(0.65f, 0.78f, 1.0f);
     // Where: only from mature storm cells (CloudStorms). The old authored
     // centre/extent square moved there as the storm domain.
+    // Ground strikes attach to the scene (terrain, meshes, scattered trees)
+    // by the rolling-sphere rule (Atmosphere/LightningStrike.h).
+    bool attach_to_scene = true;
+    // Strike altitude where nothing in the scene lies under the strike, or
+    // with attach_to_scene off.
     float ground_altitude_m = 0.0f;
     float ground_strike_fraction = 0.15f;
     // Share of the ground strikes that are UPWARD lightning: the leader
@@ -171,6 +176,8 @@ struct CloudLightning {
     float upward_fraction = 0.1f;
     float bolt_radius_m = 2.0f;
     float duration_s = 0.8f;
+    // Fraction of flash duration spent in leader formation (cinematic time scale).
+    float leader_fraction = 0.3f;
     float horizontal_span_m = 12000.0f;
     float branching = 0.75f;
     // Camera exposure the flash is averaged over, s (0 = instantaneous).
@@ -231,6 +238,20 @@ struct CloudStorms {
     std::vector<StormCell> cells;   // authored, <= kMaxManualStormCells
 };
 
+// Local weather (docs/dev/ATMOSPHERE_LOCAL_WINDS_FOG.md §2-4,
+// Atmosphere/AtmosphereLocalWeather.h): where cells are born and where fog
+// lies. Derived quantities live there; these are the switches.
+struct CloudLocalWeather {
+    // Weight automatic cell births by the terrain: windward slopes, ridges
+    // and sun-facing slopes raise the odds, the lee lowers them. No terrain
+    // = uniform births (as before).
+    bool terrain_suitability = true;
+    // Local fog: radiation fog pooling in hollows (night, calm, humid, clear
+    // sky), mist after rain and inside rain shafts. Drawn by the aerial froxel.
+    bool fog_enabled = true;
+    float fog_strength = 1.0f;   // 0..10, scales the derived extinctions
+};
+
 // One cell evaluated at a time: what the GPU cell map, the lightning and
 // world.cloud_stats all read (one definition).
 struct StormCellState {
@@ -277,6 +298,7 @@ struct CloudState {
 
     CloudLightning lightning;
     CloudStorms storms;
+    CloudLocalWeather local_weather;
 
     bool anyEnabled() const;
 };

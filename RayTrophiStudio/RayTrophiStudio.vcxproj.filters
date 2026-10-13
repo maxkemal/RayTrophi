@@ -664,6 +664,15 @@
     <ClInclude Include="source\include\Atmosphere\AtmosphereClouds.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Atmosphere\AtmosphereLocalWeather.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Atmosphere\LightningStrike.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Atmosphere\LightningStrikeResolver.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Backend\AtmosphereLutParams.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
@@ -1012,6 +1021,9 @@
       <Filter>Kaynak Dosyalar\shader</Filter>
     </None>
     <None Include="source\shaders\miss.rmiss">
+      <Filter>Kaynak Dosyalar\shader</Filter>
+    </None>
+    <None Include="source\shaders\cloud_callable.rcall">
       <Filter>Kaynak Dosyalar\shader</Filter>
     </None>
     <None Include="source\shaders\raygen.rgen">
@@ -1750,6 +1762,15 @@
       <Filter>Kaynak Dosyalar\Scene</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Atmosphere\AtmosphereClouds.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Atmosphere\AtmosphereLocalWeather.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Atmosphere\LightningStrike.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Atmosphere\LightningStrikeResolver.cpp">
       <Filter>Kaynak Dosyalar\Scene</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Scene\HittableList.cpp">

@@ -1,18 +1,12 @@
 // Finite cloud transport in front of a real RT hit. Include after the world,
-// atmosphere samplers and location-0 payload declarations.
+// atmosphere samplers and location-0 payload declarations. The transport runs
+// in cloud_callable.rcall (cloud_call_types.glsl); this stage keeps only the
+// flags and the cheap bounds test.
 #ifndef CLOUD_HIT_SEGMENT_GLSL
 #define CLOUD_HIT_SEGMENT_GLSL
 
-#define CLOUD_RT_LIGHTING
 #include "cloud_rt.glsl"
-
-vec3 cloudSkyAmbient(vec3 direction) {
-    if (worldData.w._pad5 == 0) return vec3(0.0);
-    float u = atan(direction.z, direction.x) / (2.0 * CLOUD_PI);
-    if (u < 0.0) u += 1.0;
-    float v = (1.0 - clamp(direction.y, -1.0, 1.0)) * 0.5;
-    return textureLod(atmosphereLUTs[1], vec2(u, v), 0.0).rgb;
-}
+#include "cloud_call.glsl"
 
 void cloudApplyHitSegment(float distance) {
     if (worldData.w.mode != 2 || !cloudRtEnabled() || distance <= 0.0 ||
@@ -24,8 +18,8 @@ void cloudApplyHitSegment(float distance) {
     vec3 inscatter;
     float T, depth;
     bool cameraRay = (payload.primaryMeta & PL_CAMERA_SEGMENT) != 0u;
-    cloudRenderLimited(gl_WorldRayOriginEXT, direction, distance, cameraRay, payload.seed,
-                       inscatter, T, depth);
+    cloudCallRender(gl_WorldRayOriginEXT, direction, distance, cameraRay, false, payload.seed,
+                    inscatter, T, depth);
     payload.radiance = payload.radiance * T + inscatter;
     payload.attenuation *= T;
     if (straightPass) payload.bounceType = BOUNCE_MEDIUM_PASS;

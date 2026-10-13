@@ -1,4 +1,5 @@
 #include "Atmosphere/AtmosphereClouds.h"
+#include "Atmosphere/AtmosphereLocalWeather.h"
 #include "World.h"
 
 #include <algorithm>
@@ -116,6 +117,7 @@ bool validateClouds(const CloudState& c, std::string* error) {
         !inRange(lightning.upward_fraction, 0.0f, 1.0f) ||
         !inRange(lightning.bolt_radius_m, 0.1f, 30.0f) ||
         !inRange(lightning.duration_s, 0.08f, 3.0f) ||
+        !inRange(lightning.leader_fraction, 0.05f, 0.65f) ||
         !inRange(lightning.horizontal_span_m, 100.0f, 50000.0f) ||
         !inRange(lightning.branching, 0.0f, 1.0f) ||
         !inRange(lightning.shutter_s, 0.0f, 0.25f) ||
@@ -124,7 +126,7 @@ bool validateClouds(const CloudState& c, std::string* error) {
                            "intensity 0..10000, "
                            "ground_altitude_m -500..20000, ground_strike_fraction 0..1, "
                            "upward_fraction 0..1, bolt_radius_m 0.1..30, duration_s 0.08..3, "
-                           "horizontal_span_m 100..50000, branching 0..1, "
+                           "leader_fraction 0.05..0.65, horizontal_span_m 100..50000, branching 0..1, "
                            "shutter_s 0..0.25, channel_brightness 0..1000");
     }
     for (float v : {lightning.color.x, lightning.color.y, lightning.color.z}) {
@@ -154,6 +156,9 @@ bool validateClouds(const CloudState& c, std::string* error) {
     }
     if (storms.cells.size() > static_cast<size_t>(kMaxManualStormCells)) {
         return fail(error, "storms.cells holds at most 8 authored cells");
+    }
+    if (!inRange(c.local_weather.fog_strength, 0.0f, 10.0f)) {
+        return fail(error, "local_weather.fog_strength must be within 0..10");
     }
     for (size_t i = 0; i < storms.cells.size(); ++i) {
         const StormCell& cell = storms.cells[i];
@@ -261,6 +266,7 @@ void cloudsToJson(const CloudState& c, nlohmann::json& j) {
     j["lightning"] = {
         {"enabled", lightning.enabled},
         {"derive_rate_from_climate", lightning.derive_rate_from_climate},
+        {"attach_to_scene", lightning.attach_to_scene},
         {"rate_per_minute", lightning.rate_per_minute},
         {"intensity", lightning.intensity},
         {"color", {lightning.color.x, lightning.color.y, lightning.color.z}},
@@ -269,6 +275,7 @@ void cloudsToJson(const CloudState& c, nlohmann::json& j) {
         {"upward_fraction", lightning.upward_fraction},
         {"bolt_radius_m", lightning.bolt_radius_m},
         {"duration_s", lightning.duration_s},
+        {"leader_fraction", lightning.leader_fraction},
         {"horizontal_span_m", lightning.horizontal_span_m},
         {"branching", lightning.branching},
         {"shutter_s", lightning.shutter_s},
@@ -292,6 +299,9 @@ void cloudsToJson(const CloudState& c, nlohmann::json& j) {
             {"anvil", s.anvil}, {"wall_cloud", s.wall_cloud}, {"mammatus", s.mammatus},
             {"cells", cells}};
     }
+    j["local_weather"] = {{"terrain_suitability", c.local_weather.terrain_suitability},
+                          {"fog_enabled", c.local_weather.fog_enabled},
+                          {"fog_strength", c.local_weather.fog_strength}};
     nlohmann::json layers = nlohmann::json::array();
     for (const auto& l : c.layers) {
         nlohmann::json material;
@@ -413,7 +423,8 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
             return fail(error, "lightning must be an object");
         }
         for (auto it = s.begin(); it != s.end(); ++it) {
-            const bool flag = it.key() == "enabled" || it.key() == "derive_rate_from_climate";
+            const bool flag = it.key() == "enabled" || it.key() == "derive_rate_from_climate" ||
+                              it.key() == "attach_to_scene";
             // center_m / extent_m: the storm square before 2026-10-12, read
             // into storms.* below (projects saved before storm cells).
             const bool vector = it.key() == "color" || it.key() == "center_m";
@@ -421,7 +432,8 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
                 it.key() == "extent_m" || it.key() == "ground_altitude_m" ||
                 it.key() == "ground_strike_fraction" || it.key() == "bolt_radius_m" ||
                 it.key() == "upward_fraction" ||
-                it.key() == "duration_s" || it.key() == "horizontal_span_m" ||
+                it.key() == "duration_s" || it.key() == "leader_fraction" ||
+                it.key() == "horizontal_span_m" ||
                 it.key() == "branching" || it.key() == "shutter_s" ||
                 it.key() == "channel_brightness";
             if ((!flag && !vector && !number) || (flag && !it.value().is_boolean()) ||
@@ -433,6 +445,7 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
         lightning.enabled = s.value("enabled", lightning.enabled);
         lightning.derive_rate_from_climate = s.value(
             "derive_rate_from_climate", lightning.derive_rate_from_climate);
+        lightning.attach_to_scene = s.value("attach_to_scene", lightning.attach_to_scene);
         lightning.rate_per_minute = s.value("rate_per_minute", lightning.rate_per_minute);
         lightning.intensity = s.value("intensity", lightning.intensity);
         lightning.ground_altitude_m = s.value("ground_altitude_m", lightning.ground_altitude_m);
@@ -441,6 +454,7 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
         lightning.upward_fraction = s.value("upward_fraction", lightning.upward_fraction);
         lightning.bolt_radius_m = s.value("bolt_radius_m", lightning.bolt_radius_m);
         lightning.duration_s = s.value("duration_s", lightning.duration_s);
+        lightning.leader_fraction = s.value("leader_fraction", lightning.leader_fraction);
         lightning.horizontal_span_m = s.value("horizontal_span_m", lightning.horizontal_span_m);
         lightning.branching = s.value("branching", lightning.branching);
         lightning.shutter_s = s.value("shutter_s", lightning.shutter_s);
@@ -512,6 +526,18 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
             }
         } catch (const std::exception& e) {
             return fail(error, std::string("storms: ") + e.what());
+        }
+    }
+    if (j.contains("local_weather")) {
+        const auto& s = j["local_weather"];
+        if (!s.is_object()) return fail(error, "local_weather must be an object");
+        try {
+            CloudLocalWeather& lw = c.local_weather;
+            lw.terrain_suitability = s.value("terrain_suitability", lw.terrain_suitability);
+            lw.fog_enabled = s.value("fog_enabled", lw.fog_enabled);
+            lw.fog_strength = s.value("fog_strength", lw.fog_strength);
+        } catch (const std::exception& e) {
+            return fail(error, std::string("local_weather: ") + e.what());
         }
     }
     if (j.contains("precipitation") && j["precipitation"].is_object()) {
@@ -631,6 +657,8 @@ CloudState lerpClouds(const CloudState& a, const CloudState& b, float t) {
     r.storms.column_top_m = lerpf(a.storms.column_top_m, b.storms.column_top_m, t);
     r.storms.anvil = lerpf(a.storms.anvil, b.storms.anvil, t);
     r.storms.wall_cloud = lerpf(a.storms.wall_cloud, b.storms.wall_cloud, t);
+    r.local_weather = t < 1.0f ? a.local_weather : b.local_weather;
+    r.local_weather.fog_strength = lerpf(a.local_weather.fog_strength, b.local_weather.fog_strength, t);
     r.storms.mammatus = lerpf(a.storms.mammatus, b.storms.mammatus, t);
     r.lightning.upward_fraction = lerpf(a.lightning.upward_fraction, b.lightning.upward_fraction, t);
     r.lightning.ground_altitude_m = lerpf(
@@ -639,6 +667,8 @@ CloudState lerpClouds(const CloudState& a, const CloudState& b, float t) {
         a.lightning.ground_strike_fraction, b.lightning.ground_strike_fraction, t);
     r.lightning.bolt_radius_m = lerpf(a.lightning.bolt_radius_m, b.lightning.bolt_radius_m, t);
     r.lightning.duration_s = lerpf(a.lightning.duration_s, b.lightning.duration_s, t);
+    r.lightning.leader_fraction = lerpf(a.lightning.leader_fraction,
+                                      b.lightning.leader_fraction, t);
     r.lightning.horizontal_span_m = lerpf(
         a.lightning.horizontal_span_m, b.lightning.horizontal_span_m, t);
     r.lightning.branching = lerpf(a.lightning.branching, b.lightning.branching, t);
@@ -734,6 +764,14 @@ int evaluateStormCells(const CloudState& clouds, float time_s, const Vec3& wind_
     const CloudStorms& s = clouds.storms;
     if (!s.enabled || !std::isfinite(time_s)) return 0;
     int n = 0;
+    // Birth suitability (ATMOSPHERE_LOCAL_WINDS_FOG.md §2): only with a
+    // terrain. Without one the draws below are the old ones (positions equal
+    // up to float rounding of the reordered sum).
+    std::shared_ptr<const LocalWeatherEnvironment> env;
+    if (clouds.local_weather.terrain_suitability) {
+        env = localWeatherEnvironment();
+        if (env && (!env->terrain || !env->terrain->valid)) env.reset();
+    }
     // Automatic lanes, staggered like the lightning lanes: lane k cycles a
     // cell every `period`; a gap between lives keeps the count near max_cells.
     const double period = static_cast<double>(s.lifetime_s) * 1.4;
@@ -750,8 +788,29 @@ int evaluateStormCells(const CloudState& clouds, float time_s, const Vec3& wind_
         if (age < 0.0f || age >= life) continue;
         // Born upwind of the domain centre by half a life of drift, so cells
         // cross the domain instead of all leaving it on one side.
-        const float bx = s.center_m.x + (stormRandom(seed) - 0.5f) * s.extent_m - wind_mps.x * life * 0.5f;
-        const float bz = s.center_m.z + (stormRandom(seed) - 0.5f) * s.extent_m - wind_mps.z * life * 0.5f;
+        float ux = stormRandom(seed);
+        float uz = stormRandom(seed);
+        const float upwindX = s.center_m.x - wind_mps.x * life * 0.5f;
+        const float upwindZ = s.center_m.z - wind_mps.z * life * 0.5f;
+        if (env) {
+            // Rejection on the terrain's odds: up to 6 candidates from an
+            // own stream (the cell's other draws stay unchanged); none
+            // accepted -> the best candidate, so the cell count holds.
+            uint32_t retry = stormHash(id ^ 0xa511e9b3u);
+            float bestU = ux, bestV = uz, best = -1.0f;
+            for (int attempt = 0; attempt < 6; ++attempt) {
+                const float cu = attempt == 0 ? ux : stormRandom(retry);
+                const float cv = attempt == 0 ? uz : stormRandom(retry);
+                const float suit = birthSuitability(env.get(), upwindX + (cu - 0.5f) * s.extent_m,
+                                                    upwindZ + (cv - 0.5f) * s.extent_m, wind_mps).value;
+                if (suit > best) { best = suit; bestU = cu; bestV = cv; }
+                if (stormRandom(retry) < suit) { bestU = cu; bestV = cv; break; }
+            }
+            ux = bestU;
+            uz = bestV;
+        }
+        const float bx = upwindX + (ux - 0.5f) * s.extent_m;
+        const float bz = upwindZ + (uz - 0.5f) * s.extent_m;
         StormCellState& c = out[n++];
         c.x = bx + wind_mps.x * age;
         c.z = bz + wind_mps.z * age;

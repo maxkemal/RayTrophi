@@ -344,6 +344,7 @@ RtPipelineStatusInfo rtPipelineStatus() {
     out.deferred_threads = s.deferredThreads;
     out.build_count = s.buildCount;
     out.error = s.error;
+    for (const auto& st : s.stageSeconds) out.stage_seconds.push_back({st.name, st.seconds});
     return out;
 }
 

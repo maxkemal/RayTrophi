@@ -1,0 +1,49 @@
+/*
+ * RayTrophi Studio -- cloud transport callable (Vulkan RT).
+ *
+ * The only stage that compiles the cloud transport (cloud_rt.glsl with
+ * CLOUD_RT_LIGHTING). Hit and miss stages call it through cloud_call.glsl;
+ * see cloud_call_types.glsl for why. Same results as the inlined code: the
+ * functions are the same, only the stage they run in changed.
+ */
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_nonuniform_qualifier : require
+
+#include "cloud_call_types.glsl"
+
+layout(location = CLOUD_CALL_LOCATION) callableDataInEXT CloudCall call;
+
+#include "rt_sky.glsl"
+
+#define CLOUD_RT_LIGHTING
+#include "cloud_rt.glsl"
+
+bool cloudCallMissAmbient = false;
+
+vec3 cloudSkyAmbient(vec3 direction) {
+    // Miss path: the miss shader's sky without the sun disk.
+    if (cloudCallMissAmbient) return skyColorImpl(direction, false, call.origin);
+    // Hit segments: the sky-view LUT texel.
+    if (worldData.w._pad5 == 0) return vec3(0.0);
+    float u = atan(direction.z, direction.x) / (2.0 * CLOUD_PI);
+    if (u < 0.0) u += 1.0;
+    float v = (1.0 - clamp(direction.y, -1.0, 1.0)) * 0.5;
+    return textureLod(atmosphereLUTs[1], vec2(u, v), 0.0).rgb;
+}
+
+void main() {
+    if (call.op == CLOUD_CALL_SUN_T) {
+        call.T = cloudSunTransmittance(call.origin, call.dir, call.seed);
+        return;
+    }
+    cloudCallMissAmbient = (call.flags & CLOUD_CALL_MISS_AMBIENT) != 0u;
+    vec3 inscatter;
+    float T, depth;
+    cloudRenderLimited(call.origin, call.dir, call.tLimit, (call.flags & CLOUD_CALL_CAMERA_RAY) != 0u,
+                       call.seed, inscatter, T, depth);
+    call.inscatter = inscatter;
+    call.T = T;
+    call.depth = depth;
+}

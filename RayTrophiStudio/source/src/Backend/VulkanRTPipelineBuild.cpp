@@ -55,6 +55,7 @@ struct VulkanDevice::RTPipelineBuildJob {
     uint32_t missGroupIdx = 0;
     uint32_t triHitGroupIdx = 0;
     uint32_t photonGroupIdx = VK_SHADER_UNUSED_KHR;
+    uint32_t callableGroupIdx = 0;
     bool hasVolume = false;
     bool hasHair = false;
     bool hasSphere = false;
@@ -64,6 +65,7 @@ struct VulkanDevice::RTPipelineBuildJob {
     bool cacheHitKnown = false;
     bool cacheHit = false;
     uint32_t deferredThreads = 0;
+    std::vector<Backend::RTPipelineStatus::StageTime> stageSeconds;
     std::string error;
 };
 
@@ -81,8 +83,9 @@ uint64_t hashShaderSet(const VulkanDevice::RTPipelineShaderSet& s) {
     mixVec(s.volumeClosestHit); mixVec(s.volumeIntersection);
     mixVec(s.hairClosestHit); mixVec(s.hairIntersection); mixVec(s.hairAnyHit);
     mixVec(s.shadowMiss);
-    mixVec(s.sphereClosestHit); mixVec(s.sphereIntersection);
+    mixVec(s.sphereIntersection);
     mixVec(s.photonRaygen);
+    mixVec(s.cloudCallable);
     return h == 0 ? 1 : h;   // 0 is reserved for "nothing installed"
 }
 
@@ -171,7 +174,12 @@ void VulkanDevice::loadRTPipelineCache() {
     Backend::RTPipelineStatus status;
     status.available = true;
 
-    std::vector<char> blob;
+    // ★ Only the PATH is resolved here; the blob is read at build time, and
+    //   only when it was saved for the same shaders (prepareRTPipelineCache).
+    //   The old cache was one file per GPU, loaded whole at start-up and
+    //   written back whole after every build: the driver keeps every loaded
+    //   entry, so each shader edit appended a dead pipeline (305 MB measured
+    //   2026-10-13) that every launch read and handed to the driver.
     if (envEquals("RT_VK_PIPELINE_CACHE", "0")) {
         SCENE_LOG_INFO("[VulkanDevice] RT_VK_PIPELINE_CACHE=0: RT pipeline disk cache disabled.");
     } else {
@@ -181,24 +189,68 @@ void VulkanDevice::loadRTPipelineCache() {
         } else {
             char name[64];
             std::snprintf(name, sizeof(name), "rt_pipeline_%04x_%04x.bin", props.vendorID, props.deviceID);
-            const std::filesystem::path file = dir / name;
-            status.cachePath = pathToUtf8(file);
+            status.cachePath = pathToUtf8(dir / name);
+        }
+    }
 
+    VkPipelineCacheCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    if (vkCreatePipelineCache(m_device, &ci, nullptr, &m_rtPipelineCache) != VK_SUCCESS) {
+        m_rtPipelineCache = VK_NULL_HANDLE;
+        VK_WARN() << "[VulkanDevice] vkCreatePipelineCache failed; RT pipeline builds run without a cache."
+                  << std::endl;
+    }
+    m_rtPipelineCacheShaderHash = 0;
+
+    std::lock_guard<std::mutex> lock(m_rtBuildStatusMutex);
+    m_rtBuildStatus = status;
+}
+
+namespace {
+std::filesystem::path cacheShaderStamp(const std::filesystem::path& file) {
+    std::filesystem::path stamp = file;
+    stamp += ".shaders";
+    return stamp;
+}
+} // namespace
+
+// Worker thread, before vkCreateRayTracingPipelinesKHR. The cache in use
+// holds exactly the pipeline of `shaderHash` or nothing: a blob saved for
+// other shaders is never loaded (it could only miss) and is deleted.
+void VulkanDevice::prepareRTPipelineCache(uint64_t shaderHash) {
+    if (!m_device || shaderHash == m_rtPipelineCacheShaderHash) return;
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lock(m_rtBuildStatusMutex);
+        path = m_rtBuildStatus.cachePath;
+    }
+    namespace fs = std::filesystem;
+    std::vector<char> blob;
+    std::string reject;
+    if (!path.empty()) {
+        const fs::path file = utf8ToPath(path);
+        uint64_t saved = 0;
+        {
+            std::ifstream stamp(cacheShaderStamp(file));
+            if (stamp) stamp >> std::hex >> saved;
+        }
+        std::error_code ec;
+        if (saved == shaderHash) {
             std::ifstream in(file, std::ios::binary);
-            if (in) {
-                blob.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-                const std::string reject = validateCacheBlob(blob, props);
-                if (!reject.empty()) {
-                    // A blob from another driver is valid input to the driver (it
-                    // ignores it), but a corrupt one is not; drop both, rebuild fresh.
-                    status.cacheRejectReason = reject;
-                    SCENE_LOG_WARN("[VulkanDevice] RT pipeline cache discarded (" + reject + "): " + status.cachePath);
-                    blob.clear();
-                    in.close();
-                    std::error_code ec;
-                    std::filesystem::remove(file, ec);
-                }
+            if (in) blob.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            VkPhysicalDeviceProperties props{};
+            vkGetPhysicalDeviceProperties(m_physicalDevice, &props);
+            if (!blob.empty()) reject = validateCacheBlob(blob, props);
+            if (!reject.empty()) {
+                SCENE_LOG_WARN("[VulkanDevice] RT pipeline cache discarded (" + reject + "): " + path);
+                blob.clear();
             }
+        } else if (fs::exists(file, ec)) {
+            SCENE_LOG_INFO("[VulkanDevice] RT pipeline cache is for other shaders; starting empty.");
+        }
+        if (blob.empty()) {
+            fs::remove(file, ec);
+            fs::remove(cacheShaderStamp(file), ec);
         }
     }
 
@@ -206,33 +258,33 @@ void VulkanDevice::loadRTPipelineCache() {
     ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
     ci.initialDataSize = blob.size();
     ci.pInitialData = blob.empty() ? nullptr : blob.data();
-    VkResult r = vkCreatePipelineCache(m_device, &ci, nullptr, &m_rtPipelineCache);
+    VkPipelineCache fresh = VK_NULL_HANDLE;
+    VkResult r = vkCreatePipelineCache(m_device, &ci, nullptr, &fresh);
     if (r != VK_SUCCESS && !blob.empty()) {
-        status.cacheRejectReason = "driver rejected the data (" + std::to_string(static_cast<int>(r)) + ")";
+        reject = "driver rejected the data (" + std::to_string(static_cast<int>(r)) + ")";
         SCENE_LOG_WARN("[VulkanDevice] RT pipeline cache rejected by the driver; starting empty.");
         blob.clear();
         ci.initialDataSize = 0;
         ci.pInitialData = nullptr;
-        r = vkCreatePipelineCache(m_device, &ci, nullptr, &m_rtPipelineCache);
+        r = vkCreatePipelineCache(m_device, &ci, nullptr, &fresh);
     }
-    if (r != VK_SUCCESS) {
-        m_rtPipelineCache = VK_NULL_HANDLE;
-        VK_WARN() << "[VulkanDevice] vkCreatePipelineCache failed: " << r
-                  << "; RT pipeline builds run without a cache." << std::endl;
-    } else if (!blob.empty()) {
-        status.cacheLoaded = true;
-        status.cacheLoadedBytes = blob.size();
+    if (r != VK_SUCCESS) return;   // keep the previous cache handle
+    if (m_rtPipelineCache != VK_NULL_HANDLE) vkDestroyPipelineCache(m_device, m_rtPipelineCache, nullptr);
+    m_rtPipelineCache = fresh;
+    m_rtPipelineCacheShaderHash = shaderHash;
+    if (!blob.empty()) {
         SCENE_LOG_INFO("[VulkanDevice] RT pipeline cache loaded (" + std::to_string(blob.size() / 1024) +
-                       " KB): " + status.cachePath);
+                       " KB): " + path);
     }
-
     std::lock_guard<std::mutex> lock(m_rtBuildStatusMutex);
-    m_rtBuildStatus = status;
+    m_rtBuildStatus.cacheLoaded = !blob.empty();
+    m_rtBuildStatus.cacheLoadedBytes = blob.size();
+    m_rtBuildStatus.cacheRejectReason = reject;
 }
 
 // Worker thread, after a successful build. vkGetPipelineCacheData is safe here:
 // the cache is internally synchronized and only the RT build uses it.
-void VulkanDevice::saveRTPipelineCache() {
+void VulkanDevice::saveRTPipelineCache(uint64_t shaderHash) {
     std::string path;
     {
         std::lock_guard<std::mutex> lock(m_rtBuildStatusMutex);
@@ -274,6 +326,12 @@ void VulkanDevice::saveRTPipelineCache() {
         VK_WARN() << "[VulkanDevice] RT pipeline cache rename failed: " << path << std::endl;
         return;
     }
+    // The stamp names the shaders this blob belongs to; written after the
+    // blob, so a crash between the two leaves a stamp-less blob = a miss.
+    {
+        std::ofstream stamp(cacheShaderStamp(file), std::ios::trunc);
+        if (stamp) stamp << std::hex << shaderHash;
+    }
     SCENE_LOG_INFO("[VulkanDevice] RT pipeline cache saved (" + std::to_string(data.size() / 1024) + " KB).");
 }
 
@@ -295,6 +353,7 @@ void VulkanDevice::shutdownRTPipelineBuild() {
         vkDestroyPipelineCache(m_device, m_rtPipelineCache, nullptr);
     }
     m_rtPipelineCache = VK_NULL_HANDLE;
+    m_rtPipelineCacheShaderHash = 0;
     m_rtInstalledShaderHash = 0;
     m_rtFailedShaderHash = 0;
     std::lock_guard<std::mutex> lock(m_rtBuildStatusMutex);
@@ -367,19 +426,23 @@ bool VulkanDevice::ensureRTPipelineLayouts() {
     bindings[6].binding = 6;
     bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[6].descriptorCount = static_cast<uint32_t>(Backend::VULKAN_TEXTURE_CAPACITY);
-    bindings[6].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+    // Callable: the cloud ambient of the miss path samples the environment overlay.
+    bindings[6].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
+                             VK_SHADER_STAGE_CALLABLE_BIT_KHR;
 
     bindings[7].binding = 7;
     bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[7].descriptorCount = 1;
-    bindings[7].stageFlags = VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    bindings[7].stageFlags = VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+                             VK_SHADER_STAGE_CALLABLE_BIT_KHR;
 
     bindings[8].binding = 8;
     bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[8].descriptorCount = 4;
     // closesthit.rchit also samples the atmosphere LUTs (binding 8); a stage missing
     // from stageFlags reads an undefined descriptor (validation: layout-07988).
-    bindings[8].stageFlags = VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[8].stageFlags = VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+                             VK_SHADER_STAGE_CALLABLE_BIT_KHR;
 
     bindings[9].binding = 9;
     bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -503,15 +566,16 @@ bool VulkanDevice::ensureRTPipelineLayouts() {
 
     // Bindings 30-35: cloud field (cloud_rt.glsl / cloud_common.glsl) --
     // 30 base noise 3D, 31 detail 3D, 32 curl, 33 weather map, 34 CloudParams,
-    // 35 majorant map. Miss draws the clouds; closest-hit reads them for the
-    // sun's cloud shadow. Always written (writeRtCloudDescriptors).
+    // 35 majorant map. The transport runs in the cloud callable; miss,
+    // closest-hit and raygen read flags, bounds and the lightning from them.
+    // Always written (writeRtCloudDescriptors).
     for (uint32_t i = 30; i <= 35; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = (i == 34) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
                                                : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         bindings[i].descriptorCount = 1;
         bindings[i].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
-                                 VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+                                 VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_CALLABLE_BIT_KHR;
     }
 
     // Binding 36: storm cell map (cloud_cells.comp; ATMOSPHERE_STORMS.md),
@@ -520,7 +584,7 @@ bool VulkanDevice::ensureRTPipelineLayouts() {
     bindings[36].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[36].descriptorCount = 1;
     bindings[36].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
-                              VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+                              VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_CALLABLE_BIT_KHR;
 
     VkDescriptorSetLayoutCreateInfo dslCI{};
     dslCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -654,6 +718,7 @@ Backend::RTPipelineStatus VulkanDevice::getRTPipelineStatus() const {
 
 void VulkanDevice::runRTPipelineBuildJob(RTPipelineBuildJob& job) {
     const auto t0 = std::chrono::steady_clock::now();
+    prepareRTPipelineCache(job.shaderHash);
     const RTPipelineShaderSet& s = job.shaders;
 
     std::vector<VkShaderModule> modules;
@@ -691,13 +756,13 @@ void VulkanDevice::runRTPipelineBuildJob(RTPipelineBuildJob& job) {
     const VkShaderModule hairIntModule    = createModule(s.hairIntersection, "hair_intersection");
     const VkShaderModule hairAnyHitModule = createModule(s.hairAnyHit, "hair_shadow_anyhit");
     const VkShaderModule shadowMissModule = createModule(s.shadowMiss, "shadow_miss");
-    const VkShaderModule sphereChitModule = createModule(s.sphereClosestHit, "sphere_closesthit");
     const VkShaderModule sphereIntModule  = createModule(s.sphereIntersection, "sphere_intersection");
     const VkShaderModule photonRgenModule = createModule(s.photonRaygen, "photon");
+    const VkShaderModule cloudCallModule  = createModule(s.cloudCallable, "cloud_callable");
 
     job.hasVolume     = (volChitModule != VK_NULL_HANDLE && volIntModule != VK_NULL_HANDLE);
     job.hasHair       = (hairChitModule != VK_NULL_HANDLE && hairIntModule != VK_NULL_HANDLE);
-    job.hasSphere     = (sphereChitModule != VK_NULL_HANDLE && sphereIntModule != VK_NULL_HANDLE);
+    job.hasSphere     = (sphereIntModule != VK_NULL_HANDLE);
     job.hasShadowMiss = (shadowMissModule != VK_NULL_HANDLE);
     job.hasPhoton     = (photonRgenModule != VK_NULL_HANDLE);
 
@@ -780,6 +845,11 @@ void VulkanDevice::runRTPipelineBuildJob(RTPipelineBuildJob& job) {
         job.deferredThreads = joiners;
         job.cacheHitKnown = false;
         job.cacheHit = false;
+        for (uint32_t i = 0; i < ci.stageCount && i < job.stageSeconds.size(); ++i) {
+            const bool valid = r == VK_SUCCESS && m_rtCreationFeedbackSupported &&
+                               (stageFeedback[i].flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT);
+            job.stageSeconds[i].seconds = valid ? static_cast<double>(stageFeedback[i].duration) * 1e-9 : -1.0;
+        }
         if (r == VK_SUCCESS && m_rtCreationFeedbackSupported &&
             (pipelineFeedback.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT)) {
             job.cacheHitKnown = true;
@@ -823,49 +893,53 @@ void VulkanDevice::runRTPipelineBuildJob(RTPipelineBuildJob& job) {
     };
 
     // Stage order: raygen, primary miss, [shadow miss], closesthit, [anyhit],
-    // [vol chit, vol int], [hair chit, hair int, hair anyhit], [sphere chit,
-    // sphere int], [photon raygen].
+    // [vol chit, vol int], [hair chit, hair int, hair anyhit], [sphere int],
+    // [photon raygen], cloud callable. The sphere group's closest hit is the
+    // triangle closesthit stage (one module, one compile).
     // Group order (the SBT layout depends on it): raygen | miss, [shadow miss] |
-    // triangle hit, [volume], [hair], [sphere] | [photon raygen]. The photon
-    // group comes after all hit groups so the miss/hit regions stay contiguous.
+    // triangle hit, [volume], [hair], [sphere] | [photon raygen] | cloud
+    // callable. The photon group comes after all hit groups so the miss/hit
+    // regions stay contiguous.
     auto attempt = [&](bool withHairAnyHit) -> VkResult {
         std::vector<VkPipelineShaderStageCreateInfo> stages;
         std::vector<VkRayTracingShaderGroupCreateInfoKHR> groups;
         stages.reserve(16);
         groups.reserve(10);
-        auto addStage = [&](VkShaderStageFlagBits bit, VkShaderModule mod) {
+        job.stageSeconds.clear();
+        auto addStage = [&](VkShaderStageFlagBits bit, VkShaderModule mod, const char* name) {
             stages.push_back(makeStage(bit, mod));
+            job.stageSeconds.push_back({name, -1.0});
             return static_cast<uint32_t>(stages.size() - 1);
         };
 
-        const uint32_t raygenStage = addStage(VK_SHADER_STAGE_RAYGEN_BIT_KHR, raygenModule);
-        const uint32_t missStage   = addStage(VK_SHADER_STAGE_MISS_BIT_KHR, missModule);
+        const uint32_t raygenStage = addStage(VK_SHADER_STAGE_RAYGEN_BIT_KHR, raygenModule, "raygen");
+        const uint32_t missStage   = addStage(VK_SHADER_STAGE_MISS_BIT_KHR, missModule, "miss");
         const uint32_t shadowMissStage = job.hasShadowMiss
-            ? addStage(VK_SHADER_STAGE_MISS_BIT_KHR, shadowMissModule) : VK_SHADER_UNUSED_KHR;
-        const uint32_t chitStage = addStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, chitModule);
+            ? addStage(VK_SHADER_STAGE_MISS_BIT_KHR, shadowMissModule, "shadow_miss") : VK_SHADER_UNUSED_KHR;
+        const uint32_t chitStage = addStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, chitModule, "closesthit");
         const uint32_t anyhitStage = (anyhitModule != VK_NULL_HANDLE)
-            ? addStage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR, anyhitModule) : VK_SHADER_UNUSED_KHR;
+            ? addStage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR, anyhitModule, "shadow_anyhit") : VK_SHADER_UNUSED_KHR;
         uint32_t volChitStage = VK_SHADER_UNUSED_KHR, volIntStage = VK_SHADER_UNUSED_KHR;
         if (job.hasVolume) {
-            volChitStage = addStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, volChitModule);
-            volIntStage  = addStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, volIntModule);
+            volChitStage = addStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, volChitModule, "volume_closesthit");
+            volIntStage  = addStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, volIntModule, "volume_intersection");
         }
         uint32_t hairChitStage = VK_SHADER_UNUSED_KHR, hairIntStage = VK_SHADER_UNUSED_KHR;
         uint32_t hairAnyHitStage = VK_SHADER_UNUSED_KHR;
         if (job.hasHair) {
-            hairChitStage = addStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, hairChitModule);
-            hairIntStage  = addStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, hairIntModule);
+            hairChitStage = addStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, hairChitModule, "hair_closesthit");
+            hairIntStage  = addStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, hairIntModule, "hair_intersection");
             if (withHairAnyHit && hairAnyHitModule != VK_NULL_HANDLE) {
-                hairAnyHitStage = addStage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR, hairAnyHitModule);
+                hairAnyHitStage = addStage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR, hairAnyHitModule, "hair_shadow_anyhit");
             }
         }
-        uint32_t sphereChitStage = VK_SHADER_UNUSED_KHR, sphereIntStage = VK_SHADER_UNUSED_KHR;
+        uint32_t sphereIntStage = VK_SHADER_UNUSED_KHR;
         if (job.hasSphere) {
-            sphereChitStage = addStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, sphereChitModule);
-            sphereIntStage  = addStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, sphereIntModule);
+            sphereIntStage = addStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, sphereIntModule, "sphere_intersection");
         }
         const uint32_t photonStage = job.hasPhoton
-            ? addStage(VK_SHADER_STAGE_RAYGEN_BIT_KHR, photonRgenModule) : VK_SHADER_UNUSED_KHR;
+            ? addStage(VK_SHADER_STAGE_RAYGEN_BIT_KHR, photonRgenModule, "photon") : VK_SHADER_UNUSED_KHR;
+        const uint32_t cloudCallStage = addStage(VK_SHADER_STAGE_CALLABLE_BIT_KHR, cloudCallModule, "cloud_callable");
 
         job.raygenGroupIdx = static_cast<uint32_t>(groups.size());
         groups.push_back(makeGeneralGroup(raygenStage));
@@ -885,13 +959,15 @@ void VulkanDevice::runRTPipelineBuildJob(RTPipelineBuildJob& job) {
         }
         if (job.hasSphere) {
             groups.push_back(makeHitGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR,
-                                          sphereChitStage, VK_SHADER_UNUSED_KHR, sphereIntStage));
+                                          chitStage, VK_SHADER_UNUSED_KHR, sphereIntStage));
         }
         job.photonGroupIdx = VK_SHADER_UNUSED_KHR;
         if (job.hasPhoton) {
             job.photonGroupIdx = static_cast<uint32_t>(groups.size());
             groups.push_back(makeGeneralGroup(photonStage));
         }
+        job.callableGroupIdx = static_cast<uint32_t>(groups.size());
+        groups.push_back(makeGeneralGroup(cloudCallStage));
         job.groupCount = static_cast<uint32_t>(groups.size());
 
         VkRayTracingPipelineCreateInfoKHR rtCI{};
@@ -906,8 +982,11 @@ void VulkanDevice::runRTPipelineBuildJob(RTPipelineBuildJob& job) {
     };
 
     VkResult result = VK_ERROR_INITIALIZATION_FAILED;
-    if (raygenModule == VK_NULL_HANDLE || missModule == VK_NULL_HANDLE || chitModule == VK_NULL_HANDLE) {
-        job.error = "raygen/miss/closesthit SPIR-V missing or invalid (see log)";
+    if (raygenModule == VK_NULL_HANDLE || missModule == VK_NULL_HANDLE || chitModule == VK_NULL_HANDLE ||
+        cloudCallModule == VK_NULL_HANDLE) {
+        // The hit and miss stages execute the cloud callable unconditionally
+        // once clouds are on: a pipeline without it is not a degraded one.
+        job.error = "raygen/miss/closesthit/cloud_callable SPIR-V missing or invalid (see log)";
     } else {
         const bool hairAnyHitIncluded = job.hasHair && hairAnyHitModule != VK_NULL_HANDLE;
         result = attempt(true);
@@ -933,7 +1012,7 @@ void VulkanDevice::runRTPipelineBuildJob(RTPipelineBuildJob& job) {
     job.result = result;
     job.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     // Nothing new to persist after a cache hit.
-    if (result == VK_SUCCESS && !(job.cacheHitKnown && job.cacheHit)) saveRTPipelineCache();
+    if (result == VK_SUCCESS && !(job.cacheHitKnown && job.cacheHit)) saveRTPipelineCache(job.shaderHash);
     {
         // The install waits for the next Rendered frame; until then the status
         // must not keep counting (the user may be sitting in Solid).
@@ -979,6 +1058,7 @@ bool VulkanDevice::installRTPipelineBuild(RTPipelineBuildJob& job) {
         m_rtBuildStatus.cacheHitKnown = job.cacheHitKnown;
         m_rtBuildStatus.cacheHit = job.cacheHit;
         m_rtBuildStatus.deferredThreads = job.deferredThreads;
+        m_rtBuildStatus.stageSeconds = job.stageSeconds;
         ++m_rtBuildStatus.buildCount;
     };
     auto fail = [&](const std::string& error) {
@@ -1026,7 +1106,7 @@ bool VulkanDevice::installRTPipelineBuild(RTPipelineBuildJob& job) {
     }
     if (m_sbtBuffer.buffer) destroyBuffer(m_sbtBuffer);
 
-    // SBT layout: [raygen | miss(s) | hit(s) | photon raygen] each entry aligned
+    // SBT layout: [raygen | miss(s) | hit(s) | photon raygen | callable] each entry aligned
     BufferCreateInfo sbtBufInfo;
     sbtBufInfo.size = static_cast<uint64_t>(alignedHandleSize) * groupCount;
     sbtBufInfo.usage = BufferUsage::SHADER_BINDING | BufferUsage::TRANSFER_DST;
@@ -1063,7 +1143,10 @@ bool VulkanDevice::installRTPipelineBuild(RTPipelineBuildJob& job) {
     m_sbtHitRegion.stride = alignedHandleSize;
     m_sbtHitRegion.size   = static_cast<VkDeviceSize>(numHitGroups) * alignedHandleSize;
 
-    m_sbtCallableRegion = {}; // No callable shaders
+    // Callable region: the cloud transport (cloud_call_types.glsl, record 0).
+    m_sbtCallableRegion.deviceAddress = sbtAddr + static_cast<VkDeviceAddress>(job.callableGroupIdx) * alignedHandleSize;
+    m_sbtCallableRegion.stride = alignedHandleSize;
+    m_sbtCallableRegion.size   = alignedHandleSize;
 
     // Photon caustic raygen region (Faz 2) — same SBT buffer, its own raygen slot.
     m_hasPhotonRaygen = job.hasPhoton && (job.photonGroupIdx != VK_SHADER_UNUSED_KHR);

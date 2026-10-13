@@ -249,6 +249,11 @@ struct RTPipelineStatus {
     uint32_t deferredThreads = 0;  // threads that joined the last build; 0 = synchronous call
     uint32_t buildCount = 0;       // finished builds (success or failure) since device creation
     std::string error;             // last failure, empty when none
+    // Per-stage driver compile time of the last build (pipeline creation
+    // feedback), in stage order. seconds < 0 = the driver gave no value.
+    // Stages compile in parallel, so they do not sum to compileSeconds.
+    struct StageTime { std::string name; double seconds = -1.0; };
+    std::vector<StageTime> stageSeconds;
 };
 
 struct GpuMemoryStats {

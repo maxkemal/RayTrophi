@@ -389,7 +389,8 @@ struct VkVolumeInstance {
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
-// Cloud field (Faz 3b): the sun NEE below reads the clouds\' shadow.
+// Cloud field (Faz 3b): the sun NEE below reads the clouds' shadow
+// (cloud_callable.rcall, through cloud_call.glsl).
 #include "cloud_hit_segment.glsl"
 
 // Live Vulkan gas density is a device-addressable dense float grid. Surface
@@ -705,28 +706,16 @@ layout(buffer_reference, scalar) readonly buffer PointinessBuffer    { float p[]
 layout(buffer_reference, scalar) readonly buffer AttribBuffer        { float a[]; };
 layout(buffer_reference, scalar) readonly buffer WaterVertexBuffer   { vec4 w[]; };
 
-#ifdef SPHERE_HIT
-// Procedural point-sphere variant (compiled to sphere_closesthit.spv with
-// -DSPHERE_HIT=1). The whole splat/whitewater cloud is ONE AABB BLAS; the hit
-// attribute is the analytic outward normal from sphere_intersection.rint and
-// the per-sphere material id comes from binding 18. Everything else is this
-// file's full material path, so SSS / bubble / interior depth / volume flags
-// behave exactly as on a triangle sphere.
-hitAttributeEXT vec3 sphereNormal;
-struct FoamSphereGPU {
-    vec4 centerRadius;
-    uint matId;
-    float objectRandom;
-    uint _p1;
-    uint _p2;
-};
-layout(set = 0, binding = 18, scalar) readonly buffer FoamSphereSSBO {
-    FoamSphereGPU foamSpheres[];
-};
-#else
-// Hit attributes (barycentrics)
+// This shader also serves the procedural foam-sphere hit group
+// (sphere_intersection.rint, gl_HitKindEXT == FOAM_SPHERE_HIT_KIND). The whole
+// splat/whitewater cloud is ONE AABB BLAS; the per-sphere material id comes
+// from binding 18 and the normal from the sphere centre. Everything else is
+// this file's full material path, so SSS / bubble / interior depth / volume
+// flags behave exactly as on a triangle sphere. It used to be a second compile
+// of this file (-DSPHERE_HIT) -- a whole extra closest-hit in the pipeline.
+#include "foam_sphere.glsl"
+// Hit attributes (barycentrics; unused on a sphere hit, which writes none)
 hitAttributeEXT vec2 baryCoord;
-#endif
 
 // ============================================================
 // PCG Hash — hızlı, düşük korelasyonlu RNG
@@ -981,21 +970,23 @@ void shadeSceneHit() {
     // ----------------------------------------------------------
     // 1. Instance & materyal verisi
     // ----------------------------------------------------------
-#ifdef SPHERE_HIT
+    bool foamSphereHit = gl_HitKindEXT == FOAM_SPHERE_HIT_KIND;
     // No instance/geometry record backs the procedural cloud: every per-vertex
     // channel is absent, which the code below already treats as "not uploaded".
     VkInstanceData   inst = VkInstanceData(0u, 0u, 0u, 0u);
     VkGeometryData   geo  = VkGeometryData(0ul, 0ul, 0ul, 0ul, 0ul, 0ul, 0ul, 0ul);
-    uint matIndex = foamSpheres[uint(gl_PrimitiveID)].matId;
-#else
-    VkInstanceData   inst = instances.i[gl_InstanceID];
-    VkGeometryData   geo  = geometries.g[inst.blasIndex];
-    uint matIndex = inst.materialIndex;
-    if (geo.materialAddr != 0ul) {
-        MaterialIndexBuffer mi = MaterialIndexBuffer(geo.materialAddr);
-        matIndex = mi.m[uint(gl_PrimitiveID)];
+    uint matIndex;
+    if (foamSphereHit) {
+        matIndex = foamSpheres[uint(gl_PrimitiveID)].matId;
+    } else {
+        inst = instances.i[gl_InstanceID];
+        geo  = geometries.g[inst.blasIndex];
+        matIndex = inst.materialIndex;
+        if (geo.materialAddr != 0ul) {
+            MaterialIndexBuffer mi = MaterialIndexBuffer(geo.materialAddr);
+            matIndex = mi.m[uint(gl_PrimitiveID)];
+        }
     }
-#endif
     Material         mat  = materials.m[matIndex];
 
     // ----------------------------------------------------------
@@ -1030,19 +1021,17 @@ void shadeSceneHit() {
         objV2 = vBuf.v[i2];
         vec3 localFaceNormal = normalize(cross(objV1 - objV0, objV2 - objV0));
         geomNormalRaw = normalize(vec3(localFaceNormal * mat3(gl_WorldToObjectEXT)));
+    } else if (foamSphereHit) {
+        // Same arithmetic as sphere_intersection.rint (identity instance:
+        // world ray = object ray, gl_HitTEXT = the reported t).
+        vec3 sphereHitPos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
+        geomNormalRaw = normalize(sphereHitPos - foamSpheres[uint(gl_PrimitiveID)].centerRadius.xyz);
     } else {
-#ifdef SPHERE_HIT
-        geomNormalRaw = normalize(sphereNormal);
-#else
         geomNormalRaw = normalize(vec3(0, 1, 0));  // Fallback
-#endif
     }
 
-#ifdef SPHERE_HIT
-    vec3 bary = vec3(1.0, 0.0, 0.0);
-#else
-    vec3 bary = vec3(1.0 - baryCoord.x - baryCoord.y, baryCoord.x, baryCoord.y);
-#endif
+    vec3 bary = foamSphereHit ? vec3(1.0, 0.0, 0.0)
+                              : vec3(1.0 - baryCoord.x - baryCoord.y, baryCoord.x, baryCoord.y);
 
     if (geo.normalAddr != 0) {
         NormalBuffer nBuf = NormalBuffer(geo.normalAddr);
@@ -1615,16 +1604,16 @@ void shadeSceneHit() {
         // Object Info: the instance's world origin, free from the TLAS transform. The CPU
         // fills HitRecord::object_origin from the translation of the very same matrix, so
         // both backends hash identical bits and a scattered rock keeps its color.
-#ifdef SPHERE_HIT
         // The procedural cloud is one identity-transformed TLAS instance, so
         // gl_ObjectToWorldEXT[3] is shared by every sphere. Location should be
         // the actual sphere centre, while Random comes from its stable logical
-        // identity stored in the sphere record.
-        vec3 hitObjOrigin = foamSpheres[uint(gl_PrimitiveID)].centerRadius.xyz;
-        float hitObjRandom = foamSpheres[uint(gl_PrimitiveID)].objectRandom;
-#else
+        // identity stored in the sphere record. -1 = derive it from the origin.
         vec3 hitObjOrigin = gl_ObjectToWorldEXT[3];
-#endif
+        float hitObjRandom = -1.0;
+        if (foamSphereHit) {
+            hitObjOrigin = foamSpheres[uint(gl_PrimitiveID)].centerRadius.xyz;
+            hitObjRandom = foamSpheres[uint(gl_PrimitiveID)].objectRandom;
+        }
         // Object-space shading point for the procedural "Object Space" toggle: the BLAS
         // vertices ARE object space, so this is a barycentric blend of values already loaded
         // — no inverse transform. The CPU builds it the same way out of the mesh's P_orig.
@@ -1637,19 +1626,11 @@ void shadeSceneHit() {
         // Layer Weight are the only consumers; on a secondary bounce it is that bounce's
         // incoming direction, which is exactly what a path tracer should ask them about.
         vec3 hitView = normalize(-gl_WorldRayDirectionEXT);
-#ifdef SPHERE_HIT
         MatProgOut mp = evalMaterialProgramWithObjectRandom(
             mp_procOff, rawUV, hitPos, worldNormal, hitPointiness, hitObjOrigin,
             hitObjRandom, hitAttribs, hitObjPos, hitView,
             0.0, 0.0, 0.0, 0.0, vec3(0.0), hitPos,
             vec3(0.0), vec3(0.0), 0.0, hitObjPos, cam.waterTime);
-#else
-        MatProgOut mp = evalMaterialProgram(
-            mp_procOff, rawUV, hitPos, worldNormal, hitPointiness, hitObjOrigin,
-            hitAttribs, hitObjPos, hitView,
-            0.0, 0.0, 0.0, 0.0, vec3(0.0), hitPos,
-            vec3(0.0), vec3(0.0), 0.0, hitObjPos, cam.waterTime);
-#endif
         mpWritten = mp.written;
         if ((mp.written & MP_SLOT_BASECOLOR)        != 0u) albedo       = max(mp.baseColor, vec3(0.0));
         if ((mp.written & MP_SLOT_ROUGHNESS)        != 0u) roughness    = clamp(mp.roughness, 0.0, 1.0);
@@ -2437,7 +2418,7 @@ if (emissionTexID > 0 && (mpWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
                         // Directional light = the sun (sun rule): the clouds shade it.
                         if (int(lights.l[lightIdx].position.w + 0.5) == 1 &&
                             any(greaterThan(shadowVisibility, vec3(1e-4)))) {
-                            shadowVisibility *= cloudSunTransmittance(shadowOrigin, wi, payload.seed);
+                            shadowVisibility *= cloudCallSunTransmittance(shadowOrigin, wi, payload.seed);
                         }
                         if (any(greaterThan(shadowVisibility, vec3(1e-4)))) {
                             // Volumetric soft shadow: march through any volume AABB between surface and light.

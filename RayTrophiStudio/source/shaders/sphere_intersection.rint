@@ -6,8 +6,10 @@
  * single AABB BLAS (= one TLAS instance) instead of one instance per particle —
  * the scalable representation that the OptiX side uses via built-in sphere GAS.
  * Per-sphere centre+radius live in a storage buffer indexed by gl_PrimitiveID
- * (mirrors hair_intersection.rint's HairSegmentSSBO). The geometric normal is
- * handed to the closest-hit through a hit attribute so it needs no buffer.
+ * (mirrors hair_intersection.rint's HairSegmentSSBO). The hit is reported with
+ * FOAM_SPHERE_HIT_KIND; closesthit.rchit (shared with triangles) recomputes the
+ * outward normal from the centre. The hit attribute keeps the triangle layout
+ * (vec2) so both groups of that one closest-hit see the same declaration.
  *
  * Procedural hit group: VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR.
  */
@@ -15,22 +17,12 @@
 #extension GL_EXT_ray_tracing         : require
 #extension GL_EXT_scalar_block_layout : require
 
-hitAttributeEXT vec3 sphereNormal;   // world-space outward normal at the hit
-
 // One combined foam buffer for the whole set (all types). gl_PrimitiveID indexes
 // it directly — the whole foam cloud is ONE AABB BLAS / ONE TLAS instance, so the
-// per-sphere material lives here too (read by sphere_closesthit.rchit).
-struct FoamSphereGPU {
-    vec4 centerRadius;   // xyz = centre (world space), w = radius
-    uint matId;          // foam material index (Spray / Foam / Bubble)
-    float objectRandom;  // stable logical-sphere value for Object Info -> Random
-    uint _p1;
-    uint _p2;
-};
+// per-sphere material lives here too (read by closesthit.rchit).
+#include "foam_sphere.glsl"
 
-layout(set = 0, binding = 18, scalar) readonly buffer FoamSphereSSBO {
-    FoamSphereGPU foamSpheres[];
-};
+hitAttributeEXT vec2 sphereHitAttrib;   // layout of closesthit.rchit's barycentrics; unused
 
 void main()
 {
@@ -61,7 +53,6 @@ void main()
     else if (t1 >= gl_RayTminEXT && t1 <= gl_RayTmaxEXT) t = t1;
     if (t < 0.0) return;
 
-    vec3 hit = rO + t * rD;
-    sphereNormal = normalize(hit - C);
-    reportIntersectionEXT(t, 0u);
+    sphereHitAttrib = vec2(0.0);
+    reportIntersectionEXT(t, FOAM_SPHERE_HIT_KIND);
 }

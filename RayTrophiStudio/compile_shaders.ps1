@@ -89,13 +89,13 @@ function Add-Shader {
     })
 }
 
-foreach ($extension in @('comp', 'vert', 'frag', 'geom', 'rgen', 'rmiss', 'rchit', 'rahit', 'rint')) {
+foreach ($extension in @('comp', 'vert', 'frag', 'geom', 'rgen', 'rmiss', 'rchit', 'rahit', 'rint', 'rcall')) {
     foreach ($shader in Get-ChildItem -LiteralPath $shaderRoot -File | Where-Object {
         $_.Extension -eq ('.' + $extension)
     } | Sort-Object Name) {
         if ($shader.Name -eq 'shadow_anyhit.rchit') { continue }
         $flags = @('--target-env=vulkan1.3', '-O')
-        if ($extension -in @('rgen', 'rmiss', 'rchit', 'rahit', 'rint')) {
+        if ($extension -in @('rgen', 'rmiss', 'rchit', 'rahit', 'rint', 'rcall')) {
             $flags += '--target-spv=spv1.4'
         }
         Add-Shader $shader.FullName $shader.BaseName $flags
@@ -116,8 +116,6 @@ foreach ($name in $windowShaders) {
 }
 Add-Shader (Join-Path $shaderRoot 'material_preview_frag.frag') 'material_preview_covered' @(
     '-DPREVIEW_COVERED_SHADING=1', '--target-env=vulkan1.3', '-O')
-Add-Shader (Join-Path $shaderRoot 'closesthit.rchit') 'sphere_closesthit' @(
-    '-DSPHERE_HIT=1', '--target-env=vulkan1.3', '--target-spv=spv1.4', '-O')
 $sculptPath = Join-Path $PSScriptRoot 'shaders\sculpt.comp'
 if (Test-Path -LiteralPath $sculptPath) {
     Add-Shader $sculptPath 'sculpt' @('--target-env=vulkan1.3', '-O')
@@ -155,7 +153,8 @@ try {
     foreach ($item in $plan) {
         Compile-Shader $item.Source $item.Target $item.Flags
     }
-    $staleNames = @('gradient_test.spv', 'miss.rmiss.spv', 'raygen.rgen.spv', 'rgen.spv')
+    # sphere_closesthit.spv: the foam-sphere hit group reuses closesthit.spv (2026-10-13).
+    $staleNames = @('gradient_test.spv', 'miss.rmiss.spv', 'raygen.rgen.spv', 'rgen.spv', 'sphere_closesthit.spv')
     foreach ($name in $staleNames) {
         $path = Join-Path $shaderRoot $name
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }

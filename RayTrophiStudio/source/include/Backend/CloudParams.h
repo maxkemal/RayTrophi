@@ -16,6 +16,7 @@
 */
 
 #include "Atmosphere/AtmosphereClouds.h"
+#include "Atmosphere/AtmosphereLocalWeather.h"
 #include "Backend/CloudLightningParams.h"
 #include "Backend/WeatherRenderParams.h"
 #include "Vec3.h"
@@ -54,9 +55,11 @@ struct CloudLayerGPU {
 static_assert(sizeof(CloudLayerGPU) == 112, "CloudLayerGPU std430 layout");
 
 // GPU layer slots: the authored layers, then the storm column shell
-// (ATMOSPHERE_CELL_CLOUDS.md §1, cloud_common.glsl cloudShellDensity).
-constexpr int kCloudGpuLayers = atmosphere::kMaxCloudLayers + 1;
+// (ATMOSPHERE_CELL_CLOUDS.md §1, cloud_common.glsl cloudShellDensity), then
+// the local fog (ATMOSPHERE_LOCAL_WINDS_FOG.md §4, cloudFogDensity).
+constexpr int kCloudGpuLayers = atmosphere::kMaxCloudLayers + 2;
 constexpr int kCloudStormShellLayer = atmosphere::kMaxCloudLayers;
+constexpr int kCloudFogLayer = atmosphere::kMaxCloudLayers + 1;
 
 struct CloudParamsGPU {
     CloudLayerGPU layers[kCloudGpuLayers];
@@ -81,19 +84,26 @@ struct CloudParamsGPU {
                        // storm column, wall-cloud allowance m, mammatus 0..1
     float precip3[4];  // sea-level air temperature C, lapse K/m, forced form (0 auto),
                        // reserved (ATMOSPHERE_PRECIP_TYPES.md)
+    float fog[4];      // local fog map corner x, z, 1/size (m), active (0/1);
+                       // the map is sheet 3 of the cell map
     CloudLightningGPU lightning[kCloudLightningEvents];
     CloudFlashLightGPU flash[kCloudLightningEvents];   // lit cloud base per event
     // Channel network per event (kCloudBoltSegments each; count in color[3]).
     CloudBoltSegmentGPU bolt[kCloudLightningEvents * kCloudBoltSegments];
 };
-static_assert(sizeof(CloudParamsGPU) == 6144, "CloudParamsGPU std430 layout (cloud_common.glsl)");
+static_assert(sizeof(CloudParamsGPU) == 16512, "CloudParamsGPU std430 layout (cloud_common.glsl)");
 
 // ── Storm cells (docs/dev/ATMOSPHERE_STORMS.md) ─────────────────────────────
 // Input of cloud_cells.comp, which paints the cell map every update: three
-// 256^2 fields stacked in one 256 x 768 image (cells, cell structure, storm
-// column).
+// 256^2 fields stacked in one 256 x 1024 image (cells, cell structure, storm
+// column). Sheet 3 is the local fog envelope, uploaded from the CPU map
+// (VulkanDevice::updateCloudRtParams), not painted by cloud_cells.comp.
 constexpr uint32_t kCloudCellMapSize = 256;
-constexpr uint32_t kCloudCellMapRows = 3 * kCloudCellMapSize;
+constexpr uint32_t kCloudCellMapSheets = 4;
+constexpr uint32_t kCloudCellMapRows = kCloudCellMapSheets * kCloudCellMapSize;
+constexpr uint32_t kCloudFogSheet = 3;
+static_assert(atmosphere::kLocalFogMapSize == static_cast<int>(kCloudCellMapSize),
+              "the local fog map is uploaded as one cell-map sheet");
 
 struct CloudCellGPU {
     float a[4];   // world x, z, radius m, cover floor
@@ -199,6 +209,43 @@ inline void packStormColumn(const atmosphere::CloudState& c, CloudParamsGPU& p) 
     p.storms2[1] = (tropo - base) / (top - base);
     p.storms2[2] = wall;
     p.storms2[3] = c.storms.mammatus;
+}
+
+// Local fog (ATMOSPHERE_LOCAL_WINDS_FOG.md §4): layer slot 4, the band of
+// the published fog map, shaped and lit by the cloud march like any layer.
+//   a  band bottom (altitude), band height, 1, 0
+//   b  majorant = the map's max envelope extinction, fog droplet diameter,
+//      0, enabled
+//   c  1 / shape cell (m), 1 / wisp cell (m)
+//   e  the cloud material's albedo and phase override; f no emission
+//   g  band bottom / top as SCENE y (the envelope is in scene y)
+// ★ Reads the main thread's published map: every device packs the same one.
+constexpr float kLocalFogDropletUm = 15.0f;
+constexpr float kLocalFogShapeCellM = 700.0f;
+constexpr float kLocalFogWispCellM = 120.0f;
+inline void packLocalFog(CloudParamsGPU& p, float altitude_offset_m) {
+    CloudLayerGPU& f = p.layers[kCloudFogLayer];
+    f = CloudLayerGPU{};
+    p.fog[0] = p.fog[1] = p.fog[2] = p.fog[3] = 0.0f;
+    const std::shared_ptr<const atmosphere::LocalFogMap> map = atmosphere::localFogMapSnapshot();
+    if (!map || !map->active || map->size_m <= 0.0f) return;
+    const float height = (std::max)(map->band_top_y - map->band_bottom_y, 1.0f);
+    f.a[0] = map->band_bottom_y + altitude_offset_m;
+    f.a[1] = height;
+    f.a[2] = 1.0f;
+    f.b[0] = map->max_extinction;
+    f.b[1] = kLocalFogDropletUm;
+    f.b[3] = 1.0f;
+    f.c[0] = 1.0f / kLocalFogShapeCellM;
+    f.c[1] = 1.0f / kLocalFogWispCellM;
+    f.d[0] = 1.0f;
+    for (int k = 0; k < 4; ++k) f.e[k] = p.scatterAlbedo[k];
+    f.g[0] = map->band_bottom_y;
+    f.g[1] = map->band_top_y;
+    p.fog[0] = map->origin_x;
+    p.fog[1] = map->origin_z;
+    p.fog[2] = 1.0f / map->size_m;
+    p.fog[3] = 1.0f;
 }
 
 inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float time_seconds,
@@ -343,12 +390,20 @@ inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float 
         p.storms2[0] = c.storms.stratiform_rain;
         packStormColumn(c, p);
     }
+    packLocalFog(p, altitude_offset_m);
     return p;
+}
+
+// Local fog is part of the cloud field: a clear night with every layer off
+// still draws its radiation fog.
+inline bool localFogRendering() {
+    const std::shared_ptr<const atmosphere::LocalFogMap> map = atmosphere::localFogMapSnapshot();
+    return map && map->active;
 }
 
 inline bool sharedWeatherCloudRendering(const WorldData& world,
                                        const atmosphere::CloudState& clouds) {
-    return (world.mode == WORLD_MODE_NISHITA && clouds.anyEnabled()) ||
+    return (world.mode == WORLD_MODE_NISHITA && (clouds.anyEnabled() || localFogRendering())) ||
            weatherNeedsRendering(world.weather);
 }
 
@@ -359,9 +414,13 @@ inline CloudParamsGPU makeSharedCloudParamsGPU(const atmosphere::CloudState& clo
     CloudParamsGPU p = makeCloudParamsGPU(clouds, time, drift, wind,
                                         world.nishita.planet_radius, world.nishita.altitude);
     p.cirrusDirection[2] = weatherTime; // reserved slot, shared camera-weather clock
+    if (world.mode != WORLD_MODE_NISHITA) {
+        p.layers[kCloudFogLayer].b[3] = 0.0f;
+        p.fog[3] = 0.0f;
+    }
     if (world.mode != WORLD_MODE_NISHITA || !clouds.anyEnabled()) {
-        for (auto& layer : p.layers) {
-            layer.b[3] = 0.0f;
+        for (int i = 0; i < kCloudFogLayer; ++i) {
+            p.layers[i].b[3] = 0.0f;
         }
         p.cirrus[0] = 0.0f;
         p.precip[0] = p.precip[1] = 0.0f;

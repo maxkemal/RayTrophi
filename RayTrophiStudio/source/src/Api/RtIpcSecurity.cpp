@@ -459,7 +459,8 @@ uint32_t requiredCapabilities(const std::string& method) {
         // substring heuristics below, so the world. namespace would grade them
         // SceneWrite.
         method == "world.atmosphere_stats" || method == "world.sample_climate" ||
-        method == "world.cloud_stats" || method == "world.sample_clouds")
+        method == "world.cloud_stats" || method == "world.sample_clouds" ||
+        method == "world.sample_weather_local" || method == "world.local_weather_stats")
         return Read;
     const bool read_method = method == "version" || method == "project.path" ||
         method == "undo_description" || method == "redo_description" ||

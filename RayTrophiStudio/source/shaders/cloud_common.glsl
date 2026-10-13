@@ -50,8 +50,9 @@ layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 2) uniform sampler2D clou
 layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 3) uniform sampler2D cloudWeatherMap;
 layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 4, std430) readonly buffer CloudParamsBlock {
     // 0..2 the authored layers; 3 the storm column shell (f.w = 1 when on,
-    // ATMOSPHERE_CELL_CLOUDS.md): troposphere-deep, dense only in cells.
-    CloudLayerG layers[4];
+    // ATMOSPHERE_CELL_CLOUDS.md): troposphere-deep, dense only in cells;
+    // 4 the local fog (ATMOSPHERE_LOCAL_WINDS_FOG.md §4, cloudFogDensity).
+    CloudLayerG layers[5];
     vec4 weather;   // 1/extent_m, type_variation, evolution, rt_steps
     vec4 wind;      // drift_x_m, drift_z_m, planet_radius_m, altitude_offset_m
     vec4 cirrus;    // enabled, altitude_m, coverage, optical depth
@@ -65,9 +66,10 @@ layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 4, std430) readonly buffe
     vec4 storms;    // cell map centre x, z, 1/size, enabled
     vec4 storms2;   // stratiform rain share, tropopause fraction, wall allowance m, mammatus
     vec4 precip3;   // sea-level air temperature C, lapse K/m, forced form (0 auto), reserved
+    vec4 fog;       // local fog map corner x, z, 1/size, active (map = cell-map sheet 3)
     CloudLightningG lightning[4];
     CloudFlashLightG flash[4];   // lit cloud base per event (CPU-built)
-    CloudBoltSegG bolt[160];     // channel network, 40 per event (CPU-built)
+    CloudBoltSegG bolt[320];     // channel network, 80 per event (CPU-built)
 } cloudParams;
 
 layout(set = CLOUD_SET, binding = CLOUD_CELL_BINDING) uniform sampler2D cloudCellMap;
@@ -115,6 +117,61 @@ float cloudRemap(float v, float lo, float hi, float nlo, float nhi) {
     return nlo + (v - lo) * (nhi - nlo) / max(hi - lo, 1e-5);
 }
 
+// ── Local fog (ATMOSPHERE_LOCAL_WINDS_FOG.md §4) ───────────────────────────
+// Layer slot 4. The CPU map (Atmosphere/AtmosphereLocalWeather.h) is the
+// ENVELOPE; the shape is the cloud noise's. Scene y throughout: the fog lies
+// on the scene's flat ground and terrain, not on the planet sphere.
+bool cloudFogActive() {
+    return cloudParams.fog.w > 0.5 && cloudParams.layers[4].b.w > 0.5;
+}
+
+// Envelope at p (cell-map sheet 3): R fog 1/m, G fog top y, B mist 1/m at
+// the ground, A ground y. Zero outside the map.
+vec4 cloudFogMapAt(vec3 p) {
+    vec2 uv = (p.xz - cloudParams.fog.xy) * cloudParams.fog.z;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return vec4(0.0);
+    ivec2 size = textureSize(cloudCellMap, 0);
+    float sheets = float(size.y / size.x);
+    float texel = 1.0 / float(size.x);
+    uv.y = (3.0 + clamp(uv.y, 0.5 * texel, 1.0 - 0.5 * texel)) / sheets;
+    return textureLod(cloudCellMap, uv, 0.0);
+}
+
+// Fog extinction (1/m) at p. <= the envelope at every point, so the map's
+// maximum (layers[4].b.x) is a majorant.
+//   radiation fog: fills the hollow up to a lid that undulates +-35% of its
+//                  depth; the body breaks into banks.
+//   mist:          thins upward from the ground over 250 m (scale height).
+// Constants mirror localFogExtinctionAt (kLocalFogTopSoftM 25 m,
+// kLocalMistScaleHeightM 250 m) -- the CPU reports the envelope, this draws it.
+float cloudFogDensity(vec3 p, bool detail, out float baseDensity) {
+    baseDensity = 0.0;
+    if (!cloudFogActive()) return 0.0;
+    CloudLayerG L = cloudParams.layers[4];
+    if (p.y < L.g.x || p.y > L.g.y) return 0.0;
+    vec4 m = cloudFogMapAt(p);
+    if (m.x + m.z <= 0.0 || p.y < m.w - 5.0) return 0.0;
+    vec3 drift = vec3(cloudParams.wind.x, 0.0, cloudParams.wind.y);
+    float evo = cloudParams.weather.z;
+    // Banks: the base noise squashed 4x vertically -- fog lies in sheets.
+    vec3 q = (p - drift) * L.c.x;
+    q.y *= 4.0;
+    q += vec3(0.311, 0.127, 0.719) + vec3(evo * 0.21, 0.0, evo * 0.17);
+    vec4 n = textureLod(cloudBaseNoise, q, 0.0);
+    float fbm = n.g * 0.625 + n.b * 0.25 + n.a * 0.125;
+    float depth = max(m.y - m.w, 10.0);
+    float lid = m.y + (n.r - 0.5) * 0.7 * depth;
+    float body = m.x * clamp((lid - p.y) / 25.0, 0.0, 1.0) +
+                 m.z * exp(-max(p.y - m.w, 0.0) / 250.0);
+    float shape = mix(0.15, 1.0, smoothstep(0.25, 0.7, fbm));
+    baseDensity = body * shape;
+    if (!detail) return baseDensity;
+    // Wisps: the detail octaves erode the edges only (cores stay whole).
+    vec4 d = textureLod(cloudDetailNoise, (p - drift) * L.c.y + vec3(evo * 0.9), 0.0);
+    float wisp = d.r * 0.625 + d.g * 0.25 + d.b * 0.125;
+    return body * clamp(cloudRemap(shape, wisp * 0.45, 1.0, 0.0, 1.0), 0.0, 1.0);
+}
+
 vec3 cloudPlanetCenter() {
     return vec3(0.0, -(cloudParams.wind.z + cloudParams.wind.w), 0.0);
 }
@@ -150,6 +207,8 @@ bool cloudSegmentMayContain(vec3 origin, vec3 direction, float distance) {
     if (cloudParams.cirrus.x >= 0.5 && cloudParams.cirrus.w > 0.0) {
         lowest = min(lowest, cloudParams.cirrus.y);
     }
+    // Local fog sits on the ground: any segment may cross it.
+    if (cloudFogActive()) lowest = min(lowest, cloudParams.layers[4].a.x);
     return max(cloudAltitude(origin), cloudAltitude(origin + direction * distance)) >= lowest;
 }
 
@@ -403,8 +462,16 @@ float cloudLayerOwnDensity(int li, vec3 p, float alt, bool detail,
     // Development belongs to a horizontal cell, not to successive slices of
     // the 3D texture. Weather A organizes fields, while higher-frequency
     // channels of the existing formation read vary neighbouring towers.
+    // ★ The base texture tiles every 1/(c.x * 0.271) m (6.6 km at 1.8 km
+    // cells). Read at a FIXED slice, the formation field was one 2D tile
+    // repeated across the sky: seen from altitude, rows of identical cells
+    // ran to the horizon along the tile diagonal (measured: 4.7 km apart =
+    // 6.64 km / sqrt 2). The slice now follows weather G (type, ~50 km
+    // features, 150 km period): neighbouring tiles read different depths,
+    // one cloud sees a near-constant slice. Shape only, no extra fetch.
+    float slice = w.g * 1.7;
     vec3 formationQ = vec3(relativePosition.x * L.c.x * 0.271,
-                           0.37,
+                           0.37 + slice,
                            relativePosition.z * L.c.x * 0.271) + phase;
     formationQ.xz += vec2(evo * 0.10, evo * 0.14);
     vec4 nL = textureLod(cloudBaseNoise, formationQ, 0.0);
@@ -452,7 +519,9 @@ float cloudLayerOwnDensity(int li, vec3 p, float alt, bool detail,
              vec3(evo * 0.37, evo * 0.11, evo * 0.53);
     q.xz += (nL.ga - vec2(0.5)) * hh * hh * convective * 0.8;
     // A continuous oblique component separates billow rows across a field.
-    q.y += dot(q.xz - phase.xz, vec2(0.19, -0.13)) * convective;
+    // On its own it left the (1,1) diagonal nearly periodic (0.19 - 0.13 =
+    // 0.06 of a slice per tile): the weather slice breaks that too.
+    q.y += dot(q.xz - phase.xz, vec2(0.19, -0.13)) * convective + slice;
     // Reuse the large-formation channels to bend the small billows. This
     // breaks their regular alignment without another noise octave. Warping
     // affects only the shape, never the weather coverage bound.
@@ -715,6 +784,7 @@ float cloudShellDensity(vec3 p, float alt, bool detail, out float baseDensity) {
 // (cloudIntervals), so nothing is counted twice.
 float cloudLayerDensityResolved(int li, vec3 p, float alt, bool detail,
                                out float baseDensity) {
+    if (li == 4) return cloudFogDensity(p, detail, baseDensity);
     if (li == 3) return cloudShellDensity(p, alt, detail, baseDensity);
     float own = cloudLayerOwnDensity(li, p, alt, detail, baseDensity);
     if (!cloudShellActive()) return own;
@@ -990,7 +1060,7 @@ float cloudDensity(vec3 p, bool detail) {
     float alt = cloudAltitude(p);
     float s = 0.0, b;
     for (int i = 0; i < 3; ++i) s += cloudLayerOwnDensity(i, p, alt, detail, b);
-    return s + cloudShellDensity(p, alt, detail, b);
+    return s + cloudShellDensity(p, alt, detail, b) + cloudFogDensity(p, detail, b);
 }
 
 // ── Phase: Jendersie & d'Eon 2023, HG + Draine blend from droplet diameter ──

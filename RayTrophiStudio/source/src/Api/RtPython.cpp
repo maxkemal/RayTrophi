@@ -5170,6 +5170,17 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         return pyLoads(out);
     }, "mode='density'|'transmittance'|'base_density', points=[[x,y,z],...] or "
        "segments=[[[a],[b]],...], steps=256, backend='render'|'viewport'.");
+    world.def("sample_weather_local", [pyDumps, pyLoads](const py::kwargs& kwargs) {
+        std::string out;
+        requireResult(rtapi::sampleWeatherLocalJson(pyDumps(kwargs), out));
+        return pyLoads(out);
+    }, "points=[[x,y,z],...] -> birth suitability, recent rain, rain now and the local fog "
+       "the froxel draws at each point.");
+    world.def("local_weather_stats", [pyLoads] {
+        std::string out;
+        requireResult(rtapi::localWeatherStatsJson(out));
+        return pyLoads(out);
+    });
     world.def("atmosphere_stats", [] {
         const rtapi::AtmosphereStatsInfo s = rtapi::atmosphereStats();
         py::list rows;
@@ -5385,6 +5396,14 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["cache_reject_reason"] = s.cache_reject_reason;
         d["deferred_threads"] = s.deferred_threads;
         d["build_count"] = s.build_count;
+        py::list stages;
+        for (const auto& st : s.stage_seconds) {
+            py::dict e;
+            e["stage"] = st.name;
+            e["seconds"] = st.seconds >= 0.0 ? py::object(py::float_(st.seconds)) : py::object(py::none());
+            stages.append(e);
+        }
+        d["stage_seconds"] = stages;
         d["error"] = s.error;
         return d;
     }, "Ray tracing pipeline build state: rt_pipeline_state is none|compiling|ready|failed. "

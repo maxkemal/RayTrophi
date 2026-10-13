@@ -1,9 +1,12 @@
 #pragma once
 
 #include "Atmosphere/AtmosphereClouds.h"
+#include "Atmosphere/LightningStrike.h"
+#include "Backend/CloudBoltGeometry.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace Backend {
 
@@ -13,7 +16,7 @@ struct CloudLightningGPU {
     float start[4];   // scene xyz, pulse radiance
     float end[4];     // scene xyz, bolt radius m
     float color[4];   // linear RGB, channel segment count (CloudBoltSegmentGPU)
-    float stage[4];   // growth 0..1, channel brightness, kind (0 ground / 1 cloud horizontal /
+    float stage[4];   // growth 0..1.4 (connection at 1), channel brightness, kind (0 ground / 1 cloud horizontal /
                       // 2 upward / 3 cloud vertical), glow radius m
 };
 static_assert(sizeof(CloudLightningGPU) == 64, "CloudLightningGPU std430 layout");
@@ -49,19 +52,6 @@ inline float lightningEffectiveRate(const atmosphere::CloudLightning& lightning)
     return 240.0f / period;
 }
 
-inline uint32_t lightningHash(uint32_t value) {
-    value ^= value >> 16;
-    value *= 0x7feb352du;
-    value ^= value >> 15;
-    value *= 0x846ca68bu;
-    return value ^ (value >> 16);
-}
-
-inline float lightningRandom(uint32_t& seed) {
-    seed = lightningHash(seed + 0x9e3779b9u);
-    return static_cast<float>(seed & 0x00ffffffu) / 16777216.0f;
-}
-
 inline bool lightningSceneHeight(float x, float z, float altitude, float planetRadius,
                                  float altitudeOffset, float& y) {
     const double radius = static_cast<double>(planetRadius) + altitude;
@@ -72,6 +62,14 @@ inline bool lightningSceneHeight(float x, float z, float altitude, float planetR
     }
     y = static_cast<float>(std::sqrt(support) - planetRadius - altitudeOffset);
     return std::isfinite(y);
+}
+
+// Inverse of lightningSceneHeight: the altitude of a scene point.
+inline float lightningAltitudeOf(float x, float y, float z, float planetRadius,
+                                 float altitudeOffset) {
+    const double cy = static_cast<double>(y) + planetRadius + altitudeOffset;
+    return static_cast<float>(std::sqrt(static_cast<double>(x) * x + cy * cy +
+                                        static_cast<double>(z) * z) - planetRadius);
 }
 
 // The storm column's span (ATMOSPHERE_CELL_CLOUDS.md §1; CloudParams.h
@@ -97,153 +95,21 @@ inline int stormColumnSpan(const atmosphere::CloudState& c, float& base, float& 
 // and the lit-base disc below. The shader used to hash its own 24-point bolt
 // while the cloud was lit from one straight start->end tube, so the light
 // never followed the branches that were drawn.
-constexpr int kCloudBoltSegments = 40;   // per event
-constexpr int kCloudBoltMainSegments = 16;
-
-struct CloudBoltSegmentGPU {
-    float a[4];   // scene xyz, weight (1 = main channel, <1 branch / twig)
-    float b[4];   // scene xyz, leader progress (0..1) at which it starts to grow
-};
-static_assert(sizeof(CloudBoltSegmentGPU) == 32, "CloudBoltSegmentGPU std430 layout");
-
-struct BoltP3 { float x, y, z; };
-inline BoltP3 boltAdd(BoltP3 a, BoltP3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
-inline BoltP3 boltSub(BoltP3 a, BoltP3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
-inline BoltP3 boltMul(BoltP3 a, float s) { return {a.x * s, a.y * s, a.z * s}; }
-inline float boltDot(BoltP3 a, BoltP3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-inline float boltLen(BoltP3 a) { return std::sqrt(boltDot(a, a)); }
-inline BoltP3 boltNorm(BoltP3 a) {
-    const float l = boltLen(a);
-    return l > 1e-6f ? boltMul(a, 1.0f / l) : BoltP3{0.0f, -1.0f, 0.0f};
-}
-
-// Midpoint displacement, `levels` octaves (2^levels segments). Each octave
-// halves the amplitude: the large zig-zag and the fine crackle of a real
-// channel, instead of one jitter scale. `verticalScale` < 1 keeps an in-cloud
-// channel inside its layer.
-inline void boltDisplacedPath(BoltP3 a, BoltP3 b, int levels, float amplitude,
-                              float verticalScale, uint32_t& seed, BoltP3* out) {
-    const int n = 1 << levels;
-    out[0] = a;
-    out[n] = b;
-    const BoltP3 dir = boltNorm(boltSub(b, a));
-    float amp = amplitude * boltLen(boltSub(b, a));
-    for (int step = n; step > 1; step >>= 1) {
-        for (int k = 0; k < n; k += step) {
-            BoltP3 r{lightningRandom(seed) - 0.5f, (lightningRandom(seed) - 0.5f) * verticalScale,
-                     lightningRandom(seed) - 0.5f};
-            r = boltSub(r, boltMul(dir, boltDot(r, dir)));
-            out[k + step / 2] = boltAdd(boltMul(boltAdd(out[k], out[k + step]), 0.5f),
-                                        boltMul(r, 2.0f * amp));
-        }
-        amp *= 0.5f;
-    }
-}
-
-// Writes up to kCloudBoltSegments segments; returns the count. The leader
-// grows from `start` to `end` and its forks open along that direction: a
-// downward strike (cloud -> ground) is a tree hanging from the cloud, an
-// `upward` one (ground -> cloud, from a peak or a tower) a tree standing on
-// the ground whose crown spreads into the cloud.
-// `vertical`: an in-cloud channel between the charge regions of a storm
-// column (up to the anvil, or down to the base): it zig-zags in 3D like a
-// ground strike, forks along its way and spreads a spider at both ends.
-inline int buildCloudBolt(BoltP3 start, BoltP3 end, bool ground, bool upward, bool vertical,
-                          float branching,
-                          float spiderSpan, uint32_t seed, CloudBoltSegmentGPU* out,
-                          BoltP3& centroid) {
-    int count = 0;
-    float weightSum = 0.0f;
-    centroid = {0.0f, 0.0f, 0.0f};
-    auto emit = [&](BoltP3 a, BoltP3 b, float weight, float appear) {
-        if (count >= kCloudBoltSegments) return;
-        CloudBoltSegmentGPU& s = out[count++];
-        s.a[0] = a.x; s.a[1] = a.y; s.a[2] = a.z; s.a[3] = weight;
-        // The leader progress saturates at 1 when it connects; a late twig
-        // must still start before that or it would never grow.
-        s.b[0] = b.x; s.b[1] = b.y; s.b[2] = b.z; s.b[3] = (std::min)(appear, 0.94f);
-        centroid = boltAdd(centroid, boltMul(boltAdd(a, b), 0.5f * weight));
-        weightSum += weight;
-    };
-    const float verticalScale = (ground || vertical) ? 1.0f : 0.3f;
-    BoltP3 main[kCloudBoltMainSegments + 1];
-    boltDisplacedPath(start, end, 4, 0.09f, verticalScale, seed, main);
-    for (int k = 0; k < kCloudBoltMainSegments; ++k)
-        emit(main[k], main[k + 1], 1.0f, float(k) / kCloudBoltMainSegments);
-
-    const BoltP3 mainDir = boltNorm(boltSub(end, start));
-    const float mainLen = boltLen(boltSub(end, start));
-    BoltP3 side = boltNorm(BoltP3{-mainDir.z, 0.0f, mainDir.x});
-    if (boltLen(BoltP3{mainDir.x, 0.0f, mainDir.z}) < 1e-3f) side = {1.0f, 0.0f, 0.0f};
-
-    // Branches: a ground strike forks along its leader's direction and
-    // spreads a horizontal "spider" network inside the cloud from its cloud
-    // end (that network is what lights the cell in patches); an in-cloud
-    // flash is all spider, horizontal and long.
-    struct Root { int index; bool spider; };
-    Root roots[6];
-    int nRoots = 0;
-    if (ground) {
-        // The cloud end: the first point of a downward leader, the last one
-        // of an upward leader (its spider grows once the channel arrives).
-        const int top = upward ? kCloudBoltMainSegments : 0;
-        const int next = upward ? kCloudBoltMainSegments - 1 : 1;
-        roots[nRoots++] = {top, true};
-        if (branching > 0.3f) roots[nRoots++] = {next, true};
-    } else if (vertical) {
-        // Both charge regions spread horizontally.
-        roots[nRoots++] = {0, true};
-        roots[nRoots++] = {kCloudBoltMainSegments, true};
-    }
-    const int forks = static_cast<int>(branching * 4.0f + 0.5f);
-    for (int f = 0; f < forks && nRoots < 6; ++f)
-        roots[nRoots++] = {2 + static_cast<int>(lightningRandom(seed) * 11.0f), !ground && !vertical};
-    for (int r = 0; r < nRoots; ++r) {
-        const Root root = roots[r];
-        const BoltP3 origin = main[root.index];
-        const float sign = lightningRandom(seed) < 0.5f ? -1.0f : 1.0f;
-        BoltP3 dir;
-        float len;
-        if (root.spider) {
-            const float a = lightningRandom(seed) * 6.28318530718f;
-            dir = boltNorm(BoltP3{std::cos(a), (lightningRandom(seed) - 0.5f) * 0.1f, std::sin(a)});
-            len = spiderSpan * (0.25f + 0.25f * lightningRandom(seed));
-        } else {
-            dir = boltNorm(boltAdd(boltMul(mainDir, 0.65f),
-                                   boltMul(side, sign * (0.45f + 0.4f * lightningRandom(seed)))));
-            len = mainLen * (0.12f + 0.16f * lightningRandom(seed));
-        }
-        BoltP3 path[5];
-        boltDisplacedPath(origin, boltAdd(origin, boltMul(dir, len)), 2, 0.14f,
-                          root.spider ? 0.3f : 1.0f, seed, path);
-        const float rootAppear = float(root.index) / kCloudBoltMainSegments;
-        const float weight = root.spider ? 0.6f : 0.5f;
-        for (int k = 0; k < 4; ++k)
-            emit(path[k], path[k + 1], weight, rootAppear + 0.06f * float(k + 1));
-        // A twig off the first two forks when branching is high.
-        if (r < 2 && branching > 0.5f) {
-            const BoltP3 tdir = boltNorm(boltAdd(dir, boltMul(side, -sign * 0.8f)));
-            BoltP3 twig[3];
-            boltDisplacedPath(path[2], boltAdd(path[2], boltMul(tdir, len * 0.4f)), 1, 0.15f,
-                              root.spider ? 0.3f : 1.0f, seed, twig);
-            for (int k = 0; k < 2; ++k)
-                emit(twig[k], twig[k + 1], 0.3f, rootAppear + 0.18f + 0.06f * float(k + 1));
-        }
-    }
-    if (weightSum > 0.0f) centroid = boltMul(centroid, 1.0f / weightSum);
-    return count;
-}
+// Geometry and parent-dependent growth are defined in CloudBoltGeometry.h.
 
 // Stepped leader, then return stroke, then re-strokes; instantaneous value
 // at `age`. The leader is faint and grows the channel; the flash peaks when
-// it connects (life = kCloudLeaderLife).
-constexpr float kCloudLeaderLife = 0.12f;
-inline float lightningPulse(float age, float duration) {
-    if (age < 0.0f || age >= duration) return 0.0f;
+// it connects (life = leaderFraction).
+inline float lightningPulse(float age, float duration, float leaderFraction) {
+    if (age < 0.0f || age >= duration) {
+        return 0.0f;
+    }
     const float life = age / duration;
-    if (life < kCloudLeaderLife) return 0.06f + 0.10f * (life / kCloudLeaderLife);
-    const float stroke = (life - kCloudLeaderLife) / (1.0f - kCloudLeaderLife);
-    const float strokeAge = age - kCloudLeaderLife * duration;
+    if (life < leaderFraction) {
+        return 0.08f + 0.14f * (life / leaderFraction);
+    }
+    const float stroke = (life - leaderFraction) / (1.0f - leaderFraction);
+    const float strokeAge = age - leaderFraction * duration;
     const float envelope = std::exp(-stroke * 3.0f) * (std::min)((1.0f - life) * 8.0f, 1.0f);
     return envelope * (0.35f + 0.65f * std::pow(0.5f + 0.5f * std::cos(strokeAge * 85.0f), 4.0f));
 }
@@ -297,6 +163,7 @@ inline void makeCloudLightningGPU(const atmosphere::CloudState& clouds, float ti
     // event in the middle of its growth. Duration bounds the effective rate.
     const double period = 240.0 / lightningEffectiveRate(lightning);
     for (int i = 0; i < kCloudLightningEvents; ++i) {
+        atmosphere::publishLightningStrike(i, {});
         const double offset = period * static_cast<double>(i) / kCloudLightningEvents;
         const double eventSlot = std::floor((static_cast<double>(time) - offset) / period);
         // Hash wraps intentionally without overflowing signed conversion.
@@ -307,6 +174,7 @@ inline void makeCloudLightningGPU(const atmosphere::CloudState& clouds, float ti
                              period * (0.03 + 0.07 * lightningRandom(seed));
         const float size = 0.65f + lightningRandom(seed) * 0.70f;
         const float duration = lightning.duration_s * size;
+        const float leaderFraction = lightning.leader_fraction;
         const float age = static_cast<float>(static_cast<double>(time) - onset);
         // Camera exposure: a frame integrates the light over its shutter, so
         // the pulse is averaged over [age - shutter, age]. Instantaneous
@@ -320,10 +188,11 @@ inline void makeCloudLightningGPU(const atmosphere::CloudState& clouds, float ti
         if (shutter > 0.0f) {
             constexpr int kShutterSamples = 8;
             for (int k = 0; k < kShutterSamples; ++k)
-                pulse += lightningPulse(age - shutter * (float(k) + 0.5f) / kShutterSamples, duration);
+                pulse += lightningPulse(age - shutter * (float(k) + 0.5f) / kShutterSamples,
+                                        duration, leaderFraction);
             pulse /= kShutterSamples;
         } else {
-            pulse = lightningPulse(age, duration);
+            pulse = lightningPulse(age, duration, leaderFraction);
         }
         if (pulse <= 0.0f) {
             continue;
@@ -398,20 +267,55 @@ inline void makeCloudLightningGPU(const atmosphere::CloudState& clouds, float ti
             continue;
         }
         const uint32_t geometrySeed = lightningHash(seed ^ 0x5bd1e995u);
+        // Attachment (Atmosphere/LightningStrike.h): the ground end is the
+        // scene point the leader reaches first, fixed at onset -- it does not
+        // drift with the wind like the cloud end. Striking distance from the
+        // peak current (Eriksson: 10 I^0.65 m), I 10..60 kA per event: 45-140 m.
+        if (ground && lightning.attach_to_scene) {
+            const float gx = event.end[0] - wind_mps.x * age;
+            const float gz = event.end[2] - wind_mps.z * age;
+            float topY = 0.0f;
+            if (lightningSceneHeight(gx, gz, spanBase, planetRadius, altitudeOffset, topY)) {
+                uint32_t currentSeed = lightningHash(seed ^ 0x1f123bb5u);
+                const float peakKiloAmps = 10.0f + 50.0f * lightningRandom(currentSeed);
+                const float strikingDistance = 10.0f * std::pow(peakKiloAmps, 0.65f);
+                atmosphere::LightningStrikeTarget strike;
+                if (atmosphere::resolveLightningStrike(geometrySeed, gx, gz, topY,
+                                                       strikingDistance, strike) &&
+                    strike.y < topY) {
+                    event.end[0] = strike.x;
+                    event.end[1] = strike.y;
+                    event.end[2] = strike.z;
+                    endAltitude = lightningAltitudeOf(strike.x, strike.y, strike.z,
+                                                      planetRadius, altitudeOffset);
+                    atmosphere::publishLightningStrike(i, strike);
+                }
+            }
+        }
+        // Cloud base at the strike, scene y (the planet curves it away from
+        // the flat y = base altitude): below it the channel is in clear air.
+        float clearAirBelowY = -std::numeric_limits<float>::max();
+        if (ground) {
+            float baseSceneY = 0.0f;
+            if (lightningSceneHeight(event.start[0], event.start[2], spanBase,
+                                     planetRadius, altitudeOffset, baseSceneY)) {
+                clearAirBelowY = baseSceneY;
+            }
+        }
         BoltP3 centroid;
         const BoltP3 cloudPoint{event.start[0], event.start[1], event.start[2]};
         const BoltP3 groundPoint{event.end[0], event.end[1], event.end[2]};
         const int segments = buildCloudBolt(
             upward ? groundPoint : cloudPoint, upward ? cloudPoint : groundPoint,
             ground, upward, verticalCloud, lightning.branching,
-            lightning.horizontal_span_m * size * 0.5f, geometrySeed,
+            lightning.horizontal_span_m * size * 0.5f, clearAirBelowY, geometrySeed,
             &bolt[i * kCloudBoltSegments], centroid);
         event.end[3] = lightning.bolt_radius_m;
         event.color[0] = lightning.color.x;
         event.color[1] = lightning.color.y;
         event.color[2] = lightning.color.z;
         event.color[3] = static_cast<float>(segments);
-        event.stage[0] = (std::min)(life / kCloudLeaderLife, 1.0f);
+        event.stage[0] = (std::min)(life / leaderFraction, 1.4f);
         // Channel core radiance relative to the cloud flash.
         event.stage[1] = lightning.channel_brightness;
         event.stage[2] = upward ? 2.0f : (ground ? 0.0f : (verticalCloud ? 3.0f : 1.0f));
@@ -445,7 +349,7 @@ inline void makeCloudLightningGPU(const atmosphere::CloudState& clouds, float ti
             const float exitScale = cloudFlashProfile(depth, event.stage[3]) /
                                     (1.0f + kCloudFlashDiffusion * exitTau);
             // The leader is too faint to light the landscape.
-            const float connected = life < kCloudLeaderLife ? 0.0f : 1.0f;
+            const float connected = life < leaderFraction ? 0.0f : 1.0f;
             const float L = event.start[3] * exitScale * connected;
             // A spread network lights a wider patch of base.
             float reach = event.stage[3];

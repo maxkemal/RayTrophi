@@ -1,10 +1,11 @@
 # Yerel rüzgârlar, zemin koşulları ve yerel sis (Atmosfer Faz 5b + 7)
 
-> **Durum:** TASLAK — 2026-10-12. Kullanıcı isteği: "yağış durumu, hava
-> uygunluğu ve zemin kontrolü ile sislenme; lokal sis; bulutları yükselten,
-> merkeze çeken ve çevreye kuvvet uygulayan lokal rüzgârlar". Bu not
-> `ATMOSPHERE_STORMS.md` §4'teki (5b) taslağın yerini alır. Karar bekliyor
-> (§6).
+> **Durum:** AKTİF — 2026-10-13. §2–4 parti 17'de yazıldı, derlenmedi
+> (§7). §1 (hücre rüzgârları) kullanıcı kararıyla atlandı, sonra yapılacak.
+> Kullanıcı isteği: "yağış durumu, hava uygunluğu ve zemin kontrolü ile
+> sislenme; lokal sis; bulutları yükselten, merkeze çeken ve çevreye kuvvet
+> uygulayan lokal rüzgârlar". Bu not `ATMOSPHERE_STORMS.md` §4'teki (5b)
+> taslağın yerini alır.
 
 ## 0. İlke: her şey hücrelerin saf fonksiyonu
 
@@ -119,3 +120,99 @@ yükselip dağılır.
    Öneri: evet, terrain heightfield'den 256² düşük çözünürlüklü bir kopya.
 3. Sırayla mı, birlikte mi? Öneri: önce rüzgâr (§1, bulut ve fizik ikisi de
    bekliyor), sonra uygunluk ve son yağış (§2–3), en son sis (§4).
+
+**Verilen kararlar (2026-10-12/13):**
+- Sıra: kullanıcı rüzgârı (§1) atladı; önce §2–4.
+- Karar 2: evet. Arazi 128² düşük çözünürlüklü kopya olarak okunur; sınır
+  koşulu sayılır.
+- Karar 1 (rüzgâr → fizik) §1 ile birlikte bekliyor.
+
+## 7. Uygulama (parti 17, 2026-10-13, derlenmedi)
+
+Tek dosya: `Atmosphere/AtmosphereLocalWeather.{h,cpp}`. Ana döngü her kare
+`syncLocalWeather()` çağırır (`Main.cpp`, bulut zamanı bloğu).
+
+**Arazi kopyası (`TerrainField`).**
+- Bütün arazilerin birleşimini kaplayan bir kare, 128².
+- Her texelde iki değer: sahne y'si ve ~1.5 km kutu ortalaması (çukur =
+  ortalamanın altı).
+- Ucuz parmak iziyle (boyut, dönüşüm, 257 seyrek örnek) yalnız arazi
+  değişince yeniden kurulur.
+- Bir terrain graph worker'da yükseklik hesaplarken (`defer_mesh_updates`)
+  dokunulmaz.
+
+**§2 Uygunluk (`birthSuitability`).**
+- `0.3 + 0.7·orografik + 0.25·sırt + 0.45·ısınma − 0.25·rüzgâraltı`,
+  0.05..1 arasında.
+- Orografik: rüzgârın yamaca bindiği bileşen, 8 m/s'de tam.
+- Isınma: güneşe bakan yamacın düz zeminden fazlası, yalnız gündüz.
+- `evaluateStormCells` otomatik doğumda en fazla 6 aday dener (ayrı bir
+  rastgele akış). Hiçbiri kabul edilmezse en iyisini alır; hücre sayısı
+  değişmez.
+- Arazisiz sahnede bu kol atlanır, hücreler eskisiyle aynıdır.
+- `local_weather.terrain_suitability` ile kapatılır.
+
+**§3 Son yağış (`recentRainAt`).**
+- Hücreler 8 geçmiş anda değerlendirilir (450 s aralık, 60 dk), üstel
+  ağırlıkla (τ = 30 dk).
+- `cellRainAt` = `cloud_cells.comp` B kanalının CPU aynası.
+- ★ Yalnız hücreler. GPU hava haritasının stratiform yağışı CPU'da
+  bilinmiyor; o yüzden "son yağış" hücresiz stratiform yağmuru görmez.
+
+**§4 Yerel sis — bulut alanının bir katmanı (2026-10-13 yeniden yazıldı).**
+
+İlk sürüm sisi aerial froxel'e koymuştu. Kullanıcı canlıda "yüzeyi yamalayan
+tek düze bir örtü, atmosferle etkileşmiyor" dedi. Sebep yapısaldı:
+- ekran 32×32 hücreye bölünüyordu;
+- sisin şekli ve bulut gölgesi yoktu;
+- sis yalnız kameradan yüzeye kadar toplanıyordu.
+
+Froxel yolu SÖKÜLDÜ. Sis artık bulut march'ının 5. katman yuvası
+(`kCloudFogLayer = 4`).
+
+- **CPU haritası = ZARF** (256², texel `sis, sis tepesi y, pus, zemin y`).
+  Hücre haritasının 4. yaprağına yüklenir (256×1024 RGBA16F,
+  `updateCloudRtParams`, revizyon değişince). Yağış ve hücre örtüsü 64²
+  ızgarada hesaplanıp ara değerlenir.
+- **Radyasyon sisi:** `gece · sakin · nem · açık gök` (formüller
+  değişmedi); 0.012 1/m × (0.25 + 0.75·çukurluk). Tepe
+  `zemin + (20 + 0.6·dolgu)·(0.6 + 0.4·çukurluk) + 60·sabah açılması`.
+- **Pus:** yalnız yağış sonrası. Zeminde 0.0015 1/m, yukarı doğru 250 m
+  ölçek yüksekliğiyle söner.
+  - Yağış perdesi içindeki pus yok; perde zaten o ortam. Froxel'deki
+    kopyası vadiyi güneşli bir pusla yıkamıştı ("kum rengi dağlar").
+- **Şekil (`cloudFogDensity`):**
+  - taban gürültüsü 700 m hücre, dikeyde 4× basık; sis tabakalar hâlinde
+    yatar, kümelere bölünür;
+  - tepe derinliğin ±%35'i kadar dalgalanır;
+  - ayrıntı gürültüsü (120 m) kenarları tutam tutam aşındırır;
+  - her noktada ≤ zarfın tepe değeri. Haritanın en yüksek sönümü majorant.
+- **March:**
+  - Sis kutusu (harita karesi × yükseklik bandı) ayrı bir aralık.
+  - Adım ≥ 20 m, mesafeyle 2 km'de iki katına çıkar.
+  - Işık bulutlarla aynı döngüden: güneş march'ı bulutların içinden geçer
+    (bulut gölgesi), gök ışığı en alçak bulut tabanına kadar tek tapla
+    örtülür, çoklu saçılma oktavları.
+  - `cloudDensity` sisi içerir, yani sis kendini ve araziyi gölgeler.
+    RayFusion gölge haritası ve IPC `world.sample_clouds` da sisi görür.
+- **Render bayrağı:** bütün katmanlar kapalıyken de sis aktifse bulut alanı
+  çizilir (açık gece radyasyon sisi).
+- **Harita yeri, kenar sönümü, 10 s zaman kuantumu:** değişmedi.
+- **IPC:**
+  - `world.sample_weather_local` ZARFI verir.
+  - Çizilen yoğunluk `world.sample_clouds {mode:"density"}` ile ölçülür.
+  - `world.local_weather_stats`: `band_y`, GPU'daki revizyon.
+- **Kabul testi:** `scripts/ipc/Probe-LocalWeather.ps1` (5b: march'ın
+  yoğunluğu > 0 ve ≤ zarf tepe değeri).
+
+**Bilinen sınırlar.**
+- Sis yalnız bulut alanı çizen yollarda var: Vulkan RT ve RayFusion
+  (OptiX donduruldu).
+- Bulut katmanıyla üst üste binen aralıklar ayrı ayrı birleştirilir.
+  Sırayla çarpılır, karışık ortam tam doğru değildir; dağa takılan
+  bulutta fark edilebilir.
+- Isınma terimi şimdiki güneşi okur. Güneş animasyonu (gün döngüsü, 5c)
+  gelince doğmuş hücrelerin doğum yeri de kayar; o zaman doğum anının
+  güneşi kullanılmalı.
+- Sis rüzgârla sürüklenmiyor (zaten sakin havada oluşuyor).
+- Hamle cephesi tozu (§1 gerekli) ve adveksiyon sisi yok.

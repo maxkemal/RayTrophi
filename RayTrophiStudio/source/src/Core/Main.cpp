@@ -95,6 +95,8 @@
 #include "tinyexr.h"
 #include <InstanceManager.h>
 #include "DllLoadPolicy.h"
+#include "Atmosphere/AtmosphereLocalWeather.h"
+#include "Atmosphere/LightningStrikeResolver.h"
 
 // ★★★ Ilk CUDA hatasi mandali (OptixWrapper.cpp). Cokme kaydina DURUM olarak
 //   basilir: "std::terminate" ile "CUDA 719"dan hangisinin once oldugunu
@@ -4550,12 +4552,36 @@ int main(int argc, char* argv[]) try {
                 render_settings.realtime_weather_preview &&
                 (ui.viewport_settings.shading_mode == 1 || ui.viewport_settings.shading_mode == 2) &&
                 !render_settings.animation_is_playing && !render_settings.is_render_paused);
+            // Local weather (ATMOSPHERE_LOCAL_WINDS_FOG.md §2-4): terrain copy,
+            // birth environment and fog map. Before the push below: the cells
+            // the push packs read the environment published here.
+            atmosphere::syncLocalWeather(ray_renderer.world, cloudTime,
+                                         scene.camera ? scene.camera->lookfrom : Vec3(0.0f));
+            // Ground strikes attach to this scene's geometry (LightningStrike.h).
+            // `scene` is the process-lifetime global, so installing once is enough.
+            static bool s_lightningStrikeResolver = false;
+            if (!s_lightningStrikeResolver) {
+                atmosphere::installLightningStrikeResolver(scene);
+                s_lightningStrikeResolver = true;
+            }
+            const auto localEnv = atmosphere::localWeatherEnvironment();
+            const auto localFog = atmosphere::localFogMapSnapshot();
+            // Environment and fog map revisions in one key: both are published
+            // here, outside the cloud revision.
+            const uint64_t localRevision = (localEnv ? localEnv->revision : 0) * 1000003ull +
+                                           (localFog ? localFog->revision : 0);
             static float s_pushedCloudTime = -1.0f;
             static uint64_t s_pushedCloudRevision = ~0ull;
+            static uint64_t s_pushedLocalRevision = ~0ull;
             const uint64_t cloudRevision = ray_renderer.world.cloudRevision();
-            if (cloudTime != s_pushedCloudTime || cloudRevision != s_pushedCloudRevision) {
+            // A terrain edit or a sun move re-places the cell births, and a new
+            // fog map changes the fog layer, without touching the cloud
+            // revision: both must reach the GPU too.
+            if (cloudTime != s_pushedCloudTime || cloudRevision != s_pushedCloudRevision ||
+                localRevision != s_pushedLocalRevision) {
                 s_pushedCloudTime = cloudTime;
                 s_pushedCloudRevision = cloudRevision;
+                s_pushedLocalRevision = localRevision;
                 for (Backend::IBackend* b : {g_backend.get(), static_cast<Backend::IBackend*>(g_viewport_backend.get())}) {
                     if (auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(b)) {
                         vk->setCloudState(ray_renderer.world.getClouds(), cloudTime,
