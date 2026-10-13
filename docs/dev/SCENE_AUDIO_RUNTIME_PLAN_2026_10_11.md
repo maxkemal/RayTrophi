@@ -4,6 +4,12 @@
 
 Tarih: 2026-10-11; uygulama durumu 2026-10-12 güncellendi. Tam plan henüz tamamlanmadı.
 
+2026-10-13: [Matter ses kanalları](SCENE_AUDIO_MATTER_CHANNELS.md) ile Vulkan DEM
+normal temas sönüm işi, süre, güç ve temas merkezi mevcut ses/RAM cache hattına
+bağlandı. Aynı domain içinde DEM, karma temas, sıvı/gaz akışı ve MPM deformasyonu
+ayrı seçilir; sıvı/gaz ve MPM üreticileri henüz yoktur ve sessiz/ölçümsüz kalır.
+Kaynak hazır; shader revizyonu 25, kullanıcı derlemesi ve canlı kabul bekliyor.
+
 Temel ses/asset sahne bağlantıları ve timeline Play/Pause/Stop kullanıcıyla doğrulandı.
 Taşınabilir proje, parent ve diğer ayrıntılı kabul maddeleri ayrı izlenir.
 Kapsam, mevcut sınırlar, script/IPC sözleşmesi ve kullanıcı doğrulama listesi:

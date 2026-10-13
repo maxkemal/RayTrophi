@@ -152,7 +152,8 @@ nlohmann::json author(UIContext& ctx, SceneHistory* history, const std::string& 
         bool found = false;
         for (const auto& domain : domainAudioInputs(ctx)) {
             found = found || (domain.at("system_id") == reaction.value("system_id", 0) &&
-                domain.at("domain_name") == reaction.value("domain_name", std::string()));
+                domain.at("domain_name") == reaction.value("domain_name", std::string()) &&
+                domain.at("domain_channel") == reaction.value("domain_channel", "mixed_contact"));
         }
         if (!found) {
             throw std::invalid_argument("Audio domain binding not found; inspect audio.domains");

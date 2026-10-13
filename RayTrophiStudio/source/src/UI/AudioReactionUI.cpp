@@ -76,6 +76,18 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
             }
         }
         if (config.at("driver") == "domain_contact") {
+            const std::string channel = config.at("domain_channel");
+            if (ImGui::BeginCombo("Physics input", channel.c_str())) {
+                for (const char* choice : {"mixed_contact", "dem_contact", "fluid_flow",
+                                           "gas_flow", "mpm_deformation"}) {
+                    if (ImGui::Selectable(choice, channel == choice)) {
+                        auto edited = config;
+                        edited["domain_channel"] = choice;
+                        call(ctx, "update", {{"id", id}, {"reaction", edited}});
+                    }
+                }
+                ImGui::EndCombo();
+            }
             const std::string metric = config.at("input_metric");
             if (ImGui::BeginCombo("Contact magnitude", metric.c_str())) {
                 for (const char* choice : {"energy_j", "power_w"}) {
@@ -92,6 +104,9 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
                                       "/" + config.at("domain_name").get<std::string>();
             if (ImGui::BeginCombo("Domain binding", label.c_str())) {
                 for (const auto& domain : domains) {
+                    if (domain.at("domain_channel") != channel) {
+                        continue;
+                    }
                     const std::string choice = domain.at("system_name").get<std::string>() +
                                               " / " + domain.at("domain_name").get<std::string>();
                     if (ImGui::Selectable(choice.c_str())) {
@@ -105,25 +120,28 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
             }
             ImGui::TextWrapped("Energy: J per solver step. Power: energy / measured step duration. "
                                "Unavailable power stays silent. Position uses the measured "
-                               "contact cell centroid when available, otherwise domain center. "
-                               "Material pairs and dry-grain pour are not measured yet.");
+                               "contact centroid when available, otherwise domain center. "
+                               "DEM measures normal damping only. Fluid/gas flow and MPM "
+                               "deformation producers are pending; material pairs are unavailable.");
             for (const auto& domain : domains) {
                 if (domain.at("system_id") == config.at("system_id") &&
-                    domain.at("domain_name") == config.at("domain_name")) {
+                    domain.at("domain_name") == config.at("domain_name") &&
+                    domain.at("domain_channel") == channel) {
                     ImGui::Text("Report: %s / %.4f J", domain.at("measured").get<bool>() ?
                                 "measured" : "unavailable", domain.at("contact_energy_j").get<double>());
                     ImGui::TextWrapped("%s", domain.at("reason").get<std::string>().c_str());
                     if (!domain.at("measured").get<bool>()) {
-                        ImGui::TextWrapped("Binding is configured, but this domain has no measured "
-                                           "contact input. Current support requires a CPU mixed "
-                                           "liquid / granular step. Fluid-only flow and GPU "
-                                           "contact energy are not measured by this driver.");
+                        ImGui::TextWrapped("Binding is configured, but the selected physics input "
+                                           "has no measurement. Other inputs in this domain do "
+                                           "not substitute for it.");
                     }
                     ImGui::Text("Power: %s / %.4f W", domain.at("power_measured").get<bool>() ?
                                 "measured" : "unavailable",
                                 domain.at("contact_power_w").get<double>());
                     ImGui::TextWrapped("Position: %s",
                         domain.at("position_semantics").get<std::string>().c_str());
+                    ImGui::TextWrapped("Measurement: %s",
+                        domain.at("measurement").get<std::string>().c_str());
                     if (domain.at("audio_error") != "") {
                         ImGui::TextWrapped("Telemetry: %s",
                                            domain.at("audio_error").get<std::string>().c_str());

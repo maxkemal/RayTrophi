@@ -45,6 +45,10 @@ void ParticleSimulationSystem::rebaseRestoredGridDomainStates() {
         if (state.fluid_stats.mixed_contact_position_weight > 0.0) {
             state.fluid_stats.mixed_contact_position += delta;
         }
+        auto& grain = state.fluid_stats.grain_report;
+        if (grain.contact_damping_measured && grain.contact_damping_energy_j > 0.0) {
+            grain.contact_damping_position += delta;
+        }
 
         // Fluid particles are world-space and must come along. Velocity is a
         // DIRECTION and is left alone; translating it would inject a phantom

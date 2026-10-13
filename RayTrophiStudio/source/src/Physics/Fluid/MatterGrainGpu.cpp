@@ -1,4 +1,5 @@
 #include "Fluid/MatterGrain.h"
+#include "Fluid/MatterGrainAudioTelemetry.h"
 #include "Fluid/MatterGrainMpmContact.h"
 #include "Fluid/MatterCommonClock.h"
 #include "Fluid/MatterGrainColliderBvh.h"
@@ -90,7 +91,7 @@ std::size_t particleBytes(std::size_t capacity) {
         capacity * kListBytesPerGrain +            // Verlet neighbour list
         3 * capacity * sizeof(float) +             // list build positions
         5 * capacity * sizeof(uint32_t) +          // map + owner/mask/rest/skipped time
-        kDiagnosticWords * sizeof(uint32_t);
+        (kDiagnosticWords + kGrainAudioWords * capacity) * sizeof(uint32_t);
 }
 
 std::size_t colliderBytes(std::size_t triangles) {
@@ -161,7 +162,7 @@ bool ensureParticles(SimulationComputeContext& compute, MatterGrainGpuRuntime& r
     candidate.history_blocks = makeBuffer(compute, "grain_history_blocks",
         5 * capacity * sizeof(uint32_t));
     candidate.diagnostics = makeBuffer(compute, "grain_diagnostics",
-        kDiagnosticWords * sizeof(uint32_t));
+        (kDiagnosticWords + kGrainAudioWords * capacity) * sizeof(uint32_t));
     candidate.neighbour_list = makeBuffer(compute, "grain_neighbour_list",
         capacity * kListBytesPerGrain);
     candidate.build_positions = makeBuffer(compute, "grain_list_build_positions",
@@ -543,7 +544,8 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         (grow_collider && !ensureCollider(compute, runtime, triangle_capacity, error))) {
         return false;
     }
-    std::array<uint32_t, kDiagnosticWords> diagnostics{};
+    std::vector<uint32_t> diagnostics(kDiagnosticWords + kGrainAudioWords * count, 0u);
+    const std::size_t diagnostic_bytes = diagnostics.size() * sizeof(uint32_t);
     if (refresh_collider) {
         runtime.collider_uploaded = false;
         // Velocities follow the end positions in the same buffer (offset 9 N
@@ -687,7 +689,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         runtime.published_affines.size() == count &&
         std::memcmp(runtime.published_affines.data(), p.affine.data(), count * sizeof(AffineC)) == 0 &&
         runtime.published_masses == masses;
-    std::size_t upload_bytes = sizeof(diagnostics) + coupling_rows.size() * sizeof(float);
+    std::size_t upload_bytes = diagnostic_bytes + coupling_rows.size() * sizeof(float);
     // Unknown until this upload lands; set again below when it does.
     runtime.coupling_zero = false;
     const auto upload_start = Clock::now();
@@ -695,7 +697,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     // Substep 0 always rebuilds the neighbour lists: the grains were re-ordered
     // and born/absorbed on the host since the last frame.
     diagnostics[12] = 1u;
-    bool uploaded = compute.uploadBuffer(runtime.diagnostics, diagnostics.data(), sizeof(diagnostics));
+    bool uploaded = compute.uploadBuffer(runtime.diagnostics, diagnostics.data(), diagnostic_bytes);
     if (!resident) {
         uploaded = compute.uploadBuffer(runtime.mass, masses.data(), masses.size() * sizeof(float)) &&
             uploaded;
@@ -840,7 +842,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         count * sizeof(Vec3)) && ok;
     ok = compute.downloadBuffer(runtime.affines, new_affine.data(),
         count * sizeof(AffineC)) && ok;
-    ok = compute.downloadBuffer(runtime.diagnostics, diagnostics.data(), sizeof(diagnostics)) && ok;
+    ok = compute.downloadBuffer(runtime.diagnostics, diagnostics.data(), diagnostic_bytes) && ok;
     if (coupling && drag_out) {
         ok = compute.downloadBuffer(runtime.coupling, coupling_rows.data(),
             coupling_rows.size() * sizeof(float)) && ok;
@@ -860,7 +862,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     }
     const auto overflow = diagnostics[0];
     if (overflow & 16u) {
-        error = "grain sleep metadata layout mismatch; restart with matching C++ and shaders";
+        error = "grain sleep/audio metadata layout mismatch; use matching C++ and shaders";
         return false;
     }
     if (!ok || overflow) {
@@ -901,6 +903,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             }
         }
     }
+    reduceGrainAudioTelemetry(diagnostics, kDiagnosticWords, dt, report);
     p.position = std::move(new_position);
     p.velocity = std::move(new_velocity);
     p.affine = std::move(new_affine);
@@ -948,7 +951,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         (refresh_collider ? collider.vertices.size() * sizeof(Vec3) +
             collider.nodes.size() * sizeof(MatterGrainBvhNode) +
             collider.surface_patches.size() * sizeof(uint32_t) : 0);
-    report.download_bytes = count * (2 * sizeof(Vec3) + sizeof(AffineC)) + sizeof(diagnostics) +
+    report.download_bytes = count * (2 * sizeof(Vec3) + sizeof(AffineC)) + diagnostic_bytes +
         (coupling && drag_out ? coupling_rows.size() * sizeof(float) : 0);
     report.transfer_batches = 2 + (refresh_collider ? 1 : 0);
     report.grains = count;
