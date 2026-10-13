@@ -69,9 +69,12 @@ EditorState editorState() {
     // bottom editors that differ only by its editor mode, so asking "is the
     // timeline showing" is not enough to name what the user is looking at.
     if (ui.show_animation_panel) {
-        out.open_editors.push_back(
-            ui.timeline.getEditorMode() == TimelineEditorMode::GraphEditor
-                ? "graph_editor" : "dope_sheet");
+        switch (ui.timeline.getEditorMode()) {
+            case TimelineEditorMode::GraphEditor: out.open_editors.push_back("graph_editor"); break;
+            case TimelineEditorMode::Audio: out.open_editors.push_back("audio"); break;
+            case TimelineEditorMode::Mixer: out.open_editors.push_back("audio_mixer"); break;
+            default: out.open_editors.push_back("dope_sheet"); break;
+        }
     }
     // No `break`: the loop collects all of them. The panels are supposed to be
     // mutually exclusive, and a reader that stops at the first one would report
@@ -116,7 +119,8 @@ Result setBottomEditor(const std::string& name) {
     // the screen blank, and the caller got an error with no hint that anything
     // had changed. A failure with a side effect is worse than either a clean
     // failure or a success: it is the one outcome nobody checks for.
-    const bool known_timeline = (name == "dope_sheet" || name == "graph_editor");
+    const bool known_timeline = name == "dope_sheet" || name == "graph_editor" ||
+        name == "audio" || name == "audio_mixer";
     bool known_panel = false;
     for (const auto& entry : kBottomEditors)
         if (name == entry.name) { known_panel = true; break; }
@@ -138,10 +142,15 @@ Result setBottomEditor(const std::string& name) {
 
     if (name == "none") return Result::success();
 
-    if (name == "dope_sheet" || name == "graph_editor") {
+    if (known_timeline) {
         ui.show_animation_panel = true;
-        ui.timeline.setEditorMode(name == "graph_editor" ? TimelineEditorMode::GraphEditor
-                                                         : TimelineEditorMode::DopeSheet);
+        const auto mode = name == "audio" ? TimelineEditorMode::Audio :
+            (name == "audio_mixer" ? TimelineEditorMode::Mixer :
+             (name == "graph_editor" ? TimelineEditorMode::GraphEditor : TimelineEditorMode::DopeSheet));
+        ui.timeline.setEditorMode(mode);
+        if (name == "audio" || name == "audio_mixer") {
+            ui.tab_to_focus = "Audio";
+        }
         ui.focus_bottom_panel_next_frame = true;
         return Result::success();
     }

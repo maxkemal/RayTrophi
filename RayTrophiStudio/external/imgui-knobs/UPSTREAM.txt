@@ -1,0 +1,3 @@
+https://github.com/altschuler/imgui-knobs
+Commit: 6b4b5923129c1e8fa4cd30f8c59439643d44f22f
+Host ImGui: 1.92.8 WIP (19275)

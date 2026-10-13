@@ -11,7 +11,8 @@ from rt_ipc import RtIpc
 
 
 def check(rows, require_dem=False):
-    expected = {"mixed_contact", "dem_contact", "fluid_flow", "gas_flow", "mpm_deformation"}
+    expected = {"mixed_contact", "dem_contact", "dem_friction", "dem_rolling",
+                "fluid_flow", "gas_flow", "mpm_deformation", "mpm_fracture"}
     groups = {}
     keys = set()
     for row in rows:
@@ -22,16 +23,21 @@ def check(rows, require_dem=False):
         group[channel] = row
         assert row["signal_key"] not in keys, row
         keys.add(row["signal_key"])
-        if channel in {"fluid_flow", "gas_flow", "mpm_deformation"}:
-            assert not row["measured"] and not row["power_measured"], row
-            assert row["contact_energy_j"] == row["contact_power_w"] == 0, row
         if row["measured"]:
             duration = row["measurement_duration_seconds"]
             energy = row["contact_energy_j"]
             assert math.isfinite(duration) and duration > 0, row
             assert math.isfinite(energy) and energy >= 0, row
-            assert row["power_measured"], row
-            assert math.isclose(row["contact_power_w"], energy / duration, rel_tol=1e-6), row
+            if row["energy_measured"]:
+                assert row["power_measured"], row
+                assert math.isclose(row["contact_power_w"], energy / duration, rel_tol=1e-6), row
+            else:
+                assert energy == 0, row
+            assert math.isfinite(row["value"]) and row["value"] >= 0, row
+            if channel == "mpm_fracture":
+                assert row["value_units"] == "1/s" and not row["power_measured"], row
+            else:
+                assert row["value_units"] == "W" and row["power_measured"], row
             assert len(row["position"]) == 3 and all(map(math.isfinite, row["position"])), row
         if channel == "dem_contact" and row["measured"]:
             assert row["measurement"] == "dem_normal_damping_work_per_published_step", row

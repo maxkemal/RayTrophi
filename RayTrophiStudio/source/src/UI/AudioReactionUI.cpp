@@ -78,11 +78,19 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
         if (config.at("driver") == "domain_contact") {
             const std::string channel = config.at("domain_channel");
             if (ImGui::BeginCombo("Physics input", channel.c_str())) {
-                for (const char* choice : {"mixed_contact", "dem_contact", "fluid_flow",
-                                           "gas_flow", "mpm_deformation"}) {
+                for (const char* choice : {"mixed_contact", "dem_contact", "dem_friction",
+                                           "dem_rolling", "fluid_flow", "gas_flow",
+                                           "mpm_deformation", "mpm_fracture"}) {
                     if (ImGui::Selectable(choice, channel == choice)) {
                         auto edited = config;
                         edited["domain_channel"] = choice;
+                        if (std::string(choice) == "mpm_fracture") {
+                            edited["input_metric"] = "value";
+                        } else if (std::string(choice) == "fluid_flow" ||
+                                   std::string(choice) == "gas_flow" ||
+                                   std::string(choice) == "mpm_deformation") {
+                            edited["input_metric"] = "power_w";
+                        }
                         call(ctx, "update", {{"id", id}, {"reaction", edited}});
                     }
                 }
@@ -90,7 +98,7 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
             }
             const std::string metric = config.at("input_metric");
             if (ImGui::BeginCombo("Contact magnitude", metric.c_str())) {
-                for (const char* choice : {"energy_j", "power_w"}) {
+                  for (const char* choice : {"energy_j", "power_w", "value"}) {
                     if (ImGui::Selectable(choice, metric == choice)) {
                         auto edited = config;
                         edited["input_metric"] = choice;
@@ -121,14 +129,19 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
             ImGui::TextWrapped("Energy: J per solver step. Power: energy / measured step duration. "
                                "Unavailable power stays silent. Position uses the measured "
                                "contact centroid when available, otherwise domain center. "
-                               "DEM measures normal damping only. Fluid/gas flow and MPM "
-                               "deformation producers are pending; material pairs are unavailable.");
+                               "Flow/deformation report end-state power samples; fracture reports "
+                               "damage growth per second. Use Value for fracture. Material pairs "
+                               "are unavailable.");
             for (const auto& domain : domains) {
                 if (domain.at("system_id") == config.at("system_id") &&
                     domain.at("domain_name") == config.at("domain_name") &&
                     domain.at("domain_channel") == channel) {
-                    ImGui::Text("Report: %s / %.4f J", domain.at("measured").get<bool>() ?
+                    ImGui::Text("Report: %s", domain.at("measured").get<bool>() ?
+                                "measured" : "unavailable");
+                    ImGui::Text("Energy: %s / %.4f J", domain.at("energy_measured").get<bool>() ?
                                 "measured" : "unavailable", domain.at("contact_energy_j").get<double>());
+                    ImGui::Text("Value: %.4f %s", domain.at("value").get<double>(),
+                                domain.at("value_units").get<std::string>().c_str());
                     ImGui::TextWrapped("%s", domain.at("reason").get<std::string>().c_str());
                     if (!domain.at("measured").get<bool>()) {
                         ImGui::TextWrapped("Binding is configured, but the selected physics input "

@@ -1271,7 +1271,7 @@ static const MethodDescriptor desc_editor_get_state = {
 static const MethodRegistration reg_editor_get_state(desc_editor_get_state);
 
 static const MethodParam params_editor_set_bottom_editor[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, "none|dope_sheet|graph_editor|audio|audio_mixer|console|assets|simulation|geometry|material|terrain|anim_graph"},
 };
 static const MethodDescriptor desc_editor_set_bottom_editor = {
     "editor.set_bottom_editor", "editor",

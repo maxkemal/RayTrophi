@@ -139,6 +139,7 @@ list(APPEND SOURCES_CPP "source/src/Render/FoliageWindSystem.cpp")
 list(APPEND SOURCES_CPP "source/src/Scene/AssetRegistry.cpp")
 
 file(GLOB SOURCES_IMGUI "external/imgui/*.cpp")
+list(APPEND SOURCES_IMGUI "external/imgui-knobs/imgui-knobs.cpp")
 file(GLOB_RECURSE HEADERS "source/include/*.h" "external/imgui/*.h") # Recursive header search
 list(APPEND HEADERS "source/include/FoliageWindSystem.h")
 list(APPEND HEADERS "source/include/AssetRegistry.h")

@@ -71,7 +71,7 @@ const uint BUCKET = 16u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 25u;
+const uint REVISION = 26u;
 const uint AUDIT = 0x80000000u;
 const uint SLOT_WORDS = 7u;
 const uint FRESH = 0x80000000u;
@@ -302,6 +302,7 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     }
     float kt = uintBitsToFloat(pc.substep.z);
     tangential = kt > 0.0 ? previous_tangent+slip*history_dt : vec3(0.0);
+    vec3 tangent_trial = tangential;
     vec3 ft = damping-kt*tangential;
     float coulomb = pc.step_contact.w*fn;
     float magnitude = length(ft);
@@ -320,12 +321,14 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     float mu_r = pc.rolling.x;
     float inverse_pair_inertia = inv_inertia+other_inv_inertia;
     vec3 rt = vec3(0.0);
+    float rolling_work = 0.0;
     vec3 previous_rolling_torque = vec3(0.0);
     if (mu_r > 0.0) {
         float kr = 2.25*mu_r*mu_r*k*effective_radius*effective_radius;
         float cr = .6*sqrt(kr/inverse_pair_inertia);
         previous_rolling_torque = -kr*previous_roll;
         rolling = previous_roll+roll*history_dt;
+        vec3 rolling_trial = rolling;
         vec3 roll_damping = -cr*roll;
         rt = roll_damping-kr*rolling;
         float limit = mu_r*fn*effective_radius;
@@ -334,6 +337,10 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
             rt = roll_magnitude > 1e-12 ? rt*(limit/roll_magnitude) : vec3(0.0);
             rolling = limit > 0.0 ? -(rt-roll_damping)/kr : vec3(0.0);
         }
+        float damping_share = roll_magnitude > limit && roll_magnitude > 1e-12
+            ? limit / roll_magnitude : 1.0;
+        rolling_work = max(0.0, -dot(roll_damping, roll)) * dt * damping_share +
+            max(0.0, 0.5 * kr * (dot(rolling_trial, rolling_trial) - dot(rolling, rolling)));
     } else {
         rolling = vec3(0.0);
     }
@@ -345,6 +352,14 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     float patch_radius = min(effective_radius,sqrt(max(0.0,effective_radius*overlap)));
     float twist_limit = abs(twist_speed)/(BUDGET*dt*inverse_pair_inertia);
     float twist_torque = min(uintBitsToFloat(pc.meta.z)*fn*patch_radius,twist_limit);
+    float damping_share = magnitude > coulomb && magnitude > 1e-12 ? coulomb / magnitude : 1.0;
+    float sliding_work = max(0.0, -dot(damping, slip)) * dt * damping_share +
+        max(0.0, 0.5 * kt * (dot(tangent_trial, tangent_trial) - dot(tangential, tangential)));
+    vec3 audio_point = position(i, readBank()) + arm;
+    bool audio_pair = (key & WALL_KEY) == 0u;
+    recordContactWork(1u, audio_point, sliding_work, audio_pair);
+    recordContactWork(2u, audio_point, rolling_work + twist_torque * abs(twist_speed) * dt,
+                      audio_pair);
     torque += cross(arm,ft)+rt-sign(twist_speed)*twist_torque*n;
     if (g_probe_sleep_transfer) {
         // Remove the retained elastic preload. Only the changed, post-damping
@@ -688,6 +703,7 @@ void main() {
             }
         }
     }
+    commitContactAudio(i);
     v += dt*acceleration;
     if (drag.w > 0.0 && lift.w > 0.0) {
         // Implicit drag pair: grain (m) and its private liquid lump (M).

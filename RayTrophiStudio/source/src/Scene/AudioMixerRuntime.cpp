@@ -103,6 +103,9 @@ void AudioMixerRuntime::apply(const nlohmann::json& config) {
     for (std::size_t i = 0; i < buses_.size(); ++i) {
         ma_sound_group_set_volume(&buses_[i].group,
             AudioMixer::effectiveGain(config, AudioMixer::names()[i]));
+        ma_sound_group_set_pan_mode(&buses_[i].group, ma_pan_mode_balance);
+        ma_sound_group_set_pan(&buses_[i].group,
+            config.at(AudioMixer::names()[i]).value("pan", 0.0f));
     }
 }
 

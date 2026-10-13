@@ -1,0 +1,72 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Constants {
+    uint cells; uint blocks; uint phase; uint nx;
+    uint ny; uint nz; float voxel; float origin_x;
+    float origin_y; float origin_z;
+} pc;
+layout(set = 0, binding = 0) readonly buffer Vapour { float vapour[]; };
+layout(set = 0, binding = 1) readonly buffer Foreign { float foreign_mass[]; };
+layout(set = 0, binding = 2) readonly buffer VelocityX { float vx[]; };
+layout(set = 0, binding = 3) readonly buffer VelocityY { float vy[]; };
+layout(set = 0, binding = 4) readonly buffer VelocityZ { float vz[]; };
+struct Summary { dvec4 value; dvec4 validation; };
+layout(set = 0, binding = 5) buffer Partials { Summary partials[]; };
+layout(set = 0, binding = 6) buffer Total { Summary total; };
+shared dvec4 values[256];
+shared dvec4 validation[256];
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (pc.phase == 0u && group >= pc.blocks) {
+        return;
+    }
+    uint cell = group * 256u + lane;
+    dvec4 value = dvec4(0);
+    dvec4 check = dvec4(0);
+    if (pc.phase == 0u && cell < pc.cells) {
+        uint x = cell % pc.nx, y = (cell / pc.nx) % pc.ny;
+        uint z = cell / (pc.nx * pc.ny);
+        uint ix = x + (pc.nx + 1u) * (y + pc.ny * z);
+        uint iy = x + pc.nx * (y + (pc.ny + 1u) * z);
+        uint iz = x + pc.nx * (y + pc.ny * z);
+        dvec3 velocity = dvec3(0.5 * (vx[ix] + vx[ix + 1u]),
+            0.5 * (vy[iy] + vy[iy + pc.nx]),
+            0.5 * (vz[iz] + vz[iz + pc.nx * pc.ny]));
+        double mass = double(vapour[cell]) + double(foreign_mass[cell]);
+        if (isnan(mass) || isinf(mass) || mass < 0 || any(isnan(velocity)) ||
+            any(isinf(velocity))) {
+            check.y = 1;
+        } else if (mass > 0) {
+            double speed2 = dot(velocity, velocity);
+            double power = 0.5 * mass * speed2 * sqrt(speed2) / double(pc.voxel);
+            dvec3 position = dvec3(pc.origin_x, pc.origin_y, pc.origin_z) +
+                (dvec3(x, y, z) + 0.5) * double(pc.voxel);
+            value = dvec4(power, position * power);
+            check.x = 1;
+        }
+    } else if (pc.phase == 1u) {
+        for (uint block = lane; block < pc.blocks; block += 256u) {
+            value += partials[block].value;
+            check += partials[block].validation;
+        }
+    }
+    values[lane] = value;
+    validation[lane] = check;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            values[lane] += values[lane + stride];
+            validation[lane] += validation[lane + stride];
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        if (pc.phase == 0u) {
+            partials[group] = Summary(values[0], validation[0]);
+        } else {
+            total = Summary(values[0], validation[0]);
+        }
+    }
+}

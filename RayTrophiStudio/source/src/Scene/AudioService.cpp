@@ -1,8 +1,18 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "Audio/AudioService.h"
 #include "Audio/AudioReaction.h"
 #include "Audio/AudioEnvironment.h"
 #include "Audio/AudioThunder.h"
 #include "Audio/AudioTransport.h"
+#include "Audio/AudioClips.h"
+#include "Audio/AudioClipRuntime.h"
+#include "Audio/AudioOffline.h"
+#include "Audio/AudioPcm.h"
+#include "Audio/AudioCapture.h"
+#include "Audio/AudioWorkspaceState.h"
 
 #define MA_NO_ENCODING
 #define MA_NO_GENERATION
@@ -106,7 +116,8 @@ json emitter(const json& p) {
 
 struct AudioService::Impl {
     json data = {{"version", 1}, {"next_id", 1}, {"assets", json::array()},
-                 {"emitters", json::array()}, {"thunder", AudioThunder::validate(json::object())},
+                 {"emitters", json::array()}, {"clips", json::array()},
+                 {"thunder", AudioThunder::validate(json::object())},
                  {"playback_mode", "timeline"}, {"playback_mode_explicit", false},
                  {"mixer", AudioMixer::validate(json::object())}};
     ma_engine engine{};
@@ -127,6 +138,12 @@ struct AudioService::Impl {
     std::map<std::string, std::string> autoErrors;
     AudioThunder thunder;
     AudioTransport transport;
+    AudioClipRuntime clips;
+    AudioOfflineJob offline;
+    AudioWaveformCache waveforms;
+    AudioCapture capture;
+    json workspace = defaultAudioWorkspace();
+    bool clipsSuspended = false;
     std::set<std::string> transportHeld;
     json listenerPosition = json::array({0, 0, 0});
     std::array<float, 9> listenerPose = {0, 0, 0, 0, 0, -1, 0, 1, 0};
@@ -138,6 +155,108 @@ struct AudioService::Impl {
     };
     std::vector<ThunderVoice> thunderVoices;
     std::string thunderError;
+
+    json capturedVoice(const std::string& key, const json& source, ma_sound& sound,
+                       const json& position, const json& direction, float gain, float pitch) {
+        ma_uint64 cursor = 0;
+        ma_sound_get_cursor_in_pcm_frames(&sound, &cursor);
+        ma_uint32 rate = 0;
+        ma_sound_get_data_format(&sound, nullptr, nullptr, &rate, nullptr, 0);
+        const auto& asset = find("assets", source.at("asset_id"));
+        const double span = asset.at("duration");
+        double phase = rate ? double(cursor) / rate : 0;
+        phase = (std::min)(std::fmod(phase, span),
+                          (std::max)(0.0, std::floor(span * 48000) / 48000 - 1.0 / 48000));
+        float pan = 0;
+        if (source.value("spatial", true)) {
+            double offset[3], length2 = 0;
+            for (int axis = 0; axis < 3; ++axis) {
+                offset[axis] = position[axis].get<double>() - listenerPose[axis];
+                length2 += offset[axis] * offset[axis];
+            }
+            const double distance = std::sqrt(length2);
+            const double minimum = source.value("min_distance", 1.0);
+            const double maximum = source.value("max_distance", 100.0);
+            const double rolloff = source.value("rolloff", 1.0);
+            gain *= static_cast<float>(minimum /
+                (minimum + rolloff * (std::clamp(distance, minimum, maximum) - minimum)));
+            const double inner = source.value("cone_inner", 360.0) * 0.008726646259971648;
+            const double outer = source.value("cone_outer", 360.0) * 0.008726646259971648;
+            double directionLength2 = 0, facing = 0;
+            for (int axis = 0; axis < 3; ++axis) {
+                const double component = direction[axis].get<double>();
+                directionLength2 += component * component;
+                facing -= component * offset[axis];
+            }
+            if (distance > 1e-6 && directionLength2 > 1e-12 && outer < 3.141592653589793) {
+                const double angle = std::acos(std::clamp(
+                    facing / (distance * std::sqrt(directionLength2)), -1.0, 1.0));
+                const double blend = outer > inner ? std::clamp((angle - inner) / (outer - inner), 0.0, 1.0)
+                                                   : (angle > inner ? 1.0 : 0.0);
+                gain *= static_cast<float>(1 - blend + blend * source.value("cone_gain", 1.0));
+            }
+            const double right[3] = {
+                listenerPose[4] * listenerPose[8] - listenerPose[5] * listenerPose[7],
+                listenerPose[5] * listenerPose[6] - listenerPose[3] * listenerPose[8],
+                listenerPose[3] * listenerPose[7] - listenerPose[4] * listenerPose[6]};
+            const double rightLength = std::sqrt(right[0] * right[0] + right[1] * right[1] +
+                                                 right[2] * right[2]);
+            if (distance > 1e-6 && rightLength > 1e-6) {
+                pan = static_cast<float>(std::clamp((offset[0] * right[0] + offset[1] * right[1] +
+                    offset[2] * right[2]) / (distance * rightLength), -1.0, 1.0));
+            }
+        }
+        return {{"key", key}, {"asset_id", source.at("asset_id")}, {"gain", gain},
+            {"pitch", pitch}, {"pan", pan}, {"phase_seconds", phase},
+            {"loop", source.value("loop", false)},
+            {"bus", source.value("bus", std::string("Weather"))}};
+    }
+
+    void sampleCapture() {
+        if (capture.status().at("state") != "recording" || transport.paused()) {
+            return;
+        }
+        json voices = json::array();
+        for (const auto& [id, sound] : sounds) {
+            if (!ma_sound_is_playing(sound.get())) {
+                continue;
+            }
+            const auto& source = find("emitters", id);
+            json position = poses.contains(id) ? poses.at(id).at("position") : source.at("position");
+            const json direction = poses.contains(id) ? poses.at(id).at("direction") : source.at("direction");
+            float gain = source.at("gain"), pitch = source.at("pitch");
+            if (const auto control = controls.find(id); control != controls.end()) {
+                gain *= control->second.gain;
+                pitch *= control->second.pitch;
+                if (!control->second.position.is_null()) {
+                    position = control->second.position;
+                }
+            }
+            voices.push_back(capturedVoice(id, source, *sound, position, direction, gain, pitch));
+        }
+        for (const auto& voice : thunderVoices) {
+            if (ma_sound_is_playing(voice.sound.get())) {
+                voices.push_back(capturedVoice("thunder/" + voice.event.at("key").get<std::string>(),
+                    voice.event, *voice.sound, voice.event.at("position"), json::array({0, 0, -1}),
+                    voice.event.at("gain"), voice.event.at("pitch")));
+            }
+        }
+        capture.sample(transport.time(), voices);
+    }
+
+    std::size_t nativeDecodedBytes() {
+        double result = 0;
+        for (const auto& voice : thunderVoices) {
+            result += voice.bytes;
+        }
+        for (const auto& [id, voice] : sounds) {
+            const auto& source = find("emitters", id);
+            const auto& asset = find("assets", source.at("asset_id"));
+            result += asset.at("duration").get<double>() * 48000 *
+                      asset.at("channels").get<unsigned>() * sizeof(float);
+        }
+        return static_cast<std::size_t>(result);
+    }
 
     void holdTransport() {
         for (auto& [id, sound] : sounds) {
@@ -185,6 +304,8 @@ struct AudioService::Impl {
     }
 
     void stopAll() {
+        clips.clear();
+        clipsSuspended = true;
         routedBuses.clear();
         transportHeld.clear();
         stopThunder();
@@ -304,6 +425,7 @@ struct AudioService::Impl {
             const auto& a = find("assets", e.at("asset_id"));
             residentBytes += a.at("duration").get<double>() * 48000 * a.at("channels").get<unsigned>() * 4;
         }
+        residentBytes += clips.bytes();
         require(residentBytes <= 512 * 1024 * 1024, "Stage 1 decoded audio budget reached (512 MiB)");
         ensureDevice();
         auto sound = std::make_unique<ma_sound>();
@@ -335,11 +457,21 @@ const std::vector<std::string>& AudioService::operations() {
         "duplicate", "remove", "play", "pause", "stop", "stop_all", "preview", "preview_stop",
         "preview_mute", "preview_file", "append", "signal_set", "signals_clear",
         "environment_setup", "resume_automatic", "domains", "thunder_setup", "thunder_update",
-        "thunder_event", "playback_update", "mixer_get", "mixer_update", "mixer_reset_peaks"};
+        "thunder_event", "playback_update", "mixer_get", "mixer_update", "mixer_reset_peaks",
+        "waveform", "clip_list", "clip_create", "clip_update", "clip_remove", "clip_duplicate",
+        "clip_trim", "clip_split", "export_start", "export_status", "export_cancel",
+        "capture_start", "capture_finish", "capture_status", "capture_cancel",
+        "workspace_get", "workspace_update"};
     return names;
 }
 
 bool AudioService::isAuthoring(const std::string& op) {
+    if (op == "capture_finish") {
+        return true;
+    }
+    if (op.rfind("clip_", 0) == 0) {
+        return op != "clip_list";
+    }
     return op == "mixer_update" || op == "playback_update" ||
            op == "thunder_setup" || op == "thunder_update" ||
            op == "environment_setup" || op == "append" || op == "asset_import" ||
@@ -348,8 +480,36 @@ bool AudioService::isAuthoring(const std::string& op) {
 }
 
 std::vector<std::string> AudioService::parameters(const std::string& op) {
+    if (op == "workspace_update") {
+        return {"selected_clip", "snap", "waveforms", "inspector_open"};
+    }
+    if (op == "workspace_get") {
+        return {};
+    }
+    if (op == "capture_start") {
+        return {"name", "max_seconds"};
+    }
+    if (op == "capture_finish" || op == "capture_status" || op == "capture_cancel") {
+        return {};
+    }
+    if (op.rfind("clip_", 0) == 0) {
+        auto fields = AudioClips::parameters(op);
+        if (op == "clip_create") {
+            fields.erase(std::remove(fields.begin(), fields.end(), "id"), fields.end());
+        }
+        return fields;
+    }
+    if (op == "waveform") {
+        return {"id", "points"};
+    }
+    if (op == "export_start") {
+        return AudioOfflineJob::parameters();
+    }
+    if (op == "export_status" || op == "export_cancel") {
+        return {};
+    }
     if (op == "mixer_update") {
-        return {"bus", "gain", "muted", "solo"};
+        return {"bus", "gain", "pan", "muted", "solo"};
     }
     if (op == "playback_update") {
         return {"mode"};
@@ -381,7 +541,7 @@ std::vector<std::string> AudioService::parameters(const std::string& op) {
         return {"muted"};
     }
     if (op == "signal_set") {
-        return {"key", "value", "flow_kg_s", "speed_mps", "position", "source_material",
+        return {"key", "value", "activity_value", "flow_kg_s", "speed_mps", "position", "source_material",
                 "target_material", "ttl_seconds", "power_w"};
     }
     if (op == "environment_setup" || op == "thunder_setup") {
@@ -410,6 +570,58 @@ json AudioService::invoke(const std::string& op, const json& p) {
     for (auto it = p.begin(); it != p.end(); ++it) {
         require(std::find(allowed.begin(), allowed.end(), it.key()) != allowed.end(),
                 "Unknown audio parameter: " + it.key());
+    }
+    if (op == "workspace_get") {
+        return s.workspace;
+    }
+    if (op == "workspace_update") {
+        s.workspace = updateAudioWorkspace(s.workspace, p, s.data.value("clips", json::array()));
+        return s.workspace;
+    }
+    if (op == "clip_list") {
+        return s.data.value("clips", json::array());
+    }
+    if (op == "capture_start") {
+        require(s.transport.timeline(), "Scene-clock capture requires timeline playback mode");
+        return s.capture.start(s.transport.time(), p);
+    }
+    if (op == "capture_finish") {
+        const auto result = s.capture.finish(s.transport.time(), s.data);
+        s.clips.clear();
+        s.clipsSuspended = false;
+        return result;
+    }
+    if (op == "capture_cancel") {
+        s.capture.cancel();
+        return s.capture.status();
+    }
+    if (op == "capture_status") {
+        return s.capture.status();
+    }
+    if (op.rfind("clip_", 0) == 0) {
+        const auto result = AudioClips::mutate(s.data, op, p);
+        if (op == "clip_remove" && s.workspace.at("selected_clip") == p.at("id")) {
+            s.workspace["selected_clip"] = "";
+        }
+        s.clips.clear();
+        s.clipsSuspended = false;
+        return result;
+    }
+    if (op == "waveform") {
+        require(!p.contains("points") || (p.at("points").is_number_integer() &&
+                p.at("points").get<double>() >= 16 && p.at("points").get<double>() <= 4096),
+                "Waveform points must be an integer in 16..4096");
+        return s.waveforms.get(s.find("assets", p.at("id")), p.value("points", 512u));
+    }
+    if (op == "export_start") {
+        return s.offline.start(s.data, p);
+    }
+    if (op == "export_cancel") {
+        s.offline.cancel();
+        return s.offline.status();
+    }
+    if (op == "export_status") {
+        return s.offline.status();
     }
     if (op == "mixer_get") {
         json buses = json::array();
@@ -460,6 +672,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
         return {{"mode", mode}};
     }
     if (op == "resume_automatic") {
+        s.clipsSuspended = false;
         if (s.preview) {
             ma_sound_uninit(s.preview.get());
             s.preview.reset();
@@ -583,6 +796,8 @@ json AudioService::invoke(const std::string& op, const json& p) {
                 {"reaction_runtime", s.reactions.status()}, {"automatic_errors", s.autoErrors},
                 {"automatic_suspended", s.suspended}, {"thunder_runtime", s.thunder.status()},
                 {"thunder_voices", thunderVoices}, {"thunder_error", s.thunderError},
+                {"clip_runtime", s.clips.status()}, {"export", s.offline.status()},
+                {"capture", s.capture.status()},
                 {"playback_runtime", s.transport.status()}, {"transport_held_sources", s.transportHeld}};
     }
     if (op == "asset_import" || op == "asset_relink") {
@@ -641,6 +856,13 @@ json AudioService::invoke(const std::string& op, const json& p) {
             if (!p.contains("tags")) {
                 asset["tags"] = old.value("tags", json::array());
             }
+            json assets = s.data.at("assets");
+            for (auto& entry : assets) {
+                if (entry.at("id") == asset.at("id")) {
+                    entry = asset;
+                }
+            }
+            AudioClips::validateCollection(s.data.value("clips", json::array()), assets);
             s.stopAll();
             old = asset;
             for (const auto& e : s.data.at("emitters")) {
@@ -664,6 +886,9 @@ json AudioService::invoke(const std::string& op, const json& p) {
         s.find("assets", id);
         for (const auto& e : s.data["emitters"]) {
             require(e.at("asset_id") != id, "Asset is referenced by an emitter");
+        }
+        for (const auto& clip : s.data.value("clips", json::array())) {
+            require(clip.at("asset_id") != id, "Asset is referenced by a timeline clip");
         }
         s.stopAll();
         auto& assets = s.data["assets"];
@@ -802,7 +1027,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
                         ++it;
                     }
                 }
-                require(s.sounds.size() + s.thunderVoices.size() < 32,
+                require(s.sounds.size() + s.thunderVoices.size() + s.clips.voices() < 32,
                         "Stage 1 resident voice limit reached (32)");
                 auto sound = s.load(s.find("assets", e.at("asset_id")), e.at("bus"));
                 s.apply(*sound, e);
@@ -849,6 +1074,10 @@ json AudioService::snapshot() const {
 }
 
 void AudioService::clear() {
+    impl_->workspace = defaultAudioWorkspace();
+    impl_->capture.cancel();
+    impl_->offline.cancel();
+    impl_->waveforms.clear();
     impl_->stopAll();
     impl_->poses.clear();
     impl_->reactions.clear();
@@ -858,7 +1087,7 @@ void AudioService::clear() {
     impl_->autoErrors.clear();
     ++impl_->generation;
     impl_->data = {{"version", 1}, {"next_id", 1}, {"assets", json::array()},
-                   {"emitters", json::array()},
+                   {"emitters", json::array()}, {"clips", json::array()},
                    {"thunder", AudioThunder::validate(json::object())},
                    {"playback_mode", "timeline"}, {"playback_mode_explicit", false},
                    {"mixer", AudioMixer::validate(json::object())}};
@@ -927,6 +1156,11 @@ void AudioService::restore(const json& input, const std::filesystem::path& base)
         candidate.validateAsset(e);
     }
     candidate.data["thunder"] = AudioThunder::validate(input.value("thunder", json::object()));
+    candidate.data["clips"] = AudioClips::validateCollection(
+        input.value("clips", json::array()), candidate.data.at("assets"));
+    for (const auto& clip : candidate.data["clips"]) {
+        checkId(clip, "audio_clip_");
+    }
     candidate.data["mixer"] = AudioMixer::validate(input.value("mixer", json::object()));
     const auto mode = AudioTransport::validateMode(input.value("playback_mode", json("timeline")));
     const bool explicitMode = input.value("playback_mode_explicit", false);
@@ -934,6 +1168,9 @@ void AudioService::restore(const json& input, const std::filesystem::path& base)
     candidate.data["playback_mode_explicit"] = explicitMode;
     candidate.validateThunderAssets(candidate.data.at("thunder"));
     // Validate the complete candidate before replacing live data. Missing files are retained.
+    impl_->capture.cancel();
+    impl_->offline.cancel();
+    impl_->waveforms.clear();
     impl_->stopAll();
     impl_->poses.clear();
     impl_->reactions.clear();
@@ -943,6 +1180,13 @@ void AudioService::restore(const json& input, const std::filesystem::path& base)
     impl_->autoErrors.clear();
     ++impl_->generation;
     impl_->data = std::move(candidate.data);
+    bool selectedClipExists = false;
+    for (const auto& clip : impl_->data.at("clips")) {
+        selectedClipExists = selectedClipExists || clip.at("id") == impl_->workspace.at("selected_clip");
+    }
+    if (!selectedClipExists) {
+        impl_->workspace["selected_clip"] = "";
+    }
     impl_->mixer.apply(impl_->data.at("mixer"));
     impl_->mixer.resetPeaks();
     impl_->transport.configure(impl_->data.at("playback_mode"));
@@ -1079,7 +1323,8 @@ void AudioService::tickThunder() {
     for (const auto& event : s.thunder.due()) {
         try {
             require(!s.preview, "Thunder skipped during asset audition");
-            require(s.thunderVoices.size() < 8 && s.sounds.size() + s.thunderVoices.size() < 32,
+            require(s.thunderVoices.size() < 8 &&
+                    s.sounds.size() + s.thunderVoices.size() + s.clips.voices() < 32,
                     "Thunder voice budget reached (8 thunder / 32 total)");
             const auto asset = s.find("assets", event.at("asset_id"));
             auto sound = s.load(asset, "Weather");
@@ -1103,6 +1348,12 @@ void AudioService::tickThunder() {
             s.thunderError = error.what();
         }
     }
+    try {
+        s.sampleCapture();
+    } catch (const std::exception& error) {
+        s.capture.cancel();
+        s.status = std::string("Audio capture stopped: ") + error.what();
+    }
 }
 std::uint64_t AudioService::generation() const {
     return impl_->generation;
@@ -1114,6 +1365,7 @@ bool AudioService::transportPaused() const {
 
 void AudioService::syncTransport(double seconds, bool playing) {
     auto& s = *impl_;
+    s.offline.tick();
     const auto step = s.transport.advance(seconds, playing);
     if (s.transport.timeline() && step.seek) {
         s.stopAll();
@@ -1121,6 +1373,7 @@ void AudioService::syncTransport(double seconds, bool playing) {
         s.controls.clear();
         s.suspended.clear();
         s.thunder.resume();
+        s.clipsSuspended = false;
         ++s.generation;
     }
     s.thunder.clock(s.transport.timeline(), s.transport.time());
@@ -1129,5 +1382,22 @@ void AudioService::syncTransport(double seconds, bool playing) {
         invoke("resume_automatic", json::object());
     }
     s.holdTransport();
+    if (!s.preview && !s.clipsSuspended && s.data.contains("clips") && !s.data.at("clips").empty()) {
+        try {
+            if (playing) {
+                s.ensureDevice();
+            }
+            if (s.initialized) {
+                const auto otherVoices = s.sounds.size() + s.thunderVoices.size();
+                const auto otherBytes = s.nativeDecodedBytes();
+                constexpr std::size_t budget = 512ULL * 1024 * 1024;
+                s.clips.tick(s.data, s.engine, s.mixer, seconds, playing,
+                             otherVoices < 32 ? 32 - otherVoices : 0,
+                             otherBytes < budget ? budget - otherBytes : 0);
+            }
+        } catch (const std::exception& error) {
+            s.status = error.what();
+        }
+    }
 }
 } // namespace audio

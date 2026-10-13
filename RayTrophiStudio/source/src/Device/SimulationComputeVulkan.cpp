@@ -575,6 +575,7 @@ public:
         if (!m_has_shader_float64 &&
             (kernel == "sim_inventory_conserve" ||
              kernel == "sim_inventory_summary" ||
+             kernel == "sim_audio_gas_flow" ||
              kernel == "sim_inventory_surface_exchange" ||
              kernel.rfind("sim_sparse_pressure_", 0) == 0 ||
              (kernel == "sim_fluid_cg_dot" ||
@@ -1219,6 +1220,7 @@ private:
             { "sim_inventory_deposit", "sim_inventory_deposit.spv", 3, 4 },
             { "sim_inventory_momentum", "sim_inventory_momentum.spv", 7, 20 },
             { "sim_inventory_summary", "sim_inventory_summary.spv", 4, 36 },
+            { "sim_audio_gas_flow", "sim_audio_gas_flow.spv", 7, 40 },
             { "sim_inventory_surface_exchange", "sim_inventory_surface_exchange.spv", 11, 40 },
             { "sim_inventory_surface_commit", "sim_inventory_surface_commit.spv", 8, 8 },
             { "sim_inventory_saturation", "sim_inventory_saturation.spv", 11, 112 },

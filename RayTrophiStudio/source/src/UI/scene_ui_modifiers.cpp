@@ -1,4 +1,5 @@
 #include "scene_ui.h"
+#include "UI/AudioWorkspaceUI.h"
 #include "Api/RtApi.h"
 #include "MeshEdit/ProfileSplineEditor.h"
 #include "ui_modern.h"
@@ -4484,6 +4485,9 @@ void SceneUI::drawPaintChannelTextureSlots(UIContext& ctx, Paint::MeshPaintAdapt
 }
 
 bool SceneUI::shouldShowPaintBrushDock() const {
+    if (active_properties_tab == 15) {
+        return false;
+    }
     if (active_properties_tab == 8 && show_hair_tab) {
         return true;
     }
@@ -6095,6 +6099,10 @@ void SceneUI::drawEditToolControls(UIContext& ctx, const std::shared_ptr<Triangl
 }
 
 void SceneUI::drawPaintBrushDock(UIContext& ctx) {
+    if (active_properties_tab == 15) {
+        AudioUI::drawInspectorDock(ctx);
+        return;
+    }
     if (!shouldShowPaintBrushDock()) {
         return;
     }

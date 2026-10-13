@@ -1,0 +1,669 @@
+{
+  "before": {
+    "crossover_m": 3000.0,
+    "enabled": true,
+    "far_assets": [
+      "audio_asset_2",
+      "audio_asset_3",
+      "audio_asset_4",
+      "audio_asset_5"
+    ],
+    "gain": 1.0,
+    "max_distance_m": 30000.0,
+    "near_assets": [
+      "audio_asset_6",
+      "audio_asset_7",
+      "audio_asset_8"
+    ],
+    "reference_distance_m": 500.0,
+    "sound_speed_mps": 343.0
+  },
+  "before_playback": "timeline",
+  "after": {
+    "crossover_m": 3000.0,
+    "enabled": true,
+    "far_assets": [
+      "audio_asset_17",
+      "audio_asset_18"
+    ],
+    "gain": 1.350000023841858,
+    "max_distance_m": 30000.0,
+    "near_assets": [
+      "audio_asset_15",
+      "audio_asset_16"
+    ],
+    "reference_distance_m": 750.0,
+    "sound_speed_mps": 343.0
+  },
+  "assets": [
+    {
+      "id": "rt_cc0_storm_crack_tail_a_mono",
+      "name": "Storm lightning crack and long natural thunder tail A",
+      "type": "asset",
+      "assetKind": "audio",
+      "category": "audio",
+      "subcategory": "storm_thunder",
+      "format": "wav",
+      "entry": "storm_crack_tail_a_mono.wav",
+      "description": "Storm lightning crack and long natural thunder tail A",
+      "license": "CC0-1.0",
+      "source": "https://freesound.org/people/davidhrivnak/sounds/328391/",
+      "author": "davidhrivnak",
+      "tags": [
+        "weather",
+        "thunder",
+        "field-recording",
+        "mono",
+        "cc0",
+        "near"
+      ],
+      "version": 1,
+      "duration": 17.582083333333333,
+      "channels": 1,
+      "sampleRate": 48000,
+      "loopSuitable": false,
+      "upstream_download": "https://cdn.freesound.org/previews/328/328391_817470-hq.mp3",
+      "processing": "Public HQ preview decoded to mono 48kHz; rain lead-in removed at 7.456000s; peak scaled to 0.60; 1ms/1s edge fades",
+      "packaged_sha256": "7b7b94c40bff878743dd2314509d081cd39310bae5a06ea80f32b5bdb157873d",
+      "peak_dbfs": -4.436974992327128,
+      "rms_dbfs": -19.876081995011884
+    },
+    {
+      "id": "rt_cc0_storm_crack_tail_b_mono",
+      "name": "Storm lightning crack and long natural thunder tail B (derived pitch variation)",
+      "type": "asset",
+      "assetKind": "audio",
+      "category": "audio",
+      "subcategory": "storm_thunder",
+      "format": "wav",
+      "entry": "storm_crack_tail_b_mono.wav",
+      "description": "Storm lightning crack and long natural thunder tail B (derived pitch variation)",
+      "license": "CC0-1.0",
+      "source": "https://freesound.org/people/davidhrivnak/sounds/328391/",
+      "author": "davidhrivnak",
+      "tags": [
+        "weather",
+        "thunder",
+        "field-recording",
+        "mono",
+        "cc0",
+        "near"
+      ],
+      "version": 1,
+      "duration": 18.3146875,
+      "channels": 1,
+      "sampleRate": 48000,
+      "loopSuitable": false,
+      "upstream_download": "https://cdn.freesound.org/previews/328/328391_817470-hq.mp3",
+      "processing": "Same recording as A; duration x25/24 and corresponding lower pitch; peak scaled to 0.60; 1ms/1s edge fades",
+      "packaged_sha256": "debe8d9d123e7b8c3b4ef0b71c75e2c7b1c3be52314a10653a1bd23e230d4b4d",
+      "peak_dbfs": -4.436974992327128,
+      "rms_dbfs": -19.873304717763222
+    },
+    {
+      "id": "rt_cc0_storm_deep_roll_a_mono",
+      "name": "Storm deep long-distance thunder roll A",
+      "type": "asset",
+      "assetKind": "audio",
+      "category": "audio",
+      "subcategory": "storm_thunder",
+      "format": "wav",
+      "entry": "storm_deep_roll_a_mono.wav",
+      "description": "Storm deep long-distance thunder roll A",
+      "license": "CC0-1.0",
+      "source": "https://freesound.org/people/davidhrivnak/sounds/328391/",
+      "author": "davidhrivnak",
+      "tags": [
+        "weather",
+        "thunder",
+        "field-recording",
+        "mono",
+        "cc0",
+        "far"
+      ],
+      "version": 1,
+      "duration": 20.9310625,
+      "channels": 1,
+      "sampleRate": 48000,
+      "loopSuitable": false,
+      "upstream_download": "https://cdn.freesound.org/previews/328/328391_817470-hq.mp3",
+      "processing": "Same trimmed recording; 850Hz low-pass, duration x25/21 and corresponding lower pitch; peak scaled to 0.60; 1ms/1s edge fades",
+      "packaged_sha256": "95617586175eff90b3631687b4e5e75e17b3116561ac3132ced5679cb977b568",
+      "peak_dbfs": -4.436974992327128,
+      "rms_dbfs": -19.968289890890276
+    },
+    {
+      "id": "rt_cc0_storm_deep_roll_b_mono",
+      "name": "Storm deep long-distance thunder roll B (derived pitch variation)",
+      "type": "asset",
+      "assetKind": "audio",
+      "category": "audio",
+      "subcategory": "storm_thunder",
+      "format": "wav",
+      "entry": "storm_deep_roll_b_mono.wav",
+      "description": "Storm deep long-distance thunder roll B (derived pitch variation)",
+      "license": "CC0-1.0",
+      "source": "https://freesound.org/people/davidhrivnak/sounds/328391/",
+      "author": "davidhrivnak",
+      "tags": [
+        "weather",
+        "thunder",
+        "field-recording",
+        "mono",
+        "cc0",
+        "far"
+      ],
+      "version": 1,
+      "duration": 20.0938125,
+      "channels": 1,
+      "sampleRate": 48000,
+      "loopSuitable": false,
+      "upstream_download": "https://cdn.freesound.org/previews/328/328391_817470-hq.mp3",
+      "processing": "Same trimmed recording; 850Hz low-pass, duration x8/7 and corresponding lower pitch; peak scaled to 0.60; 1ms/1s edge fades",
+      "packaged_sha256": "3e69d3ca624bcd21fa4523375d135313783c26680f303da7eba8687e2f8398c0",
+      "peak_dbfs": -4.436974992327128,
+      "rms_dbfs": -19.96155398845007
+    }
+  ],
+  "probe": {
+    "near_event": {
+      "event": {
+        "asset_id": "audio_asset_15",
+        "delay_seconds": 0.2915451895043732,
+        "distance_m": 100.0,
+        "gain": 1.322724461555481,
+        "intensity": 28.8,
+        "key": "storm_pack_near_17ef673c",
+        "max_distance": 30000.0,
+        "min_distance": 750.0,
+        "pitch": 1.0407999753952026,
+        "position": [
+          -5851.14892578125,
+          389.90118408203125,
+          -2555.531494140625
+        ]
+      },
+      "queued": true
+    },
+    "far_event": {
+      "event": {
+        "asset_id": "audio_asset_18",
+        "delay_seconds": 10.204081632653061,
+        "distance_m": 3500.0,
+        "gain": 1.322724461555481,
+        "intensity": 28.8,
+        "key": "storm_pack_far_17ef673c",
+        "max_distance": 30000.0,
+        "min_distance": 750.0,
+        "pitch": 0.9688000082969666,
+        "position": [
+          -2451.14892578125,
+          389.90118408203125,
+          -2555.531494140625
+        ]
+      },
+      "queued": true
+    },
+    "near_status": {
+      "automatic_errors": {},
+      "automatic_suspended": [],
+      "device": "ready",
+      "playback_runtime": {
+        "dt_seconds": 0.12316309660673141,
+        "mode": "continuous",
+        "paused": false,
+        "playing": false,
+        "seek_count": 0,
+        "time_seconds": 2.5416667461395264
+      },
+      "preview_muted": false,
+      "reaction_runtime": {
+        "outputs": {
+          "audio_source_10": {
+            "envelope": 0.9990543723106384,
+            "gain_multiplier": 0.999527096748352,
+            "input": 60.0,
+            "pitch_multiplier": 1.0,
+            "position": null
+          },
+          "audio_source_12": {
+            "envelope": 0.9990543723106384,
+            "gain_multiplier": 0.999527096748352,
+            "input": 1.0,
+            "pitch_multiplier": 1.0,
+            "position": null
+          }
+        },
+        "signals": {}
+      },
+      "resolved_poses": {
+        "audio_source_1": {
+          "direction": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "position": [
+            0.0,
+            -27.862152099609375,
+            4232.84228515625
+          ],
+          "valid": true
+        },
+        "audio_source_10": {
+          "direction": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "position": [
+            0.0,
+            492.3084716796875,
+            943.1817626953125
+          ],
+          "valid": true
+        },
+        "audio_source_12": {
+          "direction": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "position": [
+            0.0,
+            0.0,
+            3335.6572265625
+          ],
+          "valid": true
+        }
+      },
+      "sample_rate": 48000,
+      "thunder_error": "",
+      "thunder_runtime": {
+        "dropped_queue_full": 0,
+        "pending": [
+          {
+            "asset_id": "audio_asset_18",
+            "delay_seconds": 10.204081632653061,
+            "distance_m": 3500.0,
+            "gain": 1.322724461555481,
+            "intensity": 28.8,
+            "key": "storm_pack_far_17ef673c",
+            "max_distance": 30000.0,
+            "min_distance": 750.0,
+            "pitch": 0.9688000082969666,
+            "position": [
+              -2451.14892578125,
+              389.90118408203125,
+              -2555.531494140625
+            ],
+            "remaining_seconds": 8.838283632649109
+          }
+        ],
+        "seen_count": 2,
+        "suspended": false
+      },
+      "thunder_voices": [
+        {
+          "asset_id": "audio_asset_15",
+          "cursor_frames": 55453,
+          "delay_seconds": 0.2915451895043732,
+          "distance_m": 100.0,
+          "gain": 1.322724461555481,
+          "intensity": 28.8,
+          "key": "storm_pack_near_17ef673c",
+          "max_distance": 30000.0,
+          "min_distance": 750.0,
+          "pitch": 1.0407999753952026,
+          "playing": true,
+          "position": [
+            -5851.14892578125,
+            389.90118408203125,
+            -2555.531494140625
+          ],
+          "timeline_held": false
+        }
+      ],
+      "transport_held_sources": [],
+      "voice_limit": 32,
+      "voices": [
+        {
+          "cursor_frames": 81600,
+          "id": "audio_source_10",
+          "playing": true,
+          "timeline_held": false
+        },
+        {
+          "cursor_frames": 81600,
+          "id": "audio_source_12",
+          "playing": true,
+          "timeline_held": false
+        }
+      ]
+    },
+    "far_status": {
+      "automatic_errors": {},
+      "automatic_suspended": [],
+      "device": "ready",
+      "playback_runtime": {
+        "dt_seconds": 0.1210964024066925,
+        "mode": "continuous",
+        "paused": false,
+        "playing": false,
+        "seek_count": 0,
+        "time_seconds": 2.5416667461395264
+      },
+      "preview_muted": false,
+      "reaction_runtime": {
+        "outputs": {
+          "audio_source_10": {
+            "envelope": 0.9999999403953552,
+            "gain_multiplier": 0.9999999403953552,
+            "input": 60.0,
+            "pitch_multiplier": 1.0,
+            "position": null
+          },
+          "audio_source_12": {
+            "envelope": 0.9999999403953552,
+            "gain_multiplier": 0.9999999403953552,
+            "input": 1.0,
+            "pitch_multiplier": 1.0,
+            "position": null
+          }
+        },
+        "signals": {}
+      },
+      "resolved_poses": {
+        "audio_source_1": {
+          "direction": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "position": [
+            0.0,
+            -27.862152099609375,
+            4232.84228515625
+          ],
+          "valid": true
+        },
+        "audio_source_10": {
+          "direction": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "position": [
+            0.0,
+            492.3084716796875,
+            943.1817626953125
+          ],
+          "valid": true
+        },
+        "audio_source_12": {
+          "direction": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "position": [
+            0.0,
+            0.0,
+            3335.6572265625
+          ],
+          "valid": true
+        }
+      },
+      "sample_rate": 48000,
+      "thunder_error": "",
+      "thunder_runtime": {
+        "dropped_queue_full": 0,
+        "pending": [],
+        "seen_count": 2,
+        "suspended": false
+      },
+      "thunder_voices": [
+        {
+          "asset_id": "audio_asset_15",
+          "cursor_frames": 562031,
+          "delay_seconds": 0.2915451895043732,
+          "distance_m": 100.0,
+          "gain": 1.322724461555481,
+          "intensity": 28.8,
+          "key": "storm_pack_near_17ef673c",
+          "max_distance": 30000.0,
+          "min_distance": 750.0,
+          "pitch": 1.0407999753952026,
+          "playing": true,
+          "position": [
+            -5851.14892578125,
+            389.90118408203125,
+            -2555.531494140625
+          ],
+          "timeline_held": false
+        },
+        {
+          "asset_id": "audio_asset_18",
+          "cursor_frames": 57663,
+          "delay_seconds": 10.204081632653061,
+          "distance_m": 3500.0,
+          "gain": 1.322724461555481,
+          "intensity": 28.8,
+          "key": "storm_pack_far_17ef673c",
+          "max_distance": 30000.0,
+          "min_distance": 750.0,
+          "pitch": 0.9688000082969666,
+          "playing": true,
+          "position": [
+            -2451.14892578125,
+            389.90118408203125,
+            -2555.531494140625
+          ],
+          "timeline_held": false
+        }
+      ],
+      "transport_held_sources": [],
+      "voice_limit": 32,
+      "voices": [
+        {
+          "cursor_frames": 567840,
+          "id": "audio_source_10",
+          "playing": true,
+          "timeline_held": false
+        },
+        {
+          "cursor_frames": 240166,
+          "id": "audio_source_12",
+          "playing": true,
+          "timeline_held": false
+        }
+      ]
+    },
+    "near_mixer": {
+      "audition_bypasses_mixer": true,
+      "buses": [
+        {
+          "effective_gain": 1.0,
+          "gain": 1.0,
+          "meter": {
+            "overload_blocks": 0,
+            "peak": 0.2520574629306793,
+            "peak_dbfs": -11.970008850097656,
+            "peak_hold_dbfs": -2.3716907501220703,
+            "ready": true,
+            "rms": 0.07353687286376953,
+            "rms_dbfs": -22.669897079467773
+          },
+          "muted": false,
+          "name": "Master",
+          "output_gain": 1.0,
+          "solo": false
+        },
+        {
+          "effective_gain": 1.0,
+          "gain": 1.0,
+          "meter": {
+            "overload_blocks": 0,
+            "peak": 0.2520574629306793,
+            "peak_dbfs": -11.970008850097656,
+            "peak_hold_dbfs": -2.3716907501220703,
+            "ready": true,
+            "rms": 0.07362036406993866,
+            "rms_dbfs": -22.66004180908203
+          },
+          "muted": false,
+          "name": "Weather",
+          "output_gain": 1.0,
+          "solo": false
+        },
+        {
+          "effective_gain": 1.0,
+          "gain": 1.0,
+          "meter": {
+            "overload_blocks": 0,
+            "peak": 0.0,
+            "peak_dbfs": -120.0,
+            "peak_hold_dbfs": -120.0,
+            "ready": true,
+            "rms": 0.0,
+            "rms_dbfs": -120.0
+          },
+          "muted": false,
+          "name": "Effects",
+          "output_gain": 1.0,
+          "solo": false
+        },
+        {
+          "effective_gain": 1.0,
+          "gain": 1.0,
+          "meter": {
+            "overload_blocks": 0,
+            "peak": 0.0,
+            "peak_dbfs": -120.0,
+            "peak_hold_dbfs": -120.0,
+            "ready": true,
+            "rms": 0.0,
+            "rms_dbfs": -120.0
+          },
+          "muted": false,
+          "name": "Ambience",
+          "output_gain": 1.0,
+          "solo": false
+        },
+        {
+          "effective_gain": 1.0,
+          "gain": 1.0,
+          "meter": {
+            "overload_blocks": 0,
+            "peak": 0.0,
+            "peak_dbfs": -120.0,
+            "peak_hold_dbfs": -120.0,
+            "ready": true,
+            "rms": 0.0,
+            "rms_dbfs": -120.0
+          },
+          "muted": false,
+          "name": "Music",
+          "output_gain": 1.0,
+          "solo": false
+        }
+      ],
+      "direct_master_gain": 1.0,
+      "meter_stage": "post_bus_fader_before_preview_mute",
+      "output_muted": false
+    },
+    "far_mixer": {
+      "audition_bypasses_mixer": true,
+      "buses": [
+        {
+          "effective_gain": 1.0,
+          "gain": 1.0,
+          "meter": {
+            "overload_blocks": 0,
+            "peak": 0.1330069899559021,
+            "peak_dbfs": -17.522510528564453,
+            "peak_hold_dbfs": -2.3716907501220703,
+            "ready": true,
+            "rms": 0.04511035606265068,
+            "rms_dbfs": -26.914474487304688
+          },
+          "muted": false,
+          "name": "Master",
+          "output_gain": 1.0,
+          "solo": false
+        },
+        {
+          "effective_gain": 1.0,
+          "gain": 1.0,
+          "meter": {
+            "overload_blocks": 0,
+            "peak": 0.1330069899559021,
+            "peak_dbfs": -17.522510528564453,
+            "peak_hold_dbfs": -2.3716907501220703,
+            "ready": true,
+            "rms": 0.04510452598333359,
+            "rms_dbfs": -26.915597915649414
+          },
+          "muted": false,
+          "name": "Weather",
+          "output_gain": 1.0,
+          "solo": false
+        },
+        {
+          "effective_gain": 1.0,
+          "gain": 1.0,
+          "meter": {
+            "overload_blocks": 0,
+            "peak": 0.0,
+            "peak_dbfs": -120.0,
+            "peak_hold_dbfs": -120.0,
+            "ready": true,
+            "rms": 0.0,
+            "rms_dbfs": -120.0
+          },
+          "muted": false,
+          "name": "Effects",
+          "output_gain": 1.0,
+          "solo": false
+        },
+        {
+          "effective_gain": 1.0,
+          "gain": 1.0,
+          "meter": {
+            "overload_blocks": 0,
+            "peak": 0.0,
+            "peak_dbfs": -120.0,
+            "peak_hold_dbfs": -120.0,
+            "ready": true,
+            "rms": 0.0,
+            "rms_dbfs": -120.0
+          },
+          "muted": false,
+          "name": "Ambience",
+          "output_gain": 1.0,
+          "solo": false
+        },
+        {
+          "effective_gain": 1.0,
+          "gain": 1.0,
+          "meter": {
+            "overload_blocks": 0,
+            "peak": 0.0,
+            "peak_dbfs": -120.0,
+            "peak_hold_dbfs": -120.0,
+            "ready": true,
+            "rms": 0.0,
+            "rms_dbfs": -120.0
+          },
+          "muted": false,
+          "name": "Music",
+          "output_gain": 1.0,
+          "solo": false
+        }
+      ],
+      "direct_master_gain": 1.0,
+      "meter_stage": "post_bus_fader_before_preview_mute",
+      "output_muted": false
+    }
+  }
+}

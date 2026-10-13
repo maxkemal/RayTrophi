@@ -2,6 +2,8 @@
 #include "Audio/AudioService.h"
 #include <fstream>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace audio {
 nlohmann::json installThunder(AudioService& candidate, const std::filesystem::path& assetsRoot) {
@@ -11,11 +13,20 @@ nlohmann::json installThunder(AudioService& candidate, const std::filesystem::pa
         !existing.value("far_assets", json::array()).empty()) {
         return candidate.invoke("thunder_update", {{"config", {{"enabled", true}}}});
     }
-    const auto folder = assetsRoot / "audio" / "cc0_thunder";
+    const auto stormFolder = assetsRoot / "audio" / "cc0_storm_thunder";
+    const bool stormPack = std::filesystem::exists(stormFolder / "manifest.json");
+    const auto folder = stormPack ? stormFolder : assetsRoot / "audio" / "cc0_thunder";
+    const std::vector<std::pair<std::string, bool>> variants = stormPack
+        ? std::vector<std::pair<std::string, bool>>{
+            {"storm_crack_tail_a_mono", true}, {"storm_crack_tail_b_mono", true},
+            {"storm_deep_roll_a_mono", false}, {"storm_deep_roll_b_mono", false}}
+        : std::vector<std::pair<std::string, bool>>{
+            {"thunder_01_mono", false}, {"thunder_02_mono", false},
+            {"thunder_03_mono", false}, {"thunder_04_mono", false},
+            {"thunder_06_mono", true}, {"thunder_07_mono", true}, {"thunder_08_mono", true}};
     json nearAssets = json::array();
     json farAssets = json::array();
-    for (const std::string index : {"01", "02", "03", "04", "06", "07", "08"}) {
-        const std::string stem = "thunder_" + index + "_mono";
+    for (const auto& [stem, near] : variants) {
         std::ifstream metadata(folder / (stem + ".asset.json"));
         if (!metadata) {
             throw std::runtime_error("CC0 thunder pack not found; choose its Assets root");
@@ -26,7 +37,6 @@ nlohmann::json installThunder(AudioService& candidate, const std::filesystem::pa
             {"path", pathUtf8(folder / (stem + ".wav"))},
             {"license", record.at("license")}, {"author", record.at("author")},
             {"source", record.at("source")}, {"tags", record.at("tags")}});
-        const bool near = index == "06" || index == "07" || index == "08";
         (near ? nearAssets : farAssets).push_back(asset.at("id"));
     }
     return candidate.invoke("thunder_update", {{"config", {

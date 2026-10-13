@@ -49,6 +49,18 @@ void ParticleSimulationSystem::rebaseRestoredGridDomainStates() {
         if (grain.contact_damping_measured && grain.contact_damping_energy_j > 0.0) {
             grain.contact_damping_position += delta;
         }
+        if (grain.friction_measured && grain.friction_energy_j > 0.0) {
+            grain.friction_position += delta;
+        }
+        if (grain.rolling_measured && grain.rolling_energy_j > 0.0) {
+            grain.rolling_position += delta;
+        }
+        for (auto* measurement : {&state.audio_stats.fluid_flow, &state.audio_stats.gas_flow,
+                &state.audio_stats.mpm_deformation, &state.audio_stats.mpm_fracture}) {
+            if (measurement->measured && measurement->position_weight > 0) {
+                measurement->position += delta;
+            }
+        }
 
         // Fluid particles are world-space and must come along. Velocity is a
         // DIRECTION and is left alone; translating it would inject a phantom

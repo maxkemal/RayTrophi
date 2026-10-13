@@ -40,7 +40,9 @@ enum class TrackGroup {
 // graph editor lives inside TimelineWidget instead of a separate bottom tab.
 enum class TimelineEditorMode {
     DopeSheet = 0,   // classic keyframe diamonds per track
-    GraphEditor = 1  // per-channel value curves (transform channels)
+    GraphEditor = 1, // per-channel value curves (transform channels)
+    Audio = 2,
+    Mixer = 3
 };
 
 // Keyframe insert type for separate L/R/S options

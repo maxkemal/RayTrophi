@@ -212,6 +212,14 @@ bool loadLocked(std::string& error) {
 
 uint32_t requiredCapabilities(const std::string& method) {
     if (method.rfind("audio.", 0) == 0) {
+        if (method == "audio.workspace_get") return Read;
+        if (method == "audio.capture_status") return Read;
+        if (method == "audio.capture_start" || method == "audio.capture_finish")
+            return SceneWrite | FilesRead;
+        if (method == "audio.waveform") return Read | FilesRead;
+        if (method == "audio.export_start") return Read | FilesRead | FilesWrite;
+        if (method == "audio.export_status" || method == "audio.clip_list") return Read;
+        if (method == "audio.export_cancel") return Read | FilesWrite;
         if (method == "audio.list" || method == "audio.get" || method == "audio.status" ||
             method == "audio.domains" || method == "audio.mixer_get") return Read;
         if (method == "audio.append" || method == "audio.asset_import" || method == "audio.asset_relink" ||
@@ -220,7 +228,9 @@ uint32_t requiredCapabilities(const std::string& method) {
             method == "audio.create" || method == "audio.update" || method == "audio.duplicate" ||
             method == "audio.thunder_setup" || method == "audio.thunder_update" ||
             method == "audio.thunder_event" || method == "audio.resume_automatic" ||
-            method == "audio.playback_update")
+            method == "audio.playback_update" || method == "audio.clip_create" ||
+            method == "audio.clip_update" || method == "audio.clip_duplicate" ||
+            method == "audio.clip_trim" || method == "audio.clip_split")
             return SceneWrite | FilesRead;
         return SceneWrite;
     }

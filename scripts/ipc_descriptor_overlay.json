@@ -2967,7 +2967,12 @@
   },
   "editor.set_bottom_editor": {
     "summary": "Choose which editor fills the bottom dock",
-    "tags": "ui|editor"
+    "tags": "ui|editor",
+    "params": {
+      "name": {
+        "enum": "none|dope_sheet|graph_editor|audio|audio_mixer|console|assets|simulation|geometry|material|terrain|anim_graph"
+      }
+    }
   },
   "editor.set_node_domain": {
     "summary": "Choose which domain's graph the node editor shows",

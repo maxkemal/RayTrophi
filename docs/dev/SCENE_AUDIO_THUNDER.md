@@ -1,5 +1,30 @@
 # Scene audio: lightning and delayed thunder
 
+Progressive visual leader formation is now defined in
+[Lightning channel growth](LIGHTNING_CHANNEL_GROWTH.md). After that source update
+is built, automatic thunder starts its propagation clock at the bright discharge,
+after the authored leader phase, with its position frozen at that time. The event
+identity and distance-delay service remain shared. This timing change awaits the
+user's shader/Studio build and near-event acceptance.
+
+2026-10-13: the open storm scene now uses the CC0 real-recording derivatives in
+`assets/audio/cc0_storm_thunder`: sharp crack + 17–18 s natural near tail, and
+low-pass/deeper 20–21 s far rolls. Provenance, lossy-preview origin, processing and
+hashes are in the pack README/manifest. Scene thunder gain is 1.35 and reference
+distance 750 m; near/far crossover and propagation speed are retained.
+
+External IPC verified near/far selection and actual playback at 100 m / 3500 m,
+with delays 0.291545 / 10.204082 s, nonzero Weather/Master PCM and no decoder error
+or overload blocks in the short two-event probe. This does not establish dense
+storm voice-budget behavior. Timeline mode was restored after the probe; the scene
+has unsaved new asset bindings. Evidence: `storm_thunder_scene_setup_20261013.json`.
+
+Fresh setup prefers the new pack and falls back to the legacy pack if unavailable;
+existing complete user bindings are preserved. The gain UI now commits a 0..4 drag
+control on release; the previous numeric field required Enter. The validator/API
+already allowed values above one, and the running build accepted 1.35. New setup
+and UI source changes require the user's next build; no build was run by Codex.
+
 Implemented source contract, 2026-10-12. Transport extension:
 [SCENE_AUDIO_TRANSPORT.md](SCENE_AUDIO_TRANSPORT.md). Build and live listening acceptance are
 pending the user's build. No application launch, project/shader compilation or

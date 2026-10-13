@@ -174,6 +174,13 @@ nlohmann::json author(UIContext& ctx, SceneHistory* history, const std::string& 
     const bool mutation = AudioService::isAuthoring(operation);
     const auto before = mutation ? ctx.scene.audio->snapshot() : nlohmann::json();
     auto result = ctx.scene.audio->invoke(operation, input);
+    if (operation == "workspace_update" && input.contains("selected_clip") &&
+        !input.at("selected_clip").get<std::string>().empty()) {
+        ctx.selection.clearSelection();
+        if (ctx.scene_ui_ptr) {
+            ctx.scene_ui_ptr->tab_to_focus = "Audio";
+        }
+    }
     if (operation == "select") {
         ctx.selection.clearSelection();
         auto& item = ctx.selection.selected;
@@ -188,6 +195,10 @@ nlohmann::json author(UIContext& ctx, SceneHistory* history, const std::string& 
             // Missing parents remain selectable for repair.
         }
         ctx.selection.multi_selection.push_back(item);
+        ctx.scene.audio->invoke("workspace_update", {{"selected_clip", ""}});
+        if (ctx.scene_ui_ptr) {
+            ctx.scene_ui_ptr->tab_to_focus = "Audio";
+        }
     }
     syncScene(ctx);
     if (mutation) {

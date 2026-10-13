@@ -1,0 +1,32 @@
+{
+  "id": "rt_cc0_storm_crack_tail_b_mono",
+  "name": "Storm lightning crack and long natural thunder tail B (derived pitch variation)",
+  "type": "asset",
+  "assetKind": "audio",
+  "category": "audio",
+  "subcategory": "storm_thunder",
+  "format": "wav",
+  "entry": "storm_crack_tail_b_mono.wav",
+  "description": "Storm lightning crack and long natural thunder tail B (derived pitch variation)",
+  "license": "CC0-1.0",
+  "source": "https://freesound.org/people/davidhrivnak/sounds/328391/",
+  "author": "davidhrivnak",
+  "tags": [
+    "weather",
+    "thunder",
+    "field-recording",
+    "mono",
+    "cc0",
+    "near"
+  ],
+  "version": 1,
+  "duration": 18.3146875,
+  "channels": 1,
+  "sampleRate": 48000,
+  "loopSuitable": false,
+  "upstream_download": "https://cdn.freesound.org/previews/328/328391_817470-hq.mp3",
+  "processing": "Same recording as A; duration x25/24 and corresponding lower pitch; peak scaled to 0.60; 1ms/1s edge fades",
+  "packaged_sha256": "debe8d9d123e7b8c3b4ef0b71c75e2c7b1c3be52314a10653a1bd23e230d4b4d",
+  "peak_dbfs": -4.436974992327128,
+  "rms_dbfs": -19.873304717763222
+}
