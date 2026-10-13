@@ -12,8 +12,10 @@ namespace audio {
 namespace {
 using json = nlohmann::json;
 std::map<std::string, std::string> publicationErrors;
-std::string keyFor(unsigned system, const std::string& domain) {
-    return "@domain/" + std::to_string(system) + "/" + domain;
+std::string keyFor(unsigned system, const std::string& domain, const std::string& channel) {
+    const std::string base = "@domain/" + std::to_string(system) + "/" + domain;
+    return channel == "mixed_contact" ? base :
+        "@domain/" + channel + "/" + std::to_string(system) + "/" + domain;
 }
 }
 
@@ -29,47 +31,66 @@ json domainAudioInputs(UIContext& ctx) {
             const auto* state = i < states.size() && states[i].valid ? &states[i] : nullptr;
             const bool enabled = system.enabled && system.runtime->enabled() && domains[i].enabled;
             const auto* stats = state ? &state->fluid_stats : nullptr;
-            const double duration = stats ? stats->mixed_contact_duration_seconds : 0;
-            const bool measured = enabled && state && state->fluid_stats.mixed_model_step &&
-                !state->fluid_stats.mixed_step_held && std::isfinite(duration) && duration > 0;
-            const double energy = measured ? state->fluid_stats.mixed_contact_energy_loss : 0;
-            const bool finite = std::isfinite(energy) && energy >= 0 && energy <= 1e9;
-            const double power = finite && std::isfinite(duration) && duration > 0
-                ? energy / duration : 0;
-            const bool powerMeasured = measured && finite && std::isfinite(duration) &&
-                duration > 0 && std::isfinite(power) && power >= 0 && power <= 1e9;
-            const bool localized = measured && stats &&
-                std::isfinite(stats->mixed_contact_position_weight) &&
-                stats->mixed_contact_position_weight > 0 &&
-                std::isfinite(stats->mixed_contact_position.x) &&
-                std::isfinite(stats->mixed_contact_position.y) &&
-                std::isfinite(stats->mixed_contact_position.z);
-            const Vec3 center = localized ? stats->mixed_contact_position :
-                (state ? (state->bounds_min + state->bounds_max) * 0.5f : Vec3(0));
-            const bool positionValid = std::isfinite(center.x) && std::isfinite(center.y) &&
-                                       std::isfinite(center.z);
-            const std::string key = keyFor(system.id, domains[i].name);
-            const char* reason = !enabled ? "disabled" : (!state ? "not_initialized" :
-                (!state->fluid_stats.mixed_model_step ? "solver_contact_metric_unavailable" :
-                 (state->fluid_stats.mixed_step_held ? "mixed_step_held" :
-                  (!std::isfinite(duration) || duration <= 0 ? "contact_energy_not_published" :
-                   (!finite ? "invalid_contact_energy" : "available")))));
-            result.push_back({{"system_id", system.id}, {"system_name", system.name},
-                {"domain_name", domains[i].name}, {"signal_key", key},
-                {"enabled", enabled}, {"valid", state != nullptr},
-                {"version", state ? state->version : 0}, {"measured", measured && finite},
-                {"contact_energy_j", finite ? energy : 0},
-                {"contact_power_w", powerMeasured ? power : 0},
-                {"power_measured", powerMeasured},
-                {"measurement_duration_seconds", std::isfinite(duration) ? duration : 0},
-                {"reason", reason},
-                {"audio_error", publicationErrors.contains(key) ? publicationErrors.at(key) : ""},
-                {"contact_pairs", measured ? state->fluid_stats.mixed_contact_pairs : 0},
-                {"position", positionValid ? json::array({center.x, center.y, center.z}) : json()},
-                {"position_semantics", localized && positionValid ?
-                    "impulse_weighted_contact_cell_center" : "domain_center"},
-                {"material_pairs_available", false},
-                {"measurement", "mixed_contact_energy_loss_per_published_solver_step"}});
+            const auto* grain = stats ? &stats->grain_report : nullptr;
+            for (const std::string channel : {"mixed_contact", "dem_contact", "fluid_flow",
+                                               "gas_flow", "mpm_deformation"}) {
+                const bool grainMetric = channel == "dem_contact";
+                const bool producerAvailable = grainMetric ? grain && grain->contact_damping_measured :
+                    channel == "mixed_contact";
+                const double duration = grainMetric ?
+                    (grain ? grain->contact_damping_duration_seconds : 0) :
+                    (channel == "mixed_contact" && stats ? stats->mixed_contact_duration_seconds : 0);
+                const bool measured = producerAvailable && enabled && state &&
+                    state->fluid_stats.mixed_model_step &&
+                    !state->fluid_stats.mixed_step_held && std::isfinite(duration) && duration > 0;
+                const double energy = measured ? (grainMetric ? grain->contact_damping_energy_j :
+                    stats->mixed_contact_energy_loss) : 0;
+                const bool finite = std::isfinite(energy) && energy >= 0 && energy <= 1e9;
+                const double power = finite && std::isfinite(duration) && duration > 0
+                    ? energy / duration : 0;
+                const bool powerMeasured = measured && finite && std::isfinite(duration) &&
+                    duration > 0 && std::isfinite(power) && power >= 0 && power <= 1e9;
+                const Vec3 contactPosition = grainMetric ?
+                    (grain ? grain->contact_damping_position : Vec3(0)) :
+                    (stats ? stats->mixed_contact_position : Vec3(0));
+                const double positionWeight = grainMetric ? energy :
+                    (stats ? stats->mixed_contact_position_weight : 0);
+                const bool localized = measured && std::isfinite(positionWeight) &&
+                    positionWeight > 0 && std::isfinite(contactPosition.x) &&
+                    std::isfinite(contactPosition.y) && std::isfinite(contactPosition.z);
+                const Vec3 center = localized ? contactPosition :
+                    (state ? (state->bounds_min + state->bounds_max) * 0.5f : Vec3(0));
+                const bool positionValid = std::isfinite(center.x) && std::isfinite(center.y) &&
+                                           std::isfinite(center.z);
+                const std::string key = keyFor(system.id, domains[i].name, channel);
+                const char* reason = !enabled ? "disabled" : (!state ? "not_initialized" :
+                    (!producerAvailable ? "channel_metric_not_published" :
+                     (!state->fluid_stats.mixed_model_step ? "solver_contact_metric_unavailable" :
+                     (state->fluid_stats.mixed_step_held ? "mixed_step_held" :
+                      (!std::isfinite(duration) || duration <= 0 ? "contact_energy_not_published" :
+                       (!finite ? "invalid_contact_energy" : "available"))))));
+                result.push_back({{"system_id", system.id}, {"system_name", system.name},
+                    {"domain_name", domains[i].name}, {"signal_key", key},
+                    {"domain_channel", channel},
+                    {"enabled", enabled}, {"valid", state != nullptr},
+                    {"version", state ? state->version : 0}, {"measured", measured && finite},
+                    {"contact_energy_j", finite ? energy : 0},
+                    {"contact_power_w", powerMeasured ? power : 0},
+                    {"power_measured", powerMeasured},
+                    {"measurement_duration_seconds", std::isfinite(duration) ? duration : 0},
+                    {"reason", reason},
+                    {"audio_error", publicationErrors.contains(key) ? publicationErrors.at(key) : ""},
+                    {"contact_pairs", measured ? (grainMetric ? grain->contacts :
+                        state->fluid_stats.mixed_contact_pairs) : 0},
+                    {"position", positionValid ? json::array({center.x, center.y, center.z}) : json()},
+                    {"position_semantics", localized && positionValid ?
+                        (grainMetric ? "energy_weighted_dem_contact_center" :
+                         "impulse_weighted_contact_cell_center") : "domain_center"},
+                    {"material_pairs_available", false},
+                    {"measurement", grainMetric ? "dem_normal_damping_work_per_published_step" :
+                        (channel == "mixed_contact" ?
+                         "mixed_contact_energy_loss_per_published_solver_step" : "unavailable")}});
+            }
         }
     }
     return result;

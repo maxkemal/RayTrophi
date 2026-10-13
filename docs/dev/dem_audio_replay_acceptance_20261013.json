@@ -1,0 +1,952 @@
+{
+  "first": {
+    "1": {
+      "audio_error": "",
+      "contact_energy_j": 0.7736926624692373,
+      "contact_pairs": 87,
+      "contact_power_w": 18.568623345873597,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        -0.004354896489530802,
+        0.033889882266521454,
+        0.00496777705848217
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 94
+    },
+    "2": {
+      "audio_error": "",
+      "contact_energy_j": 0.7082582506519755,
+      "contact_pairs": 91,
+      "contact_power_w": 16.998197509061647,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        -0.010445835068821907,
+        0.01990579441189766,
+        0.006362690590322018
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 95
+    },
+    "3": {
+      "audio_error": "",
+      "contact_energy_j": 0.8451312572200751,
+      "contact_pairs": 111,
+      "contact_power_w": 20.28314956879684,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        0.016965918242931366,
+        0.025659337639808655,
+        0.010595578700304031
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 96
+    },
+    "4": {
+      "audio_error": "",
+      "contact_energy_j": 1.113068996317559,
+      "contact_pairs": 103,
+      "contact_power_w": 26.713655115492454,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        -0.005129118449985981,
+        0.030761845409870148,
+        -0.009559864178299904
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 97
+    },
+    "5": {
+      "audio_error": "",
+      "contact_energy_j": 0.8435732046499046,
+      "contact_pairs": 98,
+      "contact_power_w": 20.245756308227154,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        0.02645961008965969,
+        0.02238050289452076,
+        0.017589841037988663
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 98
+    },
+    "6": {
+      "audio_error": "",
+      "contact_energy_j": 0.784352702567958,
+      "contact_pairs": 119,
+      "contact_power_w": 18.82446430061824,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        -0.017884913831949234,
+        0.03869948163628578,
+        0.004257974214851856
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 99
+    },
+    "7": {
+      "audio_error": "",
+      "contact_energy_j": 0.586685513146016,
+      "contact_pairs": 112,
+      "contact_power_w": 14.080451895874218,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        -0.015076873824000359,
+        0.03779856860637665,
+        -0.022192511707544327
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 100
+    },
+    "8": {
+      "audio_error": "",
+      "contact_energy_j": 0.7059061133186562,
+      "contact_pairs": 122,
+      "contact_power_w": 16.941746214744366,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        -0.016989219933748245,
+        0.026269296184182167,
+        -0.017839722335338593
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 101
+    },
+    "9": {
+      "audio_error": "",
+      "contact_energy_j": 0.9771047175101376,
+      "contact_pairs": 128,
+      "contact_power_w": 23.450512521363567,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        0.009398330934345722,
+        0.020731529220938683,
+        0.00011354182061040774
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 102
+    },
+    "10": {
+      "audio_error": "",
+      "contact_energy_j": 0.9642398548891005,
+      "contact_pairs": 128,
+      "contact_power_w": 23.141755827660344,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        -0.017947925254702568,
+        0.03181085363030434,
+        0.010836782865226269
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 103
+    },
+    "11": {
+      "audio_error": "",
+      "contact_energy_j": 0.8960673999061326,
+      "contact_pairs": 141,
+      "contact_power_w": 21.505616956829854,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        0.005254264455288649,
+        0.029184376820921898,
+        0.0036124656908214092
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 104
+    },
+    "12": {
+      "audio_error": "",
+      "contact_energy_j": 0.5517784443025955,
+      "contact_pairs": 135,
+      "contact_power_w": 13.242682268599605,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        0.0003211580333299935,
+        0.031258754432201385,
+        -0.0038927425630390644
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 105
+    },
+    "13": {
+      "audio_error": "",
+      "contact_energy_j": 0.4211635387169517,
+      "contact_pairs": 146,
+      "contact_power_w": 10.107924627967213,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        -0.010642562992870808,
+        0.020739370957016945,
+        0.0032255081459879875
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 106
+    },
+    "14": {
+      "audio_error": "",
+      "contact_energy_j": 0.47501172294623445,
+      "contact_pairs": 120,
+      "contact_power_w": 11.400281010954776,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        0.04888691008090973,
+        0.011242322623729706,
+        -0.062087804079055786
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 107
+    },
+    "15": {
+      "audio_error": "",
+      "contact_energy_j": 0.30779141436620544,
+      "contact_pairs": 121,
+      "contact_power_w": 7.386993724639362,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        2.0289573512854986e-05,
+        0.010040242224931717,
+        -0.02356899343430996
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 108
+    },
+    "16": {
+      "audio_error": "",
+      "contact_energy_j": 0.20279757743849755,
+      "contact_pairs": 124,
+      "contact_power_w": 4.867141713471815,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        0.017189940437674522,
+        0.008234608918428421,
+        0.09290654957294464
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 109
+    },
+    "17": {
+      "audio_error": "",
+      "contact_energy_j": 0.13492466723567087,
+      "contact_pairs": 122,
+      "contact_power_w": 3.2381919171504614,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        0.005484467837959528,
+        0.006868964061141014,
+        0.05615616217255592
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 110
+    },
+    "18": {
+      "audio_error": "",
+      "contact_energy_j": 0.1342988972354311,
+      "contact_pairs": 136,
+      "contact_power_w": 3.2231734375922922,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        0.06452008336782455,
+        0.004116708878427744,
+        0.05988960713148117
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 111
+    },
+    "19": {
+      "audio_error": "",
+      "contact_energy_j": 0.0885266727806842,
+      "contact_pairs": 137,
+      "contact_power_w": 2.124640083417212,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        -0.03143445774912834,
+        0.00707966135814786,
+        -0.06927324086427689
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 112
+    },
+    "20": {
+      "audio_error": "",
+      "contact_energy_j": 0.10689120088660302,
+      "contact_pairs": 133,
+      "contact_power_w": 2.56538874482393,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        -0.18914803862571716,
+        0.017776699736714363,
+        0.11865466833114624
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 113
+    },
+    "21": {
+      "audio_error": "",
+      "contact_energy_j": 0.08728506194356983,
+      "contact_pairs": 136,
+      "contact_power_w": 2.0948414242145366,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        -0.015454184263944626,
+        0.007801680825650692,
+        0.028557511046528816
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 114
+    },
+    "22": {
+      "audio_error": "",
+      "contact_energy_j": 0.06233962030701602,
+      "contact_pairs": 146,
+      "contact_power_w": 1.4961508427796149,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        -0.11236562579870224,
+        0.017851604148745537,
+        0.0814545527100563
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 115
+    },
+    "23": {
+      "audio_error": "",
+      "contact_energy_j": 0.042875980989867606,
+      "contact_pairs": 138,
+      "contact_power_w": 1.029023513089532,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        -0.2005862593650818,
+        0.01739340089261532,
+        0.134161114692688
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 116
+    },
+    "24": {
+      "audio_error": "",
+      "contact_energy_j": 0.024580878190043225,
+      "contact_pairs": 130,
+      "contact_power_w": 0.5899410589794237,
+      "domain_channel": "dem_contact",
+      "domain_name": "DEM_Audio_Replay",
+      "enabled": true,
+      "material_pairs_available": false,
+      "measured": true,
+      "measurement": "dem_normal_damping_work_per_published_step",
+      "measurement_duration_seconds": 0.0416666679084301,
+      "position": [
+        -0.18847057223320007,
+        0.016082575544714928,
+        0.04812435805797577
+      ],
+      "position_semantics": "energy_weighted_dem_contact_center",
+      "power_measured": true,
+      "reason": "available",
+      "signal_key": "@domain/dem_contact/1/DEM_Audio_Replay",
+      "system_id": 1,
+      "system_name": "Particle System 1",
+      "valid": true,
+      "version": 117
+    }
+  },
+  "replay": [
+    {
+      "frame": 1,
+      "same": true,
+      "power": 18.568623345873597,
+      "version": 119
+    },
+    {
+      "frame": 2,
+      "same": true,
+      "power": 16.998197509061647,
+      "version": 120
+    },
+    {
+      "frame": 3,
+      "same": true,
+      "power": 20.28314956879684,
+      "version": 121
+    },
+    {
+      "frame": 4,
+      "same": true,
+      "power": 26.713655115492454,
+      "version": 122
+    },
+    {
+      "frame": 5,
+      "same": true,
+      "power": 20.245756308227154,
+      "version": 123
+    },
+    {
+      "frame": 6,
+      "same": true,
+      "power": 18.82446430061824,
+      "version": 124
+    },
+    {
+      "frame": 7,
+      "same": true,
+      "power": 14.080451895874218,
+      "version": 125
+    },
+    {
+      "frame": 8,
+      "same": true,
+      "power": 16.941746214744366,
+      "version": 126
+    },
+    {
+      "frame": 9,
+      "same": true,
+      "power": 23.450512521363567,
+      "version": 127
+    },
+    {
+      "frame": 10,
+      "same": true,
+      "power": 23.141755827660344,
+      "version": 128
+    },
+    {
+      "frame": 11,
+      "same": true,
+      "power": 21.505616956829854,
+      "version": 129
+    },
+    {
+      "frame": 12,
+      "same": true,
+      "power": 13.242682268599605,
+      "version": 130
+    },
+    {
+      "frame": 13,
+      "same": true,
+      "power": 10.107924627967213,
+      "version": 131
+    },
+    {
+      "frame": 14,
+      "same": true,
+      "power": 11.400281010954776,
+      "version": 132
+    },
+    {
+      "frame": 15,
+      "same": true,
+      "power": 7.386993724639362,
+      "version": 133
+    },
+    {
+      "frame": 16,
+      "same": true,
+      "power": 4.867141713471815,
+      "version": 134
+    },
+    {
+      "frame": 17,
+      "same": true,
+      "power": 3.2381919171504614,
+      "version": 135
+    },
+    {
+      "frame": 18,
+      "same": true,
+      "power": 3.2231734375922922,
+      "version": 136
+    },
+    {
+      "frame": 19,
+      "same": true,
+      "power": 2.124640083417212,
+      "version": 137
+    },
+    {
+      "frame": 20,
+      "same": true,
+      "power": 2.56538874482393,
+      "version": 138
+    },
+    {
+      "frame": 21,
+      "same": true,
+      "power": 2.0948414242145366,
+      "version": 139
+    },
+    {
+      "frame": 22,
+      "same": true,
+      "power": 1.4961508427796149,
+      "version": 140
+    },
+    {
+      "frame": 23,
+      "same": true,
+      "power": 1.029023513089532,
+      "version": 141
+    },
+    {
+      "frame": 24,
+      "same": true,
+      "power": 0.5899410589794237,
+      "version": 142
+    }
+  ],
+  "cache": {
+    "baking": false,
+    "budget_bytes": 36014621076,
+    "budget_reached": false,
+    "cache_dir": "",
+    "config_signature": 3462685467149464955,
+    "first_frame": 0,
+    "has_range": true,
+    "last_frame": 55,
+    "predates_edit_frame": -1,
+    "predates_edit_reason": "",
+    "ram_bytes": 1144904,
+    "ram_frames": 56,
+    "valid": false
+  },
+  "left_state": {
+    "automatic_errors": {},
+    "automatic_suspended": [],
+    "device": "ready",
+    "playback_runtime": {
+      "dt_seconds": 0.0,
+      "mode": "timeline",
+      "paused": true,
+      "playing": false,
+      "seek_count": 1,
+      "time_seconds": 0.0
+    },
+    "preview_muted": false,
+    "reaction_runtime": {
+      "outputs": {},
+      "signals": {}
+    },
+    "resolved_poses": {
+      "audio_source_2": {
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "valid": true
+      }
+    },
+    "sample_rate": 48000,
+    "thunder_error": "",
+    "thunder_runtime": {
+      "dropped_queue_full": 0,
+      "pending": [],
+      "seen_count": 0,
+      "suspended": false
+    },
+    "thunder_voices": [],
+    "transport_held_sources": [],
+    "voice_limit": 32,
+    "voices": []
+  },
+  "same_frame_no_republication": {
+    "passed": true,
+    "initial": {
+      "automatic_errors": {},
+      "automatic_suspended": [],
+      "device": "ready",
+      "playback_runtime": {
+        "dt_seconds": 0.25,
+        "mode": "continuous",
+        "paused": false,
+        "playing": false,
+        "seek_count": 54,
+        "time_seconds": 0.4583333432674408
+      },
+      "preview_muted": false,
+      "reaction_runtime": {
+        "outputs": {
+          "audio_source_2": {
+            "envelope": 0.0,
+            "gain_multiplier": 0.0,
+            "input": 0.0,
+            "pitch_multiplier": 1.0,
+            "position": [
+              -0.18847057223320007,
+              0.016082575544714928,
+              0.04812435805797577
+            ]
+          }
+        },
+        "signals": {}
+      },
+      "resolved_poses": {
+        "audio_source_2": {
+          "direction": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "valid": true
+        }
+      },
+      "sample_rate": 48000,
+      "thunder_error": "",
+      "thunder_runtime": {
+        "dropped_queue_full": 0,
+        "pending": [],
+        "seen_count": 0,
+        "suspended": false
+      },
+      "thunder_voices": [],
+      "transport_held_sources": [],
+      "voice_limit": 32,
+      "voices": []
+    },
+    "after_repeated_restores": {
+      "automatic_errors": {},
+      "automatic_suspended": [],
+      "device": "ready",
+      "playback_runtime": {
+        "dt_seconds": 0.25,
+        "mode": "continuous",
+        "paused": false,
+        "playing": false,
+        "seek_count": 54,
+        "time_seconds": 0.4583333432674408
+      },
+      "preview_muted": false,
+      "reaction_runtime": {
+        "outputs": {
+          "audio_source_2": {
+            "envelope": 7.138623026037294e-12,
+            "gain_multiplier": 2.6718200842879014e-06,
+            "input": 0.0,
+            "pitch_multiplier": 1.0,
+            "position": [
+              0.005254264455288649,
+              0.029184376820921898,
+              0.0036124656908214092
+            ]
+          }
+        },
+        "signals": {}
+      },
+      "resolved_poses": {
+        "audio_source_2": {
+          "direction": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "valid": true
+        }
+      },
+      "sample_rate": 48000,
+      "thunder_error": "",
+      "thunder_runtime": {
+        "dropped_queue_full": 0,
+        "pending": [],
+        "seen_count": 0,
+        "suspended": false
+      },
+      "thunder_voices": [],
+      "transport_held_sources": [],
+      "voice_limit": 32,
+      "voices": []
+    },
+    "scope": "Same-frame no-republication observed; initial signals already empty, active-to-expired transition unverified."
+  }
+}

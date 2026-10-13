@@ -209,6 +209,12 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
                 {"contactless_grains", report->contactless_grains},
                 {"collider_nodes_visited", report->collider_nodes_visited}}},
             {"contacts_last_substep", report->contacts},
+            {"normal_contact_damping", {
+                {"measured", report->contact_damping_measured},
+                {"energy_j", report->contact_damping_energy_j},
+                {"duration_seconds", report->contact_damping_duration_seconds},
+                {"position", {report->contact_damping_position.x,
+                    report->contact_damping_position.y, report->contact_damping_position.z}}}},
             {"sticking_contacts_last_substep", report->sticking_contacts},
             {"history_reset_this_step", report->history_reset},
             {"history_reset_reason", report->history_reset_reason},

@@ -31,7 +31,7 @@ nlohmann::json AudioReaction::validate(const json& p) {
     keys(p, {"driver", "input_min", "input_max", "gain_min", "gain_max", "pitch_min",
              "pitch_max", "response_seconds", "signal_key", "follow_position",
              "source_material", "target_material", "automatic", "start_threshold",
-             "stop_threshold", "system_id", "domain_name", "input_metric"});
+             "stop_threshold", "system_id", "domain_name", "input_metric", "domain_channel"});
     json result;
     const std::string driver = p.value("driver", std::string("manual"));
     require(driver == "manual" || driver == "wind" || driver == "rain" || driver == "signal" ||
@@ -42,6 +42,11 @@ nlohmann::json AudioReaction::validate(const json& p) {
     require(driver == "domain_contact" || metric == "energy_j",
             "power_w input_metric requires domain_contact driver");
     result["input_metric"] = metric;
+    const std::string channel = p.value("domain_channel", std::string("mixed_contact"));
+    require(channel == "mixed_contact" || channel == "dem_contact" ||
+            channel == "fluid_flow" || channel == "gas_flow" || channel == "mpm_deformation",
+            "Unknown domain_channel");
+    result["domain_channel"] = channel;
     result["input_min"] = field(p, "input_min", 0, 0, 1000000000);
     result["input_max"] = field(p, "input_max", driver == "wind" ? 30 : 1, 0, 1000000000);
     require(result["input_max"].get<float>() > result["input_min"].get<float>(),
@@ -81,6 +86,11 @@ nlohmann::json AudioReaction::validate(const json& p) {
                 "Aggregate domain contacts cannot classify material pairs");
         result["signal_key"] = "@domain/" + std::to_string(result["system_id"].get<int>()) +
                                "/" + result["domain_name"].get<std::string>();
+        if (channel != "mixed_contact") {
+            result["signal_key"] = "@domain/" + channel + "/" +
+                std::to_string(result["system_id"].get<int>()) + "/" +
+                result["domain_name"].get<std::string>();
+        }
     }
     require(driver != "signal" || !result["signal_key"].get<std::string>().empty(),
             "Signal reaction requires signal_key");

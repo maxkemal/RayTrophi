@@ -105,7 +105,7 @@ inline constexpr int kMatterGrainContactBudget = 24;
 // 20: single-bank in-place contact history in host-assigned blocks,
 // 21: sleeping grains (rest counter per block, 128 B push constants),
 // 22: sleep audits/force balance, bridge wake and atomic rest-word commit.
-inline constexpr uint32_t kMatterGrainShaderRevision = 24;
+inline constexpr uint32_t kMatterGrainShaderRevision = 25;
 // Neighbour hash: one table of fixed-capacity buckets, filled only when the
 // neighbour lists are rebuilt (docs/dev/DEM_VERLET_LISTESI.md).
 inline constexpr uint32_t kMatterGrainBucketCapacity = 16;
@@ -170,6 +170,11 @@ std::size_t ensureMatterGrainRestMasses(FluidParticles& particles,
                                         bool legacy_granular);
 
 struct MatterGrainStepReport {
+    // Vulkan normal-contact dashpot work over the complete committed frame.
+    bool contact_damping_measured = false;
+    double contact_damping_energy_j = 0.0;
+    double contact_damping_duration_seconds = 0.0;
+    Vec3 contact_damping_position = Vec3(0);
     int substeps = 0;
     int dispatches = 0;
     float substep_dt = 0.0f;

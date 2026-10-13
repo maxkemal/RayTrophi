@@ -51,7 +51,9 @@ struct RegisterAudioMethods {
             {"author", "string", false, "Asset author metadata", "", nullptr},
             {"source", "string", false, "Asset source metadata", "", nullptr},
             {"tags", "array", false, "Asset category tags (strings)", "[]", nullptr},
-            {"reaction", "object", false, "Driver mapping; domain input_metric: energy_j|power_w",
+            {"reaction", "object", false,
+                "Driver mapping; domain_channel: mixed_contact|dem_contact|fluid_flow|gas_flow|"
+                "mpm_deformation; input_metric: energy_j|power_w",
                 "{}", nullptr},
             {"assets_root", "string", false, "Assets library root; defaults to resolved runtime root",
                 nullptr, nullptr},

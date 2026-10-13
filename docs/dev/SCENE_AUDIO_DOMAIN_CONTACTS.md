@@ -1,5 +1,11 @@
 # Domain contact position and power
 
+2026-10-13 continuation: [Matter audio channels](SCENE_AUDIO_MATTER_CHANNELS.md)
+adds a separate Vulkan DEM normal-damping channel and keeps fluid/gas/MPM sound
+inputs independent. The CPU-only/GPU-unavailable scope below describes the earlier
+delivery. `audio.domains` now returns one row per domain and channel; legacy
+bindings retain `mixed_contact`. New source build/cache acceptance is pending.
+
 ## Connect an existing scene sound
 
 Select the scene Audio Source, choose its imported sound in Asset, and open

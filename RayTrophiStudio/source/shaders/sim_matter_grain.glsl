@@ -71,12 +71,13 @@ const uint BUCKET = 16u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 24u;
+const uint REVISION = 25u;
 const uint AUDIT = 0x80000000u;
 const uint SLOT_WORDS = 7u;
 const uint FRESH = 0x80000000u;
 #include "sim_matter_grain_sleep.glsl"
 #include "sim_matter_grain_sleep_transfer.glsl"
+#include "sim_matter_grain_audio.glsl"
 // Shared with the host (kMatterGrainListCapacity).
 const uint LIST = 32u;
 // diagnostics words: 12..14 rebuild flags (k%3), 15 builds this frame,
@@ -281,6 +282,8 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     // c = 2 zeta sqrt(k m_eff) gives every contact the same rebound.
     float cn = 2.0*pc.step_contact.y*sqrt(k/inverse_normal_mass);
     float fn = max(0.0, k*overlap-cn*normal_speed);
+    recordContactDamping(i, position(i, readBank()) + arm, normal_speed,
+        fn, k * overlap, dt, (key & WALL_KEY) == 0u);
     vec3 tangential, rolling;
     uint slot = previousSprings(key, tangential, rolling);
     float history_dt = slot == EMPTY ? dt : g_history_dt;
@@ -405,7 +408,8 @@ void main() {
     if (i == 0u) diagnostics[1] = REVISION;
     // Reject an old host's three-word metadata before indexing the new layout.
     // The descriptor/push ABI is unchanged, so reflection alone cannot catch it.
-    if (uint(history_blocks.length()) < 5u*pc.substep.y) {
+    if (uint(history_blocks.length()) < 5u*pc.substep.y ||
+        uint(diagnostics.length()) < AUDIO_HEADER_WORDS + AUDIO_WORDS_PER_GRAIN * pc.meta.x) {
         if (i == 0u) atomicOr(diagnostics[0],16u);
         return;
     }
