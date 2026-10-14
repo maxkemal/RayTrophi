@@ -104,6 +104,15 @@ Biten bir notu **silme**, `ARŞİV`e çevir; postmortem'ler bu deponun en pahal�
 `scripts/...` **ve** `x64/Release/scripts/...`. Uygulama ikincisinden okur;
 yalnızca ilkini güncellemek eski scripti koşturur.
 
+## 4b. Ekran görüntüleri repoya GİRMEZ, iş bitince silinir
+
+Doğrulama için aldığın görüntüler (`viewport.get_screenshot`, `render.start`
+çıktısı, karşılaştırma kareleri) **ajanın scratchpad'ine** yazılır; repoya,
+`docs/dev/`'e ya da kök dizine değil. İş bitince silinir. Bulguyu notta
+**sözle ve sayıyla** yaz, görüntüye bağlantı verme. 2026-10-14'te `docs/dev`
+ve kökte 22 ajan görüntüsü birikmişti; `.gitignore` sonradan eklendiği için
+takip edilmeye devam etmişlerdi ve elle temizlendi.
+
 ## 5. Geriye uyum yükü yok
 
 Bir yol doğrulanıp ölü olduğu anlaşıldıysa **sök**. İki kod yolunu "her ihtimale

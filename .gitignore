@@ -108,9 +108,22 @@ RayTrophiAgent/agent_scripts/
 RayTrophiAgent/horizon_result.json
 docs/dev/grain_suite/
 
+# Temporary agent verification screenshots, never documentation assets.
+/docs/dev/.captures/
+/docs/dev/**/*.png
+/docs/dev/**/*.jpg
+/docs/dev/**/*.jpeg
+/docs/dev/**/*.webp
+/docs/dev/**/*.bmp
+/docs/dev/**/*.gif
+
 # Generated granular regression captures at the repository root
 /granular_g2_radius_ab.png
 /granular_g2_visual_check.png
+# Agent screenshots dropped at the root (live_granular_*.jpg was committed
+# once). The root's real assets are PNG (snow_texture.png).
+/*.jpg
+/*.jpeg
 
 # Compiled SPIR-V shaders are local build output: build them with
 # compile_shaders.bat / compile_sim_shaders.bat
