@@ -15,9 +15,7 @@
          3a. YUKSEKLIGE BAGLI: tabanin %25 ve %60 ustundeki yatay volume_sdf
              profilleri birbirinden > 150 m farkli (kabuk modelinde birebir
              ayniydi: dusey uzatilmis 2B alan).
-         3b. DUZ TABAN: merkezin 0.4 R cevresindeki 4 dusey hattin en az 3'unde
-             alt sifir gecisi medyandan +-1.5 dusey voksel (biri duvar
-             bulutuyla alcalmis olabilir).
+         3b. TABAN (V3): 0.4 R cevresindeki 4 dusey hattin alt gecisi kutu tabani ile LCL arasinda (loblar, duvar bulutu, scud LCL altina sarkar, ustune cikmaz).
          3c. DETERMINIZM: ayni profil iki kez -> bit bit ayni.
       4. Sabit sonum: derin icteki (sdf < -400 m) iki noktada yogunluk ESIT.
       5. Kapatinca: atlas_slots 0 ve 1'deki 5 nokta BIT BIT ayni.
@@ -144,9 +142,15 @@ try {
                 $c = @(Crossings $yy (Sample 'volume_sdf' $pp))
                 if ($c.Count -gt 0) { $bottoms += $c[0] }
             }
-            $med = if ($bottoms.Count -gt 0) { ($bottoms | Sort-Object)[[int][math]::Floor($bottoms.Count / 2)] } else { 0 }
-            $flat = @($bottoms | Where-Object { [math]::Abs($_ - $med) -le 1.5 * $voxY }).Count
-            Check ($flat -ge 3) ("3b flat base: {0} of {1} bottoms within {2:0} m of {3:0}" -f $flat, $bottoms.Count, (1.5 * $voxY), $med)
+            # V3: the base hangs in lobes (and scud) below the LCL, never
+            # above it, and never below the box's hang room.
+            $lcl = [double]$lv.lcl_m
+            $boxBottom = [double]$box.min[1]
+            $inBand = @($bottoms | Where-Object { $_ -le ($lcl + 1.5 * $voxY) -and $_ -ge ($boxBottom - 1.5 * $voxY) }).Count
+            $txt = ($bottoms | ForEach-Object { "{0:0}" -f $_ }) -join ' '
+            Check ($bottoms.Count -ge 3 -and $inBand -eq $bottoms.Count) ("3b base between box bottom {0:0} and LCL {1:0}: {2} of {3} ({4})" -f $boxBottom, $lcl, $inBand, $bottoms.Count, $txt)
+            $hanging = @($bottoms | Where-Object { $_ -lt ($lcl - 1.5 * $voxY) }).Count
+            Write-Host ("       {0} of {1} bottoms hang below the LCL (lobes / wall cloud / scud)" -f $hanging, $bottoms.Count)
 
             $again = Sample 'volume_sdf' $p1
             $det = $true; for ($i = 0; $i -lt $s1.Count; $i++) { if ($s1[$i] -ne $again[$i]) { $det = $false } }

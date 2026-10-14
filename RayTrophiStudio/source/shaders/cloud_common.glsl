@@ -231,6 +231,9 @@ bool cloudSegmentMayContain(vec3 origin, vec3 direction, float distance) {
     }
     // Local fog sits on the ground: any segment may cross it.
     if (cloudFogActive()) lowest = min(lowest, cloudParams.layers[4].a.x);
+    // Cell volume boxes reach below the column (lowered base, scud).
+    if (cloudParams.volume.x > 0.5 && cloudShellActive())
+        lowest = min(lowest, cloudParams.volumeSlots[0].a.y);
     return max(cloudAltitude(origin), cloudAltitude(origin + direction * distance)) >= lowest;
 }
 

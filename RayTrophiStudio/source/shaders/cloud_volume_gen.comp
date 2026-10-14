@@ -153,6 +153,17 @@ const float kFeederCellM = 1500.0;
 // cauliflower below the voxel scale).
 const float kBillowScaleM = 650.0;
 const float kBillowAmpM = 170.0;
+// Lean of the crowns per unit shear (the shell's 1.6 drew towers as leaning
+// smoke plumes in the volumes, 2026-10-14).
+const float kLeanFactor = 0.8;
+// V3, below the condensation level (room: kCloudVolumeHangM, CloudParams.h):
+//   base lobes = the rain-free base hangs in rounded lobes under the updraft
+//                region, up to kBaseLobeM below the flat base;
+//   scud       = small torn fragments under the base on the inflow side,
+//                drawn INTO the storm and up into its base over their life.
+const float kBaseLobeM = 420.0;
+const float kBaseLobeCellM = 1100.0;
+const int kScud = 28;
 
 void main() {
     uint n = pc.info.y;
@@ -181,7 +192,7 @@ void main() {
     // Lean: crowns drift downwind, capped at 3 km of height (as the shell).
     float above = clamp(local.y - gBase, 0.0, 3000.0);
     vec3 q = local;
-    q.xz -= shear * (above * (above / 3000.0) * 1.6);
+    q.xz -= shear * (above * (above / 3000.0) * kLeanFactor);
 
     // Body: the broad lower chain at the core (lower when turrets carry the
     // height, as the cell map's body dome).
@@ -227,15 +238,25 @@ void main() {
         for (int gz = -1; gz <= 1; ++gz)
         for (int gx = -1; gx <= 1; ++gx) {
             ivec2 gc = ivec2(g) + ivec2(gx, gz);
-            uint s = cellHash(id * 2654435761u ^ (uint(gc.x) * 73856093u) ^ (uint(gc.y) * 19349663u));
+            uint s0 = cellHash(id * 2654435761u ^ (uint(gc.x) * 73856093u) ^ (uint(gc.y) * 19349663u));
+            // Inflow: each feeder lives one cycle, growing and decaying
+            // (sin), drawn up to 0.2 cell toward the storm meanwhile; a new
+            // generation draws a new place. Size 0 at the wrap: no pop.
+            float cyc = age / mix(900.0, 1500.0, cellRandom(s0)) + cellRandom(s0);
+            float u = fract(cyc);
+            uint s = cellHash(s0 ^ (uint(floor(cyc)) * 2246822519u));
             vec2 cen = (vec2(gc) + 0.2 + 0.6 * vec2(cellRandom(s), cellRandom(s))) * kFeederCellM;
+            vec2 toCore = C - cen;
+            cen += toCore / max(length(toCore), 1.0) * (0.2 * kFeederCellM * u);
+            float grow = sin(3.14159265 * u);
             float rr = length(cen - C) / R;
             if (rr < 1.1) continue;
             float nearS = 1.0 - smoothstep(1.1, 3.2, rr);
             if (cellRandom(s) > 0.15 + 0.6 * nearS) continue;
-            float rt = mix(180.0, 420.0, nearS * cellRandom(s));
+            float rt = mix(180.0, 420.0, nearS * cellRandom(s)) * mix(0.6, 1.0, grow);
             if (length(cen - C) > halfBox - 1.9 * rt - 150.0) continue;
-            float topM = gBase + mix(500.0, 3800.0, nearS * nearS * mix(0.5, 1.0, cellRandom(s))) * mix(0.4, 1.0, T);
+            float topM = gBase + mix(500.0, 3800.0, nearS * nearS * mix(0.5, 1.0, cellRandom(s))) *
+                                 mix(0.4, 1.0, T) * grow;
             sdf = smin(sdf, chainSdf(q, cen, rt, topM, s ^ 0x3c6ef372u), 0.1 * rt);
         }
     }
@@ -258,7 +279,9 @@ void main() {
         float a = smoothstep(0.0, 0.7, anvil);
         float ec = clamp(e, 0.0, 1.0);
         float topY = gAnvil + 0.02 * gHeight * smoothstep(0.5, 1.0, a) * (1.0 - ec);
-        float botY = topY - max(mix(0.015, 0.14, a) * gHeight * (1.0 - 0.8 * ec), 60.0);
+        // >= 250 m: thinner, the fibrous detail dent (<= 150 m) punched the
+        // anvil's edge into floating islands (2026-10-14).
+        float botY = topY - max(mix(0.015, 0.14, a) * gHeight * (1.0 - 0.8 * ec), 250.0);
         // Slab x ellipse; 0.7 covers the slope of the thinning faces.
         float sAnvil = max(max(botY - q.y, q.y - topY), (e - 1.0) * min(ax, ay)) * 0.7;
         kind = 1.0 - smoothstep(-300.0, 300.0, sAnvil - sdf);   // fibrous where the anvil is nearer
@@ -267,9 +290,51 @@ void main() {
 
     // Flat condensation base, lowered into the wall cloud under the main
     // updraft (cloud_cells.comp: 0.2 r upwind, 0.3 r wide).
+    float room = max(gBase - 40.0, 0.0);   // down to just above the box bottom
     float wallD = length(local.xz - (C - along * 0.2 * R)) / (0.3 * R);
-    float baseY = gBase - pc.d.x * T * (1.0 - smoothstep(0.4, 1.0, wallD));
+    float wall = min(room, 450.0) * T * (1.0 - smoothstep(0.4, 1.0, wallD));
+    // Base lobes under the updraft region (within ~R of the core, weighted
+    // to the inflow side): inverted 2D Worley, rounded hanging domes. The
+    // cut below has slope <= ~0.9 (kBaseLobeM x 2.1 / kBaseLobeCellM),
+    // covered by the 1.35 in the final scale.
+    vec2 rc = local.xz - C;
+    float core = 1.0 - smoothstep(0.55 * R, 1.15 * R, length(rc - along * 0.15 * R));
+    float lobe = smoothstep(0.3, 1.0, 1.0 - worleyF1(vec3(local.x / kBaseLobeCellM, 3.7,
+                                                       local.z / kBaseLobeCellM), id * 40503u + 9u));
+    float hangM = min(room, kBaseLobeM) * T * core * lobe;
+    float baseY = gBase - max(wall, hangM);
     sdf = max(sdf, baseY - local.y);
+
+    // Scud: after the base cut (it lives below the base). Each fragment
+    // lives one cycle: born out on the inflow side, it is drawn toward the
+    // core and up into the base, growing then shrinking to nothing (no pop
+    // at the wrap). Horizontally stretched ellipsoids: the squash x min axis
+    // keeps a lower bound.
+    if (room > 80.0 && T > 0.2 && local.y < gBase + 100.0) {
+        for (int k = 0; k < kScud; ++k) {
+            uint s0 = cellHash(id * 1597334677u + uint(k) * 3812015801u + 5u);
+            float cyc = age / mix(420.0, 780.0, cellRandom(s0)) + cellRandom(s0);
+            float u = fract(cyc);
+            uint s = cellHash(s0 ^ (uint(floor(cyc)) * 2654435761u));
+            // Inflow sector: around -along, +-110 degrees.
+            float ang = atan(-along.y, -along.x) + (cellRandom(s) - 0.5) * 3.84;
+            float r0 = R * mix(0.9, 1.9, cellRandom(s));
+            float rNow = r0 * mix(1.0, 0.5, u);
+            vec2 c2 = C + vec2(cos(ang), sin(ang)) * rNow;
+            float y0 = gBase - room * mix(0.35, 0.9, cellRandom(s));
+            float yNow = mix(y0, gBase - 0.15 * room, u * u);
+            float size = sin(3.14159265 * u) * mix(0.6, 1.0, T);
+            vec3 ax = vec3(mix(140.0, 320.0, cellRandom(s)), mix(50.0, 110.0, cellRandom(s)),
+                           mix(140.0, 320.0, cellRandom(s))) * size;
+            if (ax.y < 15.0) continue;
+            vec3 dq = local - vec3(c2.x, yNow, c2.y);
+            // Torn: a second, offset lobe makes each fragment ragged.
+            float d1 = (length(dq / ax) - 1.0) * ax.y;
+            vec3 off = vec3(cellRandom(s) - 0.5, 0.2, cellRandom(s) - 0.5) * ax * 1.4;
+            float d2 = (length((dq - off) / (ax * 0.6)) - 1.0) * ax.y * 0.6;
+            sdf = min(sdf, min(d1, d2));
+        }
+    }
 
     // The lean is a shear of the lookup, not a rigid motion: distances in q
     // overstate world distances by up to 1 + |shear| x d(lean)/dy. Without
@@ -277,8 +342,9 @@ void main() {
     // towers looked see-through (2026-10-14). Scaling keeps the surface.
     // The billows multiply the slope by at most 1 + kBillowAmpM / kBillowScaleM
     // (they are evaluated in the sheared lookup too).
-    float leanSlope = length(shear) * (above < 3000.0 ? 3.2 * above / 3000.0 : 0.0);
-    sdf /= (1.0 + leanSlope) * (1.0 + kBillowAmpM / kBillowScaleM);
+    // The lobed base cut adds a slope of ~0.9 below the base: x 1.35.
+    float leanSlope = length(shear) * (above < 3000.0 ? 2.0 * kLeanFactor * above / 3000.0 : 0.0);
+    sdf /= (1.0 + leanSlope) * (1.0 + kBillowAmpM / kBillowScaleM) * 1.35;
 
     sdf = clamp(sdf, -kVolumeSdfClampM, kVolumeSdfClampM);
     ivec3 dst = ivec3(v) + ivec3(0, 0, int(pc.info.x * n));
