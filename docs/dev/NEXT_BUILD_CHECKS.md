@@ -5,7 +5,53 @@ New Designer listening/UI/external IPC results are pending. The cloud V2d shader
 visual checklist below keeps its separate acceptance gate; Studio compilation does
 not establish that a shader rebuild or visual/physics test passed.
 
+# 2026-10-14 (gece, 4): bulut hacimleri V2e — gölge yüzü, etek levhası (yalnızca shader)
+
+> **Sonuç:** derlendi, CANLI — kullanıcı "çok daha doğal"; IPC karesinde
+> levha ve kutu kenarı çizgileri yok, gölge yüzü gri + gümüş kenar.
+
+Bulgular (kullanıcının ayarladığı kare, kamera güneşe bakıyor, IPC ekran
+görüntüsü):
+- gölge yüzü düz ve soluk, gök kadar açık → "saydam";
+- kule tabanında kutu genişliğinde, düz tepeli KAHVERENGİ bir levha; kutu
+  kenarlarında dik kesiliyor.
+
+Düzeltmeler:
+1. Gölge yüzünün ortam ışığı yarı yarıya yüzey NORMALİ yönündeki gökten
+   (`skyAmb`). Güneşe sırtını dönen duvar artık güneş tarafının parlak
+   ufkunu görmüyor (`cloud_rt.glsl`).
+2. Etek: kare düşüş, kırık örtü (0.3..1), tam kalınlık yalnızca duvarda,
+   kutu kenarından 2.5 km içinde sönüyor (`cloudVolumeLastEdge`,
+   `cloud_common.glsl`).
+3. Kutu içinde ama hacmin dışındaki katman örneğinin dikey AO tap'leri
+   artık yalnızca katmanın kendi yoğunluğunu okuyor. Önceden 1.5 km
+   yukarıdaki tap kuleye düşüyordu (σ·3 km ≈ 800): gök ışığı sönüyor,
+   güverte zemin kahvesine boyanıyordu. Kulenin gökten kapattığı pay
+   artık uzaklıkla azalan bir açıklık terimi.
+
+## Kontrol listesi (sırayla)
+1. **Derleme** (yalnızca shader).
+2. **Levha (göz, aynı kare).** Kahverengi düz bant ve kutu kenarındaki dik
+   çizgiler gitmeli; güverte kuleye doğru kırık kümülüslerle kabarmalı.
+   - Bozuksa: bant sürüyor ama artık gri → AO tamam, şekil hâlâ levha:
+     etekte `topFrac` satırını geçici kapat. Bant hâlâ kahverengi → kaynak
+     etek değil, ışık; `volSdf < 1e5 && !column` dalı tutmuyor demektir.
+3. **Gölge yüzü (göz).** Güneşe karşı bakan kulelerin gölge yüzü gökten
+   belirgin koyu, gri-mavi olmalı; kenarlar parlak (gümüş kenar).
+   - ★ Sinsi olan: uzak kuleler (≳30 km) yine soluk kalabilir. Bu hava
+     perspektifi (`mie_density 1200`, `mie_anisotropy 0.99` güneşe doğru
+     beyaz pus); hata değil, sahne ayarı. Yakın kuleye bak.
+4. **Probe:** `.\scripts\ipc\Probe-CloudVolumes.ps1` → PASS (şekil
+   değişmedi; yalnız ışık ve katman).
+5. **Maliyet:** değişiklik yok sayılır (+1 LUT okuması).
+
+---
+
 # 2026-10-14 (gece, 3): bulut hacimleri V2d — gölge yüzü + çoklu hücre şekli
+
+> **Sonuç (2026-10-14):** derlendi; kullanıcı "şekiller çok daha iyi". Probe
+> PASS (madde 4; probe'un geçiş sayacı düzeltildi). Açık kalan: madde 2'nin
+> gölge yüzü onayı ve madde 5 maliyet.
 
 Önceki derlemede (V2c, kullanıcı, ışık yönü değiştirildi):
 - saydamlık GÖLGE tarafında ve güneşle birlikte yer değiştiriyor → SDF

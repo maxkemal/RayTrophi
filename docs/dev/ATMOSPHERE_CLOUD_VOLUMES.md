@@ -1,7 +1,7 @@
 # Bulut hacimleri: sütun profili + arka plan katmanları + hücre hacmi (Atmosfer Faz 9)
 
 > **Durum:** AKTİF — 2026-10-14. §5 kararları öneri yönünde onaylandı.
-> V0+V1+V2 CANLI PASS, V2b+V2c canlı (2026-10-14); V2d yazıldı, derlenmedi. Yerine geçeceği yapı:
+> V0+V1+V2 CANLI PASS, V2b–V2e canlı (2026-10-14). Yerine geçeceği yapı:
 > `ATMOSPHERE_CELL_CLOUDS.md` §1 fırtına kabuğu (parti 14 yüzey modeli).
 > Kabuk, V5 kabul edilene kadar yan yana yaşar, sonra sökülür (CLAUDE.md
 > kural 5).
@@ -64,7 +64,27 @@
     daha uzun/sık), ~650 m Worley kabarmaları (±77 m), alt kabarcıklar
     duvara da iniyor ve boyları geniş dağılıyor; shader kabarcık dent'i
     80 → 120 m. Lipschitz: `(1+eğim)(1+170/650)`.
-- **Sıradaki adım:** V2d derleme → kontrol listesi → V3 (sarkan taban,
+- **V2d CANLI:** kullanıcı "şekiller çok daha iyi" (ışık yönü değişik kare).
+  Probe PASS (4 hücre, R 3.4–4.4 km, kutu 18.8 km): profil farkı 258 m,
+  düz taban 4/4 @578 m, sönüm 0.261 sabit, kapatınca aynı. Probe hatası
+  düzeltildi: `Crossings` kutu dışı (1e6) → bulut geçişini atlıyordu; taban
+  kutu tabanından ~60 m yukarıda (< örnek adımı) olunca gövde çıkışı taban
+  sanılıyordu. Ölçülmedi: kare maliyeti, yeniden boyama takılması.
+- **V2e YAZILDI, derlenmedi** (kullanıcı: "gölge yüzü hâlâ saydam gibi";
+  IPC ekran görüntüsü, kamera güneşe bakıyor): gölge yüzü gök kadar açık;
+  kule tabanında kutu genişliğinde düz kahverengi levha, kutu kenarında
+  kesik. Düzeltmeler: ortamın yarısı normal yönündeki gökten; etek kare
+  düşüş + kırık örtü + kutu kenarı sönümü (`cloudVolumeLastEdge`); kutu
+  içi katman AO tap'leri yalnız katmanın kendi yoğunluğu (tap kuleye
+  düşüp gök ışığını öldürüyordu → kahverengi).
+- **V2e CANLI** (kullanıcı: "çok daha doğal"; IPC karesi): kahverengi
+  levha ve kutu kenarı çizgileri gitti, gölge yüzü gri + gümüş kenar,
+  güverte kuleye kırık kümülüslerle kabarıyor. Karede kalanlar (V3'e
+  girdi): (a) uzak kulelerin tabanında güverte hizasında soluk, düz üstlü
+  bir şerit, alt kısımlarından ufuk seçiliyor; (b) kuleler çok eğik,
+  duman sütunu gibi (kesme/eğim payı büyük); (c) örs çevresinde havada
+  kopuk küçük parçalar.
+- **Sıradaki adım:** V3 (sarkan taban,
   scud, içe akış: besleyici halka bunun durağan hâli).
 - **Açık kararlar:** yok. Not: `.vdb` dışa aktarma V2'ye kaldı.
 - **Dokunulan dosyalar:** AtmosphereClouds.h/.cpp, CloudParams.h,

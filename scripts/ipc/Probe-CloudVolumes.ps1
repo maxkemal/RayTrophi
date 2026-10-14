@@ -52,6 +52,12 @@ function Crossings($xs, $vs) {
     $out = @()
     for ($i = 1; $i -lt $vs.Count; $i++) {
         $a = [double]$vs[$i - 1]; $b = [double]$vs[$i]
+        # Leaving the box (1e6) straight into cloud: the box face is the
+        # crossing. Skipped, a base only ~60 m above the box bottom (less than
+        # a sample step) lost its crossing and the body exit was taken for
+        # the base (2026-10-14).
+        if ([math]::Abs($a) -ge 1e5 -and $b -lt 0) { $out += $xs[$i]; continue }
+        if ($a -lt 0 -and [math]::Abs($b) -ge 1e5) { $out += $xs[$i - 1]; continue }
         if (($a -lt 0) -ne ($b -lt 0) -and [math]::Abs($a) -lt 1e5 -and [math]::Abs($b) -lt 1e5) {
             $t = $a / ($a - $b)
             $out += $xs[$i - 1] + $t * ($xs[$i] - $xs[$i - 1])

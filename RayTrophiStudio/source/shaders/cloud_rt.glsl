@@ -699,6 +699,13 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                 // Sky share of the hemisphere the sample faces, and how open
                 // its surface is (1 = no crevice). Layers: half and half.
                 float skyShare = 0.5, openness = 1.0;
+                // Sky radiance seen by this sample: the hemisphere mean, or
+                // where the surface's facing is known, half of it from the
+                // sky around its normal. A shadowed wall faces AWAY from the
+                // sun and sees the darker sky behind the viewer, not the bright
+                // sun-side horizon the mean includes (the backlit towers read
+                // as pale as the sky behind them, 2026-10-14).
+                vec3 skyAmb = ambTop;
                 if (volSdf < 0.0) {
                     // Inside a cell volume the signed distance IS the depth
                     // the sky light diffuses through, from every side. The
@@ -716,7 +723,24 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                         vec3 nV = cloudVolumeNormal(p, 120.0);
                         skyShare = 0.5 + 0.5 * dot(nV, upN);
                         openness = cloudVolumeOpenness(p, nV, volSdf);
+                        vec3 nSky = nV - upN * min(dot(nV, upN), 0.0) + upN * 0.2;
+                        skyAmb = 0.5 * (ambTop + cloudSkyAmbient(normalize(nSky)));
                     }
+                } else if (volSdf < 1e5 && !column) {
+                    // Layer cloud beside a volume (inside its box): only the
+                    // layer itself occludes the vertical taps. With the
+                    // volume in them a tap 1.5 km up landed in the tower
+                    // (sigma x 3 km ~ 800), the sky light died and the deck
+                    // around every storm was drawn in ground brown -- a dark
+                    // band at the deck top. The tower's share of the sky
+                    // instead falls with the distance to it.
+                    if (aoTick++ % aoEvery == 0) {
+                        vec3 qt = p + upN * (dTop * 0.5), qb = p - upN * (dBot * 0.5);
+                        float unused;
+                        tauTop = cloudLayerOwnDensity(li, qt, cloudAltitude(qt), false, unused) * dTop;
+                        tauBot = cloudLayerOwnDensity(li, qb, cloudAltitude(qb), false, unused) * dBot;
+                    }
+                    openness = 1.0 - 0.35 * (1.0 - smoothstep(0.0, 3000.0, volSdf));
                 } else if (aoTick++ % aoEvery == 0) {
                     vec3 qt = p + upN * (dTop * 0.5), qb = p - upN * (dBot * 0.5);
                     tauTop = (allLayers ? cloudDensity(qt, false) :
@@ -733,7 +757,7 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                 // multiply-scattered through a thick cloud falls ~1/(1+k tau)
                 // (k ~ 0.75 (1 - g)), so a tower's interior is dim grey, not
                 // the exp(-tau) = 0 that left only the zenith colour.
-                vec3 amb = openness * (skyShare * ambTop / (1.0 + 0.2 * tauTop) +
+                vec3 amb = openness * (skyShare * skyAmb / (1.0 + 0.2 * tauTop) +
                                        (1.0 - skyShare) * below / (1.0 + 0.2 * tauBot));
                 vec3 S = vec3(0.0);
                 float a = 1.0, b = 1.0;
