@@ -240,6 +240,7 @@ inline void packStormColumn(const atmosphere::CloudState& c, CloudParamsGPU& p) 
 inline float quantizeCloud(float v, float step) {
     return std::floor(v / step + 0.5f) * step;
 }
+constexpr float kCloudVolumeHangM = 900.0f;
 inline void packCloudVolumes(const atmosphere::CloudState& c, float time_seconds,
                              const Vec3& wind_mps, CloudParamsGPU& p) {
     p.volume[0] = p.volume[1] = p.volume[2] = p.volume[3] = 0.0f;
@@ -253,25 +254,31 @@ inline void packCloudVolumes(const atmosphere::CloudState& c, float time_seconds
     const float windLength = std::sqrt(wind_mps.x * wind_mps.x + wind_mps.z * wind_mps.z);
     const float windX = windLength > 1e-3f ? wind_mps.x / windLength : 0.0f;
     const float windZ = windLength > 1e-3f ? wind_mps.z / windLength : 0.0f;
+    // Room under the column base for what hangs below the condensation level
+    // (lowered base lobes, scud): the boxes reach this far below the column,
+    // the march extends the column's lowest interval down to the boxes
+    // (cloudIntervals). Never below 100 m altitude.
+    const float hang = (std::min)(kCloudVolumeHangM, (std::max)(s.a[0] - 100.0f, 0.0f));
     int k = 0;
     for (int i = 0; i < n && k < budget; ++i) {
         const atmosphere::StormCellState& cell = cells[i];
         if (cell.tower < c.volumes.min_tower) continue;
         CloudVolumeSlotGPU& v = p.volumeSlots[k];
         v.a[0] = cell.x - 0.5f * size;
-        v.a[1] = s.a[0];
+        v.a[1] = s.a[0] - hang;
         v.a[2] = cell.z - 0.5f * size;
         v.a[3] = 1.0f;
         v.b[0] = size;
-        v.b[1] = s.a[1];
+        v.b[1] = s.a[1] + hang;
         v.b[2] = size;
         v.b[3] = static_cast<float>(k);
         v.c[0] = static_cast<float>(cell.id & 0xffffu);
         v.c[1] = quantizeCloud(cell.tower, 1.0f / 64.0f);
         v.c[2] = quantizeCloud(cell.radius_m, 25.0f);
         v.c[3] = quantizeCloud(cell.life, 1.0f / 128.0f);
-        v.d[0] = p.storms2[2];
-        v.d[1] = p.storms2[1];
+        // Base and tropopause measured from the (lowered) box bottom.
+        v.d[0] = p.storms2[2] + hang;
+        v.d[1] = (p.storms2[1] * s.a[1] + hang) / (s.a[1] + hang);
         v.d[2] = quantizeCloud(cell.coverage, 1.0f / 64.0f);
         v.d[3] = quantizeCloud(cell.peak, 1.0f / 64.0f);
         // The turrets cycle over ~15 min: 4 s steps repaint a slot about every

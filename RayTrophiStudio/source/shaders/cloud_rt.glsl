@@ -155,6 +155,9 @@ int cloudIntervals(vec3 o, vec3 d, float tLimit, out vec3 iv[CLOUD_RT_MAX_INTERV
         }
         CloudLayerG S = cloudParams.layers[3];
         float lo = S.a.x;
+        // Cell volume boxes reach below the column (room for the lowered
+        // base and scud, packCloudVolumes); they all share that bottom.
+        if (cloudVolumesActive()) lo = min(lo, cloudParams.volumeSlots[0].a.y);
         float top = S.a.x + S.a.y;
         // The column draws nothing outside the cell map square (dilated by
         // the largest shear lean). Unclipped, a near-horizontal ray carried
@@ -431,6 +434,15 @@ vec3 cloudAerialTransmittance(vec3 o, vec3 d, float t) {
 
 vec3 cloudSkyAmbient(vec3 dir);
 
+// Aerial perspective: radiance of the AIR between the viewer and a cloud. The
+// sky texel below the horizon is the ground (miss path: the scene's ground
+// colour), so seen from above every shadowed cloud below the horizon turned
+// brown and every one above it sky blue -- a colour line at the horizon
+// (2026-10-14). The air light comes from the near-horizontal sky.
+vec3 cloudAerialSky(vec3 d) {
+    return cloudSkyAmbient(normalize(vec3(d.x, max(d.y, 0.03), d.z) + vec3(1e-4, 0.0, 0.0)));
+}
+
 // ── Production marcher (Schneider 2015/2022 "Nubis", Hillaire 2016) ────────
 // One jittered march per sample: adaptive steps (fine in cloud, coarse and
 // map-skipped in empty sky, growing with distance), energy-conserving step
@@ -484,7 +496,7 @@ void cloudCirrus(vec3 o, vec3 d, float tLimit, vec3 sunDir, float mu, vec3 ambTo
     vec3 L = cloudParams.scatterAlbedo.rgb *
              (Es * cloudPhaseHG(iceG, mu) + ambTop) + cloudParams.emissionSource.rgb;
     vec3 Tap = cloudAerialTransmittance(o, d, t);
-    inscatter += T * a * (L * Tap + cloudSkyAmbient(d) * (vec3(1.0) - Tap));
+    inscatter += T * a * (L * Tap + cloudAerialSky(d) * (vec3(1.0) - Tap));
     T *= 1.0 - a;
 }
 
@@ -809,7 +821,7 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
     if (depthW > 1e-4) {
         depth = depthSum / depthW;
         vec3 Tap = cloudAerialTransmittance(o, d, depth);
-        inscatter = inscatter * Tap + cloudSkyAmbient(d) * (vec3(1.0) - Tap) * (1.0 - T);
+        inscatter = inscatter * Tap + cloudAerialSky(d) * (vec3(1.0) - Tap) * (1.0 - T);
 #ifdef CLOUD_SEPARATE_FLASH_HISTORY
         cloudFlashInscatter *= Tap;
 #endif
@@ -936,7 +948,7 @@ void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout 
     if (dW <= 1e-4) return;
     float pd = dSum / dW;
     vec3 Tap = cloudAerialTransmittance(o, d, pd);
-    pin = pin * Tap + cloudSkyAmbient(d) * (vec3(1.0) - Tap) * (1.0 - pT);
+    pin = pin * Tap + cloudAerialSky(d) * (vec3(1.0) - Tap) * (1.0 - pT);
     // From below the shaft is in front of the cloud; from above, behind it.
     if (fromAbove) inscatter += T * pin;
     else           inscatter = pin + pT * inscatter;
@@ -1017,7 +1029,7 @@ void cloudRenderLimited(vec3 o, vec3 d, float tLimit, bool cameraRay, uint seed,
         // the cloud, and the sky's own in-scatter (no sun disk) fills in the
         // part of the view the cloud covers.
         vec3 Tap = cloudAerialTransmittance(o, d, depth);
-        inscatter = inscatter * Tap + cloudSkyAmbient(d) * (vec3(1.0) - Tap) * (1.0 - T);
+        inscatter = inscatter * Tap + cloudAerialSky(d) * (vec3(1.0) - Tap) * (1.0 - T);
     }
     // Cirrus uses the same bounded thin-sheet model in both renderer modes.
     // It is not part of the liquid-cloud random walk. Previously selecting

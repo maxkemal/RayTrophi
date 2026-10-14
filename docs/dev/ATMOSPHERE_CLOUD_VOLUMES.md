@@ -1,7 +1,7 @@
 # Bulut hacimleri: sütun profili + arka plan katmanları + hücre hacmi (Atmosfer Faz 9)
 
 > **Durum:** AKTİF — 2026-10-14. §5 kararları öneri yönünde onaylandı.
-> V0+V1+V2 CANLI PASS, V2b–V2e canlı (2026-10-14). Yerine geçeceği yapı:
+> V0+V1+V2 CANLI PASS, V2b–V2e canlı (2026-10-14); V3 yazıldı, derlenmedi. Yerine geçeceği yapı:
 > `ATMOSPHERE_CELL_CLOUDS.md` §1 fırtına kabuğu (parti 14 yüzey modeli).
 > Kabuk, V5 kabul edilene kadar yan yana yaşar, sonra sökülür (CLAUDE.md
 > kural 5).
@@ -84,8 +84,27 @@
   bir şerit, alt kısımlarından ufuk seçiliyor; (b) kuleler çok eğik,
   duman sütunu gibi (kesme/eğim payı büyük); (c) örs çevresinde havada
   kopuk küçük parçalar.
-- **Sıradaki adım:** V3 (sarkan taban,
-  scud, içe akış: besleyici halka bunun durağan hâli).
+- **V3 YAZILDI, derlenmedi:** kutular kolonun `kCloudVolumeHangM` (900 m,
+  ≥ 100 m irtifa) altına iniyor; `d.x/d.y` kutu tabanından ölçülüyor;
+  marcher kolonun alt aralığını `volumeSlots[0].a.y`'ye uzatıyor. Üretici:
+  sarkan taban lobları (2B Worley, ≤ 420 m), duvar bulutu ≤ 450 m, 28 scud
+  (inflow yarısı, ömür boyunca içe+yukarı, sin büyüme), besleyiciler de
+  içe akıyor, eğim 1.6 → 0.8, örs ≥ 250 m. Probe 3b → "taban kutu tabanı
+  ile LCL arasında".
+- **V3 derlendi.** Kullanıcı: gölgede ufuk altı kahve / üstü gök (iki
+  backend) → **V3b YAZILDI:** hava perspektifi gök değeri ufkun üstüne
+  kısıldı (`cloudAerialSky`); `cloudSegmentMayContain` kutu tabanını
+  biliyor. Kullanıcı ayrıca: çap büyüyünce küçük parçalar çıkıyor ve örs
+  birkaç hücreye tek şapka oluyor (açıklama: kutu büyüyünce besleyici
+  halka ve örs kesilmeden görünür; örsler birleşir — MCS'de gerçekçi;
+  istenirse örs yarı ekseni sınırlanır). Obje–bulut sırası: kod yolu doğru,
+  teyit testi yapılmadı.
+- **V3b derlendi; kullanıcı burada DURDU** ("aynı yerde fazla patinaj").
+  Son düzeltme (YAZILDI, derlenmedi): şimşek yükseklikleri hücrenin kendi
+  kolonuna ölçekleniyor (`CloudLightningParams.h`, `cellDepth`); peak
+  düşünce açık gökte çakıyordu. V3/V3b/şimşek commit'lenmedi.
+- **Sıradaki adım (kullanıcı açınca):** V3/V3b derleme → kontrol listesi → V4 (hacimsel cirrus
+  bandı; örs onun kalınlaşması) / uzak kule tabanı şeridi.
 - **Açık kararlar:** yok. Not: `.vdb` dışa aktarma V2'ye kaldı.
 - **Dokunulan dosyalar:** AtmosphereClouds.h/.cpp, CloudParams.h,
   CloudLightningParams.h, VulkanBackend.h/.cpp, VulkanDeviceClouds.cpp,

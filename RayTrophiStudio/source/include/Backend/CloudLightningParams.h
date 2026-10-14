@@ -210,13 +210,20 @@ inline void makeCloudLightningGPU(const atmosphere::CloudState& clouds, float ti
         for (float acc = cells[0].lightning; chosen + 1 < cellCount && pick > acc;
              acc += cells[++chosen].lightning) {}
         const atmosphere::StormCellState& cell = cells[chosen];
+        // The charge regions scale with THIS cell's column, not the full
+        // troposphere: a weak cell (low peak -> low tower) is a short cloud,
+        // and fractions of the full column put its flashes in clear sky above
+        // it (2026-10-14). Same top as the cell map and the volume generator
+        // (cloudShellTop / shellTopM: tower 0.75 reaches the tropopause).
+        const float cellDepth = column
+            ? spanDepth * (std::clamp)(cell.tower / 0.75f, 0.15f, 1.0f) : spanDepth;
         // Inside the core (0.4 r); the flash moves with its cell.
         const float coreAngle = lightningRandom(seed) * 6.28318530718f;
         const float coreRadius = std::sqrt(lightningRandom(seed)) * 0.4f * cell.radius_m;
         CloudLightningGPU& event = events[i];
         event.start[0] = cell.x + std::cos(coreAngle) * coreRadius + wind_mps.x * age;
         event.start[2] = cell.z + std::sin(coreAngle) * coreRadius + wind_mps.z * age;
-        float startAltitude = spanBase + spanDepth *
+        float startAltitude = spanBase + cellDepth *
             (column ? 0.3f + lightningRandom(seed) * 0.15f : 0.35f + lightningRandom(seed) * 0.3f);
         event.start[3] = lightning.intensity * pulse;
         const bool ground = lightningRandom(seed) < lightning.ground_strike_fraction;
@@ -230,13 +237,13 @@ inline void makeCloudLightningGPU(const atmosphere::CloudState& clouds, float ti
             const float k = lightningRandom(kindSeed);
             icKind = k < 0.5f ? 1 : (k < 0.7f ? 2 : 3);
         }
-        if (icKind == 3) startAltitude = spanBase + spanDepth * (0.72f + 0.1f * lightningRandom(kindSeed));
+        if (icKind == 3) startAltitude = spanBase + cellDepth * (0.72f + 0.1f * lightningRandom(kindSeed));
         // Own hash: the existing draw sequence (and so every other flash)
         // stays the same when upward_fraction changes.
         uint32_t upwardSeed = lightningHash(seed ^ 0x2545f491u);
         const bool upward = ground && lightningRandom(upwardSeed) < lightning.upward_fraction;
         const float angle = lightningRandom(seed) * 6.28318530718f;
-        float span = ground ? (std::min)(spanDepth * 0.18f, 2500.0f) :
+        float span = ground ? (std::min)(cellDepth * 0.18f, 2500.0f) :
                               lightning.horizontal_span_m * size;
         if (icKind == 1) span = cell.radius_m * (0.15f + 0.35f * lightningRandom(kindSeed));
         if (icKind == 2) span = cell.radius_m * (0.3f + 0.5f * lightningRandom(kindSeed));
@@ -251,9 +258,9 @@ inline void makeCloudLightningGPU(const atmosphere::CloudState& clouds, float ti
             (std::clamp)(startAltitude + (lightningRandom(seed) - 0.5f) *
                          layer.thickness_m * 0.12f, layer.base_altitude_m,
                          layer.base_altitude_m + layer.thickness_m);
-        if (icKind == 1) endAltitude = spanBase + spanDepth * (0.72f + 0.15f * lightningRandom(kindSeed));
-        if (icKind == 2) endAltitude = spanBase + spanDepth * (0.01f + 0.05f * lightningRandom(kindSeed));
-        if (icKind == 3) endAltitude = spanBase + spanDepth * (0.82f + 0.06f * lightningRandom(kindSeed));
+        if (icKind == 1) endAltitude = spanBase + cellDepth * (0.72f + 0.15f * lightningRandom(kindSeed));
+        if (icKind == 2) endAltitude = spanBase + cellDepth * (0.01f + 0.05f * lightningRandom(kindSeed));
+        if (icKind == 3) endAltitude = spanBase + cellDepth * (0.82f + 0.06f * lightningRandom(kindSeed));
         const bool verticalCloud = icKind == 1 || icKind == 2;
         if (!lightningSceneHeight(event.start[0], event.start[2], startAltitude,
                                   planetRadius, altitudeOffset, event.start[1]) ||
