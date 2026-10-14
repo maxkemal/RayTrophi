@@ -411,6 +411,11 @@ vec4 cloudWeatherAt(CloudLayerG L, vec3 p) {
 bool cloudVolumesActive();
 bool cloudVolumeNear(vec3 p, float alt, float dilation);
 vec2 cloudVolumeSample(vec3 p, float alt);
+// Horizontal distance (m) from the last cloudVolumeSample() point to the
+// nearest side of the box holding it (the largest over overlapping boxes;
+// 0 = in no box). Effects that reach out of the volume fade with it, so they
+// never end at a box face.
+float cloudVolumeLastEdge = 0.0;
 
 // Extinction (1/m) of one AUTHORED layer (0..2) at world point p, without
 // the storm column. `alt` = cloudAltitude(p), passed in so a caller summing
@@ -443,14 +448,19 @@ float cloudLayerOwnDensity(int li, vec3 p, float alt, bool detail,
         // ACTUAL surface, not from the cell's cover disc: leaning towers and
         // off-centre turrets left the disc, and the layer filled the towers'
         // lower part a second time -- a hard line at the layer top.
-        // Around the tower the deck is drawn INTO the storm (inflow): within
-        // 2.5 km of the surface it thickens, rises to its full depth and
-        // heaps up. Bounded by the cell's dilated cover (cell.a), which the
-        // layer majorant adds in volume mode, so the bound holds.
+        // Around the tower the deck is drawn INTO the storm (inflow): toward
+        // the surface it fills in and heaps up against it. Bounded by the
+        // cell's dilated cover (cell.a), which the layer majorant adds in
+        // volume mode, so the bound holds.
+        // ★ Squared fall-off, a broken cover and the full depth only at the
+        // wall: a linear 2.5 km fall-off with cover 0.7..1 and full depth
+        // drew a flat-topped slab at the layer top under every storm, cut
+        // straight at the box faces (2026-10-14) -- hence the edge fade.
         if (cloudVolumesActive() && cloudVolumeNear(pWorld, alt, 0.0)) {
             float sdfV = cloudVolumeSample(pWorld, alt).x;
             shellMask = 1.0 - smoothstep(-100.0, 100.0, sdfV);
-            skirt = (1.0 - smoothstep(0.0, 2500.0, sdfV)) * cell.a;
+            float s = 1.0 - smoothstep(0.0, 2500.0, sdfV);
+            skirt = s * s * smoothstep(0.0, 2500.0, cloudVolumeLastEdge) * cell.a;
         }
         cell = vec4(0.0);
     }
@@ -469,7 +479,7 @@ float cloudLayerOwnDensity(int li, vec3 p, float alt, bool detail,
     // generator), so thresholding it at 1 - coverage covers ~coverage of sky.
     float cov = clamp(cloudRemap(w.r, 1.0 - L.a.z, 1.0, 0.0, 1.0), 0.0, 1.0);
     cov = max(cov, cell.r * mix(0.7, 1.0, w.r));   // <= cell.a: the majorant holds
-    cov = max(cov, skirt * mix(0.7, 1.0, w.r));    // <= cell.a as well
+    cov = max(cov, skirt * mix(0.3, 1.0, w.r));    // <= cell.a as well; broken
     cov *= 1.0 - shellMask;
     if (cov <= 0.0) return 0.0;
     float type = clamp(L.a.w + (w.g - 0.5) * cloudParams.weather.y, 0.0, 1.0);
@@ -534,7 +544,7 @@ float cloudLayerOwnDensity(int li, vec3 p, float alt, bool detail,
     // their heights, the body between them stays lower (cloud_cells.comp).
     // Without this the cell's full cover made one flat slab of the layer.
     if (flow.z > 0.0) topFrac = mix(topFrac, max(flow.z, 0.25), cellW);
-    topFrac = mix(topFrac, 1.0, skirt);
+    topFrac = mix(topFrac, 1.0, skirt * skirt);   // full depth only at the wall
     if (stormRegion) topFrac = 1.0;
     float hh = h / topFrac;
     if (stormRegion) hh = (alt - L.g.x) / max(L.g.y, 1.0);
@@ -748,6 +758,7 @@ float cloudVolumeLastSdf = 1e6;
 // box), y = detail kind of that surface (0 crisp cauliflower .. 1 fibrous ice).
 vec2 cloudVolumeSample(vec3 p, float alt) {
     vec2 best = vec2(1e6, 0.0);
+    cloudVolumeLastEdge = 0.0;
     ivec3 sz = textureSize(cloudVolumeAtlas, 0);
     float slots = float(sz.z / max(sz.x, 1));
     float texel = 1.0 / float(max(sz.x, 1));
@@ -759,6 +770,8 @@ vec2 cloudVolumeSample(vec3 p, float alt) {
         if (S.b.w + 0.5 > slots) continue;
         vec3 uvw = vec3((p.x - S.a.x) / S.b.x, (alt - S.a.y) / S.b.y, (p.z - S.a.z) / S.b.z);
         if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) continue;
+        vec2 edge = min(uvw.xz, 1.0 - uvw.xz) * S.b.xz;
+        cloudVolumeLastEdge = max(cloudVolumeLastEdge, min(edge.x, edge.y));
         // Slots are stacked along w: clamp half a texel inside the slot so the
         // linear filter never blends two of them.
         uvw.z = (S.b.w + clamp(uvw.z, 0.5 * texel, 1.0 - 0.5 * texel)) / slots;
