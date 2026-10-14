@@ -106,6 +106,9 @@ std::vector<std::string> AudioClips::parameters(const std::string& operation) {
     if (operation == "clip_split") {
         return {"id", "time_seconds"};
     }
+    if (operation == "clip_resize") {
+        return {"id", "end_seconds", "auto_loop"};
+    }
     if (operation == "clip_trim") {
         return {"id", "start_seconds", "end_seconds"};
     }
@@ -272,6 +275,28 @@ json AudioClips::mutate(json& scene, const std::string& operation, const json& p
             if (params.contains("duration_seconds") && !params.contains("envelope_duration_seconds")) {
                 clip["envelope_duration_seconds"] = params.at("duration_seconds");
                 clip["envelope_offset_seconds"] = 0;
+            }
+            result = validate(clip, candidate.at("assets"));
+            find(clips, id) = result;
+        } else if (operation == "clip_resize") {
+            const double start = clip.at("start_seconds");
+            const double end = params.at("end_seconds").get<double>();
+            require(std::isfinite(end) && end > start && end <= 86400,
+                    "Resize end must be after clip start and within the timeline");
+            const auto automatic = params.value("auto_loop", json(false));
+            require(automatic.is_boolean(), "auto_loop must be boolean");
+            const double duration = end - start;
+            clip["duration_seconds"] = duration;
+            const double offset = clip.at("envelope_offset_seconds");
+            clip["envelope_duration_seconds"] = std::max(
+                clip.at("envelope_duration_seconds").get<double>(), offset + duration);
+            // Pitch automation holds its final value beyond existing knots.
+            const double required = clip.at("phase_seconds").get<double>() + travel(clip, duration);
+            const double span = clip.at("source_out_seconds").get<double>() -
+                                clip.at("source_in_seconds").get<double>();
+            if (!clip.at("loop").get<bool>() && required > span + 1e-7) {
+                require(automatic.get<bool>(), "Resize exceeds source range; enable auto_loop");
+                clip["loop"] = true;
             }
             result = validate(clip, candidate.at("assets"));
             find(clips, id) = result;

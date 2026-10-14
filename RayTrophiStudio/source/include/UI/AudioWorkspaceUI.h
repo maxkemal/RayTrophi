@@ -8,6 +8,9 @@ nlohmann::json workspaceCall(UIContext& ctx, const std::string& operation,
 void drawWorkspace(UIContext& ctx);
 void drawInspectorDock(UIContext& ctx);
 void drawSourceInspector(UIContext& ctx);
+void drawSynthesisControls(UIContext& ctx);
+void finishAudioTimelineGesture(UIContext& ctx);
+void drawAudioEditorNavigation(UIContext& ctx);
 void drawAudioBottomTabs(UIContext& ctx);
 void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidth);
 void drawMixerContent(UIContext& ctx);

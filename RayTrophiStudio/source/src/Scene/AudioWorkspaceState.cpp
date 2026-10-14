@@ -5,7 +5,7 @@ namespace audio {
 using json = nlohmann::json;
 json defaultAudioWorkspace() {
     return {{"selected_clip", ""}, {"snap", true}, {"waveforms", true},
-            {"inspector_open", false}};
+            {"inspector_open", false}, {"designer_open", false}};
 }
 
 json updateAudioWorkspace(const json& current, const json& patch, const json& clips) {
@@ -24,7 +24,7 @@ json updateAudioWorkspace(const json& current, const json& patch, const json& cl
                 throw std::invalid_argument("Selected audio clip does not exist");
             }
         } else if (entry.key() == "snap" || entry.key() == "waveforms" ||
-                   entry.key() == "inspector_open") {
+                   entry.key() == "inspector_open" || entry.key() == "designer_open") {
             if (!entry.value().is_boolean()) {
                 throw std::invalid_argument("Audio workspace toggles must be boolean");
             }

@@ -16149,6 +16149,12 @@ bool VulkanBackendAdapter::ensureCloudPipelines(const std::string& shaderDir) {
     if (!std::filesystem::exists(cellsPath) || !m_device->createCloudCellsPipeline(loadSPV(cellsPath))) {
         SCENE_LOG_WARN("[Vulkan] cloud_cells pipeline unavailable: storm cells are not drawn.");
     }
+    // Storm cell volumes (ATMOSPHERE_CLOUD_VOLUMES.md): without the generator
+    // the atlas stays "far" everywhere and the cells keep the column shell.
+    const std::string volumePath = shaderDir + "/cloud_volume_gen.spv";
+    if (!std::filesystem::exists(volumePath) || !m_device->createCloudVolumePipeline(loadSPV(volumePath))) {
+        SCENE_LOG_WARN("[Vulkan] cloud_volume_gen pipeline unavailable: storm cells are not drawn as volumes.");
+    }
     // RayFusion layer: optional -- RT clouds work without it.
     const std::string rasterPath = shaderDir + "/cloud_raster.spv";
     std::vector<std::uint32_t> raster = std::filesystem::exists(rasterPath) ? loadSPV(rasterPath)

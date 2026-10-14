@@ -31,6 +31,9 @@
 #ifndef CLOUD_CELL_BINDING
 #error "cloud_common.glsl: define CLOUD_CELL_BINDING"
 #endif
+#ifndef CLOUD_VOLUME_BINDING
+#error "cloud_common.glsl: define CLOUD_VOLUME_BINDING"
+#endif
 
 struct CloudLayerG {
     vec4 a;   // base_altitude_m, thickness_m, coverage, type
@@ -40,6 +43,16 @@ struct CloudLayerG {
     vec4 e;   // effective RGB albedo, phase override (2 = droplet fit)
     vec4 f;   // effective emission RGB, reserved
     vec4 g;   // group base, height, inverse footprint period, base raggedness
+};
+
+// One storm cell drawn as a volume (Backend::CloudVolumeSlotGPU).
+struct CloudVolumeSlotG {
+    vec4 a;   // box min x, box bottom altitude, box min z, active
+    vec4 b;   // box size x, height, size z, atlas slot index
+    vec4 c;   // cell id, tower, radius m, life
+    vec4 d;   // wall allowance m, tropopause fraction, coverage, peak
+    vec4 e;   // age s, wind direction x, z, anvil spread
+    vec4 f;   // turret detail, rotation, shear x, z
 };
 
 #include "cloud_lightning_light.glsl"   // CloudLightningG, CloudFlashLightG
@@ -67,12 +80,18 @@ layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 4, std430) readonly buffe
     vec4 storms2;   // stratiform rain share, tropopause fraction, wall allowance m, mammatus
     vec4 precip3;   // sea-level air temperature C, lapse K/m, forced form (0 auto), reserved
     vec4 fog;       // local fog map corner x, z, 1/size, active (map = cell-map sheet 3)
+    vec4 volume;    // storm cell volumes: active, voxels per axis, skin m, requested slots
+    CloudVolumeSlotG volumeSlots[16];
     CloudLightningG lightning[4];
     CloudFlashLightG flash[4];   // lit cloud base per event (CPU-built)
     CloudBoltSegG bolt[320];     // channel network, 80 per event (CPU-built)
 } cloudParams;
 
 layout(set = CLOUD_SET, binding = CLOUD_CELL_BINDING) uniform sampler2D cloudCellMap;
+// Storm cell volume atlas (cloud_volume_gen.comp; ATMOSPHERE_CLOUD_VOLUMES.md):
+// 128^3 slots stacked along z. R = signed distance to the cloud surface (m,
+// negative inside). A 1^3 placeholder while volumes are off.
+layout(set = CLOUD_SET, binding = CLOUD_VOLUME_BINDING) uniform sampler3D cloudVolumeAtlas;
 
 const float CLOUD_PI = 3.14159265358979;
 
@@ -109,8 +128,11 @@ vec4 cloudStormCellAt(vec3 p) {
 
 // Cell structure at p: RG swirl displacement of the shape lookup (m), B local
 // top as a share of the layer, A updraft (turret core). ATMOSPHERE_STORMS §3.1.
+// B is stored squared (cloud_cells.comp): filtered as a quadratic, then sqrt.
 vec4 cloudStormFlowAt(vec3 p) {
-    return cloudStormMapAt(p, 1.0);
+    vec4 f = cloudStormMapAt(p, 1.0);
+    f.z = sqrt(max(f.z, 0.0));
+    return f;
 }
 
 float cloudRemap(float v, float lo, float hi, float nlo, float nhi) {
@@ -385,6 +407,11 @@ vec4 cloudWeatherAt(CloudLayerG L, vec3 p) {
     return textureLod(cloudWeatherMap, cloudWeatherUV(L, p), 0.0);
 }
 
+// Storm cell volumes (defined with the storm column below).
+bool cloudVolumesActive();
+bool cloudVolumeNear(vec3 p, float alt, float dilation);
+vec2 cloudVolumeSample(vec3 p, float alt);
+
 // Extinction (1/m) of one AUTHORED layer (0..2) at world point p, without
 // the storm column. `alt` = cloudAltitude(p), passed in so a caller summing
 // layers computes it once. `detail` = false gives the cheap base shape
@@ -399,6 +426,7 @@ float cloudLayerOwnDensity(int li, vec3 p, float alt, bool detail,
     bool stormRegion = L.d.z > 0.5;
     float h = (alt - L.a.x) / max(L.a.y, 1.0);
     if (h < 0.0 || h >= 1.0 || (!stormRegion && h <= 0.0)) return 0.0;
+    vec3 pWorld = p;   // the volumes are placed unsheared
     p = cloudShear(L, p, alt);
 
     vec4 w = cloudWeatherAt(L, p);
@@ -408,8 +436,22 @@ float cloudLayerOwnDensity(int li, vec3 p, float alt, bool detail,
     // With the storm column on, the cells are drawn by the column; the layer
     // steps aside inside them (no double density) and keeps its own cover.
     float shellMask = 0.0;
+    float skirt = 0.0;
     if (cloudShellActive()) {
         shellMask = smoothstep(0.05, 0.4, cell.r);
+        // Inside a cell volume's box the layer steps aside from the volume's
+        // ACTUAL surface, not from the cell's cover disc: leaning towers and
+        // off-centre turrets left the disc, and the layer filled the towers'
+        // lower part a second time -- a hard line at the layer top.
+        // Around the tower the deck is drawn INTO the storm (inflow): within
+        // 2.5 km of the surface it thickens, rises to its full depth and
+        // heaps up. Bounded by the cell's dilated cover (cell.a), which the
+        // layer majorant adds in volume mode, so the bound holds.
+        if (cloudVolumesActive() && cloudVolumeNear(pWorld, alt, 0.0)) {
+            float sdfV = cloudVolumeSample(pWorld, alt).x;
+            shellMask = 1.0 - smoothstep(-100.0, 100.0, sdfV);
+            skirt = (1.0 - smoothstep(0.0, 2500.0, sdfV)) * cell.a;
+        }
         cell = vec4(0.0);
     }
     // Cell structure (turrets, rotation): read only inside a cell's reach.
@@ -418,7 +460,7 @@ float cloudLayerOwnDensity(int li, vec3 p, float alt, bool detail,
     float lift = flow.w;
     // Per-cell development (weather A): shallow cells sit a little higher
     // (no perfectly flat base across the field) and stop lower.
-    float dev = max(w.a, cell.g);
+    float dev = max(max(w.a, cell.g), skirt);
     if (!stormRegion) {
         h = (h - (1.0 - dev) * 0.04) / (1.0 - (1.0 - dev) * 0.04);
     }
@@ -427,10 +469,12 @@ float cloudLayerOwnDensity(int li, vec3 p, float alt, bool detail,
     // generator), so thresholding it at 1 - coverage covers ~coverage of sky.
     float cov = clamp(cloudRemap(w.r, 1.0 - L.a.z, 1.0, 0.0, 1.0), 0.0, 1.0);
     cov = max(cov, cell.r * mix(0.7, 1.0, w.r));   // <= cell.a: the majorant holds
+    cov = max(cov, skirt * mix(0.7, 1.0, w.r));    // <= cell.a as well
     cov *= 1.0 - shellMask;
     if (cov <= 0.0) return 0.0;
     float type = clamp(L.a.w + (w.g - 0.5) * cloudParams.weather.y, 0.0, 1.0);
     type = max(type, cell.g);
+    type = max(type, 0.85 * skirt);   // the deck heaps into cumulus toward the storm
     vec3 drift = vec3(cloudParams.wind.x, 0.0, cloudParams.wind.y);
     float evo = cloudParams.weather.z;
     // The cell's rotation winds the SHAPE lookup (never the weather or the
@@ -490,6 +534,7 @@ float cloudLayerOwnDensity(int li, vec3 p, float alt, bool detail,
     // their heights, the body between them stays lower (cloud_cells.comp).
     // Without this the cell's full cover made one flat slab of the layer.
     if (flow.z > 0.0) topFrac = mix(topFrac, max(flow.z, 0.25), cellW);
+    topFrac = mix(topFrac, 1.0, skirt);
     if (stormRegion) topFrac = 1.0;
     float hh = h / topFrac;
     if (stormRegion) hh = (alt - L.g.x) / max(L.g.y, 1.0);
@@ -669,9 +714,137 @@ const float kTowerBubbleScaleM = 320.0;    // small cauliflower bubbles
 const mat3 kCloudOctaveRotation = mat3(0.00, 0.80, 0.60,
                                        -0.80, 0.36, -0.48,
                                        -0.60, -0.48, 0.64);
+// ── Storm cell volumes (ATMOSPHERE_CLOUD_VOLUMES.md §3.3-3.4) ──────────────
+// A developed cell is a signed-distance volume in its own atlas slot instead
+// of the heightfield below: the column's intervals, majorant and the layers'
+// stepping aside stay; inside a box the volume replaces the shell (no double
+// density), outside every box the shell still draws the remaining cells.
+bool cloudVolumesActive() {
+    return cloudParams.volume.x > 0.5 && cloudShellActive();
+}
+
+// p inside (or within `dilation` metres of) an active box.
+bool cloudVolumeNear(vec3 p, float alt, float dilation) {
+    for (int i = 0; i < 16; ++i) {
+        CloudVolumeSlotG S = cloudParams.volumeSlots[i];
+        if (S.a.w < 0.5) break;   // slots are packed from 0
+        vec3 lo = vec3(S.a.x, S.a.y, S.a.z) - dilation;
+        vec3 hi = vec3(S.a.x + S.b.x, S.a.y + S.b.y, S.a.z + S.b.z) + dilation;
+        vec3 q = vec3(p.x, alt, p.z);
+        if (all(greaterThanEqual(q, lo)) && all(lessThanEqual(q, hi))) return true;
+    }
+    return false;
+}
+
+// Largest dent the detail pass cuts into a volume surface (m): the marcher's
+// empty-space skip keeps this much margin (plus a voxel) from the surface.
+const float kCloudVolumeDentMaxM = 150.0;
+// Signed distance of the last cloudVolumeDensity() call (1e6 = p was in no
+// volume box). The march reads it right after a column sample to step over
+// the empty part of a box (sphere tracing, cloud_rt.glsl).
+float cloudVolumeLastSdf = 1e6;
+
+// x = signed distance (m) to the nearest volume surface (1e6 outside every
+// box), y = detail kind of that surface (0 crisp cauliflower .. 1 fibrous ice).
+vec2 cloudVolumeSample(vec3 p, float alt) {
+    vec2 best = vec2(1e6, 0.0);
+    ivec3 sz = textureSize(cloudVolumeAtlas, 0);
+    float slots = float(sz.z / max(sz.x, 1));
+    float texel = 1.0 / float(max(sz.x, 1));
+    for (int i = 0; i < 16; ++i) {
+        CloudVolumeSlotG S = cloudParams.volumeSlots[i];
+        if (S.a.w < 0.5) break;
+        // The atlas is reallocated a frame after the budget grows: a slot it
+        // does not hold yet is skipped, never read out of range.
+        if (S.b.w + 0.5 > slots) continue;
+        vec3 uvw = vec3((p.x - S.a.x) / S.b.x, (alt - S.a.y) / S.b.y, (p.z - S.a.z) / S.b.z);
+        if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) continue;
+        // Slots are stacked along w: clamp half a texel inside the slot so the
+        // linear filter never blends two of them.
+        uvw.z = (S.b.w + clamp(uvw.z, 0.5 * texel, 1.0 - 0.5 * texel)) / slots;
+        vec2 v = textureLod(cloudVolumeAtlas, uvw, 0.0).rg;
+        if (v.x < best.x) best = v;
+    }
+    return best;
+}
+
+float cloudVolumeSdf(vec3 p, float alt) {
+    return cloudVolumeSample(p, alt).x;
+}
+
+// Signed distance at a world point, capped at the atlas clamp so a probe that
+// leaves every box reads "far", not 1e6.
+float cloudVolumeSdfAt(vec3 q) {
+    return min(cloudVolumeSdf(q, cloudAltitude(q)), 2000.0);
+}
+
+// Outward surface normal of the volumes near p: tetrahedral gradient of the
+// distance over `h` metres (Quilez), 4 atlas reads.
+vec3 cloudVolumeNormal(vec3 p, float h) {
+    const vec2 k = vec2(1.0, -1.0);
+    vec3 g = k.xyy * cloudVolumeSdfAt(p + k.xyy * h) +
+             k.yyx * cloudVolumeSdfAt(p + k.yyx * h) +
+             k.yxy * cloudVolumeSdfAt(p + k.yxy * h) +
+             k.xxx * cloudVolumeSdfAt(p + k.xxx * h);
+    return dot(g, g) > 1e-6 ? normalize(g) : vec3(0.0, 1.0, 0.0);
+}
+
+// Openness of the surface around p (1 = a free bulge, -> 0 deep in a crevice
+// between bubbles): along the normal a flat surface's distance grows by the
+// probe length; a neighbouring bulge keeps it smaller. 2 atlas reads.
+float cloudVolumeOpenness(vec3 p, vec3 n, float sdf) {
+    float occ = 0.0;
+    for (int i = 0; i < 2; ++i) {
+        float h = i == 0 ? 220.0 : 600.0;
+        occ += clamp((sdf + h - cloudVolumeSdfAt(p + n * h)) / h, 0.0, 1.0);
+    }
+    return 1.0 - 0.45 * occ;
+}
+
+// Extinction inside a volume: CONSTANT liquid water (the host layer's
+// extinction), not scaled by the cell's cover -- a weak cell is a smaller
+// cloud, not a more transparent one (ATMOSPHERE_CLOUD_VOLUMES.md §0). The
+// surface ramps over `skin` metres of signed distance; detail only dents it
+// (<= kCloudVolumeDentMaxM), so the cheap shape stays the majorant.
+//   kind 0 (towers): inverted-Worley bubbles, small cauliflower;
+//   kind 1 (anvil):  horizontally stretched fbm, fibrous ice.
+float cloudVolumeDensity(vec3 p, float alt, bool detail, out float baseDensity) {
+    baseDensity = 0.0;
+    vec2 v = cloudVolumeSample(p, alt);
+    float sdf = v.x;
+    cloudVolumeLastSdf = sdf;
+    float skin = max(cloudParams.volume.z, 1.0);
+    if (sdf >= 0.0) return 0.0;
+    float sigma = cloudParams.layers[3].b.x;
+    baseDensity = sigma * smoothstep(0.0, skin, -sdf);
+    if (!detail || -sdf > skin + kCloudVolumeDentMaxM) return baseDensity;
+    vec3 drift = vec3(cloudParams.wind.x, 0.0, cloudParams.wind.y);
+    vec3 rel = p - drift;
+    float evo = cloudParams.weather.z;
+    vec3 phase = cloudShapePhase(0);
+    float dent = 0.0;
+    if (v.y < 0.99) {
+        vec4 d = textureLod(cloudDetailNoise, (kCloudOctaveRotation * rel) / kTowerBubbleScaleM +
+                            phase + vec3(evo * 1.3), 0.0);
+        float bubbles = d.r * 0.6 + d.g * 0.3 + d.b * 0.1;
+        // The generator carries the billows down to ~600 m (and its voxels
+        // ~100 m); this octave is the cauliflower below that.
+        dent += (1.0 - v.y) * (1.0 - bubbles) * 120.0;
+    }
+    if (v.y > 0.01) {
+        vec4 f = textureLod(cloudDetailNoise, rel * vec3(1.0 / 900.0, 1.0 / 110.0, 1.0 / 900.0) +
+                            phase.zxy + vec3(evo * 0.6), 0.0);
+        float fbm = f.r * 0.625 + f.g * 0.25 + f.b * 0.125;
+        dent += v.y * (1.0 - fbm) * kCloudVolumeDentMaxM;
+    }
+    return sigma * smoothstep(0.0, skin, -sdf - dent);
+}
+
 float cloudShellDensity(vec3 p, float alt, bool detail, out float baseDensity) {
     baseDensity = 0.0;
     if (!cloudShellActive()) return 0.0;
+    if (cloudVolumesActive() && cloudVolumeNear(p, alt, 0.0))
+        return cloudVolumeDensity(p, alt, detail, baseDensity);
     CloudLayerG L = cloudParams.layers[3];
     float depth = max(L.a.y, 1.0);
     float h = (alt - L.a.x) / depth;

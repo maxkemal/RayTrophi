@@ -1,5 +1,6 @@
 """Read-only channel acceptance; run outside Studio on the user's new build.
 
+Manually enable Audio > Scene > Collect physics audio telemetry first.
 Run during live simulation and again during forward RAM cache replay.
 This probe does not drive playback, create sources, or establish audible acceptance.
 """

@@ -17,6 +17,21 @@ struct RegisterAudioMethods {
             names.push_back("audio." + op);
         }
         static const MethodParam params[] = {
+            {"recipe", "object", true, "Validated sound design v2 recipe; see AUDIO_SOUND_DESIGN.md",
+                nullptr, nullptr},
+            {"original", "bool", false, "Audition unprocessed input", "false", nullptr},
+            {"folder", "string", false, "Output folder; defaults to current project/assets/audio/generated",
+                nullptr, nullptr},
+            {"designer_open", "bool", false, "Show sound designer in Audio bottom editor", "false", nullptr},
+            {"auto_loop", "bool", false,
+                "Resize beyond source range by looping; defaults false", "false", nullptr},
+            {"enabled", "bool", false, "Manually collect domain physics audio telemetry; default off",
+                "false", nullptr},
+            {"preset", "string", false, "Offline procedural preset", "metal", "tone|wind|metal|wood"},
+            {"seed", "int", false, "Deterministic uint32 synthesis seed", "1", nullptr},
+            {"frequency_hz", "float", false, "Synthesis frequency 20..4000 Hz; preset default", nullptr, nullptr},
+            {"decay_seconds", "float", false, "Impact decay 0.01..10 seconds; preset default", nullptr, nullptr},
+            {"brightness", "float", false, "Noise cutoff and modal damping 0..1", "0.5", nullptr},
             {"selected_clip", "string", false, "Existing clip id, or empty to clear selection", "", nullptr},
             {"snap", "bool", false, "Snap audio timeline edits to scene frames", "true", nullptr},
             {"waveforms", "bool", false, "Display waveform envelopes on timeline clips", "true", nullptr},
@@ -104,12 +119,17 @@ struct RegisterAudioMethods {
             const auto& op = audio::AudioService::operations()[i];
             const bool read = op == "list" || op == "get" || op == "status" || op == "domains" ||
                               op == "mixer_get" || op == "clip_list" || op == "export_status" ||
-                              op == "waveform" || op == "capture_status" || op == "workspace_get";
+                              op == "waveform" || op == "capture_status" || op == "workspace_get" ||
+                              op == "synth_presets" || op == "telemetry_get" ||
+                              op == "design_status" || op == "design_destination";
             MethodDescriptor descriptor{};
             descriptor.name = names[i].c_str();
             descriptor.domain = "audio";
             descriptor.summary = "Scene audio service operation";
-            descriptor.notes = "See docs/dev/AUDIO_PRE_UI_DELIVERY.md and SCENE_AUDIO_STAGE1_API.md.";
+            descriptor.notes = op == "telemetry_get" || op == "telemetry_update"
+                ? "See docs/dev/SCENE_AUDIO_TELEMETRY_POLICY.md. Off by default; never auto-enabled."
+                : (op.rfind("design_", 0) == 0 ? "See docs/dev/AUDIO_SOUND_DESIGN.md. Transient preview; explicit asset save."
+                : "See docs/dev/AUDIO_PRE_UI_DELIVERY.md and SCENE_AUDIO_STAGE1_API.md.");
             descriptor.access = read ? "read" : "write";
             const bool readsFile = op == "append" || op == "asset_import" || op == "asset_relink" ||
                                    op == "play" || op == "preview" || op == "preview_file" ||
@@ -118,16 +138,20 @@ struct RegisterAudioMethods {
                                    op == "thunder_update" || op == "thunder_event" ||
                                    op == "resume_automatic" || op == "playback_update" ||
                                    op == "clip_create" || op == "clip_update" || op == "clip_duplicate" ||
-                                   op == "clip_trim" || op == "clip_split" ||
+                                   op == "clip_trim" || op == "clip_split" || op == "clip_resize" ||
                                    op == "capture_start" || op == "capture_finish";
-            descriptor.capability = op == "export_cancel" ? "Read|FilesWrite" :
+            descriptor.capability = (op == "synth_generate" || op == "design_save") ? "SceneWrite|FilesRead|FilesWrite" :
+                op == "design_render" ? "SceneWrite|FilesRead" :
+                op == "design_destination" ? "Read|FilesRead" :
+                op == "export_cancel" ? "Read|FilesWrite" :
                 (op == "export_start" ? "Read|FilesRead|FilesWrite" :
                 (op == "waveform" ? "Read|FilesRead" :
                  (read ? "Read" : (readsFile ? "SceneWrite|FilesRead" : "SceneWrite"))));
             descriptor.undoable = audio::AudioService::isAuthoring(op);
             descriptor.return_type = "object";
             descriptor.tags = "audio|scene|assets";
-            descriptor.verify_with = "audio.list|audio.status";
+            descriptor.verify_with = op.rfind("design_", 0) == 0
+                ? "audio.design_status|audio.list" : "audio.list|audio.status";
             schemas.emplace_back();
             for (const auto& key : audio::AudioService::parameters(op)) {
                 for (const auto& definition : params) {
@@ -136,9 +160,28 @@ struct RegisterAudioMethods {
                         param.required = key == "id" || key == "path" ||
                             (op == "preview_mute" && key == "muted") ||
                             key == "key" || key == "config" || key == "mode" ||
-                            key == "end_frame_exclusive" || key == "end_seconds" || key == "time_seconds" ||
+                            key == "recipe" || key == "end_frame_exclusive" || key == "end_seconds" || key == "time_seconds" ||
                             (op == "clip_create" && key == "asset_id") ||
                             (op == "thunder_event" && key == "position");
+                        if (op == "design_save" && key == "name") {
+                            param.default_value = "Sound";
+                            param.description = "Safe sound filename; collisions receive numeric suffixes";
+                        }
+                        if (op.rfind("design_", 0) == 0 && key == "path") {
+                            param.required = false;
+                            param.description = "Optional explicit new WAV path; default uses folder/name";
+                        }
+                        if (op == "synth_generate") {
+                            if (key == "duration_seconds") {
+                                param.description = "Synthesis duration 0.05..10 seconds";
+                                param.default_value = "2";
+                            } else if (key == "gain") {
+                                param.description = "Synthesis target peak 0..1";
+                                param.default_value = "0.5";
+                            } else if (key == "path") {
+                                param.description = "New absolute WAV path; existing files are rejected";
+                            }
+                        }
                         if (op == "mixer_update") {
                             param.required = key == "bus";
                             param.default_value = nullptr;

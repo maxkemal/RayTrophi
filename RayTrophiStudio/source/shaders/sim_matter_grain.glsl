@@ -71,7 +71,7 @@ const uint BUCKET = 16u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 26u;
+const uint REVISION = 27u;
 const uint AUDIT = 0x80000000u;
 const uint SLOT_WORDS = 7u;
 const uint FRESH = 0x80000000u;
@@ -337,10 +337,12 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
             rt = roll_magnitude > 1e-12 ? rt*(limit/roll_magnitude) : vec3(0.0);
             rolling = limit > 0.0 ? -(rt-roll_damping)/kr : vec3(0.0);
         }
-        float damping_share = roll_magnitude > limit && roll_magnitude > 1e-12
-            ? limit / roll_magnitude : 1.0;
-        rolling_work = max(0.0, -dot(roll_damping, roll)) * dt * damping_share +
-            max(0.0, 0.5 * kr * (dot(rolling_trial, rolling_trial) - dot(rolling, rolling)));
+        if (audioTelemetryEnabled()) {
+            float damping_share = roll_magnitude > limit && roll_magnitude > 1e-12
+                ? limit / roll_magnitude : 1.0;
+            rolling_work = max(0.0, -dot(roll_damping, roll)) * dt * damping_share +
+                max(0.0, 0.5 * kr * (dot(rolling_trial, rolling_trial) - dot(rolling, rolling)));
+        }
     } else {
         rolling = vec3(0.0);
     }
@@ -352,14 +354,16 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     float patch_radius = min(effective_radius,sqrt(max(0.0,effective_radius*overlap)));
     float twist_limit = abs(twist_speed)/(BUDGET*dt*inverse_pair_inertia);
     float twist_torque = min(uintBitsToFloat(pc.meta.z)*fn*patch_radius,twist_limit);
-    float damping_share = magnitude > coulomb && magnitude > 1e-12 ? coulomb / magnitude : 1.0;
-    float sliding_work = max(0.0, -dot(damping, slip)) * dt * damping_share +
-        max(0.0, 0.5 * kt * (dot(tangent_trial, tangent_trial) - dot(tangential, tangential)));
-    vec3 audio_point = position(i, readBank()) + arm;
-    bool audio_pair = (key & WALL_KEY) == 0u;
-    recordContactWork(1u, audio_point, sliding_work, audio_pair);
-    recordContactWork(2u, audio_point, rolling_work + twist_torque * abs(twist_speed) * dt,
-                      audio_pair);
+    if (audioTelemetryEnabled()) {
+        float damping_share = magnitude > coulomb && magnitude > 1e-12 ? coulomb / magnitude : 1.0;
+        float sliding_work = max(0.0, -dot(damping, slip)) * dt * damping_share +
+            max(0.0, 0.5 * kt * (dot(tangent_trial, tangent_trial) - dot(tangential, tangential)));
+        vec3 audio_point = position(i, readBank()) + arm;
+        bool audio_pair = (key & WALL_KEY) == 0u;
+        recordContactWork(1u, audio_point, sliding_work, audio_pair);
+        recordContactWork(2u, audio_point, rolling_work + twist_torque * abs(twist_speed) * dt,
+                          audio_pair);
+    }
     torque += cross(arm,ft)+rt-sign(twist_speed)*twist_torque*n;
     if (g_probe_sleep_transfer) {
         // Remove the retained elastic preload. Only the changed, post-damping
@@ -424,7 +428,9 @@ void main() {
     // Reject an old host's three-word metadata before indexing the new layout.
     // The descriptor/push ABI is unchanged, so reflection alone cannot catch it.
     if (uint(history_blocks.length()) < 5u*pc.substep.y ||
-        uint(diagnostics.length()) < AUDIO_HEADER_WORDS + AUDIO_WORDS_PER_GRAIN * pc.meta.x) {
+        uint(diagnostics.length()) < AUDIO_HEADER_WORDS ||
+        (audioTelemetryEnabled() && uint(diagnostics.length()) <
+            AUDIO_HEADER_WORDS + AUDIO_WORDS_PER_GRAIN * pc.meta.x)) {
         if (i == 0u) atomicOr(diagnostics[0],16u);
         return;
     }

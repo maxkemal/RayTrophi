@@ -2,6 +2,8 @@
 #define NOMINMAX
 #endif
 #include "UI/AudioWorkspaceUI.h"
+#include "UI/AudioSoundDesignerUI.h"
+#include "UI/AudioPropertyLayout.h"
 #include "UI/AudioUI.h"
 #include "UI/AudioThunderUI.h"
 #include "Audio/AudioAuthoring.h"
@@ -35,9 +37,15 @@ void openBottom(const char* name) {
 
 void editNumber(UIContext& ctx, const json& clip, const char* key, const char* label) {
     double value = clip.at(key);
-    if (ImGui::InputDouble(label, &value, 0, 0, "%.4f",
+    if (ImGui::InputDouble(property(label).c_str(), &value, 0, 0, "%.4f",
                           ImGuiInputTextFlags_EnterReturnsTrue)) {
-        workspaceCall(ctx, "clip_update", {{"id", clip.at("id")}, {key, value}});
+        if (std::string(key) == "duration_seconds") {
+            workspaceCall(ctx, "clip_resize", {{"id", clip.at("id")},
+                {"end_seconds", clip.at("start_seconds").get<double>() + value},
+                {"auto_loop", true}});
+        } else {
+            workspaceCall(ctx, "clip_update", {{"id", clip.at("id")}, {key, value}});
+        }
     }
 }
 
@@ -47,16 +55,13 @@ void editCurve(UIContext& ctx, const json& clip, const char* key, const char* la
         return;
     }
     const auto& curve = clip.at(key);
-    ImGui::TextDisabled("Time is relative to the original clip envelope.");
+    ImGui::TextWrapped("Time is relative to the original clip envelope.");
     for (std::size_t index = 0; index < curve.size(); ++index) {
         ImGui::PushID(static_cast<int>(index));
         double time = curve[index][0], value = curve[index][1];
-        ImGui::SetNextItemWidth(90);
-        bool changed = ImGui::InputDouble("Time", &time, 0, 0, "%.3f",
+        bool changed = ImGui::InputDouble(property("Time").c_str(), &time, 0, 0, "%.3f",
                                          ImGuiInputTextFlags_EnterReturnsTrue);
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(90);
-        changed = ImGui::InputDouble("Value", &value, 0, 0, "%.3f",
+        changed = ImGui::InputDouble(property("Value").c_str(), &value, 0, 0, "%.3f",
                                     ImGuiInputTextFlags_EnterReturnsTrue) || changed;
         if (changed) {
             auto updated = curve;
@@ -102,11 +107,11 @@ void drawClipInspector(UIContext& ctx, const json& clip) {
     ImGui::TextUnformatted("Audio clip");
     char name[257]{};
     std::snprintf(name, sizeof(name), "%s", clip.at("name").get<std::string>().c_str());
-    if (ImGui::InputText("Name", name, sizeof(name), ImGuiInputTextFlags_EnterReturnsTrue)) {
+    if (ImGui::InputText(property("Name").c_str(), name, sizeof(name), ImGuiInputTextFlags_EnterReturnsTrue)) {
         workspaceCall(ctx, "clip_update", {{"id", id}, {"name", name}});
     }
     const auto data = ctx.scene.audio->snapshot();
-    if (ImGui::BeginCombo("Asset", clip.at("asset_id").get<std::string>().c_str())) {
+    if (ImGui::BeginCombo(property("Asset").c_str(), clip.at("asset_id").get<std::string>().c_str())) {
         for (const auto& asset : data.at("assets")) {
             if (ImGui::Selectable(asset.at("name").get<std::string>().c_str(),
                                   clip.at("asset_id") == asset.at("id"))) {
@@ -153,7 +158,7 @@ void drawClipInspector(UIContext& ctx, const json& clip) {
             workspaceCall(ctx, "clip_update", {{"id", id}, {key, value}});
         }
     }
-    if (ImGui::BeginCombo("Bus", clip.at("bus").get<std::string>().c_str())) {
+    if (ImGui::BeginCombo(property("Bus").c_str(), clip.at("bus").get<std::string>().c_str())) {
         for (const char* bus : {"Master", "Weather", "Effects", "Ambience", "Music"}) {
             if (ImGui::Selectable(bus, clip.at("bus") == bus)) {
                 workspaceCall(ctx, "clip_update", {{"id", id}, {"bus", bus}});
@@ -170,7 +175,10 @@ void drawClipInspector(UIContext& ctx, const json& clip) {
             selectClip(ctx, added.at("id"));
         }
     }
-    ImGui::SameLine();
+    if (ImGui::GetContentRegionAvail().x + ImGui::GetCursorScreenPos().x -
+        ImGui::GetItemRectMax().x > ImGui::CalcTextSize("Delete clip").x + 24) {
+        ImGui::SameLine();
+    }
     if (ImGui::Button("Delete clip")) {
         workspaceCall(ctx, "clip_remove", {{"id", id}});
         workspaceCall(ctx, "workspace_update", {{"selected_clip", ""}});
@@ -208,18 +216,48 @@ void addTimelineAsset(UIContext& ctx, const std::string& assetId) {
     }
 }
 
-void drawAudioBottomTabs(UIContext& ctx) {
+void drawSynthesisControls(UIContext& ctx) {
+    if (ImGui::Button("Design sound...")) {
+        openSoundDesigner(ctx);
+    }
+}
+
+void drawAudioEditorNavigation(UIContext& ctx) {
     const auto state = rtapi::editorState();
-    for (const auto& entry : {std::pair{"Audio", "audio"}, std::pair{"Mixer", "audio_mixer"}}) {
-        const bool active = state.bottom_editor == entry.second;
-        if (UIWidgets::HorizontalTab(entry.first, UIWidgets::IconType::Audio, active)) {
-            openBottom(active ? "none" : entry.second);
-            if (ctx.scene_ui_ptr && !active) {
-                ctx.scene_ui_ptr->tab_to_focus = "Audio";
-            }
+    for (const auto& entry : {std::pair{"Timeline", "audio"},
+                              std::pair{"Mixer", "audio_mixer"}}) {
+        if (state.bottom_editor != "audio" && !ImGui::GetIO().MouseDown[0]) {
+            finishAudioTimelineGesture(ctx);
+        }
+        const bool active = state.bottom_editor == entry.second &&
+            !ctx.scene.audio->invoke("workspace_get", json::object()).value("designer_open", false);
+        if (ImGui::Selectable(entry.first, active, 0, ImVec2(85, 0))) {
+            finishAudioTimelineGesture(ctx);
+            workspaceCall(ctx, "workspace_update", {{"designer_open", false}});
+            workspaceCall(ctx, "design_stop");
+            openBottom(entry.second);
         }
         ImGui::SameLine();
     }
+    const auto view = ctx.scene.audio->invoke("workspace_get", json::object());
+    if (ImGui::Selectable("Designer", view.value("designer_open", false), 0, ImVec2(85, 0))) {
+        openSoundDesigner(ctx);
+    }
+    ImGui::NewLine();
+    ImGui::Separator();
+}
+
+void drawAudioBottomTabs(UIContext& ctx) {
+    const auto state = rtapi::editorState();
+    const bool active = state.bottom_editor == "audio" || state.bottom_editor == "audio_mixer";
+    if (UIWidgets::HorizontalTab("Audio", UIWidgets::IconType::Audio, active)) {
+        finishAudioTimelineGesture(ctx);
+        openBottom(active ? "none" : "audio");
+        if (ctx.scene_ui_ptr && !active) {
+            ctx.scene_ui_ptr->tab_to_focus = "Audio";
+        }
+    }
+    ImGui::SameLine();
     const auto status = ctx.scene.audio->invoke("status", json::object());
     if (status.at("capture").at("state") == "recording") {
         ImGui::TextColored(ImVec4(1, 0.3f, 0.2f, 1), "REC");
@@ -383,6 +421,7 @@ void drawWorkspace(UIContext& ctx) {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Assets")) {
+            drawSynthesisControls(ctx);
             for (const auto& asset : data.at("assets")) {
                 const auto id = asset.at("id").get<std::string>();
                 ImGui::PushID(id.c_str());
@@ -393,6 +432,9 @@ void drawWorkspace(UIContext& ctx) {
                     workspaceCall(ctx, "preview", {{"id", id}});
                 }
                 ImGui::SameLine();
+                if (ImGui::SmallButton("Design / process")) {
+                    openSoundDesigner(ctx, id);
+                }
                 if (ImGui::SmallButton("Add clip")) {
                     addTimelineAsset(ctx, id);
                 }
@@ -424,6 +466,15 @@ void drawWorkspace(UIContext& ctx) {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Scene")) {
+            const auto telemetry = ctx.scene.audio->invoke("telemetry_get", json::object());
+            bool collect = telemetry.at("enabled");
+            if (ImGui::Checkbox("Collect physics audio telemetry", &collect)) {
+                workspaceCall(ctx, "telemetry_update", {{"enabled", collect}});
+            }
+            ImGui::TextWrapped(collect ?
+                "Domain physics measurements are enabled. DEM readback scales with grain count." :
+                "Off: skips additional physics audio collection. Enable manually when using domain sounds.");
+            ImGui::Separator();
             const auto mode = data.at("playback_mode").get<std::string>();
             if (ImGui::BeginCombo("Playback", mode.c_str())) {
                 for (const char* entry : {"timeline", "continuous"}) {
@@ -465,13 +516,18 @@ void drawInspectorDock(UIContext& ctx) {
     if (!open) {
         return;
     }
+    ImGui::SetNextWindowSizeConstraints(ImVec2(180, 180), ImVec2(FLT_MAX, FLT_MAX));
     ImGui::SetNextWindowSize(ImVec2(360, 520), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Audio Inspector", &open)) {
-        ImGui::PushItemWidth(-125);
+        ImGui::SetScrollX(0);
+        ImGui::PushItemWidth(-FLT_MIN);
         const auto data = ctx.scene.audio->snapshot();
-        bool found = false;
+        bool found = view.value("designer_open", false);
+        if (found) {
+            drawSoundDesignInspector(ctx);
+        }
         for (const auto& clip : data.value("clips", json::array())) {
-            if (clip.at("id") == view.at("selected_clip")) {
+            if (!found && clip.at("id") == view.at("selected_clip")) {
                 drawClipInspector(ctx, clip);
                 found = true;
                 break;

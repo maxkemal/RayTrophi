@@ -15,7 +15,7 @@ Model, sculpt, paint, groom, simulate, light, animate, and render — in one app
 [![RayTrophi Showcase](https://img.youtube.com/vi/-xRiPhc-p6k/maxresdefault.jpg)](https://www.youtube.com/watch?v=-xRiPhc-p6k)
 **[▶️ Watch the showcase on YouTube](https://www.youtube.com/watch?v=-xRiPhc-p6k)**
 
-[What it is](#-what-it-is) • [Workspaces](#-workspaces) • [Rendering](#-rendering--backends) • [Simulation](#-physics--simulation-suite) • [Quick Start](#-quick-start) • [Architecture](#-architecture) • [Gallery](#-gallery)
+[What it is](#-what-it-is) • [Workspaces](#-workspaces) • [Rendering](#-rendering--backends) • [Simulation](#-physics--simulation-suite) • [Audio](#scene-audio--sound-design) • [Quick Start](#-quick-start) • [Architecture](#-architecture) • [Gallery](#-gallery)
 
 </div>
 
@@ -42,19 +42,36 @@ It is not a render farm plugin or a library. It is an interactive editor with a 
 <!-- STATS_START -->
 | Metric | Value |
 | :--- | :--- |
-| **Project code / shader lines** | ~561,000 |
-| **Project code / shader files** | 1,170+ |
-| **GPU kernel & shader files** | 251 (CUDA, OptiX PTX, Vulkan GLSL/RT, compute) |
-| **UI control call sites** | 3,500+ |
-| **IPC surface** | 594 dispatched methods |
+| **Project code / shader lines** | ~635,000 |
+| **Project code / shader files** | 1,682 |
+| **GPU kernel & shader files** | 397 (CUDA, OptiX PTX, Vulkan GLSL/RT, compute) |
+| **IPC surface** | 667 statically audited routes; 60 dynamic `audio.*` operations |
 | **Render backends** | CPU (Embree) · NVIDIA OptiX · Vulkan RT |
-| **Node systems** | Terrain (78), Animation (14+), Material (11+) |
-| **Last source/audit refresh** | 2026-09-25 — thermal liquid, granular and multi-substance authoring; IPC descriptor/security audit |
+| **Node editors** | Terrain · Animation · Material · Simulation |
+| **Last source/audit refresh** | 2026-10-14 — scene audio/Designer, unified Matter, atmosphere/cloud volumes; IPC and shader-layout audits |
 <!-- STATS_END -->
 
 Counts cover `RayTrophiStudio/source` and exclude vendored single-file libraries (`simdjson`, `stb`, `json.hpp`, `tinyexr`).
 
 Full technical report: **[ARCHITECTURE.md](ARCHITECTURE.md)** · Türkçe: **[README_TR.md](README_TR.md)**
+
+---
+
+## Current delivery status — 2026-10-14
+
+The table separates available source, recorded acceptance and remaining work. A
+successful build does not establish sound quality, visual quality or solver parity.
+
+| Area | Added | Acceptance and next work |
+|---|---|---|
+| Scene audio | Positional sources, imported assets, weather/thunder reactions, fixed mixer buses, timeline clips, waveform, fades, automation, capture and offline WAV | Core playback/mixer, a short WAV export and small DEM RAM replay have recorded acceptance. Full capture, save/reopen and broader channel tests remain open. |
+| Sound designer | DaisySP synthesis/filtering, Signalsmith independent pitch/time, in-memory original/processed audition, envelope/filter/spectrum views and saving by name | User confirmed the Studio build on October 14. New Designer listening/UI/IPC acceptance is pending; uninterrupted live DSP and further presets follow. |
+| Physics audio telemetry | Separate DEM contact/sliding/rolling, liquid/gas activity and MPM stress/damage channels; manual scene-wide collection switch | Collection defaults off. Enabled DEM measurement still carries a per-grain readback cost; selective channels and GPU aggregation are next. |
+| Atmosphere | Shared climate/cloud data, storm cells, precipitation forms, local fog, scene lightning and delayed thunder; new cell-volume atlas/SDF path | Cloud volume V0–V2 and V2b/V2c have recorded live checks. V2d shadow lighting and multiple-tower shape changes await shader/visual acceptance. V3–V5 and surface accumulation remain planned. |
+| Unified Matter | Substance library/derived profiles, DEM/MPM/liquid ownership, latent heat, condensation, fog water and rain inventory; staged compact liquid MAC/FLIP storage | T1/T3 quick checks and T2 thermal cases passed. The extended mixed-owner shared-clock regression, full sparse migration and performance gates remain open. |
+
+Start with the [engineering index](docs/dev/README.md) and
+[next build/acceptance checks](docs/dev/NEXT_BUILD_CHECKS.md) for the exact pending gates.
 
 ---
 
@@ -72,6 +89,7 @@ RayTrophi Studio is organized into task-focused workspaces that all operate on t
 | **Foliage / Scatter** | Biome-aware node layers, Asset Library + scene sources, rule-based and hand-painted GPU instancing |
 | **Hair** | Groom, comb, cut/grow, simulate, and render hair & fur |
 | **Simulation** | Liquid (APIC/FLIP), gas/smoke/fire, whitewater, rigid + soft bodies & cloth (Jolt), mesh/primitive colliders, force fields, emitters |
+| **Audio** | Scene sources, reactive weather/domain sound, timeline/mixer, Sound Designer, capture and WAV export |
 | **Animation** | Multi-track timeline, per-channel keyframing, skeletal animation, animation graph |
 | **Render / Look-dev** | Pick a backend, set sampling/quality, denoise, tonemap, and Stylize the result |
 
@@ -104,6 +122,14 @@ The Render-device selector does not replace the interactive viewport path while 
 - Full texture support (albedo, roughness, metallic, normal, emission, transmission, opacity) with sRGB/linear handling
 
 ### Lighting & sky
+
+The unified atmosphere feeds Vulkan RT and RayFusion from shared climate/cloud data:
+layered clouds and cirrus, editable storm cells, scene lightning, distant precipitation
+forms and local radiation fog. Cell-volume SDF atlases add three-dimensional storm
+structure; the latest V2d shape/shadow refinements still need visual acceptance.
+Near precipitation particles, storm-local winds, surface accumulation/runoff and
+later cloud-volume stages remain planned. [Atmosphere notes](docs/dev/ATMOSPHERE_CLOUD_VOLUMES.md).
+
 - Point, directional, spot, and **mesh-based area lights**; emissive materials
 - **HDR/EXR environment maps** (equirectangular)
 - **Nishita physical sky** with day/night cycle, procedural stars & moon (phases, horizon magnification, atmospheric dimming), sun glow, and automatic sun↔directional-light sync
@@ -185,6 +211,17 @@ A multi-threaded grid- and particle-based FX suite with CPU, CUDA, and Vulkan Co
 - **Ghost-fluid 2nd-order free surface** (Gibou/Enright): sub-cell level set removes the voxel "staircase" on the liquid surface
 - Keyframe-animated colliders are re-posed per sub-step so the fluid tracks moving geometry
 - Physical viscosity solve, adaptive resolution, open/closed boundary modes, dynamic particle reseeding to prevent leaks, and fluid material presets (Water, Oil, Custom)
+
+### Unified Matter domains
+
+A shared substance library supplies built-in and derived profiles; phase and substance
+select the model rather than independent UI switches. DEM grains, MPM solids and
+liquid parcels share canonical identity/state and a domain clock. Latent-heat fusion,
+surface condensation, fog water and rain inventory have recorded T2 checks; fog/rain
+render integration and full mixed-owner acceptance remain open. Compact liquid MAC/
+FLIP tile storage is a staged Vulkan path, while host/render/cache and gas migration
+remain separate work. [Matter status](docs/dev/MADDE_T2_T3_HANDOFF.md),
+[sparse stages](docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md).
 
 ### Thermal liquids, substances & granular materials
 - **Kelvin-authored thermal liquids** — source birth temperature, world/domain ambient temperature, stable exponential air/contact cooling, particle conduction, a log-space viscosity ramp, support-aware freezing, and melt hysteresis
@@ -302,6 +339,40 @@ A post-convergence layer that reads the path-traced result + AOV buffers and res
 ### 🖥️ Viewport shading
 - Vulkan raster **Solid + Matcap** mode for fast sculpt/paint feedback (drop matcaps in `raytrac_sdl2/assets/matcaps/`)
 - Ray-traced interactive preview on any backend, with idle-preview during gizmo manipulation
+
+---
+
+## Scene audio & sound design
+
+- **Scene sources and assets:** mono positional emitters, stereo ambience, camera
+  listener, source gizmos, import/relink, project packaging and authoring undo.
+- **Timeline and mixer:** shared Play/Pause/Stop, waveform clips, trim/split, fades,
+  gain/pitch/pan automation, Master/Weather/Effects/Ambience/Music buses and PCM meters.
+  Extending a clip reveals the source first, then enables repetition past its range.
+- **Reactive sound:** wind/rain starter assets, lightning-event deduplication and
+  distance-delayed thunder; measured domain channels can drive bounded audio sources.
+  This is not one voice per particle or calibrated material acoustics.
+- **Sound Designer:** choose a synthetic character or an imported mono/stereo asset,
+  audition in memory, compare original/processed, shape ADSR/noise/modulation/filter/
+  saturation, change pitch and duration independently, and prepare loop seams.
+  Waveform, draggable envelope, filter response and sampled spectrum accompany controls.
+- **Save by name:** the project audio folder or active asset library supplies the
+  destination. A folder picker and automatic collision suffixes replace routine path
+  entry. The saved WAV contains the preview PCM and its recipe/provenance metadata.
+- **Capture/export:** scene-clock capture produces clips; offline stereo 48 kHz WAV
+  evaluates authored/captured clips with rational frame boundaries. It does not rerun
+  simulation or synthesize future lightning. Video muxing and a portable player remain
+  planned.
+
+UI, `rt.audio` and `audio.*` IPC use the same service. Physics telemetry is explicitly
+opt-in; opening Audio or binding a sound does not enable collection. Designer edits
+currently render on release and restart audition; uninterrupted realtime processing,
+GPU telemetry aggregation, occlusion, reflections and room reverberation remain open.
+
+Contracts and acceptance: [Sound Designer](docs/dev/AUDIO_SOUND_DESIGN.md),
+[Audio workspace](docs/dev/AUDIO_WORKSPACE_UI.md),
+[telemetry policy](docs/dev/SCENE_AUDIO_TELEMETRY_POLICY.md),
+[scene audio roadmap](docs/dev/SCENE_AUDIO_RUNTIME_PLAN_2026_10_11.md).
 
 ---
 
@@ -523,7 +594,12 @@ RayTrophi/
 > [`docs/dev/`](docs/dev/README.md) — indexed and status-tagged. Most of them
 > are written in Turkish; the index explains what each one covers.
 
-**Recently shipped**
+**Recent source deliveries and recorded acceptance**
+- Scene audio/timeline/mixer and offline WAV; new Designer build confirmed, fresh listening/UI tests pending.
+- Shared atmosphere, storm/lightning/local-fog paths; cell-volume V0–V2 live checks, V2d visual gate open.
+- Unified substances and latent-heat Matter; compact liquid storage staged, extended mixed-owner regression open.
+
+**Earlier delivered systems**
 - ✅ Vulkan RT backend (interactive primary) with GPU skinning, async ping-pong pipeline, analytical LSS hair
 - ✅ Physics & particle simulation suite (APIC/FLIP liquid, gas/fire, whitewater)
 - ✅ Rigid, soft-body & cloth dynamics (Jolt Physics) — primitive/mesh colliders, vertex pinning, force-field coupling, two-way fluid coupling (solid voxelization + buoyancy/drag), selective fluid re-bake
@@ -537,6 +613,9 @@ RayTrophi/
 - ✅ Progressive photon-mapped caustics + spectral dispersion + volumetric light shafts (Vulkan RT)
 
 **Planned / in progress**
+- [ ] Audio live DSP/background rendering, additional presets, selected-channel GPU telemetry, geometry acoustics, video mux and player packaging
+- [ ] Cloud-volume V3–V5, near precipitation, local storm winds and atmosphere-to-surface accumulation/runoff
+- [ ] Extended mixed-owner Matter acceptance, compact solid-weight parity, sparse host/render/cache and gas migration
 - [ ] Caustics on OptiX / CPU; anisotropic phase & real density fields (VDB) for the light shafts
 - [ ] GPU port of variational solids + ghost-fluid surface (Stage 2)
 - [ ] Kinematic collider sources for bone-attached character and animated-body proxies

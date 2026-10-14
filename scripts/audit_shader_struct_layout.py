@@ -129,6 +129,15 @@ def extract(path, pattern):
 
 GROUPS = [
     {
+        "name": "CloudBoltSegmentGPU",
+        "align": 16,
+        "reference": ("include/Backend/CloudBoltGeometry.h",
+                      r"struct CloudBoltSegmentGPU \{(.*?)\n\};"),
+        "mirrors": [
+            ("shaders/cloud_lightning_light.glsl", r"struct CloudBoltSegG \{(.*?)\n\};"),
+        ],
+    },
+    {
         "name": "VkVolumeInstance",
         "align": 16,
         "reference": ("include/Backend/vulkan_volume_types.h",

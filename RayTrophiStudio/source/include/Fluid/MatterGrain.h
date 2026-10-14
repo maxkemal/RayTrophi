@@ -28,6 +28,9 @@ struct MatterGrainCommonDriver;
 
 // Opt-in dry DEM candidate. Physical radius is independent of render detail.
 struct MatterGrainParams {
+    // Transient solver gate derived from AudioService's saved opt-in policy.
+    // Not a material property; never implicitly enabled by a sound binding.
+    bool audio_telemetry_enabled = false;
     // `enabled` and the material below (restitution, friction, rolling and
     // twisting friction, tangential ratio, packing, wet grains, water capacity,
     // absorption, drying, surface tension, contact angle, real radius) are
@@ -105,7 +108,8 @@ inline constexpr int kMatterGrainContactBudget = 24;
 // 20: single-bank in-place contact history in host-assigned blocks,
 // 21: sleeping grains (rest counter per block, 128 B push constants),
 // 22: sleep audits/force balance, bridge wake and atomic rest-word commit.
-inline constexpr uint32_t kMatterGrainShaderRevision = 26;
+// 27: optional audio diagnostics tail; header-only buffers are valid when opted out.
+inline constexpr uint32_t kMatterGrainShaderRevision = 27;
 // Neighbour hash: one table of fixed-capacity buckets, filled only when the
 // neighbour lists are rebuilt (docs/dev/DEM_VERLET_LISTESI.md).
 inline constexpr uint32_t kMatterGrainBucketCapacity = 16;
@@ -252,6 +256,10 @@ struct MatterGrainStepReport {
     float liquid_speed_p99 = 0.0f;
     int liquid_substeps = 0;
     std::size_t working_set_bytes = 0;
+    // Published transfer costs, not estimates of audio engine voice memory.
+    bool audio_telemetry_enabled = false;
+    std::size_t audio_readback_bytes = 0;
+    std::size_t diagnostics_readback_bytes = 0;
     // Separate fluid and continuum MPM owners beside the DEM grains.
     std::size_t grains = 0;
     std::size_t liquid_parcels = 0;
@@ -317,6 +325,7 @@ struct MatterGrainGpuRuntime {
     // Grain -> history block map, then {owner id, occupied-slot mask} per block.
     ComputeBufferHandle history_blocks;
     ComputeBufferHandle diagnostics;
+    bool audio_telemetry_enabled = false;
     ComputeBufferHandle triangles;
     ComputeBufferHandle collider_nodes;
     ComputeBufferHandle collider_patches;

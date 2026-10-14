@@ -32,6 +32,37 @@ VkSampler makeRepeatSampler(VkDevice device) {
     return out;
 }
 
+VkSampler makeClampSampler(VkDevice device) {
+    VkSamplerCreateInfo s{};
+    s.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    s.magFilter = VK_FILTER_LINEAR;
+    s.minFilter = VK_FILTER_LINEAR;
+    s.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    s.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    s.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    s.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    s.maxLod = 0.0f;
+    VkSampler out = VK_NULL_HANDLE;
+    vkCreateSampler(device, &s, nullptr, &out);
+    return out;
+}
+
+// FNV-1a over the shape inputs of a volume slot (b.xyz, c, d, e, f): equal key =
+// same generated SDF, so the slot is not repainted.
+uint64_t hashCloudVolumeSlot(const Backend::CloudVolumeSlotGPU& s) {
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&](const float* v, int count) {
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(v);
+        for (size_t i = 0; i < size_t(count) * sizeof(float); ++i) { h ^= p[i]; h *= 1099511628211ull; }
+    };
+    mix(s.b, 3);
+    mix(s.c, 4);
+    mix(s.d, 4);
+    mix(s.e, 4);
+    mix(s.f, 4);
+    return h | 1ull;   // never 0: 0 means "not painted"
+}
+
 bool makeComputePipeline(VkDevice device, const std::vector<uint32_t>& spv, VkPipelineLayout layout,
                          VkPipeline& out) {
     VkShaderModuleCreateInfo sm{};
@@ -118,7 +149,7 @@ void VulkanDevice::destroyCloudResources() {
     destroyCloudPipelines();
     destroyCloudUploadRing();
     for (ImageHandle* img : {&m_cloudBase, &m_cloudDetail, &m_cloudCurl, &m_cloudWeather, &m_cloudMajorant,
-                             &m_cloudCellMap}) {
+                             &m_cloudCellMap, &m_cloudVolumeAtlas}) {
         if (img->image || img->view) destroyImage(*img);
         *img = {};
     }
@@ -127,6 +158,8 @@ void VulkanDevice::destroyCloudResources() {
         if (b->buffer) destroyBuffer(*b);
         *b = {};
     }
+    m_cloudVolumeSlots = 0;
+    for (uint64_t& key : m_cloudVolumeKeys) key = 0;
     m_cloudQueryCapacity = 0;
     m_cloudNoiseReady = false;
     m_cloudWeatherHash = 0;
@@ -134,7 +167,7 @@ void VulkanDevice::destroyCloudResources() {
 
 bool VulkanDevice::ensureCloudTextures() {
     if (m_cloudBase.view && m_cloudMajorant.view && m_cloudRtParamsBuffer.buffer &&
-        m_cloudCellMap.view && m_cloudCellsBuffer.buffer) return true;
+        m_cloudCellMap.view && m_cloudCellsBuffer.buffer && m_cloudVolumeAtlas.view) return true;
     const VkImageUsageFlags use = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     VramCategoryScope vram(VramCategory::RenderTarget);
     // createImage2D / createImage3D leave the images in GENERAL: the storage
@@ -184,6 +217,12 @@ bool VulkanDevice::ensureCloudTextures() {
             endSingleTimeCommands(cmd);
         }
     }
+    // Volume atlas placeholder: bound everywhere from the first descriptor
+    // write; holds no slot (cloudVolumeSdf skips every entry).
+    if (ok && !m_cloudVolumeAtlas.view) {
+        ensureCloudVolumeAtlas(0);
+        ok = m_cloudVolumeAtlas.view != VK_NULL_HANDLE;
+    }
     if (ok) {
         BufferCreateInfo ci{};
         ci.size = sizeof(Backend::CloudCellsGPU);
@@ -208,10 +247,11 @@ bool VulkanDevice::ensureCloudTextures() {
         return true;
     }
     for (ImageHandle* img : {&m_cloudBase, &m_cloudDetail, &m_cloudCurl, &m_cloudWeather, &m_cloudMajorant,
-                             &m_cloudCellMap}) {
+                             &m_cloudCellMap, &m_cloudVolumeAtlas}) {
         if (img->image || img->view) destroyImage(*img);
         *img = {};
     }
+    m_cloudVolumeSlots = 0;
     for (BufferHandle* b : {&m_cloudRtParamsBuffer, &m_cloudCellsBuffer}) {
         if (b->buffer) destroyBuffer(*b);
         *b = {};
@@ -219,15 +259,16 @@ bool VulkanDevice::ensureCloudTextures() {
     return false;
 }
 
-// RT set bindings 30-36: base, detail, curl, weather, params, majorant, cell map.
+// RT set bindings 30-37: base, detail, curl, weather, params, majorant, cell
+// map, volume atlas.
 void VulkanDevice::writeRtCloudDescriptors() {
     if (m_rtDescriptorSet == VK_NULL_HANDLE || !ensureCloudTextures()) return;
-    const ImageHandle* imgs[6] = {&m_cloudBase, &m_cloudDetail, &m_cloudCurl, &m_cloudWeather, &m_cloudMajorant,
-                                  &m_cloudCellMap};
-    const uint32_t bindings[6] = {30, 31, 32, 33, 35, 36};
-    VkDescriptorImageInfo ii[6]{};
-    VkWriteDescriptorSet w[7]{};
-    for (uint32_t i = 0; i < 6; ++i) {
+    const ImageHandle* imgs[7] = {&m_cloudBase, &m_cloudDetail, &m_cloudCurl, &m_cloudWeather, &m_cloudMajorant,
+                                  &m_cloudCellMap, &m_cloudVolumeAtlas};
+    const uint32_t bindings[7] = {30, 31, 32, 33, 35, 36, 37};
+    VkDescriptorImageInfo ii[7]{};
+    VkWriteDescriptorSet w[8]{};
+    for (uint32_t i = 0; i < 7; ++i) {
         ii[i].sampler = imgs[i]->sampler;
         ii[i].imageView = imgs[i]->view;
         ii[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -239,13 +280,154 @@ void VulkanDevice::writeRtCloudDescriptors() {
         w[i].pImageInfo = &ii[i];
     }
     VkDescriptorBufferInfo bi{m_cloudRtParamsBuffer.buffer, 0, sizeof(Backend::CloudParamsGPU)};
-    w[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w[6].dstSet = m_rtDescriptorSet;
-    w[6].dstBinding = 34;
-    w[6].descriptorCount = 1;
-    w[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    w[6].pBufferInfo = &bi;
-    vkUpdateDescriptorSets(m_device, 7, w, 0, nullptr);
+    w[7].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w[7].dstSet = m_rtDescriptorSet;
+    w[7].dstBinding = 34;
+    w[7].descriptorCount = 1;
+    w[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[7].pBufferInfo = &bi;
+    vkUpdateDescriptorSets(m_device, 8, w, 0, nullptr);
+}
+
+// ── Storm cell volumes (ATMOSPHERE_CLOUD_VOLUMES.md §3.3) ──────────────────
+
+// Atlas of `slots` 128^3 RGBA16F slots stacked along z; 0 = a 2x2x1
+// placeholder that holds no slot (z / x = 0). Reallocation waits for the
+// device: frames in flight read the old image through every cloud set.
+bool VulkanDevice::ensureCloudVolumeAtlas(uint32_t slots) {
+    slots = (std::min)(slots, static_cast<uint32_t>(atmosphere::kMaxCloudVolumeSlots));
+    if (m_cloudVolumeAtlas.view && slots == m_cloudVolumeSlots) return false;
+    waitIdle();
+    if (m_cloudVolumeAtlas.image || m_cloudVolumeAtlas.view) destroyImage(m_cloudVolumeAtlas);
+    m_cloudVolumeAtlas = {};
+    const uint32_t n = static_cast<uint32_t>(atmosphere::kCloudVolumeVoxels);
+    {
+        VramCategoryScope vram(VramCategory::RenderTarget);
+        m_cloudVolumeAtlas = slots == 0
+            ? createImage3D(2, 2, 1, VK_FORMAT_R16G16B16A16_SFLOAT,
+                            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+            : createImage3D(n, n, n * slots, VK_FORMAT_R16G16B16A16_SFLOAT,
+                            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    }
+    if (!m_cloudVolumeAtlas.view && slots > 0) {
+        // Out of memory for the requested budget: keep a placeholder, the
+        // cells stay in the storm-column shell (world.cloud_stats shows 0 slots).
+        m_cloudVolumeAtlas = createImage3D(2, 2, 1, VK_FORMAT_R16G16B16A16_SFLOAT,
+                                           VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                           VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        slots = 0;
+    }
+    if (!m_cloudVolumeAtlas.view) {
+        m_cloudVolumeSlots = 0;
+        return false;
+    }
+    m_cloudVolumeAtlas.sampler = makeClampSampler(m_device);
+    {
+        // Far outside every surface until a slot is painted.
+        VkCommandBuffer cmd = beginSingleTimeCommands();
+        if (cmd != VK_NULL_HANDLE) {
+            VkClearColorValue far{};
+            far.float32[0] = 2000.0f;
+            far.float32[3] = 1.0f;
+            VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCmdClearColorImage(cmd, m_cloudVolumeAtlas.image, VK_IMAGE_LAYOUT_GENERAL, &far, 1, &range);
+            endSingleTimeCommands(cmd);
+        }
+    }
+    m_cloudVolumeSlots = slots;
+    for (uint64_t& key : m_cloudVolumeKeys) key = 0;
+    ++m_cloudVolumeAllocations;
+    writeCloudVolumeDescriptors();
+    return true;
+}
+
+// The atlas in every set that reads the cloud field, plus the generator's
+// storage binding. Only called after a device idle (ensureCloudVolumeAtlas)
+// or from a set's own creation, so no in-flight frame holds these sets.
+void VulkanDevice::writeCloudVolumeDescriptors() {
+    if (!m_cloudVolumeAtlas.view) return;
+    VkDescriptorImageInfo sampled{m_cloudVolumeAtlas.sampler, m_cloudVolumeAtlas.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo storage{VK_NULL_HANDLE, m_cloudVolumeAtlas.view, VK_IMAGE_LAYOUT_GENERAL};
+    std::vector<VkWriteDescriptorSet> ws;
+    auto add = [&](VkDescriptorSet set, uint32_t binding, VkDescriptorType type, const VkDescriptorImageInfo* ii) {
+        if (set == VK_NULL_HANDLE) return;
+        VkWriteDescriptorSet x{};
+        x.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        x.dstSet = set;
+        x.dstBinding = binding;
+        x.descriptorCount = 1;
+        x.descriptorType = type;
+        x.pImageInfo = ii;
+        ws.push_back(x);
+    };
+    add(m_rtDescriptorSet, 37, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &sampled);
+    add(m_cloudRasterSets[0], 17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &sampled);
+    add(m_cloudRasterSets[1], 17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &sampled);
+    add(m_cloudSceneSet, 17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &sampled);
+    add(m_cloudSampleDescSet, 8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &sampled);
+    add(m_cloudVolumeSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &storage);
+    if (!ws.empty()) vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(ws.size()), ws.data(), 0, nullptr);
+}
+
+bool VulkanDevice::createCloudVolumePipeline(const std::vector<uint32_t>& spv) {
+    if (m_cloudVolumePipeline) return true;
+    if (spv.empty() || !ensureCloudTextures()) return false;
+    VkDescriptorSetLayoutBinding b{};
+    b.binding = 0;
+    b.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    b.descriptorCount = 1;
+    b.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutCreateInfo li{};
+    li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    li.bindingCount = 1; li.pBindings = &b;
+    bool ok = vkCreateDescriptorSetLayout(m_device, &li, nullptr, &m_cloudVolumeDescLayout) == VK_SUCCESS;
+    if (ok) {
+        VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1};
+        VkDescriptorPoolCreateInfo pi{};
+        pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        pi.poolSizeCount = 1; pi.pPoolSizes = &size; pi.maxSets = 1;
+        ok = vkCreateDescriptorPool(m_device, &pi, nullptr, &m_cloudVolumePool) == VK_SUCCESS;
+    }
+    if (ok) {
+        VkDescriptorSetAllocateInfo ai{};
+        ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        ai.descriptorPool = m_cloudVolumePool; ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &m_cloudVolumeDescLayout;
+        ok = vkAllocateDescriptorSets(m_device, &ai, &m_cloudVolumeSet) == VK_SUCCESS;
+    }
+    if (ok) {
+        // The slot entry (CloudVolumeSlotGPU, 96 B) + atlas slot / voxels.
+        VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, 112};
+        VkPipelineLayoutCreateInfo pl{};
+        pl.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pl.setLayoutCount = 1; pl.pSetLayouts = &m_cloudVolumeDescLayout;
+        pl.pushConstantRangeCount = 1; pl.pPushConstantRanges = &range;
+        ok = vkCreatePipelineLayout(m_device, &pl, nullptr, &m_cloudVolumeLayout) == VK_SUCCESS;
+    }
+    ok = ok && makeComputePipeline(m_device, spv, m_cloudVolumeLayout, m_cloudVolumePipeline);
+    if (ok) {
+        VkDescriptorImageInfo storage{VK_NULL_HANDLE, m_cloudVolumeAtlas.view, VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet w{};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = m_cloudVolumeSet;
+        w.dstBinding = 0;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w.pImageInfo = &storage;
+        vkUpdateDescriptorSets(m_device, 1, &w, 0, nullptr);
+        for (uint64_t& key : m_cloudVolumeKeys) key = 0;   // paint every live slot
+        return true;
+    }
+    if (m_cloudVolumePipeline) vkDestroyPipeline(m_device, m_cloudVolumePipeline, nullptr);
+    if (m_cloudVolumeLayout) vkDestroyPipelineLayout(m_device, m_cloudVolumeLayout, nullptr);
+    if (m_cloudVolumePool) vkDestroyDescriptorPool(m_device, m_cloudVolumePool, nullptr);
+    if (m_cloudVolumeDescLayout) vkDestroyDescriptorSetLayout(m_device, m_cloudVolumeDescLayout, nullptr);
+    m_cloudVolumePipeline = VK_NULL_HANDLE;
+    m_cloudVolumeLayout = VK_NULL_HANDLE;
+    m_cloudVolumePool = VK_NULL_HANDLE;
+    m_cloudVolumeDescLayout = VK_NULL_HANDLE;
+    m_cloudVolumeSet = VK_NULL_HANDLE;
+    return false;
 }
 
 void VulkanDevice::destroyCloudUploadRing() {
@@ -269,6 +451,13 @@ void VulkanDevice::destroyCloudUploadRing() {
 void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
                                        const Backend::CloudCellsGPU& cells) {
     if (!ensureCloudTextures()) return;
+    // Volume atlas follows the requested budget (0 with volumes off: the
+    // 128 MB atlas is released). Rare; waits for the device when it changes.
+    ensureCloudVolumeAtlas(static_cast<uint32_t>(params.volume[3] + 0.5f));
+    // Volumes are drawn only where this device can paint them: without the
+    // generator or an atlas the flag is cleared and the shell keeps the cells
+    // (an unpainted atlas reads "far" -- the cells would vanish otherwise).
+    const bool volumesLive = m_cloudVolumePipeline != VK_NULL_HANDLE && m_cloudVolumeSlots > 0;
     constexpr VkDeviceSize kCellsOffset = (sizeof(Backend::CloudParamsGPU) + 255u) & ~VkDeviceSize(255u);
     // Local fog envelope: one RGBA16F cell-map sheet, uploaded only when the
     // published map changed (its placement is in `params`, same snapshot).
@@ -300,8 +489,11 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
         if (!slot.staging.buffer ||
             vkAllocateCommandBuffers(m_device, &ai, &slot.cmd) != VK_SUCCESS ||
             vkCreateFence(m_device, &fi, nullptr, &slot.fence) != VK_SUCCESS) {
-            // Never lose an update: fall back to the blocking path.
-            uploadBuffer(m_cloudRtParamsBuffer, &params, sizeof(params));
+            // Never lose an update: fall back to the blocking path (no volume
+            // repaint on it, so the volumes are off for this update).
+            Backend::CloudParamsGPU gated = params;
+            gated.volume[0] = 0.0f;
+            uploadBuffer(m_cloudRtParamsBuffer, &gated, sizeof(gated));
             uploadBuffer(m_cloudCellsBuffer, &cells, sizeof(cells));
             if (slot.cmd) vkFreeCommandBuffers(m_device, m_commandPool, 1, &slot.cmd);
             if (slot.staging.buffer) destroyBuffer(slot.staging);
@@ -314,6 +506,9 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
     void* mapped = nullptr;
     if (vkMapMemory(m_device, slot.staging.memory, 0, kStagingBytes, 0, &mapped) != VK_SUCCESS) return;
     std::memcpy(mapped, &params, sizeof(params));
+    if (!volumesLive) {
+        static_cast<Backend::CloudParamsGPU*>(mapped)->volume[0] = 0.0f;
+    }
     std::memcpy(static_cast<char*>(mapped) + kCellsOffset, &cells, sizeof(cells));
     if (uploadFog) {
         uint16_t* halfs = reinterpret_cast<uint16_t*>(static_cast<char*>(mapped) + kFogOffset);
@@ -372,6 +567,46 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
         painted.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         vkCmdPipelineBarrier(slot.cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &painted, 0, nullptr, 0, nullptr);
+    }
+    // Storm cell volumes: repaint the slots whose shape inputs changed. The
+    // leading barrier of this buffer already ordered the write after every
+    // earlier frame's reads; the trailing one publishes it to later frames.
+    m_cloudVolumeLastRepaints = 0;
+    if (volumesLive && m_cloudVolumeSet && params.volume[0] > 0.5f) {
+        bool bound = false;
+        for (int i = 0; i < atmosphere::kMaxCloudVolumeSlots; ++i) {
+            const Backend::CloudVolumeSlotGPU& v = params.volumeSlots[i];
+            if (v.a[3] < 0.5f) break;
+            const uint32_t atlasSlot = static_cast<uint32_t>(v.b[3] + 0.5f);
+            if (atlasSlot >= m_cloudVolumeSlots) continue;
+            const uint64_t key = hashCloudVolumeSlot(v);
+            if (key == m_cloudVolumeKeys[atlasSlot]) continue;
+            if (!bound) {
+                vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudVolumePipeline);
+                vkCmdBindDescriptorSets(slot.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudVolumeLayout, 0, 1,
+                                        &m_cloudVolumeSet, 0, nullptr);
+                bound = true;
+            }
+            struct VolumeGenPush {
+                Backend::CloudVolumeSlotGPU slot;
+                uint32_t info[4];
+            } push{v, {atlasSlot, static_cast<uint32_t>(atmosphere::kCloudVolumeVoxels), 0u, 0u}};
+            static_assert(sizeof(VolumeGenPush) == 112, "cloud_volume_gen.comp push ABI");
+            vkCmdPushConstants(slot.cmd, m_cloudVolumeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+            const uint32_t groups = (static_cast<uint32_t>(atmosphere::kCloudVolumeVoxels) + 7u) / 8u;
+            vkCmdDispatch(slot.cmd, groups, groups, groups);
+            m_cloudVolumeKeys[atlasSlot] = key;
+            ++m_cloudVolumeLastRepaints;
+            ++m_cloudVolumeGenerations;
+        }
+        if (bound) {
+            VkMemoryBarrier painted{};
+            painted.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            painted.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            painted.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(slot.cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &painted, 0, nullptr, 0, nullptr);
+        }
     }
     vkEndCommandBuffer(slot.cmd);
     VkSubmitInfo si{};
@@ -467,6 +702,11 @@ void VulkanDevice::destroyCloudPipelines() {
     killD(m_cloudCellsDescLayout);
     if (m_cloudCellsPool) { vkDestroyDescriptorPool(m_device, m_cloudCellsPool, nullptr); m_cloudCellsPool = VK_NULL_HANDLE; }
     m_cloudCellsSet = VK_NULL_HANDLE;
+    kill(m_cloudVolumePipeline);
+    killL(m_cloudVolumeLayout);
+    killD(m_cloudVolumeDescLayout);
+    if (m_cloudVolumePool) { vkDestroyDescriptorPool(m_device, m_cloudVolumePool, nullptr); m_cloudVolumePool = VK_NULL_HANDLE; }
+    m_cloudVolumeSet = VK_NULL_HANDLE;
 }
 
 bool VulkanDevice::createCloudPipelines(const std::vector<uint32_t>& noiseSPV,
@@ -485,26 +725,26 @@ bool VulkanDevice::createCloudPipelines(const std::vector<uint32_t>& noiseSPV,
         nb[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     // Sample set: 0-3 sampled textures, 4 params, 5 queries, 6 results,
-    // 7 storm cell map.
-    VkDescriptorSetLayoutBinding sb[8]{};
-    for (uint32_t i = 0; i < 8; ++i) {
+    // 7 storm cell map, 8 storm cell volume atlas.
+    VkDescriptorSetLayoutBinding sb[9]{};
+    for (uint32_t i = 0; i < 9; ++i) {
         sb[i].binding = i;
         sb[i].descriptorCount = 1;
         sb[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        sb[i].descriptorType = (i < 4 || i == 7) ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+        sb[i].descriptorType = (i < 4 || i >= 7) ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
                                                  : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     }
     VkDescriptorSetLayoutCreateInfo li{};
     li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     li.bindingCount = 5; li.pBindings = nb;
     bool ok = vkCreateDescriptorSetLayout(m_device, &li, nullptr, &m_cloudNoiseDescLayout) == VK_SUCCESS;
-    li.bindingCount = 8; li.pBindings = sb;
+    li.bindingCount = 9; li.pBindings = sb;
     ok = ok && vkCreateDescriptorSetLayout(m_device, &li, nullptr, &m_cloudSampleDescLayout) == VK_SUCCESS;
 
     if (ok) {
         VkDescriptorPoolSize sizes[3] = {
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5},
-            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5},
+            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 6},
             {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3}};
         VkDescriptorPoolCreateInfo pi{};
         pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -594,6 +834,11 @@ bool VulkanDevice::createCloudPipelines(const std::vector<uint32_t>& noiseSPV,
     cellWrite.pImageInfo = &cellInfo;
     vkUpdateDescriptorSets(m_device, 5, sw, 0, nullptr);
     vkUpdateDescriptorSets(m_device, 1, &cellWrite, 0, nullptr);
+    VkDescriptorImageInfo volumeInfo{m_cloudVolumeAtlas.sampler, m_cloudVolumeAtlas.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet volumeWrite = cellWrite;
+    volumeWrite.dstBinding = 8;
+    volumeWrite.pImageInfo = &volumeInfo;
+    vkUpdateDescriptorSets(m_device, 1, &volumeWrite, 0, nullptr);
     return true;
 }
 
@@ -688,7 +933,12 @@ bool VulkanDevice::sampleClouds(const Backend::CloudParamsGPU& params, uint32_t 
         // it cannot race a frame.
         vkUpdateDescriptorSets(m_device, 2, w, 0, nullptr);
     }
-    uploadBuffer(m_cloudSampleParamsBuffer, &params, sizeof(params));
+    {
+        // Same volume gate as updateCloudRtParams: measure what is drawn.
+        Backend::CloudParamsGPU gated = params;
+        if (!m_cloudVolumePipeline || m_cloudVolumeSlots == 0) gated.volume[0] = 0.0f;
+        uploadBuffer(m_cloudSampleParamsBuffer, &gated, sizeof(gated));
+    }
     uploadBuffer(m_cloudQueryBuffer, queries.data(), uint64_t(n) * sizeof(Backend::CloudQueryGPU));
 
     VkCommandBuffer cmd = beginSingleTimeCommands();
@@ -717,23 +967,6 @@ bool VulkanDevice::sampleClouds(const Backend::CloudParamsGPU& params, uint32_t 
 // Set: 0-3 cloud textures, 4 CloudParams (the RT params buffer: one block for
 // both renderers), 5 majorant, 6 atmosphere LUTs [transmittance, sky-view],
 // 7 frame block, 8 previous history (sampled), 9 current history, 10 output.
-
-namespace {
-VkSampler makeClampSampler(VkDevice device) {
-    VkSamplerCreateInfo s{};
-    s.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    s.magFilter = VK_FILTER_LINEAR;
-    s.minFilter = VK_FILTER_LINEAR;
-    s.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    s.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    s.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    s.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    s.maxLod = 0.0f;
-    VkSampler out = VK_NULL_HANDLE;
-    vkCreateSampler(device, &s, nullptr, &out);
-    return out;
-}
-} // namespace
 
 void VulkanDevice::destroyCloudRaster() {
     if (m_cloudScenePipeline) vkDestroyPipeline(m_device, m_cloudScenePipeline, nullptr);
@@ -771,8 +1004,9 @@ bool VulkanDevice::createCloudRasterPipeline(const std::vector<uint32_t>& spv) {
     // 14/15: the interleaved march's fresh grid (cloud_raster.comp writes,
     // cloud_resolve.comp reads).
     // 16: storm cell map (cloud_common.glsl, ATMOSPHERE_STORMS.md).
-    VkDescriptorSetLayoutBinding b[17]{};
-    for (uint32_t i = 0; i < 17; ++i) {
+    // 17: storm cell volume atlas (ATMOSPHERE_CLOUD_VOLUMES.md).
+    VkDescriptorSetLayoutBinding b[18]{};
+    for (uint32_t i = 0; i < 18; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = (i == 6) ? 2u : 1u;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -782,10 +1016,10 @@ bool VulkanDevice::createCloudRasterPipeline(const std::vector<uint32_t>& spv) {
     }
     VkDescriptorSetLayoutCreateInfo li{};
     li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    li.bindingCount = 17; li.pBindings = b;
+    li.bindingCount = 18; li.pBindings = b;
     bool ok = vkCreateDescriptorSetLayout(m_device, &li, nullptr, &m_cloudRasterDescLayout) == VK_SUCCESS;
     if (ok) {
-        VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * 11},
+        VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * 12},
                                          {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 * 2},
                                          {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 * 6}};
         VkDescriptorPoolCreateInfo pi{};
@@ -849,7 +1083,8 @@ bool VulkanDevice::createCloudScenePipeline(const std::vector<uint32_t>& spv) {
     VkDescriptorBufferInfo params{m_cloudRtParamsBuffer.buffer, 0, sizeof(Backend::CloudParamsGPU)};
     VkDescriptorBufferInfo frame{m_cloudRasterFrameBuf.buffer, 0, sizeof(Backend::CloudRasterFrameGPU)};
     VkDescriptorImageInfo cellMap{m_cloudCellMap.sampler, m_cloudCellMap.view, VK_IMAGE_LAYOUT_GENERAL};
-    VkWriteDescriptorSet writes[8]{};
+    VkDescriptorImageInfo volumeAtlas{m_cloudVolumeAtlas.sampler, m_cloudVolumeAtlas.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet writes[9]{};
     uint32_t count = 0;
     for (uint32_t i = 0; i < 8; ++i) {
         if (i == 6) {
@@ -877,6 +1112,15 @@ bool VulkanDevice::createCloudScenePipeline(const std::vector<uint32_t>& spv) {
         write.descriptorCount = 1;
         write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         write.pImageInfo = &cellMap;
+    }
+    {
+        auto& write = writes[count++];
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = m_cloudSceneSet;
+        write.dstBinding = 17;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &volumeAtlas;
     }
     vkUpdateDescriptorSets(m_device, count, writes, 0, nullptr);
     writeCloudRasterLutDescriptors();
@@ -1057,7 +1301,7 @@ bool VulkanDevice::ensureCloudRasterTargets(uint32_t w, uint32_t h, uint32_t int
     const ImageHandle* tex[6] = {&m_cloudBase, &m_cloudDetail, &m_cloudCurl, &m_cloudWeather, nullptr, &m_cloudMajorant};
     for (uint32_t s = 0; s < 2; ++s) {
         VkDescriptorImageInfo ti[6]{};
-        VkDescriptorImageInfo prev{}, cur{}, out{}, fresh{}, freshAux{}, cellMap{};
+        VkDescriptorImageInfo prev{}, cur{}, out{}, fresh{}, freshAux{}, cellMap{}, volumeAtlas{};
         VkDescriptorBufferInfo params{m_cloudRtParamsBuffer.buffer, 0, sizeof(Backend::CloudParamsGPU)};
         VkDescriptorBufferInfo frame{m_cloudRasterFrameBuf.buffer, 0, sizeof(Backend::CloudRasterFrameGPU)};
         std::vector<VkWriteDescriptorSet> ws;
@@ -1093,6 +1337,8 @@ bool VulkanDevice::ensureCloudRasterTargets(uint32_t w, uint32_t h, uint32_t int
         add(15, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &freshAux, nullptr);
         cellMap = {m_cloudCellMap.sampler, m_cloudCellMap.view, VK_IMAGE_LAYOUT_GENERAL};
         add(16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &cellMap, nullptr);
+        volumeAtlas = {m_cloudVolumeAtlas.sampler, m_cloudVolumeAtlas.view, VK_IMAGE_LAYOUT_GENERAL};
+        add(17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &volumeAtlas, nullptr);
         vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(ws.size()), ws.data(), 0, nullptr);
     }
     writeCloudRasterLutDescriptors();

@@ -1,4 +1,5 @@
 #include "UI/AudioUI.h"
+#include "UI/AudioPropertyLayout.h"
 #include "Audio/AudioService.h"
 #include "Audio/AudioAuthoring.h"
 #include "Audio/AudioWeatherBridge.h"
@@ -199,16 +200,16 @@ void drawSourceInspector(UIContext& ctx) {
         }
         char parent[256]{};
         std::snprintf(parent, sizeof(parent), "%s", e.value("parent", std::string()).c_str());
-        if (ImGui::InputText("Parent object", parent, sizeof(parent), ImGuiInputTextFlags_EnterReturnsTrue)) {
+        if (ImGui::InputText(property("Parent object").c_str(), parent, sizeof(parent), ImGuiInputTextFlags_EnterReturnsTrue)) {
             call(ctx, "update", {{"id", id}, {"parent", parent}});
         }
         char name[256]{};
         const auto text = e.at("name").get<std::string>();
         std::snprintf(name, sizeof(name), "%s", text.c_str());
-        if (ImGui::InputText("Source name", name, sizeof(name), ImGuiInputTextFlags_EnterReturnsTrue)) {
+        if (ImGui::InputText(property("Source name").c_str(), name, sizeof(name), ImGuiInputTextFlags_EnterReturnsTrue)) {
             call(ctx, "update", {{"id", id}, {"name", name}});
         }
-        if (ImGui::BeginCombo("Asset", assetLabel.c_str())) {
+        if (ImGui::BeginCombo(property("Asset").c_str(), assetLabel.c_str())) {
             for (const auto& asset : data.at("assets")) {
                 const auto label = asset.at("name").get<std::string>() + "##" +
                                    asset.at("id").get<std::string>();
@@ -225,14 +226,14 @@ void drawSourceInspector(UIContext& ctx) {
         if (ImGui::CollapsingHeader("Spatial settings")) {
             for (const char* key : {"position", "direction"}) {
                 float v[3] = {e.at(key)[0], e.at(key)[1], e.at(key)[2]};
-                if (ImGui::InputFloat3(key, v, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue)) {
+                if (ImGui::InputFloat3(property(key).c_str(), v, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue)) {
                     call(ctx, "update", {{"id", id}, {key, json::array({v[0], v[1], v[2]})}});
                 }
             }
             for (const char* key : {"min_distance", "max_distance", "rolloff",
                                     "cone_inner", "cone_outer", "cone_gain"}) {
                 float value = e.at(key);
-                if (ImGui::InputFloat(key, &value, 0, 0, "%.3f",
+                if (ImGui::InputFloat(property(key).c_str(), &value, 0, 0, "%.3f",
                                       ImGuiInputTextFlags_EnterReturnsTrue)) {
                     call(ctx, "update", {{"id", id}, {key, value}});
                 }
@@ -240,7 +241,7 @@ void drawSourceInspector(UIContext& ctx) {
         }
         for (const char* key : {"gain", "pitch"}) {
             float value = e.at(key);
-            if (ImGui::InputFloat(key, &value, 0, 0, "%.3f",
+            if (ImGui::InputFloat(property(key).c_str(), &value, 0, 0, "%.3f",
                                   ImGuiInputTextFlags_EnterReturnsTrue)) {
                 call(ctx, "update", {{"id", id}, {key, value}});
             }
@@ -249,12 +250,12 @@ void drawSourceInspector(UIContext& ctx) {
             bool value = e.at(key);
             const bool spatial = std::strcmp(key, "spatial") == 0;
             ImGui::BeginDisabled(spatial && stereoAsset);
-            if (ImGui::Checkbox(spatial ? "3D positional (mono)" : "Loop", &value)) {
+            if (ImGui::Checkbox(property(spatial ? "3D positional (mono)" : "Loop").c_str(), &value)) {
                 call(ctx, "update", {{"id", id}, {key, value}});
             }
             ImGui::EndDisabled();
         }
-        if (ImGui::BeginCombo("Bus", e.at("bus").get<std::string>().c_str())) {
+        if (ImGui::BeginCombo(property("Bus").c_str(), e.at("bus").get<std::string>().c_str())) {
             for (const char* bus : {"Master", "Weather", "Effects", "Ambience", "Music"}) {
                 if (ImGui::Selectable(bus, e.at("bus") == bus)) {
                     call(ctx, "update", {{"id", id}, {"bus", bus}});
@@ -262,7 +263,16 @@ void drawSourceInspector(UIContext& ctx) {
             }
             ImGui::EndCombo();
         }
+        bool firstAction = true;
         for (const char* op : {"play", "pause", "stop", "duplicate", "remove"}) {
+            const float width = ImGui::CalcTextSize(op).x + ImGui::GetStyle().FramePadding.x * 2;
+            const float contentRight = ImGui::GetCursorScreenPos().x +
+                ImGui::GetContentRegionAvail().x;
+            if (!firstAction && contentRight - ImGui::GetItemRectMax().x > width +
+                ImGui::GetStyle().ItemSpacing.x) {
+                ImGui::SameLine();
+            }
+            firstAction = false;
             ImGui::BeginDisabled(std::strcmp(op, "play") == 0 && assetId.empty());
             if (ImGui::Button(op)) {
                 const auto result = call(ctx, op, {{"id", id}});
@@ -274,9 +284,7 @@ void drawSourceInspector(UIContext& ctx) {
                 }
             }
             ImGui::EndDisabled();
-            ImGui::SameLine();
         }
-        ImGui::NewLine();
         AudioReactionUI::draw(ctx, e);
     }
 }

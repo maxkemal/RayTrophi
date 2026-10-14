@@ -12,6 +12,8 @@
 // mode 4: dominant precipitation form id at query.a (0 none, 1 rain,
 //         2 drizzle, 3 snow, 4 sleet, 5 graupel, 6 hail, 7 freezing rain,
 //         8 ice pellets; cloudPrecipFormIdAt)
+// mode 5: storm cell volume signed distance (m, negative inside; 1e6 outside
+//         every box or with volumes off; cloudVolumeSdf)
 
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
@@ -19,6 +21,7 @@ layout(local_size_x = 64) in;
 #define CLOUD_SET 0
 #define CLOUD_BINDING_BASE 0
 #define CLOUD_CELL_BINDING 7
+#define CLOUD_VOLUME_BINDING 8
 #include "cloud_common.glsl"
 
 struct CloudQuery { vec4 a; vec4 b; };
@@ -45,6 +48,8 @@ void main() {
         results[i] = cloudPrecipAt(a);
     } else if (pc.mode == 4u) {
         results[i] = cloudPrecipFormIdAt(a);
+    } else if (pc.mode == 5u) {
+        results[i] = cloudVolumesActive() ? cloudVolumeSdf(a, cloudAltitude(a)) : 1e6;
     } else {
         uint n = max(pc.steps, 1u);
         float len = length(b - a);

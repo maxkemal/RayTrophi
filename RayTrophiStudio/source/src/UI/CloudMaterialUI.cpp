@@ -89,6 +89,28 @@ static bool drawStormControls(atmosphere::CloudState& clouds) {
                        "to the tropopause (towers, overshooting tops, anvil downwind, wall cloud, "
                        "mammatus); the layers step aside inside the cells. Off: the cells only "
                        "raise the cover of the layers they sit in.");
+    // Storm cell volumes (docs/dev/ATMOSPHERE_CLOUD_VOLUMES.md).
+    ImGui::BeginDisabled(!s.column);
+    atmosphere::CloudVolumes& v = clouds.volumes;
+    changed |= ImGui::Checkbox("Cell volumes (3D signed distance)", &v.enabled);
+    ImGui::BeginDisabled(!v.enabled);
+    changed |= ImGui::SliderInt("Volume slots", &v.slots, 1, atmosphere::kMaxCloudVolumeSlots);
+    changed |= ImGui::DragFloat("Voxel size (m)", &v.voxel_m, 1.0f, 20.0f, 400.0f, "%.0f");
+    changed |= ImGui::DragFloat("Surface skin (m)", &v.skin_m, 1.0f, 5.0f, 500.0f, "%.0f");
+    changed |= ImGui::SliderFloat("Min development", &v.min_tower, 0.0f, 1.0f, "%.2f");
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    {
+        const atmosphere::ColumnLevels lv = atmosphere::columnLevels(clouds);
+        if (lv.valid) {
+            ImGui::Text("Column: LCL %.0f m, freezing %.0f m, tropopause %.0f m",
+                        lv.lcl_m, lv.freezing_m, lv.tropopause_m);
+        }
+    }
+    ImGui::TextWrapped("Cell volumes: developed cells are drawn from a generated 3D volume "
+                       "(%d m wide box, 16 MB per slot): thermal bubble towers, flat base with a "
+                       "wall cloud, anvil at the tropopause. The rest keep the column surface.",
+                       static_cast<int>(v.voxel_m * atmosphere::kCloudVolumeVoxels));
     ImGui::Checkbox("Show cells in viewport", &StormGizmoUI::visible);
     ImGui::TextWrapped("Cells grow, mature (heavy rain, lightning) and dissipate (light, wide "
                        "rain), drifting with the climate wind. Stratiform rain = broad light "
@@ -250,10 +272,12 @@ bool drawWeatherLightningControls(UIContext& ctx) {
         nlohmann::json json;
         atmosphere::cloudsToJson(clouds, json);
         // Every block drawLightningControls edits must be in the patch: a
-        // block left out snaps back next frame (local_weather did).
+        // block left out snaps back next frame (local_weather did, then
+        // volumes did -- drawStormControls edits clouds.volumes too).
         const rtapi::Result result = rtapi::setCloudsJson(
             nlohmann::json{{"lightning", json["lightning"]}, {"storms", json["storms"]},
-                           {"local_weather", json["local_weather"]}}.dump());
+                           {"local_weather", json["local_weather"]},
+                           {"volumes", json["volumes"]}}.dump());
         error = result.error;
         if (!result.ok) {
             ImGui::TextWrapped("%s", error.c_str());

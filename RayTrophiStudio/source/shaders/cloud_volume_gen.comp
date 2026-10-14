@@ -1,0 +1,286 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// Storm cell volume generator (docs/dev/ATMOSPHERE_CLOUD_VOLUMES.md §3.3, V2).
+//
+// Writes one atlas slot: a signed distance field (m, negative inside) of the
+// cell's cloud in its box. The slot entry (Backend::CloudVolumeSlotGPU) comes
+// in the push block, so the generator needs no other binding; the device runs
+// it only when the entry's shape inputs change (VulkanDevice::
+// updateCloudRtParams), queue-ordered before the frames that read it.
+// Pure function of the entry: a scrubbed timeline paints the same slot.
+//
+// Shape (V2):
+//   towers  = THERMAL BUBBLE CHAINS. A convective tower is not one column but
+//             successive buoyant bubbles, each a vortex ring entraining air;
+//             the cauliflower is their trace, on every side -- not a
+//             heightfield (the storm shell's walls were a vertically extruded
+//             2D field). One chain for the cell body, one per updraft turret
+//             (cloud_turrets.glsl: the same turrets as the cell map); smaller
+//             bubbles sit on the upper half of each bubble.
+//   base    = the condensation level, flat, lowered into a wall cloud under
+//             the main updraft (inflow side).
+//   anvil   = a wedge under the tropopause, thick over the core and thinning
+//             downwind (fibrous detail kind).
+//   lean    = the crowns drift downwind with height (cloudShellShear without
+//             its curl modulation).
+//   multicell (V2d) = a flanking line of younger, lower towers on the inflow
+//             flank and a ring of feeder cumulus, taller toward the storm;
+//             Worley billows (~0.6 km) over the whole surface.
+// The field is a LOWER BOUND of the distance everywhere (smooth union only
+// lowers it, squashed shapes are scaled, quick rejects return bounds): the
+// marcher steps over empty space by it.
+//
+// Channels: R signed distance (m), G detail kind (0 cauliflower .. 1 fibrous
+// ice), B reserved (updraft, V3), A 1.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image3D cloudVolumeAtlas;
+
+layout(push_constant) uniform VolumeGenPush {
+    vec4 a;      // box min x, bottom altitude, min z, active
+    vec4 b;      // box size x, height, size z, atlas slot index
+    vec4 c;      // cell id, tower, radius m, life
+    vec4 d;      // wall allowance m, tropopause fraction, coverage, peak
+    vec4 e;      // age s, wind direction x, z, anvil spread
+    vec4 f;      // turret detail, rotation, shear x, z
+    uvec4 info;  // atlas slot, voxels per axis, -, -
+} pc;
+
+#include "cloud_turrets.glsl"   // kTurrets, cellHash, cellRandom, cloudTurret
+
+// Clamp of the stored distance: far enough for empty-space skipping, well
+// inside half-float precision (1 m steps up to 2048 m).
+const float kVolumeSdfClampM = 2000.0;
+
+float gHeight;   // box height (m)
+float gBase;     // host layer base above the box bottom (m)
+float gAnvil;    // tropopause above the box bottom (m)
+
+// Polynomial smooth minimum: <= min(a, b), so a union of bounds stays a bound.
+float smin(float a, float b, float k) {
+    float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+// Top height (m above the box bottom) of a share of the column: up to 0.75 it
+// reaches the tropopause, above that it overshoots it (cloudShellTop).
+float shellTopM(float frac) {
+    return frac < 0.75 ? frac / 0.75 * gAnvil : mix(gAnvil, gHeight, (frac - 0.75) / 0.25);
+}
+
+// Thermal bubble chain around `c2` from the base up to `topM`, bubble radius
+// ~`rt` (narrowing toward the crown). `seed` makes each chain's meander and
+// bubble sizes its own.
+float chainSdf(vec3 q, vec2 c2, float rt, float topM, uint seed) {
+    float h = topM - gBase;
+    if (h < 250.0) return 1e5;
+    // Bubble (<= 1.05 rt) + meander (0.35 rb) + side bubbles (1.37 rb).
+    float reach = rt * 1.85;
+    float dh = length(q.xz - c2);
+    if (dh > reach) return dh - reach;                 // nothing of the chain is nearer
+    if (q.y > topM + rt) return q.y - topM - rt;       // above the crown
+    // Core: a tapered column through the chain. Without it the bubbles read
+    // as beads on a string, deep waists between them (2026-10-14).
+    float crownY = topM - 0.6 * rt;
+    float fy = clamp((q.y - gBase) / max(crownY - gBase, 1.0), 0.0, 1.0);
+    float coreR = rt * mix(0.6, 0.4, fy);
+    float coreV = max(max(gBase - q.y, q.y - crownY), 0.0);
+    // The taper adds at most 0.2 rt over the chain's height to the slope.
+    float res = (length(vec2(dh, coreV)) - coreR) * 0.9;
+    // Bubbles every ~half a radius: they overlap into one lumpy body.
+    int nb = clamp(int(h / (rt * 0.5)) + 1, 3, 20);
+    for (int k = 0; k < nb; ++k) {
+        uint s = cellHash(seed ^ (uint(k) * 0x9e3779b9u + 0x632be5abu));
+        float f = (float(k) + 0.5) / float(nb);
+        float rb = rt * mix(0.95, 0.55, f * f) * mix(0.85, 1.1, cellRandom(s));
+        float y = min(gBase + f * h, topM - 0.75 * rb);
+        vec2 off = (vec2(cellRandom(s), cellRandom(s)) - 0.5) * 0.7 * rb;
+        vec3 cc = vec3(c2.x + off.x, y, c2.y + off.y);
+        // Bubbles are flattened to 0.75 vertically; the squash stretches
+        // distances by at most 1 / 0.75, so x 0.75 keeps a lower bound.
+        float dist = (length((q - cc) / vec3(1.0, 0.75, 1.0)) - rb) * 0.75;
+        float eu = length(q - cc);
+        if (eu < 1.6 * rb) {
+            res = smin(res, dist, 0.35 * rb);
+            // Cauliflower: smaller bubbles all over the bubble, from slightly
+            // under its equator to near its top -- on the walls too, not
+            // only the crown (the walls read as smooth columns, 2026-10-14).
+            // Sizes spread wide (squared draw): a few big lobes, many small.
+            for (int j = 0; j < 8; ++j) {
+                float az = cellRandom(s) * 6.28318530718;
+                float el = mix(-0.3, 1.2, cellRandom(s));
+                vec3 dir = vec3(cos(el) * cos(az), sin(el), cos(el) * sin(az));
+                float rr = cellRandom(s);
+                float sr = rb * mix(0.2, 0.55, rr * rr);
+                res = smin(res, length(q - (cc + dir * rb * 0.82)) - sr, 0.12 * rb);
+            }
+        } else {
+            // Far from this bubble: its small bubbles reach at most 1.37 rb
+            // from its centre, so that is still a bound.
+            res = smin(res, eu - 1.37 * rb, 0.35 * rb);
+        }
+    }
+    return res;
+}
+
+// Distance (cell units) to the nearest feature point of a jittered unit grid
+// (Worley F1). 1-Lipschitz in x, so A x F1(q / L) changes a distance field's
+// slope by at most A / L.
+float worleyF1(vec3 x, uint seed) {
+    vec3 i = floor(x);
+    vec3 f = x - i;
+    float best = 8.0;
+    for (int z = -1; z <= 1; ++z)
+    for (int y = -1; y <= 1; ++y)
+    for (int xx = -1; xx <= 1; ++xx) {
+        ivec3 c = ivec3(i) + ivec3(xx, y, z);
+        uint s = cellHash(seed ^ (uint(c.x) * 73856093u) ^ (uint(c.y) * 19349663u) ^ (uint(c.z) * 83492791u));
+        vec3 jit = vec3(cellRandom(s), cellRandom(s), cellRandom(s));
+        best = min(best, length(vec3(xx, y, z) + jit - f));
+    }
+    return best;
+}
+
+// Multicell storm (Browning 1977): beside the mature cell, a FLANKING LINE of
+// younger towers on the inflow flank, each lower the farther out -- the
+// staircase that makes a cumulonimbus complex rather than one column -- and,
+// around them, a field of cumulus feeding the storm, taller and denser toward
+// it. Each its own bubble chain with its own seed, joined to the base only.
+const int kFlankTowers = 4;
+const float kFeederCellM = 1500.0;
+// Billows carried by the field itself (the shader's detail pass adds the
+// cauliflower below the voxel scale).
+const float kBillowScaleM = 650.0;
+const float kBillowAmpM = 170.0;
+
+void main() {
+    uint n = pc.info.y;
+    uvec3 v = gl_GlobalInvocationID;
+    if (any(greaterThanEqual(v, uvec3(n)))) return;
+    // Voxel centre in box metres (y = metres above the box bottom).
+    vec3 local = (vec3(v) + 0.5) / float(n) * pc.b.xyz;
+
+    gHeight = pc.b.y;
+    gBase = pc.d.x;
+    gAnvil = clamp(pc.d.y, 0.05, 1.0) * pc.b.y;
+    float R = max(pc.c.z, 300.0);
+    float T = clamp(pc.c.y, 0.0, 1.0);
+    float life = pc.c.w;
+    float peak = pc.d.w;
+    float age = pc.e.x;
+    vec2 along = dot(pc.e.yz, pc.e.yz) > 1e-6 ? normalize(pc.e.yz) : vec2(1.0, 0.0);
+    vec2 across = vec2(-along.y, along.x);
+    float anvilSpread = pc.e.w;
+    float detail = clamp(pc.f.x, 0.0, 1.0);
+    float spinAngle = pc.f.y * age * 0.0015;
+    vec2 shear = pc.f.zw;
+    uint id = uint(pc.c.x + 0.5);
+    vec2 C = 0.5 * pc.b.xz;   // the cell sits at the box centre
+
+    // Lean: crowns drift downwind, capped at 3 km of height (as the shell).
+    float above = clamp(local.y - gBase, 0.0, 3000.0);
+    vec3 q = local;
+    q.xz -= shear * (above * (above / 3000.0) * 1.6);
+
+    // Body: the broad lower chain at the core (lower when turrets carry the
+    // height, as the cell map's body dome).
+    float sdf = chainSdf(q, C, 0.6 * R, shellTopM(T * mix(1.0, 0.55, detail)), cellHash(id * 92821u + 7u));
+    // Updraft turrets.
+    if (detail > 0.05) {
+        for (int t = 0; t < kTurrets; ++t) {
+            CloudTurret tr = cloudTurret(id, t, age, R, C, along, spinAngle);
+            float topM = shellTopM(T * tr.height * tr.rise);
+            sdf = smin(sdf, chainSdf(q, tr.centre, tr.radius, topM, tr.seed), 0.25 * tr.radius);
+        }
+    }
+
+    float halfBox = 0.5 * min(pc.b.x, pc.b.z);
+    // Flanking line: rear of the inflow side (upwind, to one side by the
+    // cell's hash). Small blend: the towers stay separate above the base.
+    float multicell = smoothstep(0.3, 0.6, T);
+    if (multicell > 0.0) {
+        float side = (cellHash(id * 31u + 5u) & 1u) == 1u ? 1.0 : -1.0;
+        vec2 flank = normalize(-0.75 * along + 0.66 * side * across);
+        for (int i = 0; i < kFlankTowers; ++i) {
+            uint s = cellHash(id * 15485863u + uint(i) * 2246822519u + 3u);
+            float fi = float(i);
+            float rt = R * (0.36 - 0.05 * fi) * mix(0.85, 1.15, cellRandom(s));
+            float dist = min(R * (0.95 + 0.62 * fi) * mix(0.9, 1.1, cellRandom(s)),
+                             halfBox - 1.9 * rt - 200.0);
+            if (dist < 0.7 * R) break;
+            vec2 cen = C + flank * dist + vec2(cellRandom(s) - 0.5, cellRandom(s) - 0.5) * 0.35 * R;
+            // Each tower pulses on its own slow cycle (time-pure, smooth).
+            float pulse = 0.82 + 0.18 * sin(6.28318530718 * (age / mix(700.0, 1300.0, cellRandom(s)) +
+                                                           cellRandom(s)));
+            // Below the tropopause share (0.75): only the mature cell overshoots.
+            float frac = T * multicell * (0.7 - 0.12 * fi) * pulse;
+            sdf = smin(sdf, chainSdf(q, cen, rt, shellTopM(frac), s ^ 0xa511e9b3u), 0.12 * rt);
+        }
+    }
+
+    // Feeder cumulus: one candidate per kFeederCellM grid cell in the ring
+    // around the storm; the 3 x 3 cells around the voxel cover every cloud
+    // that can reach it (radius + reach < a cell).
+    {
+        vec2 g = floor(q.xz / kFeederCellM);
+        for (int gz = -1; gz <= 1; ++gz)
+        for (int gx = -1; gx <= 1; ++gx) {
+            ivec2 gc = ivec2(g) + ivec2(gx, gz);
+            uint s = cellHash(id * 2654435761u ^ (uint(gc.x) * 73856093u) ^ (uint(gc.y) * 19349663u));
+            vec2 cen = (vec2(gc) + 0.2 + 0.6 * vec2(cellRandom(s), cellRandom(s))) * kFeederCellM;
+            float rr = length(cen - C) / R;
+            if (rr < 1.1) continue;
+            float nearS = 1.0 - smoothstep(1.1, 3.2, rr);
+            if (cellRandom(s) > 0.15 + 0.6 * nearS) continue;
+            float rt = mix(180.0, 420.0, nearS * cellRandom(s));
+            if (length(cen - C) > halfBox - 1.9 * rt - 150.0) continue;
+            float topM = gBase + mix(500.0, 3800.0, nearS * nearS * mix(0.5, 1.0, cellRandom(s))) * mix(0.4, 1.0, T);
+            sdf = smin(sdf, chainSdf(q, cen, rt, topM, s ^ 0x3c6ef372u), 0.1 * rt);
+        }
+    }
+
+    // Billows on everything above: inverted Worley lobes at ~0.6 km, seeded
+    // per cell. Mean-free (F1 ~ 0.45 on average): the surface moves in and out.
+    sdf += kBillowAmpM * (worleyF1(q / kBillowScaleM, id * 668265263u + 11u) - 0.45);
+
+    // Anvil (cloud_cells.comp column sheet: same growth, centre and ellipse).
+    float kind = 0.0;
+    float anvil = peak * anvilSpread * smoothstep(0.3, 0.5, life) * (1.0 - smoothstep(0.92, 1.0, life));
+    if (anvil > 0.02) {
+        float age01 = smoothstep(0.3, 0.9, life);
+        float spread = mix(1.6, 3.2, age01);
+        vec2 ac = C + along * R * mix(0.3, 1.4, age01) * anvilSpread;
+        float ax = R * spread * mix(1.0, 1.4, anvilSpread);
+        float ay = R * spread * 0.75;
+        vec2 rel = q.xz - ac;
+        float e = length(vec2(dot(rel, along) / ax, dot(rel, across) / ay));
+        float a = smoothstep(0.0, 0.7, anvil);
+        float ec = clamp(e, 0.0, 1.0);
+        float topY = gAnvil + 0.02 * gHeight * smoothstep(0.5, 1.0, a) * (1.0 - ec);
+        float botY = topY - max(mix(0.015, 0.14, a) * gHeight * (1.0 - 0.8 * ec), 60.0);
+        // Slab x ellipse; 0.7 covers the slope of the thinning faces.
+        float sAnvil = max(max(botY - q.y, q.y - topY), (e - 1.0) * min(ax, ay)) * 0.7;
+        kind = 1.0 - smoothstep(-300.0, 300.0, sAnvil - sdf);   // fibrous where the anvil is nearer
+        sdf = smin(sdf, sAnvil, 250.0);
+    }
+
+    // Flat condensation base, lowered into the wall cloud under the main
+    // updraft (cloud_cells.comp: 0.2 r upwind, 0.3 r wide).
+    float wallD = length(local.xz - (C - along * 0.2 * R)) / (0.3 * R);
+    float baseY = gBase - pc.d.x * T * (1.0 - smoothstep(0.4, 1.0, wallD));
+    sdf = max(sdf, baseY - local.y);
+
+    // The lean is a shear of the lookup, not a rigid motion: distances in q
+    // overstate world distances by up to 1 + |shear| x d(lean)/dy. Without
+    // this the marcher's empty-space skip jumped over thin parts and the
+    // towers looked see-through (2026-10-14). Scaling keeps the surface.
+    // The billows multiply the slope by at most 1 + kBillowAmpM / kBillowScaleM
+    // (they are evaluated in the sheared lookup too).
+    float leanSlope = length(shear) * (above < 3000.0 ? 3.2 * above / 3000.0 : 0.0);
+    sdf /= (1.0 + leanSlope) * (1.0 + kBillowAmpM / kBillowScaleM);
+
+    sdf = clamp(sdf, -kVolumeSdfClampM, kVolumeSdfClampM);
+    ivec3 dst = ivec3(v) + ivec3(0, 0, int(pc.info.x * n));
+    imageStore(cloudVolumeAtlas, dst, vec4(sdf, kind, 0.0, 1.0));
+}

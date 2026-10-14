@@ -55,6 +55,7 @@ nlohmann::json localPosition(UIContext&, const nlohmann::json& emitter,
 }
 
 void syncScene(UIContext& ctx) {
+    syncDomainAudioTelemetry(ctx);
     const auto data = ctx.scene.audio->snapshot();
     bool selectionExists = false;
     for (const auto& emitter : data.at("emitters")) {
@@ -81,10 +82,12 @@ public:
 
     void execute(UIContext& ctx) override {
         ctx.scene.audio->restore(after_);
+        syncScene(ctx);
         ProjectManager::getInstance().markModified();
     }
     void undo(UIContext& ctx) override {
         ctx.scene.audio->restore(before_);
+        syncScene(ctx);
         ProjectManager::getInstance().markModified();
     }
     Type getType() const override {
@@ -133,6 +136,29 @@ nlohmann::json author(UIContext& ctx, SceneHistory* history, const std::string& 
         return domainAudioInputs(ctx);
     }
     auto input = params;
+    if ((operation == "design_destination" || operation == "design_save") &&
+        !input.contains("folder") && !input.contains("path")) {
+        const auto project = ProjectManager::getInstance().getCurrentFilePath();
+        auto root = ctx.scene_ui_ptr ? ctx.scene_ui_ptr->getActiveAssetLibraryRoot() :
+                                      std::filesystem::path();
+        if (!project.empty()) {
+            root = std::filesystem::path(std::u8string(project.begin(), project.end())).parent_path() /
+                   "assets";
+        } else if (root.empty()) {
+            root = AssetRegistry::resolveDefaultRoot();
+        }
+        if (root.empty()) {
+            throw std::invalid_argument("No project or asset-library folder; choose a sound folder");
+        }
+        input["folder"] = pathUtf8(std::filesystem::absolute(root / "audio" / "generated"));
+    }
+    if ((operation == "design_preview" || operation == "design_render") &&
+        rtapi::renderOutputPending()) {
+        throw std::runtime_error("Sound design preview is locked by the render job");
+    }
+    if (operation == "design_destination") {
+        return ctx.scene.audio->invoke(operation, input);
+    }
     if (operation == "thunder_event") {
         if (!ctx.scene.camera) {
             throw std::invalid_argument("Thunder needs an active listener camera");

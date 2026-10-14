@@ -1,4 +1,5 @@
 #include "UI/AudioReactionUI.h"
+#include "UI/AudioPropertyLayout.h"
 #include "Audio/AudioAuthoring.h"
 #include "Audio/AudioService.h"
 #include "Audio/AudioReaction.h"
@@ -29,7 +30,7 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
     }
     const std::string id = emitter.at("id");
     auto config = audio::AudioReaction::validate(emitter.value("reaction", json::object()));
-    if (ImGui::BeginCombo("Driver", config.at("driver").get<std::string>().c_str())) {
+    if (ImGui::BeginCombo(AudioUI::property("Driver").c_str(), config.at("driver").get<std::string>().c_str())) {
         for (const char* driver : {"manual", "wind", "rain", "signal", "domain_contact"}) {
             if (ImGui::Selectable(driver, config.at("driver") == driver)) {
                 config["driver"] = driver;
@@ -60,7 +61,7 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
         ImGui::TextWrapped("Bind a sound asset and enable Automatic to start/stop with activity. "
                            "Pause/Stop suspend automation until Play or reconfiguration.");
         bool automatic = config.at("automatic");
-        if (ImGui::Checkbox("Automatic start / stop", &automatic)) {
+        if (ImGui::Checkbox(AudioUI::property("Automatic start / stop").c_str(), &automatic)) {
             auto edited = config;
             edited["automatic"] = automatic;
             call(ctx, "update", {{"id", id}, {"reaction", edited}, {"loop", true}});
@@ -69,15 +70,24 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
                                 "pitch_min", "pitch_max", "response_seconds", "start_threshold",
                                 "stop_threshold"}) {
             float value = config.at(key);
-            if (ImGui::InputFloat(key, &value, 0, 0, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue)) {
+            if (ImGui::InputFloat(AudioUI::property(key).c_str(), &value, 0, 0, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue)) {
                 auto edited = config;
                 edited[key] = value;
                 call(ctx, "update", {{"id", id}, {"reaction", edited}});
             }
         }
         if (config.at("driver") == "domain_contact") {
+            const auto policy = ctx.scene.audio->invoke("telemetry_get", json::object());
+            bool collect = policy.at("enabled");
+            if (ImGui::Checkbox(AudioUI::property("Collect physics audio telemetry (scene)").c_str(), &collect)) {
+                call(ctx, "telemetry_update", {{"enabled", collect}});
+            }
+            if (!collect) {
+                ImGui::TextWrapped("Physics audio collection is off. Binding a sound does not "
+                                   "enable particle telemetry; opt in manually when needed.");
+            }
             const std::string channel = config.at("domain_channel");
-            if (ImGui::BeginCombo("Physics input", channel.c_str())) {
+            if (ImGui::BeginCombo(AudioUI::property("Physics input").c_str(), channel.c_str())) {
                 for (const char* choice : {"mixed_contact", "dem_contact", "dem_friction",
                                            "dem_rolling", "fluid_flow", "gas_flow",
                                            "mpm_deformation", "mpm_fracture"}) {
@@ -97,7 +107,7 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
                 ImGui::EndCombo();
             }
             const std::string metric = config.at("input_metric");
-            if (ImGui::BeginCombo("Contact magnitude", metric.c_str())) {
+            if (ImGui::BeginCombo(AudioUI::property("Contact magnitude").c_str(), metric.c_str())) {
                   for (const char* choice : {"energy_j", "power_w", "value"}) {
                     if (ImGui::Selectable(choice, metric == choice)) {
                         auto edited = config;
@@ -110,7 +120,7 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
             const auto domains = audio::domainAudioInputs(ctx);
             const std::string label = std::to_string(config.at("system_id").get<int>()) +
                                       "/" + config.at("domain_name").get<std::string>();
-            if (ImGui::BeginCombo("Domain binding", label.c_str())) {
+            if (ImGui::BeginCombo(AudioUI::property("Domain binding").c_str(), label.c_str())) {
                 for (const auto& domain : domains) {
                     if (domain.at("domain_channel") != channel) {
                         continue;
@@ -166,14 +176,14 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
             for (const char* key : {"signal_key", "source_material", "target_material"}) {
                 char text[257]{};
                 std::snprintf(text, sizeof(text), "%s", config.at(key).get<std::string>().c_str());
-                if (ImGui::InputText(key, text, sizeof(text), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                if (ImGui::InputText(AudioUI::property(key).c_str(), text, sizeof(text), ImGuiInputTextFlags_EnterReturnsTrue)) {
                     auto edited = config;
                     edited[key] = text;
                     call(ctx, "update", {{"id", id}, {"reaction", edited}});
                 }
             }
             bool follow = config.at("follow_position");
-            if (ImGui::Checkbox("Follow signal world position", &follow)) {
+            if (ImGui::Checkbox(AudioUI::property("Follow signal world position").c_str(), &follow)) {
                 auto edited = config;
                 edited["follow_position"] = follow;
                 call(ctx, "update", {{"id", id}, {"reaction", edited}});
@@ -182,9 +192,9 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
                 static float flow = 1;
                 static float speed = 1;
                 static float position[3]{};
-                ImGui::InputFloat("Mass flow kg/s", &flow);
-                ImGui::InputFloat("Contact speed m/s", &speed);
-                ImGui::InputFloat3("Contact world position", position);
+                ImGui::InputFloat(AudioUI::property("Mass flow kg/s").c_str(), &flow);
+                ImGui::InputFloat(AudioUI::property("Contact speed m/s").c_str(), &speed);
+                ImGui::InputFloat3(AudioUI::property("Contact world position").c_str(), position);
                 if (ImGui::Button("Publish 2-second signal")) {
                     call(ctx, "signal_set", {{"key", config.at("signal_key")},
                         {"flow_kg_s", flow}, {"speed_mps", speed}, {"ttl_seconds", 2},
@@ -213,7 +223,7 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
         const auto& outputs = runtime.at("reaction_runtime").at("outputs");
         if (outputs.contains(id)) {
             const auto& output = outputs.at(id);
-            ImGui::Text("Input %.3f / gain x%.3f / pitch x%.3f",
+            ImGui::TextWrapped("Input %.3f / gain x%.3f / pitch x%.3f",
                         output.at("input").get<float>(), output.at("gain_multiplier").get<float>(),
                         output.at("pitch_multiplier").get<float>());
         }

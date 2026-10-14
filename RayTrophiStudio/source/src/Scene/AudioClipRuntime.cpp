@@ -18,6 +18,7 @@ using json = nlohmann::json;
 struct AudioClipRuntime::Impl {
     struct Voice {
         AudioPcm pcm;
+        json configuration;
         ma_audio_buffer_ref buffer{};
         ma_sound sound{};
         bool bufferReady = false, soundReady = false;
@@ -69,24 +70,36 @@ void AudioClipRuntime::tick(const json& scene, ma_engine& engine, AudioMixerRunt
             continue;
         }
         active.insert(id);
+        const json* asset = nullptr;
+        for (const auto& entry : scene.at("assets")) {
+            if (entry.at("id") == clip.at("asset_id")) {
+                asset = &entry;
+                break;
+            }
+        }
+        const json configuration = {
+            {"asset_id", clip.at("asset_id")}, {"path", asset ? asset->at("path") : json()},
+            {"source_in", clip.at("source_in_seconds")},
+            {"source_out", clip.at("source_out_seconds")},
+            {"bus", clip.at("bus")}, {"loop", clip.at("loop")}};
         auto found = impl_->voices.find(id);
+        if (found != impl_->voices.end() && found->second->configuration != configuration) {
+            impl_->voices.erase(found);
+            impl_->failed.erase(id);
+            found = impl_->voices.end();
+        }
         if (found == impl_->voices.end() && playing && starts < 2 &&
             (!impl_->failed.contains(id) || now - impl_->failed.at(id) >= std::chrono::seconds(5))) {
             try {
                 if (impl_->voices.size() >= voiceSlots) {
                     throw std::runtime_error("Shared scene voice budget reached");
                 }
-                const json* asset = nullptr;
-                for (const auto& entry : scene.at("assets")) {
-                    if (entry.at("id") == clip.at("asset_id")) {
-                        asset = &entry;
-                    }
-                }
                 if (!asset) {
                     throw std::runtime_error("Clip asset not found");
                 }
                 const auto pathText = asset->at("path").get<std::string>();
                 auto voice = std::make_unique<Impl::Voice>();
+                voice->configuration = configuration;
                 voice->pcm = decodeAudioPcm(
                     std::filesystem::path(std::u8string(pathText.begin(), pathText.end())));
                 if (voice->pcm.samples.size() * sizeof(float) + bytes() > byteBudget) {

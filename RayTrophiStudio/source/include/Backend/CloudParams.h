@@ -61,6 +61,22 @@ constexpr int kCloudGpuLayers = atmosphere::kMaxCloudLayers + 2;
 constexpr int kCloudStormShellLayer = atmosphere::kMaxCloudLayers;
 constexpr int kCloudFogLayer = atmosphere::kMaxCloudLayers + 1;
 
+// One storm cell drawn as a volume (docs/dev/ATMOSPHERE_CLOUD_VOLUMES.md §3.3).
+// The box is placed every update (the cell drifts); the SHAPE inputs (b.xyz,
+// c, d) are quantized so the device regenerates a slot only when they change
+// (VulkanDevice::updateCloudRtParams keys on them).
+struct CloudVolumeSlotGPU {
+    float a[4];   // box min x, box bottom ALTITUDE, box min z, active (0/1)
+    float b[4];   // box size x, height, size z, atlas slot index
+    float c[4];   // cell id, tower (1/64), radius m (25 m), life (1/128)
+    float d[4];   // wall-cloud allowance m, tropopause fraction of the height,
+                  // coverage (1/64), peak (1/64)
+    float e[4];   // age s (4 s steps: the turrets' cycle), wind direction x, z,
+                  // anvil spread (0 without the column's anvil)
+    float f[4];   // turret detail 0..1, rotation (signed), shear x, z (m per m)
+};
+static_assert(sizeof(CloudVolumeSlotGPU) == 96, "CloudVolumeSlotGPU std430 layout");
+
 struct CloudParamsGPU {
     CloudLayerGPU layers[kCloudGpuLayers];
     float weather[4]; // 1/extent_m, type_variation, evolution (s * speed), rt_steps
@@ -86,12 +102,16 @@ struct CloudParamsGPU {
                        // reserved (ATMOSPHERE_PRECIP_TYPES.md)
     float fog[4];      // local fog map corner x, z, 1/size (m), active (0/1);
                        // the map is sheet 3 of the cell map
+    float volume[4];   // storm cell volumes: active (0/1), voxels per axis,
+                       // skin m, requested atlas slots
+    CloudVolumeSlotGPU volumeSlots[atmosphere::kMaxCloudVolumeSlots];
     CloudLightningGPU lightning[kCloudLightningEvents];
     CloudFlashLightGPU flash[kCloudLightningEvents];   // lit cloud base per event
     // Channel network per event (kCloudBoltSegments each; count in color[3]).
     CloudBoltSegmentGPU bolt[kCloudLightningEvents * kCloudBoltSegments];
 };
-static_assert(sizeof(CloudParamsGPU) == 16512, "CloudParamsGPU std430 layout (cloud_common.glsl)");
+static_assert(sizeof(CloudParamsGPU) == 16512 + 16 + 96 * atmosphere::kMaxCloudVolumeSlots,
+              "CloudParamsGPU std430 layout (cloud_common.glsl)");
 
 // ── Storm cells (docs/dev/ATMOSPHERE_STORMS.md) ─────────────────────────────
 // Input of cloud_cells.comp, which paints the cell map every update: three
@@ -209,6 +229,67 @@ inline void packStormColumn(const atmosphere::CloudState& c, CloudParamsGPU& p) 
     p.storms2[1] = (tropo - base) / (top - base);
     p.storms2[2] = wall;
     p.storms2[3] = c.storms.mammatus;
+}
+
+// Storm cell volumes (ATMOSPHERE_CLOUD_VOLUMES.md §3.3-3.4). The developed
+// cells (tower >= min_tower), in evaluateStormCells order, take atlas slots
+// 0..slots-1; each box is 128 voxels wide around the cell and spans the storm
+// column's altitudes exactly, so the column's intervals already cover it.
+// Needs the column packed first (packStormColumn): without it nothing is set
+// and the shader keeps the shell.
+inline float quantizeCloud(float v, float step) {
+    return std::floor(v / step + 0.5f) * step;
+}
+inline void packCloudVolumes(const atmosphere::CloudState& c, float time_seconds,
+                             const Vec3& wind_mps, CloudParamsGPU& p) {
+    p.volume[0] = p.volume[1] = p.volume[2] = p.volume[3] = 0.0f;
+    for (auto& slot : p.volumeSlots) slot = {};
+    const CloudLayerGPU& s = p.layers[kCloudStormShellLayer];
+    if (!c.volumes.enabled || s.f[3] < 0.5f) return;
+    atmosphere::StormCellState cells[atmosphere::kMaxStormCells];
+    const int n = atmosphere::evaluateStormCells(c, time_seconds, wind_mps, cells);
+    const int budget = (std::min)(c.volumes.slots, atmosphere::kMaxCloudVolumeSlots);
+    const float size = static_cast<float>(atmosphere::kCloudVolumeVoxels) * c.volumes.voxel_m;
+    const float windLength = std::sqrt(wind_mps.x * wind_mps.x + wind_mps.z * wind_mps.z);
+    const float windX = windLength > 1e-3f ? wind_mps.x / windLength : 0.0f;
+    const float windZ = windLength > 1e-3f ? wind_mps.z / windLength : 0.0f;
+    int k = 0;
+    for (int i = 0; i < n && k < budget; ++i) {
+        const atmosphere::StormCellState& cell = cells[i];
+        if (cell.tower < c.volumes.min_tower) continue;
+        CloudVolumeSlotGPU& v = p.volumeSlots[k];
+        v.a[0] = cell.x - 0.5f * size;
+        v.a[1] = s.a[0];
+        v.a[2] = cell.z - 0.5f * size;
+        v.a[3] = 1.0f;
+        v.b[0] = size;
+        v.b[1] = s.a[1];
+        v.b[2] = size;
+        v.b[3] = static_cast<float>(k);
+        v.c[0] = static_cast<float>(cell.id & 0xffffu);
+        v.c[1] = quantizeCloud(cell.tower, 1.0f / 64.0f);
+        v.c[2] = quantizeCloud(cell.radius_m, 25.0f);
+        v.c[3] = quantizeCloud(cell.life, 1.0f / 128.0f);
+        v.d[0] = p.storms2[2];
+        v.d[1] = p.storms2[1];
+        v.d[2] = quantizeCloud(cell.coverage, 1.0f / 64.0f);
+        v.d[3] = quantizeCloud(cell.peak, 1.0f / 64.0f);
+        // The turrets cycle over ~15 min: 4 s steps repaint a slot about every
+        // 4 s of cloud time, each step moving a turret by ~0.5% of its life.
+        v.e[0] = quantizeCloud(cell.age_s, 4.0f);
+        v.e[1] = quantizeCloud(windX, 1.0f / 256.0f);
+        v.e[2] = quantizeCloud(windZ, 1.0f / 256.0f);
+        v.e[3] = c.storms.anvil;
+        v.f[0] = c.storms.turrets;
+        v.f[1] = c.storms.rotation;
+        v.f[2] = quantizeCloud(p.precip2[2], 1.0f / 1024.0f);
+        v.f[3] = quantizeCloud(p.precip2[3], 1.0f / 1024.0f);
+        ++k;
+    }
+    p.volume[0] = k > 0 ? 1.0f : 0.0f;
+    p.volume[1] = static_cast<float>(atmosphere::kCloudVolumeVoxels);
+    p.volume[2] = c.volumes.skin_m;
+    p.volume[3] = static_cast<float>(budget);
 }
 
 // Local fog (ATMOSPHERE_LOCAL_WINDS_FOG.md §4): layer slot 4, the band of
@@ -389,6 +470,7 @@ inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float 
         p.storms[3] = 1.0f;
         p.storms2[0] = c.storms.stratiform_rain;
         packStormColumn(c, p);
+        packCloudVolumes(c, time_seconds, wind_mps, p);
     }
     packLocalFog(p, altitude_offset_m);
     return p;
@@ -422,6 +504,7 @@ inline CloudParamsGPU makeSharedCloudParamsGPU(const atmosphere::CloudState& clo
         for (int i = 0; i < kCloudFogLayer; ++i) {
             p.layers[i].b[3] = 0.0f;
         }
+        p.volume[0] = 0.0f;
         p.cirrus[0] = 0.0f;
         p.precip[0] = p.precip[1] = 0.0f;
         for (auto& event : p.lightning) {
