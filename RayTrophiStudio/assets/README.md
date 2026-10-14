@@ -54,3 +54,20 @@ The Asset Browser can generate a starter `asset.json` automatically.
 Legacy compatibility:
 
 - `assets/default.glb` is kept as a fallback for older builds.
+
+## Audio assets and generated sounds
+
+- `audio/cc0_starter/`: bundled wind/rain/contact starter assets and notices.
+- `audio/cc0_thunder/` and `audio/cc0_storm_thunder/`: thunder variations with source/license metadata.
+- `audio/generated/`: default Sound Designer destination for an unsaved scene using
+  this active library. Saved projects use their own `assets/audio/generated/` folder.
+- `licenses/audio_dsp/`: pinned DaisySP, Signalsmith Stretch and Signalsmith Linear
+  notices, copied into the runtime distribution.
+
+Sound Designer previews in memory. Save asset writes a new float32 48 kHz WAV by
+name, automatically numbers collisions and imports it into scene audio. Recipe and
+original license/author provenance are retained; undo removes the authored asset or
+clip but leaves the WAV on disk. Imported WAV/FLAC/MP3 remain supported.
+
+See [Sound Designer contracts](../../docs/dev/AUDIO_SOUND_DESIGN.md) and
+[audio workspace](../../docs/dev/AUDIO_WORKSPACE_UI.md).

@@ -75,18 +75,14 @@ inline float lightningAltitudeOf(float x, float y, float z, float planetRadius,
 // The storm column's span (ATMOSPHERE_CELL_CLOUDS.md §1; CloudParams.h
 // packStormColumn): from the lowest enabled layer's base (the LCL) to the
 // tropopause. Returns the host layer, or -1 when there is no column.
+// The levels themselves are atmosphere::columnLevels (one definition).
 inline int stormColumnSpan(const atmosphere::CloudState& c, float& base, float& tropopause) {
     if (!c.storms.enabled || !c.storms.column) return -1;
-    int host = -1;
-    for (int i = 0; i < atmosphere::kMaxCloudLayers; ++i) {
-        const atmosphere::CloudLayer& l = c.layers[i];
-        if (!l.enabled || l.extinction_per_m <= 0.0f) continue;
-        if (host < 0 || l.base_altitude_m < c.layers[host].base_altitude_m) host = i;
-    }
-    if (host < 0) return -1;
-    base = c.layers[host].base_altitude_m;
-    tropopause = (std::max)(c.storms.column_top_m, base + 1500.0f);
-    return host;
+    const atmosphere::ColumnLevels lv = atmosphere::columnLevels(c);
+    if (!lv.valid) return -1;
+    base = lv.lcl_m;
+    tropopause = lv.tropopause_m;
+    return lv.host_layer;
 }
 
 // ── Channel network ─────────────────────────────────────────────────────────

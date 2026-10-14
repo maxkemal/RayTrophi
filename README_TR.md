@@ -42,19 +42,36 @@ Bu bir render-farm eklentisi ya da kütüphane değil. Modern dock'lu bir arayü
 <!-- STATS_START -->
 | Metrik | Değer |
 | :--- | :--- |
-| **Proje kod / shader satırı** | ~561.000 |
-| **Proje kod / shader dosyası** | 1.170+ |
-| **GPU çekirdek & shader dosyası** | 251 (CUDA, OptiX PTX, Vulkan GLSL/RT, compute) |
-| **UI kontrol çağrı noktası** | 3.500+ |
-| **IPC yüzeyi** | 594 yönlendirilen metot |
+| **Proje kod / shader satırı** | ~635.000 |
+| **Proje kod / shader dosyası** | 1.682 |
+| **GPU çekirdek & shader dosyası** | 397 (CUDA, OptiX PTX, Vulkan GLSL/RT, compute) |
+| **IPC yüzeyi** | 667 statik denetlenmiş yol; 60 dinamik `audio.*` işlemi |
 | **Render backendleri** | CPU (Embree) · NVIDIA OptiX · Vulkan RT |
-| **Düğüm sistemleri** | Arazi (78), Animasyon (14+), Materyal (11+) |
-| **Son kaynak/denetim yenilemesi** | 2026-09-25 — termal sıvı, granüler ve çoklu-substance authoring; IPC descriptor/güvenlik denetimi |
+| **Düğüm editörleri** | Arazi · Animasyon · Materyal · Simülasyon |
+| **Son kaynak/denetim yenilemesi** | 2026-10-14 — sahne sesi/Designer, birleşik Matter, atmosfer/bulut hacimleri; IPC ve shader-layout denetimi |
 <!-- STATS_END -->
 
 Sayımlar `RayTrophiStudio/source` kapsamındadır ve tek dosyalık dış kütüphaneleri (`simdjson`, `stb`, `json.hpp`, `tinyexr`) hariç tutar.
 
 Tam teknik rapor: **[ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)** · English: **[README.md](README.md)**
+
+---
+
+## Güncel teslim durumu — 2026-10-14
+
+Bu tablo kaynakta eklenen yetenekleri, kayıtlı kabul sonuçlarını ve kalan işleri
+ayrı gösterir. Başarılı derleme; ses/görsel kalite veya çözücü eşitliği kabulü değildir.
+
+| Alan | Eklenenler | Kabul ve sıradaki iş |
+|---|---|---|
+| Sahne sesi | Konumlu kaynaklar, dosya assetleri, hava/thunder tepkileri, sabit mixer bus'ları, timeline klipleri, waveform, fade, otomasyon, capture ve offline WAV | Temel playback/mixer, kısa WAV export ve küçük DEM RAM replay kabulü kayıtlı. Tam capture, save/reopen ve diğer kanal testleri açık. |
+| Ses tasarımcısı | DaisySP sentez/filtre, Signalsmith bağımsız perde/süre, bellekte orijinal/işlenmiş ön dinleme, zarf/filtre/spektrum ve adla kayıt | Kullanıcı 14 Ekim'de Studio derlemesini doğruladı. Yeni Designer dinleme/UI/IPC kabulü bekliyor; kesintisiz canlı DSP ve yeni presetler sırada. |
+| Fizik ses telemetrisi | Ayrı DEM temas/sürtünme/yuvarlanma, sıvı/gaz aktivitesi ve MPM gerilme/hasar kanalları; sahne genelinde manuel ölçüm anahtarı | Varsayılan kapalı. Açık DEM ölçümü hâlâ tane başına readback maliyeti taşır; seçili kanal ölçümü ve GPU indirgeme sırada. |
+| Atmosfer | Ortak iklim/bulut verisi, fırtına hücreleri, yağış tipleri, yerel sis, sahne yıldırımı ve gecikmeli thunder; yeni hücre hacmi atlası/SDF yolu | Bulut hacmi V0–V2 ve V2b/V2c canlı kontrolleri kayıtlı. V2d gölge aydınlatması ve çoklu kule şekli shader/görsel kabul bekliyor. V3–V5 ve yüzey birikimi planlı. |
+| Birleşik Matter | Madde kütüphanesi/türetilmiş profiller, DEM/MPM/sıvı sahipliği, gizli ısı, yoğuşma, sis suyu ve yağmur envanteri; aşamalı compact sıvı MAC/FLIP depolama | T1/T3 hızlı kontroller ve T2 termal vakaları geçti. Uzatılmış karma sahip/ortak saat regresyonu, tam sparse göç ve performans kapıları açık. |
+
+Kesin bekleyen kapılar için [mühendislik indeksi](docs/dev/README.md) ve
+[sonraki derleme/kabul kontrolleri](docs/dev/NEXT_BUILD_CHECKS.md) esas alınır.
 
 ---
 
@@ -72,6 +89,7 @@ RayTrophi Studio, hepsi aynı canlı sahne üzerinde çalışan, göreve odaklı
 | **Bitki / Scatter** | Biome duyarlı node katmanları, Asset Library + sahne kaynakları, kural tabanlı ve elle boyanan GPU instancing |
 | **Saç** | Tüy/saç groom, tara, kes/uzat, simüle et ve render et |
 | **Simülasyon** | Sıvı (APIC/FLIP), gaz/duman/ateş, whitewater, rigid + soft body & cloth (Jolt), mesh/primitif collider, kuvvet alanları, emitter |
+| **Audio** | Sahne kaynakları, hava/domain tepkileri, timeline/mixer, Sound Designer, capture ve WAV export |
 | **Animasyon** | Çok-track zaman çizelgesi, kanal bazlı keyframe, iskelet animasyonu, animasyon grafiği |
 | **Render / Look-dev** | Backend seç, örnekleme/kalite ayarla, denoise, tonemap ve sonucu Stylize'la |
 
@@ -104,6 +122,14 @@ Render aygıtı seçimi Solid, Matcap veya RayFusion etkinken interaktif viewpor
 - Tam doku desteği (albedo, roughness, metallic, normal, emission, transmission, opacity), sRGB/linear yönetimi
 
 ### Işıklandırma & gökyüzü
+
+Birleşik atmosfer Vulkan RT ve RayFusion'ı ortak iklim/bulut verisinden besler:
+katmanlı bulut/cirrus, düzenlenebilir fırtına hücreleri, sahne yıldırımı, uzak yağış
+tipleri ve yerel radyasyon sisi. Hücre hacmi SDF atlası fırtınaya üç boyutlu yapı
+kazandırır; son V2d şekil/gölge düzeltmeleri görsel kabul bekler. Yakın yağış
+parçacıkları, hücre rüzgârları, yüzey birikimi/akış ve sonraki hacim aşamaları planlıdır.
+[Atmosfer notları](docs/dev/ATMOSPHERE_CLOUD_VOLUMES.md).
+
 - Nokta, yönlü, spot ve **mesh tabanlı alan ışıkları**; emissive materyaller
 - **HDR/EXR ortam haritaları** (equirectangular)
 - Gündüz/gece döngülü **Nishita fiziksel gökyüzü**: prosedürel yıldız ve ay (evreler, ufuk büyütme, atmosferik sönümleme), güneş halesi, otomatik güneş↔yönlü-ışık senkronu
@@ -185,6 +211,17 @@ CPU, CUDA ve Vulkan Compute yürütme yollarına sahip, çok iş parçacıklı g
 - **Ghost-fluid 2. derece serbest yüzey** (Gibou/Enright): alt-hücre level set, sıvı yüzeyindeki voksel "merdivenleşmesini" giderir
 - Keyframe ile animasyonlu collider'lar her alt-adımda yeniden konumlanır, böylece sıvı hareketli geometriyi takip eder
 - Fiziksel viskozite çözümü, adaptif çözünürlük, açık/kapalı sınır modları, sızıntıyı önleyen dinamik parçacık yeniden tohumlama ve sıvı materyal preset'leri (Su, Yağ, Özel)
+
+### Birleşik Matter domain'leri
+
+Ortak madde kütüphanesi yerleşik ve türetilmiş profilleri sağlar; model bağımsız UI
+anahtarlarından değil hal ve maddeden türetilir. DEM taneleri, MPM katıları ve sıvı
+parselleri kanonik kimlik/state ile domain saatini paylaşır. Gizli ısılı erime/donma,
+yüzey yoğuşması, sis suyu ve yağmur envanteri T2 kontrolleri kayıtlıdır; sis/yağmur
+render bağlantısı ve tam karma sahip kabulü açıktır. Compact sıvı MAC/FLIP tile
+depolama aşamalı Vulkan yoludur; host/render/cache ve gaz göçü ayrı işlerdir.
+[Madde durumu](docs/dev/MADDE_T2_T3_HANDOFF.md),
+[sparse aşamalar](docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md).
 
 ### Termal sıvılar, substance'lar & granüler materyaller
 - **Kelvin tabanlı termal sıvılar** — kaynak doğum sıcaklığı, dünya/domain ortam sıcaklığı, kararlı üstel hava/temas soğuması, parçacık iletimi, log-uzayında viskozite rampası, desteğe duyarlı donma ve erime histerezisi
@@ -302,6 +339,39 @@ Yakınsama sonrası, path-traced sonucu + AOV tamponlarını okuyup; sahne geome
 ### 🖥️ Viewport gölgeleme
 - Hızlı sculpt/paint geri bildirimi için Vulkan raster **Solid + Matcap** modu (matcap'leri `raytrac_sdl2/assets/matcaps/` içine bırak)
 - Herhangi bir backend'de ışın izlemeli interaktif önizleme; gizmo sırasında idle-preview
+
+---
+
+## Sahne sesi ve ses tasarımı
+
+- **Sahne kaynakları ve assetler:** mono konumlu yayıcı, stereo ortam sesi, kamera
+  dinleyicisi, kaynak gizmosu, import/relink, proje paketleme ve authoring undo.
+- **Timeline ve mixer:** ortak Play/Pause/Stop, waveform klipleri, trim/split, fade,
+  gain/pitch/pan otomasyonu, Master/Weather/Effects/Ambience/Music bus'ları ve PCM metreleri.
+  Klip uzatılınca önce kaynakta kalan ses açılır; kaynak aralığı aşılınca tekrar etkinleşir.
+- **Tepkisel ses:** başlangıç wind/rain assetleri, yıldırım olaylarını tekilleştirme ve
+  mesafeye bağlı gecikmeli thunder; ölçülmüş domain kanalları sınırlı ses kaynaklarını
+  sürebilir. Bu, parçacık başına ses veya kalibre edilmiş malzeme akustiği değildir.
+- **Sound Designer:** sentetik karakter veya mono/stereo dosya asseti seç, bellekte
+  ön dinle, orijinal/işlenmiş karşılaştır, ADSR/gürültü/modülasyon/filtre/doygunlukla
+  şekillendir, perde ve süreyi bağımsız değiştir, loop birleşimini hazırla.
+  Waveform, sürüklenebilir zarf, filtre eğrisi ve örneklenmiş spektrum kontrolleri tamamlar.
+- **Adla kayıt:** proje ses klasörü veya aktif asset kütüphanesi hedefi sağlar.
+  Klasör seçici ve otomatik çakışma numaraları rutin path yazmayı kaldırır.
+  Kaydedilen WAV ön dinleme PCM'ini ve tarif/kaynak metadata'sını taşır.
+- **Capture/export:** sahne saatine bağlı capture klip üretir; offline stereo 48 kHz
+  WAV, yazılmış/yakalanmış klipleri rasyonel kare sınırlarıyla değerlendirir. Simülasyonu
+  yeniden koşmaz veya gelecekteki yıldırımı üretmez. Video mux ve taşınabilir player planlıdır.
+
+UI, `rt.audio` ve `audio.*` IPC aynı servisi kullanır. Fizik telemetrisi elle açılır;
+Audio'yu açmak veya ses bağlamak ölçümü etkinleştirmez. Designer düzenlemeleri şimdilik
+kontrol bırakılınca render edilir ve ön dinleme yeniden başlar. Kesintisiz canlı DSP,
+GPU telemetri indirgeme, engellenme, yansıma ve oda yankısı sonraki işlerdir.
+
+Sözleşmeler ve kabul: [Sound Designer](docs/dev/AUDIO_SOUND_DESIGN.md),
+[Audio çalışma alanı](docs/dev/AUDIO_WORKSPACE_UI.md),
+[telemetri politikası](docs/dev/SCENE_AUDIO_TELEMETRY_POLICY.md),
+[sahne sesi yol haritası](docs/dev/SCENE_AUDIO_RUNTIME_PLAN_2026_10_11.md).
 
 ---
 
@@ -523,7 +593,12 @@ RayTrophi/
 > [`docs/dev/`](docs/dev/README.md) altında; hepsi indekslenmiş ve durum
 > etiketli (AKTİF / REFERANS / ARŞİV / TASLAK).
 
-**Yakın zamanda eklenenler**
+**Yeni kaynak teslimleri ve kayıtlı kabul**
+- Sahne sesi/timeline/mixer ve offline WAV; yeni Designer derlemesi doğrulandı, yeni dinleme/UI testleri bekliyor.
+- Ortak atmosfer, fırtına/yıldırım/yerel sis; hücre hacmi V0–V2 canlı kontrolleri, V2d görsel kapısı açık.
+- Birleşik maddeler ve gizli ısılı Matter; compact sıvı depolama aşamalı, uzatılmış karma sahip regresyonu açık.
+
+**Önceki teslimler**
 - ✅ Vulkan RT backend (interaktif birincil) — GPU skinning, asenkron ping-pong pipeline, analitik LSS saç
 - ✅ Fizik & parçacık simülasyon paketi (APIC/FLIP sıvı, gaz/ateş, whitewater)
 - ✅ Rigid, soft-body & cloth dinamiği (Jolt Physics) — primitif/mesh collider, vertex pinleme, kuvvet-alanı eşleşmesi, iki-yönlü sıvı eşleşmesi (katı voksellemesi + kaldırma/sürükleme), seçici sıvı yeniden-pişirme
@@ -537,6 +612,9 @@ RayTrophi/
 - ✅ Aşamalı photon-map caustic + spektral dispersiyon + volumetrik ışık huzmeleri (Vulkan RT)
 
 **Planlanan / devam eden**
+- [ ] Audio canlı DSP/arka plan üretimi, yeni presetler, seçili kanal GPU telemetrisi, geometri akustiği, video mux ve player paketleme
+- [ ] Bulut hacmi V3–V5, yakın yağış, hücre rüzgârları ve atmosferden yüzeye birikim/akış
+- [ ] Uzatılmış karma sahip Matter kabulü, compact katı ağırlık eşitliği, sparse host/render/cache ve gaz göçü
 - [ ] OptiX / CPU'da caustic; huzmeler için anizotropik faz ve gerçek yoğunluk alanları (VDB)
 - [ ] Varyasyonel katılar + ghost-fluid yüzeyin GPU portu (Faz 2)
 - [ ] Kemiklere bağlı karakter ve animasyonlu-gövde proxy'leri için kinematic collider kaynakları

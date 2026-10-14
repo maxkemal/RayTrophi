@@ -8,6 +8,9 @@
 #include "Audio/AudioThunder.h"
 #include "Audio/AudioTransport.h"
 #include "Audio/AudioClips.h"
+#include "Audio/AudioSynthesis.h"
+#include "Audio/AudioSoundDesign.h"
+#include "Audio/AudioTelemetryPolicy.h"
 #include "Audio/AudioClipRuntime.h"
 #include "Audio/AudioOffline.h"
 #include "Audio/AudioPcm.h"
@@ -119,7 +122,8 @@ struct AudioService::Impl {
                  {"emitters", json::array()}, {"clips", json::array()},
                  {"thunder", AudioThunder::validate(json::object())},
                  {"playback_mode", "timeline"}, {"playback_mode_explicit", false},
-                 {"mixer", AudioMixer::validate(json::object())}};
+                 {"mixer", AudioMixer::validate(json::object())},
+                 {"telemetry", validateTelemetryPolicy(json::object())}};
     ma_engine engine{};
     AudioMixerRuntime mixer;
     std::map<std::string, std::string> routedBuses;
@@ -142,6 +146,7 @@ struct AudioService::Impl {
     AudioOfflineJob offline;
     AudioWaveformCache waveforms;
     AudioCapture capture;
+    AudioSoundDesign designer;
     json workspace = defaultAudioWorkspace();
     bool clipsSuspended = false;
     std::set<std::string> transportHeld;
@@ -304,6 +309,7 @@ struct AudioService::Impl {
     }
 
     void stopAll() {
+        designer.stop();
         clips.clear();
         clipsSuspended = true;
         routedBuses.clear();
@@ -459,9 +465,10 @@ const std::vector<std::string>& AudioService::operations() {
         "environment_setup", "resume_automatic", "domains", "thunder_setup", "thunder_update",
         "thunder_event", "playback_update", "mixer_get", "mixer_update", "mixer_reset_peaks",
         "waveform", "clip_list", "clip_create", "clip_update", "clip_remove", "clip_duplicate",
-        "clip_trim", "clip_split", "export_start", "export_status", "export_cancel",
+        "clip_trim", "clip_split", "clip_resize", "export_start", "export_status", "export_cancel",
         "capture_start", "capture_finish", "capture_status", "capture_cancel",
-        "workspace_get", "workspace_update"};
+        "design_render", "design_preview", "design_status", "design_stop", "design_save",
+        "design_destination", "workspace_get", "workspace_update", "synth_presets", "synth_generate", "telemetry_get", "telemetry_update"};
     return names;
 }
 
@@ -472,7 +479,7 @@ bool AudioService::isAuthoring(const std::string& op) {
     if (op.rfind("clip_", 0) == 0) {
         return op != "clip_list";
     }
-    return op == "mixer_update" || op == "playback_update" ||
+    return op == "design_save" || op == "telemetry_update" || op == "synth_generate" || op == "mixer_update" || op == "playback_update" ||
            op == "thunder_setup" || op == "thunder_update" ||
            op == "environment_setup" || op == "append" || op == "asset_import" ||
            op == "asset_relink" || op == "asset_remove" ||
@@ -480,8 +487,36 @@ bool AudioService::isAuthoring(const std::string& op) {
 }
 
 std::vector<std::string> AudioService::parameters(const std::string& op) {
+    if (op == "design_render") {
+        return {"recipe"};
+    }
+    if (op == "design_preview") {
+        return {"original", "loop"};
+    }
+    if (op == "design_save") {
+        return {"name", "folder", "path"};
+    }
+    if (op == "design_destination") {
+        return {"folder"};
+    }
+    if (op == "design_status" || op == "design_stop") {
+        return {};
+    }
+    if (op == "telemetry_get") {
+        return {};
+    }
+    if (op == "telemetry_update") {
+        return {"enabled"};
+    }
+    if (op == "synth_presets") {
+        return {};
+    }
+    if (op == "synth_generate") {
+        return {"path", "preset", "duration_seconds", "seed", "frequency_hz",
+                "decay_seconds", "brightness", "gain"};
+    }
     if (op == "workspace_update") {
-        return {"selected_clip", "snap", "waveforms", "inspector_open"};
+        return {"selected_clip", "snap", "waveforms", "inspector_open", "designer_open"};
     }
     if (op == "workspace_get") {
         return {};
@@ -571,6 +606,79 @@ json AudioService::invoke(const std::string& op, const json& p) {
         require(std::find(allowed.begin(), allowed.end(), it.key()) != allowed.end(),
                 "Unknown audio parameter: " + it.key());
     }
+    if (op == "design_destination") {
+        return soundDesignDestination(p);
+    }
+    if (op == "design_status") {
+        return s.designer.status();
+    }
+    if (op == "design_render") {
+        return s.designer.render(p.at("recipe"), s.data.at("assets"));
+    }
+    if (op == "design_stop") {
+        s.designer.stop();
+        return s.designer.status();
+    }
+    if (op == "design_preview") {
+        require(s.designer.status().at("ready"), "Render a sound before preview");
+        require(!p.contains("original") || p.at("original").is_boolean(),
+                "original must be boolean");
+        require(!p.contains("loop") || p.at("loop").is_boolean(), "loop must be boolean");
+        s.ensureDevice();
+        invoke("stop_all", json::object());
+        return s.designer.preview(s.engine, s.mixer.group("Effects"), p);
+    }
+    if (op == "design_save") {
+        const auto report = s.designer.save(p);
+        try {
+            const auto asset = invoke("asset_import", {
+                {"path", report.at("path")},
+                {"source", std::string("RayTrophi sound design v2 ") + report.dump()},
+                {"license", report.at("origin").value("license", std::string())},
+                {"author", report.at("origin").value("author", std::string())},
+                {"tags", json::array({"sound_design"})}});
+            return {{"asset", asset}, {"design", report}};
+        } catch (...) {
+            std::error_code ignored;
+            std::filesystem::remove(pathFromUtf8(report.at("path")), ignored);
+            throw;
+        }
+    }
+    if (op == "telemetry_get") {
+        return s.data.at("telemetry");
+    }
+    if (op == "telemetry_update") {
+        const auto candidate = updateTelemetryPolicy(s.data.at("telemetry"), p);
+        if (candidate == s.data.at("telemetry")) {
+            return candidate;
+        }
+        s.data["telemetry"] = candidate;
+        for (const auto& emitter : s.data.at("emitters")) {
+            const auto& reaction = emitter.at("reaction");
+            if (reaction.at("driver") == "domain_contact") {
+                s.reactions.invalidateSignal(reaction.at("signal_key"));
+            }
+        }
+        return s.data.at("telemetry");
+    }
+    if (op == "synth_presets") {
+        return synthesisPresets();
+    }
+    if (op == "synth_generate") {
+        const auto report = generateSyntheticAudio(p);
+        try {
+            const auto asset = invoke("asset_import", {
+                {"path", report.at("path")},
+                {"source", std::string("RayTrophi synthesis v1 ") + report.dump()},
+                {"tags", json::array({"synthetic", report.at("preset")})}});
+            return {{"asset", asset}, {"synthesis", report}};
+        } catch (...) {
+            const auto text = report.at("path").get<std::string>();
+            std::error_code ignored;
+            std::filesystem::remove(pathFromUtf8(text), ignored);
+            throw;
+        }
+    }
     if (op == "workspace_get") {
         return s.workspace;
     }
@@ -603,7 +711,6 @@ json AudioService::invoke(const std::string& op, const json& p) {
         if (op == "clip_remove" && s.workspace.at("selected_clip") == p.at("id")) {
             s.workspace["selected_clip"] = "";
         }
-        s.clips.clear();
         s.clipsSuspended = false;
         return result;
     }
@@ -672,6 +779,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
         return {{"mode", mode}};
     }
     if (op == "resume_automatic") {
+        s.designer.stop();
         s.clipsSuspended = false;
         if (s.preview) {
             ma_sound_uninit(s.preview.get());
@@ -719,7 +827,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
         return config;
     }
     if (op == "thunder_event") {
-        if (s.preview) {
+        if (s.preview || s.designer.playing()) {
             return {{"queued", false}, {"reason", "asset_preview_active"}};
         }
         return s.thunder.publish(p, s.listenerPosition);
@@ -989,6 +1097,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
             ma_engine_set_volume(&s.engine, s.muted ? 0.0f : 1.0f);
         }
     } else if (op == "preview_stop") {
+        s.designer.stop();
         if (s.preview) {
             ma_sound_uninit(s.preview.get());
             s.preview.reset();
@@ -1005,6 +1114,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
         const std::string id = p.at("id");
         const auto e = s.find("emitters", id);
         if (op == "play") {
+            s.designer.stop();
             require(!e.at("asset_id").get<std::string>().empty(),
                     "No audio asset is bound. Import a file, then choose it in the Asset field.");
             const auto pose = s.poses.find(id);
@@ -1078,6 +1188,7 @@ void AudioService::clear() {
     impl_->capture.cancel();
     impl_->offline.cancel();
     impl_->waveforms.clear();
+    impl_->designer.clear();
     impl_->stopAll();
     impl_->poses.clear();
     impl_->reactions.clear();
@@ -1090,7 +1201,8 @@ void AudioService::clear() {
                    {"emitters", json::array()}, {"clips", json::array()},
                    {"thunder", AudioThunder::validate(json::object())},
                    {"playback_mode", "timeline"}, {"playback_mode_explicit", false},
-                   {"mixer", AudioMixer::validate(json::object())}};
+                   {"mixer", AudioMixer::validate(json::object())},
+                 {"telemetry", validateTelemetryPolicy(json::object())}};
     impl_->mixer.apply(impl_->data.at("mixer"));
     impl_->mixer.resetPeaks();
     impl_->transport.configure("timeline");
@@ -1108,6 +1220,8 @@ void AudioService::restore(const json& input, const std::filesystem::path& base)
     require(input.at("version") == 1, "Unsupported audio schema version");
     Impl candidate;
     candidate.data = input;
+    candidate.data["telemetry"] = validateTelemetryPolicy(
+        input.value("telemetry", json::object()));
     require(input.at("assets").is_array() && input.at("emitters").is_array(), "Invalid audio collections");
     const auto next = input.at("next_id").get<unsigned long long>();
     require(next > 0 && next <= 9007199254740991ULL, "Invalid audio next_id");
@@ -1171,6 +1285,7 @@ void AudioService::restore(const json& input, const std::filesystem::path& base)
     impl_->capture.cancel();
     impl_->offline.cancel();
     impl_->waveforms.clear();
+    impl_->designer.clear();
     impl_->stopAll();
     impl_->poses.clear();
     impl_->reactions.clear();
@@ -1276,7 +1391,7 @@ void AudioService::tickReactions(float windMps, float rain) {
         if (voice != impl_->sounds.end()) {
             impl_->apply(*voice->second, e);
         }
-        if (automatic && validPose && !impl_->preview && !impl_->suspended.contains(id) &&
+        if (automatic && validPose && !impl_->preview && !impl_->designer.playing() && !impl_->suspended.contains(id) &&
             voice == impl_->sounds.end() && activity >= config.at("start_threshold").get<float>()) {
             const auto failed = impl_->failedAt.find(id);
             if (failed == impl_->failedAt.end() || now - failed->second >= std::chrono::seconds(5)) {
@@ -1322,7 +1437,7 @@ void AudioService::tickThunder() {
     }
     for (const auto& event : s.thunder.due()) {
         try {
-            require(!s.preview, "Thunder skipped during asset audition");
+            require(!s.preview && !s.designer.playing(), "Thunder skipped during asset audition");
             require(s.thunderVoices.size() < 8 &&
                     s.sounds.size() + s.thunderVoices.size() + s.clips.voices() < 32,
                     "Thunder voice budget reached (8 thunder / 32 total)");
@@ -1382,7 +1497,7 @@ void AudioService::syncTransport(double seconds, bool playing) {
         invoke("resume_automatic", json::object());
     }
     s.holdTransport();
-    if (!s.preview && !s.clipsSuspended && s.data.contains("clips") && !s.data.at("clips").empty()) {
+    if (!s.preview && !s.designer.playing() && !s.clipsSuspended && s.data.contains("clips") && !s.data.at("clips").empty()) {
         try {
             if (playing) {
                 s.ensureDevice();

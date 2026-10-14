@@ -80,6 +80,13 @@ MatterAudioFrame::MatterAudioFrame(SimulationGridDomainState& state,
     const auto publication = std::max(state_.version, state_.audio_stats.publication_version) + 1;
     state_.audio_stats = {};
     state_.audio_stats.publication_version = publication;
+    if (!domain_.fluid_params.grain.audio_telemetry_enabled) {
+        state_.audio_stats.fluid_flow.reason = "telemetry_disabled";
+        state_.audio_stats.gas_flow.reason = "telemetry_disabled";
+        state_.audio_stats.mpm_deformation.reason = "telemetry_disabled";
+        state_.audio_stats.mpm_fracture.reason = "telemetry_disabled";
+        return;
+    }
     const auto& particles = state_.particles;
     try {
         for (std::size_t i = 0; i < particles.size(); ++i) {
@@ -95,6 +102,9 @@ MatterAudioFrame::MatterAudioFrame(SimulationGridDomainState& state,
 }
 
 void MatterAudioFrame::publishLiquid() {
+    if (!domain_.fluid_params.grain.audio_telemetry_enabled) {
+        return;
+    }
     if (state_.fluid_stats.mixed_step_held || !std::isfinite(duration_) || duration_ <= 0) {
         return;
     }
@@ -179,6 +189,9 @@ void MatterAudioFrame::publishLiquid() {
 
 void MatterAudioFrame::publishGas(SimulationComputeContext* compute,
                                  SimulationGridDomainComputeBuffers* buffers) {
+    if (!domain_.fluid_params.grain.audio_telemetry_enabled) {
+        return;
+    }
     auto& measurement = state_.audio_stats.gas_flow;
     if (!state_.gas_stats.stepped || !state_.gas_inventory_error.empty()) {
         return;

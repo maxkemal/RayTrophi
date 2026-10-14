@@ -185,7 +185,7 @@
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <AdditionalOptions>/bigobj /FS /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <AdditionalIncludeDirectories>$(ProjectDir)external\JoltPhysics;external\JoltPhysics;$(ProjectDir)source\include;source\include;$(ProjectDir)libs;$(ProjectDir)external\cgltf;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)external\DaisySP\Source;$(ProjectDir)external\DaisySP\Source\Utility;$(ProjectDir)external;$(ProjectDir)external\JoltPhysics;external\JoltPhysics;$(ProjectDir)source\include;source\include;$(ProjectDir)libs;$(ProjectDir)external\cgltf;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -239,7 +239,7 @@
       <WholeProgramOptimization>true</WholeProgramOptimization>
       <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
       <OpenMPSupport>true</OpenMPSupport>
-      <AdditionalIncludeDirectories>$(ProjectDir)external\JoltPhysics;external\JoltPhysics;$(ProjectDir)source\include;source\include;$(ProjectDir)libs;$(ProjectDir)external\cgltf;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)external\DaisySP\Source;$(ProjectDir)external\DaisySP\Source\Utility;$(ProjectDir)external;$(ProjectDir)external\JoltPhysics;external\JoltPhysics;$(ProjectDir)source\include;source\include;$(ProjectDir)libs;$(ProjectDir)external\cgltf;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
       <AdditionalOptions>/bigobj /FS /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
     </ClCompile>
@@ -2129,6 +2129,14 @@
           DestinationFiles="@(RayTrophiScript->'$(OutDir)scripts\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
+  <Target Name="CopyAudioDspNotices" AfterTargets="Build">
+    <ItemGroup>
+      <RayTrophiAudioDspNotice Include="$(ProjectDir)assets\licenses\audio_dsp\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(RayTrophiAudioDspNotice)"
+          DestinationFiles="@(RayTrophiAudioDspNotice->'$(OutDir)assets\licenses\audio_dsp\%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
   <Target Name="CopyAudioStarterAssets" AfterTargets="Build"
           Condition="Exists('$(ProjectDir)assets\audio')">
     <ItemGroup>
@@ -2407,6 +2415,8 @@
     <ClInclude Include="source\include\Audio\AudioMixer.h" />
     <ClInclude Include="source\include\Audio\AudioClips.h" />
     <ClInclude Include="source\include\Audio\AudioClipRuntime.h" />
+    <ClInclude Include="source\include\Audio\AudioTelemetryPolicy.h" />
+    <ClInclude Include="source\include\Audio\AudioSynthesis.h" />
     <ClInclude Include="source\include\Audio\AudioPcm.h" />
     <ClInclude Include="source\include\Audio\AudioOffline.h" />
     <ClInclude Include="source\include\Audio\AudioCapture.h" />
@@ -2443,6 +2453,28 @@
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <ClCompile Include="source\src\Scene\AudioClipRuntime.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioTelemetryPolicy.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioSoundDesign.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDspModules.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioSoundDesignerUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\Audio\AudioSoundDesign.h" />
+    <ClInclude Include="source\include\UI\AudioSoundDesignerUI.h" />
+    <ClCompile Include="source\src\Scene\AudioSynthesis.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>

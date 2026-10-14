@@ -16,7 +16,7 @@ open an issue and it will be translated.
 
 ## How to read the status line
 
-Every document starts with a `> **Durum:**` line. Four values:
+Plans use `> **Durum:**` lines; delivery notes also distinguish source, build and live acceptance. Status keys:
 
 | Durum | Meaning |
 |---|---|
@@ -32,19 +32,35 @@ being paid for twice.
 
 ---
 
+## Latest delivery checkpoint — 2026-10-14
+
+The English and Turkish project READMEs now summarize these capabilities. Detailed
+notes remain the authority for acceptance; older dated handoffs below are historical
+checkpoints, not proof that a later build/listening/physics gate passed.
+
+| Area | Current delivery | Next gate / plan |
+|---|---|---|
+| [Sound Designer](AUDIO_SOUND_DESIGN.md) | **BUILD CONFIRMED 2026-10-14.** DaisySP/Signalsmith, in-memory preview, visual Designer and name-based save. New listening/UI/external IPC acceptance pending. |
+| [Audio workspace](AUDIO_WORKSPACE_UI.md) | Timeline/mixer, fades, live gestures, source-aware right-edge loop extension, responsive inspector. User accepted v1 synthesis, fades and live movement. | Latest Designer/resize/narrow-panel checks; [runtime plan](SCENE_AUDIO_RUNTIME_PLAN_2026_10_11.md). |
+| [Physics audio telemetry](SCENE_AUDIO_TELEMETRY_POLICY.md) | Manual collection defaults off; no implicit enable from binding, capture or Audio UI. Separate DEM/flow/MPM channels in source; small DEM live/RAM replay acceptance recorded. | Revision-27 shader off/on/off checks, all-channel replay and cost; selective requests/GPU reductions. [Pre-UI contracts](AUDIO_PRE_UI_DELIVERY.md). |
+| [Cell cloud volumes](ATMOSPHERE_CLOUD_VOLUMES.md) | **ACTIVE 2026-10-14.** V0–V2 recorded live acceptance, V2b/V2c live observations; V2d source ready, shader/visual gate pending. SDF/atlas cell clouds; V3–V5 remain planned. |
+| [Unified Matter](MADDE_T2_T3_HANDOFF.md) | Substance profiles, DEM/MPM/liquid ownership, latent heat and measured fog/rain inventory; T1/T3 quick and T2 thermal acceptance recorded. | Extended shared-clock mixed-owner regression, full physics/convergence/cost gates, fog/rain render integration. |
+| [Compact liquid storage](MATTER_SPARSE_S1_SIVI_GPU.md) | Staged device MAC/FLIP storage; S1 PASS reported in handoff, later solid-weight work remains separately gated. | Compact solid-weight parity, S1b cell fields, host/render/cache S2 and gas S3. No blanket sparse-performance claim. |
+| [Storm/local fog/precipitation](ATMOSPHERE_STORMS.md) | Editable storm cells, scene lightning, local fog and distant precipitation forms are available in source. | [Local winds/fog](ATMOSPHERE_LOCAL_WINDS_FOG.md), [near precipitation](ATMOSPHERE_PRECIP_TYPES.md) and [surface coupling](ATMOSPHERE_SURFACE_COUPLING.md) retain their own gates. |
+
+---
+
 ## Active plans (AKTIF)
 
 | Document | Area |
 |---|---|
 | [RT_SHADER_COMPILE_LOAD.md](RT_SHADER_COMPILE_LOAD.md) | **ACTIVE 2026-10-13 (first step LIVE: 651 s -> ~3 min, image and pass time unchanged).** Vulkan RT pipeline driver compile grew from ~3 to ~11 min because `-O` inlines every shared include into each hit/miss stage. Rule: a heavy subsystem called from several RT stages compiles once, in a callable; measure first with `render.rt_pipeline_status.stage_seconds`. Done: cloud transport -> `cloud_callable.rcall`. Candidates: sphere_closesthit is a second compile of closesthit; volume_closesthit (5.6 MB) bounds the wall time. |
-| [SCENE_AUDIO_RUNTIME_PLAN_2026_10_11.md](SCENE_AUDIO_RUNTIME_PLAN_2026_10_11.md) | **ACTIVE 2026-10-11.** Scene audio, timeline mix and runnable-export plan; stage 1 source added, not built. |
-| [SCENE_AUDIO_STAGE1_API.md](SCENE_AUDIO_STAGE1_API.md) | **ACTIVE 2026-10-11 (written, not built).** Scene audio stage 1: miniaudio service, audio assets/sources, `audio.*` IPC + Python + capabilities. |
-| [MATTER_SPARSE_S1_SIVI_GPU.md](MATTER_SPARSE_S1_SIVI_GPU.md) | **ACTIVE 2026-10-09 (written, not built).** Sparse stage 1 (staged plan approved by the user): the mixed Matter liquid lane keeps its device MAC velocity and FLIP baseline on compact tile pages only; 13 compact kernel twins over shared dense/compact bodies (`sim_mac_lane.glsl`), no dense velocity/FLIP bank for a compact owner, explicit fallback (`transfer_sparse_blocked`), frame publication scattered to the still-dense host grid. Pure-liquid path is not device-resident (S1.5); host/render/cache S2; gas S3 (`GasSimulator.cpp` is dead code, out of scope). |
+| [SCENE_AUDIO_RUNTIME_PLAN_2026_10_11.md](SCENE_AUDIO_RUNTIME_PLAN_2026_10_11.md) | **ACTIVE 2026-10-14.** Source/assets, reactive weather/thunder, timeline/mixer, capture/offline WAV and Designer delivered. Recorded base acceptance is separate from fresh Designer tests; video/player and geometry acoustics remain planned. |
+| [SCENE_AUDIO_STAGE1_API.md](SCENE_AUDIO_STAGE1_API.md) | **IMPLEMENTED.** Miniaudio assets/sources and shared rt.audio/audio.* contracts; core live acceptance recorded. Current extensions and remaining checks are in SCENE_AUDIO_RUNTIME_PLAN_2026_10_11.md. |
 | [DEM_UYUYAN_TANELER.md](DEM_UYUYAN_TANELER.md) | **ACTIVE 2026-10-09 (written, not built; shader revision 21).** Dry DEM grains: a grain slower than an absolute speed for a set time sleeps (no contacts, no integration) until a faster grain touches it (WAKE bit in its history block). Off with moving colliders, MPM contact, the shared clock; never under liquid drag or a force field. Scriptable (`sleep`, `sleep_speed_m_s`, `sleep_time_s`); `sleep=false` is the A/B reference. |
 | [DEM_VERLET_LISTESI.md](DEM_VERLET_LISTESI.md) | **ACTIVE 2026-10-08 (written, not built).** Dry DEM grains: per-grain Verlet neighbour list with a GPU-side rebuild trigger replaces the three rotating hash tables; cost counters, memory targets, next steps (history compaction, sleeping). |
 | [ATMOSPHERE_LOCAL_WINDS_FOG.md](ATMOSPHERE_LOCAL_WINDS_FOG.md) | **ACTIVE 2026-10-13 (batch 17 written, not built: §2-4).** Phase 5b + 7. Written: terrain-weighted storm births (orographic, ridge, heating, lee; 128² terrain copy), recent rain from 8 past cell evaluations, local fog = layer slot 4 of the cloud field (CPU envelope map in cell-map sheet 3, shaped by the cloud noise, lit and shadowed by the cloud march; the first froxel version was removed); IPC `world.sample_weather_local`, `world.local_weather_stats`. Still open: §1 storm winds (skipped by the user), gust-front dust, advection fog, fog drift. |
 | [ATMOSPHERE_CELL_CLOUDS.md](ATMOSPHERE_CELL_CLOUDS.md) | **ACTIVE 2026-10-12 (storm shell = the batch-14 surface model; batches 15, 15b and 16 looked worse live and were reverted in 16b, section 8.1; optics later).** Atmosphere Phase 6: storm cells as full columns (a 'storm shell' from LCL to the tropopause: towers, overshooting top, anvil, wall cloud, mammatus, shelf cloud) instead of floors painted into each layer; density- and phase-dependent optics (water/ice by temperature, effective radius from LWC, darker precipitation cores). Decisions in section 6. |
-| [ATMOSPHERE_STORMS.md](ATMOSPHERE_STORMS.md) | **ACTIVE 2026-10-12 (5a live; batch 11 written: cell turrets + rotation, pressure -> derived weather, viewport gizmo, upward lightning).** Atmosphere Phase 5: storm systems. Mesoscale convective cells (pure function of seed + time, drift with the wind, grow/mature/dissipate) synthesized on the GPU into a 256^2 cell map with its own analytic majorant; precipitation only under cells (+ optional stratiform), lightning only from mature cell cores. 5b cold pool / outflow wind, 5c synoptic background (pressure centre, fronts) drafted. Also documents the per-frame cloud-params upload stall (staging + fence wait) and its removal. |
 | [ATMOSPHERE_WEATHER.md](ATMOSPHERE_WEATHER.md) | **ACTIVE 2026-10-01 (decisions approved, 4a written).** Atmosphere Phase 4: weather derived from climate (LCL cloud base, type from instability, precipitation in weather-map B), precipitation in both modes (volumetric shafts inside `cloudMarch` + near-field GPU particles + surface wetness/snow map), lightning (seeded events, in-cloud illumination, transient light), force fields -> cloud drift field (vortex spirals, funnel). Removes the RT-only screen-space weather overlay. Decisions in section 8. |
 | [ATMOSPHERE_CLOUDS.md](ATMOSPHERE_CLOUDS.md) | **ACTIVE (3a-3c live, 2026-10-01).** Atmosphere Phase 3: clouds. One CloudState authority; one `cloudMarch` (Nubis/Hillaire marcher: adaptive steps, 6-sample sun march, Wrenninge octaves) shared by Vulkan RT (per-sample jittered) and RayFusion (half-res compute + temporal, `cloud_raster.comp`); path tracer kept as reference only. Ground shadows (RT direct, RayFusion 512^2 map), cirrus, wind drift. HANDOFF NOTE at the top of the file. |
 | [ATMOSPHERE_SYSTEM.md](ATMOSPHERE_SYSTEM.md) | **ACTIVE 2026-09-29. Phase 1a (climate authority, dead humidity revived) VERIFIED LIVE 2026-09-30; Phase 1b (aerial froxel + height fog, both Vulkan backends, `world.get/set_aerial`, `world.atmosphere_stats`) WRITTEN 2026-09-30, not built — start at the "Kaldığımız yer" section.** One `AtmosphereState` authority for sky, aerial perspective, clouds, weather and climate fields (wind, temperature, humidity). Shared backend-agnostic LUT/froxel/cloud-shadow passes read by both Vulkan RT and RayFusion; OptiX gets a read-only mapping (frozen). Physics reads climate one-way through `sampleClimate` with per-consumer `inherit_atmosphere`. Section 0 documents that the old cloud roadmap's "done" claims were never in code. |
@@ -103,7 +119,7 @@ being paid for twice.
 | [VOLUME_SHADER_GRAPH_ROADMAP.md](VOLUME_SHADER_GRAPH_ROADMAP.md) | Volume output of the unified material graph |
 | [gpu_foliage_scatter_roadmap.md](gpu_foliage_scatter_roadmap.md) | GPU foliage scatter migration |
 | [hydraulic_multipass_next_steps.md](hydraulic_multipass_next_steps.md) | Terrain hydraulic erosion multi-pass |
-| [ASSIMP_IMPORT_REPLACEMENT_BRIEF.md](ASSIMP_IMPORT_REPLACEMENT_BRIEF.md) | Assimp import'tan çıkış. **Faz 0 YAZILDI, DERLENMEDİ (2026-09-05):** animasyon anahtar tipi Assimp'ten ayrıştırıldı (`RayTrophi::VectorKey`/`QuatKey`), sarkan `aiNode*` alanı ve ölü `AnimatedObject` söküldü, `.rtp` şeması değişmedi. Faz 1 (doğrudan glTF okuyucu) başlamadı. Kabul aleti: `anim.source_clips` + `scripts/probe_import_export_parity.py` |
+| [ASSIMP_IMPORT_REPLACEMENT_BRIEF.md](ASSIMP_IMPORT_REPLACEMENT_BRIEF.md) | Migration history. Direct model readers/export are implemented; current remaining import/export work is tracked in IMPORT_EXPORT_OPEN_DEBTS.md rather than the original phase-0 checkpoint. |
 | [SCENE_EXPORT_DIRECT_GLTF.md](SCENE_EXPORT_DIRECT_GLTF.md) | Why the Assimp export round trip cost minutes and 15 GB on one giant mesh, and the plan-then-write glTF writer that replaced it — plus `scene.export_gltf`, the script surface export never had |
 | [TERRAIN_NODE_CONTRACT_REDESIGN.md](TERRAIN_NODE_CONTRACT_REDESIGN.md) | Compact terrain ports, authoritative field ownership, node pruning and setup migration |
 | [TERRAIN_LANDFORM_SHAPE.md](TERRAIN_LANDFORM_SHAPE.md) | Measured: the Noise Generator was producing a homogeneous fractal, not a landscape - no landform wider than a quarter tile, 4.4% flat ground, gaussian hypsometry. Feature Size sized to the terrain, dissection driven by an authored lowland area, and terrain.landform_stats to judge it |
@@ -117,7 +133,6 @@ being paid for twice.
 
 | [HANDOFF_DEM_THERMAL.md](HANDOFF_DEM_THERMAL.md) | **TASLAK 2026-10-10.** DEM tanelerine sıcaklık: madde ısı katmanı (§4.7) bitti, taneler dışında; yeniden kullanılacak fonksiyonlar, sıra ve kabul. Diğer ajana devir. |
 | [BUZ_MODEL_KARARI.md](BUZ_MODEL_KARARI.md) | **AKTİF 2026-10-08.** Katı buz: granül taşıyıcı mı rijit gövde mi. Ice preset'i kum varsayılanlarını (35°, E=2e5 Pa) alıyor — düzeltilmeli. Karar onayı bekleniyor. |
-| [MADDE_T2_T3_HANDOFF.md](MADDE_T2_T3_HANDOFF.md) | **AKTİF 2026-10-11 (T2 canlı PASS).** T1/T3 hızlı canlı kabul, test kanıtı, açık kapanışlar ve T2 kaynak devam noktası. |
 | [MADDE_TIPLERI_TASARIMI.md](MADDE_TIPLERI_TASARIMI.md) | **AKTİF 2026-10-11. T2 canlı PASS: erime/donma gizli ısı öder, domain donma aynası söküldü (§6f). T1/T3 build + hızlı IPC PASS; legacy/save-open/görsel kabul açık.** Madde tek tablo: Fluid/Chemistry preset kopyaları söküldü; Initial/Constitutive ve hal birleşmesi T2 devamıdır. Üç katman: madde seçilir, hal sıcaklıktan türetilir, çözücü hal+maddeden türetilir; preset = tarif. Türetilmiş maddeler kalıtımla (`based_on` + override), projeyle kaydedilir. Uzman Gas/Liquid domain'leri performans ölçüsü (T0) eşitlenmeden kalkmaz. |
 
 ## Rules and architecture in force (REFERANS)

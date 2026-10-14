@@ -312,6 +312,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Viewport"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Device"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Stylize"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/DaisySP/Source"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/DaisySP/Source/Utility"
     "${CMAKE_CURRENT_SOURCE_DIR}/external"
     "${CMAKE_CURRENT_SOURCE_DIR}/external/JoltPhysics"
     "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui"

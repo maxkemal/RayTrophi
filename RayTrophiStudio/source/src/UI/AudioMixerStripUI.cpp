@@ -11,6 +11,7 @@
 #include "../../../external/imgui-knobs/imgui-knobs.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -56,7 +57,7 @@ void applyDrag(UIContext& ctx, Edit& edit, bool changed, const std::string& bus,
 
 void meter(const json& reading, float height) {
     const auto origin = ImGui::GetCursorScreenPos();
-    const float width = 23;
+    const float width = 32;
     auto* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + height),
                          ImGui::GetColorU32(ImGuiCol_FrameBg), 3);
@@ -65,9 +66,14 @@ void meter(const json& reading, float height) {
             return origin.y + height * (1 - std::clamp((db + 60) / 60, 0.0f, 1.0f));
         };
         const float peak = reading.at("peak_dbfs"), rms = reading.at("rms_dbfs");
-        draw->AddRectFilled(ImVec2(origin.x + 3, yAt(rms)),
-                             ImVec2(origin.x + width - 3, origin.y + height),
-                             IM_COL32(72, 191, 117, 255));
+        // Segmented level display: energy (RMS), transient peak and hold stay distinct.
+        for (float db = -60; db < 0; db += 3) {
+            const auto color = db >= -6 ? IM_COL32(231, 93, 87, 255) :
+                db >= -18 ? IM_COL32(222, 183, 87, 255) : IM_COL32(68, 193, 156, 255);
+            draw->AddRectFilled(ImVec2(origin.x + 3, yAt(db + 2)),
+                ImVec2(origin.x + width - 3, yAt(db)),
+                db <= rms ? color : IM_COL32(45, 53, 60, 150), 1);
+        }
         draw->AddLine(ImVec2(origin.x + 2, yAt(peak)),
                        ImVec2(origin.x + width - 2, yAt(peak)), IM_COL32(236, 176, 64, 255), 2);
         const float hold = reading.at("peak_hold_dbfs");
@@ -85,6 +91,7 @@ void meter(const json& reading, float height) {
 }
 
 void drawMixerContent(UIContext& ctx) {
+    drawAudioEditorNavigation(ctx);
     const auto view = ctx.scene.audio->invoke("mixer_get", json::object());
     ImGui::TextDisabled("Gain in dB | stereo balance | meters before preview mute");
     if (ImGui::Button("Reset peak holds")) {
@@ -97,19 +104,34 @@ void drawMixerContent(UIContext& ctx) {
     }
     ImGui::BeginChild("AudioMixerStrips", ImVec2(0, 0), false,
                       ImGuiWindowFlags_HorizontalScrollbar);
-    const float height = std::clamp(ImGui::GetContentRegionAvail().y - 185, 70.0f, 210.0f);
+    const float height = std::clamp(ImGui::GetContentRegionAvail().y - 225, 65.0f, 260.0f);
+    const float stripWidth = std::clamp((ImGui::GetContentRegionAvail().x - 48) / 5,
+                                       136.0f, 200.0f);
     for (const auto& bus : view.at("buses")) {
         const auto name = bus.at("name").get<std::string>();
         ImGui::PushID(name.c_str());
-        ImGui::BeginGroup();
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 10));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
+        ImGui::BeginChild("Strip", ImVec2(stripWidth, height + 215), true,
+                          ImGuiWindowFlags_NoScrollbar);
+        auto* draw = ImGui::GetWindowDrawList();
+        const auto origin = ImGui::GetCursorScreenPos();
+        const auto accent = ImGui::GetColorU32(name == "Master" ?
+            ImGuiCol_PlotLinesHovered : ImGuiCol_SliderGrabActive);
+        draw->AddRectFilled(origin, ImVec2(origin.x + stripWidth - 28, origin.y + 3),
+                            accent, 2);
+        ImGui::Dummy(ImVec2(0, 6));
         ImGui::TextUnformatted(name.c_str());
+        ImGui::TextDisabled(name == "Master" ? "Stereo output" : "Bus > Master");
         bool muted = bus.at("muted"), solo = bus.at("solo");
-        if (ImGui::Checkbox("M", &muted)) {
+        if (ImGui::Selectable("Mute", muted, 0, ImVec2(48, 0))) {
+            muted = !muted;
             workspaceCall(ctx, "mixer_update", {{"bus", name}, {"muted", muted}});
         }
         ImGui::SameLine();
         ImGui::BeginDisabled(name == "Master");
-        if (ImGui::Checkbox("S", &solo)) {
+        if (ImGui::Selectable("Solo", solo, 0, ImVec2(44, 0))) {
+            solo = !solo;
             workspaceCall(ctx, "mixer_update", {{"bus", name}, {"solo", solo}});
         }
         ImGui::EndDisabled();
@@ -124,7 +146,15 @@ void drawMixerContent(UIContext& ctx) {
         applyDrag(ctx, gainEdit, changed, name, "gain",
             gainEdit.value <= -60 ? 0 : std::min(4.0f, std::pow(10.0f, gainEdit.value / 20)));
         ImGui::SameLine();
+        const auto meterOrigin = ImGui::GetCursorScreenPos();
         meter(bus.at("meter"), height);
+        for (float db : {0.0f, -6.0f, -12.0f, -24.0f, -36.0f, -60.0f}) {
+            char label[16];
+            std::snprintf(label, sizeof(label), "%.0f", db);
+            draw->AddText(ImVec2(meterOrigin.x + 36,
+                meterOrigin.y + height * (1 - (db + 60) / 60) - 5),
+                ImGui::GetColorU32(ImGuiCol_TextDisabled), label);
+        }
         float gainDb = gainEdit.value;
         ImGui::SetNextItemWidth(82);
         if (ImGui::InputFloat("##GainDb", &gainDb, 0, 0, "%.2f dB",
@@ -146,9 +176,11 @@ void drawMixerContent(UIContext& ctx) {
         } else {
             ImGui::TextDisabled("Peak %.1f", bus.at("meter").at("peak_dbfs").get<float>());
         }
-        ImGui::EndGroup();
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
         ImGui::PopID();
-        ImGui::SameLine(0, 24);
+        ImGui::SameLine(0, 10);
     }
     ImGui::NewLine();
     if (!mixerError.empty()) {

@@ -63,6 +63,26 @@ void configureStormLayers(CloudState& c, bool storm) {
 
 } // namespace
 
+ColumnLevels columnLevels(const CloudState& c) {
+    ColumnLevels lv;
+    for (int i = 0; i < kMaxCloudLayers; ++i) {
+        const CloudLayer& l = c.layers[i];
+        if (!l.enabled || l.extinction_per_m <= 0.0f) continue;
+        if (lv.host_layer < 0 || l.base_altitude_m < c.layers[lv.host_layer].base_altitude_m) lv.host_layer = i;
+    }
+    if (lv.host_layer < 0) return lv;
+    lv.valid = true;
+    lv.lcl_m = c.layers[lv.host_layer].base_altitude_m;
+    lv.tropopause_m = (std::max)(c.storms.column_top_m, lv.lcl_m + 1500.0f);
+    // The same linear profile the precipitation forms follow (cloudAirTempC).
+    const float t0 = c.precipitation.air_temperature_c;
+    const float lapse = c.precipitation.lapse_rate_k_per_m;
+    if (t0 <= 0.0f) lv.freezing_m = 0.0f;
+    else if (lapse <= 1e-6f) lv.freezing_m = lv.tropopause_m;
+    else lv.freezing_m = (std::min)(t0 / lapse, 11000.0f);
+    return lv;
+}
+
 bool CloudState::anyEnabled() const {
     if (material.density_multiplier <= 0.0f) {
         return false;
@@ -159,6 +179,11 @@ bool validateClouds(const CloudState& c, std::string* error) {
     }
     if (!inRange(c.local_weather.fog_strength, 0.0f, 10.0f)) {
         return fail(error, "local_weather.fog_strength must be within 0..10");
+    }
+    if (c.volumes.slots < 1 || c.volumes.slots > kMaxCloudVolumeSlots ||
+        !inRange(c.volumes.voxel_m, 20.0f, 400.0f) || !inRange(c.volumes.skin_m, 5.0f, 500.0f) ||
+        !inRange(c.volumes.min_tower, 0.0f, 1.0f)) {
+        return fail(error, "volumes: slots 1..16, voxel_m 20..400, skin_m 5..500, min_tower 0..1");
     }
     for (size_t i = 0; i < storms.cells.size(); ++i) {
         const StormCell& cell = storms.cells[i];
@@ -302,6 +327,15 @@ void cloudsToJson(const CloudState& c, nlohmann::json& j) {
     j["local_weather"] = {{"terrain_suitability", c.local_weather.terrain_suitability},
                           {"fog_enabled", c.local_weather.fog_enabled},
                           {"fog_strength", c.local_weather.fog_strength}};
+    j["volumes"] = {{"enabled", c.volumes.enabled}, {"slots", c.volumes.slots},
+                    {"voxel_m", c.volumes.voxel_m}, {"skin_m", c.volumes.skin_m},
+                    {"min_tower", c.volumes.min_tower}};
+    {
+        // Read-only (ignored by cloudsFromJson): the derived column levels.
+        const ColumnLevels lv = columnLevels(c);
+        j["column_levels"] = {{"valid", lv.valid}, {"lcl_m", lv.lcl_m},
+                              {"freezing_m", lv.freezing_m}, {"tropopause_m", lv.tropopause_m}};
+    }
     nlohmann::json layers = nlohmann::json::array();
     for (const auto& l : c.layers) {
         nlohmann::json material;
@@ -540,6 +574,20 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
             return fail(error, std::string("local_weather: ") + e.what());
         }
     }
+    if (j.contains("volumes")) {
+        const auto& s = j["volumes"];
+        if (!s.is_object()) return fail(error, "volumes must be an object");
+        try {
+            CloudVolumes& v = c.volumes;
+            v.enabled = s.value("enabled", v.enabled);
+            v.slots = s.value("slots", v.slots);
+            v.voxel_m = s.value("voxel_m", v.voxel_m);
+            v.skin_m = s.value("skin_m", v.skin_m);
+            v.min_tower = s.value("min_tower", v.min_tower);
+        } catch (const std::exception& e) {
+            return fail(error, std::string("volumes: ") + e.what());
+        }
+    }
     if (j.contains("precipitation") && j["precipitation"].is_object()) {
         const auto& s = j["precipitation"];
         c.precipitation.rate_mm_h = s.value("rate_mm_h", c.precipitation.rate_mm_h);
@@ -659,6 +707,8 @@ CloudState lerpClouds(const CloudState& a, const CloudState& b, float t) {
     r.storms.wall_cloud = lerpf(a.storms.wall_cloud, b.storms.wall_cloud, t);
     r.local_weather = t < 1.0f ? a.local_weather : b.local_weather;
     r.local_weather.fog_strength = lerpf(a.local_weather.fog_strength, b.local_weather.fog_strength, t);
+    // Volume settings are a resource configuration, not a look: no blend.
+    r.volumes = t < 1.0f ? a.volumes : b.volumes;
     r.storms.mammatus = lerpf(a.storms.mammatus, b.storms.mammatus, t);
     r.lightning.upward_fraction = lerpf(a.lightning.upward_fraction, b.lightning.upward_fraction, t);
     r.lightning.ground_altitude_m = lerpf(

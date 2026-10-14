@@ -212,6 +212,27 @@ bool loadLocked(std::string& error) {
 
 uint32_t requiredCapabilities(const std::string& method) {
     if (method.rfind("audio.", 0) == 0) {
+        if (method == "audio.design_status") {
+            return Read;
+        }
+        if (method == "audio.design_destination") {
+            return Read | FilesRead;
+        }
+        if (method == "audio.design_render") {
+            return SceneWrite | FilesRead;
+        }
+        if (method == "audio.design_save") {
+            return SceneWrite | FilesRead | FilesWrite;
+        }
+        if (method == "audio.telemetry_get") {
+            return Read;
+        }
+        if (method == "audio.synth_presets") {
+            return Read;
+        }
+        if (method == "audio.synth_generate") {
+            return SceneWrite | FilesRead | FilesWrite;
+        }
         if (method == "audio.workspace_get") return Read;
         if (method == "audio.capture_status") return Read;
         if (method == "audio.capture_start" || method == "audio.capture_finish")
@@ -230,7 +251,8 @@ uint32_t requiredCapabilities(const std::string& method) {
             method == "audio.thunder_event" || method == "audio.resume_automatic" ||
             method == "audio.playback_update" || method == "audio.clip_create" ||
             method == "audio.clip_update" || method == "audio.clip_duplicate" ||
-            method == "audio.clip_trim" || method == "audio.clip_split")
+            method == "audio.clip_trim" || method == "audio.clip_split" ||
+            method == "audio.clip_resize")
             return SceneWrite | FilesRead;
         return SceneWrite;
     }

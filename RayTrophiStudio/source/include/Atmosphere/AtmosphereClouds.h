@@ -252,6 +252,36 @@ struct CloudLocalWeather {
     float fog_strength = 1.0f;   // 0..10, scales the derived extinctions
 };
 
+// Storm cell volumes (docs/dev/ATMOSPHERE_CLOUD_VOLUMES.md §3.3): each
+// developed cell becomes a GPU-generated 3D signed-distance volume read by the
+// cloud marcher instead of the storm-column heightfield. Requires the storm
+// column (storms.column): the volumes live in its altitude span and its
+// interval / majorant plumbing.
+struct CloudVolumes {
+    bool enabled = false;
+    // Atlas slots = cells drawn as volumes at once (16 MB per slot: RGBA16F
+    // 128^3, allocated only while enabled). The GPU packet holds at most
+    // kMaxCloudVolumeSlots; the rest of the developed cells keep the
+    // storm-column shell.
+    int slots = 8;
+    float voxel_m = 100.0f;     // horizontal voxel size; the box is 128 voxels wide
+    float skin_m = 60.0f;       // density ramp inside the surface (signed distance)
+    float min_tower = 0.15f;    // cells below this development stay in the shell
+};
+constexpr int kMaxCloudVolumeSlots = 16;
+constexpr int kCloudVolumeVoxels = 128;   // per axis and slot
+
+// Thermodynamic levels of the column (ATMOSPHERE_CLOUD_VOLUMES.md §3.1),
+// altitudes above sea level in metres. One definition for the column span,
+// the precipitation forms and the volume generator. DERIVED, read-only.
+struct ColumnLevels {
+    float lcl_m = 0.0f;          // condensation level = lowest enabled layer base
+    float freezing_m = 0.0f;     // 0 C on the climate's linear profile (0 when frozen at sea level)
+    float tropopause_m = 0.0f;   // anvil level (storms.column_top_m, >= lcl + 1500)
+    int host_layer = -1;         // the layer whose base is the LCL (its look hosts the column)
+    bool valid = false;          // false without an enabled layer
+};
+
 // One cell evaluated at a time: what the GPU cell map, the lightning and
 // world.cloud_stats all read (one definition).
 struct StormCellState {
@@ -299,9 +329,12 @@ struct CloudState {
     CloudLightning lightning;
     CloudStorms storms;
     CloudLocalWeather local_weather;
+    CloudVolumes volumes;
 
     bool anyEnabled() const;
 };
+
+ColumnLevels columnLevels(const CloudState& c);
 
 // Rejects (does not clamp) out-of-range input.
 bool validateClouds(const CloudState& c, std::string* error);

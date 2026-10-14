@@ -81,7 +81,7 @@ std::size_t bucketBytes(uint32_t buckets) {
 }
 
 // Bytes the particle-side buffers occupy at `capacity` grains.
-std::size_t particleBytes(std::size_t capacity) {
+std::size_t particleBytes(std::size_t capacity, bool audio_enabled) {
     return bucketBytes(bucketsFor(capacity)) +
         2 * capacity * sizeof(float) +             // mass, ids
         18 * capacity * sizeof(float) +            // bank 0 (pos/vel/affine)
@@ -91,7 +91,7 @@ std::size_t particleBytes(std::size_t capacity) {
         capacity * kListBytesPerGrain +            // Verlet neighbour list
         3 * capacity * sizeof(float) +             // list build positions
         5 * capacity * sizeof(uint32_t) +          // map + owner/mask/rest/skipped time
-        (kDiagnosticWords + kGrainAudioWords * capacity) * sizeof(uint32_t);
+        (kDiagnosticWords + (audio_enabled ? kGrainAudioWords * capacity : 0)) * sizeof(uint32_t);
 }
 
 std::size_t colliderBytes(std::size_t triangles) {
@@ -141,7 +141,7 @@ std::size_t grownCapacity(std::size_t current, std::size_t count) {
 }
 
 bool ensureParticles(SimulationComputeContext& compute, MatterGrainGpuRuntime& runtime,
-                     std::size_t capacity, std::string& error) {
+                     std::size_t capacity, bool audio_enabled, std::string& error) {
     MatterGrainGpuRuntime candidate;
     candidate.buckets = bucketsFor(capacity);
     candidate.positions = makeBuffer(compute, "grain_positions", capacity * sizeof(Vec3));
@@ -162,7 +162,7 @@ bool ensureParticles(SimulationComputeContext& compute, MatterGrainGpuRuntime& r
     candidate.history_blocks = makeBuffer(compute, "grain_history_blocks",
         5 * capacity * sizeof(uint32_t));
     candidate.diagnostics = makeBuffer(compute, "grain_diagnostics",
-        (kDiagnosticWords + kGrainAudioWords * capacity) * sizeof(uint32_t));
+        (kDiagnosticWords + (audio_enabled ? kGrainAudioWords * capacity : 0)) * sizeof(uint32_t));
     candidate.neighbour_list = makeBuffer(compute, "grain_neighbour_list",
         capacity * kListBytesPerGrain);
     candidate.build_positions = makeBuffer(compute, "grain_list_build_positions",
@@ -191,6 +191,7 @@ bool ensureParticles(SimulationComputeContext& compute, MatterGrainGpuRuntime& r
     runtime.history = candidate.history;
     runtime.history_blocks = candidate.history_blocks;
     runtime.diagnostics = candidate.diagnostics;
+    runtime.audio_telemetry_enabled = audio_enabled;
     runtime.neighbour_list = candidate.neighbour_list;
     runtime.build_positions = candidate.build_positions;
     runtime.buckets = candidate.buckets;
@@ -499,14 +500,26 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     }
     const std::size_t triangle_capacity = grow_collider
         ? std::max(triangles.size(), std::size_t{1}) : runtime.triangle_capacity;
-    std::size_t working = particleBytes(capacity) + colliderBytes(triangle_capacity);
+    std::size_t working = particleBytes(capacity, params.audio_telemetry_enabled) +
+        colliderBytes(triangle_capacity);
     if (grow_particles || grow_collider) {
         // Existing scratch remains allocated during transactional replacement.
-        working += (grow_particles && runtime.capacity ? particleBytes(runtime.capacity) : 0) +
+        working += (grow_particles && runtime.capacity
+            ? particleBytes(runtime.capacity, runtime.audio_telemetry_enabled) : 0) +
             (grow_collider && runtime.triangle_capacity
                 ? colliderBytes(runtime.triangle_capacity) : 0);
     }
+    const bool resize_audio = !grow_particles &&
+        runtime.audio_telemetry_enabled != params.audio_telemetry_enabled;
+    const auto diagnostic_words = kDiagnosticWords +
+        (params.audio_telemetry_enabled ? kGrainAudioWords * capacity : 0);
+    if (resize_audio) {
+        // Include old+new diagnostic buffers in the transactional peak budget.
+        working += (kDiagnosticWords + (runtime.audio_telemetry_enabled
+            ? kGrainAudioWords * runtime.capacity : 0)) * sizeof(uint32_t);
+    }
     const auto largest_buffer = std::max({largest_particle_buffer(capacity),
+        diagnostic_words * sizeof(uint32_t),
         triangle_capacity * 2 * sizeof(MatterGrainBvhNode),
         triangle_capacity * 6 * sizeof(Vec3)});
     // Say which limit and by how much: the two used to share one message, and
@@ -540,12 +553,29 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             triangle_velocity, dt)) {
         return false;
     }
-    if ((grow_particles && !ensureParticles(compute, runtime, capacity, error)) ||
+    if ((grow_particles && !ensureParticles(compute, runtime, capacity,
+            params.audio_telemetry_enabled, error)) ||
         (grow_collider && !ensureCollider(compute, runtime, triangle_capacity, error))) {
         return false;
     }
-    std::vector<uint32_t> diagnostics(kDiagnosticWords + kGrainAudioWords * count, 0u);
+    if (resize_audio) {
+        auto diagnostics = makeBuffer(compute, "grain_diagnostics",
+                                      diagnostic_words * sizeof(uint32_t));
+        if (!diagnostics.valid()) {
+            error = "grain audio diagnostics allocation failed";
+            return false;
+        }
+        compute.destroyBuffer(runtime.diagnostics);
+        runtime.diagnostics = diagnostics;
+        runtime.audio_telemetry_enabled = params.audio_telemetry_enabled;
+    }
+    std::vector<uint32_t> diagnostics(kDiagnosticWords +
+        (params.audio_telemetry_enabled ? kGrainAudioWords * count : 0), 0u);
     const std::size_t diagnostic_bytes = diagnostics.size() * sizeof(uint32_t);
+    report.audio_telemetry_enabled = params.audio_telemetry_enabled;
+    report.diagnostics_readback_bytes = diagnostic_bytes;
+    report.audio_readback_bytes = params.audio_telemetry_enabled
+        ? kGrainAudioWords * count * sizeof(uint32_t) : 0;
     if (refresh_collider) {
         runtime.collider_uploaded = false;
         // Velocities follow the end positions in the same buffer (offset 9 N
@@ -903,7 +933,16 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             }
         }
     }
-    reduceGrainAudioTelemetry(diagnostics, kDiagnosticWords, dt, report);
+    if (params.audio_telemetry_enabled) {
+        reduceGrainAudioTelemetry(diagnostics, kDiagnosticWords, dt, report);
+    } else {
+        report.contact_damping_measured = false;
+        report.friction_measured = false;
+        report.rolling_measured = false;
+        report.contact_damping_energy_j = 0;
+        report.friction_energy_j = 0;
+        report.rolling_energy_j = 0;
+    }
     p.position = std::move(new_position);
     p.velocity = std::move(new_velocity);
     p.affine = std::move(new_affine);

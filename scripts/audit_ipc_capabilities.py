@@ -60,21 +60,23 @@ def required(method, namespaces):
     """Mirror of RtIpcSecurity.cpp::requiredCapabilities (name-level only)."""
     if method.startswith("audio."):
         operation = method[6:]
-        if operation in {"waveform"}:
+        if operation in {"waveform", "design_destination"}:
             return "Read|FilesRead"
+        if operation in {"synth_generate", "design_save"}:
+            return "SceneWrite|FilesRead|FilesWrite"
         if operation == "export_start":
             return "Read|FilesRead|FilesWrite"
         if operation == "export_cancel":
             return "Read|FilesWrite"
         if operation in {"list", "get", "status", "domains", "mixer_get",
-                         "clip_list", "export_status", "capture_status", "workspace_get"}:
+                         "clip_list", "export_status", "capture_status", "workspace_get", "synth_presets", "telemetry_get", "design_status", "design_destination"}:
             return "Read"
         if operation in {"append", "asset_import", "asset_relink", "play", "preview",
                          "preview_file", "environment_setup", "create", "update",
                          "duplicate", "thunder_setup", "thunder_update", "thunder_event",
                          "resume_automatic", "playback_update", "clip_create", "clip_update",
-                         "clip_duplicate", "clip_trim", "clip_split",
-                         "capture_start", "capture_finish"}:
+                         "clip_duplicate", "clip_trim", "clip_split", "clip_resize",
+                         "capture_start", "capture_finish", "design_render"}:
             return "SceneWrite|FilesRead"
         return "SceneWrite"
     if method in ("fluid.grain_reference", "fluid.matter_models", "fluid.grain_settings"):

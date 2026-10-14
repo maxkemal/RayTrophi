@@ -174,6 +174,35 @@ Result cloudStatsJson(std::string& out_json) {
             // non-Nishita world, or with every layer off.
             r["rt_rendering"] = vk->cloudRtRendering();
             r["scene_depth_pipeline_available"] = vk->cloudSceneDepthAvailable();
+            // Storm cell volumes (ATMOSPHERE_CLOUD_VOLUMES.md): what this
+            // device holds. atlas_slots 0 = placeholder (volumes off, or the
+            // budget did not fit in memory); live_slots = boxes in the packet.
+            {
+                const Backend::CloudParamsGPU vp = vk->cloudParamsGPU();
+                int live = 0;
+                nlohmann::json boxes = nlohmann::json::array();
+                for (const auto& v : vp.volumeSlots) {
+                    if (v.a[3] < 0.5f) break;
+                    ++live;
+                    boxes.push_back({{"atlas_slot", static_cast<int>(v.b[3] + 0.5f)},
+                                     {"cell_id", static_cast<int>(v.c[0] + 0.5f)},
+                                     {"min", {v.a[0], v.a[1], v.a[2]}},
+                                     {"size", {v.b[0], v.b[1], v.b[2]}},
+                                     {"tower", v.c[1]}, {"radius_m", v.c[2]}, {"life", v.c[3]}});
+                }
+                r["volumes"] = {{"generator_ready", vk->cloudVolumePipelineReady()},
+                                {"requested", vp.volume[0] > 0.5f},
+                                {"requested_slots", static_cast<int>(vp.volume[3] + 0.5f)},
+                                {"atlas_slots", vk->cloudVolumeAtlasSlots()},
+                                {"atlas_bytes", static_cast<uint64_t>(vk->cloudVolumeAtlasSlots()) *
+                                                    atmosphere::kCloudVolumeVoxels * atmosphere::kCloudVolumeVoxels *
+                                                    atmosphere::kCloudVolumeVoxels * 8ull},
+                                {"live_slots", live},
+                                {"repaints_last_update", vk->cloudVolumeLastRepaints()},
+                                {"repaints_total", vk->cloudVolumeGenerations()},
+                                {"allocations", vk->cloudVolumeAllocations()},
+                                {"boxes", boxes}};
+            }
             // Lightning as the shaders receive it at this instant: channel,
             // growth, pulse radiance, and the lit cloud base that lights the
             // ground and rain (flash_*; radius 0 = not lighting anything,
@@ -285,7 +314,8 @@ Result sampleCloudsJson(const std::string& request_json, std::string& out_json) 
     else if (mode == "base_density") modeId = 2;
     else if (mode == "precipitation") modeId = 3;   // mm/h at points
     else if (mode == "precipitation_form") modeId = 4;   // dominant form id at points
-    else return Result::fail("mode must be density|transmittance|base_density|precipitation|precipitation_form");
+    else if (mode == "volume_sdf") modeId = 5;   // storm cell volume signed distance (m), 1e6 = no volume
+    else return Result::fail("mode must be density|transmittance|base_density|precipitation|precipitation_form|volume_sdf");
     const int steps = req.value("steps", 256);
     if (steps < 1 || steps > 100000) return Result::fail("steps must be within 1..100000");
 

@@ -20,8 +20,22 @@ std::string keyFor(unsigned system, const std::string& domain, const std::string
 }
 }
 
+void syncDomainAudioTelemetry(UIContext& ctx) {
+    const bool enabled = ctx.scene.audio->invoke("telemetry_get", json::object()).at("enabled");
+    for (auto& system : ctx.scene.particle_systems) {
+        if (!system.runtime) {
+            continue;
+        }
+        for (auto& domain : system.runtime->gridDomains()) {
+            domain.fluid_params.grain.audio_telemetry_enabled = enabled;
+        }
+    }
+}
+
 json domainAudioInputs(UIContext& ctx) {
     json result = json::array();
+    const auto policy = ctx.scene.audio->invoke("telemetry_get", json::object());
+    const bool telemetryEnabled = policy.at("enabled");
     for (const auto& system : ctx.scene.particle_systems) {
         if (!system.runtime) {
             continue;
@@ -90,7 +104,7 @@ json domainAudioInputs(UIContext& ctx) {
                 const double power = finite && measurement.physical_power
                     ? (measurement.energy_measured ? energy / duration : measurement.value) : 0;
                 const double value = measurement.physical_power ? power : measurement.value;
-                const bool measured = enabled && measurement.measured && finite &&
+                const bool measured = telemetryEnabled && enabled && measurement.measured && finite &&
                     std::isfinite(value) && value >= 0 && value <= 1e9;
                 const auto& contact = measurement.position;
                 const bool localized = measured && measurement.position_weight > 0 &&
@@ -98,12 +112,12 @@ json domainAudioInputs(UIContext& ctx) {
                 const Vec3 position = localized ? contact :
                     (state ? (state->bounds_min + state->bounds_max) * 0.5f : Vec3(0));
                 const std::string key = keyFor(system.id, domains[i].name, channel);
-                const std::string reason = !enabled ? "disabled" : (!state ? "not_initialized" :
+                const std::string reason = !telemetryEnabled ? "telemetry_disabled" : !enabled ? "disabled" : (!state ? "not_initialized" :
                     (measured ? "available" : (measurement.measured ? "invalid_measurement" :
                      measurement.reason)));
                 result.push_back({{"system_id", system.id}, {"system_name", system.name},
                     {"domain_name", domains[i].name}, {"signal_key", key}, {"domain_channel", channel},
-                    {"enabled", enabled}, {"valid", state != nullptr},
+                    {"enabled", enabled}, {"telemetry_enabled", telemetryEnabled}, {"valid", state != nullptr},
                     {"version", state ? std::max(state->version,
                         state->audio_stats.publication_version) : 0}, {"measured", measured},
                     {"contact_energy_j", measured ? energy : 0},
@@ -144,7 +158,17 @@ void tickDomainAudioInputs(UIContext& ctx) {
         lastTime = std::isfinite(time) ? time : 0;
         return;
     }
+    syncDomainAudioTelemetry(ctx);
     const auto data = ctx.scene.audio->snapshot();
+    if (!data.at("telemetry").at("enabled").get<bool>()) {
+        for (const auto& entry : versions) {
+            ctx.scene.audio->invalidateSignal(entry.first);
+        }
+        versions.clear();
+        publicationErrors.clear();
+        lastTime = time;
+        return;
+    }
     std::set<std::string> watched;
     for (const auto& e : data.at("emitters")) {
         if (e.at("reaction").at("driver") == "domain_contact") {

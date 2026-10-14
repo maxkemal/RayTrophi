@@ -61,7 +61,9 @@ void tickCloudThunder(UIContext& ctx) {
                 const double onset = offset + slot * period +
                     period * (0.03 + 0.07 * Backend::lightningRandom(seed));
                 const float size = 0.65f + Backend::lightningRandom(seed) * 0.70f;
-                if (onset <= previousTime || onset > time) {
+                const double dischargeOnset = onset + clouds.lightning.duration_s * size *
+                    clouds.lightning.leader_fraction;
+                if (dischargeOnset <= previousTime || dischargeOnset > time) {
                     continue;
                 }
                 const float probeAge = clouds.lightning.duration_s * size * 0.5f;
@@ -73,11 +75,12 @@ void tickCloudThunder(UIContext& ctx) {
                     continue;
                 }
                 // Closest point on the channel trunk is a bounded approximation to the first
-                // audible wavefront. Freeze it at onset; later camera movement affects pan/gain.
-                const Vec3 start(event.start[0] - wind.x * probeAge, event.start[1],
-                                 event.start[2] - wind.z * probeAge);
-                const Vec3 end(event.end[0] - wind.x * probeAge, event.end[1],
-                               event.end[2] - wind.z * probeAge);
+                // audible wavefront. Freeze at discharge; later camera motion affects pan/gain.
+                const float windShift = static_cast<float>(dischargeOnset - onset) - probeAge;
+                const Vec3 start(event.start[0] + wind.x * windShift, event.start[1],
+                                 event.start[2] + wind.z * windShift);
+                const Vec3 end(event.end[0] + wind.x * windShift, event.end[1],
+                               event.end[2] + wind.z * windShift);
                 const Vec3 delta = end - start;
                 const float squared = delta.dot(delta);
                 const float u = squared > 0 ?
@@ -90,7 +93,7 @@ void tickCloudThunder(UIContext& ctx) {
                     service->invoke("thunder_event", {{"key", key},
                         {"position", nlohmann::json::array({position.x, position.y, position.z})},
                         {"intensity", clouds.lightning.intensity},
-                        {"age_seconds", std::clamp(time - onset, 0.0, 2.0)}});
+                        {"age_seconds", std::clamp(time - dischargeOnset, 0.0, 2.0)}});
                 } catch (const std::exception&) {
                     // A full bounded queue may drop new events; the editor must keep rendering.
                 }

@@ -35,6 +35,9 @@
 #ifndef CLOUD_CELL_BINDING
 #define CLOUD_CELL_BINDING 36
 #endif
+#ifndef CLOUD_VOLUME_BINDING
+#define CLOUD_VOLUME_BINDING 37
+#endif
 #include "cloud_common.glsl"
 #include "cloud_cirrus_shape.glsl"
 
@@ -88,13 +91,13 @@ vec2 cloudSphere(vec3 o, vec3 d, float r) {
     return vec2(min(tBig, tSmall), max(tBig, tSmall));
 }
 
-// Pieces of [0, tLimit] between the spheres at altitudes lo and hi.
-void cloudShellPieces(vec3 o, vec3 d, float tLimit, float lo, float hi, int li,
+// Pieces of [tMin, tLimit] between the spheres at altitudes lo and hi.
+void cloudShellPieces(vec3 o, vec3 d, float tMin, float tLimit, float lo, float hi, int li,
                       inout vec3 iv[CLOUD_RT_MAX_INTERVALS], inout int n) {
     float R = cloudParams.wind.z;
     vec2 a = cloudSphere(o, d, R + hi);
-    if (a.x > a.y || a.y <= 0.0) return;
-    float s0 = max(a.x, 0.0);
+    if (a.x > a.y || a.y <= tMin) return;
+    float s0 = max(a.x, tMin);
     float s1 = min(a.y, tLimit);
     vec2 b = cloudSphere(o, d, R + lo);
     bool inner = b.x <= b.y && b.y > 0.0;
@@ -106,6 +109,19 @@ void cloudShellPieces(vec3 o, vec3 d, float tLimit, float lo, float hi, int li,
         float e1 = max(b.y, s0);
         if (s1 > e1 && n < CLOUD_RT_MAX_INTERVALS) iv[n++] = vec3(e1, s1, float(li));
     }
+}
+
+// Ray range [t0, t1] over the storm cell map's square (xz), dilated by the
+// largest lean cloudShellShear can give a lookup (3 km x 1.6 x 1.6 |shear|).
+// t1 < t0 = the ray misses it.
+vec2 cloudStormMapSpan(vec3 o, vec3 d, float tLimit) {
+    float halfSize = 0.5 / max(cloudParams.storms.z, 1e-9) + 7680.0 * length(cloudParams.precip2.zw);
+    vec2 lo = cloudParams.storms.xy - halfSize;
+    vec2 hi = cloudParams.storms.xy + halfSize;
+    vec2 inv = 1.0 / mix(d.xz, vec2(1e-8), lessThan(abs(d.xz), vec2(1e-8)));
+    vec2 ta = (lo - o.xz) * inv, tb = (hi - o.xz) * inv;
+    vec2 tn = min(ta, tb), tf = max(ta, tb);
+    return vec2(max(max(tn.x, tn.y), 0.0), min(min(tf.x, tf.y), tLimit));
 }
 
 // Segments of [0, tLimit] inside each enabled layer's shell, sorted by start.
@@ -126,7 +142,7 @@ int cloudIntervals(vec3 o, vec3 d, float tLimit, out vec3 iv[CLOUD_RT_MAX_INTERV
         CloudLayerG L = cloudParams.layers[li];
         if (L.b.w < 0.5 || L.b.x <= 0.0 || L.a.z <= 0.0) continue;
         ranges[nr++] = vec2(L.a.x, L.a.x + L.a.y);
-        cloudShellPieces(o, d, tLimit, L.a.x, L.a.x + L.a.y, li, iv, n);
+        cloudShellPieces(o, d, 0.0, tLimit, L.a.x, L.a.x + L.a.y, li, iv, n);
     }
     if (cloudShellActive()) {
         // Layers never overlap each other (validateClouds): sort by base and
@@ -140,9 +156,14 @@ int cloudIntervals(vec3 o, vec3 d, float tLimit, out vec3 iv[CLOUD_RT_MAX_INTERV
         CloudLayerG S = cloudParams.layers[3];
         float lo = S.a.x;
         float top = S.a.x + S.a.y;
-        for (int i = 0; i <= nr; ++i) {
+        // The column draws nothing outside the cell map square (dilated by
+        // the largest shear lean). Unclipped, a near-horizontal ray carried
+        // a ~400 km column interval: the budget stretched the step to ~460 m
+        // and dense cloud showed constant-altitude bands (2026-10-14).
+        vec2 span = cloudStormMapSpan(o, d, tLimit);
+        for (int i = 0; i <= nr && span.y > span.x; ++i) {
             float hi = i < nr ? min(ranges[i].x, top) : top;
-            if (hi > lo) cloudShellPieces(o, d, tLimit, lo, hi, 3, iv, n);
+            if (hi > lo) cloudShellPieces(o, d, span.x, span.y, lo, hi, 3, iv, n);
             if (i < nr) lo = max(lo, ranges[i].y);
         }
     }
@@ -196,7 +217,12 @@ float cloudLayerMajorant(int li, vec3 p) {
     // Local fog: the map's maximum envelope (cloudFogDensity never exceeds it).
     if (li == 4) return cloudParams.layers[4].b.x;
     // The column alone (layer 3), or inside a layer's interval added to it.
+    // Near a cell volume the column is bounded by its constant extinction
+    // (both the volume and the shell outside the box stay below it); the box
+    // is dilated by the 1.5 tiles a segment can travel from p.
     float shellMaj = cloudShellMajorant(p);
+    if (cloudVolumesActive() && cloudVolumeNear(p, cloudAltitude(p), 1.5 * cloudTileWorld()))
+        shellMaj = max(shellMaj, cloudParams.layers[3].b.x);
     if (li == 3) return shellMaj;
     CloudLayerG L = cloudParams.layers[li];
     p = cloudShear(L, p, cloudAltitude(p));
@@ -218,7 +244,7 @@ float cloudLayerMajorant(int li, vec3 p) {
     float cov = clamp(cloudRemap(m, 1.0 - L.a.z, 1.0, 0.0, 1.0), 0.0, 1.0);
     // Storm cells raise the cover; their map carries its own dilated bound.
     // With the column on they do not (the column draws them instead).
-    if (!cloudShellActive()) cov = max(cov, cloudStormCellAt(p).a);
+    if (!cloudShellActive() || cloudVolumesActive()) cov = max(cov, cloudStormCellAt(p).a);
     return cov * L.b.x + shellMaj;
 }
 
@@ -491,12 +517,17 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
 
     vec3 sunDir = normalize(worldData.w.sunDir);
     float mu = dot(d, sunDir);
-    // Sky ambient = the hemisphere, not the zenith texel: zenith and horizon
-    // averaged. The zenith alone is deep blue and painted every shadowed
-    // cloud underside saturated navy.
-    vec3 horiz = normalize(vec3(d.x, 0.08, d.z) + vec3(1e-4, 0.0, 0.0));
-    vec3 ambTop = 0.5 * (cloudSkyAmbient(normalize(vec3(0.0, 1.0, 0.0) + d * 0.2)) +
-                         cloudSkyAmbient(horiz));
+    // Sky ambient = the hemisphere, not the zenith texel: zenith and four
+    // horizon azimuths averaged, the same for every view direction. The
+    // zenith alone is deep blue and painted every shadowed cloud underside
+    // saturated navy; the horizon read along the VIEW azimuth copied the sky
+    // gradient behind a tower onto its shadowed side, which then looked
+    // see-through and followed the sun around (2026-10-14).
+    vec3 ambTop = 0.5 * cloudSkyAmbient(vec3(0.0, 1.0, 0.0)) +
+                  0.125 * (cloudSkyAmbient(normalize(vec3(1.0, 0.15, 0.0))) +
+                           cloudSkyAmbient(normalize(vec3(-1.0, 0.15, 0.0))) +
+                           cloudSkyAmbient(normalize(vec3(0.0, 0.15, 1.0))) +
+                           cloudSkyAmbient(normalize(vec3(0.0, 0.15, -1.0))));
     // Light from below = the GROUND, not the sky LUT's below-horizon texel
     // (which can be as bright as the sky and whitened cloud bases). Lambert
     // ground, albedo 0.25, lit by sky + sun; the sun part is shadowed per
@@ -545,7 +576,11 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
         float t = iv[k].x;
         float tEnd = iv[k].y;
         float dt = baseDt * (1.0 + t / growth);
-        t += dt * jitter;
+        // Jitter the start by a fraction of the step the march will REALLY
+        // take: on a long interval the budget's completion step, not dt, sets
+        // the spacing, and a dt-sized jitter sampled the same depths every
+        // frame -- bands of constant altitude that accumulation never removed.
+        t += max(dt, (tEnd - t) / float(max(budget - reserve, 1))) * jitter;
         // Ambient occlusion varies slowly: refreshed every `aoEvery` lit
         // samples once the view is mostly occluded (and on secondary rays).
         float tauTop = 0.0, tauBot = 0.0;
@@ -577,11 +612,24 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
             // T is small the rest of the pixel cannot show it (Nubis LOD).
             bool wantDetail = !secondary && T > 0.15;
             float cheap;
+            cloudVolumeLastSdf = 1e6;
             float sigma = cloudLayerDensityResolved(li, p, alt, wantDetail, cheap);
             if (cheap <= 0.0) {
-                t += min(max(dt, completionStep), tEnd - t);
+                float skip = max(dt, completionStep);
+                // Inside a cell volume's box the signed distance proves the
+                // way empty (minus the detail dent and a voxel of filtering).
+                // Column intervals only: a layer interval also holds the
+                // layer's own cloud, which the distance knows nothing about.
+                if (li == 3 && cloudVolumeLastSdf < 1e5) {
+                    float voxel = max(cloudParams.layers[3].a.y, cloudParams.volumeSlots[0].b.x) /
+                                  max(cloudParams.volume.y, 1.0);
+                    skip = max(skip, cloudVolumeLastSdf - kCloudVolumeDentMaxM - voxel);
+                }
+                t += min(skip, tEnd - t);
                 continue;
             }
+            // The light march below overwrites it: keep this sample's own.
+            float volSdf = cloudVolumeLastSdf;
             // Inside cloud: finer steps (vertical structure), >= 25 m.
             // Deep in (low T) the remaining samples matter little: longer
             // steps, the integration below is energy-conserving per step.
@@ -648,7 +696,28 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                 }
                 bool allLayers = L.d.z > 0.5 || inColumn || fogLayer;
                 int aoEvery = secondary ? 4 : (T > 0.25 ? 1 : 2);
-                if (aoTick++ % aoEvery == 0) {
+                // Sky share of the hemisphere the sample faces, and how open
+                // its surface is (1 = no crevice). Layers: half and half.
+                float skyShare = 0.5, openness = 1.0;
+                if (volSdf < 0.0) {
+                    // Inside a cell volume the signed distance IS the depth
+                    // the sky light diffuses through, from every side. The
+                    // vertical taps made a tower's side wall dark: the tower
+                    // above it hid the zenith, although the wall sees the
+                    // sky sideways -- every bubble waist went navy.
+                    tauTop = tauBot = cloudParams.layers[3].b.x * (-volSdf) * 1.5;
+                    // Near the surface the facing decides it: a crown sees the
+                    // sky, an overhang the ground, a crevice between bubbles
+                    // little of either. Dense cloud is opaque within metres,
+                    // so the shadowed side is drawn by this term alone; as a
+                    // flat half-sky colour it had no relief at all. Primary
+                    // rays while visible: 6 atlas reads, refreshed per sample.
+                    if (!secondary && T > 0.15 && volSdf > -400.0) {
+                        vec3 nV = cloudVolumeNormal(p, 120.0);
+                        skyShare = 0.5 + 0.5 * dot(nV, upN);
+                        openness = cloudVolumeOpenness(p, nV, volSdf);
+                    }
+                } else if (aoTick++ % aoEvery == 0) {
                     vec3 qt = p + upN * (dTop * 0.5), qb = p - upN * (dBot * 0.5);
                     tauTop = (allLayers ? cloudDensity(qt, false) :
                               cloudLayerDensity(li, qt, cloudAltitude(qt), false)) * dTop;
@@ -664,10 +733,16 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                 // multiply-scattered through a thick cloud falls ~1/(1+k tau)
                 // (k ~ 0.75 (1 - g)), so a tower's interior is dim grey, not
                 // the exp(-tau) = 0 that left only the zenith colour.
-                vec3 amb = 0.5 * (ambTop / (1.0 + 0.2 * tauTop) + below / (1.0 + 0.2 * tauBot));
+                vec3 amb = openness * (skyShare * ambTop / (1.0 + 0.2 * tauTop) +
+                                       (1.0 - skyShare) * below / (1.0 + 0.2 * tauBot));
                 vec3 S = vec3(0.0);
                 float a = 1.0, b = 1.0;
                 float meanAlbedo = dot(L.e.rgb, vec3(1.0 / 3.0));
+                // What a crevice sees instead of the sky is the cloud around
+                // it: grey interreflection, brighter where the sun reaches.
+                // Keeps shadowed relief neutral grey rather than sky-blue.
+                amb += (1.0 - openness) * Es * pIso * 0.3 * meanAlbedo *
+                       (0.2 + 0.8 * exp(-0.125 * tau));
                 for (int oc = 0; oc < CLOUD_MS_OCTAVES; ++oc) {
                     S += a * Es * exp(-tau * b) * ph[oc];
                     a *= CLOUD_MS_A * meanAlbedo;

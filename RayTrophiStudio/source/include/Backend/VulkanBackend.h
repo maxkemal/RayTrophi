@@ -1498,6 +1498,25 @@ public:
     VkDescriptorSet m_cloudCellsSet = VK_NULL_HANDLE;
     ImageHandle m_cloudCellMap;
     BufferHandle m_cloudCellsBuffer;
+    // Storm cell volumes (ATMOSPHERE_CLOUD_VOLUMES.md §3.3): RGBA16F atlas of
+    // 128^3 slots stacked along z, bound at RT 37 / raster 17 / sample 8. A
+    // 1^3 placeholder while the budget is 0, so every binding stays valid.
+    // cloud_volume_gen.comp repaints a slot when its entry's shape key
+    // changes (updateCloudRtParams); keys are per device (two VkDevices).
+    bool createCloudVolumePipeline(const std::vector<uint32_t>& spv);
+    bool ensureCloudVolumeAtlas(uint32_t slots);   // true = (re)allocated
+    void writeCloudVolumeDescriptors();
+    VkPipeline m_cloudVolumePipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_cloudVolumeLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_cloudVolumeDescLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_cloudVolumePool = VK_NULL_HANDLE;
+    VkDescriptorSet m_cloudVolumeSet = VK_NULL_HANDLE;
+    ImageHandle m_cloudVolumeAtlas;
+    uint32_t m_cloudVolumeSlots = 0;              // slots the atlas holds (0 = placeholder)
+    uint64_t m_cloudVolumeKeys[atmosphere::kMaxCloudVolumeSlots] = {};
+    uint64_t m_cloudVolumeGenerations = 0;        // slot repaints, lifetime
+    uint64_t m_cloudVolumeAllocations = 0;        // atlas (re)allocations, lifetime
+    uint32_t m_cloudVolumeLastRepaints = 0;       // slots repainted by the last update
     // Per-update cloud upload WITHOUT a CPU wait: a ring of persistent
     // staging buffers + command buffers, submitted in queue order. The old
     // uploadBuffer path allocated a staging buffer and waited on a fence on
@@ -2361,6 +2380,12 @@ public:
     // Local fog envelope in the cell map: uploaded revision (0 = none), uploads.
     uint64_t cloudFogRevision() const { return m_device ? m_device->m_cloudFogRevision : 0; }
     uint64_t cloudFogUploads() const { return m_device ? m_device->m_cloudFogUploads : 0; }
+    // Storm cell volumes on this device (world.cloud_stats backends[].volumes).
+    bool cloudVolumePipelineReady() const { return m_device && m_device->m_cloudVolumePipeline != VK_NULL_HANDLE; }
+    uint32_t cloudVolumeAtlasSlots() const { return m_device ? m_device->m_cloudVolumeSlots : 0; }
+    uint64_t cloudVolumeGenerations() const { return m_device ? m_device->m_cloudVolumeGenerations : 0; }
+    uint64_t cloudVolumeAllocations() const { return m_device ? m_device->m_cloudVolumeAllocations : 0; }
+    uint32_t cloudVolumeLastRepaints() const { return m_device ? m_device->m_cloudVolumeLastRepaints : 0; }
     bool cloudRtRendering() const { return m_cloudRtRendering; }
     void setInteractiveViewportMatcap(int64_t textureID);
     void setInteractiveViewportMatcapPreset(int preset);

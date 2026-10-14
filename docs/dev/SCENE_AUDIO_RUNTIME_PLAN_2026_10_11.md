@@ -8,7 +8,23 @@ Tarih: 2026-10-11; uygulama durumu 2026-10-12 güncellendi. Tam plan henüz tama
 normal temas sönüm işi, süre, güç ve temas merkezi mevcut ses/RAM cache hattına
 bağlandı. Aynı domain içinde DEM, karma temas, sıvı/gaz akışı ve MPM deformasyonu
 ayrı seçilir; sıvı/gaz ve MPM üreticileri henüz yoktur ve sessiz/ölçümsüz kalır.
-Kaynak hazır; shader revizyonu 25, kullanıcı derlemesi ve canlı kabul bekliyor.
+Shader revizyonu 25 kullanıcı tarafından derlendi. Canlı DEM/ses bağlantısı ve
+24/24 RAM kare karşılaştırması geçti; kullanıcı Play ile doğru çalıştığını doğruladı.
+DEM sürtünme/yuvarlanma, sıvı/gaz akışı ve MPM deformasyon üreticileri hâlâ açık.
+
+2026-10-13 devam durumu: güçlü yakın çatlama + uzun doğal thunder kuyruğu ve derin
+uzak thunder kayıtları sahneye bağlandı; kullanıcı ses sonucunu beğendi. Kaydedilmemiş
+sahne yeniden açılınca bağlantılar dış IPC ile tekrar kuruldu; kalıcılık için sahne
+kaydı gerekir. [Yıldırım kanal büyümesi](LIGHTNING_CHANNEL_GROWTH.md) kaynakta hazır;
+bu konuşmada yeni shader/Studio derlemesi ve görsel kabul henüz doğrulanmadı.
+
+Kullanıcının istediği sonraki UI işi: ses düzenini mevcut editör omurgasında ele al.
+Asset seçimi/dinleme, seçili kaynak ve fizik kanal bağlantısı sağ contextual dock'ta;
+bus mikseri ve ileride waveform/klip kurgu alt editörde yer alır. Atmosfer ve thunder
+bağlantıları anlaşılır bir sahne ses bölümünde toplanır; teknik tanılama katlanır.
+Gain, transport, otomasyon durumu ve hata mesajları tutarlı gösterilir. Kalıcı büyük
+shelf ekleme; UI, script ve IPC aynı servis işlemlerini kullanmaya devam eder.
+Bu madde plan kaydıdır; UI yeniden düzenlemesi henüz uygulanmadı.
 
 Temel ses/asset sahne bağlantıları ve timeline Play/Pause/Stop kullanıcıyla doğrulandı.
 Taşınabilir proje, parent ve diğer ayrıntılı kabul maddeleri ayrı izlenir.
@@ -25,6 +41,21 @@ başlatma/sönme, hazır atmosfer bağlantısı ve mevcut karma temas enerji rap
 ilk domain adaptörü eklendi; derleme/canlı kabul bekliyor. Malzeme çifti ve kesin temas
 konumu telemetrisi, kuru DEM dökülme sesi ve yerel yağış hâlâ açık. Thunder bağlantısı
 ve mesafe gecikmesi kullanıcıyla doğrulandı.
+
+2026-10-14 yeni teslim (kaynakta; sonraki kullanıcı derlemesi ve kabul bekliyor):
+alt barda tek Audio girişi; editör içinde Timeline/Mixer; canlı klip zamanı/bus
+sürükleme, gain çizgisi, fade tutamaçları ve cursor konumunda Razor kesme.
+Mixer kanal şeritleri ve metreleri yenilendi. Gain/fade/zaman değişimleri tüm klip
+voice'larını yeniden kurmaz. [Audio workspace](AUDIO_WORKSPACE_UI.md).
+İlk çevrimdışı prosedürel tone/wind/metal/wood asset üreticisi UI/script/IPC ile
+kaynakta eklendi: [Sentetik ses](SCENE_AUDIO_SYNTHESIS.md). Bu teslim fizik
+telemetrisinden sürekli malzeme sesi sentezini tamamlamaz; sonraki aşama açık.
+
+2026-10-14 ölçekleme güvenliği: fizik ses telemetrisi varsayılan kapalı, açık kullanıcı
+seçimiyle etkinleşir. UI/script/IPC ortak sahne policy'si; kapalıyken DEM ek audio
+tail/readback, sıvı/MPM taraması ve gaz audio dispatch'i atlanır. Revision 27
+kullanıcı Studio/shader derlemesi ve canlı kabul bekler. Ayrıntılar ve sonraki
+GPU reduction/geometry acoustics mimarisi: [Telemetri policy](SCENE_AUDIO_TELEMETRY_POLICY.md).
 
 ## Ürün hedefi
 
@@ -229,3 +260,32 @@ olarak işaretlenmez.
 PCM peak/RMS göstergeleri ve kayıt/undo/UI/script/IPC sözleşmesi kaynakta eklendi:
 [SCENE_AUDIO_MIXER.md](SCENE_AUDIO_MIXER.md). Yeni mixer derlemesi ve canlı kabul
 bekliyor; waveform/trim/split/fade ve klip seek çalışmaları henüz başlamadı.
+
+
+## 2026-10-14 kullanıcı kabulü ve devam
+
+Kullanıcı sentetik ses sonucunu, klip fade ve canlı taşımayı doğruladı. Yeni kaynak
+değişikliği: tam genişlikte inspector alanları; sağ kenardan kaynak sınırını aşınca
+açık auto_loop politikasıyla tekrar eden clip_resize UI/script/IPC işlemi.
+Son UI/resize değişiklikleri yeni Studio derlemesini bekler; shader değişikliği yok.
+Ayrıntılar: [Audio workspace](AUDIO_WORKSPACE_UI.md).
+
+## 2026-10-14 sound design continuation
+
+Approved direction: [Sound design plan](AUDIO_SOUND_DESIGN_PLAN_2026_10_14.md).
+Source delivery: [Sound designer v2](AUDIO_SOUND_DESIGN.md): in-memory preview,
+DaisySP synthesis/filtering, Signalsmith independent pitch/time, waveform/envelope/
+filter/spectrum and name-based save to the existing project/library folder.
+Studio build, external IPC probe and listening/visual acceptance remain pending.
+
+## 2026-10-14 sound design continuation
+
+Approved direction: [Sound design plan](AUDIO_SOUND_DESIGN_PLAN_2026_10_14.md).
+Source delivery: [Sound designer v2](AUDIO_SOUND_DESIGN.md): in-memory preview,
+DaisySP synthesis/filtering, Signalsmith independent pitch/time, waveform/envelope/
+filter/spectrum and name-based save to the existing project/library folder.
+Studio build, external IPC probe and listening/visual acceptance remain pending.
+
+2026-10-14 latest build: user confirmed Studio compilation after Sound Designer
+MSVC fixes. New Designer listening/UI/external IPC results are pending. This does
+not close shader telemetry, full capture/replay, video/player or geometry-acoustics gates.

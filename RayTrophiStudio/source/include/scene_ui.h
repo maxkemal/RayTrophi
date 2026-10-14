@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -1497,6 +1497,7 @@ public:
     bool mesh_cache_valid = false;
     bool show_python_console = false;
     bool show_remote_ipc_panel = false;
+    float bottom_panel_height = 100.0f; // Default height
 private:
     // --- UI Structure ---
     void drawPanels(UIContext& ctx);
@@ -1631,7 +1632,7 @@ private:
     void drawPoppedPropertyWindows(UIContext& ctx);     // hosts all currently popped tabs as windows
     void drawHairTabContent(UIContext& ctx);            // hair tab body (shared by main panel + popped window)
     float side_panel_width = 360.0f; // Resizable Left Panel width
-    float bottom_panel_height = 100.0f; // Default height
+
     float preferred_bottom_panel_height = 100.0f; // Persist desired height; avoid shrinking permanently during minimized/small viewport frames
     float hierarchy_panel_height = 250.0f; // New: Resizable hierarchy list height
     float last_applied_width = 0.0f;
@@ -1802,6 +1803,14 @@ private:
 
 public:
     void releaseTerrainNodePreviewTexture() { terrainNodeEditorUI.releaseMaskPreviewTexture(); }
+
+    std::filesystem::path getActiveAssetLibraryRoot() const {
+        if (active_asset_library_index >= 0 &&
+            static_cast<std::size_t>(active_asset_library_index) < asset_library_paths.size()) {
+            return asset_library_paths[active_asset_library_index];
+        }
+        return asset_registry.getRootPath();
+    }
 
     // Timeline Widget
     class TimelineWidget timeline;  // Timeline animation widget

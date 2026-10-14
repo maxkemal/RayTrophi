@@ -5168,8 +5168,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         std::string out;
         requireResult(rtapi::sampleCloudsJson(pyDumps(kwargs), out));
         return pyLoads(out);
-    }, "mode='density'|'transmittance'|'base_density', points=[[x,y,z],...] or "
-       "segments=[[[a],[b]],...], steps=256, backend='render'|'viewport'.");
+    }, "mode='density'|'transmittance'|'base_density'|'precipitation'|'precipitation_form'|"
+       "'volume_sdf' (storm cell volume signed distance, m; 1e6 = no volume), "
+       "points=[[x,y,z],...] or segments=[[[a],[b]],...], steps=256, backend='render'|'viewport'.");
     world.def("sample_weather_local", [pyDumps, pyLoads](const py::kwargs& kwargs) {
         std::string out;
         requireResult(rtapi::sampleWeatherLocalJson(pyDumps(kwargs), out));

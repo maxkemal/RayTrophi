@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 // Storm cell map (docs/dev/ATMOSPHERE_STORMS.md §3).
 //
 // Paints the live storm cells (CPU: atmosphere::evaluateStormCells, packed
@@ -19,8 +20,14 @@
 //   RG swirl              horizontal displacement (m) of the SHAPE lookup:
 //                          the cell's rotation winds its noise into spiral
 //                          bands (never the coverage, so the majorant holds)
-//   B  top fraction       local cloud top as a share of the storm column:
-//                          rising turrets reach it, the body between is lower
+//   B  top fraction SQUARED  local cloud top as a share of the storm column:
+//                          rising turrets reach it, the body between is lower.
+//                          Stored squared, read through sqrt (cloudStormFlowAt):
+//                          the domes are sqrt profiles with VERTICAL edges, and
+//                          a bilinear lookup of the top itself put a crease on
+//                          every texel of the wall -- each texel drew one
+//                          vertical stripe up the whole tower. The square of a
+//                          dome is quadratic, which bilinear filtering follows.
 //   A  updraft            turret core weight: crisp, less eroded towers
 // Rows 512..767, the storm column (ATMOSPHERE_CELL_CLOUDS.md §1):
 //   R  anvil cover        mature / dissipating cells spread an elliptic sheet
@@ -49,23 +56,10 @@ layout(set = 0, binding = 0, std430) readonly buffer CloudCells {
 
 layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D cellMap;
 
-const int kTurrets = 5;
+#include "cloud_turrets.glsl"   // kTurrets, cellHash, cellRandom, cloudTurret
 
 float cellCover(float d) {   // d = distance / radius
     return 1.0 - smoothstep(0.55, 1.15, d);
-}
-
-uint cellHash(uint v) {
-    v ^= v >> 16u;
-    v *= 0x7feb352du;
-    v ^= v >> 15u;
-    v *= 0x846ca68bu;
-    return v ^ (v >> 16u);
-}
-
-float cellRandom(inout uint s) {
-    s = cellHash(s + 0x9e3779b9u);
-    return float(s & 0x00ffffffu) / 16777216.0;
 }
 
 void main() {
@@ -138,27 +132,13 @@ void main() {
         float spinAngle = spin * age * 0.0015;
         float top = 0.0, lift = 0.0, mass = 0.0;
         for (int t = 0; t < kTurrets; ++t) {
-            uint s0 = cellHash(id * 7919u + uint(t) * 104729u + 17u);
-            float period = 900.0 * (0.75 + 0.5 * cellRandom(s0));
-            float cycle = age / period + float(t) / float(kTurrets) + cellRandom(s0);
-            float generation = floor(cycle);
-            float u = cycle - generation;
-            uint s = cellHash(s0 ^ (uint(generation) * 2654435761u));
-            float angle = cellRandom(s) * 6.28318530718 + spinAngle;
-            float ring = r * (0.06 + 0.42 * sqrt(cellRandom(s)));
-            vec2 centre = c.a.xy + vec2(cos(angle), sin(angle)) * ring - windDir * 0.12 * r;
-            // A turret is a DOME (sqrt profile), kilometres wide: a linear
-            // fall-off across a narrow turret drew needles and cones.
-            float turretRadius = r * (0.3 + 0.18 * cellRandom(s));
-            float height = mix(0.7, 1.0, cellRandom(s));
-            float x = length(q - centre) / turretRadius;
+            CloudTurret tr = cloudTurret(id, t, age, r, c.a.xy, windDir, spinAngle);
+            float x = length(q - tr.centre) / tr.radius;
             if (x >= 1.0) continue;
             float k = sqrt(1.0 - x * x);
-            float rise = smoothstep(0.0, 0.35, u) * (1.0 - 0.45 * smoothstep(0.6, 1.0, u));
-            float strength = smoothstep(0.0, 0.12, u) * (1.0 - smoothstep(0.65, 1.0, u));
-            top = max(top, height * rise * k);
-            lift = max(lift, strength * smoothstep(0.0, 0.6, k));
-            mass = max(mass, smoothstep(0.0, 0.4, k) * mix(0.5, 1.0, rise));
+            top = max(top, tr.height * tr.rise * k);
+            lift = max(lift, tr.strength * smoothstep(0.0, 0.6, k));
+            mass = max(mass, smoothstep(0.0, 0.4, k) * mix(0.5, 1.0, tr.rise));
         }
         // The body between the turrets: a lower, broad dome.
         float body = sqrt(max(1.0 - d * d / 0.9, 0.0));
@@ -176,7 +156,7 @@ void main() {
         float theta = spin * tower * 1.4 * (1.0 - smoothstep(0.15, 1.2, d));
         float cs = cos(theta), sn = sin(theta);
         flow.xy += vec2(cs * rel.x - sn * rel.y, sn * rel.x + cs * rel.y) - rel;
-        flow.z = max(flow.z, cellTop * step(0.0, 1.2 - d));
+        flow.z = max(flow.z, cellTop * cellTop * step(0.0, 1.2 - d));
         flow.w = max(flow.w, lift * tower * detail);
     }
     imageStore(cellMap, px, o);

@@ -1,146 +1,106 @@
-# 2026-10-13 (gece): sphere_closesthit, closesthit ile tek modül + şimşeğin ince yapısı + sahneye çarpma
+# Latest checkpoint — 2026-10-14
 
-Önceki derlemede doğrulananlar:
-- bulut taşıması → `cloud_callable.rcall`: RT derlemesi 651 sn → ~3 dk;
-  görüntü aynı; iki sahnede pass süresi aynı;
-- yatay çizgili bant (kabuk kesişimi) — görüntü sorunsuz bildirildi.
+User confirmed successful Studio compilation after the Sound Designer MSVC fixes.
+New Designer listening/UI/external IPC results are pending. The cloud V2d shader/
+visual checklist below keeps its separate acceptance gate; Studio compilation does
+not establish that a shader rebuild or visual/physics test passed.
 
-## Bu derlemede
-- **`sphere_closesthit.spv` artık yok.** Köpük/sıçrama küreleri
-  (`sphere_intersection.rint`, binding 18) kendi hit grubunda
-  `closesthit.spv`'yi kullanıyor.
-  - Önce: `closesthit.rchit` `-DSPHERE_HIT=1` ile ikinci kez derleniyordu
-    (3.0 MB SPIR-V, pipeline'da ikinci bir tam closest-hit).
-  - Şimdi: iki grubu çalışma anında `gl_HitKindEXT` ayırıyor. Küre,
-    `FOAM_SPHERE_HIT_KIND = 1` raporluyor; üçgenler 0xFE/0xFF.
-  - Küre normali artık hit attribute'tan değil merkezden hesaplanıyor
-    (kesişimle aynı aritmetik). Kesişim shader'ı attribute'u üçgen
-    düzeninde (vec2) bırakıyor.
-  - Malzeme VM'i tek çağrı: üçgende `objectRandom = -1`, yani
-    `evalMaterialProgram`'ın önceden yaptığının aynısı.
-  - Ortak tanım: `foam_sphere.glsl` (struct, binding 18, hit kind).
-- `compile_shaders.ps1` eski `sphere_closesthit.spv`'yi siliyor (stale
-  listesi).
-- **Şimşeğin ince yapısı** (`cloud_lightning.glsl`, `CloudBoltGeometry.h`).
-  - Sorun (canlı görüntü): yerden buluta 8–10 km'lik bir kanal 32 eşit
-    parçaydı. Parça başına ~300 m düz çizgi düşüyordu; bulut tabanının
-    altında 4–5 kırık kalıyordu ve hiç dal görünmüyordu.
-  - Shader: kameranın büyük gördüğü parça, orta nokta kaydırmasıyla
-    32'ye kadar alt parçaya bölünüyor (`cloudBoltRayFine`). Kırılma
-    açısı her ölçekte sabit. Şekil parça kimliğinden üretiliyor, kareden
-    kareye değişmiyor. Uzak şimşek eskisiyle aynı.
-  - CPU: yere inen şimşekte dal köklerinin 3/4'ü bulut tabanının altındaki
-    açık havadan seçiliyor (`clearAirBelowY`).
-- **Şimşek sahneye çarpıyor** (`Atmosphere/LightningStrike*`,
-  `lightning.attach_to_scene`, varsayılan açık).
-  - Sorun (canlı): yere inen şimşek `ground_altitude_m`'ye (y = 0) kadar
-    iniyordu. Dağa çarpan bir kanal kayanın içinden geçip devam ediyordu;
-    dallar o tabana yassılaştığı için hepsi aynı noktanın çevresine
-    "çarpıyordu".
-  - Şimdi: "yuvarlanan küre" kuralı. Çarpma mesafesi (olaydan olaya
-    45–140 m, akımdan) içindeki arazi, mesh ve scatter ağaç tepeleri
-    taranıyor. Alçalan kürenin İLK dokunduğu nokta hedef oluyor.
-  - Hedef olay başına bir kez seçiliyor, ömrü boyunca sabit kalıyor ve
-    rüzgârla kaymıyor.
-  - Dallar hedefin biraz üstünde (düşüşün %4'ü, ≥ 15 m) havada bitiyor.
-  - Sahnede altında hiçbir şey yoksa `ground_altitude_m` kullanılıyor
-    (panelde "Fallback strike altitude").
-  - Ölçüm: `world.cloud_stats` → `lightning[i].strike` {kind, object,
-    position, striking_distance_m, contact_height_m, candidates}.
+# 2026-10-14 (gece, 3): bulut hacimleri V2d — gölge yüzü + çoklu hücre şekli
+
+Önceki derlemede (V2c, kullanıcı, ışık yönü değiştirildi):
+- saydamlık GÖLGE tarafında ve güneşle birlikte yer değiştiriyor → SDF
+  atlaması değil, aydınlatma;
+- şekil hâlâ tek düze bir kule: çoklu kümülonimbüs, parçalı çevre ve
+  farklı karnabahar kabarmaları yok.
+
+## Bu derlemede (yalnızca shader)
+1. **Gölge yüzü** (`cloud_rt.glsl`, `cloud_common.glsl`).
+   - Kök: ortam ışığının ufuk payı BAKIŞ azimutundan okunuyordu. Yoğun
+     bulut birkaç metrede opaklaştığı için gölge yüzü yalnızca bu terimle
+     çiziliyor ve tam arkasındaki gök rengini taşıyordu → "saydam".
+   - Şimdi: zenit + 4 sabit azimut (bakıştan bağımsız). Hacim yüzeyinde
+     SDF normali gök/zemin payını, iki sonda girinti koyuluğunu belirliyor;
+     girintiler mavi değil gri (bulutlar arası yansıma).
+2. **Çoklu hücre şekli** (`cloud_volume_gen.comp`).
+   - Yan hat: ana hücrenin inflow arka kanadında 4 genç kule, dışa doğru
+     alçalan merdiven, her biri kendi yavaş nabzıyla.
+   - Besleyici kümülüs halkası: fırtınaya yakın daha sık ve uzun.
+   - ~650 m Worley kabarmaları tüm yüzeyde; alt kabarcıklar artık duvara
+     da iniyor, boyları geniş dağılıyor; shader kabarcık oyuğu 80 → 120 m.
 
 ---
 
 ## Kontrol listesi (sırayla)
 
-1. **Shader derlemesi.**
-   - Görmen gereken: hata yok; `x64/Release/shaders/sphere_closesthit.spv`
-     yok.
-   - Bozuksa: "foamSpheres redeclared" çıkarsa `foam_sphere.glsl` iki kez
-     include ediliyor (koruma makrosu).
+1. **Derleme** (yalnızca shader).
 
-2. **RT pipeline derleme süresi.** Rendered'a geç.
-   - Ölçüm: `render.rt_pipeline_status` → `compile_seconds` ve
-     `stage_seconds`.
-   - Görmen gereken: ~3 dk'dan biraz daha az; `stage_seconds` listesinde
-     `sphere_closesthit` yok.
-   - Not: toplam süreyi en büyük aşama (büyük ihtimalle
-     volume_closesthit) belirlediği için düşüş küçük olabilir. Bu
-     derlemede `stage_seconds`'ı oku; sıradaki adayı o seçecek.
-
-3. **Köpük/sıçrama küreleri (göz).** Beyaz su / sıvı splat'ı olan bir
-   sahne, Vulkan RT.
-   - Görmen gereken: küreler öncekiyle aynı. Malzeme rengi, yuvarlak
-     gölgelenme ve Object Info → Random farkı korunmalı.
+2. **Gölge yüzü (göz).** Aynı kamera, güneş kuleyi arkadan/yandan
+   aydınlatsın.
+   - Görmen gereken: gölge yüzü arkadaki gökten belirgin şekilde ayrı,
+     gri-mavi ve kabartmalı (tepe yüzleri açık, girintiler koyu, alt
+     yüzler zemin renginde). Güneşi çevirince "saydamlık" gölgeyle
+     birlikte gezmiyor.
    - Bozuksa:
-     - küreler düz renk ya da hep yukarı bakan normalle aydınlanıyorsa
-       hit kind eşleşmiyor (`FOAM_SPHERE_HIT_KIND` iki tarafta aynı mı);
-     - küreler yanlış malzemeyle çıkıyorsa küre isabeti üçgen yoluna
-       düşüyor ve `instances.i[gl_InstanceID]` okunuyor.
-   - ★ Sinsi olan: küre isabeti üçgen sayılırsa da bir şey çizilir, çünkü
-     instance/geometri okuması sıfır adreslerde "veri yok" yoluna düşer.
-     Yani görüntü bozuk değil ama yanlış malzemeli olur. Malzeme rengine
-     bak.
+     - hâlâ gök rengi ve düz: normal/açıklık dalı çalışmıyor olabilir
+       (`T > 0.15 && volSdf > -400` koşulu). Geçici olarak `openness = 0.3`
+       yazıp fark görülüyor mu bak;
+     - gölge yüzü simsiyah: açıklık fazla kısıyor; `0.45` katsayısını
+       `0.3`'e indir.
+   - ★ Sinsi olan: ortam artık bakıştan bağımsız, bu yüzden **katman
+     bulutlarının** gölgeli altları da biraz değişir (güneş tarafındaki
+     parlak ufuk da ortalamada). Hafif ısınma/grileşme beklenen; mavi→turuncu
+     bir kayma beklenmeyen.
 
-4. **Üçgen sahneler (göz).** Herhangi bir normal sahne.
-   - Görmen gereken: değişiklik yok. Prosedürel malzemelerde Object Info
-     → Random aynı.
-
-5. **Şimşek, yakın plan (göz).** Fırtına sahnesi, kamera yerde, şimşeğe
-   1–3 km. Zaman çubuğuyla bir çakmanın üstünde dur.
-   - Görmen gereken:
-     - kanal metre ölçeğinde kırık; uzun düz cetvel parçaları yok;
-     - yere inen şimşekte bulut tabanının altında dallar var;
-     - zamanı ileri/geri oynatınca şekil aynı kalıyor;
-     - büyüyen uç, uzayan bir çizgi değil kırık yol boyunca ilerliyor.
+3. **Şekil (göz).** Uzak kare.
+   - Görmen gereken: ana kule + bir yanında alçalan 2–4 kule (merdiven),
+     tabanda ve çevrede dağınık küçük kümülüsler (fırtınaya yakın olanlar
+     daha büyük), yüzeyde farklı boyda kabarmalar, duvarlarda da.
    - Bozuksa:
-     - kanal titriyor ya da her karede şekil değişiyorsa tohum hareket
-       eden bir değere bağlı (parça konumu rüzgârla kayıyor; tohum
-       birth/completion'dan gelmeli);
-     - kırıklar kanaldan kopuk duruyorsa düğüm uçları eşleşmiyor
-       (j = n son noktası parçanın ucu olmalı);
-     - uzaktaki şimşek değiştiyse seviye seçimi hep > 0 (açısal boyut eşiği).
-   - ★ Sinsi olan: maliyet. Yalnızca kanalın yakınındaki pikseller ince
-     yolu öder. Çakma anında kare süresi belirgin sıçrıyorsa zarf testi
-     (`envelope + width*30`) fazla geniş.
-   - Notlar:
-     - Bu sahnede `upward_fraction = 1`, yani bütün şimşekler yerden
-       yukarı. Yukarı giden şimşeğin dalları gerçekte de üstte, bulutun
-       içinde olur. Dal kontrolü için `upward_fraction`'ı 0'a çek.
-     - Her iki yol da (Vulkan RT raygen ve RayFusion `cloud_scene.comp`)
-       aynı fonksiyonu çağırıyor.
+     - yan kuleler kutu kenarında kesik: kutu 12.8 km; hücre yarıçapı
+       büyükse yan hat sınırlanıyor (`halfBox - 1.9 rt`) — kesik değil
+       eksik görünmeli;
+     - besleyiciler kutu kenarında düz bir çizgide bitiyor: beklenen sınır
+       (V3'te kutu dışı kabuk/katman devralır);
+     - yüzey "köpük" gibi çok gürültülü: `kBillowAmpM` 170 → 110.
 
-6. **Şimşek sahneye çarpıyor (dağ/ağaç).** Aynı fırtına sahnesi.
-   - Hazırlık: `upward_fraction` 0, `ground_strike_fraction` ~0.3.
-     Bu sahnede ikisi de 1'de: her çakma yerden yukarı ve hepsi yere iniyor.
-   - Ölçüm: çakma anında `world.cloud_stats` → `strike.kind` (terrain |
-     mesh | scatter) ve `position.y` arazinin o noktadaki yüksekliği
-     (`scene.raycast` ile karşılaştır).
-   - Görmen gereken:
-     - kanal dağın yüzeyinde bitiyor, içine girmiyor;
-     - dallar havada sönüyor, aynı noktanın çevresine toplanmıyor;
-     - ağaçlı yamaçta bazen bir ağaç tepesine çarpıyor
-       (`kind = scatter`).
-   - Bozuksa:
-     - `strike` hep null: çözücü kurulmamış (Main.cpp,
-       `installLightningStrikeResolver`) ya da şimşek yere inmiyor;
-     - kanal havada bitiyorsa hedef bir mesh'in sınır kutusu ya da yanlış
-       scatter yüksekliği (`local_bbox.max.y - mesh_center.y` × ölçek);
-     - hedef her karede zıplıyorsa önbellek anahtarı değişiyor
-       (geometri nesli her karede farklı).
-   - Takılma (canlı, 2026-10-14, düzeltildi): ilk sürüm bazı karelerde
-     saniyelerce donuyordu. Sorgu, BVH ıskalayınca bütün üçgenleri tarayan
-     seçim yolunu kullanıyordu. Şimdi yalnız BVH + TerrainManager.
-     Görmen gereken: yeni şimşek doğarken kare takılmıyor.
-     Bozuksa: takılma sürüyorsa scatter taraması (çok büyük grup) ya da
-     her karede değişen geometri nesli (önbellek hiç tutmuyor).
-   - ★ Sinsi olan: dağın yamacında, zirve çarpma mesafesinin dışındaysa
-     şimşek yamaca çarpar. Bu doğru davranış; her şimşek zirveye gitmez.
+4. **Probe.** Zamanı durdur:
+   ```
+   .\scripts\ipc\Probe-CloudVolumes.ps1
+   ```
+   - Görmen gereken: PASS. Adım 3a profil farkı büyüyebilir; 3b düz taban
+     korunmalı (taban kabarmalardan SONRA kesiliyor).
+   - Bozuksa 3b: besleyici bulut tabanları ölçüm hattına denk geldi;
+     ölçüm noktalarını yaz, bakarım.
+
+5. **Maliyet.**
+   - Render: hacim yüzeyindeki her görünür örnek +6 atlas okuması (yalnız
+     birincil ışın). RT kare süresini V2c ile karşılaştır.
+   - Üretim: Worley (27 hücre) + 9 besleyici + 4 yan kule voksel başına;
+     yuvalar ~4 sn'de bir yeniden boyanıyor. `cloud_stats.volumes
+     .repaints_last_update` ile kare sıçraması (takılma) var mı bak.
 
 ## Bilinen
-- Sıradaki derleme yükü adayı: volume_closesthit
-  (`docs/dev/RT_SHADER_COMPILE_LOAD.md`).
-- Sis/yağış görsel kontrolleri hâlâ bekliyor (önceki listedeki madde 6).
-- Ayrı hatalar (görev kartlarında):
-  - kapanışta `rtipc_transport` atexit `std::terminate`;
-  - `viewport.render_frames` CPU renderer'ını sürüyor.
-- `audit_ipc_capabilities.py` `audio.*` uyarıları paralel ajana ait.
+- Taban henüz düz; sarkan loblar, scud ve içe akış V3'te. Besleyici halka
+  bunun durağan hâli.
+- Örs kutu kenarında kabukla dikişli olabilir.
+- Bu sahnede yağış görünmüyor: `ground_fraction = 0` (sahne ayarı).
+
+
+## 2026-10-14 Audio sound designer v2 — Studio build only
+
+No additional shaders for this delivery. Source contracts: AUDIO_SOUND_DESIGN.md.
+1. Build Studio (new AudioSoundDesign, AudioDspModules, AudioSoundDesignerUI modules).
+2. Audio > Assets > Design sound: Designer bottom tab, controls in Audio Inspector.
+3. Render/listen without selecting a folder: no WAV/asset until Save asset.
+4. Adjust preset, noise, ADSR handles, filters/drive; release previews the new sound.
+5. Import mono/stereo; Design / process; compare original and processed. Change
+   pitch and duration independently; try loop seam crossfade, loop and stop.
+6. Save by name twice: project/assets/audio/generated (or existing asset-library
+   root for unsaved scenes), suffix _2, preserved existing files. Folder picker.
+7. Timeline insertion, undo, scene save/reopen and portable asset packaging.
+8. Narrow/high-DPI inspector, short bottom panel scrolling, waveform/graphs/meters.
+9. Run externally: python scripts/test/rt_test_audio_sound_design_ipc.py
+   --output-dir E:\YOUR_EXISTING_TEST_FOLDER (add --audition only to hear preview).
+10. Check assets/licenses/audio_dsp notices in the built distribution.
+
+Codex performed source/static checks only; build/listening acceptance is pending.

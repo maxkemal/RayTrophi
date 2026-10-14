@@ -391,7 +391,7 @@ bool VulkanDevice::ensureRTPipelineLayouts() {
     // Binding 18: Foam sphere SSBO (intersection + closest-hit)
     // Binding 19: Photon caustic hash grid SSBO (photon raygen writes, camera
     //             raygen debug-reads, closesthit gathers in Dilim 2)
-    VkDescriptorSetLayoutBinding bindings[37] = {};
+    VkDescriptorSetLayoutBinding bindings[38] = {};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[0].descriptorCount = 1;
@@ -586,9 +586,17 @@ bool VulkanDevice::ensureRTPipelineLayouts() {
     bindings[36].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                               VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_CALLABLE_BIT_KHR;
 
+    // Binding 37: storm cell volume atlas (cloud_volume_gen.comp;
+    // ATMOSPHERE_CLOUD_VOLUMES.md), read by cloud_common.glsl with the cell map.
+    bindings[37].binding = 37;
+    bindings[37].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[37].descriptorCount = 1;
+    bindings[37].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+                              VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_CALLABLE_BIT_KHR;
+
     VkDescriptorSetLayoutCreateInfo dslCI{};
     dslCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslCI.bindingCount =  37;
+    dslCI.bindingCount =  38;
     dslCI.pBindings = bindings;
     // A layout left from an attempt whose pipeline-layout step failed is kept:
     // bindRTDescriptors may already have allocated m_rtDescriptorSet from it.

@@ -381,6 +381,7 @@ vec3 sanitizeRadiance(vec3 c) {
 #define CLOUD_BINDING_BASE 30
 #define CLOUD_MAJORANT_BINDING 35
 #define CLOUD_CELL_BINDING 36
+#define CLOUD_VOLUME_BINDING 37
 #include "cloud_rt.glsl"
 #define WEATHER_TIME cloudParams.cirrusDirection.z
 #include "weather_from_world.glsl"

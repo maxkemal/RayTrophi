@@ -27,6 +27,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 #define CLOUD_BINDING_BASE 0
 #define CLOUD_MAJORANT_BINDING 5
 #define CLOUD_CELL_BINDING 16
+#define CLOUD_VOLUME_BINDING 17
 #define CLOUD_RT_LIGHTING
 #define CLOUD_SEPARATE_FLASH_HISTORY
 #include "cloud_rt.glsl"
