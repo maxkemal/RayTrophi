@@ -77,6 +77,21 @@ struct CloudVolumeSlotGPU {
 };
 static_assert(sizeof(CloudVolumeSlotGPU) == 96, "CloudVolumeSlotGPU std430 layout");
 
+// Near-camera drop state (docs/dev/ATMOSPHERE_NEAR_PRECIP.md). `camera` and
+// `sun` are written by the CPU; `state` by cloud_sample.comp mode 7 on the
+// GPU, once per cloud update, in the same submission as the params copy
+// (VulkanDevice::updateCloudRtParams). RT and RayFusion read it instead of
+// evaluating the camera's precipitation and cloud shadow in EVERY pixel --
+// that per-pixel evaluation was the same handful of heavy cloud lookups
+// 1.6 M times per frame. No dispatch (pipeline missing, near drops off) =
+// state zero = rate 0 = no drops.
+struct CloudNearStateGPU {
+    float camera[4];    // camera position xyz, reserved
+    float sun[4];       // sun direction xyz, reserved
+    float state[6][4];  // near_precip.glsl nearStateAt(): rate, ids, shade, forms
+};
+static_assert(sizeof(CloudNearStateGPU) == 128, "CloudNearStateGPU std430 layout");
+
 struct CloudParamsGPU {
     CloudLayerGPU layers[kCloudGpuLayers];
     float weather[4]; // 1/extent_m, type_variation, evolution (s * speed), rt_steps
@@ -90,16 +105,16 @@ struct CloudParamsGPU {
     float precip[4];  // rate_mm_h, extinction_per_m at that rate, trail_x, trail_z
                       // (trail = upwind lag behind the drifting cloud, metres
                       //  per metre of fall, at the ground; see makeCloudParamsGPU)
-    float precip2[4]; // reserved, ground_fraction, shear_x, shear_z
+    float precip2[4]; // shutter_s (frame exposure), ground_fraction, shear_x, shear_z
                       // (shear = horizontal metres per metre of height, Faz 3e)
     float scatterAlbedo[4]; // linear RGB albedo, HG g override (2 = droplet fit)
-    float emissionSource[4]; // linear RGB source radiance, reserved
-    float cirrusDirection[4]; // authored wind x,z; camera weather time, reserved
+    float emissionSource[4]; // linear RGB source radiance, surface wind z m/s (near drops)
+    float cirrusDirection[4]; // authored wind x,z; time s (near drops), surface wind x m/s
     float storms[4];   // cell map centre x, z, 1/size (m), enabled (0/1)
     float storms2[4];  // stratiform rain share, tropopause height fraction in the
                        // storm column, wall-cloud allowance m, mammatus 0..1
     float precip3[4];  // sea-level air temperature C, lapse K/m, forced form (0 auto),
-                       // reserved (ATMOSPHERE_PRECIP_TYPES.md)
+                       // near-drop range m (0 = near drops off; ATMOSPHERE_NEAR_PRECIP.md)
     float fog[4];      // local fog map corner x, z, 1/size (m), active (0/1);
                        // the map is sheet 3 of the cell map
     float volume[4];   // storm cell volumes: active (0/1), voxels per axis,
@@ -109,9 +124,14 @@ struct CloudParamsGPU {
     CloudFlashLightGPU flash[kCloudLightningEvents];   // lit cloud base per event
     // Channel network per event (kCloudBoltSegments each; count in color[3]).
     CloudBoltSegmentGPU bolt[kCloudLightningEvents * kCloudBoltSegments];
+    CloudNearStateGPU nearState;
 };
-static_assert(sizeof(CloudParamsGPU) == 16512 + 16 + 96 * atmosphere::kMaxCloudVolumeSlots,
+static_assert(sizeof(CloudParamsGPU) == 16512 + 16 + 96 * atmosphere::kMaxCloudVolumeSlots + 128,
               "CloudParamsGPU std430 layout (cloud_common.glsl)");
+// Float index of nearState.state[0] in the block: where cloud_sample.comp
+// mode 7 writes (its results binding aliases the params buffer).
+constexpr uint32_t kCloudNearStateFloatOffset =
+    static_cast<uint32_t>((offsetof(CloudParamsGPU, nearState) + offsetof(CloudNearStateGPU, state)) / sizeof(float));
 
 // ── Storm cells (docs/dev/ATMOSPHERE_STORMS.md) ─────────────────────────────
 // Input of cloud_cells.comp, which paints the cell map every update: three
@@ -186,6 +206,8 @@ inline CloudCellsGPU makeCloudCellsGPU(const atmosphere::CloudState& c, float ti
 }
 
 inline void clearTransientCloudKey(CloudParamsGPU& key) {
+    // The camera moves every frame: it must not drop the cloud history.
+    key.nearState = {};
     for (auto& event : key.lightning) {
         event = {};
     }
@@ -456,7 +478,17 @@ inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float 
     const float kSurfaceWindFraction = 0.6f;
     p.precip[2] = -wind_mps.x * (1.0f - kSurfaceWindFraction);
     p.precip[3] = -wind_mps.z * (1.0f - kSurfaceWindFraction);
-    p.precip2[0] = 0.0f;   // reserved
+    // Near-camera drops (ATMOSPHERE_NEAR_PRECIP.md): the drop range (0 = off,
+    // the curtain then starts at the camera), the frame exposure a drop's
+    // streak spans, the surface wind that carries it and the timeline time
+    // its lattice moves with (pure in time: no wall clock). The surface wind
+    // is the SAME near-surface air the curtain's foot drag assumes above
+    // (kSurfaceWindFraction of the climate wind): one definition.
+    p.precip2[0] = c.shutter_s;
+    p.precip3[3] = (rate > 0.0f && c.precipitation.near_enabled) ? c.precipitation.near_range_m : 0.0f;
+    p.cirrusDirection[2] = time_seconds;
+    p.cirrusDirection[3] = wind_mps.x * kSurfaceWindFraction;
+    p.emissionSource[3] = wind_mps.z * kSurfaceWindFraction;
     p.precip2[1] = c.precipitation.ground_fraction;
     // Wind shear: crowns lean downwind ~0.015 m/m per m/s at the top (quadratic
     // in height and position-modulated in cloudShear),
@@ -498,11 +530,9 @@ inline bool sharedWeatherCloudRendering(const WorldData& world,
 
 inline CloudParamsGPU makeSharedCloudParamsGPU(const atmosphere::CloudState& clouds,
                                               float time, const Vec3& drift,
-                                              const Vec3& wind, const WorldData& world,
-                                              float weatherTime) {
+                                              const Vec3& wind, const WorldData& world) {
     CloudParamsGPU p = makeCloudParamsGPU(clouds, time, drift, wind,
                                         world.nishita.planet_radius, world.nishita.altitude);
-    p.cirrusDirection[2] = weatherTime; // reserved slot, shared camera-weather clock
     if (world.mode != WORLD_MODE_NISHITA) {
         p.layers[kCloudFogLayer].b[3] = 0.0f;
         p.fog[3] = 0.0f;
@@ -514,6 +544,7 @@ inline CloudParamsGPU makeSharedCloudParamsGPU(const atmosphere::CloudState& clo
         p.volume[0] = 0.0f;
         p.cirrus[0] = 0.0f;
         p.precip[0] = p.precip[1] = 0.0f;
+        p.precip3[3] = 0.0f;
         for (auto& event : p.lightning) {
             event.start[3] = 0.0f;
         }

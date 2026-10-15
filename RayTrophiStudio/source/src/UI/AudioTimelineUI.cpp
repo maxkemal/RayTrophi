@@ -4,6 +4,7 @@
 #endif
 #include "UI/AudioWorkspaceUI.h"
 #include "Audio/AudioClips.h"
+#include "Audio/AudioClipBatch.h"
 #include "Audio/AudioAuthoring.h"
 #include "Audio/AudioService.h"
 #include "Api/RtApi.h"
@@ -24,11 +25,14 @@ using json = nlohmann::json;
 struct Drag {
     json before;
     std::string id;
+    json batchIds = json::array();
+    double batchDelta = 0;
     json sceneBefore, lastApplied;
     int mode = 0; // Move, trim left/right, gain, fade in/out.
     float mouseY = 0;
     std::string bus;
-    std::vector<std::string> laneBuses;
+    std::vector<std::string> laneBuses, laneTracks, laneNames;
+    std::string track;
     std::map<std::string, std::size_t> lanes;
     std::size_t targetLane = 0;
     float mouse = 0;
@@ -82,7 +86,8 @@ double snapped(double seconds, double fps, bool snap) {
 
 void finishAudioTimelineGesture(UIContext& ctx) {
     if (!drag.id.empty()) {
-        if (drag.owner.lock() == ctx.scene.audio && ctx.scene_ui_ptr) {
+        if (drag.owner.lock() == ctx.scene.audio && ctx.scene_ui_ptr &&
+            !(drag.mode == 1 && drag.batchIds.size() > 1)) {
             audio::recordEdit(ctx, &ctx.scene_ui_ptr->history, drag.sceneBefore,
                               "Audio clip gesture");
         }
@@ -90,12 +95,14 @@ void finishAudioTimelineGesture(UIContext& ctx) {
     }
 }
 
-void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidth) {
+void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidth, bool embedded) {
     if (!ctx.scene_ui_ptr) {
         return;
     }
-    drawAudioEditorNavigation(ctx);
-    if (ctx.scene.audio->invoke("workspace_get", json::object()).value("designer_open", false)) {
+    if (!embedded) {
+        drawAudioEditorNavigation(ctx);
+    }
+    if (!embedded && ctx.scene.audio->invoke("workspace_get", json::object()).value("designer_open", false)) {
         drawSoundDesigner(ctx);
         return;
     }
@@ -107,105 +114,110 @@ void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidt
     auto data = ctx.scene.audio->snapshot();
     const auto view = ctx.scene.audio->invoke("workspace_get", json::object());
     const auto selected = view.at("selected_clip").get<std::string>();
+    const auto selectedIds = view.value("selected_clips", json::array());
     bool snap = view.at("snap"), showWaves = view.at("waveforms");
-    if (ImGui::Selectable(razor ? "Razor [B]" : "Select [A]", razor, 0, ImVec2(90, 0))) {
-        razor = !razor;
-    }
-    ImGui::SameLine();
-    drawSynthesisControls(ctx);
-    ImGui::SameLine();
-    if (ImGui::Button("Add clip...")) {
-        ImGui::OpenPopup("Audio clip assets");
-    }
-    if (ImGui::BeginPopup("Audio clip assets")) {
-        ImGui::TextDisabled("Existing scene assets");
-        for (const auto& asset : data.at("assets")) {
-            const auto label = asset.at("name").get<std::string>() + "##" +
-                asset.at("id").get<std::string>();
-            if (ImGui::Selectable(label.c_str())) {
-                addTimelineAsset(ctx, asset.at("id"));
-            }
-        }
-        ImGui::Separator();
-        ImGui::TextDisabled("Use a scene source's bound sound");
-        for (const auto& source : data.at("emitters")) {
-            if (source.at("asset_id").get<std::string>().empty()) {
-                continue;
-            }
-            const auto label = source.at("name").get<std::string>() + "##" +
-                source.at("id").get<std::string>();
-            if (ImGui::Selectable(label.c_str())) {
-                const auto added = workspaceCall(ctx, "clip_create", {
-                    {"asset_id", source.at("asset_id")}, {"name", source.at("name")},
-                    {"bus", source.at("bus")}, {"gain", source.at("gain")},
-                    {"pitch", source.at("pitch")},
-                    {"start_seconds", timeline.getCurrentFrame() / fps}});
-                if (added.contains("id")) {
-                    selectClip(ctx, added.at("id"));
-                }
-            }
-        }
-        ImGui::TextWrapped("A source clip uses its sound and base controls. Capture records reactions.");
-        ImGui::EndPopup();
-    }
-    ImGui::SameLine();
-    bool inspectorOpen = view.at("inspector_open");
-    if (ImGui::Checkbox("Inspector", &inspectorOpen)) {
-        workspaceCall(ctx, "workspace_update", {{"inspector_open", inspectorOpen}});
-    }
-    ImGui::SameLine();
-    if (ImGui::Checkbox("Snap frames", &snap)) {
-        workspaceCall(ctx, "workspace_update", {{"snap", snap}});
-    }
-    ImGui::SameLine();
-    if (ImGui::Checkbox("Waveform", &showWaves)) {
-        workspaceCall(ctx, "workspace_update", {{"waveforms", showWaves}});
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Fit range")) {
-        zoom = 1;
-        pan = 0;
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Refresh waveforms")) {
-        waves.clear();
-    }
     const json* selectedClip = nullptr;
     for (const auto& clip : data.at("clips")) {
         if (clip.at("id") == selected) {
             selectedClip = &clip;
         }
     }
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!selectedClip);
-    if (ImGui::SmallButton("Split at playhead")) {
-        const auto split = workspaceCall(ctx, "clip_split", {{"id", selected},
-            {"time_seconds", timeline.getCurrentFrame() / fps}});
-        if (split.contains("right")) {
-            selectClip(ctx, split.at("right").at("id"));
+    if (!embedded) {
+        if (ImGui::Selectable(razor ? "Razor [B]" : "Select [A]", razor, 0, ImVec2(90, 0))) {
+            razor = !razor;
         }
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Duplicate")) {
-        const auto copied = workspaceCall(ctx, "clip_duplicate", {{"id", selected}});
-        if (copied.contains("id")) {
-            selectClip(ctx, copied.at("id"));
+        ImGui::SameLine();
+        drawSynthesisControls(ctx);
+        ImGui::SameLine();
+        if (ImGui::Button("Add clip...")) {
+            ImGui::OpenPopup("Audio clip assets");
         }
+        if (ImGui::BeginPopup("Audio clip assets")) {
+            ImGui::TextDisabled("Existing scene assets");
+            for (const auto& asset : data.at("assets")) {
+                const auto label = asset.at("name").get<std::string>() + "##" +
+                    asset.at("id").get<std::string>();
+                if (ImGui::Selectable(label.c_str())) {
+                    addTimelineAsset(ctx, asset.at("id"));
+                }
+            }
+            ImGui::Separator();
+            ImGui::TextDisabled("Use a scene source's bound sound");
+            for (const auto& source : data.at("emitters")) {
+                if (source.at("asset_id").get<std::string>().empty()) {
+                    continue;
+                }
+                const auto label = source.at("name").get<std::string>() + "##" +
+                    source.at("id").get<std::string>();
+                if (ImGui::Selectable(label.c_str())) {
+                    const auto added = workspaceCall(ctx, "clip_create", {
+                        {"asset_id", source.at("asset_id")}, {"name", source.at("name")},
+                        {"bus", source.at("bus")}, {"gain", source.at("gain")},
+                        {"pitch", source.at("pitch")},
+                        {"start_seconds", timeline.getCurrentFrame() / fps}});
+                    if (added.contains("id")) {
+                        selectClip(ctx, added.at("id"));
+                    }
+                }
+            }
+            ImGui::TextWrapped("A source clip uses its sound and base controls. Capture records reactions.");
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine();
+        bool inspectorOpen = view.at("inspector_open");
+        if (ImGui::Checkbox("Inspector", &inspectorOpen)) {
+            workspaceCall(ctx, "workspace_update", {{"inspector_open", inspectorOpen}});
+        }
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Snap frames", &snap)) {
+            workspaceCall(ctx, "workspace_update", {{"snap", snap}});
+        }
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Waveform", &showWaves)) {
+            workspaceCall(ctx, "workspace_update", {{"waveforms", showWaves}});
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Fit range")) {
+            zoom = 1;
+            pan = 0;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Refresh waveforms")) {
+            waves.clear();
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!selectedClip);
+        if (ImGui::SmallButton("Split at playhead")) {
+            const auto split = workspaceCall(ctx, "clip_split", {{"id", selected},
+                {"time_seconds", timeline.getCurrentFrame() / fps}});
+            if (split.contains("right")) {
+                selectClip(ctx, split.at("right").at("id"));
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Duplicate")) {
+            const auto copied = workspaceCall(ctx, "clip_duplicate", {{"id", selected}});
+            if (copied.contains("id")) {
+                selectClip(ctx, copied.at("id"));
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Delete")) {
+            workspaceCall(ctx, "clip_remove", {{"id", selected}});
+            workspaceCall(ctx, "workspace_update", {{"selected_clip", ""}});
+        }
+        ImGui::EndDisabled();
     }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Delete")) {
-        workspaceCall(ctx, "clip_remove", {{"id", selected}});
-        workspaceCall(ctx, "workspace_update", {{"selected_clip", ""}});
-    }
-    ImGui::EndDisabled();
     if (data.at("clips").empty()) {
         ImGui::TextDisabled("Add a clip from Audio > Assets, or capture played scene sources.");
     }
     if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
         !ImGui::GetIO().WantTextInput && selectedClip &&
         ImGui::IsKeyPressed(ImGuiKey_Delete)) {
-        workspaceCall(ctx, "clip_remove", {{"id", selected}});
-        workspaceCall(ctx, "workspace_update", {{"selected_clip", ""}});
+        if (!selectedIds.empty()) {
+            workspaceCall(ctx, "clip_batch", {{"ids", selectedIds}, {"action", "remove"}});
+        }
+        selectAudioClips(ctx, json::array());
     }
     if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
         !ImGui::GetIO().WantTextInput && drag.id.empty()) {
@@ -220,7 +232,7 @@ void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidt
         ImGui::TextWrapped("%s", timelineError.c_str());
     }
     ImGui::BeginChild("AudioTimelineCanvas", ImVec2(0, 0), false,
-                      ImGuiWindowFlags_HorizontalScrollbar);
+                      ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     auto origin = ImGui::GetCursorScreenPos();
     const float available = std::max(80.0f, ImGui::GetContentRegionAvail().x - legendWidth);
     const float x0 = origin.x + legendWidth;
@@ -258,14 +270,16 @@ void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidt
         std::string bus;
         std::vector<json> clips;
         double end = -1;
+        std::string track, name;
     };
     std::vector<Row> rows;
     const auto buildRows = [&]() {
         rows.clear();
         if (!drag.id.empty() && drag.owner.lock() == ctx.scene.audio) {
             // Freeze lane geometry while held: overlap packing must not move drop targets.
-            for (const auto& bus : drag.laneBuses) {
-                rows.push_back({bus});
+            for (std::size_t lane = 0; lane < drag.laneBuses.size(); ++lane) {
+                rows.push_back({drag.laneBuses[lane], {}, -1,
+                    drag.laneTracks[lane], drag.laneNames[lane]});
             }
             for (const auto& clip : data.at("clips")) {
                 const auto id = clip.at("id").get<std::string>();
@@ -274,12 +288,21 @@ void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidt
             }
             return;
         }
+        for (const auto& track : data.at("tracks")) {
+            rows.push_back({track.at("bus").get<std::string>(), {}, -1,
+                track.at("id").get<std::string>(), track.at("name").get<std::string>()});
+            for (const auto& clip : data.at("clips")) {
+                if (clip.value("track_id", std::string()) == track.at("id").get<std::string>()) {
+                    rows.back().clips.push_back(clip);
+                }
+            }
+        }
         for (const char* bus : {"Master", "Weather", "Effects", "Ambience", "Music"}) {
             const auto base = rows.size();
             rows.push_back({bus});
             std::vector<json> clips;
             for (const auto& clip : data.at("clips")) {
-                if (clip.at("bus") == bus) {
+                if (clip.value("track_id", std::string()).empty() && clip.at("bus") == bus) {
                     clips.push_back(clip);
                 }
             }
@@ -317,14 +340,30 @@ void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidt
     if (!drag.id.empty()) {
         auto current = std::find_if(data["clips"].begin(), data["clips"].end(),
             [&](const json& clip) { return clip.at("id") == drag.id; });
-        if (current == data["clips"].end() || *current != drag.lastApplied) {
+        bool groupChanged = drag.mode == 1 && drag.batchIds.size() > 1 &&
+            selectedIds != drag.batchIds;
+        if (drag.mode == 1 && drag.batchIds.size() > 1) {
+            for (const auto& id : drag.batchIds) {
+                const auto latest = std::find_if(data.at("clips").begin(), data.at("clips").end(),
+                    [&](const json& clip) { return clip.at("id") == id; });
+                const auto initial = std::find_if(drag.sceneBefore.at("clips").begin(),
+                    drag.sceneBefore.at("clips").end(), [&](const json& clip) { return clip.at("id") == id; });
+                groupChanged = groupChanged || latest == data.at("clips").end() ||
+                    initial == drag.sceneBefore.at("clips").end() || *latest != *initial;
+            }
+        }
+        if (groupChanged) {
+            drag = {};
+        } else if (current == data["clips"].end() || *current != drag.lastApplied) {
             // A script/IPC edit wins; never overwrite concurrent authoring.
             audio::recordEdit(ctx, &ctx.scene_ui_ptr->history, drag.sceneBefore,
                               "Audio clip gesture");
             drag = {};
         } else if (rtapi::renderOutputPending()) {
-            audio::recordEdit(ctx, &ctx.scene_ui_ptr->history, drag.sceneBefore,
-                              "Audio clip gesture");
+            if (!(drag.mode == 1 && drag.batchIds.size() > 1)) {
+                audio::recordEdit(ctx, &ctx.scene_ui_ptr->history, drag.sceneBefore,
+                                  "Audio clip gesture");
+            }
             drag = {};
         } else {
             const double initial = drag.before.at("start_seconds");
@@ -332,6 +371,23 @@ void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidt
             const double finish = initial + duration;
             const double delta = (io.MousePos.x - drag.mouse) / (scale * fps);
             try {
+                if (drag.mode == 1 && drag.batchIds.size() > 1) {
+                    double minimum = 86400, maximum = 0;
+                    for (const auto& entry : drag.sceneBefore.at("clips")) {
+                        if (std::find(drag.batchIds.begin(), drag.batchIds.end(), entry.at("id")) != drag.batchIds.end()) {
+                            minimum = std::min(minimum, entry.at("start_seconds").get<double>());
+                            maximum = std::max(maximum, entry.at("start_seconds").get<double>() +
+                                entry.at("duration_seconds").get<double>());
+                        }
+                    }
+                    drag.batchDelta = std::clamp(snapped(initial + delta, fps, snap) - initial,
+                        -minimum, 86400 - maximum);
+                    auto preview = data;
+                    audio::AudioClipBatch::mutate(preview, {{"ids", drag.batchIds},
+                        {"action", "move"}, {"delta_seconds", drag.batchDelta}});
+                    data = std::move(preview);
+                    buildRows();
+                } else {
                 json patch = {{"id", drag.id}};
                 if (drag.mode == 1) {
                     drag.left = std::clamp(snapped(initial + delta, fps, snap),
@@ -342,10 +398,12 @@ void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidt
                     if (target >= 0 && target < static_cast<int>(rows.size()) &&
                         io.MousePos.x >= x0 && io.MousePos.x <= x0 + available) {
                         drag.bus = rows[target].bus;
+                        drag.track = rows[target].track;
                         drag.targetLane = static_cast<std::size_t>(target);
                     }
                     patch["start_seconds"] = drag.left;
                     patch["bus"] = drag.bus;
+                    patch["track_id"] = drag.track;
                 } else if (drag.mode == 2 || drag.mode == 3) {
                     auto candidate = drag.sceneBefore;
                     if (drag.mode == 2) {
@@ -392,12 +450,22 @@ void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidt
                     data = ctx.scene.audio->snapshot();
                     buildRows();
                 }
+                }
             } catch (const std::exception& exception) {
                 timelineError = exception.what();
             }
-            if (!io.MouseDown[0]) {
-                audio::recordEdit(ctx, &ctx.scene_ui_ptr->history, drag.sceneBefore,
-                                  "Audio clip gesture");
+            if (drag.mode == 1 && drag.batchIds.size() > 1 && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                drag = {};
+                data = ctx.scene.audio->snapshot();
+                buildRows();
+            } else if (!io.MouseDown[0]) {
+                if (drag.batchIds.size() > 1 && drag.mode == 1) {
+                    workspaceCall(ctx, "clip_batch", {{"ids", drag.batchIds},
+                        {"action", "move"}, {"delta_seconds", drag.batchDelta}});
+                } else {
+                    audio::recordEdit(ctx, &ctx.scene_ui_ptr->history, drag.sceneBefore,
+                                      "Audio clip gesture");
+                }
                 drag = {};
                 buildRows();
             }
@@ -413,7 +481,7 @@ void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidt
             ImGui::GetColorU32(destination ? ImGuiCol_Header :
                 index % 2 == 0 ? ImGuiCol_TableRowBg : ImGuiCol_TableRowBgAlt));
         draw->AddText(ImVec2(origin.x + 6, top + 10), ImGui::GetColorU32(ImGuiCol_Text),
-                       row.bus.c_str());
+                       (row.name.empty() ? row.bus : row.name).c_str());
         draw->AddLine(ImVec2(origin.x, top + rowHeight), ImVec2(x0 + available, top + rowHeight),
                        ImGui::GetColorU32(ImGuiCol_Border));
         for (const auto& clip : row.clips) {
@@ -429,7 +497,8 @@ void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidt
             }
             const ImVec2 a(visibleLeft, top + 3), b(visibleRight, top + rowHeight - 3);
             const auto fill = clip.at("muted").get<bool>() ? ImGuiCol_FrameBg : ImGuiCol_Header;
-            draw->AddRectFilled(a, b, ImGui::GetColorU32(id == selected ? ImGuiCol_HeaderActive : fill), 4);
+            const bool clipSelected = std::find(selectedIds.begin(), selectedIds.end(), json(id)) != selectedIds.end();
+            draw->AddRectFilled(a, b, ImGui::GetColorU32(clipSelected ? ImGuiCol_HeaderActive : fill), 4);
             draw->PushClipRect(a, b, true);
             if (showWaves) {
                 if (const auto* wave = waveform(ctx, clip, data.at("assets"))) {
@@ -483,6 +552,51 @@ void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidt
             ImGui::PushID(id.c_str());
             ImGui::SetCursorScreenPos(a);
             ImGui::InvisibleButton("Clip", ImVec2(b.x - a.x, b.y - a.y));
+            static double contextCut = 0;
+            if (embedded && ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                contextCut = snapped(secondsAt(io.MousePos.x), fps, snap);
+            }
+            if (embedded && ImGui::BeginPopupContextItem("ClipActions")) {
+                if (ImGui::MenuItem("Split here")) {
+                    const auto split = workspaceCall(ctx, "clip_split", {{"id", id},
+                        {"time_seconds", contextCut}});
+                    if (split.contains("right")) {
+                        selectClip(ctx, split.at("right").at("id"));
+                    }
+                }
+                if (ImGui::MenuItem("Duplicate")) {
+                    const auto copied = workspaceCall(ctx, "clip_duplicate", {{"id", id}});
+                    if (copied.contains("id")) {
+                        selectClip(ctx, copied.at("id"));
+                    }
+                }
+                if (ImGui::MenuItem("Delete")) {
+                    workspaceCall(ctx, "clip_remove", {{"id", id}});
+                    workspaceCall(ctx, "workspace_update", {{"selected_clip", ""}});
+                }
+                if (selectedIds.size() > 1) {
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Duplicate selection")) {
+                        const auto copied = workspaceCall(ctx, "clip_batch", {{"ids", selectedIds},
+                            {"action", "duplicate"}});
+                        if (copied.contains("ids")) {
+                            selectAudioClips(ctx, copied.at("ids"));
+                        }
+                    }
+                    if (ImGui::MenuItem("Delete selection")) {
+                        workspaceCall(ctx, "clip_batch", {{"ids", selectedIds}, {"action", "remove"}});
+                    }
+                    if (ImGui::MenuItem("Align selection start to playhead")) {
+                        workspaceCall(ctx, "clip_batch", {{"ids", selectedIds}, {"action", "align_start"},
+                            {"time_seconds", timeline.getCurrentFrame() / fps}});
+                    }
+                    if (ImGui::MenuItem("Align selection end to playhead")) {
+                        workspaceCall(ctx, "clip_batch", {{"ids", selectedIds}, {"action", "align_end"},
+                            {"time_seconds", timeline.getCurrentFrame() / fps}});
+                    }
+                }
+                ImGui::EndPopup();
+            }
             const bool nearIn = std::abs(io.MousePos.x - fadeIn) < 8 &&
                                 std::abs(io.MousePos.y - handleY) < 8;
             const bool nearOut = std::abs(io.MousePos.x - fadeOut) < 8 &&
@@ -492,7 +606,19 @@ void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidt
                 io.MousePos.x - left < 7 ? 2 : right - io.MousePos.x < 7 ? 3 :
                 nearGain ? 4 : 1;
             if (ImGui::IsItemActivated() && !rtapi::renderOutputPending()) {
-                selectClip(ctx, id);
+                auto selection = selectedIds;
+                const auto item = std::find(selection.begin(), selection.end(), json(id));
+                if (io.KeyCtrl) {
+                    if (item == selection.end()) {
+                        selection.push_back(id);
+                    } else {
+                        selection.erase(item);
+                    }
+                    selectAudioClips(ctx, selection);
+                } else if (item == selection.end()) {
+                    selection = json::array({id});
+                    selectAudioClips(ctx, selection);
+                }
                 if (razor) {
                     const double cut = snapped(secondsAt(io.MousePos.x), fps, snap);
                     if (cut > start && cut < end) {
@@ -502,8 +628,9 @@ void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidt
                             selectClip(ctx, result.at("right").at("id"));
                         }
                     }
-                } else {
+                } else if (!io.KeyCtrl) {
                     drag = {};
+                    drag.batchIds = selection;
                     drag.before = drag.lastApplied = clip;
                     drag.sceneBefore = ctx.scene.audio->snapshot();
                     drag.id = id;
@@ -513,10 +640,13 @@ void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidt
                     drag.left = start;
                     drag.right = end;
                     drag.bus = clip.at("bus").get<std::string>();
+                    drag.track = clip.value("track_id", std::string());
                     drag.owner = ctx.scene.audio;
                     drag.targetLane = index;
                     for (std::size_t lane = 0; lane < rows.size(); ++lane) {
                         drag.laneBuses.push_back(rows[lane].bus);
+                        drag.laneTracks.push_back(rows[lane].track);
+                        drag.laneNames.push_back(rows[lane].name);
                         for (const auto& entry : rows[lane].clips) {
                             drag.lanes[entry.at("id").get<std::string>()] = lane;
                         }
@@ -542,16 +672,32 @@ void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidt
         }
     }
     const float playhead = xAt(timeline.getCurrentFrame() / fps);
+    if (embedded) {
+        const auto audition = ctx.scene.audio->invoke("arrange_status", json::object());
+        if (audition.value("playing", false)) {
+            const auto position = audition.at("start_seconds").get<double>() +
+                audition.at("cursor_seconds").get<double>();
+            const float x = xAt(position);
+            if (x >= x0 && x <= x0 + available) {
+                draw->AddLine(ImVec2(x, origin.y), ImVec2(x, origin.y + height),
+                    ImGui::GetColorU32(ImGuiCol_SliderGrabActive), 2);
+            }
+        }
+    }
     if (playhead >= x0 && playhead <= x0 + available) {
         draw->AddLine(ImVec2(playhead, origin.y), ImVec2(playhead, origin.y + height),
                        ImGui::GetColorU32(ImGuiCol_PlotLinesHovered), 2);
     }
     if (drag.id.empty() && ImGui::IsWindowHovered() && io.MouseWheel != 0) {
-        if (io.KeyCtrl) {
+        if (embedded || io.KeyCtrl) {
             zoom = std::clamp(zoom * std::pow(1.2f, io.MouseWheel), 0.1f, 100.0f);
         } else {
             pan = std::max(0.0f, pan - io.MouseWheel * static_cast<float>(50 / scale));
         }
+    }
+    if (embedded && ImGui::IsWindowHovered() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+        pan = std::max(0.0f, pan - io.MouseDelta.x / static_cast<float>(scale));
+        ImGui::SetScrollY(std::max(0.0f, ImGui::GetScrollY() - io.MouseDelta.y));
     }
     ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + height));
     ImGui::Dummy(ImVec2(legendWidth + available, 2));

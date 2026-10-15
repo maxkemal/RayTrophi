@@ -234,7 +234,7 @@ bool VulkanDevice::ensureCloudTextures() {
     if (ok) {
         BufferCreateInfo ci{};
         ci.size = sizeof(Backend::CloudParamsGPU);
-        ci.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
+        ci.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC;
         ci.location = MemoryLocation::GPU_ONLY;
         m_cloudRtParamsBuffer = createBuffer(ci);
         ok = m_cloudRtParamsBuffer.buffer != VK_NULL_HANDLE;
@@ -365,6 +365,7 @@ void VulkanDevice::writeCloudVolumeDescriptors() {
     add(m_cloudRasterSets[1], 17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &sampled);
     add(m_cloudSceneSet, 17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &sampled);
     add(m_cloudSampleDescSet, 8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &sampled);
+    add(m_cloudNearDescSet, 8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &sampled);
     add(m_cloudVolumeSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &storage);
     if (!ws.empty()) vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(ws.size()), ws.data(), 0, nullptr);
 }
@@ -450,6 +451,9 @@ void VulkanDevice::destroyCloudUploadRing() {
 // ring slots are still in flight (four updates, ~two frames, ahead).
 void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
                                        const Backend::CloudCellsGPU& cells) {
+    m_lensWind[0] = params.cirrusDirection[3];
+    m_lensWind[1] = params.emissionSource[3];
+    m_lensTime = params.cirrusDirection[2];
     if (!ensureCloudTextures()) return;
     // Volume atlas follows the requested budget (0 with volumes off: the
     // 128 MB atlas is released). Rare; waits for the device when it changes.
@@ -608,6 +612,27 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
                                  VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &painted, 0, nullptr, 0, nullptr);
         }
     }
+    // Near-camera drops (ATMOSPHERE_NEAR_PRECIP.md): their camera state --
+    // rate, form mix, cloud shadow -- ONCE here, written into this params
+    // buffer, instead of in every pixel of RT and RayFusion. After the cell
+    // map and volumes it reads; skipped (state stays zero = no drops) when
+    // near drops are off or the field is not generated yet.
+    if ((params.precip3[3] > 0.0f || m_lensWeatherCamera.settings.enabled) && m_cloudSamplePipeline && m_cloudNearDescSet &&
+        m_cloudNoiseReady && m_cloudWeatherHash != 0) {
+        vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudSamplePipeline);
+        vkCmdBindDescriptorSets(slot.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudSamplePipelineLayout,
+                                0, 1, &m_cloudNearDescSet, 0, nullptr);
+        const uint32_t pc[4] = {7u, 1u, 1u, Backend::kCloudNearStateFloatOffset};
+        vkCmdPushConstants(slot.cmd, m_cloudSamplePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), pc);
+        vkCmdDispatch(slot.cmd, 1, 1, 1);
+        VkMemoryBarrier nearDone{};
+        nearDone.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        nearDone.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        nearDone.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(slot.cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &nearDone, 0, nullptr, 0, nullptr);
+        ++m_cloudNearStateDispatches;
+    }
     vkEndCommandBuffer(slot.cmd);
     VkSubmitInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -697,6 +722,7 @@ void VulkanDevice::destroyCloudPipelines() {
     if (m_cloudDescPool) { vkDestroyDescriptorPool(m_device, m_cloudDescPool, nullptr); m_cloudDescPool = VK_NULL_HANDLE; }
     m_cloudNoiseDescSet = VK_NULL_HANDLE;
     m_cloudSampleDescSet = VK_NULL_HANDLE;
+    m_cloudNearDescSet = VK_NULL_HANDLE;
     kill(m_cloudCellsPipeline);
     killL(m_cloudCellsLayout);
     killD(m_cloudCellsDescLayout);
@@ -742,24 +768,27 @@ bool VulkanDevice::createCloudPipelines(const std::vector<uint32_t>& noiseSPV,
     ok = ok && vkCreateDescriptorSetLayout(m_device, &li, nullptr, &m_cloudSampleDescLayout) == VK_SUCCESS;
 
     if (ok) {
+        // Noise set + sample set + near-state set (the sample layout twice).
         VkDescriptorPoolSize sizes[3] = {
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5},
-            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 6},
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3}};
+            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 12},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6}};
         VkDescriptorPoolCreateInfo pi{};
         pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        pi.poolSizeCount = 3; pi.pPoolSizes = sizes; pi.maxSets = 2;
+        pi.poolSizeCount = 3; pi.pPoolSizes = sizes; pi.maxSets = 3;
         ok = vkCreateDescriptorPool(m_device, &pi, nullptr, &m_cloudDescPool) == VK_SUCCESS;
     }
     if (ok) {
-        VkDescriptorSetLayout layouts[2] = {m_cloudNoiseDescLayout, m_cloudSampleDescLayout};
-        VkDescriptorSet sets[2] = {};
+        VkDescriptorSetLayout layouts[3] = {m_cloudNoiseDescLayout, m_cloudSampleDescLayout,
+                                            m_cloudSampleDescLayout};
+        VkDescriptorSet sets[3] = {};
         VkDescriptorSetAllocateInfo ai{};
         ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        ai.descriptorPool = m_cloudDescPool; ai.descriptorSetCount = 2; ai.pSetLayouts = layouts;
+        ai.descriptorPool = m_cloudDescPool; ai.descriptorSetCount = 3; ai.pSetLayouts = layouts;
         ok = vkAllocateDescriptorSets(m_device, &ai, sets) == VK_SUCCESS;
         m_cloudNoiseDescSet = sets[0];
         m_cloudSampleDescSet = sets[1];
+        m_cloudNearDescSet = sets[2];
     }
     auto makeLayout = [&](VkDescriptorSetLayout set, uint32_t pushBytes, VkPipelineLayout& out) {
         VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, pushBytes};
@@ -839,6 +868,31 @@ bool VulkanDevice::createCloudPipelines(const std::vector<uint32_t>& noiseSPV,
     volumeWrite.dstBinding = 8;
     volumeWrite.pImageInfo = &volumeInfo;
     vkUpdateDescriptorSets(m_device, 1, &volumeWrite, 0, nullptr);
+
+    // Near-state set: the same textures; params (4), queries (5, unused by
+    // mode 7) and results (6) all the RT params buffer. Mode 7 reads the
+    // camera / sun and writes nearState.state -- disjoint bytes of one buffer.
+    {
+        VkWriteDescriptorSet nw[9]{};
+        VkDescriptorBufferInfo rtParams{m_cloudRtParamsBuffer.buffer, 0, sizeof(Backend::CloudParamsGPU)};
+        for (uint32_t i = 0; i < 4; ++i) {
+            nw[i] = sw[i];
+            nw[i].dstSet = m_cloudNearDescSet;
+        }
+        for (uint32_t b = 4; b < 7; ++b) {
+            nw[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            nw[b].dstSet = m_cloudNearDescSet;
+            nw[b].dstBinding = b;
+            nw[b].descriptorCount = 1;
+            nw[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            nw[b].pBufferInfo = &rtParams;
+        }
+        nw[7] = cellWrite;
+        nw[7].dstSet = m_cloudNearDescSet;
+        nw[8] = volumeWrite;
+        nw[8].dstSet = m_cloudNearDescSet;
+        vkUpdateDescriptorSets(m_device, 9, nw, 0, nullptr);
+    }
     return true;
 }
 

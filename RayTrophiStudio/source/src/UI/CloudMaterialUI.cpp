@@ -174,12 +174,21 @@ static bool drawLocalWeatherControls(atmosphere::CloudState& clouds) {
     changed |= ImGui::Checkbox("Local fog", &lw.fog_enabled);
     ImGui::BeginDisabled(!lw.fog_enabled);
     changed |= ImGui::DragFloat("Fog strength", &lw.fog_strength, 0.01f, 0.0f, 10.0f, "%.2f");
+    changed |= ImGui::Checkbox("Author the fog (ignore the weather)", &lw.fog_manual);
+    ImGui::BeginDisabled(!lw.fog_manual);
+    changed |= ImGui::SliderFloat("Valley fog", &lw.valley_fog, 0.0f, 1.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Valley fog lift", &lw.valley_fog_lift, 0.0f, 1.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Ground mist", &lw.post_rain_mist, 0.0f, 1.0f, "%.2f");
+    ImGui::EndDisabled();
     ImGui::EndDisabled();
     ImGui::TextWrapped("Radiation fog forms on calm, humid, clear nights and pools in hollows; "
                        "it lifts and burns off after sunrise. Mist follows rain: inside rain "
                        "shafts and over ground that has just been rained on.");
     if (const auto map = atmosphere::localFogMapSnapshot()) {
         const atmosphere::LocalFogDrivers& d = map->drivers;
+        if (lw.fog_manual) {
+            ImGui::TextDisabled("Authored: the weather drivers below are not used");
+        }
         ImGui::Text("Night %.2f  calm %.2f  RH %.2f  layer cover %.2f",
                     d.night, d.calm, d.humidity, d.layer_cover);
         ImGui::Text("Fog over %.0f%% of a %.1f km map (%s), peak %.4f 1/m",
@@ -212,7 +221,6 @@ static bool drawLightningControls(atmosphere::CloudState& clouds) {
         changed |= ImGui::DragFloat("Horizontal flash span (m)", &lightning.horizontal_span_m,
                                     100.0f, 100.0f, 50000.0f, "%.0f");
         changed |= ImGui::SliderFloat("Branching", &lightning.branching, 0.0f, 1.0f, "%.2f");
-        changed |= ImGui::SliderFloat("Exposure (s)", &lightning.shutter_s, 0.0f, 0.25f, "%.3f");
         changed |= ImGui::DragFloat("Channel brightness", &lightning.channel_brightness,
                                     0.1f, 0.0f, 1000.0f, "%.1f");
         const float effectiveRate = Backend::lightningEffectiveRate(lightning);

@@ -1569,11 +1569,15 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                 VkPipelineLayoutCreateInfo plci{};
                 plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
                 plci.setLayoutCount = 1;
-                plci.pSetLayouts = &m_interactiveViewport.postDescLayout;
+                const VkDescriptorSetLayout postLayouts[] = {
+                    m_interactiveViewport.postDescLayout, m_device->lensWeatherLayout()};
+                plci.setLayoutCount = 2;
+                plci.pSetLayouts = postLayouts;
                 plci.pushConstantRangeCount = 1;
                 plci.pPushConstantRanges = &pcr;
-                ok = vkCreatePipelineLayout(vkDevice, &plci, nullptr,
-                                            &m_interactiveViewport.postPipelineLayout) == VK_SUCCESS;
+                ok = postLayouts[1] != VK_NULL_HANDLE &&
+                    vkCreatePipelineLayout(vkDevice, &plci, nullptr,
+                        &m_interactiveViewport.postPipelineLayout) == VK_SUCCESS;
             }
             if (ok) {
                 VkPipelineShaderStageCreateInfo stage{};
@@ -8831,6 +8835,7 @@ void VulkanViewportBackend::recordRasterPostPass(VkCommandBuffer cmd,
 
     recordCloudScenePass(cmd, width, height, pc.depthA, pc.depthB, pc.depthC);
 
+    m_device->recordLensWeather(cmd, m_interactiveViewport.postPipelineLayout, width, height);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_interactiveViewport.postPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                             m_interactiveViewport.postPipelineLayout, 0, 1,

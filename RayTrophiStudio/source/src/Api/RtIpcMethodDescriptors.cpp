@@ -765,6 +765,19 @@ static const MethodDescriptor desc_camera_get = {
 };
 static const MethodRegistration reg_camera_get(desc_camera_get);
 
+static const MethodDescriptor desc_camera_get_lens_weather = {
+    "camera.get_lens_weather", "camera",
+    "Read active camera glass settings",
+    "Rain/snow/ice glass; default off, timeline-driven, Vulkan RT/RayFusion. Temperature inherits the canonical climate at camera altitude. No local glass-temperature setting. See docs/dev/ATMOSPHERE_LENS_WATER.md section 12.",
+    "read", "Read", false, "any",
+    "camera|get|lens|weather|rain",
+    "camera.get_lens_weather|camera.set_lens_weather|camera.reset_lens_weather|camera.sample_lens_weather",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_camera_get_lens_weather(desc_camera_get_lens_weather);
+
 static const MethodDescriptor desc_camera_get_pivot = {
     "camera.get_pivot", "camera",
     "Return the viewport navigation pivot: mode, anchor point, navigation radius and the SEPARATE lens focus distance",
@@ -824,6 +837,35 @@ static const MethodDescriptor desc_camera_pan = {
     true
 };
 static const MethodRegistration reg_camera_pan(desc_camera_pan);
+
+static const MethodDescriptor desc_camera_reset_lens_weather = {
+    "camera.reset_lens_weather", "camera",
+    "Clear camera glass on its next display pass",
+    "Clear liquid, snow and ice together on next display; preserves authored settings.",
+    "write", "SceneWrite", false, "any",
+    "camera|reset|lens|weather|rain",
+    "camera.get_lens_weather|camera.set_lens_weather|camera.reset_lens_weather|camera.sample_lens_weather",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_camera_reset_lens_weather(desc_camera_reset_lens_weather);
+
+static const MethodParam params_camera_sample_lens_weather[] = {
+    {"backend", "string", false, "viewport|render; explicit synchronous GPU readback", "viewport", nullptr},
+};
+static const MethodDescriptor desc_camera_sample_lens_weather = {
+    "camera.sample_lens_weather", "camera",
+    "Measure the selected device camera glass simulation",
+    "Synchronous GPU state and optical-field readback. water_volume_m3 includes all phases as liquid-equivalent volume; snow_fraction/ice_fraction are water mass fractions. Includes snow/ice counts, phase volumes and field_max_snow/field_max_ice.",
+    "read", "Read", false, "any",
+    "camera|sample|lens|weather|rain",
+    "camera.get_lens_weather|camera.set_lens_weather|camera.reset_lens_weather|camera.sample_lens_weather",
+    nullptr, nullptr, nullptr, nullptr,
+    params_camera_sample_lens_weather, 1,
+    true
+};
+static const MethodRegistration reg_camera_sample_lens_weather(desc_camera_sample_lens_weather);
 
 static const MethodParam params_camera_set_aperture[] = {
     {"aperture", "float", true, "", nullptr, nullptr},
@@ -952,6 +994,22 @@ static const MethodDescriptor desc_camera_set_iso_preset = {
     true
 };
 static const MethodRegistration reg_camera_set_iso_preset(desc_camera_set_iso_preset);
+
+static const MethodParam params_camera_set_lens_weather[] = {
+    {"patch", "object", true, "enabled bool; coating bare|hydrophobic; hood_deg 0..89; diameter_mm 10..200; seed uint32. Temperature is inherited from world climate.", nullptr, nullptr},
+};
+static const MethodDescriptor desc_camera_set_lens_weather = {
+    "camera.set_lens_weather", "camera",
+    "Atomically patch active camera glass settings",
+    "Rain/snow/ice glass. Use world.set_climate for temperature; retired glass_temperature_c patches are rejected. Old project values are ignored on load. Same canonical service as UI/Python; invalid patches are atomic.",
+    "write", "SceneWrite", false, "any",
+    "camera|set|lens|weather|rain",
+    "camera.get_lens_weather|camera.set_lens_weather|camera.reset_lens_weather|camera.sample_lens_weather",
+    nullptr, nullptr, nullptr, nullptr,
+    params_camera_set_lens_weather, 1,
+    true
+};
+static const MethodRegistration reg_camera_set_lens_weather(desc_camera_set_lens_weather);
 
 static const MethodParam params_camera_set_pivot_mode[] = {
     {"mode", "string", true, "", nullptr, nullptr},
@@ -9680,6 +9738,38 @@ static const MethodDescriptor desc_spline_subdivide = {
 };
 static const MethodRegistration reg_spline_subdivide(desc_spline_subdivide);
 
+static const MethodParam params_substance_adopt_object[] = {
+    {"object", "string", true, "Canonical flat mesh node name", nullptr, nullptr},
+};
+static const MethodDescriptor desc_substance_adopt_object = {
+    "substance.adopt_object", "substance",
+    "Promote an unambiguous legacy collider material to the scene object",
+    "Shared object-level authority independent of domains and render shaders. See docs/dev/OBJECT_SUBSTANCE_BINDINGS.md. Legacy conflicts are explicit; assignment does not create a collider or enable simulation.",
+    "write", "SceneWrite", true, "object",
+    "substance|adopt|object|physical_material",
+    "substance.list|substance.get|substance.get_object",
+    nullptr, nullptr, nullptr, nullptr,
+    params_substance_adopt_object, 1,
+    true
+};
+static const MethodRegistration reg_substance_adopt_object(desc_substance_adopt_object);
+
+static const MethodParam params_substance_clear_object[] = {
+    {"object", "string", true, "Canonical flat mesh node name", nullptr, nullptr},
+};
+static const MethodDescriptor desc_substance_clear_object = {
+    "substance.clear_object", "substance",
+    "Clear shared object material authority and retain collider compatibility values",
+    "Shared object-level authority independent of domains and render shaders. See docs/dev/OBJECT_SUBSTANCE_BINDINGS.md. Legacy conflicts are explicit; assignment does not create a collider or enable simulation.",
+    "write", "SceneWrite", true, "object",
+    "substance|clear|object|physical_material",
+    "substance.list|substance.get|substance.get_object",
+    nullptr, nullptr, nullptr, nullptr,
+    params_substance_clear_object, 1,
+    true
+};
+static const MethodRegistration reg_substance_clear_object(desc_substance_clear_object);
+
 static const MethodParam params_substance_derive[] = {
     {"based_on", "string", true, "", nullptr, nullptr},
     {"name", "string", true, "", nullptr, nullptr},
@@ -9713,6 +9803,22 @@ static const MethodDescriptor desc_substance_get = {
 };
 static const MethodRegistration reg_substance_get(desc_substance_get);
 
+static const MethodParam params_substance_get_object[] = {
+    {"object", "string", true, "Canonical flat mesh node name", nullptr, nullptr},
+};
+static const MethodDescriptor desc_substance_get_object = {
+    "substance.get_object", "substance",
+    "Resolve an object substance and report legacy collider conflicts",
+    "Shared object-level authority independent of domains and render shaders. See docs/dev/OBJECT_SUBSTANCE_BINDINGS.md. Legacy conflicts are explicit; assignment does not create a collider or enable simulation.",
+    "read", "Read", false, "object",
+    "substance|get|object|physical_material",
+    "substance.list|substance.get|substance.get_object",
+    nullptr, nullptr, nullptr, nullptr,
+    params_substance_get_object, 1,
+    true
+};
+static const MethodRegistration reg_substance_get_object(desc_substance_get_object);
+
 static const MethodDescriptor desc_substance_list = {
     "substance.list", "substance",
     "List the substance library: built-ins and project substances derived from them, with category",
@@ -9725,6 +9831,19 @@ static const MethodDescriptor desc_substance_list = {
     true
 };
 static const MethodRegistration reg_substance_list(desc_substance_list);
+
+static const MethodDescriptor desc_substance_list_objects = {
+    "substance.list_objects", "substance",
+    "List flat scene nodes and their shared physical substance bindings",
+    "Shared object-level authority independent of domains and render shaders. See docs/dev/OBJECT_SUBSTANCE_BINDINGS.md. Legacy conflicts are explicit; assignment does not create a collider or enable simulation.",
+    "read", "Read", false, "array",
+    "substance|list|objects|object|physical_material",
+    "substance.list|substance.get|substance.get_object",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_substance_list_objects(desc_substance_list_objects);
 
 static const MethodParam params_substance_remove[] = {
     {"name", "string", true, "", nullptr, nullptr},
@@ -9758,6 +9877,23 @@ static const MethodDescriptor desc_substance_set = {
     true
 };
 static const MethodRegistration reg_substance_set(desc_substance_set);
+
+static const MethodParam params_substance_set_object[] = {
+    {"object", "string", true, "Canonical flat mesh node name", nullptr, nullptr},
+    {"binding", "object", true, "substance name and optional overrides: override_ignition, ignition_kelvin, burn_rate_scale, fuel_capacity_scale", nullptr, nullptr},
+};
+static const MethodDescriptor desc_substance_set_object = {
+    "substance.set_object", "substance",
+    "Assign the shared physical substance of a flat scene object",
+    "Shared object-level authority independent of domains and render shaders. See docs/dev/OBJECT_SUBSTANCE_BINDINGS.md. Legacy conflicts are explicit; assignment does not create a collider or enable simulation.",
+    "write", "SceneWrite", true, "object",
+    "substance|set|object|physical_material",
+    "substance.list|substance.get|substance.get_object",
+    nullptr, nullptr, nullptr, nullptr,
+    params_substance_set_object, 2,
+    true
+};
+static const MethodRegistration reg_substance_set_object(desc_substance_set_object);
 
 static const MethodParam params_templates_delete_user[] = {
     {"id", "string", false, "", "", nullptr},
@@ -11298,7 +11434,7 @@ static const MethodRegistration reg_world_atmosphere_stats(desc_world_atmosphere
 static const MethodDescriptor desc_world_cloud_stats = {
     "world.cloud_stats", "world",
     "Per-backend cloud resource counters (textures built, noise/weather generations, sample dispatches) and the live lightning events with their lit-base flash lights",
-    "Lazy by design: with every layer off, noise_ready/weather_ready stay false and nothing is generated. weather_generations must stay flat while only the wind/time moves (drift moves the lookup, not the map); it climbs only on seed/extent/cluster-size changes. `renderer` names what draws the picture (legacy_volume until Faz 3b). Each Vulkan backend row carries `lightning`: 4 lanes as the shaders receive them now (active, pulse_radiance, start/end, growth, ground_strike, kind (ground|cloud|upward|cloud_vertical: in a storm column, between its charge regions -- up to the anvil or down to the base), glow_radius_m, flash_position/flash_radius_m/flash_radiance = the cloud-base disc that lights ground and rain; radius 0 during the stepped leader; channel_brightness; segments = the CPU-built channel network [[a],[b],weight 1=main,leader progress] that the bolt, the in-cloud light and the lit base all read). Pulse is averaged over lightning.shutter_s. Time-driven: poll to catch a flash. Top-level `storms`: the live storm cells at the current cloud time (position, radius, life 0..1, phase growing|mature|dissipating, coverage, tower, convective/stratiform rain, lightning weight, manual, manual_index, age_s) -- exactly the GPU cell map's input. Each lightning lane also carries `strike`: where a ground strike attached by the rolling-sphere rule -- {kind terrain|mesh|scatter, object, position, striking_distance_m (45-140 m per event), contact_height_m, candidates}; null = not a ground strike, lightning.attach_to_scene off, or nothing under it (the bolt then ends at lightning.ground_altitude_m). geometry_revision 3. backends[].volumes: generator_ready, requested, requested_slots, atlas_slots (0 = placeholder: volumes off or the budget did not fit), atlas_bytes, live_slots, repaints_last_update / repaints_total (a slot is repainted only when its quantized shape inputs change), allocations, boxes[] {atlas_slot, cell_id, min (x, bottom ALTITUDE, z), size, tower, radius_m, life}.",
+    "Lazy by design: with every layer off, noise_ready/weather_ready stay false and nothing is generated. weather_generations must stay flat while only the wind/time moves (drift moves the lookup, not the map); it climbs only on seed/extent/cluster-size changes. `renderer` names what draws the picture (legacy_volume until Faz 3b). Each Vulkan backend row carries `lightning`: 4 lanes as the shaders receive them now (active, pulse_radiance, start/end, growth, ground_strike, kind (ground|cloud|upward|cloud_vertical: in a storm column, between its charge regions -- up to the anvil or down to the base), glow_radius_m, flash_position/flash_radius_m/flash_radiance = the cloud-base disc that lights ground and rain; radius 0 during the stepped leader; channel_brightness; segments = the CPU-built channel network [[a],[b],weight 1=main,leader progress] that the bolt, the in-cloud light and the lit base all read). Pulse is averaged over the atmosphere frame exposure shutter_s (world.get_clouds top level). Time-driven: poll to catch a flash. Top-level `storms`: the live storm cells at the current cloud time (position, radius, life 0..1, phase growing|mature|dissipating, coverage, tower, convective/stratiform rain, lightning weight, manual, manual_index, age_s) -- exactly the GPU cell map's input. Each lightning lane also carries `strike`: where a ground strike attached by the rolling-sphere rule -- {kind terrain|mesh|scatter, object, position, striking_distance_m (45-140 m per event), contact_height_m, candidates}; null = not a ground strike, lightning.attach_to_scene off, or nothing under it (the bolt then ends at lightning.ground_altitude_m). geometry_revision 3. backends[].volumes: generator_ready, requested, requested_slots, atlas_slots (0 = placeholder: volumes off or the budget did not fit), atlas_bytes, live_slots, repaints_last_update / repaints_total (a slot is repainted only when its quantized shape inputs change), allocations, boxes[] {atlas_slot, cell_id, min (x, bottom ALTITUDE, z), size, tower, radius_m, life}. backends[].near_state_dispatches: how many times the near-camera drop state (rate, form mix, cloud shadow at the camera) was evaluated on the GPU -- once per cloud update / camera move, never per pixel; it stays flat with near drops off or no precipitation (docs/dev/ATMOSPHERE_NEAR_PRECIP.md).",
     "read", "Read", false, "any",
     "world|cloud|stats|clouds|measure|diagnostics|atmosphere",
     "world.sample_clouds|world.get_clouds",
@@ -11415,7 +11551,7 @@ static const MethodRegistration reg_world_get_weather(desc_world_get_weather);
 static const MethodDescriptor desc_world_local_weather_stats = {
     "world.local_weather_stats", "world",
     "Published local weather: fog map placement, revision, drivers and coverage, terrain field, fog texels on each GPU",
-    "fog_map.drivers are the scene-wide inputs (night, burn_off, calm, humidity, layer_cover, cloud_base_y); max_extinction_per_m (= the fog layer's majorant), band_y (scene y range the fog layer occupies) and fogged_fraction say whether any fog exists. backends[].fog_revision_on_gpu behind fog_map.revision = that device has not received the map yet (it rides the next cloud upload); cloud_rendering false = the device draws no cloud field at all. Settings: world.set_clouds {local_weather:{terrain_suitability, fog_enabled, fog_strength}}.",
+    "fog_map.drivers are the scene-wide inputs (night, burn_off, calm, humidity, layer_cover, cloud_base_y); max_extinction_per_m (= the fog layer's majorant), band_y (scene y range the fog layer occupies) and fogged_fraction say whether any fog exists. backends[].fog_revision_on_gpu behind fog_map.revision = that device has not received the map yet (it rides the next cloud upload); cloud_rendering false = the device draws no cloud field at all. Settings: world.set_clouds {local_weather:{terrain_suitability, fog_enabled, fog_strength}}. fog_map.source = weather|authored; with authored (local_weather.fog_manual) fog_map.authored holds the values used and fog_map.drivers are NOT the map's input.",
     "read", "Read", false, "any",
     "world|local|weather|stats|atmosphere|fog|measure|verify",
     "world.sample_weather_local|world.set_clouds",
@@ -11450,8 +11586,8 @@ static const MethodParam params_world_sample_clouds[] = {
 };
 static const MethodDescriptor desc_world_sample_clouds = {
     "world.sample_clouds", "world",
-    "Measure the cloud field on the GPU: density (1/m) or precipitation (mm/h) at points, or transmittance along segments",
-    "Runs the SAME cloudDensity() the renderers use (shaders/cloud_common.glsl) -- no CPU mirror. mode density|base_density need points [[x,y,z],...] in scene metres; transmittance needs segments [[[ax,ay,az],[bx,by,bz]],...] and integrates with `steps` midpoint samples. mode precipitation returns the local rain/snow rate (mm/h, cloudPrecipAt: layer 0 weather-map B channel under cloud, slanted by wind, virga cut) at points. mode precipitation_form returns the dominant precipitation FORM per point as an id plus `forms` names (none|rain|drizzle|snow|sleet|graupel|hail|freezing_rain|ice_pellets): it follows the column through the climate temperature profile (snow above the freezing level, a sleet band, rain below; freezing rain / ice pellets under an inversion; graupel/hail in storm-cell updrafts; drizzle from shallow stratiform cloud) -- docs/dev/ATMOSPHERE_PRECIP_TYPES.md. backend render|viewport picks the device (both must agree: same shader, same packet). Works with clouds off (measures 0). mode volume_sdf returns the storm cell VOLUME signed distance at points (m, negative inside the cloud surface; 1e6 outside every volume box or with volumes off) -- docs/dev/ATMOSPHERE_CLOUD_VOLUMES.md; compare it with the generator's shape, density only says how much cloud the marcher sees.",
+    "Measure the cloud field on the GPU: density (1/m), precipitation (mm/h / form / near-camera drop state) at points, or transmittance along segments",
+    "Runs the SAME cloudDensity() the renderers use (shaders/cloud_common.glsl) -- no CPU mirror. mode density|base_density need points [[x,y,z],...] in scene metres; transmittance needs segments [[[ax,ay,az],[bx,by,bz]],...] and integrates with `steps` midpoint samples. mode precipitation returns the local rain/snow rate (mm/h, cloudPrecipAt: layer 0 weather-map B channel under cloud, slanted by wind, virga cut) at points. mode precipitation_form returns the dominant precipitation FORM per point as an id plus `forms` names (none|rain|drizzle|snow|sleet|graupel|hail|freezing_rain|ice_pellets): it follows the column through the climate temperature profile (snow above the freezing level, a sleet band, rain below; freezing rain / ice pellets under an inversion; graupel/hail in storm-cell updrafts; drizzle from shallow stratiform cloud) -- docs/dev/ATMOSPHERE_PRECIP_TYPES.md. backend render|viewport picks the device (both must agree: same shader, same packet). Works with clouds off (measures 0). mode volume_sdf returns the storm cell VOLUME signed distance at points (m, negative inside the cloud surface; 1e6 outside every volume box or with volumes off) -- docs/dev/ATMOSPHERE_CLOUD_VOLUMES.md; compare it with the generator's shape, density only says how much cloud the marcher sees. mode near_precip returns per point the state the near-camera drops are DRAWN from (shaders/near_precip.glsl, the same function the RT callable and RayFusion cloud_scene call; docs/dev/ATMOSPHERE_NEAR_PRECIP.md): points[] {rate_mm_h, dominant_form, forms [{form, share, number_density_per_m3, drawn}] (the two largest shares; the second is drawn above 5%), number_density_per_m3 (drawn total), streak_length_m (= |fall + surface wind| x shutter_s), fall_speed_mps, radius_m, near_range_m = curtain_start_m (camera rays' curtain march starts there; 0 = near drops off)} plus top-level shutter_s. Sample at the camera position to see why drops are (not) there: no rate at the camera = no drops, by design (rain comes from the atmosphere only; the old manual weather overlay is gone).",
     "read", "Read", false, "any",
     "world|sample|clouds|measure|verify|atmosphere",
     "world.cloud_stats|world.get_clouds",
@@ -11467,7 +11603,7 @@ static const MethodParam params_world_sample_weather_local[] = {
 static const MethodDescriptor desc_world_sample_weather_local = {
     "world.sample_weather_local", "world",
     "Local weather at points: storm-birth suitability, recent rain, rain now and the local fog drawn there",
-    "docs/dev/ATMOSPHERE_LOCAL_WINDS_FOG.md §2-4. points [[x,y,z],...] in scene metres. suitability = odds an automatic storm cell is born here (terms: orographic = wind pushed up the slope, lee, ridge above the ~1.5 km local mean, heating = sun-facing slope); 1 everywhere without a terrain. recent_rain = exponentially weighted cell rain of the last hour (8 samples, 450 s apart), rain_now = cell rain potential now -- cells only, the GPU weather map's stratiform rain is not included. fog = the ENVELOPE of the published fog map: radiation fog (night, calm, humid, clear sky, pooling in hollows up to radiation_top_y) and mist over recently rained-on ground (mist_per_m at mist_ground_y, thinning upward over 250 m). The cloud march draws the fog as layer slot 4 and shapes it with the cloud noise (banks, undulating lid, wisps), always <= this envelope: measure the drawn density with world.sample_clouds mode density. extinction_per_m is the envelope at the point's own y. Time is quantized to 10 s (time_quantum_s), like the map.",
+    "docs/dev/ATMOSPHERE_LOCAL_WINDS_FOG.md §2-4. points [[x,y,z],...] in scene metres. suitability = odds an automatic storm cell is born here (terms: orographic = wind pushed up the slope, lee, ridge above the ~1.5 km local mean, heating = sun-facing slope); 1 everywhere without a terrain. recent_rain = exponentially weighted cell rain of the last hour (8 samples, 450 s apart), rain_now = cell rain potential now -- cells only, the GPU weather map's stratiform rain is not included. fog = the ENVELOPE of the published fog map: radiation fog (night, calm, humid, clear sky, pooling in hollows up to radiation_top_y) and mist over recently rained-on ground (mist_per_m at mist_ground_y, thinning upward over 250 m). The cloud march draws the fog as layer slot 4 and shapes it with the cloud noise (banks, undulating lid, wisps), always <= this envelope: measure the drawn density with world.sample_clouds mode density. extinction_per_m is the envelope at the point's own y. Time is quantized to 10 s (time_quantum_s), like the map. air_temperature_c is the canonical climate at scene y plus altitude offset; frozen_surface_share = 1-smoothstep(0,2,air_temperature_c), a thermal suitability signal, not stored coverage/mass. Available identically in Python and IPC.",
     "read", "Read", false, "any",
     "world|sample|weather|local|atmosphere|fog|measure|verify",
     "world.local_weather_stats|world.cloud_stats|world.set_clouds",
@@ -11588,7 +11724,7 @@ static const MethodParam params_world_set_clouds[] = {
 static const MethodDescriptor desc_world_set_clouds = {
     "world.set_clouds", "world",
     "Patch cloud layers (formation roles/groups and optical modifiers), cirrus, weather, quality and common material",
-    "Partial objects merge; layers merge per element. Layer fields include base_raggedness (0..1: flat base -> hanging lobes + fractus), rotation_degrees (-360..360), formation_role (integer 0 generic, 1 storm base, 2 tower, 3 anvil), formation_group (integer 0 independent, 1..3 linked), use_custom_material and material. Common material and local material share density_multiplier, scattering_coefficient/color, absorption_coefficient, override_anisotropy/anisotropy, emission_color/strength. Enabled local optics multiply density/scattering/colour, add absorption/emission, and optionally override phase. precipitation {rate_mm_h, form auto|rain|drizzle|snow|sleet|graupel|hail|freezing_rain|ice_pellets (auto = from the climate temperature profile per point), ground_fraction; read-only derived: air_temperature_c (sea level), lapse_rate_k_per_m, snow (frozen at the scene ground)}; a legacy snow:true without form reads as form snow. storms (docs/dev/ATMOSPHERE_STORMS.md): {enabled, derive_from_climate, center_m, extent_m, max_cells 0..16, cell_radius_m, lifetime_s, intensity, stratiform_rain, turrets 0..1 (updraft towers vs one uniform column), rotation -1..1 (mesocyclone, + = counter-clockwise from above), column (bool, default true: each cell is its own cloud from the lowest layer base to column_top_m + 800 m overshoot, with anvil, wall cloud and mammatus; the layers step aside inside cells -- docs/dev/ATMOSPHERE_CELL_CLOUDS.md), column_top_m 2000..20000 (tropopause / anvil level), anvil, wall_cloud, mammatus 0..1, cells:[{position_m, radius_m, intensity, birth_s, lifetime_s (0 = always mature)}] <= 8}; cells replace wholesale; storms.freeze_automatic:true is an ACTION applied after the rest of the patch: the automatic cells alive now become authored cells (same birth, position, radius, peak, life; up to 8) and the automatic lanes stop (max_cells 0, derive_from_climate false); lightning only from mature cells, rain only under cells plus the stratiform share. lightning.upward_fraction (0..1): share of ground strikes that are upward lightning (leader from the ground, branches open toward the cloud). Legacy lightning.center_m/extent_m are read into storms. quality.realtime_interleave (1..4): RayFusion marches 1 of N x N cloud pixels per frame into a full-resolution history. Invalid values or overlapping enabled layers are rejected without changing state. Read-only keys from world.get_clouds are ignored for round-trips. lightning.attach_to_scene (default true): ground strikes end on the scene surface the leader reaches first (terrain, meshes, scattered trees); lightning.ground_altitude_m is then only the fallback where nothing lies under the strike. volumes {enabled, slots 1..16, voxel_m 20..400, skin_m 5..500, min_tower 0..1} (docs/dev/ATMOSPHERE_CLOUD_VOLUMES.md): developed storm cells (tower >= min_tower) become GPU-generated signed-distance volumes in the storm column's span (needs storms.enabled + storms.column); inside a volume box the volume replaces the column shell, other cells keep the shell. world.get_clouds also reports read-only column_levels {lcl_m, freezing_m, tropopause_m, valid}.",
+    "Partial objects merge; layers merge per element. Layer fields include base_raggedness (0..1: flat base -> hanging lobes + fractus), rotation_degrees (-360..360), formation_role (integer 0 generic, 1 storm base, 2 tower, 3 anvil), formation_group (integer 0 independent, 1..3 linked), use_custom_material and material. Common material and local material share density_multiplier, scattering_coefficient/color, absorption_coefficient, override_anisotropy/anisotropy, emission_color/strength. Enabled local optics multiply density/scattering/colour, add absorption/emission, and optionally override phase. precipitation {rate_mm_h, form auto|rain|drizzle|snow|sleet|graupel|hail|freezing_rain|ice_pellets (auto = from the climate temperature profile per point), ground_fraction; read-only derived: air_temperature_c (sea level), lapse_rate_k_per_m, snow (frozen at the scene ground)}; a legacy snow:true without form reads as form snow. storms (docs/dev/ATMOSPHERE_STORMS.md): {enabled, derive_from_climate, center_m, extent_m, max_cells 0..16, cell_radius_m, lifetime_s, intensity, stratiform_rain, turrets 0..1 (updraft towers vs one uniform column), rotation -1..1 (mesocyclone, + = counter-clockwise from above), column (bool, default true: each cell is its own cloud from the lowest layer base to column_top_m + 800 m overshoot, with anvil, wall cloud and mammatus; the layers step aside inside cells -- docs/dev/ATMOSPHERE_CELL_CLOUDS.md), column_top_m 2000..20000 (tropopause / anvil level), anvil, wall_cloud, mammatus 0..1, cells:[{position_m, radius_m, intensity, birth_s, lifetime_s (0 = always mature)}] <= 8}; cells replace wholesale; storms.freeze_automatic:true is an ACTION applied after the rest of the patch: the automatic cells alive now become authored cells (same birth, position, radius, peak, life; up to 8) and the automatic lanes stop (max_cells 0, derive_from_climate false); lightning only from mature cells, rain only under cells plus the stratiform share. lightning.upward_fraction (0..1): share of ground strikes that are upward lightning (leader from the ground, branches open toward the cloud). Legacy lightning.center_m/extent_m are read into storms. quality.realtime_interleave (1..4): RayFusion marches 1 of N x N cloud pixels per frame into a full-resolution history. Invalid values or overlapping enabled layers are rejected without changing state. Read-only keys from world.get_clouds are ignored for round-trips. lightning.attach_to_scene (default true): ground strikes end on the scene surface the leader reaches first (terrain, meshes, scattered trees); lightning.ground_altitude_m is then only the fallback where nothing lies under the strike. volumes {enabled, slots 1..16, voxel_m 20..400, skin_m 5..500, min_tower 0..1} (docs/dev/ATMOSPHERE_CLOUD_VOLUMES.md): developed storm cells (tower >= min_tower) become GPU-generated signed-distance volumes in the storm column's span (needs storms.enabled + storms.column); inside a volume box the volume replaces the column shell, other cells keep the shell. world.get_clouds also reports read-only column_levels {lcl_m, freezing_m, tropopause_m, valid}. precipitation.near_enabled / precipitation.near_range_m (2..60 m) switch and size the near-camera drop field (the same precipitation as the shafts, drawn as streaks/flakes; docs/dev/ATMOSPHERE_NEAR_PRECIP.md); top-level shutter_s (0..0.5 s) is the ONE frame exposure of the atmosphere: rain streak length = speed x shutter_s and the lightning pulse is averaged over it (formerly lightning.shutter_s, still read from old files). local_weather.fog_manual (bool) + valley_fog, valley_fog_lift, post_rain_mist (0..1): AUTHORED local fog -- e.g. a morning valley fog with no rain: replaces the weather drivers (night x calm x humid x clear sky -> valley_fog; sunrise burn-off -> valley_fog_lift; recent rain -> post_rain_mist); pooling in hollows, depth, shape and light stay the terrain's and the march's. Off (default) = the fog follows the weather. Keyable (lerped).",
     "write", "SceneWrite", false, "any",
     "world|set|clouds|environment|sky|atmosphere",
     "world.get_clouds|world.apply_cloud_preset",

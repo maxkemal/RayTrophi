@@ -1,6 +1,11 @@
 #ifndef WEATHER_SURFACE_GLSL
 #define WEATHER_SURFACE_GLSL
 #include "weather_render_data.glsl"
+#include "atmosphere_temperature.glsl"
+float weatherSurfaceFrozenShare(vec3 position) {
+    return atmosphereFrozenSurfaceShare(atmosphereAirTemperatureC(
+        WEATHER_DATA.visual.y, WEATHER_DATA.visual.z, position.y + WEATHER_DATA.visual.w));
+}
 #ifndef WEATHER_SURFACE_AVAILABLE
 #define WEATHER_SURFACE_AVAILABLE true
 #endif
@@ -66,7 +71,9 @@ float weatherSurfaceAccumulation(vec3 hitPos, vec3 normal, vec3 supportNormal) {
     float typeBoost = (WEATHER_DATA.state.y == 2) ? 1.10 : 0.90;
     float directAccum = baseAccum * intensityResponse * weatherSurfaceExposure(hitPos, normal) * densityResponse * typeBoost * geomSupport;
     float settling = weatherSurfaceSettling(hitPos, normal, supportNormal);
-    return clamp(directAccum + (1.0 - clamp(directAccum, 0.0, 1.0)) * settling, 0.0, 1.0);
+    directAccum *= WEATHER_DATA.state.y == 2 ? weatherSurfaceFrozenShare(hitPos) : 1.0;
+    return clamp(directAccum +
+        (1.0 - clamp(directAccum, 0.0, 1.0)) * settling, 0.0, 1.0);
 }
 
 float weatherSurfaceSettling(vec3 hitPos, vec3 normal, vec3 supportNormal) {
@@ -98,7 +105,9 @@ float weatherSurfaceSettling(vec3 hitPos, vec3 normal, vec3 supportNormal) {
     float density = clamp(WEATHER_DATA.state.w, 0.0, 1.0);
     float typeBoost = (WEATHER_DATA.state.y == 2) ? 1.34 : 1.04;
     float anchor = max(pocketMask, slopeBase * 0.30 + cavity * 0.40 + lee * 0.30);
-    return clamp(settlingAmount * supportGate * shelter * anchor * (0.76 + density * 1.10) * typeBoost, 0.0, 1.0);
+    return clamp(settlingAmount * supportGate * shelter * anchor *
+        (0.76 + density * 1.10) * typeBoost, 0.0, 1.0) *
+        (WEATHER_DATA.state.y == 2 ? weatherSurfaceFrozenShare(hitPos) : 1.0);
 }
 
 float weatherSurfaceHeight(vec3 hitPos) {
@@ -182,7 +191,14 @@ void applyWeatherSurface(vec3 hitPos, vec3 normal, vec3 supportNormal, inout vec
         albedo = mix(albedo, albedo * 0.50, wet * 0.62);
         roughness = max(0.012, roughness * (1.0 - wet * 0.78));
         metallic = max(0.0, metallic - wet * 0.05);
+        float frozenWet = wet * weatherSurfaceFrozenShare(hitPos);
+        albedo = mix(albedo, vec3(0.72, 0.79, 0.86), frozenWet * 0.18);
+        roughness = mix(roughness, 0.08, frozenWet);
     } else if (WEATHER_DATA.state.y == 2) {
+        float thawWet = (1.0 - weatherSurfaceFrozenShare(hitPos)) *
+            clamp(WEATHER_DATA.surface.y, 0.0, 1.0) * mix(0.35, 1.0, exposed);
+        albedo *= 1.0 - thawWet * 0.31;
+        roughness = max(0.012, roughness * (1.0 - thawWet * 0.78));
         float acc = weatherSurfaceAccumulation(hitPos, normal, supportNormal);
         float settling = weatherSurfaceSettling(hitPos, normal, supportNormal);
         float heightLift = clamp(WEATHER_DATA.surface.w, 0.0, 1.0);

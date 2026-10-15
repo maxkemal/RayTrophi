@@ -2084,9 +2084,7 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     // but ensures water still flows properly when rendering or playing a timeline animation.
     float fps = static_cast<float>(render_settings.animation_fps > 0 ? render_settings.animation_fps : 24);
     float frame_time = static_cast<float>(render_settings.animation_current_frame) / fps;
-    params.water_time = render_settings.realtime_weather_preview
-        ? params.time
-        : frame_time;
+    params.water_time = frame_time;
 
     // Full image tiles
     params.tile_x = 0;

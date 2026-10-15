@@ -176,7 +176,7 @@ inline void makeCloudLightningGPU(const atmosphere::CloudState& clouds, float ti
         // the pulse is averaged over [age - shutter, age]. Instantaneous
         // sampling of the ~74 ms re-strokes at 30-60 fps aliased into random
         // strobing, and a stroke shorter than a frame could vanish.
-        const float shutter = lightning.shutter_s;
+        const float shutter = clouds.shutter_s;
         if (age < 0.0f || age - shutter >= duration) {
             continue;
         }

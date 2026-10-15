@@ -1,3 +1,5 @@
+#include "RtLensWeatherBindings.h"
+#include "RtObjectSubstanceBindings.h"
 #include "RtPostBindings.h"
 #include "RtAudioBindings.h"
 #include "RtWeatherEffectsBindings.h"
@@ -3459,6 +3461,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     // Substance library: rt.substance (built-ins read-only; derive to edit).
     py::module_ substance = module.def_submodule(
         "substance", "Substance library: built-ins and project substances derived from them");
+    rtpy::registerObjectSubstanceBindings(substance);
     substance.def("list", [] {
         std::vector<rtapi::SubstanceSummary> rows;
         requireResult(rtapi::listSubstances(rows));
@@ -4799,6 +4802,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     module.def("remove_scene_load_callback", &rtapi::removeSceneLoadCallback, py::arg("id"));
 
     py::module_ camera = module.def_submodule("camera", "Active camera get/set (Faz 5.1a)");
+    rtpy::registerLensWeatherBindings(camera);
     camera.def("get", [] {
         rtapi::CameraState s;
         requireResult(rtapi::getCamera(s));

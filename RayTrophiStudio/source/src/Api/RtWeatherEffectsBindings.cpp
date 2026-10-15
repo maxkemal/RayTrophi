@@ -15,13 +15,13 @@ const MethodParam weatherPatch[] = {
     {"patch", "object", true, "Weather effect fields; wind is climate-owned", nullptr, nullptr}
 };
 const MethodDescriptor weatherGet = {
-    "world.get_weather_effects", "world", "Read fast weather and surface cover controls",
-    "Wind values are read-only. Rain=1, snow=2, dust=3, mist=4.",
+    "world.get_weather_effects", "world", "Read the manual surface cover (wet/snow/dust)",
+    "Surface cover only: type 1 = wet, 2 = snow, 3 = dust. Falling precipitation (shafts and near-camera drops) is the atmosphere's: world.get_clouds precipitation, measured with world.sample_clouds mode near_precip. Wind values are read-only (climate).",
     "read", "Read", false, "object", "weather|rain|snow|dust", "world.set_weather_effects",
     nullptr, nullptr, nullptr, nullptr, nullptr, 0, true
 };
 const MethodDescriptor weatherSet = {
-    "world.set_weather_effects", "world", "Patch fast weather and surface cover controls",
+    "world.set_weather_effects", "world", "Patch the manual surface cover (wet/snow/dust)",
     "Rejects malformed or out-of-range values atomically; wind reads climate.",
     "write", "SceneWrite", false, "object", "weather|rain|snow|dust", "world.get_weather_effects",
     nullptr, nullptr, "world.get_weather_effects", "accumulation",
@@ -43,7 +43,7 @@ void registerWeatherEffectsBindings(pybind11::module_& world) {
         const std::string patch = py::cast<std::string>(
             py::module_::import("json").attr("dumps")(kwargs));
         requireWeatherResult(rtapi::setWeatherEffectsJson(patch));
-    }, "Partial patch of fast rain/snow/dust/mist and surface cover controls.");
+    }, "Partial patch of the manual surface cover (wet/snow/dust).");
 }
 } // namespace rtpy
 

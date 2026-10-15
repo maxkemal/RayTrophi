@@ -12,10 +12,11 @@ void tickWeatherReactions(UIContext& ctx) {
     if (ctx.scene.audio->transportPaused()) {
         return;
     }
-    const auto weather = ctx.renderer.world.getWeatherParams();
     const float wind = ctx.renderer.world.getClimate().wind_speed_mps;
-    float rain = weather.enabled && weather.type == WEATHER_RAIN ?
-        std::clamp(weather.intensity, 0.0f, 1.0f) : 0.0f;
+    // Rain is the atmosphere's (the manual WeatherParams is surface cover only
+    // since 2026-10-14). The rate AT the camera needs a GPU read-back:
+    // ATMOSPHERE_NEAR_PRECIP.md N2.
+    float rain = 0.0f;
     const auto& clouds = ctx.renderer.world.getClouds();
     // Global ground-reaching cloud precipitation only; no claim of local shelter/core sampling.
     if (clouds.layers[0].enabled && clouds.layers[0].coverage > 0 &&

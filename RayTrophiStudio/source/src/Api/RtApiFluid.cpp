@@ -3490,6 +3490,7 @@ Result createSimulationCollider(const SimulationColliderInfo& info,
     RayTrophiSim::ParticleColliderDesc desc;
     Result converted = colliderDescFromInfo(info, desc);
     if (!converted.ok) return converted;
+    matter::applyObjectSubstance(g_ctx->scene, desc);
     auto& created = runtime.addCollider(desc);
     out = colliderInfoFromDesc(created);
     invalidateScriptSimulation();
@@ -3512,6 +3513,9 @@ Result updateSimulationCollider(const std::string& name,
     RayTrophiSim::ParticleColliderDesc desc;
     Result converted = colliderDescFromInfo(info, desc);
     if (!converted.ok) return converted;
+    if (!matter::colliderMatchesObjectSubstance(g_ctx->scene, desc)) {
+        return Result::fail("Collider material follows the object; use substance.set_object");
+    }
     *it = std::move(desc);
     invalidateScriptSimulation();
     g_ctx->scene.rebuildSDFColliderAsync(*it);

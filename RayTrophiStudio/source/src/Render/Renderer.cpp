@@ -1,3 +1,4 @@
+#include "Backend/LensWeatherGpu.h"
 #include "renderer.h"
 #include "Animation/RigPoseView.h"
 #include <SDL_image.h>
@@ -147,10 +148,6 @@ float rt_cloud_fbm(Vec3 p, int octaves) {
 bool rt_weather_active(const WeatherParams& weather) {
     return weather.enabled != 0 && weather.type != WEATHER_NONE &&
            weather.intensity > 0.0f && weather.density > 0.0f;
-}
-
-bool rt_weather_visual_active(const WeatherParams& weather) {
-    return rt_weather_active(weather) && weather.visual_mode != WEATHER_VISUAL_SURFACE_ONLY;
 }
 
 bool rt_weather_surface_active(const WeatherParams& weather) {
@@ -369,157 +366,6 @@ void rt_apply_weather_surface(
         roughness = std::min(1.0f, roughness + cover * (0.38f + heightLift * 0.08f));
         metallic *= (1.0f - cover * 0.55f);
     }
-}
-
-Vec3 rt_weather_tint_color(const WeatherParams& weather) {
-    switch (weather.type) {
-        case WEATHER_RAIN: return Vec3(0.50f, 0.56f, 0.62f);
-        case WEATHER_SNOW: return Vec3(0.86f, 0.90f, 0.96f);
-        case WEATHER_DUST: return Vec3(0.74f, 0.58f, 0.38f);
-        case WEATHER_MIST: return Vec3(0.70f, 0.76f, 0.82f);
-        default: return Vec3(0.0f);
-    }
-}
-
-Vec3 rt_apply_weather_atmosphere(const WeatherParams& weather, const Vec3& color, const Vec3& rayDir, float distance) {
-    if (!rt_weather_visual_active(weather)) return color;
-
-    const float vis = std::max(0.02f, std::clamp(weather.visibility, 0.0f, 1.0f));
-    const float sigma = weather.intensity * weather.density * (0.00018f + (1.0f - vis) * 0.00042f);
-    float amount = std::clamp(1.0f - std::exp(-std::max(distance, 0.0f) * sigma), 0.0f, 0.82f);
-
-    Vec3 tint = rt_weather_tint_color(weather);
-    if (weather.type == WEATHER_RAIN) tint *= 0.72f;
-    if (weather.type == WEATHER_DUST) tint *= 1.12f;
-
-    const Vec3 wind = Vec3(weather.derived_wind_direction.x, weather.derived_wind_direction.y, weather.derived_wind_direction.z);
-    const Vec3 windDir = wind.length_squared() > 1e-8 ? wind.normalize() : Vec3(1.0f, 0.0f, 0.0f);
-    const float forward = std::pow(std::max(0.0f, Vec3::dot(rayDir.normalize(), windDir)), 4.0f);
-    amount = std::min(0.90f, amount + forward * weather.intensity * weather.density * 0.08f);
-    return Vec3::lerp(color, tint, amount);
-}
-
-float rt_precip_smoothstep(float edge0, float edge1, float x) {
-    float t = 0.0f;
-    if (edge1 >= edge0) {
-        t = std::clamp((x - edge0) / std::max(edge1 - edge0, 1e-6f), 0.0f, 1.0f);
-    } else {
-        t = std::clamp((edge0 - x) / std::max(edge0 - edge1, 1e-6f), 0.0f, 1.0f);
-    }
-    return t * t * (3.0f - 2.0f * t);
-}
-
-float rt_precip_hash(float x, float y) {
-    const float v = std::sin(x * 127.1f + y * 311.7f) * 43758.5453123f;
-    return v - std::floor(v);
-}
-
-float rt_precip_noise(float x, float y) {
-    const float cell_x = std::floor(x);
-    const float cell_y = std::floor(y);
-    const float frac_x = x - cell_x;
-    const float frac_y = y - cell_y;
-    const float smooth_x = frac_x * frac_x * (3.0f - 2.0f * frac_x);
-    const float smooth_y = frac_y * frac_y * (3.0f - 2.0f * frac_y);
-    const float n00 = rt_precip_hash(cell_x, cell_y);
-    const float n10 = rt_precip_hash(cell_x + 1.0f, cell_y);
-    const float n01 = rt_precip_hash(cell_x, cell_y + 1.0f);
-    const float n11 = rt_precip_hash(cell_x + 1.0f, cell_y + 1.0f);
-    const float nx0 = rt_cloud_lerp(n00, n10, smooth_x);
-    const float nx1 = rt_cloud_lerp(n01, n11, smooth_x);
-    return rt_cloud_lerp(nx0, nx1, smooth_y);
-}
-
-float rt_precip_line(float u, float v, float windX, float windY, float time, float density, float scale) {
-    const float wind_drive = 1.0f + density * 0.85f;
-    const float px = u * 74.0f / scale + windX * time * (6.5f + density * 4.0f);
-    const float py = v * 22.0f / scale - time * (34.0f + density * 10.0f) + windY * time * (7.5f + density * 4.5f);
-    const float cx = std::floor(px);
-    const float cy = std::floor(py);
-    const float fx = px - cx;
-    const float fy = py - cy;
-    const float rnd = rt_precip_hash(cx, cy);
-    const float spawn = rt_precip_smoothstep(0.94f - density * 0.10f, 1.0f, rnd);
-    const float x = std::abs(fx - 0.5f - (rnd - 0.5f) * (0.35f + 0.18f * wind_drive));
-    return spawn * rt_precip_smoothstep(0.055f - density * 0.016f, 0.0f, x) * rt_precip_smoothstep(1.0f, 0.04f, fy);
-}
-
-float rt_precip_flake(float u, float v, float windX, float windY, float time, float density, float scale) {
-    const float px = u * 46.0f / scale + windX * time * (2.6f + density * 2.5f);
-    const float py = v * 30.0f / scale - time * (2.8f + density * 0.9f) + windY * time * (1.1f + density * 0.9f);
-    const float cx = std::floor(px);
-    const float cy = std::floor(py);
-    const float fx = px - cx;
-    const float fy = py - cy;
-    const float rnd = rt_precip_hash(cx, cy);
-    const float spawn = rt_precip_smoothstep(0.84f - density * 0.22f, 1.0f, rnd);
-    const float ox = rt_precip_hash(cx + 13.7f, cy + 13.7f) + std::sin(time * 1.7f + rnd * 6.2831f) * (0.12f + density * 0.08f) + windX * 0.12f;
-    const float oy = rt_precip_hash(cx + 41.3f, cy + 41.3f) + windY * 0.05f;
-    const float radius = rt_cloud_lerp(0.035f, 0.120f + density * 0.025f, rt_precip_hash(cx + 7.1f, cy + 7.1f));
-    const float dx = fx - ox;
-    const float dy = fy - oy;
-    return spawn * rt_precip_smoothstep(radius, 0.0f, std::sqrt(dx * dx + dy * dy));
-}
-
-float rt_precip_dust(float u, float v, float windX, float windY, float time, float density, float scale) {
-    const float advected_u = u / scale + windX * time * (0.24f + density * 0.08f);
-    const float advected_v = v / scale + windY * time * (0.18f + density * 0.10f);
-    const float streaks = rt_precip_noise(advected_u * 18.0f, advected_v * 7.5f);
-    const float wisps = rt_precip_noise(advected_u * 33.0f + 19.4f, advected_v * 12.0f + 7.1f);
-    const float grain = rt_precip_noise(advected_u * 95.0f + 3.7f, advected_v * 42.0f + 17.3f);
-    const float elongated = rt_precip_smoothstep(0.52f, 0.98f, streaks * 0.72f + wisps * 0.28f);
-    const float soft_grain = rt_precip_smoothstep(0.38f, 0.88f, grain);
-    return (elongated * (0.72f + density * 0.28f) + soft_grain * 0.18f) * density;
-}
-
-Vec3 rt_apply_weather_precipitation_overlay(
-    const WeatherParams& weather,
-    const Vec3& color,
-    const Vec3& rayDirIn,
-    float distance,
-    float time
-) {
-    if (!rt_weather_visual_active(weather)) return color;
-
-    const float density = std::clamp(std::pow(std::clamp(weather.intensity, 0.0f, 1.0f), 0.82f) *
-        (0.28f + std::clamp(weather.density, 0.0f, 1.0f) * 1.22f), 0.0f, 1.0f);
-    if (density <= 0.001f) return color;
-
-    const Vec3 rayDir = rayDirIn.normalize();
-    constexpr float kPi = 3.14159265358979323846f;
-    const float u = std::atan2(static_cast<float>(rayDir.z), static_cast<float>(rayDir.x)) / (2.0f * kPi) + 0.5f;
-    const float v = std::acos(std::clamp(static_cast<float>(rayDir.y), -1.0f, 1.0f)) / kPi;
-    const float scale = std::max(weather.precipitation_scale, 0.25f);
-    const float depthFade = rt_precip_smoothstep(0.6f, 18.0f, std::max(distance, 0.0f));
-    const float horizonFade = std::clamp(1.0f - std::max(static_cast<float>(rayDir.y), 0.0f) * 0.35f, 0.35f, 1.0f);
-    const Vec3 wind(weather.derived_wind_direction.x, weather.derived_wind_direction.y, weather.derived_wind_direction.z);
-    const float windLen2 = static_cast<float>(wind.x * wind.x + wind.z * wind.z);
-    const float windAmount = std::clamp(weather.derived_wind_speed_mps / 35.0f, 0.0f, 1.0f);
-    const float invWindLen = windLen2 > 1e-8f ? 1.0f / std::sqrt(windLen2) : 0.0f;
-    const float windX = (windLen2 > 1e-8f ? static_cast<float>(wind.x) * invWindLen : 1.0f) * windAmount;
-    const float windY = (windLen2 > 1e-8f ? static_cast<float>(wind.z) * invWindLen : 0.0f) * windAmount;
-    const float windVisual = 0.65f + windAmount * 0.9f;
-    Vec3 result = color;
-    const Vec3 tint = rt_weather_tint_color(weather);
-
-    if (weather.type == WEATHER_RAIN) {
-        const float amount = std::min(1.0f, rt_precip_line(u, v, windX, windY, time, density, scale) * (0.85f + density * 0.85f + windAmount * 0.35f));
-        result = Vec3::lerp(result, result * 0.84f, amount * density * 0.24f * depthFade);
-        result += Vec3(0.45f, 0.55f, 0.66f) * amount * density * 0.28f * depthFade * horizonFade * windVisual;
-    } else if (weather.type == WEATHER_SNOW) {
-        const float amount = std::min(1.0f, rt_precip_flake(u, v, windX, windY, time, density, scale) * (0.80f + density * 0.95f + windAmount * 0.22f));
-        result = Vec3::lerp(result, tint, amount * density * 0.34f * depthFade * horizonFade);
-        result += Vec3(0.85f, 0.92f, 1.0f) * amount * density * 0.16f * depthFade * windVisual;
-    } else if (weather.type == WEATHER_DUST) {
-        const float amount = std::min(1.0f, rt_precip_dust(u, v, windX, windY, time, density, scale) * (0.75f + density * 1.05f + windAmount * 0.45f));
-        result = Vec3::lerp(result, tint, amount * 0.16f * depthFade * windVisual);
-        result += tint * amount * 0.075f * depthFade * windVisual;
-    } else if (weather.type == WEATHER_MIST) {
-        const float amount = std::min(1.0f, rt_precip_dust(u, v, windX * 0.25f, windY * 0.25f, time * 0.35f, density, scale * 1.4f) * (0.65f + density * 0.85f));
-        result = Vec3::lerp(result, tint, amount * 0.11f * depthFade);
-    }
-
-    return result;
 }
 
 float rt_sample_procedural_cloud_cpu(const Vec3& local_p, const VDBVolume* vdb, const NishitaSkyParams& n) {
@@ -6757,26 +6603,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         // ... (Optional: could add simple fog here too if needed, but Nishita Parity is the main goal)
     }
 
-    if (rt_weather_active(world.data.weather)) {
-        float weather_dist = first_hit_t > 0.0f ? first_hit_t : 12000.0f;
-        if (first_vol_t > 0.0f) weather_dist = std::min(weather_dist, first_vol_t);
-        weather_dist *= (1.0f - first_hit_transmission);
-        color = toVec3f(rt_apply_weather_atmosphere(
-            world.data.weather,
-            toVec3(color),
-            r.direction,
-            weather_dist));
-        const float fps = static_cast<float>(render_settings.animation_fps > 0 ? render_settings.animation_fps : 24);
-        const float weather_time = render_settings.realtime_weather_preview
-            ? static_cast<float>(SDL_GetTicks()) / 1000.0f
-            : static_cast<float>(render_settings.animation_current_frame) / fps;
-        color = toVec3f(rt_apply_weather_precipitation_overlay(
-            world.data.weather,
-            toVec3(color),
-            r.direction,
-            weather_dist,
-            weather_time));
-    }
+    // Falling precipitation is the atmosphere's (cloud march + near drops,
+    // Vulkan only; docs/dev/ATMOSPHERE_NEAR_PRECIP.md): the CPU path draws
+    // none, as it draws no cloud field.
 
     // --- Final NaN/Inf check and clamp (matching GPU) ---
     // GPU: color.x = isfinite(color.x) ? fminf(fmaxf(color.x, 0.0f), 100.0f) : 0.0f;
@@ -9334,6 +9163,7 @@ void Renderer::syncCameraToBackend(const Camera& cam) {
     // Pro Features
     cp.distortion = cam.distortion;
     cp.lens_quality = cam.lens_quality;
+    Backend::copyLensWeatherCamera(cam, cp);
     cp.vignetting_amount = cam.vignetting_amount;
     cp.vignetting_falloff = cam.vignetting_falloff;
     cp.chromatic_aberration = cam.chromatic_aberration;

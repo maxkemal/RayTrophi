@@ -164,6 +164,8 @@ void syncLocalWeather(const World& world, float cloud_time_s, const Vec3& camera
 
 // Recent rain at a point, evaluated now (IPC): the same function the map uses.
 struct LocalWeatherPoint {
+    float air_temperature_c = 15.0f;
+    float frozen_surface_share = 0.0f; // thermal suitability, not deposited mass
     SuitabilityTerms suitability;
     float recent_rain = 0.0f;
     float rain_now = 0.0f;

@@ -272,6 +272,8 @@ void scheduleUvGeometrySync(UIContext& ctx) {
 // ============================================================================
 
 void DeleteObjectCommand::execute(UIContext& ctx) {
+    deleted_object_substance_ = matter::takeObjectSubstance(ctx.scene, object_name_);
+    deleted_substance_references_ = matter::retainObjectSubstanceHistory(deleted_object_substance_);
     bool needs_update = false;
 
     // Flat (direct-SoA) node: capture the mesh Hittables once so undo can restore
@@ -354,6 +356,7 @@ void DeleteObjectCommand::execute(UIContext& ctx) {
 }
 
 void DeleteObjectCommand::undo(UIContext& ctx) {
+    matter::putObjectSubstance(ctx.scene, object_name_, deleted_object_substance_);
     bool needs_update = false;
     for (const auto& tri : deleted_triangles_) {
         if (tri) {
@@ -454,6 +457,7 @@ void DeleteObjectCommand::undo(UIContext& ctx) {
 // ============================================================================
 
 void DuplicateObjectCommand::execute(UIContext& ctx) {
+    matter::putObjectSubstance(ctx.scene, new_name_, duplicated_object_substance_);
     // Redo: Add duplicates back
     bool needs_update = false;
     
@@ -484,6 +488,9 @@ void DuplicateObjectCommand::execute(UIContext& ctx) {
 }
 
 void DuplicateObjectCommand::undo(UIContext& ctx) {
+    duplicated_object_substance_ = matter::takeObjectSubstance(ctx.scene, new_name_);
+    duplicated_substance_references_ =
+        matter::retainObjectSubstanceHistory(duplicated_object_substance_);
     // Remove duplicated objects
     auto& objs = ctx.scene.world.objects;
     auto new_end = std::remove_if(objs.begin(), objs.end(), 

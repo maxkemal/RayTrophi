@@ -11,18 +11,38 @@ namespace {
 // Every scene entry that names a substance, as "kind 'owner'" strings.
 std::vector<std::string> substanceReferences(const std::string& name) {
     std::vector<std::string> refs;
-    auto& runtime = scriptSimulationRuntime();
-    for (const auto& source : runtime.flowSources()) {
-        if (source.fluid_substance == name) refs.push_back("flow source '" + source.name + "'");
+    if (matter::objectSubstanceHistoryUses(name)) {
+        refs.push_back("object material undo history");
     }
-    for (const auto& collider : runtime.colliders()) {
-        if (collider.msf_substance == name) refs.push_back("collider '" + collider.name + "'");
+    for (auto item = g_ctx->scene.object_substances.begin();
+         item != g_ctx->scene.object_substances.end(); ++item) {
+        if (item.value().at("substance") == name) {
+            refs.push_back("object '" + item.key() + "'");
+        }
     }
-    for (const auto& domain : runtime.gridDomains()) {
-        if (domain.fluid_params.default_substance == name)
-            refs.push_back("domain '" + domain.name + "' default substance");
-        for (const auto& binding : domain.fluid_substance_materials) {
-            if (binding.substance == name) refs.push_back("domain '" + domain.name + "' binding");
+    for (const auto& system : g_ctx->scene.particle_systems) {
+        if (!system.runtime) {
+            continue;
+        }
+        for (const auto& source : system.runtime->flowSources()) {
+            if (source.fluid_substance == name) {
+                refs.push_back("flow source '" + source.name + "'");
+            }
+        }
+        for (const auto& collider : system.runtime->colliders()) {
+            if (collider.msf_substance == name) {
+                refs.push_back("collider '" + collider.name + "'");
+            }
+        }
+        for (const auto& domain : system.runtime->gridDomains()) {
+            if (domain.fluid_params.default_substance == name) {
+                refs.push_back("domain '" + domain.name + "' default substance");
+            }
+            for (const auto& binding : domain.fluid_substance_materials) {
+                if (binding.substance == name) {
+                    refs.push_back("domain '" + domain.name + "' binding");
+                }
+            }
         }
     }
     for (const auto& domain : g_ctx->scene.fluid_objects) {
@@ -36,18 +56,25 @@ std::vector<std::string> substanceReferences(const std::string& name) {
 // Refresh physical readback immediately after a library edit, including
 // descendants. Do not reapply solver hints: the user's numerical tuning stays.
 void refreshDomainMaterials() {
-    auto& runtime = scriptSimulationRuntime();
-    const auto scale = runtime.worldThermal().scale();
     std::string error;
-    for (auto& domain : runtime.gridDomains()) {
-        if (RayTrophiSim::simulationDomainHasLiquid(domain.type)) {
-            RayTrophiSim::Fluid::resolveGridDomainSubstancePhysics(
-                domain, domain.voxel_size, scale, error);
+    for (auto& system : g_ctx->scene.particle_systems) {
+        if (!system.runtime) {
+            continue;
+        }
+        const auto scale = system.runtime->worldThermal().scale();
+        for (auto& domain : system.runtime->gridDomains()) {
+            if (RayTrophiSim::simulationDomainHasLiquid(domain.type)) {
+                RayTrophiSim::Fluid::resolveGridDomainSubstancePhysics(
+                    domain, domain.voxel_size, scale, error);
+            }
         }
     }
-    for (auto& domain : g_ctx->scene.fluid_objects) {
-        RayTrophiSim::Fluid::resolveDomainSubstancePhysics(
-            domain.params, domain.voxel_size, scale, error);
+    if (!g_ctx->scene.fluid_objects.empty()) {
+        const auto scale = scriptSimulationRuntime().worldThermal().scale();
+        for (auto& domain : g_ctx->scene.fluid_objects) {
+            RayTrophiSim::Fluid::resolveDomainSubstancePhysics(
+                domain.params, domain.voxel_size, scale, error);
+        }
     }
 }
 

@@ -15,12 +15,11 @@ nlohmann::json weatherJson(const WeatherParams& w) {
     return {
         {"enabled", w.enabled != 0}, {"type", w.type},
         {"intensity", w.intensity}, {"density", w.density},
-        {"precipitation_scale", w.precipitation_scale}, {"visibility", w.visibility},
+        {"precipitation_scale", w.precipitation_scale},
         {"surface_wetness_output", w.surface_wetness_output},
         {"surface_accumulation_output", w.surface_accumulation_output},
         {"surface_settling_output", w.surface_settling_output},
         {"surface_height_output", w.surface_height_output},
-        {"visual_mode", w.visual_mode},
         {"surface_response_enabled", w.surface_response_enabled != 0}
     };
 }
@@ -38,12 +37,13 @@ Result setWeatherEffects(const WeatherParams& w) {
     if (renderJobActive()) {
         return Result::fail("scene is locked by the final render job");
     }
-    if ((w.enabled != 0 && w.enabled != 1) || w.type < WEATHER_NONE || w.type > WEATHER_MIST ||
-        w.visual_mode < WEATHER_VISUAL_OVERLAY || w.visual_mode > WEATHER_VISUAL_SURFACE_ONLY ||
+    // Surface cover only (none/wet/snow/dust): falling precipitation is the
+    // atmosphere's (world.set_clouds precipitation, ATMOSPHERE_NEAR_PRECIP.md).
+    if ((w.enabled != 0 && w.enabled != 1) || w.type < WEATHER_NONE || w.type > WEATHER_DUST ||
         (w.surface_response_enabled != 0 && w.surface_response_enabled != 1)) {
-        return Result::fail("weather enabled/surface flags must be 0/1, type 0..4, visual_mode 0..1");
+        return Result::fail("weather enabled/surface flags must be 0/1, type 0..3 (none|wet|snow|dust)");
     }
-    if (!unit(w.intensity) || !unit(w.density) || !unit(w.visibility) ||
+    if (!unit(w.intensity) || !unit(w.density) ||
         !unit(w.surface_wetness_output) || !unit(w.surface_accumulation_output) ||
         !unit(w.surface_settling_output) || !unit(w.surface_height_output) ||
         !std::isfinite(w.precipitation_scale) || w.precipitation_scale < 0.1f ||
@@ -92,7 +92,7 @@ Result setWeatherEffectsJson(const std::string& patchText) {
                 return Result::fail("unknown weather field: " + it.key());
             }
             const bool flag = it.key() == "enabled" || it.key() == "surface_response_enabled";
-            const bool integer = it.key() == "type" || it.key() == "visual_mode";
+            const bool integer = it.key() == "type";
             if ((flag && !it.value().is_boolean()) ||
                 (integer && !it.value().is_number_integer()) ||
                 (!flag && !integer && !it.value().is_number())) {
@@ -106,12 +106,10 @@ Result setWeatherEffectsJson(const std::string& patchText) {
         w.intensity = json["intensity"].get<float>();
         w.density = json["density"].get<float>();
         w.precipitation_scale = json["precipitation_scale"].get<float>();
-        w.visibility = json["visibility"].get<float>();
         w.surface_wetness_output = json["surface_wetness_output"].get<float>();
         w.surface_accumulation_output = json["surface_accumulation_output"].get<float>();
         w.surface_settling_output = json["surface_settling_output"].get<float>();
         w.surface_height_output = json["surface_height_output"].get<float>();
-        w.visual_mode = json["visual_mode"].get<int>();
         w.surface_response_enabled = json["surface_response_enabled"].get<bool>() ? 1 : 0;
         return setWeatherEffects(w);
     } catch (const std::exception& e) {

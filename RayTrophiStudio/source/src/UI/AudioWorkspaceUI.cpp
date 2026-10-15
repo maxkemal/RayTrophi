@@ -111,6 +111,18 @@ void drawClipInspector(UIContext& ctx, const json& clip) {
         workspaceCall(ctx, "clip_update", {{"id", id}, {"name", name}});
     }
     const auto data = ctx.scene.audio->snapshot();
+    if (ImGui::BeginCombo(property("Track").c_str(),
+        clip.value("track_id", std::string()).c_str())) {
+        if (ImGui::Selectable("Legacy bus / no track")) {
+            workspaceCall(ctx, "clip_update", {{"id", id}, {"track_id", ""}});
+        }
+        for (const auto& track : data.at("tracks")) {
+            if (ImGui::Selectable(track.at("name").get<std::string>().c_str())) {
+                workspaceCall(ctx, "clip_update", {{"id", id}, {"track_id", track.at("id")}});
+            }
+        }
+        ImGui::EndCombo();
+    }
     if (ImGui::BeginCombo(property("Asset").c_str(), clip.at("asset_id").get<std::string>().c_str())) {
         for (const auto& asset : data.at("assets")) {
             if (ImGui::Selectable(asset.at("name").get<std::string>().c_str(),
@@ -158,6 +170,7 @@ void drawClipInspector(UIContext& ctx, const json& clip) {
             workspaceCall(ctx, "clip_update", {{"id", id}, {key, value}});
         }
     }
+    ImGui::BeginDisabled(!clip.value("track_id", std::string()).empty());
     if (ImGui::BeginCombo(property("Bus").c_str(), clip.at("bus").get<std::string>().c_str())) {
         for (const char* bus : {"Master", "Weather", "Effects", "Ambience", "Music"}) {
             if (ImGui::Selectable(bus, clip.at("bus") == bus)) {
@@ -166,6 +179,7 @@ void drawClipInspector(UIContext& ctx, const json& clip) {
         }
         ImGui::EndCombo();
     }
+    ImGui::EndDisabled();
     editCurve(ctx, clip, "gain_curve", "Gain automation", 1);
     editCurve(ctx, clip, "pitch_curve", "Pitch automation", 1);
     editCurve(ctx, clip, "pan_curve", "Pan automation", 0);
@@ -198,18 +212,62 @@ json workspaceCall(UIContext& ctx, const std::string& operation, const json& par
     }
 }
 
-void selectClip(UIContext& ctx, const std::string& id) {
-    const auto result = workspaceCall(ctx, "workspace_update", {{"selected_clip", id}});
+void drawSelectedAudioClipProperties(UIContext& ctx) {
+    const auto view = ctx.scene.audio->invoke("workspace_get", json::object());
+    const auto data = ctx.scene.audio->snapshot();
+    for (const auto& clip : data.at("clips")) {
+        if (clip.at("id") == view.at("selected_clip")) {
+            drawClipInspector(ctx, clip);
+            return;
+        }
+    }
+    ImGui::TextWrapped("Select a clip on the arrangement canvas.");
+}
+
+void selectAudioClips(UIContext& ctx, const json& ids) {
+    const auto id = ids.empty() ? std::string() : ids.back().get<std::string>();
+    std::string trackId;
+    const auto data = ctx.scene.audio->snapshot();
+    for (const auto& clip : data.at("clips")) {
+        if (clip.at("id").get<std::string>() == id) {
+            trackId = clip.value("track_id", std::string());
+            break;
+        }
+    }
+    json patch = {{"selected_clip", id}, {"selected_clips", ids}, {"selected_track", trackId}};
+    if (!ids.empty()) {
+        double first = 86400, last = 0;
+        for (const auto& clip : data.at("clips")) {
+            if (std::find(ids.begin(), ids.end(), clip.at("id")) != ids.end()) {
+                first = std::min(first, clip.at("start_seconds").get<double>());
+                last = std::max(last, clip.at("start_seconds").get<double>() +
+                    clip.at("duration_seconds").get<double>());
+            }
+        }
+        first = std::min(first, 86400 - 0.05);
+        patch["audition_start_seconds"] = first;
+        patch["audition_end_seconds"] = std::min(86400.0,
+            std::max(first + 0.05, std::min(last, first + 30)));
+    }
+    const auto result = workspaceCall(ctx, "workspace_update", patch);
     if (result.contains("selected_clip") && ctx.scene_ui_ptr) {
         ctx.selection.clearSelection();
         ctx.scene_ui_ptr->tab_to_focus = "Audio";
     }
 }
 
+void selectClip(UIContext& ctx, const std::string& id) {
+    selectAudioClips(ctx, id.empty() ? json::array() : json::array({id}));
+}
+
 void addTimelineAsset(UIContext& ctx, const std::string& assetId) {
     const double fps = std::max(1, ctx.render_settings.animation_fps);
+    const auto view = ctx.scene.audio->invoke("workspace_get", json::object());
+    const auto track = view.value("designer_open", false) &&
+        view.value("designer_edit_view", std::string("source")) == "arrange" ?
+        view.value("selected_track", std::string()) : std::string();
     const auto added = workspaceCall(ctx, "clip_create", {
-        {"asset_id", assetId}, {"start_seconds", ctx.scene.timeline.current_frame / fps}});
+        {"track_id", track}, {"asset_id", assetId}, {"start_seconds", ctx.scene.timeline.current_frame / fps}});
     if (added.contains("id")) {
         selectClip(ctx, added.at("id"));
         openBottom("audio");
@@ -243,8 +301,11 @@ void drawAudioEditorNavigation(UIContext& ctx) {
     if (ImGui::Selectable("Designer", view.value("designer_open", false), 0, ImVec2(85, 0))) {
         openSoundDesigner(ctx);
     }
-    ImGui::NewLine();
-    ImGui::Separator();
+    if (view.value("designer_open", false)) {
+        ImGui::SameLine();
+    } else {
+        ImGui::Separator();
+    }
 }
 
 void drawAudioBottomTabs(UIContext& ctx) {
@@ -435,6 +496,10 @@ void drawWorkspace(UIContext& ctx) {
                 if (ImGui::SmallButton("Design / process")) {
                     openSoundDesigner(ctx, id);
                 }
+                if (asset.value("source", std::string()).rfind("RayTrophi sound design v", 0) == 0 &&
+                    ImGui::SmallButton("Reuse recipe")) {
+                    reuseSoundRecipe(ctx, id);
+                }
                 if (ImGui::SmallButton("Add clip")) {
                     addTimelineAsset(ctx, id);
                 }
@@ -491,6 +556,11 @@ void drawWorkspace(UIContext& ctx) {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Output")) {
+            if (ctx.scene.audio->invoke("workspace_get", json::object()).value("designer_open", false)) {
+                if (ImGui::CollapsingHeader("Designed sound / Save", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    drawSoundDesignInspector(ctx);
+                }
+            }
             drawOutputControls(ctx);
             ImGui::EndTabItem();
         }
@@ -522,10 +592,7 @@ void drawInspectorDock(UIContext& ctx) {
         ImGui::SetScrollX(0);
         ImGui::PushItemWidth(-FLT_MIN);
         const auto data = ctx.scene.audio->snapshot();
-        bool found = view.value("designer_open", false);
-        if (found) {
-            drawSoundDesignInspector(ctx);
-        }
+        bool found = false;
         for (const auto& clip : data.value("clips", json::array())) {
             if (!found && clip.at("id") == view.at("selected_clip")) {
                 drawClipInspector(ctx, clip);

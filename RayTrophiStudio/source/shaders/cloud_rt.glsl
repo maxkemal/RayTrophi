@@ -569,15 +569,18 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
         float thick = max(L.a.y, 1.0);
         bool column = li == 3;
         bool fogLayer = li == 4;
-        // Fog: a thin band crossed nearly horizontally; >= 20 m steps that
+        // Fog: a thin band crossed nearly horizontally; >= 40 m steps that
         // grow faster with distance (a 1 km band at 128 steps would ask for
-        // 15 m steps over kilometres of ground).
-        float growth = fogLayer ? 2000.0 : 5000.0;
+        // 15 m steps over kilometres of ground). Its shape cell is 700 m
+        // (175 m vertically): 20 m steps, refined to 25 m inside, gave a
+        // camera inside the fog ~150 lit samples per ray and doubled the
+        // frame (2026-10-15).
+        float growth = fogLayer ? 1000.0 : 5000.0;
         // Fine step: the shell in `steps` samples; it grows with distance so
         // horizon clouds do not eat the budget. The storm column is
         // troposphere-deep: step it like a 3 km layer, not like 12 km.
         float baseDt = min(thick, column ? 3000.0 : thick) / float(steps) * 2.0;
-        if (fogLayer) baseDt = max(baseDt, 20.0);
+        if (fogLayer) baseDt = max(baseDt, 40.0);
         // Phase lobes for this layer.
         float ph[CLOUD_MS_OCTAVES];
         float pIso = 1.0 / (4.0 * CLOUD_PI);
@@ -597,6 +600,15 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
         // samples once the view is mostly occluded (and on secondary rays).
         float tauTop = 0.0, tauBot = 0.0;
         int aoTick = 0;
+        // Local fog: its light (sun through the clouds above, sky / ground
+        // occlusion) changes over hundreds of metres, while the band is
+        // stepped every ~20 m over kilometres of the map box. Every fog
+        // sample ran the full 7-tap light march and 2 AO taps through the
+        // storm clouds: ~80-100 ms of a RayFusion frame (2026-10-15, storm
+        // scene, post-rain mist). The light is reused within fogReuseM.
+        vec3 fogLitAt = vec3(0.0);
+        float fogLitTau = 0.0;
+        bool fogLitValid = false;
         while (t < tEnd && budget > reserve) {
             int remaining = budget - reserve;
             --budget;
@@ -647,7 +659,9 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
             // steps, the integration below is energy-conserving per step.
             float deepGrow = 1.0 + 1.5 * (1.0 - smoothstep(0.05, 0.35, T));
             if (secondary) deepGrow *= 2.0;
-            float stepLen = min(max(max(dt * 0.6 * deepGrow, 25.0), completionStep), tEnd - t);
+            // Fog is a smooth medium: no in-cloud refinement.
+            float stepLen = fogLayer ? min(max(dt * deepGrow, completionStep), tEnd - t)
+                                     : min(max(max(dt * 0.6 * deepGrow, 25.0), completionStep), tEnd - t);
             if (sigma > 0.0) {
                 if (Es.r < 0.0) Es = cloudSunIrradiance(p, sunDir);
                 // Light march: 6 samples doubling from 40 m (2.5 km), detail
@@ -658,15 +672,27 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                 // falls (secondary: 2). The last tap stretches to the same
                 // 2520 m, so the total path is unchanged -- only resolution.
                 float tau = 0.0;
-                if (sunUp) {
+                bool fogReuse = fogLayer && fogLitValid &&
+                                distance(p, fogLitAt) < max(150.0, 0.05 * t);
+                if (fogReuse) {
+                    tau = fogLitTau;
+                } else if (sunUp) {
                     int lightTaps = secondary ? 2 : (T > 0.35 ? 6 : (T > 0.12 ? 4 : 3));
-                    bool lightDetail = !secondary && T > 0.35;
+                    // Fog: DETERMINISTIC taps, base shape only. A low sun's
+                    // path runs kilometres through the band (tau ~ 7), so
+                    // exp(-tau) of a randomly placed tap swung from dark to
+                    // fully lit: bright speckles on sunlit fog, frozen in
+                    // RayFusion's opaque-pixel pass, which has no temporal
+                    // history (2026-10-15). The fog is smooth: midpoint
+                    // quadrature has nothing to alias.
+                    bool lightDetail = !secondary && T > 0.35 && !fogLayer;
                     float lt = 0.0;
                     for (int j = 0; j < lightTaps; ++j) {
                         float seg = (j == lightTaps - 1) ? 2520.0 - lt : 40.0 * pow(2.0, float(j));
                         // Stratify the existing light samples to soften fixed
                         // quadrature bands without adding another shaft march.
-                        vec3 q = p + sunDir * (lt + seg * mix(0.2, 0.8, cloudRand(rng)));
+                        float lj = fogLayer ? 0.5 : mix(0.2, 0.8, cloudRand(rng));
+                        vec3 q = p + sunDir * (lt + seg * lj);
                         tau += cloudDensity(q, lightDetail && j < 3 && j < lightTaps - 1) * seg;
                         lt += seg;
                     }
@@ -753,12 +779,30 @@ void cloudMarchLimited(vec3 o, vec3 d, float tLimit, int steps, uint seed,
                         tauBot = cloudLayerOwnDensity(li, qb, cloudAltitude(qb), false, unused) * dBot;
                     }
                     openness = 1.0 - 0.35 * (1.0 - smoothstep(0.0, 3000.0, volSdf));
+                } else if (fogReuse) {
+                    // tauTop / tauBot of the sample the light was taken at.
                 } else if (aoTick++ % aoEvery == 0) {
                     vec3 qt = p + upN * (dTop * 0.5), qb = p - upN * (dBot * 0.5);
                     tauTop = (allLayers ? cloudDensity(qt, false) :
                               cloudLayerDensity(li, qt, cloudAltitude(qt), false)) * dTop;
                     tauBot = (allLayers ? cloudDensity(qb, false) :
                               cloudLayerDensity(li, qb, cloudAltitude(qb), false)) * dBot;
+                    if (fogLayer) {
+                        // Fog barely absorbs: its own depth REDISTRIBUTES the
+                        // sky light, it does not remove it. Counted as an
+                        // occluder it held unlit fog at ~0.4 x the sky -- as
+                        // dark as the terrain inside it, which then stayed
+                        // readable through the fog (2026-10-15). Only the
+                        // clouds above / below occlude the fog's ambient.
+                        float unusedFog;
+                        tauTop = max(tauTop - cloudFogDensity(qt, false, unusedFog) * dTop, 0.0);
+                        tauBot = max(tauBot - cloudFogDensity(qb, false, unusedFog) * dBot, 0.0);
+                    }
+                }
+                if (fogLayer && !fogReuse) {
+                    fogLitAt = p;
+                    fogLitTau = tau;
+                    fogLitValid = true;
                 }
                 // The ground under this cloud sits in the cloud's own shadow:
                 // approximate by the sun transmittance of this column.
@@ -878,6 +922,10 @@ void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout 
     } else if (b.x <= b.y && b.y > 0.0) {
         tEnd = min(tEnd, b.y);                 // below: leave through it
     }
+    // A camera ray's first metres belong to the near drops (near_precip.glsl):
+    // their mean coverage IS this curtain's optical depth there, so the
+    // curtain starts where they end -- counted once.
+    if (cloudMarchLod == 0 && !fromAbove) t0 = max(t0, cloudNearPrecipRange());
     if (tEnd <= t0) return;
 
     uint rng = cloudSeed(seed ^ 0x2c1b3c6du, o + d * 3.0);
@@ -893,46 +941,66 @@ void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout 
     // Cost (2026-10-13, storm scene with stratiform rain everywhere): the
     // curtain took RT from 400 to 1600 ms per sample. Secondary rays (every
     // bounce segment) only carry the curtain into indirect light: 8 samples,
-    // no streaks, one sun estimate. Camera rays: at most 48 samples (the
-    // jitter is averaged by RT accumulation / RayFusion history).
-    int n = secondary ? 8 : clamp(steps / 3, 16, 48);
+    // no streaks, one sun estimate. Camera rays: at most 48 samples with
+    // deterministic quadrature (opaque raster pixels have no such history), and no
+    // more than one per ~80 m of
+    // the segment -- the shafts' finest structure is the ~110 m streak
+    // octave, and a camera -> ground segment of 200 m took the same 48 heavy
+    // samples as a 40 km sky ray (2026-10-14, storm scene at 178 mm/h:
+    // the curtain was ~210 of 340 ms per RayFusion frame).
+    float len = tEnd - t0;
+    int n = secondary ? 8 : clamp(int(ceil(len / 80.0)), 6, clamp(steps / 3, 16, 48));
     // Lit cloud bases light the curtain during a flash.
     vec4 flashActivity = cloudFlashAny() ? cloudLightningActivities() : vec4(0.0);
     bool flashOn = any(greaterThan(flashActivity, vec4(0.0)));
     // The sun's optical depth through the column above changes slowly along
-    // the ray: one estimate serves `shadeEvery` neighbouring samples (the
+    // the ray: one estimate serves every sample within `refresh` metres (the
     // per-sample 4-step march was the most expensive part of the curtain).
-    // Far samples (dt > 400 m) used to force a fresh 4-step estimate EACH --
-    // with the quadratic spacing that was most of them. Far shafts are a
-    // veil: every 3rd sample, 2 steps.
-    int shadeTick = 0;
+    // Far shafts (dt > 400 m) are a veil: 2 steps.
     float shade = 1.0;
-    // Steps grow with distance: near shafts resolved, far ones a veil.
-    float len = tEnd - t0;
-    float jitter = cloudRand(rng);
+    vec3 shadeAt = vec3(0.0);
+    bool shadeValid = false;
+    // Stable camera quadrature; secondary rays retain stochastic sample points.
+    float jitter = secondary ? cloudRand(rng) : 0.5;
     vec3 pin = vec3(0.0);
     float pT = 1.0, dSum = 0.0, dW = 0.0;
     for (int i = 0; i < n; ++i) {
-        float u0 = (float(i) + jitter) / float(n);
-        float u1 = (float(i) + 1.0 + jitter) / float(n);
-        float ta = t0 + len * u0 * u0, tb = t0 + len * min(u1 * u1, 1.0);
+        // Randomize the sample, never the interval boundaries: the old
+        // shifted boundaries omitted the first len*(jitter/n)^2 metres.
+        float u0 = float(i) / float(n);
+        float u1 = float(i + 1) / float(n);
+        float ta = t0 + len * u0 * u0;
+        float tb = t0 + len * u1 * u1;
         float dt = tb - ta;
         if (dt <= 0.0) continue;
-        vec3 p = o + d * ta;
-        // Streaks only where the step resolves them (~110 m fine octave):
-        // a short segment in front of a nearby slope keeps them at any
-        // distance, a long sky ray turns far shafts into their mean veil.
+        float sampleDistance = mix(ta, tb, jitter);
+        vec3 p = o + d * sampleDistance;
+        // Far sky segments average unresolved streaks into their mean veil.
         float forward;
-        float sigma = cloudPrecipDensityLod(p, secondary ? 0.0 : 1.0 - smoothstep(120.0, 600.0, dt), forward);
+        // Inside a shaft its fine modulation must not become a noisy screen
+        // veil. Near individual particles already supply resolved detail;
+        // the curtain keeps its mean extinction and gains structure gradually.
+        float detail = secondary ? 0.0 :
+            (1.0 - smoothstep(120.0, 600.0, dt)) *
+            smoothstep(240.0, 1200.0, sampleDistance);
+        float sigma = cloudPrecipDensityLod(p, detail, forward);
         if (sigma <= 0.0) continue;
         float ph = mix(pIso, pFwd, forward);
         if (Es.r < 0.0) Es = cloudSunIrradiance(p, sunDir);
         bool far = dt > 400.0;
-        int shadeEvery = secondary ? n : (far ? 3 : 2);
-        if (shadeTick++ % shadeEvery == 0) {
+        // The shade is the cloud SHADOW on the shaft: it changes over
+        // hundreds of metres, so it is refreshed by distance, not per sample
+        // (every 2nd sample x every cloud interval x 4 steps was hundreds of
+        // density evaluations per pixel). Secondary rays: one estimate.
+        // 0.4 t: on a 40 km sky ray (quadratic spacing) a 0.15 t radius
+        // re-marched nearly every far sample.
+        float refresh = max(250.0, 0.4 * ta);
+        if (!shadeValid || (!secondary && distance(p, shadeAt) > refresh)) {
             float tauSun = cloudOpticalDepth(p, sunDir, CLOUD_RT_MAX_DIST,
                                              (secondary || far) ? 2 : 4, jitter, false);
             shade = exp(-tauSun);
+            shadeAt = p;
+            shadeValid = true;
         }
         // Under a cloud the sky above is mostly blocked (scaled with the sun
         // shade as a proxy); ~0.125 of it comes back off the ground.
@@ -940,7 +1008,7 @@ void cloudPrecipMarch(vec3 o, vec3 d, float tLimit, int steps, uint seed, inout 
         if (flashOn) S += cloudFlashMediumLight(p, flashActivity) * (1.0 / (4.0 * CLOUD_PI));
         float Ts = exp(-sigma * dt);
         pin += pT * S * 0.95 * (1.0 - Ts);
-        dSum += ta * pT * (1.0 - Ts);
+        dSum += sampleDistance * pT * (1.0 - Ts);
         dW += pT * (1.0 - Ts);
         pT *= Ts;
         if (pT < 0.01) break;

@@ -1,0 +1,61 @@
+#version 460
+#include "lens_water_state.glsl"
+#include "lens_water_phase.glsl"
+layout(local_size_x = 8, local_size_y = 8) in;
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(lensField);
+    if (any(greaterThanEqual(pixel, size))) {
+        return;
+    }
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
+    // Unit determinant preserves drop area while equalizing screen pixel axes.
+    float rootAspect = sqrt(max(lp.optics.y, 0.0001));
+    vec2 metric = vec2(rootAspect, 1.0 / rootAspect);
+    vec2 shift = vec2(0.0);
+    float cover = 0.0;
+    float blur = 0.0;
+    vec2 solidCover = vec2(0.0);
+    if (lp.control.x != 0u && lens.meta.y > 0u) {
+        for (uint i = 0u; i < LENS_CAPACITY; ++i) {
+            if (lens.drops[i].a.z <= 0.0) {
+                continue;
+            }
+            LensDrop drop = lens.drops[i];
+            float radius = lensParticleRadius(drop) / lp.windGlass.z;
+            float support = sqrt(radius * radius + lp.optics.x * lp.optics.x);
+            vec2 delta = (uv - lens.drops[i].a.xy) * metric;
+            float q = dot(delta, delta) / max(support * support, 1e-8);
+            if (q >= 1.0) {
+                continue;
+            }
+            float shape = 1.0 - q;
+            float dilution = radius * radius / max(support * support, 1e-8);
+            vec2 solidShare = clamp(drop.b.zw / max(drop.a.z, 1e-20), 0.0, 1.0);
+            float liquidShare = max(1.0 - solidShare.x - solidShare.y, 0.0);
+            // Stable granular snow boundary; the coating does not shimmer
+            // while time is paused or when the cached frame is replayed.
+            float grain = 0.75 + 0.25 * sin(delta.x / max(radius, 1e-6) * 17.0 +
+                float(i) * 2.4) * sin(delta.y / max(radius, 1e-6) * 13.0);
+            solidCover += shape * shape * dilution * solidShare * vec2(grain * 7.0, 3.0);
+            float weight = shape * shape * dilution * liquidShare;
+            shift -= delta * (4.0 * radius * radius * shape * dilution /
+                              max(support * support, 1e-8)) * liquidShare;
+            cover += weight;
+            blur = max(blur, support * 0.15 * shape * liquidShare);
+        }
+    }
+    // Displacement is conditional on a ray intersecting water. Coverage is
+    // applied once by the composite; leaving it in shift as well suppresses
+    // defocused drops twice and makes an otherwise populated glass invisible.
+    if (cover > 1e-8) {
+        shift /= cover;
+    }
+    shift /= metric;
+    cover = 1.0 - exp(-cover * 3.0);
+    float film = lp.control.x != 0u ? lens.stats.z : 0.0;
+    imageStore(lensField, pixel, vec4(clamp(shift, -0.05, 0.05),
+        max(blur, film * 0.003), max(cover, film * 0.4)));
+    imageStore(lensSolidField, pixel,
+        vec4(vec2(1.0) - exp(-solidCover), 0.0, 0.0));
+}

@@ -1,5 +1,11 @@
 # RayTrophi — engineering notes index
 
+- [Audio background jobs — kaynak teslimi ve yeni build kabulü](AUDIO_BACKGROUND_JOBS.md)
+- [Shared object physical materials](OBJECT_SUBSTANCE_BINDINGS.md)
+- [Scene acoustics roadmap](SCENE_ACOUSTICS_ROADMAP.md)
+- [Scene acoustic direct-path diagnostic](SCENE_ACOUSTICS_TRACE.md)
+- [Audio spectral region editing — PCM işleme ve son kabul kuyruğu](AUDIO_SPECTRAL_EDITING.md)
+
 - [Matter sparse tile grid — AKTİF, depolama temeli ve solver geçiş kapıları](MATTER_SPARSE_TILE_GRID.md)
 
 This folder holds the working documents behind RayTrophi Studio: roadmaps,
@@ -40,13 +46,14 @@ checkpoints, not proof that a later build/listening/physics gate passed.
 
 | Area | Current delivery | Next gate / plan |
 |---|---|---|
-| [Sound Designer](AUDIO_SOUND_DESIGN.md) | **BUILD CONFIRMED 2026-10-14.** DaisySP/Signalsmith, in-memory preview, visual Designer and name-based save. New listening/UI/external IPC acceptance pending. |
+| [Sound Designer](AUDIO_SOUND_DESIGN.md) | **V2 BUILD/PREVIEW CONFIRMED.** [V3 visual tools](AUDIO_DESIGN_TOOLS.md): layers, rack, waveform editing, full FFT, history/reuse implemented in source; new build and external/manual acceptance pending. |
 | [Audio workspace](AUDIO_WORKSPACE_UI.md) | Timeline/mixer, fades, live gestures, source-aware right-edge loop extension, responsive inspector. User accepted v1 synthesis, fades and live movement. | Latest Designer/resize/narrow-panel checks; [runtime plan](SCENE_AUDIO_RUNTIME_PLAN_2026_10_11.md). |
 | [Physics audio telemetry](SCENE_AUDIO_TELEMETRY_POLICY.md) | Manual collection defaults off; no implicit enable from binding, capture or Audio UI. Separate DEM/flow/MPM channels in source; small DEM live/RAM replay acceptance recorded. | Revision-27 shader off/on/off checks, all-channel replay and cost; selective requests/GPU reductions. [Pre-UI contracts](AUDIO_PRE_UI_DELIVERY.md). |
 | [Cell cloud volumes](ATMOSPHERE_CLOUD_VOLUMES.md) | **ACTIVE 2026-10-14.** V0–V2 recorded live acceptance, V2b/V2c live observations; V2d source ready, shader/visual gate pending. SDF/atlas cell clouds; V3–V5 remain planned. |
 | [Unified Matter](MADDE_T2_T3_HANDOFF.md) | Substance profiles, DEM/MPM/liquid ownership, latent heat and measured fog/rain inventory; T1/T3 quick and T2 thermal acceptance recorded. | Extended shared-clock mixed-owner regression, full physics/convergence/cost gates, fog/rain render integration. |
 | [Compact liquid storage](MATTER_SPARSE_S1_SIVI_GPU.md) | Staged device MAC/FLIP storage; S1 PASS reported in handoff, later solid-weight work remains separately gated. | Compact solid-weight parity, S1b cell fields, host/render/cache S2 and gas S3. No blanket sparse-performance claim. |
-| [Storm/local fog/precipitation](ATMOSPHERE_STORMS.md) | Editable storm cells, scene lightning, local fog and distant precipitation forms are available in source. | [Local winds/fog](ATMOSPHERE_LOCAL_WINDS_FOG.md), [near precipitation](ATMOSPHERE_PRECIP_TYPES.md) and [surface coupling](ATMOSPHERE_SURFACE_COUPLING.md) retain their own gates. |
+| [Storm/local fog/precipitation](ATMOSPHERE_STORMS.md) | Editable storm cells, scene lightning, local fog and distant precipitation forms are available in source. | [Local winds/fog](ATMOSPHERE_LOCAL_WINDS_FOG.md), [precipitation forms](ATMOSPHERE_PRECIP_TYPES.md), [near-camera precipitation](ATMOSPHERE_NEAR_PRECIP.md) and [surface coupling](ATMOSPHERE_SURFACE_COUPLING.md) retain their own gates. |
+| [Near-camera precipitation](ATMOSPHERE_NEAR_PRECIP.md) | **ACTIVE 2026-10-15: N1c user-built, numerical probe ALL PASS; visual acceptance pending.** Atmosphere-driven near drops/flakes and distant-curtain handoff. | N2 shelter/splash; [Camera glass L1 user-built; L2 snow/ice source pending build](ATMOSPHERE_LENS_WATER.md); N4 surface coupling. |
 
 ---
 
@@ -197,6 +204,8 @@ Volume shadow implementation: [REALTIME_VOLUME_SHADOWS.md](REALTIME_VOLUME_SHADO
 | Document | Area |
 |---|---|
 | [ATMOSPHERE_PRECIP_TYPES.md](ATMOSPHERE_PRECIP_TYPES.md) | **ACTIVE 2026-10-12 (batch 14 written, not built: far-curtain forms).** Phase 8: precipitation type from the column temperature profile and terrain height (drizzle, rain, sleet, snow by temperature, freezing rain, graupel, hail in strong cores), snow line, per-type visual table (size, fall speed, far curtain, near particles, bright band). |
+| [ATMOSPHERE_NEAR_PRECIP.md](ATMOSPHERE_NEAR_PRECIP.md) | **AKTİF 2026-10-15 (N1c user-built, external numerical probe passed).** Phase 10: near-camera precipitation as one more view of the atmosphere's precipitation — `cloudPrecipSampleForm` at the camera, a world-anchored drop lattice moving with fall speed + surface wind, streak = speed × shared `shutter_s`, the curtain's light, mean coverage equal to the curtain's optical depth (curtain starts at the drop range). Removed the manual weather overlay/sky tint/wall-clock preview (CPU, OptiX, Vulkan RT, RayFusion); `WeatherParams` is manual surface cover only. Plan: N2 shelter + splash + camera motion, N3 lens drops, N4 surface coupling. |
+| [ATMOSPHERE_LENS_WATER.md](ATMOSPHERE_LENS_WATER.md) | **AKTIF 2026-10-15: L1 user-built; L2 snow/ice source delivered, build/live acceptance pending.** Shared atmosphere temperature for camera/surface response, snow accumulation, mass-preserving melt/freeze and separate solid HDR optical field. Local camera temperature removed; common-temperature build/live checks pending. 256 particles / 601-step replay. Slight ellipticity remains a visual follow-up; L3 shelter/wipers planned. |
 | [ATMOSPHERE_SURFACE_COUPLING.md](ATMOSPHERE_SURFACE_COUPLING.md) | **TASLAK 2026-10-12.** Separate plan: one ground precipitation map (rate, type, size, wind, temperature, recent rain) published one-way to wetness, splash, runoff, snow accumulation, melt and hail consumers; fixes the interface now so the two sides cannot diverge. |
 | [MADDE_UI_TEK_OTORITE.md](MADDE_UI_TEK_OTORITE.md) | **2026-10-09.** MADDE_TIPLERI'nin panel/otorite devamı: dört soru modeli (Domain = nerede/kalite, Madde = ne, Kaynak = ne kadar/hangi durumda, çözücü = türetilir). Tane malzeme alanları domain'den maddeye (U2), Kalite + türetilmiş sertlik (U3), Matter sekmesi salt okunur İçerik (U4). Kar neden kurulamıyor: sertleşme kaymaya bağlı, hacimsel sıkışmaya (J_p) değil (hipotez, U5 önce ölçüm). U0–U5 kaynakta tek build (U4 kısmi), Snow + sıkışma sertleşmesi, kontratlar 21/21 PASS; derlenmedi. |
 | [BIRLESIK_MADDE_DOMAIN_TASARIMI.md](BIRLESIK_MADDE_DOMAIN_TASARIMI.md) | **2026-10-11 (güncel devir tablosu başta): yüzey yoğuşması + plana yazılmamış GPU gaz envanteri yapıları (§4.7b) + sis suyu/doygunluk ayarı (§4.8, CANLI PASS) + yağmur: otokonversiyon/sis tavanı/düşüş/iniş (§4.8b, CANLI PASS).** **2026-09-27.** Gaz/sıvı ayrımı olmayan domain: fazlar tek konteynerde, parçacık etiketleri (body/spray/foam/mist/frozen) simülasyonda, görünüm (SDF/splat/fog) etiketten tek karar noktasıyla. Kimlik+depolama birleşir, çözücü değerlendirmesi birleşmez; önce zayıf bağlama (ortak seyrek grid), güçlü iki fazlı projeksiyon isteğe bağlı. İlk senaryo şelale. |
@@ -224,3 +233,9 @@ Related material outside this folder:
 - [`docs/`](../) — the user-facing HTML manual
 - [`docs/template_hub/`](../template_hub/) — template manifest schema and examples
 - [`CLAUDE.md`](../../CLAUDE.md) / [`AGENTS.md`](../../AGENTS.md) — working rules for agents and contributors
+
+Audio next-stage plan: [Çok katmanlı ses kurgu](AUDIO_MULTITRACK_AUTHORING_PLAN.md)
+— planned M0–M4; existing clip foundation, real track model, selection/automation,
+project migration and acceptance. Implementation starts with the shared clip canvas.
+
+- [Scene acoustics listening checkpoint](SCENE_ACOUSTICS_PREVIEW.md) � session preview and user build/scene acceptance.

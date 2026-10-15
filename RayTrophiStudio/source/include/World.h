@@ -25,17 +25,15 @@ enum WorldMode {
     WORLD_MODE_NISHITA = 2
 };
 
+// What MANUALLY covers the surfaces (wet / snow / dust). Falling
+// precipitation is not here: it is the atmosphere's (CloudState::
+// precipitation), shafts and near-camera drops alike
+// (docs/dev/ATMOSPHERE_NEAR_PRECIP.md). Mist (4) left with the screen overlay.
 enum WeatherType {
     WEATHER_NONE = 0,
     WEATHER_RAIN = 1,
     WEATHER_SNOW = 2,
-    WEATHER_DUST = 3,
-    WEATHER_MIST = 4
-};
-
-enum WeatherVisualMode {
-    WEATHER_VISUAL_OVERLAY = 0,
-    WEATHER_VISUAL_SURFACE_ONLY = 1
+    WEATHER_DUST = 3
 };
 
 // GPU-Compatible Structs
@@ -170,24 +168,27 @@ struct AtmosphereAdvanced {
     int env_overlay_blend_mode;    // 0 = Mix, 1 = Multiply, 2 = Screen, 3 = Replace
 };
 
+// Manual SURFACE weather: wetness and snow / dust buildup on materials,
+// until the ground precipitation map drives them
+// (docs/dev/ATMOSPHERE_SURFACE_COUPLING.md step 2). Since 2026-10-14 nothing
+// here draws precipitation in the air: the screen overlay, sky tint,
+// `visibility` and `visual_mode` were removed with it.
 struct WeatherParams {
-    int enabled;                    // 1 = weather system active
-    int type;                       // WeatherType
-    float intensity;                // Artist-facing strength, 0..1
-    float density;                  // Particle/volume density, 0..1
+    int enabled;                    // 1 = surface weather active
+    int type;                       // WeatherType: what covers the surfaces
+    float intensity;                // deposition strength, 0..1
+    float density;                  // deposition density (settling), 0..1
 
     // Climate PACKET (see NishitaSkyParams::derived_*): mirrored from
     // atmosphere::ClimateState by World::syncClimatePacket(), never authored here.
     float3 derived_wind_direction;  // Normalized horizontal world-space wind direction
     float derived_wind_speed_mps;   // m/s at the surface
 
-    float precipitation_scale;      // Visual streak/flake scale
-    float visibility;               // 1 = clear, lower values reduce distance contrast
+    float precipitation_scale;      // breakup pattern scale of the deposit
     float surface_wetness_output;   // Output signal for future surface interaction
     float surface_accumulation_output; // Output signal for snow/dust accumulation
     float surface_settling_output;  // Extra buildup in cavities, pockets, and slope bases
     float surface_height_output;    // Additional shading height for deposited material
-    int visual_mode;                // WeatherVisualMode
     int surface_response_enabled;   // 1 = allow wetness/accumulation on materials
 };
 

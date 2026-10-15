@@ -11,7 +11,7 @@ discarded. After the user prepared the scene again, external IPC captured the im
 below and `cloud_cut_before_2026_10_11.json` with the camera and settings. The image
 shows a conspicuously straight vertical face on the right-hand cloud.
 
-![Straight cloud face baseline](cloud_cut_before_2026_10_11.jpg)
+Straight cloud face baseline (temporary capture removed)
 
 At capture: one generic layer, base 1100 m, thickness 7910 m, type 1, coverage 0.66,
 cell period 4200 m, detail period 500 m, production RT with 128 steps. Cirrus was off.

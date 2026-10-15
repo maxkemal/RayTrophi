@@ -91,7 +91,8 @@ struct VkWorldDataExtended {
     float _aerialPad1;
     float _aerialPad2;
 
-    // Weather payload (passive until weather rendering is enabled)
+    // Surface-weather payload. Retired overlay padding now carries climate;
+    // offsets/types stay fixed in every shader copy of this block.
     int   weatherEnabled;
     int   weatherType;
     float weatherIntensity;
@@ -99,12 +100,12 @@ struct VkWorldDataExtended {
     float weatherWindDirection[3];
     float weatherWindSpeed;
     float weatherPrecipitationScale;
-    float weatherVisibility;
+    float _weatherPad0;       // climate sea-level temperature C
     float weatherSurfaceWetness;
     float weatherSurfaceAccumulation;
     float weatherSurfaceSettling;
     float weatherSurfaceHeight;
-    int   weatherVisualMode;
+    int   _weatherPad1;       // climate lapse K/m, float bits (ABI preserved)
     int   weatherSurfaceResponseEnabled;
     
     // ═══════════════════════════════════════════════════════════════════════════════

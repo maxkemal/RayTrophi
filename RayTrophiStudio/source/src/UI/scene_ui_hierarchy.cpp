@@ -1,3 +1,4 @@
+#include "UI/LensWeatherUI.h"
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - HIERARCHY PANEL
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1883,6 +1884,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
             // CAMERA PROPERTIES
             if (sel.selected.type == SelectableType::Camera && sel.selected.camera) {
                 auto& cam = *sel.selected.camera;
+                LensWeatherUI::draw(ctx, cam);
                 ImGui::Separator();
 
                 // Helper lambda for camera per-property keyframes
@@ -3284,6 +3286,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
         // MATERIAL EDITOR (Only for Objects - not Camera, Light, or World)
         // ─────────────────────────────────────────────────────────────────────────
         if (sel.selected.type == SelectableType::Object) {
+            matter::drawObjectSubstance(ctx, sel.selected.name);
             ImGui::Separator();
             ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.52f, 1.0f), "Material Properties");
             drawMaterialPanel(ctx);

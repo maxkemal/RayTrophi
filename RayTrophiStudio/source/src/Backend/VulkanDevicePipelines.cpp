@@ -405,7 +405,10 @@ bool VulkanDevice::createTonemapPipeline(const std::vector<uint32_t>& computeSPV
     VkPipelineLayoutCreateInfo plInfo{};
     plInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     plInfo.setLayoutCount = 1;
-    plInfo.pSetLayouts = &m_tonemapDescLayout;
+    if (!ensureLensWeatherLayout()) return false;
+    const VkDescriptorSetLayout postLayouts[] = {m_tonemapDescLayout, lensWeatherLayout()};
+    plInfo.setLayoutCount = 2;
+    plInfo.pSetLayouts = postLayouts;
     plInfo.pushConstantRangeCount = 1;
     plInfo.pPushConstantRanges = &pc;
     if (vkCreatePipelineLayout(m_device, &plInfo, nullptr, &m_tonemapPipelineLayout) != VK_SUCCESS) {

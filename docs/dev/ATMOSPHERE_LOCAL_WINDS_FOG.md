@@ -7,6 +7,49 @@
 > uygulayan lokal rüzgârlar". Bu not `ATMOSPHERE_STORMS.md` §4'teki (5b)
 > taslağın yerini alır.
 
+## ★ DEVİR NOTU
+
+- **2026-10-15 — sis maliyeti, YAZILDI derlenmedi.** Kullanıcı: "lokal sis
+  kaliteli ama zemin kontrolü yok sanırım, maliyeti aşırı". Canlı ölçüm
+  (RayFusion, fırtına sahnesi, iki tur): sis açık 217–227 ms, kapalı
+  117–147 ms → **~80–100 ms**, ~80'i gök pass'inde. Sürücüler: `calm = 0`
+  → radyasyon sisi SIFIR; görünen sis tamamen yağmur sonrası pus (ölçek
+  yüksekliği 250 m), bant −5…1740 m, harita 4.2 km kare.
+  Kök: her sis örneği (~20 m'de bir, ışın başına yüzlerce) tam bulut ışık
+  yürüyüşü (7 güneş + 2 AO tam yoğunluk sorgusu) yapıyordu. Düzeltme
+  (`cloud_rt.glsl`): sis örneklerinde ışık `max(150 m, 0.05 t)` içinde
+  yeniden kullanılıyor.
+- **2026-10-15 (2) — derlendi; YAZILDI derlenmedi:** kullanıcı: önceki
+  sahnede biraz iyileşme, ama durdurulmuş yoğun sis karesinde sis hâlâ
+  toplamı ikiye katlıyor. Ölçüm: 154–163 → 359–388 ms (+~200 ms; 2/3'ü gök
+  pass'i). `realtime_steps` 256, kamera sisin İÇİNDE (y 409), pus ölçek
+  yüksekliği 250 m, `fog_strength` 6.66. Kök: sis adımı 20 m, içeride 25 m'ye
+  inceliyordu (bulut kenarı kuralı) → ışın başına ~150 örnek; sisin şekil
+  hücresi 700 m (dikey 175 m). Düzeltme: sis adımı ≥ 40 m, büyüme 1000 m'de,
+  içeride inceltme yok (~4× daha az örnek).
+- **Kullanıcı kastı netleşti — "kontrol" = ELLE SİS:** yağmurlu atmosferde
+  sis vadilere güzel birikip yükseliyor; ama kullanıcı yağmur yokken de
+  isteyebilmeli (sabah yükselen vadi sisi). Eklendi: `local_weather.
+  fog_manual` + `valley_fog` (radyasyon sisi potansiyeli), `valley_fog_lift`
+  (sabah kalkışı), `post_rain_mist` (zemin pusu), 0..1, keylenebilir;
+  çukurlarda toplanma/derinlik/şekil/ışık aynı kalır. IPC `world.set_clouds`,
+  panel "Author the fog", `local_weather_stats.fog_map.source`.
+- **2026-10-15 (3):** derlendi — maliyet gitti, elle sis kuruluyor. Güneşli
+  sis noktacıklıydı (şimşekli temiz): rastgele güneş tap'leri × τ ~ 7 ×
+  RayFusion opak pass'inde birikim yok. Sis ışık tap'leri deterministik
+  yapıldı (YAZILDI, derlenmedi).
+- **2026-10-15 (4):** noktacıklar azaldı (kullanıcı). Işıksız sis zayıftı,
+  arazi seçiliyordu: sisin ortam örtmesi kendi yoğunluğunu sayıyordu →
+  yalnız bulutlar örter (YAZILDI, derlenmedi). Açık: sis içindeki yüzeylerin
+  ortam ışığı (RayFusion IBL) sisi bilmiyor.
+- ~~Açık — "zemin kontrolü"~~ (yanlış anlamaydı; aşağıdaki not referans): bugünkü zemin mantığı: yoğunluk harita
+  zemininin (arazi yüksekliği, 16 m texel) 5 m altında sıfır; çukurlar
+  radyasyon sisini toplar; pus son yağıştan. Ağlar (bina, köprü) ve yüzey
+  türü (su, ıslak toprak, orman) haritada YOK. Kullanıcının kastı
+  netleşmedi (sorulacak).
+
+---
+
 ## 0. İlke: her şey hücrelerin saf fonksiyonu
 
 Hücreler `(seed, t)`'nin saf fonksiyonu. Yerel rüzgâr, "son yağış" ve sis de

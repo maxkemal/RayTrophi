@@ -1,9 +1,21 @@
-# Sound designer v2
+# Sound designer v2 / v3
 
 2026-10-14: implemented in source; user confirmed the Studio build after the MSVC
 JSON-comparison and DaisySP math-constant fixes. New external IPC, listening and UI
 acceptance remain pending. Extends [the approved plan](AUDIO_SOUND_DESIGN_PLAN_2026_10_14.md).
 Legacy synth_generate/preset contracts remain available.
+
+2026-10-14 user test: synthetic preview is good; the reported problem is UI usage
+and wasted header space (test1.jpg reference). This is listening feedback, not a full
+external IPC/serialization/performance acceptance run. Follow-up source layout hides
+scene timeline controls in Designer, removes the redundant blank navigation row,
+uses a compact Play/Stop/Loop/Original/Processed toolbar and shows visual tools
+in four focused workflow pages. This layout change still needs a user build.
+
+The expanded [v3 visual tools contract](AUDIO_DESIGN_TOOLS.md) documents layers,
+ordered effects, full FFT/spectrogram, waveform editing, Designer history and recipe
+reuse. V3 is source-only pending a new user build; the earlier v2 build result does
+not validate these additions. The sampled views described below are the legacy summary.
 
 ## Workflow
 
@@ -52,9 +64,9 @@ scene state; failed asset import removes only the newly authored WAV.
 
 | Operation | Parameters | Capability / history |
 |---|---|---|
-| design_render | required recipe object below | SceneWrite + FilesRead; transient, no undo |
+| design_render | required recipe object below | SceneWrite + FilesRead; transient Designer recipe history |
 | design_preview | original=false, loop=false, strict booleans | SceneWrite; transient |
-| design_status | none | Read; PCM summary, recipe, waveform, envelope, filter, spectrum, cursor |
+| design_status | details=true | Read; PCM summary, recipe, waveform, envelope, filter, spectrum, cursor |
 | design_stop | none | SceneWrite; releases voice/data source, retains design |
 | design_destination | optional absolute folder | Read + FilesRead; resolves folder, creates nothing |
 | design_save | name="Sound", optional folder OR path | SceneWrite + FilesRead + FilesWrite; asset undo |

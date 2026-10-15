@@ -117,7 +117,10 @@ dolu alıyordu. Düzeltme (parti 15): dolu ≤ %60 (updraft 0.55–0.85),
 graupel ≤ %40 (0.3–0.6). Kütle payı olarak.
 
 **Henüz yok:**
-- yakın alan parçacıkları (WeatherParams Rain/Snow, ayrı sistem)
+- ~~yakın alan parçacıkları (WeatherParams Rain/Snow, ayrı sistem)~~ →
+  2026-10-14 `ATMOSPHERE_NEAR_PRECIP.md` N1: kamera önü damlalar bu tip
+  karışımından ve bu tablolardan (düşüş hızı, sönüm, ileri lob) besleniyor;
+  eski WeatherParams overlay'i söküldü
 - zemindeki arazi yüksekliği: kar çizgisi şimdilik perdenin kendi
   yüksekliğinden çıkıyor, arazi okunmuyor
 - erime bandının parlaklığı

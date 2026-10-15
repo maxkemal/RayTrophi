@@ -33,9 +33,21 @@ vec3 cloudSkyAmbient(vec3 direction) {
     return textureLod(atmosphereLUTs[1], vec2(u, v), 0.0).rgb;
 }
 
+#define NEAR_PRECIP_DRAW
+#include "near_precip.glsl"
+
 void main() {
     if (call.op == CLOUD_CALL_SUN_T) {
         call.T = cloudSunTransmittance(call.origin, call.dir, call.seed);
+        return;
+    }
+    if (call.op == CLOUD_CALL_NEAR_PRECIP) {
+        vec3 acc;
+        float T;
+        nearPrecipComposite(call.origin, call.dir, call.tLimit, call.pixelAngle, acc, T);
+        call.inscatter = acc;
+        call.T = T;
+        call.depth = -1.0;
         return;
     }
     cloudCallMissAmbient = (call.flags & CLOUD_CALL_MISS_AMBIENT) != 0u;

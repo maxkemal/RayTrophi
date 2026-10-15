@@ -69,7 +69,7 @@ void tickCloudThunder(UIContext& ctx) {
                 const float probeAge = clouds.lightning.duration_s * size * 0.5f;
                 const float sampleTime = static_cast<float>(onset + probeAge);
                 const auto packet = Backend::makeSharedCloudParamsGPU(clouds, sampleTime,
-                    world.cloudWindOffset(), wind, world.data, sampleTime);
+                    world.cloudWindOffset(), wind, world.data);
                 const auto& event = packet.lightning[lane];
                 if (event.start[3] <= 0 || event.color[3] <= 0) {
                     continue;

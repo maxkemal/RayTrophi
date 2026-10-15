@@ -907,12 +907,10 @@ struct WorldKeyframe {
     float weather_intensity = 0.0f;
     float weather_density = 0.0f;
     float weather_precipitation_scale = 1.0f;
-    float weather_visibility = 1.0f;
     float weather_surface_wetness = 0.0f;
     float weather_surface_accumulation = 0.0f;
     float weather_surface_settling = 0.0f;
     float weather_surface_height = 0.0f;
-    int weather_visual_mode = 0;
     int weather_surface_response_enabled = 1;
 
     // Climate — same units and defaults as atmosphere::ClimateState.
@@ -1166,30 +1164,26 @@ struct WorldKeyframe {
             result.weather_intensity = a.weather_intensity + (b.weather_intensity - a.weather_intensity) * t;
             result.weather_density = a.weather_density + (b.weather_density - a.weather_density) * t;
             result.weather_precipitation_scale = a.weather_precipitation_scale + (b.weather_precipitation_scale - a.weather_precipitation_scale) * t;
-            result.weather_visibility = a.weather_visibility + (b.weather_visibility - a.weather_visibility) * t;
             result.weather_surface_wetness = a.weather_surface_wetness + (b.weather_surface_wetness - a.weather_surface_wetness) * t;
             result.weather_surface_accumulation = a.weather_surface_accumulation + (b.weather_surface_accumulation - a.weather_surface_accumulation) * t;
             result.weather_surface_settling = a.weather_surface_settling + (b.weather_surface_settling - a.weather_surface_settling) * t;
             result.weather_surface_height = a.weather_surface_height + (b.weather_surface_height - a.weather_surface_height) * t;
-            result.weather_visual_mode = (t < 0.5f) ? a.weather_visual_mode : b.weather_visual_mode;
             result.weather_surface_response_enabled = (t < 0.5f) ? a.weather_surface_response_enabled : b.weather_surface_response_enabled;
         } else if (a.has_weather_params) {
             result.weather_enabled = a.weather_enabled; result.weather_type = a.weather_type;
             result.weather_intensity = a.weather_intensity; result.weather_density = a.weather_density;
-            result.weather_precipitation_scale = a.weather_precipitation_scale; result.weather_visibility = a.weather_visibility;
+            result.weather_precipitation_scale = a.weather_precipitation_scale;
             result.weather_surface_wetness = a.weather_surface_wetness; result.weather_surface_accumulation = a.weather_surface_accumulation;
             result.weather_surface_settling = a.weather_surface_settling;
             result.weather_surface_height = a.weather_surface_height;
-            result.weather_visual_mode = a.weather_visual_mode;
             result.weather_surface_response_enabled = a.weather_surface_response_enabled;
         } else if (b.has_weather_params) {
             result.weather_enabled = b.weather_enabled; result.weather_type = b.weather_type;
             result.weather_intensity = b.weather_intensity; result.weather_density = b.weather_density;
-            result.weather_precipitation_scale = b.weather_precipitation_scale; result.weather_visibility = b.weather_visibility;
+            result.weather_precipitation_scale = b.weather_precipitation_scale;
             result.weather_surface_wetness = b.weather_surface_wetness; result.weather_surface_accumulation = b.weather_surface_accumulation;
             result.weather_surface_settling = b.weather_surface_settling;
             result.weather_surface_height = b.weather_surface_height;
-            result.weather_visual_mode = b.weather_visual_mode;
             result.weather_surface_response_enabled = b.weather_surface_response_enabled;
         }
 
@@ -2582,12 +2576,10 @@ struct ObjectAnimationTrack {
                     result.world.weather_intensity = p->world.weather_intensity + (n->world.weather_intensity - p->world.weather_intensity) * t;
                     result.world.weather_density = p->world.weather_density + (n->world.weather_density - p->world.weather_density) * t;
                     result.world.weather_precipitation_scale = p->world.weather_precipitation_scale + (n->world.weather_precipitation_scale - p->world.weather_precipitation_scale) * t;
-                    result.world.weather_visibility = p->world.weather_visibility + (n->world.weather_visibility - p->world.weather_visibility) * t;
                     result.world.weather_surface_wetness = p->world.weather_surface_wetness + (n->world.weather_surface_wetness - p->world.weather_surface_wetness) * t;
                     result.world.weather_surface_accumulation = p->world.weather_surface_accumulation + (n->world.weather_surface_accumulation - p->world.weather_surface_accumulation) * t;
                     result.world.weather_surface_settling = p->world.weather_surface_settling + (n->world.weather_surface_settling - p->world.weather_surface_settling) * t;
                     result.world.weather_surface_height = p->world.weather_surface_height + (n->world.weather_surface_height - p->world.weather_surface_height) * t;
-                    result.world.weather_visual_mode = (t < 0.5f) ? p->world.weather_visual_mode : n->world.weather_visual_mode;
                     result.world.weather_surface_response_enabled = (t < 0.5f) ? p->world.weather_surface_response_enabled : n->world.weather_surface_response_enabled;
                     result.world.has_weather_params = true;
                     result.has_world = true;
@@ -2597,12 +2589,10 @@ struct ObjectAnimationTrack {
                     result.world.weather_intensity = p->world.weather_intensity;
                     result.world.weather_density = p->world.weather_density;
                     result.world.weather_precipitation_scale = p->world.weather_precipitation_scale;
-                    result.world.weather_visibility = p->world.weather_visibility;
                     result.world.weather_surface_wetness = p->world.weather_surface_wetness;
                     result.world.weather_surface_accumulation = p->world.weather_surface_accumulation;
                     result.world.weather_surface_settling = p->world.weather_surface_settling;
                     result.world.weather_surface_height = p->world.weather_surface_height;
-                    result.world.weather_visual_mode = p->world.weather_visual_mode;
                     result.world.weather_surface_response_enabled = p->world.weather_surface_response_enabled;
                     result.world.has_weather_params = true;
                     result.has_world = true;
@@ -2612,12 +2602,10 @@ struct ObjectAnimationTrack {
                     result.world.weather_intensity = n->world.weather_intensity;
                     result.world.weather_density = n->world.weather_density;
                     result.world.weather_precipitation_scale = n->world.weather_precipitation_scale;
-                    result.world.weather_visibility = n->world.weather_visibility;
                     result.world.weather_surface_wetness = n->world.weather_surface_wetness;
                     result.world.weather_surface_accumulation = n->world.weather_surface_accumulation;
                     result.world.weather_surface_settling = n->world.weather_surface_settling;
                     result.world.weather_surface_height = n->world.weather_surface_height;
-                    result.world.weather_visual_mode = n->world.weather_visual_mode;
                     result.world.weather_surface_response_enabled = n->world.weather_surface_response_enabled;
                     result.world.has_weather_params = true;
                     result.has_world = true;
@@ -3063,9 +3051,9 @@ inline void to_json(json& j, const WorldKeyframe& w) {
         {"ove", w.env_overlay_enabled}, {"ovi", w.env_overlay_intensity}, {"ovr", w.env_overlay_rotation}, {"ovm", w.env_overlay_blend_mode},
         {"wte", w.weather_enabled}, {"wtt", w.weather_type}, {"wti", w.weather_intensity}, {"wtd", w.weather_density},
         {"wtps", w.weather_precipitation_scale},
-        {"wtv", w.weather_visibility}, {"wtwet", w.weather_surface_wetness}, {"wtacc", w.weather_surface_accumulation},
+        {"wtwet", w.weather_surface_wetness}, {"wtacc", w.weather_surface_accumulation},
         {"wtset", w.weather_surface_settling}, {"wthgt", w.weather_surface_height},
-        {"wtvm", w.weather_visual_mode}, {"wtsr", w.weather_surface_response_enabled}
+        {"wtsr", w.weather_surface_response_enabled}
     };
     if (w.has_clouds) atmosphere::cloudsToJson(w.clouds, j["clds"]);
 }
@@ -3134,12 +3122,10 @@ inline void from_json(const json& j, WorldKeyframe& w) {
     w.weather_intensity = j.value("wti", 0.0f);
     w.weather_density = j.value("wtd", 0.0f);
     w.weather_precipitation_scale = j.value("wtps", 1.0f);
-    w.weather_visibility = j.value("wtv", 1.0f);
     w.weather_surface_wetness = j.value("wtwet", 0.0f);
     w.weather_surface_accumulation = j.value("wtacc", 0.0f);
     w.weather_surface_settling = j.value("wtset", 0.0f);
     w.weather_surface_height = j.value("wthgt", 0.0f);
-    w.weather_visual_mode = j.value("wtvm", WEATHER_VISUAL_OVERLAY);
     w.weather_surface_response_enabled = j.value("wtsr", 1);
 }
 

@@ -1,0 +1,235 @@
+#version 460
+#include "lens_water_state.glsl"
+#include "lens_water_phase.glsl"
+layout(local_size_x = 1) in;
+
+void storeSnapshot() {
+    uint slot = lens.meta.x % LENS_HISTORY;
+    lens.snapshots[slot].meta = lens.meta;
+    lens.snapshots[slot].stats = lens.stats;
+    lens.snapshots[slot].previous = lens.previous;
+    for (uint i = 0u; i < LENS_CAPACITY; ++i) {
+        lens.snapshots[slot].drops[i] = lens.drops[i];
+    }
+}
+
+void resetLens(uint target) {
+    for (uint i = 0u; i < LENS_CAPACITY; ++i) {
+        lens.drops[i].a = vec4(0.0);
+        lens.drops[i].b = vec4(0.0);
+    }
+    lens.meta = uvec4(target, 0u, lp.control.z + 1u, lp.control.y);
+    lens.stats = vec4(0.0);
+    lens.previous = lp.originTime;
+    lens.history = uvec4(target, target, lens.history.z, target);
+    storeSnapshot();
+}
+
+int emptySlot() {
+    for (uint i = 0u; i < LENS_CAPACITY; ++i) {
+        if (lens.drops[i].a.z <= 0.0) {
+            return int(i);
+        }
+    }
+    lens.stats.w += 1.0;
+    return -1;
+}
+
+void depositPhase(vec2 uv, float mass, uint seed, vec2 solidShare) {
+    int slot = emptySlot();
+    if (slot < 0) {
+        // Capacity overflow coalesces into an existing drop, preserving water.
+        slot = int(seed % LENS_CAPACITY);
+        lens.drops[slot].a.z += mass;
+        lens.drops[slot].b.zw += mass * solidShare;
+        return;
+    }
+    lens.drops[slot].a = vec4(uv, mass, 0.0);
+    lens.drops[slot].b = vec4(0.0, 0.0, mass * solidShare);
+}
+
+void deposit(vec2 uv, float mass, uint seed, bool trail) {
+    depositPhase(uv, mass, seed, vec2(0.0));
+}
+
+void main() {
+    uint target = uint(clamp(floor(lp.originTime.w * 60.0 + 0.0001), 0.0, 5184000.0));
+    if (lens.meta.z == 0u || lens.meta.w != lp.control.y) {
+        lens.history.z = 0u;
+        resetLens(target);
+        return;
+    }
+    if (lp.control.x == 0u) {
+        resetLens(target);
+        return;
+    }
+    if (lens.meta.z != lp.control.z + 1u) {
+        // A hood/coating edit branches history but preserves water already on glass.
+        lens.meta.z = lp.control.z + 1u;
+        lens.history.x = lens.meta.x;
+        lens.history.y = lens.meta.x;
+        lens.history.w = lens.meta.x;
+        storeSnapshot();
+    }
+    if (target == lens.meta.x) {
+        lens.previous = lp.originTime; // Rebase manual navigation without fake camera speed.
+        return; // Pause and display-only rerenders never advance the simulation.
+    }
+    if (target >= lens.history.x && target <= lens.history.y) {
+        uint slot = target % LENS_HISTORY;
+        if (lens.snapshots[slot].meta.x == target &&
+            lens.snapshots[slot].meta.w == lp.control.y) {
+            lens.meta = lens.snapshots[slot].meta;
+            lens.stats = lens.snapshots[slot].stats;
+            lens.previous = lens.snapshots[slot].previous;
+            for (uint i = 0u; i < LENS_CAPACITY; ++i) {
+                lens.drops[i] = lens.snapshots[slot].drops[i];
+            }
+            return;
+        }
+    }
+    if (target < lens.meta.x || target - lens.meta.x > LENS_HISTORY - 1u) {
+        ++lens.history.z;
+        resetLens(target); // Explicit bounded-history miss; no invented past weather.
+        return;
+    }
+    const float dt = 1.0 / 60.0;
+    float elapsed = max(lp.originTime.w - lens.previous.w, dt);
+    vec3 cameraVelocity = clamp((lp.originTime.xyz - lens.previous.xyz) / elapsed,
+                               vec3(-300.0), vec3(300.0));
+    vec3 gravity = vec3(0.0, -9.81, 0.0);
+    float diameter = lp.windGlass.z;
+    uint requestedSteps = target - lens.meta.x;
+    uint steps = min(8u, requestedSteps);
+    vec4 originBefore = lens.previous;
+    for (uint step = 0u; step < steps; ++step) {
+        ++lens.meta.x;
+        uint seed = lensHash(lp.control.w ^ lens.meta.x);
+        float flux[2];
+        float radii[2];
+        vec3 relative[2];
+        vec3 phases[2];
+        float totalFlux = 0.0;
+        for (int f = 0; f < 2; ++f) {
+            vec4 form = lens.nearState[f == 0 ? 3 : 5];
+            uint id = uint(lens.nearState[2][f == 0 ? 1 : 2] + 0.5);
+            relative[f] = vec3(lp.windGlass.x, -form.y, lp.windGlass.y) - cameraVelocity;
+            float incidence = max(0.0, -dot(relative[f], lp.forward.xyz));
+            float cosine = incidence / max(length(relative[f]), 0.001);
+            bool exposed = lp.up.w < 0.0 || cosine >= lp.up.w;
+            // The represented glass area is square: identical to the draw UV mapping.
+            phases[f] = lensImpactPhase(id, lp.optics.z);
+            flux[f] = exposed ? form.z * incidence * diameter * diameter *
+                lensRetention(id, lp.optics.z) : 0.0;
+            radii[f] = max(form.w, 0.0001);
+            totalFlux += flux[f];
+        }
+        lens.stats.x = totalFlux;
+        // Bounded stratified Bernoulli arrivals; exact expected count below the cap.
+        float requested = totalFlux * dt;
+        float expected = min(requested, 32.0);
+        float representativeWeight = max(requested / 32.0, 1.0);
+        uint count = uint(floor(expected));
+        count += lensRandom(seed) < fract(expected) ? 1u : 0u;
+        for (uint event = 0u; event < count; ++event) {
+            uint h = lensHash(seed + event * 17u);
+            int f = lensRandom(h + 1u) * max(totalFlux, 0.00001) < flux[0] ? 0 : 1;
+            float radius = radii[f];
+            vec2 uv = vec2(lensRandom(h + 2u), lensRandom(h + 3u));
+            float mass = radius * radius * radius * representativeWeight * phases[f].x;
+            if (phases[f].y + phases[f].z > 0.0) {
+                depositPhase(uv, mass, h, phases[f].yz);
+            } else if (radius > 0.0015) {
+                deposit(uv, mass * 0.7, h, false);
+                for (uint child = 0u; child < 3u; ++child) {
+                    vec2 offset = vec2(lensRandom(h + 11u + child),
+                                       lensRandom(h + 21u + child)) - 0.5;
+                    deposit(clamp(uv + offset * 0.05, 0.0, 1.0), mass * 0.1,
+                            lensHash(h + child), true);
+                }
+            } else {
+                deposit(uv, mass, h, false);
+            }
+        }
+        vec3 air = (relative[0] * flux[0] + relative[1] * flux[1]) / max(totalFlux, 0.00001);
+        vec2 force = vec2(dot(gravity, lp.right.xyz), -dot(gravity, lp.up.xyz));
+        force += 0.015 * vec2(dot(air, lp.right.xyz), -dot(air, lp.up.xyz)) * length(air);
+        for (uint i = 0u; i < LENS_CAPACITY; ++i) {
+            if (lens.drops[i].a.z <= 0.0) {
+                continue;
+            }
+            LensDrop d = lens.drops[i];
+            d.a.w += dt;
+            lensExchangePhase(d, lp.optics.z, dt);
+            float liquid = lensLiquidMass(d);
+            float radius = pow(liquid, 1.0 / 3.0);
+            vec2 before = d.a.xy;
+            if (radius >= lp.windGlass.w && d.b.z + d.b.w < d.a.z * 0.25) {
+                float slip = clamp((radius / lp.windGlass.w - 0.8) * 0.02, 0.0, 0.2);
+                d.b.xy = mix(d.b.xy, force * slip / diameter, 1.0 - exp(-dt * 8.0));
+                d.a.xy += d.b.xy * dt;
+            } else {
+                d.b.xy = vec2(0.0);
+            }
+            // Slow evaporation; mass removed here is not misreported as coalescence loss.
+            d.a.z -= liquid * (1.0 - exp(-dt / 180.0));
+            if (any(lessThan(d.a.xy, vec2(-0.05))) ||
+                any(greaterThan(d.a.xy, vec2(1.05))) || d.a.z < 1e-13) {
+                d.a.z = 0.0;
+            }
+            lens.drops[i] = d;
+            if (d.a.z > 0.0 && length(d.a.xy - before) > 0.0001 &&
+                lensRandom(seed + i) < 0.15) {
+                float trailMass = lensLiquidMass(d) * 0.015;
+                lens.drops[i].a.z -= trailMass;
+                deposit(before, trailMass, lensHash(seed + i), true);
+            }
+        }
+        // Deterministic order; merge velocity and center by water volume.
+        for (uint i = 0u; i < LENS_CAPACITY; ++i) {
+            if (lens.drops[i].a.z <= 0.0) {
+                continue;
+            }
+            for (uint j = i + 1u; j < LENS_CAPACITY; ++j) {
+                if (lens.drops[j].a.z <= 0.0) {
+                    continue;
+                }
+                float reach = (lensParticleRadius(lens.drops[i]) +
+                               lensParticleRadius(lens.drops[j])) / diameter;
+                if (distance(lens.drops[i].a.xy, lens.drops[j].a.xy) < reach) {
+                    float total = lens.drops[i].a.z + lens.drops[j].a.z;
+                    float weight = lens.drops[j].a.z / total;
+                    lens.drops[i].a.xy = mix(lens.drops[i].a.xy, lens.drops[j].a.xy, weight);
+                    lens.drops[i].b.xy = mix(lens.drops[i].b.xy, lens.drops[j].b.xy, weight);
+                    lens.drops[i].b.zw += lens.drops[j].b.zw;
+                    lens.drops[i].a.z = total;
+                    lens.drops[j].a.z = 0.0;
+                    lens.drops[j].b.zw = vec2(0.0);
+                }
+            }
+        }
+        lens.meta.y = 0u;
+        float coverage = 0.0;
+        for (uint i = 0u; i < LENS_CAPACITY; ++i) {
+            if (lens.drops[i].a.z > 0.0) {
+                ++lens.meta.y;
+                float radius = lensParticleRadius(lens.drops[i]) / diameter;
+                coverage += 3.14159265 * radius * radius;
+            }
+        }
+        lens.stats.y = 1.0 - exp(-coverage);
+        float liquidCoverage = 0.0;
+        for (uint i = 0u; i < LENS_CAPACITY; ++i) {
+            if (lens.drops[i].a.z > 0.0) {
+                float radius = pow(lensLiquidMass(lens.drops[i]), 1.0 / 3.0) / diameter;
+                liquidCoverage += 3.14159265 * radius * radius;
+            }
+        }
+        lens.stats.z = smoothstep(0.35, 0.8, 1.0 - exp(-liquidCoverage));
+        float fraction = float(step + 1u) / float(requestedSteps);
+        lens.previous = mix(originBefore, lp.originTime, fraction);
+        lens.history.y = lens.meta.x;
+        lens.history.x = max(lens.history.w, lens.meta.x > 600u ? lens.meta.x - 600u : 0u);
+        storeSnapshot();
+    }
+}

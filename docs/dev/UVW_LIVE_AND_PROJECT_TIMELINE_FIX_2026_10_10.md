@@ -32,8 +32,8 @@ formülü veya default filtresi eklenmedi. Raw=.0 yolu hâlâ kullanılabilir.
 
 Ham kayıt/görüntü:
 [uvw_filtered_live_frame61_2026_10_10.json](uvw_filtered_live_frame61_2026_10_10.json),
-[filter .9](sdf_filtered_uvw_compiled_frame61.jpg),
-[raw .0](sdf_raw_uvw_compiled_frame61.jpg).
+filter .9 (temporary capture removed),
+raw .0 (temporary capture removed).
 İki karşılaştırma sonunda position_smoothing=.9 ve capture=false geri
 yüklendi; sahne 61. karede durmuş bırakıldı.
 

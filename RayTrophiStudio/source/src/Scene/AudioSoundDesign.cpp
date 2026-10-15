@@ -2,6 +2,8 @@
 #define NOMINMAX
 #endif
 #include "Audio/AudioSoundDesign.h"
+#include "Audio/AudioDesignDsp.h"
+#include "Audio/AudioDesignJobs.h"
 #include "Audio/AudioService.h"
 #include "../../../external/miniaudio/miniaudio.h"
 #include "../../../external/DaisySP/Source/Synthesis/oscillator.h"
@@ -11,10 +13,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <deque>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <set>
 #include <stdexcept>
 #ifdef _WIN32
 #include <Windows.h>
@@ -50,7 +54,8 @@ json validate(const json& input) {
     require(input.is_object(), "recipe must be an object");
     const std::vector<std::string> common = {"mode", "gain", "lowpass_hz", "highpass_hz",
         "drive", "fade_in_seconds", "fade_out_seconds", "pitch_semitones", "stretch_ratio",
-        "loop_crossfade_seconds"};
+        "loop_crossfade_seconds", "layers", "effects", "gain_db", "reverse", "tail_seconds",
+        "formant_semitones", "formant_base_hz", "formant_compensate"};
     const std::vector<std::string> synth = {"preset", "duration_seconds", "seed",
         "frequency_hz", "decay_seconds", "brightness", "wave", "noise_mix",
         "attack_seconds", "sustain", "release_seconds", "detune_cents",
@@ -66,6 +71,22 @@ json validate(const json& input) {
     }
     json recipe = {{"mode", mode}};
     recipe["gain"] = control(input, "gain", mode == "synth" ? 0.5 : 1, 0, 2);
+    if (input.contains("gain_db")) {
+        const double gainDb = control(input, "gain_db", -6, -60, 6);
+        const double gain = std::pow(10.0, gainDb / 20);
+        require(!input.contains("gain") || std::abs(input.at("gain").get<double>() - gain) < 1e-6,
+                "Choose gain or gain_db; conflicting output levels are rejected");
+        recipe["gain"] = gain;
+    }
+    recipe["tail_seconds"] = control(input, "tail_seconds", 0, 0, 5);
+    recipe["formant_semitones"] = control(input, "formant_semitones", 0, -12, 12);
+    recipe["formant_base_hz"] = control(input, "formant_base_hz", 200, 20, 2000);
+    require(!input.contains("formant_compensate") || input.at("formant_compensate").is_boolean(),
+            "formant_compensate must be boolean");
+    require(!input.contains("reverse") || input.at("reverse").is_boolean(), "reverse must be boolean");
+    recipe["formant_compensate"] = input.value("formant_compensate", false);
+    recipe["reverse"] = input.value("reverse", false);
+    validateDesignDsp(input, recipe);
     recipe["lowpass_hz"] = control(input, "lowpass_hz", 20000, 20, 20000);
     recipe["highpass_hz"] = control(input, "highpass_hz", 20, 20, 20000);
     require(recipe.at("highpass_hz").get<double>() < recipe.at("lowpass_hz").get<double>(),
@@ -111,7 +132,8 @@ json validate(const json& input) {
     return recipe;
 }
 
-AudioPcm synthesize(const json& recipe, std::vector<float>& envelope) {
+AudioPcm synthesize(const json& recipe, std::vector<float>& envelope,
+                    const AudioCancelCheck& check) {
     AudioPcm pcm;
     pcm.channels = 1;
     const auto frames = static_cast<std::size_t>(std::llround(
@@ -150,6 +172,9 @@ AudioPcm synthesize(const json& recipe, std::vector<float>& envelope) {
     std::uint32_t random = recipe.at("seed");
     const std::size_t stride = std::max<std::size_t>(1, frames / 256);
     for (std::size_t frame = 0; frame < frames; ++frame) {
+        if (check && frame % 1024 == 0) {
+            check();
+        }
         const double time = frame / static_cast<double>(rate);
         random = random * 1664525U + 1013904223U;
         const float noise = noiseFilter.Process(static_cast<float>(
@@ -212,10 +237,20 @@ AudioPcm loadRange(json& recipe, const json& assets) {
     return selected;
 }
 
-AudioPcm transform(const AudioPcm& original, const json& recipe) {
+AudioPcm transform(const AudioPcm& original, const json& recipe, json& processing,
+                   const AudioCancelCheck& check) {
     const double ratio = recipe.at("stretch_ratio"), pitch = recipe.at("pitch_semitones");
     AudioPcm result = original;
-    if (ratio != 1 || pitch != 0) {
+    if (recipe.at("reverse").get<bool>()) {
+        for (std::size_t frame = 0; frame < result.frames() / 2; ++frame) {
+            for (unsigned channel = 0; channel < result.channels; ++channel) {
+                std::swap(result.samples[frame * result.channels + channel],
+                    result.samples[(result.frames() - 1 - frame) * result.channels + channel]);
+            }
+        }
+    }
+    if (ratio != 1 || pitch != 0 || recipe.at("formant_semitones").get<double>() != 0 ||
+        recipe.at("formant_compensate").get<bool>()) {
         const auto frames = static_cast<std::size_t>(std::llround(original.frames() * ratio));
         require(frames <= 30 * rate, "Stretched output must not exceed 30 seconds");
         std::vector<std::vector<float>> input(original.channels), output(original.channels);
@@ -223,23 +258,38 @@ AudioPcm transform(const AudioPcm& original, const json& recipe) {
             input[channel].resize(original.frames());
             output[channel].resize(frames);
             for (std::size_t frame = 0; frame < original.frames(); ++frame) {
-                input[channel][frame] = original.samples[frame * original.channels + channel];
+                input[channel][frame] = result.samples[frame * original.channels + channel];
             }
         }
         // Local fixed seed ensures repeatable phase initialization for identical recipes.
         signalsmith::stretch::SignalsmithStretch<float> stretch(1);
         stretch.presetDefault(original.channels, rate);
         stretch.setTransposeSemitones(static_cast<float>(pitch));
+        stretch.setFormantBase(recipe.at("formant_base_hz").get<float>() / rate);
+        stretch.setFormantFactor(static_cast<float>(std::pow(2.0,
+            recipe.at("formant_semitones").get<double>() / 12)),
+            recipe.at("formant_compensate").get<bool>());
         require(stretch.exact(input, static_cast<int>(original.frames()), output,
                               static_cast<int>(frames)),
                 "Source range is too short for independent pitch/time processing");
+        if (check) {
+            check();
+        }
         result.samples.resize(frames * original.channels);
         for (unsigned channel = 0; channel < original.channels; ++channel) {
             for (std::size_t frame = 0; frame < frames; ++frame) {
+                if (check && frame % 1024 == 0) {
+                    check();
+                }
                 result.samples[frame * original.channels + channel] = output[channel][frame];
             }
         }
     }
+    const auto tail = static_cast<std::size_t>(std::llround(
+        recipe.at("tail_seconds").get<double>() * rate));
+    require(result.frames() + tail <= 30 * rate, "Sound including effect tail exceeds 30 seconds");
+    result.samples.resize(result.samples.size() + tail * result.channels, 0);
+    applyDesignEffects(result, recipe.at("effects"), check);
     daisysp::OnePole low[2], high[2];
     for (unsigned channel = 0; channel < result.channels; ++channel) {
         low[channel].Init();
@@ -253,7 +303,11 @@ AudioPcm transform(const AudioPcm& original, const json& recipe) {
     const bool useLowpass = recipe.at("lowpass_hz").get<double>() < 20000;
     const double fadeIn = recipe.at("fade_in_seconds").get<double>() * rate;
     const double fadeOut = recipe.at("fade_out_seconds").get<double>() * rate;
+    std::uint64_t clamped = 0;
     for (std::size_t frame = 0; frame < result.frames(); ++frame) {
+        if (check && frame % 1024 == 0) {
+            check();
+        }
         const double envelope = (fadeIn > 0 ? std::min(1.0, frame / fadeIn) : 1) *
             (fadeOut > 0 ? std::min(1.0, (result.frames() - 1 - frame) / fadeOut) : 1);
         for (unsigned channel = 0; channel < result.channels; ++channel) {
@@ -269,7 +323,9 @@ AudioPcm transform(const AudioPcm& original, const json& recipe) {
                 sample = static_cast<float>(std::tanh(sample * (1 + drive * 15)) /
                                              std::tanh(1 + drive * 15));
             }
-            sample = static_cast<float>(std::clamp(sample * gain * envelope, -1.0, 1.0));
+            const double output = sample * gain * envelope;
+            clamped += std::abs(output) > 1;
+            sample = static_cast<float>(std::clamp(output, -1.0, 1.0));
             require(std::isfinite(sample), "Nonfinite sound design sample");
         }
     }
@@ -295,81 +351,13 @@ AudioPcm transform(const AudioPcm& original, const json& recipe) {
         }
         result = std::move(loop);
     }
+    processing = {{"clamped_samples_before_loop_join", clamped},
+        {"effects", recipe.at("effects").size()}, {"layers", recipe.at("layers").size()}};
     return result;
 }
 
-json analyze(const AudioPcm& pcm) {
-    float peak = 0;
-    double square = 0;
-    std::uint64_t hash = 14695981039346656037ULL;
-    const auto* bytes = reinterpret_cast<const unsigned char*>(pcm.samples.data());
-    for (std::size_t byte = 0; byte < pcm.samples.size() * sizeof(float); ++byte) {
-        hash = (hash ^ bytes[byte]) * 1099511628211ULL;
-    }
-    for (const float sample : pcm.samples) {
-        require(std::isfinite(sample), "Nonfinite sound design PCM");
-        peak = std::max(peak, std::abs(sample));
-        square += static_cast<double>(sample) * sample;
-    }
-    json waveform = json::array();
-    const auto bins = std::min<std::uint64_t>(256, pcm.frames());
-    for (std::uint64_t bin = 0; bin < bins; ++bin) {
-        float low = std::numeric_limits<float>::max();
-        float high = -std::numeric_limits<float>::max();
-        for (auto frame = pcm.frames() * bin / bins;
-             frame < pcm.frames() * (bin + 1) / bins; ++frame) {
-            for (unsigned channel = 0; channel < pcm.channels; ++channel) {
-                const auto value = pcm.samples[frame * pcm.channels + channel];
-                low = std::min(low, value);
-                high = std::max(high, value);
-            }
-        }
-        waveform.push_back({low, high});
-    }
-    // Bounded log-frequency DFT over the loudest of sixteen windows (not a live analyzer).
-    constexpr std::size_t window = 2048;
-    const auto count = std::min<std::uint64_t>(window, pcm.frames());
-    std::uint64_t offset = 0;
-    double loudest = -1;
-    for (unsigned section = 0; section < 16; ++section) {
-        const auto start = (pcm.frames() - count) * section / 15;
-        double energy = 0;
-        for (std::uint64_t frame = 0; frame < count; ++frame) {
-            for (unsigned channel = 0; channel < pcm.channels; ++channel) {
-                const double sample = pcm.samples[(start + frame) * pcm.channels + channel];
-                energy += sample * sample;
-            }
-        }
-        if (energy > loudest) {
-            loudest = energy;
-            offset = start;
-        }
-    }
-    json spectrum = json::array();
-    for (unsigned bin = 0; bin < 64; ++bin) {
-        const double frequency = 20 * std::pow(1000.0, bin / 63.0);
-        double magnitude2 = 0;
-        for (unsigned channel = 0; channel < pcm.channels; ++channel) {
-            double real = 0, imaginary = 0;
-            for (std::uint64_t frame = 0; frame < count; ++frame) {
-                const double sample = pcm.samples[(offset + frame) * pcm.channels + channel] *
-                    (0.5 - 0.5 * std::cos(2 * pi * frame / (count - 1)));
-                const double phase = 2 * pi * frequency * frame / rate;
-                real += sample * std::cos(phase);
-                imaginary -= sample * std::sin(phase);
-            }
-            magnitude2 += real * real + imaginary * imaginary;
-        }
-        const double magnitude = 4 * std::sqrt(magnitude2 / pcm.channels) / count;
-        spectrum.push_back({frequency, 20 * std::log10(std::max(1e-6, magnitude))});
-    }
-    std::ostringstream text;
-    text << std::hex << std::setw(16) << std::setfill('0') << hash;
-    return {{"frames", pcm.frames()}, {"channels", pcm.channels}, {"sample_rate", rate},
-        {"duration_seconds", pcm.frames() / static_cast<double>(rate)}, {"peak", peak},
-        {"rms", std::sqrt(square / pcm.samples.size())}, {"pcm_hash", text.str()},
-        {"waveform", waveform}, {"spectrum", spectrum},
-        {"spectrum_window_start_seconds", offset / static_cast<double>(rate)}};
+json summarizePcm(const AudioPcm& pcm) {
+    return analyzeDesignPcm(pcm, {{"points", 64}, {"time_bins", 8}, {"continuous", false}});
 }
 
 std::string safeName(const json& params) {
@@ -453,9 +441,47 @@ bool publish(const AudioPcm& pcm, const std::filesystem::path& path) {
 }
 } // namespace
 
+namespace {
+json designSourceVersions(const json& recipe, const json& assets) {
+    std::set<std::string> ids;
+    if (recipe.at("mode") == "asset") {
+        ids.insert(recipe.at("asset_id").get<std::string>());
+    }
+    for (const auto& layer : recipe.at("layers")) {
+        if (layer.at("type") == "asset" && layer.at("enabled").get<bool>()) {
+            ids.insert(layer.at("asset_id").get<std::string>());
+        }
+    }
+    json versions = json::object();
+    for (const auto& id : ids) {
+        const auto asset = std::find_if(assets.begin(), assets.end(), [&](const json& entry) {
+            return entry.at("id") == id;
+        });
+        require(asset != assets.end(), "Background design source asset is unavailable");
+        const auto path = pathOf(asset->at("path").get<std::string>());
+        versions[id] = {{"bytes", std::filesystem::file_size(path)},
+            {"modified", std::filesystem::last_write_time(path).time_since_epoch().count()}};
+    }
+    return versions;
+}
+} // namespace
+
 struct AudioSoundDesign::Impl {
     AudioPcm original, processed;
+    AudioDesignJobs jobs;
     json report = {{"ready", false}};
+    std::uint64_t revision = 0;
+    std::shared_ptr<AudioPcm> sourceCache;
+    AudioDesignJobs sourceJobs;
+    std::string sourceRequest;
+    json sourceWaveform;
+    std::filesystem::path sourcePath;
+    std::filesystem::file_time_type sourceModified;
+    std::uintmax_t sourceBytes = 0;
+    std::deque<json> undoRecipes, redoRecipes;
+    bool applyingHistory = false;
+    std::uint64_t historyJob = 0;
+    bool historyRedo = false;
     ma_audio_buffer buffer{};
     ma_sound sound{};
     bool bufferReady = false, soundReady = false, auditionOriginal = false;
@@ -474,20 +500,37 @@ struct AudioSoundDesign::Impl {
 
 AudioSoundDesign::AudioSoundDesign() : impl_(std::make_unique<Impl>()) {}
 AudioSoundDesign::~AudioSoundDesign() {
+    impl_->jobs.cancel();
     stop();
 }
 
-json AudioSoundDesign::render(const json& input, const json& assets) {
+json validateSoundDesignRecipe(const json& input) {
+    return validate(input);
+}
+
+AudioDesignResult prepareSoundDesign(const json& input, const json& assets,
+                                    const AudioCancelCheck& check) {
+    const auto checkpoint = [&] {
+        if (check) {
+            check();
+        }
+    };
+    checkpoint();
     auto recipe = validate(input);
     std::vector<float> envelope;
-    auto original = recipe.at("mode") == "synth" ? synthesize(recipe, envelope) :
-                                                     loadRange(recipe, assets);
-    auto processed = transform(original, recipe);
-    const auto processedReport = analyze(processed);
-    const auto originalReport = analyze(original);
-    json report = {{"ready", true}, {"version", 2}, {"recipe", recipe},
+    auto original = recipe.at("mode") == "synth" ?
+        (recipe.at("layers").empty() ? synthesize(recipe, envelope, check) :
+                                      renderDesignLayers(recipe, assets, envelope, check)) :
+        loadRange(recipe, assets);
+    checkpoint();
+    json processing;
+    auto processed = transform(original, recipe, processing, check);
+    checkpoint();
+    const auto processedReport = summarizePcm(processed);
+    const auto originalReport = summarizePcm(original);
+    json report = {{"ready", true}, {"version", 3}, {"recipe", recipe},
         {"processed", processedReport}, {"original", originalReport}, {"envelope", envelope},
-        {"engine", "DaisySP + Signalsmith Stretch"}};
+        {"engine", "DaisySP + Signalsmith Stretch"}, {"processing", processing}};
     report["origin"] = json::object();
     if (recipe.at("mode") == "asset") {
         for (const auto& asset : assets) {
@@ -514,21 +557,163 @@ json AudioSoundDesign::render(const json& input, const json& assets) {
         response.push_back({frequency, 20 * std::log10(std::max(1e-6, magnitude))});
     }
     report["filter_response"] = response;
+    report["eq_response"] = designEqResponse(recipe.at("effects"));
+    report["source_assets"] = json::array();
+    for (const auto& layer : recipe.at("layers")) {
+        if (layer.at("type") == "asset") {
+            for (const auto& asset : assets) {
+                if (asset.at("id").get<std::string>() == layer.at("asset_id").get<std::string>()) {
+                    report["source_assets"].push_back(asset);
+                    break;
+                }
+            }
+        }
+    }
+    checkpoint();
+    return {std::move(original), std::move(processed), std::move(report)};
+}
+
+json AudioSoundDesign::render(const json& input, const json& assets) {
+    auto prepared = prepareSoundDesign(input, assets);
+    impl_->jobs.cancel();
+    return commit(std::move(prepared));
+}
+
+json AudioSoundDesign::commit(AudioDesignResult prepared) {
+    const auto& recipe = prepared.report.at("recipe");
+    // Store recipes, not PCM banks. Invalid requests do not touch history or audition.
+    if (!impl_->applyingHistory && impl_->report.at("ready").get<bool>() &&
+        impl_->report.at("recipe") != recipe) {
+        impl_->undoRecipes.push_back(impl_->report.at("recipe"));
+        if (impl_->undoRecipes.size() > 32) {
+            impl_->undoRecipes.pop_front();
+        }
+        impl_->redoRecipes.clear();
+    }
     // Validation, decode and rendering succeed before replacing the previous audition.
     stop();
-    impl_->original = std::move(original);
-    impl_->processed = std::move(processed);
-    impl_->report = std::move(report);
+    impl_->original = std::move(prepared.original);
+    impl_->processed = std::move(prepared.processed);
+    impl_->report = std::move(prepared.report);
+    ++impl_->revision;
     impl_->auditionOriginal = false;
     return status();
+}
+
+json AudioSoundDesign::jobStart(const json& params, const json& assets) {
+    const auto kind = params.at("kind").get<std::string>();
+    require(kind == "render" || kind == "analysis", "Job kind must be render or analysis");
+    if (kind == "render") {
+        require(!params.contains("options"), "Render jobs do not accept analysis options");
+        const auto recipe = validateSoundDesignRecipe(params.at("recipe"));
+        const auto files = designSourceVersions(recipe, assets);
+        impl_->jobs.start(kind, impl_->revision,
+            [recipe, assets, files](const AudioCancelCheck& check) {
+                check();
+                require(designSourceVersions(recipe, assets) == files,
+                        "Background design source file changed before rendering");
+                AudioDesignJobs::Result result;
+                result.assets = assets;
+                result.files = files;
+                result.design = prepareSoundDesign(recipe, assets, check);
+                require(designSourceVersions(recipe, assets) == files,
+                        "Background design source file changed during rendering");
+                return result;
+            });
+    } else {
+        require(!params.contains("recipe"), "Analysis jobs do not accept a recipe");
+        require(impl_->report.at("ready").get<bool>(), "Render a sound before analysis");
+        auto options = params.value("options", json::object());
+        require(options.is_object(), "Analysis options must be an object");
+        require(!options.contains("original") || options.at("original").is_boolean(),
+                "original must be boolean");
+        const bool original = options.value("original", false);
+        options.erase("original");
+        const auto& source = original ? impl_->original : impl_->processed;
+        // Reject malformed requests before copying PCM or replacing an existing task.
+        validateDesignAnalysis(source, options);
+        auto pcm = source;
+        impl_->jobs.start(kind, impl_->revision,
+            [pcm = std::move(pcm), options, original, assets](const AudioCancelCheck& check) {
+                AudioDesignJobs::Result result;
+                result.assets = assets;
+                result.analysis = analyzeDesignPcm(pcm, options, check);
+                result.analysis["original"] = original;
+                return result;
+            });
+    }
+    return impl_->jobs.status();
+}
+
+json AudioSoundDesign::jobStatus() const {
+    return impl_->jobs.status();
+}
+
+json AudioSoundDesign::jobCancel() {
+    impl_->jobs.cancel();
+    impl_->historyJob = 0;
+    return impl_->jobs.status();
+}
+
+json AudioSoundDesign::jobApply(const json& assets) {
+    const auto report = impl_->jobs.status();
+    auto result = impl_->jobs.take();
+    if (!result) {
+        return report;
+    }
+    if (result->revision != impl_->revision || result->assets != assets) {
+        return {{"id", result->id}, {"state", "stale"}};
+    }
+    if (!result->analysis.is_null()) {
+        result->analysis["revision"] = impl_->revision;
+        return {{"id", result->id}, {"state", "applied"}, {"analysis", result->analysis}};
+    }
+    try {
+        if (designSourceVersions(result->design.report.at("recipe"), assets) != result->files) {
+            return {{"id", result->id}, {"state", "stale"}};
+        }
+    } catch (const std::filesystem::filesystem_error&) {
+        return {{"id", result->id}, {"state", "stale"}};
+    }
+    const bool history = result->id == impl_->historyJob;
+    const bool redo = impl_->historyRedo;
+    if (history) {
+        const auto& from = redo ? impl_->redoRecipes : impl_->undoRecipes;
+        if (from.empty() || from.back() != result->design.report.at("recipe")) {
+            impl_->historyJob = 0;
+            return {{"id", result->id}, {"state", "stale"}};
+        }
+    }
+    const auto current = history ? impl_->report.at("recipe") : json();
+    impl_->applyingHistory = history;
+    json design;
+    try {
+        design = commit(std::move(result->design));
+    } catch (...) {
+        impl_->applyingHistory = false;
+        throw;
+    }
+    impl_->applyingHistory = false;
+    if (history) {
+        auto& from = redo ? impl_->redoRecipes : impl_->undoRecipes;
+        auto& to = redo ? impl_->undoRecipes : impl_->redoRecipes;
+        from.pop_back();
+        to.push_back(current);
+        impl_->historyJob = 0;
+        design = status();
+    }
+    return {{"id", result->id}, {"state", "applied"}, {"design", design}};
 }
 
 bool AudioSoundDesign::playing() const {
     return impl_->soundReady && ma_sound_is_playing(&impl_->sound);
 }
 
-json AudioSoundDesign::status() const {
-    auto report = impl_->report;
+json AudioSoundDesign::status(bool details) const {
+    auto report = details ? impl_->report : json{{"ready", impl_->report.at("ready")}};
+    report["revision"] = impl_->revision;
+    report["undo_available"] = !impl_->undoRecipes.empty();
+    report["redo_available"] = !impl_->redoRecipes.empty();
     report["playing"] = playing();
     report["audition_original"] = impl_->auditionOriginal;
     report["loop"] = impl_->soundReady && ma_sound_is_looping(&impl_->sound);
@@ -538,6 +723,133 @@ json AudioSoundDesign::status() const {
     }
     report["cursor_seconds"] = cursor / static_cast<double>(rate);
     return report;
+}
+
+json AudioSoundDesign::analyze(const json& params) const {
+    require(impl_->report.at("ready").get<bool>(), "Render a sound before analysis");
+    require(!params.contains("original") || params.at("original").is_boolean(),
+            "original must be boolean");
+    auto input = params;
+    input.erase("original");
+    const bool original = params.value("original", false);
+    auto result = analyzeDesignPcm(original ? impl_->original : impl_->processed, input);
+    result["revision"] = impl_->revision;
+    result["original"] = original;
+    return result;
+}
+
+json AudioSoundDesign::undo(const json& assets, bool redo, bool background) {
+    auto& from = redo ? impl_->redoRecipes : impl_->undoRecipes;
+    auto& to = redo ? impl_->undoRecipes : impl_->redoRecipes;
+    require(!from.empty(), redo ? "No designer redo" : "No designer undo");
+    const auto candidate = from.back(), current = impl_->report.at("recipe");
+    if (background) {
+        auto job = jobStart({{"kind", "render"}, {"recipe", candidate}}, assets);
+        impl_->historyJob = job.at("id");
+        impl_->historyRedo = redo;
+        job["recipe"] = candidate;
+        return job;
+    }
+    impl_->applyingHistory = true;
+    try {
+        render(candidate, assets);
+    } catch (...) {
+        impl_->applyingHistory = false;
+        throw;
+    }
+    impl_->applyingHistory = false;
+    from.pop_back();
+    to.push_back(current);
+    return status();
+}
+
+json AudioSoundDesign::waveform(const json& params, const json& assets) {
+    require(!params.contains("background") || params.at("background").is_boolean(),
+            "background must be boolean");
+    const auto id = params.at("id").get<std::string>();
+    const auto found = std::find_if(assets.begin(), assets.end(), [&](const json& asset) {
+        return asset.at("id").get<std::string>() == id;
+    });
+    require(found != assets.end(), "Source waveform asset not found");
+    const double begin = control(params, "start_seconds", 0, 0, 600);
+    const double end = control(params, "end_seconds", found->at("duration"), 0, 600);
+    require(end > begin && end <= found->at("duration").get<double>() + 1e-6,
+            "Source waveform range is outside the asset");
+    const auto pointsValue = params.value("points", json(512));
+    require(pointsValue.is_number_integer() && pointsValue.get<double>() >= 16 &&
+            pointsValue.get<double>() <= 4096, "Waveform points must be integer 16..4096");
+    const auto path = pathOf(found->at("path"));
+    const auto modified = std::filesystem::last_write_time(path);
+    const auto bytes = std::filesystem::file_size(path);
+    const bool cached = impl_->sourceCache && impl_->sourcePath == path &&
+        impl_->sourceModified == modified && impl_->sourceBytes == bytes;
+    if (params.value("background", false)) {
+        const auto key = json{{"params", params}, {"asset", *found}, {"bytes", bytes},
+            {"modified", modified.time_since_epoch().count()}}.dump();
+        if (impl_->sourceRequest != key) {
+            const auto cache = cached ? impl_->sourceCache : nullptr;
+            const auto points = pointsValue.get<unsigned>();
+            impl_->sourceJobs.start("waveform", impl_->revision,
+                [path, modified, bytes, cache, begin, end, points, id]
+                (const AudioCancelCheck& check) {
+                    check();
+                    const auto unchanged = [&] {
+                        return std::filesystem::file_size(path) == bytes &&
+                            std::filesystem::last_write_time(path) == modified;
+                    };
+                    require(unchanged(), "Source waveform file changed before decode");
+                    AudioDesignJobs::Result result;
+                    if (!cache) {
+                        result.design.original = decodeAudioPcm(path);
+                    }
+                    check();
+                    const auto& pcm = cache ? *cache : result.design.original;
+                    const auto first = static_cast<std::uint64_t>(std::llround(begin * rate));
+                    const auto last = std::min(pcm.frames(),
+                        static_cast<std::uint64_t>(std::llround(end * rate)));
+                    result.analysis = designPcmWaveform(pcm, first, last, points, check);
+                    result.analysis["asset_id"] = id;
+                    check();
+                    require(unchanged(), "Source waveform file changed during decode");
+                    return result;
+                });
+            impl_->sourceRequest = key;
+            impl_->sourceWaveform = nullptr;
+        }
+        if (auto result = impl_->sourceJobs.take()) {
+            // The request key includes asset identity, range and current file metadata.
+            impl_->sourceWaveform = std::move(result->analysis);
+            if (!cached) {
+                impl_->sourceCache = std::make_shared<AudioPcm>(
+                    std::move(result->design.original));
+                impl_->sourcePath = path;
+                impl_->sourceModified = modified;
+                impl_->sourceBytes = bytes;
+            }
+        }
+        if (!impl_->sourceWaveform.is_null()) {
+            auto result = impl_->sourceWaveform;
+            result["state"] = "ready";
+            return result;
+        }
+        return impl_->sourceJobs.status();
+    }
+    impl_->sourceJobs.cancel();
+    impl_->sourceRequest.clear();
+    impl_->sourceWaveform = nullptr;
+    if (!cached) {
+        auto decoded = decodeAudioPcm(path);
+        impl_->sourceCache = std::make_shared<AudioPcm>(std::move(decoded));
+        impl_->sourcePath = path;
+        impl_->sourceModified = modified;
+        impl_->sourceBytes = bytes;
+    }
+    const auto first = static_cast<std::uint64_t>(std::llround(begin * rate));
+    const auto last = std::min(impl_->sourceCache->frames(),
+        static_cast<std::uint64_t>(std::llround(end * rate)));
+    auto result = designPcmWaveform(*impl_->sourceCache, first, last, pointsValue.get<unsigned>());
+    result["asset_id"] = id;
+    return result;
 }
 
 json AudioSoundDesign::preview(ma_engine& engine, ma_sound_group* group, const json& params) {
@@ -574,10 +886,20 @@ void AudioSoundDesign::stop() {
 }
 
 void AudioSoundDesign::clear() {
+    impl_->jobs.cancel();
+    impl_->historyJob = 0;
+    impl_->sourceJobs.cancel();
+    impl_->sourceRequest.clear();
+    impl_->sourceWaveform = nullptr;
     stop();
     impl_->original = {};
     impl_->processed = {};
     impl_->report = {{"ready", false}};
+    impl_->sourceCache = {};
+    impl_->sourcePath.clear();
+    impl_->undoRecipes.clear();
+    impl_->redoRecipes.clear();
+    ++impl_->revision;
 }
 
 json soundDesignDestination(const json& params) {
@@ -614,7 +936,8 @@ json AudioSoundDesign::save(const json& params) const {
                 return {{"path", pathUtf8(target)}, {"name", name},
                     {"recipe", impl_->report.at("recipe")},
                     {"origin", impl_->report.at("origin")},
-                    {"pcm_hash", impl_->report.at("processed").at("pcm_hash")}, {"version", 2}};
+                    {"source_assets", impl_->report.at("source_assets")},
+                    {"pcm_hash", impl_->report.at("processed").at("pcm_hash")}, {"version", 3}};
             }
         }
         throw std::runtime_error("No available sound filename");
@@ -622,6 +945,7 @@ json AudioSoundDesign::save(const json& params) const {
     require(publish(impl_->processed, target), "Existing output is preserved");
     return {{"path", pathUtf8(target)}, {"name", name}, {"recipe", impl_->report.at("recipe")},
         {"origin", impl_->report.at("origin")},
-        {"pcm_hash", impl_->report.at("processed").at("pcm_hash")}, {"version", 2}};
+        {"source_assets", impl_->report.at("source_assets")},
+        {"pcm_hash", impl_->report.at("processed").at("pcm_hash")}, {"version", 3}};
 }
 } // namespace audio

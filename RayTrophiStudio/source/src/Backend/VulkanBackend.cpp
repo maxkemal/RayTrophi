@@ -900,6 +900,7 @@ void VulkanDevice::shutdown() {
         destroyFrameSlots();
         destroyDenoiserCopySlot();
 
+        destroyLensWeather();
         // Destroy tonemap compute resources (persistent across frames).
         if (m_tonemapPipeline)       { vkDestroyPipeline(m_device, m_tonemapPipeline, nullptr); m_tonemapPipeline = VK_NULL_HANDLE; }
         if (m_tonemapPipelineLayout) { vkDestroyPipelineLayout(m_device, m_tonemapPipelineLayout, nullptr); m_tonemapPipelineLayout = VK_NULL_HANDLE; }
@@ -6495,6 +6496,7 @@ bool VulkanDevice::traceRaysTonemapAndReadback(uint32_t w, uint32_t h,
     // ── 3. Dispatch tonemap compute ──────────────────────────────────────────
     waitFrameSlot(0);
     m_exposureMeter.record(cmd, hdrImage.view, 0);
+    recordLensWeather(cmd, m_tonemapPipelineLayout, w, h);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_tonemapPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
         m_tonemapPipelineLayout, 0, 1, &tmDescSet, 0, nullptr);
@@ -7153,6 +7155,7 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
 
     // ── 3. Tonemap compute ───────────────────────────────────────────────────
     m_exposureMeter.record(cmd, hdrImage.view, slot);
+    recordLensWeather(cmd, m_tonemapPipelineLayout, w, h);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_tonemapPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
         m_tonemapPipelineLayout, 0, 1, &m_tonemapDescSet, 0, nullptr);
@@ -14584,6 +14587,17 @@ void VulkanBackendAdapter::setRenderParams(const RenderParams& p) {
 
 void VulkanBackendAdapter::setCamera(const CameraParams& c) {
     m_camera = c;
+    if (m_device) m_device->setLensWeatherCamera(c);
+    // The near-drop state is evaluated at the camera once per cloud update
+    // (ATMOSPHERE_NEAR_PRECIP.md): a moved camera needs a new one. Only while
+    // near drops can be drawn, so a clear sky pays nothing.
+    if (m_cloudStateSet && (m_cachedClouds.precipitation.near_enabled || c.lens_weather.enabled) &&
+        m_cachedClouds.precipitation.rate_mm_h > 0.0f && m_cachedClouds.layers[0].enabled &&
+        (c.origin.x != m_cloudNearCamera.x || c.origin.y != m_cloudNearCamera.y ||
+         c.origin.z != m_cloudNearCamera.z)) {
+        m_cloudNearCamera = c.origin;
+        setCloudState(m_cachedClouds, m_cloudTime, m_cloudDrift, m_cloudWind);
+    }
     // ★★★★ Burada pozlama formulunun DORDUNCU kopyasi vardi ve 2026-09-06'da
     //   SOKULDU: sonucu (`m_camera.exposureFactor`) hicbir yerde okunmuyordu.
     //   Traversal push-constant'i yillardir sabit 1.0 gonderiyor ("scene-linear
@@ -14650,6 +14664,7 @@ void VulkanBackendAdapter::syncCamera(const Camera& cam) {
     cp.chromatic_aberration_b = cam.chromatic_aberration_b;
     cp.blade_count = cam.blade_count;
     cp.lens_quality = cam.lens_quality;
+    copyLensWeatherCamera(cam, cp);
     cp.camera_mode = (int)cam.camera_mode;
     cp.motionBlurEnabled = cam.enable_motion_blur;
 
@@ -16125,6 +16140,7 @@ bool VulkanBackendAdapter::ensureAerialFroxelPipeline(const std::string& shaderD
 // ── Clouds (Faz 3a) ─────────────────────────────────────────────────────────
 bool VulkanBackendAdapter::ensureCloudPipelines(const std::string& shaderDir) {
     if (!m_device || !m_device->isInitialized()) return false;
+    m_device->loadLensWeatherPipelines(shaderDir);
     if (m_device->hasCloudResources()) return true;
     if (m_cloudPipelineAttempted) return false;
     m_cloudPipelineAttempted = true;
@@ -16189,6 +16205,7 @@ bool VulkanBackendAdapter::ensureCloudPipelines(const std::string& shaderDir) {
 
 void VulkanBackendAdapter::setCloudState(const atmosphere::CloudState& clouds, float time_seconds,
                                          const Vec3& drift_m, const Vec3& wind_mps) {
+    if (m_device) m_device->noteLensWeatherEnvironment(clouds, wind_mps);
     // Cloud time is not part of WorldData, so a playing timeline changes the
     // sky without changing the world block: progressive accumulation must be
     // reset here, or the RT image keeps the old sky (clouds look frozen).
@@ -16282,7 +16299,7 @@ void VulkanBackendAdapter::recordCloudRasterPass(VkCommandBuffer cmd, uint32_t w
     if (m_device->m_cloudRasterW == 0) return;
 
     Backend::CloudRasterFrameGPU f{};
-    f.weatherEffects = Backend::makeWeatherRenderGPU(m_cachedWorld.weather, m_weatherTime);
+    f.weatherEffects = Backend::makeWeatherRenderGPU(m_cachedWorld.weather);
     const auto& n = m_cachedWorld.nishita;
     f.sunDir[0] = n.sun_direction.x; f.sunDir[1] = n.sun_direction.y; f.sunDir[2] = n.sun_direction.z;
     f.sunIntensity = n.sun_intensity;
@@ -16345,8 +16362,20 @@ bool VulkanBackendAdapter::syncCloudResources() {
 }
 
 Backend::CloudParamsGPU VulkanBackendAdapter::cloudParamsGPU() const {
-    return Backend::makeSharedCloudParamsGPU(
-        m_cachedClouds, m_cloudTime, m_cloudDrift, m_cloudWind, m_cachedWorld, m_weatherTime);
+    Backend::CloudParamsGPU p = Backend::makeSharedCloudParamsGPU(
+        m_cachedClouds, m_cloudTime, m_cloudDrift, m_cloudWind, m_cachedWorld);
+    // Where the near-drop state is evaluated (cloud_sample.comp mode 7, once
+    // per update): this adapter's camera and sun.
+    p.nearState.camera[0] = m_camera.origin.x;
+    p.nearState.camera[1] = m_camera.origin.y;
+    p.nearState.camera[2] = m_camera.origin.z;
+    Vec3 sun(m_cachedWorld.nishita.sun_direction.x, m_cachedWorld.nishita.sun_direction.y,
+             m_cachedWorld.nishita.sun_direction.z);
+    sun = sun.length_squared() > 1e-12 ? sun.normalize() : Vec3(0.0f, 1.0f, 0.0f);
+    p.nearState.sun[0] = sun.x;
+    p.nearState.sun[1] = sun.y;
+    p.nearState.sun[2] = sun.z;
+    return p;
 }
 
 bool VulkanBackendAdapter::sampleClouds(uint32_t mode, uint32_t steps,
@@ -20311,12 +20340,11 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
     gw.weatherWindDirection[2] = wd->weather.derived_wind_direction.z;
     gw.weatherWindSpeed = wd->weather.derived_wind_speed_mps;
     gw.weatherPrecipitationScale = wd->weather.precipitation_scale;
-    gw.weatherVisibility = wd->weather.visibility;
     gw.weatherSurfaceWetness = wd->weather.surface_wetness_output;
     gw.weatherSurfaceAccumulation = wd->weather.surface_accumulation_output;
     gw.weatherSurfaceSettling = wd->weather.surface_settling_output;
     gw.weatherSurfaceHeight = wd->weather.surface_height_output;
-    gw.weatherVisualMode = wd->weather.visual_mode;
+    Backend::fillWeatherClimateGPU(gw);
     gw.weatherSurfaceResponseEnabled = wd->weather.surface_response_enabled;
 
     // ═════════════════════════════════════════════════════════════════

@@ -61,6 +61,14 @@ layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 0) uniform sampler3D clou
 layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 1) uniform sampler3D cloudDetailNoise;
 layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 2) uniform sampler2D cloudCurlNoise;
 layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 3) uniform sampler2D cloudWeatherMap;
+// Backend::CloudNearStateGPU: camera / sun written by the CPU, state by
+// cloud_sample.comp mode 7 once per cloud update (near_precip.glsl).
+struct CloudNearStateG {
+    vec4 camera;    // xyz, reserved
+    vec4 sun;       // sun direction xyz, reserved
+    vec4 state[6];
+};
+
 layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 4, std430) readonly buffer CloudParamsBlock {
     // 0..2 the authored layers; 3 the storm column shell (f.w = 1 when on,
     // ATMOSPHERE_CELL_CLOUDS.md): troposphere-deep, dense only in cells;
@@ -72,19 +80,20 @@ layout(set = CLOUD_SET, binding = CLOUD_BINDING_BASE + 4, std430) readonly buffe
     vec4 misc;      // 1/cirrus_scale_m, seed, rt_max_bounces, rt_flags (cloud_rt.glsl)
     vec4 precip;    // rate_mm_h, extinction bound at that rate (any form), trail_x, trail_z
                     // (upwind lag per m of fall at the ground for a 1 m/s faller)
-    vec4 precip2;   // reserved, ground_fraction, shear_x, shear_z (m per m of height)
+    vec4 precip2;   // shutter s (near streaks, lightning), ground_fraction, shear_x, shear_z (m per m of height)
     vec4 scatterAlbedo; // RGB albedo, HG g override (2 = droplet fit)
-    vec4 emissionSource; // RGB source radiance, reserved
-    vec4 cirrusDirection; // along-wind x,z; camera weather time, reserved
+    vec4 emissionSource; // RGB source radiance, surface wind z m/s (near drops)
+    vec4 cirrusDirection; // along-wind x,z; timeline time s (near drops), surface wind x m/s
     vec4 storms;    // cell map centre x, z, 1/size, enabled
     vec4 storms2;   // stratiform rain share, tropopause fraction, wall allowance m, mammatus
-    vec4 precip3;   // sea-level air temperature C, lapse K/m, forced form (0 auto), reserved
+    vec4 precip3;   // sea-level air temperature C, lapse K/m, forced form (0 auto), near-drop range m (0 off)
     vec4 fog;       // local fog map corner x, z, 1/size, active (map = cell-map sheet 3)
     vec4 volume;    // storm cell volumes: active, voxels per axis, skin m, requested slots
     CloudVolumeSlotG volumeSlots[16];
     CloudLightningG lightning[4];
     CloudFlashLightG flash[4];   // lit cloud base per event (CPU-built)
     CloudBoltSegG bolt[320];     // channel network, 80 per event (CPU-built)
+    CloudNearStateG nearState;   // near-camera drop state (GPU-written, near_precip.glsl)
 } cloudParams;
 
 layout(set = CLOUD_SET, binding = CLOUD_CELL_BINDING) uniform sampler2D cloudCellMap;
@@ -1031,8 +1040,9 @@ struct CloudPrecipForm {
     vec4 b;   // graupel, hail, freezing rain, ice pellets
 };
 
+#include "atmosphere_temperature.glsl"
 float cloudAirTempC(float altitude) {
-    return cloudParams.precip3.x - cloudParams.precip3.y * min(altitude, 11000.0);
+    return atmosphereAirTemperatureC(cloudParams.precip3.x, cloudParams.precip3.y, altitude);
 }
 
 // Integral over [z1, z2] of max(sign * T(z), 0) dz, in C*m (linear profile).
@@ -1210,6 +1220,17 @@ float cloudPrecipFormIdAt(vec3 p) {
     if (cloudPrecipSampleForm(p, fallLine, form) <= 0.0) return 0.0;
     return float(cloudPrecipDominantForm(form));
 }
+
+// Near-camera drops (docs/dev/ATMOSPHERE_NEAR_PRECIP.md, near_precip.glsl).
+// Range m out to which camera rays draw individual drops; 0 = off, and the
+// curtain then starts at the camera. Packed by makeCloudParamsGPU.
+float cloudNearPrecipRange() { return cloudParams.precip3.w; }
+// Frame exposure s (CloudState::shutter_s): a drop sweeps v * shutter.
+float cloudShutter()         { return cloudParams.precip2.x; }
+// Climate surface wind m/s (horizontal) that carries the near drops.
+vec3  cloudSurfaceWind()     { return vec3(cloudParams.cirrusDirection.w, 0.0, cloudParams.emissionSource.w); }
+// Timeline time s the drop lattice moves with (pure in time: no wall clock).
+float cloudNearPrecipTime()  { return cloudParams.cirrusDirection.z; }
 
 // Extinction (1/m) of the falling drops at p. Fall streaks: drop bundles
 // tens to a few hundred metres across and kilometres long, read along the
