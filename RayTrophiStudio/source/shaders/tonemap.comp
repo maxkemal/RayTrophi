@@ -12,6 +12,7 @@
 //   tone_mapping=none) cikti eskisiyle BIREBIR ayni kalir -- None dali
 //   Reinhard'dir. Bu bilerek: bu partide Rendered'in gorunumu degismemeli.
 #include "post_chain.glsl"
+#include "lens_water_composite.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -92,6 +93,12 @@ vec3 dvViridis(float t) {
 // ★ `sanitize` ve `linToSrgb` post_chain.glsl'e tasindi (rtSanitize /
 //   rtLinearToSRGB); ayni sayilar, tek tanim.
 
+vec3 lensWeatherScene(vec2 uv) {
+    ivec2 source = ivec2(clamp(uv * vec2(pc.width, pc.height), vec2(0.0),
+                                vec2(pc.width - 1u, pc.height - 1u)));
+    return imageLoad(inHDR, source).rgb;
+}
+
 void main() {
     uvec2 px = gl_GlobalInvocationID.xy;
     if (px.x >= pc.width || px.y >= pc.height) return;
@@ -102,6 +109,8 @@ void main() {
     // vignette -> sRGB). sRGB kodlamasi dahil oldugu icin debug dallari
     // ASAGIDA ayrica kodlanir; ikisi ayni yerde toplanamaz.
     vec2 uv01 = (vec2(px) + vec2(0.5)) / vec2(max(pc.width, 1u), max(pc.height, 1u));
+    hdr.rgb = lensWeatherComposite(hdr.rgb, uv01, pc.debugView == 0u,
+                                  vec2(pc.width, pc.height));
     vec3 beautySrgb = rtApplyPost(hdr.rgb, beautyPostParams(), uv01);
 
     // Debug karisimlari icin lineer-benzeri (0-1) beauty: operator uygulanmis

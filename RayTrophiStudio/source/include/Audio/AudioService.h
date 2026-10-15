@@ -31,6 +31,7 @@ public:
     void tickReactions(float windMps, float rain);
     void syncTransport(double seconds, bool playing);
     bool transportPaused() const;
+    void acousticPreviewResult(const std::string& id, const nlohmann::json& report);
     void tickThunder();
     void resetThunder();
     void invalidateSignal(const std::string& key);

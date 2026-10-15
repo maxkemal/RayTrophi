@@ -45,7 +45,7 @@ It is not a render farm plugin or a library. It is an interactive editor with a 
 | **Project code / shader lines** | ~635,000 |
 | **Project code / shader files** | 1,682 |
 | **GPU kernel & shader files** | 397 (CUDA, OptiX PTX, Vulkan GLSL/RT, compute) |
-| **IPC surface** | 667 statically audited routes; 60 dynamic `audio.*` operations |
+| **IPC surface** | 667 statically audited routes; 76 dynamic `audio.*` operations |
 | **Render backends** | CPU (Embree) · NVIDIA OptiX · Vulkan RT |
 | **Node editors** | Terrain · Animation · Material · Simulation |
 | **Last source/audit refresh** | 2026-10-14 — scene audio/Designer, unified Matter, atmosphere/cloud volumes; IPC and shader-layout audits |
@@ -65,7 +65,7 @@ successful build does not establish sound quality, visual quality or solver pari
 | Area | Added | Acceptance and next work |
 |---|---|---|
 | Scene audio | Positional sources, imported assets, weather/thunder reactions, fixed mixer buses, timeline clips, waveform, fades, automation, capture and offline WAV | Core playback/mixer, a short WAV export and small DEM RAM replay have recorded acceptance. Full capture, save/reopen and broader channel tests remain open. |
-| Sound designer | DaisySP synthesis/filtering, Signalsmith independent pitch/time, in-memory original/processed audition, envelope/filter/spectrum views and saving by name | User confirmed the Studio build on October 14. New Designer listening/UI/IPC acceptance is pending; uninterrupted live DSP and further presets follow. |
+| Sound designer | Five production layer types, nine ordered effects, waveform/ADSR/EQ controls, FFT/spectrogram, independent pitch/time/formants, recipe history/reuse and saving by name | V2 build and synthetic preview confirmed. Expanded v3 visual tools are source-only; new build/UI/listening/IPC acceptance pending. Background/live DSP follows. |
 | Physics audio telemetry | Separate DEM contact/sliding/rolling, liquid/gas activity and MPM stress/damage channels; manual scene-wide collection switch | Collection defaults off. Enabled DEM measurement still carries a per-grain readback cost; selective channels and GPU aggregation are next. |
 | Atmosphere | Shared climate/cloud data, storm cells, precipitation forms, local fog, scene lightning and delayed thunder; new cell-volume atlas/SDF path | Cloud volume V0–V2 and V2b/V2c have recorded live checks. V2d shadow lighting and multiple-tower shape changes await shader/visual acceptance. V3–V5 and surface accumulation remain planned. |
 | Unified Matter | Substance library/derived profiles, DEM/MPM/liquid ownership, latent heat, condensation, fog water and rain inventory; staged compact liquid MAC/FLIP storage | T1/T3 quick checks and T2 thermal cases passed. The extended mixed-owner shared-clock regression, full sparse migration and performance gates remain open. |
@@ -355,7 +355,7 @@ A post-convergence layer that reads the path-traced result + AOV buffers and res
 - **Sound Designer:** choose a synthetic character or an imported mono/stereo asset,
   audition in memory, compare original/processed, shape ADSR/noise/modulation/filter/
   saturation, change pitch and duration independently, and prepare loop seams.
-  Waveform, draggable envelope, filter response and sampled spectrum accompany controls.
+  Generate/Edit/Effects/Analyze pages add layered synthesis, ordered effects, waveform range/zoom, draggable ADSR/fades/EQ, full FFT/spectrogram and recipe undo/reuse. See [v3 visual tools](docs/dev/AUDIO_DESIGN_TOOLS.md); a new build is pending.
 - **Save by name:** the project audio folder or active asset library supplies the
   destination. A folder picker and automatic collision suffixes replace routine path
   entry. The saved WAV contains the preview PCM and its recipe/provenance metadata.
@@ -367,7 +367,7 @@ A post-convergence layer that reads the path-traced result + AOV buffers and res
 UI, `rt.audio` and `audio.*` IPC use the same service. Physics telemetry is explicitly
 opt-in; opening Audio or binding a sound does not enable collection. Designer edits
 currently render on release and restart audition; uninterrupted realtime processing,
-GPU telemetry aggregation, occlusion, reflections and room reverberation remain open.
+GPU telemetry aggregation, occlusion, reflections and scene acoustic reverberation remain open. The Designer includes an offline room-reverb effect.
 
 Contracts and acceptance: [Sound Designer](docs/dev/AUDIO_SOUND_DESIGN.md),
 [Audio workspace](docs/dev/AUDIO_WORKSPACE_UI.md),

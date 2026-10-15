@@ -4,6 +4,7 @@
 
 #include "Audio/AudioClipRuntime.h"
 #include "Audio/AudioClips.h"
+#include "Audio/AudioTracks.h"
 #include "Audio/AudioPcm.h"
 #include "Audio/AudioMixerRuntime.h"
 #include <algorithm>
@@ -64,7 +65,8 @@ void AudioClipRuntime::tick(const json& scene, ma_engine& engine, AudioMixerRunt
     std::set<std::string> active;
     unsigned starts = 0;
     for (const auto& clip : scene.at("clips")) {
-        const auto sample = AudioClips::evaluate(clip, time);
+        auto sample = AudioClips::evaluate(clip, time);
+        AudioTracks::apply(sample, AudioTracks::mix(clip, scene.at("tracks")));
         const std::string id = clip.at("id");
         if (!sample.active) {
             continue;

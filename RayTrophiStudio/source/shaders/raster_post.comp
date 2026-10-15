@@ -29,6 +29,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include "post_chain.glsl"
+#include "lens_water_composite.glsl"
 #include "aerial_froxel.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -108,6 +109,10 @@ float cocPixels(float z) {
     return min(coc, pc.maxCoC);
 }
 
+vec3 lensWeatherScene(vec2 uv) {
+    return hazedHDR(uv, texture(inDepth, uv).r);
+}
+
 void main() {
     uvec2 px = gl_GlobalInvocationID.xy;
     if (px.x >= pc.width || px.y >= pc.height) return;
@@ -185,6 +190,8 @@ void main() {
             color = acc / max(wsum, 1e-6);
         }
     }
+
+    color = lensWeatherComposite(color, uv, true, vec2(pc.width, pc.height));
 
     // ── Goruntuleme donusumu (TEK yer) ──────────────────────────────────────
     RtPostParams p;

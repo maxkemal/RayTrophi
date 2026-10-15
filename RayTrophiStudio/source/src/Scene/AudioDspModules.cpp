@@ -16,3 +16,10 @@
 #undef M_E
 #undef RAYTROPHI_DAISY_LOCAL_M_E
 #endif
+
+#include "../../../external/DaisySP/Source/Synthesis/fm2.cpp"
+#include "../../../external/DaisySP/Source/Effects/chorus.cpp"
+#include "../../../external/DaisySP/Source/Effects/phaser.cpp"
+#include "../../../external/DaisySP/Source/Effects/overdrive.cpp"
+#include "../../../external/DaisySP/Source/PhysicalModeling/resonator.cpp"
+#include "../../../external/DaisySP/Source/Filters/svf.cpp"

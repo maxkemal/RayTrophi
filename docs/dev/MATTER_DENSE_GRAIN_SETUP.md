@@ -42,7 +42,7 @@ Yoğun rampalı steady-state/uzun settle ve bağımsız tekrarlı performans kab
 Ayrı gerçek akış göz testi4.5 s/270 adımda16384 taneye ulaştı;
 kütle3276.80005 kg, held-step yok. Akış devam ederken alınan görünüm, settle/repose kabulü değil.
 
-![16384 tane göz testi](matter_h1_dense_grain_visual_full.jpg)
+16384 tane göz testi (temporary capture removed)
 
 Kanıt: `matter_h1_dense_grain_voxel010_measured_2026-10-06.json`,
 `matter_h1_dense_grain_visual_full_live.json`. Tekrar:

@@ -33,4 +33,19 @@ float cloudCallSunTransmittance(vec3 p, vec3 wi, uint seed) {
     return cloudCall.T;
 }
 
+// Near-camera drops in front of a camera ray's first tHit metres
+// (near_precip.glsl): result = inscatter + T * behind.
+void cloudCallNearPrecip(vec3 camera, vec3 d, float tHit, float pixelAngle,
+                         out vec3 inscatter, out float T) {
+    cloudCall.origin = camera;
+    cloudCall.dir = d;
+    cloudCall.tLimit = tHit;
+    cloudCall.pixelAngle = pixelAngle;
+    cloudCall.op = CLOUD_CALL_NEAR_PRECIP;
+    cloudCall.flags = 0u;
+    executeCallableEXT(CLOUD_CALL_SBT_INDEX, CLOUD_CALL_LOCATION);
+    inscatter = cloudCall.inscatter;
+    T = cloudCall.T;
+}
+
 #endif // CLOUD_CALL_GLSL

@@ -2,6 +2,10 @@
 #define NOMINMAX
 #endif
 #include "UI/AudioSoundDesignerUI.h"
+#include "UI/AudioDesignPanels.h"
+#include "UI/AudioDesignView.h"
+#include "UI/AudioTrackPanels.h"
+#include "UI/AudioClipEnvelopeEditor.h"
 #include "UI/AudioWorkspaceUI.h"
 #include "UI/AudioPropertyLayout.h"
 #include "Audio/AudioService.h"
@@ -13,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <utility>
 
 namespace AudioUI {
 namespace {
@@ -22,11 +27,19 @@ struct DesignerUI {
     std::uint64_t generation = 0;
     json recipe = {{"mode", "synth"}, {"preset", "metal"}};
     bool dirty = true;
+    std::uint64_t renderJob = 0;
+    json requestedRecipe;
+    bool previewWhenReady = false;
+    bool saveWhenReady = false;
     bool loop = false;
     bool autoPreview = true;
     bool insertClip = true;
     bool original = false;
     int envelopeHandle = -1;
+    int fadeHandle = -1;
+    bool fitCanvasRequested = true;
+    json rendered = json::object();
+    std::uint64_t renderedRevision = 0;
     char name[128] = "Metal impact";
     std::string folder;
     std::string savedPath;
@@ -54,6 +67,8 @@ void sync(UIContext& ctx) {
         state.owner = ctx.scene.audio.get();
         state.generation = ctx.scene.audio->generation();
         const auto report = ctx.scene.audio->invoke("design_status", json::object());
+        state.rendered = report;
+        state.renderedRevision = report.at("revision");
         if (report.at("ready")) {
             state.recipe = report.at("recipe");
             state.dirty = false;
@@ -61,24 +76,115 @@ void sync(UIContext& ctx) {
     }
 }
 
-bool render(UIContext& ctx) {
-    const auto result = call(ctx, "design_render", {{"recipe", state.recipe}});
-    if (!result.value("ready", false)) {
-        return false;
+json currentReport(UIContext& ctx) {
+    const auto transport = ctx.scene.audio->invoke("design_status", {{"details", false}});
+    if (state.rendered.empty() || state.renderedRevision != transport.at("revision").get<std::uint64_t>()) {
+        state.rendered = ctx.scene.audio->invoke("design_status", json::object());
+        state.renderedRevision = transport.at("revision");
     }
-    state.recipe = result.at("recipe");
-    state.dirty = false;
-    return true;
+    auto result = state.rendered;
+    for (auto field = transport.begin(); field != transport.end(); ++field) {
+        result[field.key()] = field.value();
+    }
+    return result;
+}
+
+void saveAsset(UIContext& ctx) {
+    json params = {{"name", state.name}};
+    if (!state.folder.empty()) {
+        params["folder"] = state.folder;
+    }
+    const auto result = call(ctx, "design_save", params);
+    if (result.contains("design")) {
+        state.savedPath = result.at("design").at("path");
+    }
+    if (result.contains("asset") && state.insertClip) {
+        addTimelineAsset(ctx, result.at("asset").at("id"));
+    }
+}
+
+void requestRender(UIContext& ctx, bool preview) {
+    state.saveWhenReady = false;
+    const auto job = call(ctx, "design_job_start", {{"kind", "render"}, {"recipe", state.recipe}});
+    if (job.contains("id")) {
+        state.renderJob = job.at("id");
+        state.requestedRecipe = state.recipe;
+        state.previewWhenReady = preview;
+    }
+}
+
+void followRecipeJob(const json& job) {
+    if (!job.contains("id") || !job.contains("recipe")) {
+        return;
+    }
+    state.recipe = job.at("recipe");
+    state.requestedRecipe = state.recipe;
+    state.renderJob = job.at("id");
+    state.dirty = true;
+    state.previewWhenReady = false;
+    state.saveWhenReady = false;
+}
+
+void pollRender(UIContext& ctx) {
+    if (state.renderJob == 0) {
+        return;
+    }
+    const auto job = ctx.scene.audio->invoke("design_job_status", json::object());
+    if (job.at("id").get<std::uint64_t>() != state.renderJob) {
+        state.renderJob = 0;
+        return;
+    }
+    if (state.recipe != state.requestedRecipe) {
+        call(ctx, "design_job_cancel");
+        state.renderJob = 0;
+        return;
+    }
+    const auto phase = job.at("state").get<std::string>();
+    if (phase == "completed") {
+        const auto result = call(ctx, "design_job_apply");
+        state.renderJob = 0;
+        if (result.contains("design")) {
+            state.rendered = result.at("design");
+            state.renderedRevision = state.rendered.at("revision");
+            state.recipe = state.rendered.at("recipe");
+            state.dirty = false;
+            if (state.saveWhenReady && !rtapi::renderOutputPending()) {
+                saveAsset(ctx);
+            }
+            state.saveWhenReady = false;
+            if (state.previewWhenReady && !rtapi::renderOutputPending()) {
+                call(ctx, "design_preview", {{"original", state.original}, {"loop", state.loop}});
+            }
+        } else {
+            state.dirty = true;
+            state.saveWhenReady = false;
+            state.error = "Render context changed; refresh the current recipe.";
+        }
+    } else if (phase == "failed" || phase == "cancelled" || phase == "consumed") {
+        state.renderJob = 0;
+        if (phase == "failed") {
+            state.error = job.value("error", std::string("Audio render failed"));
+        }
+    }
 }
 
 void play(UIContext& ctx, bool original) {
-    if (state.dirty && !render(ctx)) {
+    state.original = original;
+    if (state.dirty || !currentReport(ctx).value("ready", false)) {
+        requestRender(ctx, true);
         return;
     }
-    const auto report = call(ctx, "design_preview", {{"original", original}, {"loop", state.loop}});
-    if (report.contains("playing")) {
-        state.original = original;
-    }
+    call(ctx, "design_preview", {{"original", original}, {"loop", state.loop}});
+}
+
+void playArrangement(UIContext& ctx) {
+    commitAudioClipEnvelope(ctx);
+    const auto view = ctx.scene.audio->invoke("workspace_get", json::object());
+    finishAudioTimelineGesture(ctx);
+    call(ctx, "arrange_preview", {{"ids", view.at("selected_clips")},
+        {"start_seconds", view.at("audition_start_seconds")},
+        {"end_seconds", view.at("audition_end_seconds")}, {"loop", state.loop},
+        {"background", true}});
 }
 
 bool slider(const char* key, const char* label, double fallback, float low, float high,
@@ -88,6 +194,9 @@ bool slider(const char* key, const char* label, double fallback, float low, floa
         logarithmic ? ImGuiSliderFlags_Logarithmic : ImGuiSliderFlags_None);
     if (changed) {
         state.recipe[key] = value;
+        if (std::string(key) == "gain_db") {
+            state.recipe.erase("gain");
+        }
         state.dirty = true;
     }
     return ImGui::IsItemDeactivatedAfterEdit();
@@ -137,6 +246,44 @@ void waveform(const json& report, const ImVec2& size, double cursor, bool playin
     }
 }
 
+bool fadeControls(json& recipe, const json& report) {
+    const auto first = ImGui::GetItemRectMin(), last = ImGui::GetItemRectMax();
+    const float width = last.x - first.x;
+    const double duration = report.at("duration_seconds");
+    const double fadeIn = recipe.value("fade_in_seconds", 0.003);
+    const double fadeOut = recipe.value("fade_out_seconds", 0.02);
+    const ImVec2 handles[] = {
+        ImVec2(first.x + static_cast<float>(std::min(1.0, fadeIn / duration)) * width, first.y + 8),
+        ImVec2(last.x - static_cast<float>(std::min(1.0, fadeOut / duration)) * width, first.y + 8)};
+    auto* draw = ImGui::GetWindowDrawList();
+    draw->AddLine(ImVec2(first.x, last.y), handles[0], ImGui::GetColorU32(ImGuiCol_SliderGrabActive));
+    draw->AddLine(handles[1], last, ImGui::GetColorU32(ImGuiCol_SliderGrabActive));
+    const auto mouse = ImGui::GetIO().MousePos;
+    for (int handle = 0; handle < 2; ++handle) {
+        const auto point = handles[handle];
+        draw->AddRectFilled(ImVec2(point.x - 5, point.y - 5), ImVec2(point.x + 5, point.y + 5),
+                            ImGui::GetColorU32(ImGuiCol_SliderGrabActive));
+        if (ImGui::IsItemHovered() && std::abs(mouse.x - point.x) < 12 &&
+            std::abs(mouse.y - point.y) < 16) {
+            ImGui::SetTooltip("Drag fade %s (%.3f s)", handle == 0 ? "in" : "out",
+                               handle == 0 ? fadeIn : fadeOut);
+            if (ImGui::IsMouseClicked(0)) {
+                state.fadeHandle = handle;
+            }
+        }
+    }
+    if (state.fadeHandle >= 0 && ImGui::IsItemActive()) {
+        const double position = std::clamp((mouse.x - first.x) / width, 0.0f, 1.0f);
+        recipe[state.fadeHandle == 0 ? "fade_in_seconds" : "fade_out_seconds"] =
+            std::min(10.0, (state.fadeHandle == 0 ? position : 1 - position) * duration);
+    }
+    if (state.fadeHandle >= 0 && ImGui::IsItemDeactivated()) {
+        state.fadeHandle = -1;
+        return true;
+    }
+    return false;
+}
+
 void curve(const char* id, const std::vector<float>& values, const ImVec2& size) {
     ImGui::InvisibleButton(id, size);
     const auto start = ImGui::GetItemRectMin(), end = ImGui::GetItemRectMax();
@@ -157,10 +304,10 @@ void curve(const char* id, const std::vector<float>& values, const ImVec2& size)
     }
 }
 
-void envelopeEditor(UIContext& ctx, const json& report, float width) {
+bool envelopeEditor(UIContext& ctx, const json& report, float width) {
     ImGui::TextWrapped("Amplitude envelope | drag Attack, Sustain or Release");
     curve("##designer_envelope", report.at("envelope").get<std::vector<float>>(),
-           ImVec2(width, 70));
+           ImVec2(width, designViewPixels(70)));
     const auto start = ImGui::GetItemRectMin(), end = ImGui::GetItemRectMax();
     const double duration = state.recipe.value("duration_seconds", 2.0);
     const double attack = state.recipe.value("attack_seconds", 0.003);
@@ -168,7 +315,7 @@ void envelopeEditor(UIContext& ctx, const json& report, float width) {
     const double sustain = state.recipe.value("sustain", 0.7);
     const ImVec2 handles[] = {
         ImVec2(start.x + static_cast<float>(std::min(1.0, attack / duration)) * width, start.y + 5),
-        ImVec2(start.x + width * 0.5f, end.y - static_cast<float>(sustain) * 70),
+        ImVec2(start.x + width * 0.5f, end.y - static_cast<float>(sustain) * designViewPixels(70)),
         ImVec2(end.x - static_cast<float>(std::min(0.5, release / duration)) * width, end.y - 5)};
     const char* names[] = {"Attack", "Sustain", "Release"};
     const auto mouse = ImGui::GetIO().MousePos;
@@ -188,7 +335,7 @@ void envelopeEditor(UIContext& ctx, const json& report, float width) {
         if (state.envelopeHandle == 0) {
             state.recipe["attack_seconds"] = std::clamp(position * duration, 0.001, 5.0);
         } else if (state.envelopeHandle == 1) {
-            state.recipe["sustain"] = std::clamp((end.y - mouse.y) / 70, 0.0f, 1.0f);
+            state.recipe["sustain"] = std::clamp((end.y - mouse.y) / designViewPixels(70), 0.0f, 1.0f);
         } else {
             state.recipe["release_seconds"] = std::clamp((1 - position) * duration, 0.001,
                                                         std::min(5.0, duration * 0.5));
@@ -197,12 +344,15 @@ void envelopeEditor(UIContext& ctx, const json& report, float width) {
     }
     if (state.envelopeHandle >= 0 && ImGui::IsItemDeactivated()) {
         state.envelopeHandle = -1;
-        if (state.autoPreview && !rtapi::renderOutputPending()) {
-            play(ctx, false);
-        }
+        return true;
     }
+    return false;
 }
 } // namespace
+
+bool isSoundDesignerOpen(UIContext& ctx) {
+    return ctx.scene.audio->invoke("workspace_get", json::object()).value("designer_open", false);
+}
 
 void openSoundDesigner(UIContext& ctx, const std::string& assetId) {
     sync(ctx);
@@ -217,24 +367,39 @@ void openSoundDesigner(UIContext& ctx, const std::string& assetId) {
                                asset.at("name").get<std::string>().c_str());
                 state.dirty = true;
                 state.original = false;
+                call(ctx, "design_stop");
                 break;
             }
         }
     }
     finishAudioTimelineGesture(ctx);
-    workspaceCall(ctx, "workspace_update", {{"designer_open", true}, {"inspector_open", true}});
+    workspaceCall(ctx, "workspace_update", {{"designer_open", true},
+        {"designer_page", state.recipe.value("mode", "synth") == "asset" ? "edit" : "generate"}});
     rtapi::setBottomEditor("audio");
     if (ctx.scene_ui_ptr) {
         ctx.scene_ui_ptr->tab_to_focus = "Audio";
     }
 }
 
-void drawSoundDesignInspector(UIContext& ctx) {
+void reuseSoundRecipe(UIContext& ctx, const std::string& assetId) {
     sync(ctx);
+    const auto result = call(ctx, "design_reuse", {{"id", assetId}, {"background", true}});
+    if (result.contains("id")) {
+        followRecipeJob(result);
+        openSoundDesigner(ctx);
+    }
+}
+
+static void drawSoundDesignControls(UIContext& ctx, bool primary = false) {
+    sync(ctx);
+    pollRender(ctx);
     ImGui::TextUnformatted("Sound design");
     bool finished = false;
+    const auto before = state.recipe;
+    const auto view = ctx.scene.audio->invoke("workspace_get", json::object());
+    const auto page = view.value("designer_page", std::string("generate"));
     const bool synth = state.recipe.value("mode", "synth") == "synth";
-    if (ImGui::BeginCombo(property("Input").c_str(), synth ? "Synthetic" : "Audio asset")) {
+    if (primary && ImGui::BeginCombo(property("Input").c_str(), synth ? "Synthetic" : "Audio asset")) {
         if (ImGui::Selectable("Synthetic", synth)) {
             choosePreset("metal", "Metal impact");
             finished = true;
@@ -252,89 +417,142 @@ void drawSoundDesignInspector(UIContext& ctx) {
         }
         ImGui::EndCombo();
     }
-    if (state.recipe.value("mode", "synth") == "synth") {
-        const auto catalogue = ctx.scene.audio->invoke("synth_presets", json::object());
-        const auto preset = state.recipe.value("preset", "metal");
-        if (ImGui::BeginCombo(property("Character").c_str(), preset.c_str())) {
-            for (const auto& entry : catalogue.at("presets")) {
-                if (ImGui::Selectable(entry.at("name").get<std::string>().c_str(),
-                                      entry.at("id").get<std::string>() == preset)) {
-                    choosePreset(entry.at("id").get<std::string>().c_str(),
-                                 entry.at("name").get<std::string>().c_str());
-                    finished = true;
-                }
-            }
-            ImGui::EndCombo();
-        }
-        finished |= slider("duration_seconds", "Duration (s)", 2, 0.05f, 10);
-        finished |= slider("frequency_hz", "Body frequency (Hz)", 330, 20, 4000, "%.0f", true);
-        finished |= slider("decay_seconds", "Decay / damping (s)", 0.8, 0.01f, 10, "%.3f", true);
-        finished |= slider("brightness", "Brightness", 0.5, 0, 1);
-        finished |= slider("noise_mix", "Noise / texture", preset == "wind" ? 1 : 0.15, 0, 1);
-        if (ImGui::CollapsingHeader("Envelope", ImGuiTreeNodeFlags_DefaultOpen)) {
-            finished |= slider("attack_seconds", "Attack (s)", 0.003, 0.001f, 5, "%.3f", true);
-            finished |= slider("sustain", "Sustain", 0.7, 0, 1);
-            finished |= slider("release_seconds", "Release (s)", 0.1, 0.001f, 5, "%.3f", true);
-        }
-        if (ImGui::CollapsingHeader("Oscillator / modulation")) {
-            const auto wave = state.recipe.value("wave", "sine");
-            ImGui::BeginDisabled(preset != "tone" && preset != "wind");
-            if (ImGui::BeginCombo(property("Wave").c_str(), wave.c_str())) {
-                for (const char* item : {"sine", "triangle", "saw", "square"}) {
-                    if (ImGui::Selectable(item, wave == item)) {
-                        state.recipe["wave"] = item;
+    if (!primary) {
+        if (page == "generate" && state.recipe.value("mode", "synth") == "synth") {
+            const auto library = ctx.scene.audio->invoke("design_catalogue", json::object());
+            if (ImGui::BeginCombo(property("Sound recipe").c_str(), "Choose complete preset...")) {
+                for (const auto& entry : library.at("presets")) {
+                    if (ImGui::Selectable(entry.at("name").get<std::string>().c_str())) {
+                        state.recipe = entry.at("recipe");
+                        std::snprintf(state.name, sizeof(state.name), "%s", entry.at("name").get<std::string>().c_str());
                         state.dirty = true;
                         finished = true;
                     }
                 }
                 ImGui::EndCombo();
             }
-            ImGui::EndDisabled();
-            ImGui::BeginDisabled(preset != "tone");
-            finished |= slider("detune_cents", "Tone detune (cents)", 0, -100, 100);
-            ImGui::EndDisabled();
-            finished |= slider("modulation_hz", "Amplitude modulation (Hz)", 0.7, 0.05f, 20);
-            finished |= slider("modulation_depth", "Modulation depth", 0, 0, 1);
-            std::uint32_t seed = state.recipe.value("seed", std::uint32_t(1));
-            if (ImGui::InputScalar(property("Variation seed").c_str(), ImGuiDataType_U32, &seed)) {
-                state.recipe["seed"] = seed;
-                state.dirty = true;
+            if (ImGui::CollapsingHeader("Generator details")) {
+                const auto catalogue = ctx.scene.audio->invoke("synth_presets", json::object());
+                const auto preset = state.recipe.value("preset", "metal");
+                const bool layered = !state.recipe.value("layers", json::array()).empty();
+                ImGui::BeginDisabled(layered);
+                if (ImGui::BeginCombo(property("Character").c_str(), preset.c_str())) {
+                    for (const auto& entry : catalogue.at("presets")) {
+                        if (ImGui::Selectable(entry.at("name").get<std::string>().c_str(),
+                                              entry.at("id").get<std::string>() == preset)) {
+                            choosePreset(entry.at("id").get<std::string>().c_str(),
+                                         entry.at("name").get<std::string>().c_str());
+                            finished = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::EndDisabled();
+                finished |= slider("duration_seconds", "Duration (s)", 2, 0.05f, 10);
+                ImGui::BeginDisabled(layered);
+                finished |= slider("frequency_hz", "Body frequency (Hz)", 330, 20, 4000, "%.0f", true);
+                ImGui::EndDisabled();
+                finished |= slider("decay_seconds", "Decay / damping (s)", 0.8, 0.01f, 10, "%.3f", true);
+                ImGui::BeginDisabled(layered);
+                finished |= slider("brightness", "Brightness", 0.5, 0, 1);
+                finished |= slider("noise_mix", "Noise / texture", preset == "wind" ? 1 : 0.15, 0, 1);
+                ImGui::EndDisabled();
+                if (ImGui::CollapsingHeader("Envelope")) {
+                    finished |= slider("attack_seconds", "Attack (s)", 0.003, 0.001f, 5, "%.3f", true);
+                    finished |= slider("sustain", "Sustain", 0.7, 0, 1);
+                    finished |= slider("release_seconds", "Release (s)", 0.1, 0.001f, 5, "%.3f", true);
+                }
+                if (ImGui::CollapsingHeader("Oscillator / modulation")) {
+                    const auto wave = state.recipe.value("wave", "sine");
+                    ImGui::BeginDisabled(layered || (preset != "tone" && preset != "wind"));
+                    if (ImGui::BeginCombo(property("Wave").c_str(), wave.c_str())) {
+                        for (const char* item : {"sine", "triangle", "saw", "square"}) {
+                            if (ImGui::Selectable(item, wave == item)) {
+                                state.recipe["wave"] = item;
+                                state.dirty = true;
+                                finished = true;
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                    ImGui::EndDisabled();
+                    ImGui::BeginDisabled(layered || preset != "tone");
+                    finished |= slider("detune_cents", "Tone detune (cents)", 0, -100, 100);
+                    ImGui::EndDisabled();
+                    finished |= slider("modulation_hz", "Amplitude modulation (Hz)", 0.7, 0.05f, 20);
+                    finished |= slider("modulation_depth", "Modulation depth", 0, 0, 1);
+                    std::uint32_t seed = state.recipe.value("seed", std::uint32_t(1));
+                    if (ImGui::InputScalar(property("Variation seed").c_str(), ImGuiDataType_U32, &seed)) {
+                        state.recipe["seed"] = seed;
+                        state.dirty = true;
+                    }
+                    finished |= ImGui::IsItemDeactivatedAfterEdit();
+                }
+
             }
-            finished |= ImGui::IsItemDeactivatedAfterEdit();
-        }
-    } else {
-        const auto scene = ctx.scene.audio->snapshot();
-        double duration = 0;
-        for (const auto& asset : scene.at("assets")) {
-            if (asset.at("id") == state.recipe.at("asset_id")) {
-                duration = asset.at("duration");
+        } else if (page == "edit" && state.recipe.value("mode", "synth") == "asset") {
+            const auto scene = ctx.scene.audio->snapshot();
+            double duration = 0;
+            for (const auto& asset : scene.at("assets")) {
+                if (asset.at("id") == state.recipe.at("asset_id")) {
+                    duration = asset.at("duration");
+                }
             }
+            finished |= slider("source_in_seconds", "Source start (s)", 0, 0,
+                                static_cast<float>(duration));
+            finished |= slider("source_out_seconds", "Source end (s)", std::min(10.0, duration),
+                                0, static_cast<float>(duration));
+            ImGui::TextWrapped("Select up to 30 seconds. The original file is preserved.");
         }
-        finished |= slider("source_in_seconds", "Source start (s)", 0, 0,
-                            static_cast<float>(duration));
-        finished |= slider("source_out_seconds", "Source end (s)", std::min(10.0, duration),
-                            0, static_cast<float>(duration));
-        ImGui::TextWrapped("Select up to 30 seconds. The original file is preserved.");
+        if (page == "edit" && ImGui::CollapsingHeader("Pitch / duration")) {
+            finished |= slider("pitch_semitones", "Pitch (semitones)", 0, -24, 24);
+            finished |= slider("stretch_ratio", "Duration multiplier", 1, 0.5f, 2);
+            finished |= slider("formant_semitones", "Formant shift (semitones)", 0, -12, 12);
+            finished |= slider("formant_base_hz", "Formant base (Hz)", 200, 20, 2000, "%.0f", true);
+            bool compensate = state.recipe.value("formant_compensate", false);
+            if (ImGui::Checkbox("Compensate formants for pitch", &compensate)) {
+                state.recipe["formant_compensate"] = compensate;
+                finished = true;
+            }
+            bool reverse = state.recipe.value("reverse", false);
+            if (ImGui::Checkbox("Reverse input", &reverse)) {
+                state.recipe["reverse"] = reverse;
+                finished = true;
+            }
+            ImGui::TextWrapped("Pitch and duration are independent. Very short ranges may be rejected.");
+        }
+        if ((page == "edit" || page == "effects") &&
+            ImGui::CollapsingHeader("Output / shaping")) {
+            finished |= slider("highpass_hz", "Highpass (Hz)", 20, 20, 20000, "%.0f", true);
+            finished |= slider("lowpass_hz", "Lowpass (Hz)", 20000, 20, 20000, "%.0f", true);
+            finished |= slider("drive", "Saturation", 0, 0, 1);
+            finished |= slider("fade_in_seconds", "Edge fade in (s)", 0.003, 0, 10, "%.3f");
+            finished |= slider("fade_out_seconds", "Edge fade out (s)", 0.02, 0, 10, "%.3f");
+            finished |= slider("loop_crossfade_seconds", "Loop seam crossfade (s)", 0, 0, 1, "%.3f");
+            ImGui::TextWrapped("Loop crossfade joins the tail to the head and shortens the result "
+                               "by its overlap.");
+        }
+
+        if (page != "analyze" && ImGui::CollapsingHeader("Master output")) {
+            const double defaultGainDb = 20 * std::log10(std::max(1e-3,
+                state.recipe.value("gain", synth ? 0.5 : 1.0)));
+            finished |= slider("gain_db", "Output level (dB)", defaultGainDb, -60, 6, "%.1f");
+            finished |= slider("tail_seconds", "Effect tail (s)", 0, 0, 5);
+        }
+        if (page == "analyze") {
+            ImGui::TextWrapped("Analysis controls are in the bottom canvas. Peak/RMS, clipping, DC, "
+                               "FFT spectrum and spectrogram inspect the selected original/processed sound.");
+        }
     }
-    if (ImGui::CollapsingHeader("Pitch / duration")) {
-        finished |= slider("pitch_semitones", "Pitch (semitones)", 0, -24, 24);
-        finished |= slider("stretch_ratio", "Duration multiplier", 1, 0.5f, 2);
-        ImGui::TextWrapped("Pitch and duration are independent. Very short ranges may be rejected.");
-    }
-    if (ImGui::CollapsingHeader("Filter / shaping", ImGuiTreeNodeFlags_DefaultOpen)) {
-        finished |= slider("highpass_hz", "Highpass (Hz)", 20, 20, 20000, "%.0f", true);
-        finished |= slider("lowpass_hz", "Lowpass (Hz)", 20000, 20, 20000, "%.0f", true);
-        finished |= slider("drive", "Saturation", 0, 0, 1);
-        finished |= slider("gain", "Output gain", synth ? 0.5 : 1, 0, 2);
-        finished |= slider("fade_in_seconds", "Edge fade in (s)", 0.003, 0, 10, "%.3f");
-        finished |= slider("fade_out_seconds", "Edge fade out (s)", 0.02, 0, 10, "%.3f");
-        finished |= slider("loop_crossfade_seconds", "Loop seam crossfade (s)", 0, 0, 1, "%.3f");
-        ImGui::TextWrapped("Loop crossfade joins the tail to the head and shortens the result "
-                           "by its overlap.");
+    if (before != state.recipe) {
+        state.dirty = true;
     }
     ImGui::Checkbox("Preview after releasing a control", &state.autoPreview);
     if (finished && state.autoPreview && !rtapi::renderOutputPending()) {
         play(ctx, false);
+    }
+    if (!primary) {
+        return;
     }
     ImGui::Separator();
     ImGui::InputText(property("Sound name").c_str(), state.name, sizeof(state.name));
@@ -352,20 +570,13 @@ void drawSoundDesignInspector(UIContext& ctx) {
         state.folder.clear();
     }
     ImGui::Checkbox("Insert clip at playhead", &state.insertClip);
-    ImGui::BeginDisabled(rtapi::renderOutputPending() || state.name[0] == 0);
+    ImGui::BeginDisabled(rtapi::renderOutputPending() || state.name[0] == 0 || state.renderJob != 0);
     if (ImGui::Button("Save asset", ImVec2(-1, 0))) {
-        if (!state.dirty || render(ctx)) {
-            json params = {{"name", state.name}};
-            if (!state.folder.empty()) {
-                params["folder"] = state.folder;
-            }
-            const auto result = call(ctx, "design_save", params);
-            if (result.contains("design")) {
-                state.savedPath = result.at("design").at("path");
-            }
-            if (result.contains("asset") && state.insertClip) {
-                addTimelineAsset(ctx, result.at("asset").at("id"));
-            }
+        if (state.dirty) {
+            requestRender(ctx, false);
+            state.saveWhenReady = state.renderJob != 0;
+        } else {
+            saveAsset(ctx);
         }
     }
     ImGui::EndDisabled();
@@ -378,70 +589,382 @@ void drawSoundDesignInspector(UIContext& ctx) {
     }
 }
 
+void drawSoundDesignInspector(UIContext& ctx) {
+    drawSoundDesignControls(ctx, true);
+}
+
 void drawSoundDesigner(UIContext& ctx) {
     sync(ctx);
-    auto status = ctx.scene.audio->invoke("design_status", json::object());
+    pollRender(ctx);
+    auto status = currentReport(ctx);
+    auto workspace = ctx.scene.audio->invoke("workspace_get", json::object());
+    const bool arrange = workspace.value("designer_page", "generate") == "edit" &&
+        workspace.value("designer_edit_view", "source") == "arrange";
+    if (arrange) {
+        const auto transport = ctx.scene.audio->invoke("arrange_status", json::object());
+        status["playing"] = transport.at("playing");
+        status["loop"] = transport.at("loop");
+        status["rendering"] = transport.value("rendering", false);
+        const auto job = transport.value("job", json::object());
+        if (job.value("state", "idle") == "failed") {
+            state.error = job.value("error", "Arrangement render failed");
+        }
+    }
+    if (status.at("playing")) {
+        if (!arrange) {
+            state.original = status.at("audition_original");
+        }
+        state.loop = status.at("loop");
+    }
     if (status.at("ready") && !state.dirty && status.at("recipe") != state.recipe) {
         state.recipe = status.at("recipe");
     }
-    ImGui::TextUnformatted("Sound designer");
-    nextButton("Loop preview");
-    if (ImGui::Checkbox("Loop preview", &state.loop) && status.at("playing")) {
-        play(ctx, status.at("audition_original"));
-    }
     ImGui::BeginDisabled(rtapi::renderOutputPending());
-    if (ImGui::Button(state.dirty ? "Render + listen" : "Listen processed")) {
-        play(ctx, false);
-    }
-    nextButton("Listen original");
-    if (ImGui::Button("Listen original")) {
-        play(ctx, true);
-    }
-    nextButton("Update visuals");
-    if (ImGui::Button("Update visuals")) {
-        render(ctx);
+    if (ImGui::Button("Play")) {
+        if (arrange) {
+            playArrangement(ctx);
+        } else {
+            play(ctx, state.original);
+        }
     }
     ImGui::EndDisabled();
+    nextButton("Stop");
     if (ImGui::Button("Stop")) {
-        call(ctx, "design_stop");
+        call(ctx, arrange ? "arrange_stop" : "design_stop");
+        state.renderJob = 0;
+        state.previewWhenReady = false;
+        state.saveWhenReady = false;
     }
-    nextButton("Controls / Save");
-    if (ImGui::Button("Controls / Save")) {
-        workspaceCall(ctx, "workspace_update", {{"inspector_open", true}});
+    ImGui::BeginDisabled(rtapi::renderOutputPending());
+    nextButton("Loop");
+    if (ImGui::Checkbox("Loop", &state.loop) && status.at("playing")) {
+        if (arrange) {
+            playArrangement(ctx);
+        } else {
+            play(ctx, state.original);
+        }
     }
-    status = ctx.scene.audio->invoke("design_status", json::object());
-    ImGui::BeginChild("SoundDesignCanvas", ImVec2(0, 0), false);
-    if (!status.at("ready")) {
-        ImGui::TextWrapped("Choose a character or audio asset in the inspector, then Render + listen. "
-                           "Preview creates no files or scene assets.");
+    if (!arrange) {
+        nextButton("Original");
+        if (ImGui::RadioButton("Original", state.original)) {
+            state.original = true;
+            if (status.at("playing")) {
+                play(ctx, true);
+            }
+        }
+        nextButton("Processed");
+        if (ImGui::RadioButton("Processed", !state.original)) {
+            state.original = false;
+            if (status.at("playing")) {
+                play(ctx, false);
+            }
+        }
+        nextButton("Refresh");
+        if (ImGui::Button("Refresh")) {
+            requestRender(ctx, false);
+        }
+        nextButton("Undo");
+        ImGui::BeginDisabled(!status.value("undo_available", false));
+        if (ImGui::Button("Undo")) {
+            followRecipeJob(call(ctx, "design_undo", {{"background", true}}));
+        }
+        ImGui::EndDisabled();
+        nextButton("Redo");
+        ImGui::BeginDisabled(!status.value("redo_available", false));
+        if (ImGui::Button("Redo")) {
+            followRecipeJob(call(ctx, "design_redo", {{"background", true}}));
+        }
+        ImGui::EndDisabled();
+    }
+    ImGui::EndDisabled();
+    if (state.renderJob != 0 || (arrange && status.value("rendering", false))) {
+        nextButton("Rendering...");
+        ImGui::TextUnformatted("Rendering...");
+    }
+    status = currentReport(ctx);
+    auto view = ctx.scene.audio->invoke("workspace_get", json::object());
+    auto page = view.value("designer_page", std::string("generate"));
+    nextButton("Workflow");
+    ImGui::SetNextItemWidth(105);
+    if (ImGui::BeginCombo("##DesignerWorkflow", page.c_str())) {
+        for (const char* entry : {"generate", "edit", "effects", "analyze"}) {
+            if (ImGui::Selectable(entry, page == entry)) {
+                finishAudioTimelineGesture(ctx);
+                workspaceCall(ctx, "workspace_update", {{"designer_page", entry}});
+                page = entry;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    nextButton("View");
+    bool toolsOpen = view.value("designer_tools_open", true);
+    bool propertiesOpen = view.value("designer_properties_open", false);
+    if (ImGui::SmallButton("View")) {
+        ImGui::OpenPopup("DesignerViewMenu");
+    }
+    if (ImGui::BeginPopup("DesignerViewMenu")) {
+        if (ImGui::MenuItem("Tools", nullptr, &toolsOpen)) {
+            workspaceCall(ctx, "workspace_update", {{"designer_tools_open", toolsOpen}});
+        }
+        if (ImGui::MenuItem("Properties", nullptr, &propertiesOpen)) {
+            workspaceCall(ctx, "workspace_update", {{"designer_properties_open", propertiesOpen}});
+        }
+        if (page == "edit") {
+            ImGui::Separator();
+            for (const char* mode : {"source", "arrange"}) {
+                if (ImGui::MenuItem(mode, nullptr,
+                    view.value("designer_edit_view", std::string("source")) == mode)) {
+                    finishAudioTimelineGesture(ctx);
+                    workspaceCall(ctx, "workspace_update", {{"designer_edit_view", mode}});
+                }
+            }
+        }
+        ImGui::EndPopup();
+    }
+    nextButton("Fit");
+    if (ImGui::SmallButton("Fit")) {
+        state.fitCanvasRequested = true;
+        workspaceCall(ctx, "workspace_update", {{"designer_canvas_zoom", 1},
+            {"designer_canvas_pan_x", 0}, {"designer_canvas_pan_y", 0},
+            {"designer_zoom", 1}, {"designer_pan", 0}});
+        view = ctx.scene.audio->invoke("workspace_get", json::object());
+    }
+    ImGui::Separator();
+    const bool wide = ImGui::GetContentRegionAvail().x >= 720;
+    const auto before = state.recipe;
+    bool completed = false;
+    const int columns = 1 + (wide && toolsOpen ? 1 : 0) + (wide && propertiesOpen ? 1 : 0);
+    const bool table = ImGui::BeginTable("DesignerStudioWorkspace", columns,
+        ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp);
+    if (!table) {
+        return;
+    }
+    if (wide && toolsOpen) {
+        ImGui::TableSetupColumn("Tools", ImGuiTableColumnFlags_WidthFixed, 240);
+    }
+    ImGui::TableSetupColumn("Sound canvas", ImGuiTableColumnFlags_WidthStretch);
+    if (wide && propertiesOpen) {
+        ImGui::TableSetupColumn("Properties", ImGuiTableColumnFlags_WidthFixed, 280);
+    }
+    ImGui::TableNextRow();
+    int canvasColumn = 0;
+    if (wide && toolsOpen) {
+        ImGui::TableSetColumnIndex(0);
+        ImGui::BeginChild("DesignerTools", ImVec2(0, 0), false);
+        if (ImGui::SmallButton("x##CloseTools")) {
+            workspaceCall(ctx, "workspace_update", {{"designer_tools_open", false}});
+        }
+        if (page == "generate" || page == "effects") {
+            completed |= drawDesignModules(ctx, state.recipe, page == "effects", 1);
+        } else if (page == "edit") {
+            const auto editView = view.value("designer_edit_view", std::string("source"));
+            for (const char* mode : {"source", "arrange"}) {
+                if (ImGui::Selectable(mode, editView == mode)) {
+                    finishAudioTimelineGesture(ctx);
+                    workspaceCall(ctx, "workspace_update", {{"designer_edit_view", mode}});
+                }
+            }
+            if (editView == "arrange") {
+                drawAudioTrackTools(ctx);
+                drawAudioClipSelectionTools(ctx);
+                const auto data = ctx.scene.audio->snapshot();
+                if (ImGui::BeginCombo("Add asset clip", "Choose asset...")) {
+                    for (const auto& asset : data.at("assets")) {
+                        if (ImGui::Selectable(asset.at("name").get<std::string>().c_str())) {
+                            addTimelineAsset(ctx, asset.at("id"));
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::TextWrapped("Ctrl+click: multi-select. A: select. B: razor. Drag clips/edges/gain/fades. "
+                                   "Right-click: split, duplicate, delete. Track rows route into mixer buses.");
+                if (ImGui::SmallButton("Scene transport")) {
+                    finishAudioTimelineGesture(ctx);
+                    call(ctx, "design_stop");
+                    workspaceCall(ctx, "workspace_update", {{"designer_open", false}});
+                }
+                const auto audition = ctx.scene.audio->invoke("arrange_status", json::object());
+                ImGui::TextWrapped("Audition %.3f..%.3f s | selected clips, or all when selection is empty",
+                    view.at("audition_start_seconds").get<double>(),
+                    view.at("audition_end_seconds").get<double>());
+                if (audition.value("ready", false)) {
+                    ImGui::Text("Mix peak %.3f | RMS %.3f", audition.at("peak").get<double>(),
+                        audition.at("rms").get<double>());
+                }
+                if (ImGui::CollapsingHeader("Audition range")) {
+                    double start = view.at("audition_start_seconds"), end = view.at("audition_end_seconds");
+                    bool changed = ImGui::InputDouble("Start", &start, 0, 0, "%.3f",
+                        ImGuiInputTextFlags_EnterReturnsTrue);
+                    changed |= ImGui::InputDouble("End", &end, 0, 0, "%.3f",
+                        ImGuiInputTextFlags_EnterReturnsTrue);
+                    if (changed) {
+                        workspaceCall(ctx, "workspace_update", {{"audition_start_seconds", start},
+                            {"audition_end_seconds", end}});
+                    }
+                }
+            }
+        } else {
+            ImGui::TextWrapped("Wheel zooms; middle drag pans; Fit resets the canvas.");
+        }
+        ImGui::EndChild();
+        canvasColumn = 1;
+    }
+    if (wide && propertiesOpen) {
+        ImGui::TableSetColumnIndex(canvasColumn + 1);
+        ImGui::BeginChild("DesignerProperties", ImVec2(0, 0), false);
+        if (ImGui::SmallButton("x##CloseProperties")) {
+            workspaceCall(ctx, "workspace_update", {{"designer_properties_open", false}});
+        }
+        if (page == "generate" || page == "effects") {
+            completed |= drawDesignModules(ctx, state.recipe, page == "effects", 2);
+        }
+        if (arrange) {
+            if (!drawSelectedAudioTrackProperties(ctx)) {
+                drawSelectedAudioClipProperties(ctx);
+            }
+        } else {
+            drawSoundDesignControls(ctx);
+        }
+        ImGui::EndChild();
+    }
+    ImGui::TableSetColumnIndex(canvasColumn);
+    status = currentReport(ctx);
+    const auto viewportSize = ImGui::GetContentRegionAvail();
+    float canvasZoom = view.value("designer_canvas_zoom", 1.0f);
+    ImGui::SetNextWindowContentSize(ImVec2(
+        std::max(1.0f, viewportSize.x - 20) * (arrange ? 1.0f : canvasZoom), 0));
+    ImGui::BeginChild("SoundDesignCanvas", ImVec2(0, 0), false,
+        ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    const float graphBudget = std::max(60.0f, viewportSize.y -
+        (page == "analyze" ? 190.0f : page == "generate" ? 180.0f : 150.0f));
+    const float nominalGraphs = page == "generate" ? 455.0f :
+        page == "effects" ? 335.0f : page == "analyze" ? 225.0f : 230.0f;
+    designViewScale = std::clamp(graphBudget / nominalGraphs, 0.2f, 1.0f) * canvasZoom;
+    static std::string appliedView;
+    const auto viewKey = std::to_string(canvasZoom) + ":" +
+        std::to_string(view.value("designer_canvas_pan_x", 0.0f)) + ":" +
+        std::to_string(view.value("designer_canvas_pan_y", 0.0f));
+    if (appliedView != viewKey || state.fitCanvasRequested) {
+        ImGui::SetScrollX(view.value("designer_canvas_pan_x", 0.0f) * ImGui::GetScrollMaxX());
+        ImGui::SetScrollY(view.value("designer_canvas_pan_y", 0.0f) * ImGui::GetScrollMaxY());
+        appliedView = viewKey;
+        state.fitCanvasRequested = false;
+    }
+    if (!wide && toolsOpen && ImGui::CollapsingHeader("Tools")) {
+        if (page == "generate" || page == "effects") {
+            completed |= drawDesignModules(ctx, state.recipe, page == "effects", 1);
+        }
+    }
+    if (!wide && propertiesOpen && ImGui::CollapsingHeader("Properties")) {
+        if (page == "generate" || page == "effects") {
+            completed |= drawDesignModules(ctx, state.recipe, page == "effects", 2);
+        }
+        if (arrange) {
+            if (!drawSelectedAudioTrackProperties(ctx)) {
+                drawSelectedAudioClipProperties(ctx);
+            }
+        } else {
+            drawSoundDesignControls(ctx);
+        }
+        status = currentReport(ctx);
+    }
+    if (page == "generate") {
+        completed |= drawDesignGenerationCanvas(ctx, state.recipe);
+    }
+    if (arrange) {
+        const float firstFrame = static_cast<float>(ctx.render_settings.animation_start_frame);
+        const float lastFrame = static_cast<float>(ctx.render_settings.animation_end_frame);
+        const float span = std::max(1.0f, lastFrame - firstFrame);
+        float arrangementZoom = canvasZoom;
+        float arrangementPan = view.value("designer_canvas_pan_x", 0.0f) * span;
+        const bool envelopeOpen = view.value("designer_envelope", std::string("none")) != "none";
+        const float laneHeight = std::max(80.0f, ImGui::GetContentRegionAvail().y -
+            (envelopeOpen ? 180.0f : 35.0f));
+        ImGui::BeginChild("ArrangementLanes", ImVec2(0, laneHeight), false);
+        drawAudioTimeline(ctx, arrangementZoom, arrangementPan, 100, true);
+        ImGui::EndChild();
+        drawAudioClipEnvelope(ctx);
+        if (arrangementZoom != canvasZoom ||
+            arrangementPan != view.value("designer_canvas_pan_x", 0.0f) * span) {
+            workspaceCall(ctx, "workspace_update", {
+                {"designer_canvas_zoom", std::clamp(arrangementZoom, 1.0f, 8.0f)},
+                {"designer_canvas_pan_x", std::clamp(arrangementPan / span, 0.0f, 1.0f)}});
+        }
+    }
+    if (page == "edit" && !arrange) {
+        completed |= drawDesignSourceEditor(ctx, state.recipe);
+    }
+    if (page == "effects") {
+        completed |= drawDesignEffectGraph(ctx, state.recipe);
+        completed |= drawDesignEffectPad(ctx, state.recipe);
+    }
+    if (arrange) {
+        // The embedded arrangement consumes the canvas and retains its own clip gestures.
+    } else if (page == "analyze") {
+        completed |= drawDesignAnalysis(ctx, status, state.original, state.recipe);
+    } else if (!status.at("ready")) {
+        ImGui::TextWrapped("Choose layers in Tools, a recipe in Properties or an asset in the main panel. "
+                           "Play renders and auditions without creating files.");
     } else {
-        const bool original = status.at("audition_original");
+        if (status.value("output_muted", false) || status.value("audition_output_gain", 1.0) <= 0) {
+            ImGui::TextWrapped("Audition is muted by preview output or Master. Check the main Audio/Mixer controls.");
+        }
+        const bool original = status.at("playing").get<bool>() ?
+                              status.at("audition_original").get<bool>() : state.original;
         const auto& report = status.at(original ? "original" : "processed");
+        if (report.at("rms").get<double>() < 1e-7) {
+            ImGui::TextWrapped("Rendered audio is silent. Check enabled layers, source range, "
+                               "effect mix and output level.");
+        }
         ImGui::TextWrapped("%s | %.2f s | %d channels | peak %.3f | RMS %.3f%s",
             original ? "Original" : "Processed", report.at("duration_seconds").get<double>(),
             report.at("channels").get<int>(), report.at("peak").get<double>(),
             report.at("rms").get<double>(), state.dirty ? " | changes pending" : "");
         const float width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
-        waveform(report, ImVec2(width, 110), status.at("cursor_seconds"), status.at("playing"));
-        if (!status.at("envelope").empty() && state.recipe.value("mode", "synth") == "synth") {
-            envelopeEditor(ctx, status, width);
+        waveform(report, ImVec2(width, designViewPixels(page == "generate" ? 120 : 80)),
+                  status.at("cursor_seconds"), status.at("playing"));
+        if (page == "edit" && !original) {
+            completed |= fadeControls(state.recipe, report);
         }
-        ImGui::TextWrapped("Filter response | 20 Hz - 20 kHz | -60 to 0 dB");
-        std::vector<float> response;
-        for (const auto& point : status.at("filter_response")) {
-            response.push_back(static_cast<float>((point[1].get<double>() + 60) / 60));
+        if (page == "generate" && !status.at("envelope").empty() &&
+            state.recipe.value("mode", "synth") == "synth") {
+            completed |= envelopeEditor(ctx, status, width);
         }
-        curve("##designer_filter", response, ImVec2(width, 55));
-        ImGui::TextWrapped("Spectrum of loudest sampled window | 20 Hz - 20 kHz | -120 to 0 dB");
-        std::vector<float> spectrum;
-        for (const auto& point : report.at("spectrum")) {
-            spectrum.push_back(static_cast<float>((point[1].get<double>() + 120) / 120));
-        }
-        curve("##designer_spectrum", spectrum, ImVec2(width, 70));
+    }
+    if (before != state.recipe) {
+        state.dirty = true;
+    }
+    if (completed && state.autoPreview && !rtapi::renderOutputPending()) {
+        play(ctx, false);
+    }
+    if (!designPanelsError().empty()) {
+        ImGui::TextWrapped("%s", designPanelsError().c_str());
     }
     if (!state.error.empty()) {
         ImGui::TextWrapped("%s", state.error.c_str());
     }
+    if (!arrange && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) {
+        const auto& io = ImGui::GetIO();
+        if (!io.KeyCtrl && io.MouseWheel != 0) {
+            canvasZoom = std::clamp(canvasZoom * std::pow(1.25f, io.MouseWheel), 1.0f, 8.0f);
+            workspaceCall(ctx, "workspace_update", {{"designer_canvas_zoom", canvasZoom}});
+        }
+        if (!io.KeyCtrl && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+            const float x = ImGui::GetScrollMaxX() > 0 ? std::clamp(
+                (ImGui::GetScrollX() - io.MouseDelta.x) / ImGui::GetScrollMaxX(), 0.0f, 1.0f) : 0;
+            const float y = ImGui::GetScrollMaxY() > 0 ? std::clamp(
+                (ImGui::GetScrollY() - io.MouseDelta.y) / ImGui::GetScrollMaxY(), 0.0f, 1.0f) : 0;
+            workspaceCall(ctx, "workspace_update", {{"designer_canvas_pan_x", x},
+                {"designer_canvas_pan_y", y}});
+        }
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Middle)) {
+            state.fitCanvasRequested = true;
+            workspaceCall(ctx, "workspace_update", {{"designer_canvas_zoom", 1},
+                {"designer_canvas_pan_x", 0}, {"designer_canvas_pan_y", 0}});
+        }
+    }
+    designViewScale = 1;
     ImGui::EndChild();
+    ImGui::EndTable();
 }
 } // namespace AudioUI

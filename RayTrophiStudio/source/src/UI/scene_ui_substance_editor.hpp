@@ -300,6 +300,7 @@ inline bool draw(const char* id, std::string& assigned) {
         {"Combustion", "Burning (solid)", field_flag("combustible"), "combustible"},
         {"Liquid fuel", "Liquid fuel", category == "fuel" || field_flag("fluid_flammable") ||
             field_flag("fluid_extinguishing"), nullptr},
+        {"Acoustics", "Acoustics", true, nullptr},
         {"Optical", "Look", true, nullptr},
     };
     static bool show_unused = false;

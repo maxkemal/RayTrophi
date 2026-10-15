@@ -12,7 +12,6 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 #define CLOUD_VOLUME_BINDING 17
 #define CLOUD_RT_LIGHTING
 #include "cloud_rt.glsl"
-#include "weather_fast.glsl"
 
 layout(set = 0, binding = 12) uniform sampler2D sceneDepth;
 layout(set = 0, binding = 13, rgba16f) uniform image2D sceneHDR;
@@ -32,6 +31,9 @@ vec3 cloudSkyAmbient(vec3 direction) {
     float v = (1.0 - clamp(direction.y, -1.0, 1.0)) * 0.5;
     return textureLod(atmosphereLUTs[1], vec2(u, v), 0.0).rgb;
 }
+
+#define NEAR_PRECIP_DRAW
+#include "near_precip.glsl"
 
 void main() {
     ivec2 px = ivec2(gl_GlobalInvocationID.xy);
@@ -63,7 +65,14 @@ void main() {
     vec4 surface = imageLoad(sceneHDR, px);
     vec3 color = surface.rgb * T + inscatter;
     color = cloudApplyLightning(color, worldData.camPos.xyz, direction, distance);
-    color = applyWeatherAtmosphere(color, direction, min(distance, 12000.0));
-    color = applyWeatherPrecipitation(color, worldData.camPos.xyz, direction, distance);
+    // Near-camera drops (docs/dev/ATMOSPHERE_NEAR_PRECIP.md), the same
+    // function as RT; the curtain above started at their range.
+    if (cloudNearPrecipRange() > 0.0 && cloudParams.nearState.state[0].x > 0.0) {
+        vec3 nearIn;
+        float nearT;
+        float pixelAngle = 2.0 * tanH / float(pc.height);
+        nearPrecipComposite(worldData.camPos.xyz, direction, distance, pixelAngle, nearIn, nearT);
+        color = nearIn + nearT * color;
+    }
     imageStore(sceneHDR, px, vec4(color, surface.a));
 }

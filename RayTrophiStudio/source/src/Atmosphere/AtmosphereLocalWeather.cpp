@@ -276,8 +276,9 @@ struct PastCells {
     }
 };
 
-LocalFogTexel fogTexel(const LocalFogDrivers& d, float strength, float ground, float mean,
+LocalFogTexel fogTexel(const LocalFogDrivers& d, const CloudLocalWeather& lw, float ground, float mean,
                        bool on_terrain, float cover, float recent, float now) {
+    const float strength = lw.fog_strength;
     LocalFogTexel t;
     t.ground = ground;
     // Hollows (below the ~1.5 km local mean) collect the cold air; on flat
@@ -286,13 +287,17 @@ LocalFogTexel fogTexel(const LocalFogDrivers& d, float strength, float ground, f
     const float fill = on_terrain ? std::clamp(mean - ground, 0.0f, 250.0f) : 0.0f;
     const float humid = smooth01(0.80f, 0.97f, d.humidity + 0.12f * recent);
     const float clear = 1.0f - smooth01(0.3f, 0.85f, cover);
-    const float potential = d.night * d.calm * humid * clear;
+    // Authored (fog_manual): the potential, lift and mist are the user's;
+    // where it pools (hollows) and how deep it fills stay the terrain's.
+    const float potential = lw.fog_manual ? lw.valley_fog : d.night * d.calm * humid * clear;
+    const float lift = lw.fog_manual ? lw.valley_fog_lift : d.burn_off;
     t.fog = strength * kRadiationFogPeak * potential * (0.25f + 0.75f * hollow);
     // The fog fills the hollow; in the morning its top lifts as it thins.
-    t.fog_top = ground + (20.0f + 0.6f * fill) * (0.6f + 0.4f * hollow) + 60.0f * d.burn_off;
+    t.fog_top = ground + (20.0f + 0.6f * fill) * (0.6f + 0.4f * hollow) + 60.0f * lift;
     // Mist: after the rain has stopped -- wet ground evaporating into humid
     // air. Where it still rains, the curtain is the medium.
-    const float post = std::clamp(recent - now, 0.0f, 1.0f) *
+    const float post = lw.fog_manual ? lw.post_rain_mist :
+                       std::clamp(recent - now, 0.0f, 1.0f) *
                        smooth01(0.55f, 0.85f, d.humidity + 0.25f * recent);
     t.mist = strength * kPostRainMistPeak * post;
     return t;
@@ -368,7 +373,7 @@ std::shared_ptr<LocalFogMap> buildFogMap(const World& world, const LocalWeatherE
                 recent = coarse(gRecent, x, z);
                 now = coarse(gNow, x, z);
             }
-            LocalFogTexel t = fogTexel(drivers, clouds.local_weather.fog_strength, ground, mean,
+            LocalFogTexel t = fogTexel(drivers, clouds.local_weather, ground, mean,
                                        onTerrain, cover, recent, now);
             // Fade over the outer 6% of the map: no wall at its edge.
             const float edge = static_cast<float>(std::min({ix, iz, n - 1 - ix, n - 1 - iz}));
@@ -591,6 +596,9 @@ void syncLocalWeather(const World& world, float cloud_time_s, const Vec3& camera
 
 LocalWeatherPoint sampleLocalWeather(const World& world, float cloud_time_s, const Vec3& p) {
     LocalWeatherPoint out;
+    out.air_temperature_c = world.sampleClimate(p).temperature_k - 273.15f;
+    const float thaw = std::clamp(out.air_temperature_c * 0.5f, 0.0f, 1.0f);
+    out.frozen_surface_share = 1.0f - thaw * thaw * (3.0f - 2.0f * thaw);
     const std::shared_ptr<const LocalWeatherEnvironment> env = localWeatherEnvironment();
     const CloudState& clouds = world.getClouds();
     const Vec3 wind = world.cloudWindVelocity();

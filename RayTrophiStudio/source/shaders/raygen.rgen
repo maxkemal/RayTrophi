@@ -130,12 +130,12 @@ struct VkWorldDataExtended {
     vec3  weatherWindDirection;
     float weatherWindSpeed;
     float weatherPrecipitationScale;
-    float weatherVisibility;
+    float _weatherPad0;
     float weatherSurfaceWetness;
     float weatherSurfaceAccumulation;
     float weatherSurfaceSettling;
     float weatherSurfaceHeight;
-    int   weatherVisualMode;
+    int   _weatherPad1;
     int   weatherSurfaceResponseEnabled;
     
     // ════════════════════════════ ENVIRONMENT & LUT REFS (32 bytes)
@@ -383,9 +383,9 @@ vec3 sanitizeRadiance(vec3 c) {
 #define CLOUD_CELL_BINDING 36
 #define CLOUD_VOLUME_BINDING 37
 #include "cloud_rt.glsl"
-#define WEATHER_TIME cloudParams.cirrusDirection.z
-#include "weather_from_world.glsl"
-#include "weather_fast.glsl"
+// Near-camera drops run in the cloud callable (cloud_call_types.glsl: the
+// heavy cloud code is compiled in that one stage only).
+#include "cloud_call.glsl"
 
 vec3 softClipFireflies(vec3 c, float maxLuma) {
     float l = luminance(c);
@@ -1020,11 +1020,20 @@ void main() {
     //                  holds the air to infinity; adding it again double-hazes)
     float boltLimit = firstHitValid ? length(firstHitPos - primaryRayOrigin) : CLOUD_RT_MAX_DIST;
     radiance = cloudApplyLightning(radiance, primaryRayOrigin, normalize(primaryRayDir), boltLimit);
-    if (weatherVisualActive()) {
-        float weatherDist = firstHitValid ? length(firstHitPos - primaryRayOrigin) : 12000.0;
-        weatherDist *= (1.0 - clamp(firstHitTransmission, 0.0, 1.0));
-        radiance = applyWeatherAtmosphere(radiance, normalize(primaryRayDir), weatherDist);
-        radiance = applyWeatherPrecipitation(radiance, primaryRayOrigin, normalize(primaryRayDir), weatherDist);
+    // Near-camera precipitation (docs/dev/ATMOSPHERE_NEAR_PRECIP.md): the
+    // atmosphere's drops in front of the first surface. The curtain march of
+    // this camera ray started at the drop range, so nothing is counted twice.
+    // The per-update camera state (nearState) says whether it rains HERE;
+    // a dry camera never calls the callable.
+    if (cloudRtEnabled() && cloudNearPrecipRange() > 0.0 && cloudParams.nearState.state[0].x > 0.0) {
+        float nearHit = firstHitValid ? length(firstHitPos - primaryRayOrigin) : CLOUD_RT_MAX_DIST;
+        vec3 imageCenter = cam.lowerLeft.xyz + 0.5 * (cam.horizontal.xyz + cam.vertical.xyz);
+        float pixelAngle = length(cam.vertical.xyz) /
+                           max(length(imageCenter - cam.origin.xyz) * float(screenSize.y), 1e-6);
+        vec3 nearIn;
+        float nearT;
+        cloudCallNearPrecip(primaryRayOrigin, normalize(primaryRayDir), nearHit, pixelAngle, nearIn, nearT);
+        radiance = nearIn + nearT * radiance;
     }
 
     if (worldData.w.aerialFroxelReady != 0) {

@@ -244,9 +244,9 @@ struct VkWorldDataExtended {
     int   aerialFroxelReady; float _aerialPad0; float _aerialPad1; float _aerialPad2;
     int   weatherEnabled; int weatherType; float weatherIntensity; float weatherDensity;
     vec3  weatherWindDirection; float weatherWindSpeed;
-    float weatherPrecipitationScale; float weatherVisibility; float weatherSurfaceWetness; float weatherSurfaceAccumulation;
+    float weatherPrecipitationScale; float _weatherPad0; float weatherSurfaceWetness; float weatherSurfaceAccumulation;
     float weatherSurfaceSettling; float weatherSurfaceHeight;
-    int   weatherVisualMode; int weatherSurfaceResponseEnabled;
+    int   _weatherPad1; int weatherSurfaceResponseEnabled;
     int   envTexSlot;   float envIntensity; float envRotation; int _pad5; // nishitaLutReady
     int   envOverlayEnabled; int envOverlayBlendMode; float envOverlayIntensity; float envOverlayRotation;
     uvec2 transmittanceLUT; uvec2 skyviewLUT; uvec2 multiScatterLUT; uvec2 aerialPerspectiveLUT;

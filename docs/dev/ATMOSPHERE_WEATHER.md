@@ -102,6 +102,10 @@ her yerinde değil.
   haritası B'nin de maksimumunu tutar — mode 4 genişler).
 
 ### 3.2 Yakın alan — parçacıklar (kamera çevresi, iki mod)
+
+> 2026-10-14: parçacık yerine dünyaya sabit, hareketli bir damla kafesi
+> olarak yapıldı (aynı ilke: tek tanım, iki mod, oran/tip atmosferden) —
+> `ATMOSPHERE_NEAR_PRECIP.md`. Ekran overlay'i söküldü (§7).
 - Kamera merkezli, kamerayla kayan bir kutu (~40 m); GPU parçacık sistemi
   (mevcut) üzerinden, yeni bir **yağış yayıcısı**: yoğunluk `precipAt(kamera)`,
   hız = düşüş hızı + iklim rüzgârı, tip (yağmur çizgisi / kar tanesi / toz)

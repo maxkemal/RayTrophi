@@ -15,7 +15,7 @@ The viewport capture below shows the nested contour pattern reported by the user
 No scene or camera settings were changed. Capture was temporarily enabled to obtain
 the frame and then disabled. This image is a baseline, not a rendering of the new code.
 
-![Compiled baseline](cloud_storm_before_2026_10_11.jpg)
+Compiled baseline (temporary capture removed)
 
 The source uses several cellular distance channels both for formations and erosion,
 and folded absolute-value gradient noise for the base shape. These are plausible

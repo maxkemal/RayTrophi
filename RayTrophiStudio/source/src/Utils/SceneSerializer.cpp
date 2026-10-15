@@ -1,3 +1,4 @@
+#include "Atmosphere/LensWeatherState.h"
 #include "Fluid/MatterPoreAuthoring.h"
 #include "Fluid/MatterGrain.h"
 #include "Fluid/FluidDomainSubstance.h"
@@ -871,6 +872,7 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
         //   dususuyle tahmin edilir (eski dosyalarin niyeti buydu).
         root["camera"]["depth_of_field"] = scene.camera->depth_of_field;
         root["camera"]["focus_dist"] = scene.camera->focus_dist;
+        root["camera"]["lens_weather"] = atmosphere::lensWeatherJson(scene.camera->lens_weather);
     }
 
     // 3. Lights
@@ -1004,6 +1006,7 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
     }
 
     // 9.55 Project substances (derived from built-ins; before anything names one).
+    root["object_substances"] = matter::saveObjectSubstances(scene);
     root["substances"] = json::array();
     for (const auto& item : RayTrophiSim::projectSubstances()) {
         root["substances"].push_back({{"name", item.name}, {"based_on", item.based_on},
@@ -1172,6 +1175,8 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         if (!cam["depth_of_field"].get(dof_saved)) dof_on = dof_saved;
         scene.camera->depth_of_field = dof_on;
         scene.camera->focus_dist = (float)focus_dist;
+        scene.camera->lens_weather = atmosphere::lensWeatherFromCameraJson(
+            simdjson::to_string(cam));
         scene.camera->update_camera_vectors();
     }
 
@@ -1529,6 +1534,10 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
     }
 
     // 9.6 Particle Systems
+    simdjson::dom::element objectSubstancesRoot;
+    matter::restoreObjectSubstances(scene,
+        root["object_substances"].get(objectSubstancesRoot) ? json::object() :
+        sjsonToNlohmann(objectSubstancesRoot));
     simdjson::dom::element psRoot;
     if (!root["particle_systems"].get(psRoot)) {
         nlohmann::json particleSystemsJson = sjsonToNlohmann(psRoot);

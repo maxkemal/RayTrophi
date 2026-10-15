@@ -140,14 +140,13 @@ bool validateClouds(const CloudState& c, std::string* error) {
         !inRange(lightning.leader_fraction, 0.05f, 0.65f) ||
         !inRange(lightning.horizontal_span_m, 100.0f, 50000.0f) ||
         !inRange(lightning.branching, 0.0f, 1.0f) ||
-        !inRange(lightning.shutter_s, 0.0f, 0.25f) ||
         !inRange(lightning.channel_brightness, 0.0f, 1000.0f)) {
         return fail(error, "lightning requires finite rate_per_minute 0..600, "
                            "intensity 0..10000, "
                            "ground_altitude_m -500..20000, ground_strike_fraction 0..1, "
                            "upward_fraction 0..1, bolt_radius_m 0.1..30, duration_s 0.08..3, "
                            "leader_fraction 0.05..0.65, horizontal_span_m 100..50000, branching 0..1, "
-                           "shutter_s 0..0.25, channel_brightness 0..1000");
+                           "channel_brightness 0..1000");
     }
     for (float v : {lightning.color.x, lightning.color.y, lightning.color.z}) {
         if (!inRange(v, 0.0f, 1.0f)) {
@@ -176,6 +175,11 @@ bool validateClouds(const CloudState& c, std::string* error) {
     }
     if (storms.cells.size() > static_cast<size_t>(kMaxManualStormCells)) {
         return fail(error, "storms.cells holds at most 8 authored cells");
+    }
+    if (!inRange(c.local_weather.valley_fog, 0.0f, 1.0f) ||
+        !inRange(c.local_weather.valley_fog_lift, 0.0f, 1.0f) ||
+        !inRange(c.local_weather.post_rain_mist, 0.0f, 1.0f)) {
+        return fail(error, "local_weather.valley_fog / valley_fog_lift / post_rain_mist must be within 0..1");
     }
     if (!inRange(c.local_weather.fog_strength, 0.0f, 10.0f)) {
         return fail(error, "local_weather.fog_strength must be within 0..10");
@@ -246,6 +250,8 @@ bool validateClouds(const CloudState& c, std::string* error) {
     }
     if (!inRange(c.precipitation.rate_mm_h, 0.0f, 200.0f)) return fail(error, "precipitation.rate_mm_h must be within 0..200");
     if (!inRange(c.precipitation.ground_fraction, 0.0f, 1.0f)) return fail(error, "precipitation.ground_fraction must be within 0..1");
+    if (!inRange(c.precipitation.near_range_m, 2.0f, 60.0f)) return fail(error, "precipitation.near_range_m must be within 2..60 m");
+    if (!inRange(c.shutter_s, 0.0f, 0.5f)) return fail(error, "shutter_s must be within 0..0.5 s");
     if (c.precipitation.form < kPrecipAuto || c.precipitation.form > kPrecipIcePellets)
         return fail(error, "precipitation.form must be auto|rain|drizzle|snow|sleet|graupel|hail|freezing_rain|ice_pellets");
     if (!inRange(c.cirrus.altitude_m, 3000.0f, 20000.0f)) return fail(error, "cirrus.altitude_m must be within 3000..20000 m");
@@ -303,7 +309,6 @@ void cloudsToJson(const CloudState& c, nlohmann::json& j) {
         {"leader_fraction", lightning.leader_fraction},
         {"horizontal_span_m", lightning.horizontal_span_m},
         {"branching", lightning.branching},
-        {"shutter_s", lightning.shutter_s},
         {"channel_brightness", lightning.channel_brightness}
     };
     {
@@ -326,7 +331,11 @@ void cloudsToJson(const CloudState& c, nlohmann::json& j) {
     }
     j["local_weather"] = {{"terrain_suitability", c.local_weather.terrain_suitability},
                           {"fog_enabled", c.local_weather.fog_enabled},
-                          {"fog_strength", c.local_weather.fog_strength}};
+                          {"fog_strength", c.local_weather.fog_strength},
+                          {"fog_manual", c.local_weather.fog_manual},
+                          {"valley_fog", c.local_weather.valley_fog},
+                          {"valley_fog_lift", c.local_weather.valley_fog_lift},
+                          {"post_rain_mist", c.local_weather.post_rain_mist}};
     j["volumes"] = {{"enabled", c.volumes.enabled}, {"slots", c.volumes.slots},
                     {"voxel_m", c.volumes.voxel_m}, {"skin_m", c.volumes.skin_m},
                     {"min_tower", c.volumes.min_tower}};
@@ -357,7 +366,10 @@ void cloudsToJson(const CloudState& c, nlohmann::json& j) {
                           {"ground_fraction", c.precipitation.ground_fraction},
                           {"air_temperature_c", c.precipitation.air_temperature_c},
                           {"lapse_rate_k_per_m", c.precipitation.lapse_rate_k_per_m},
-                          {"snow", c.precipitation.snow}};
+                          {"snow", c.precipitation.snow},
+                          {"near_enabled", c.precipitation.near_enabled},
+                          {"near_range_m", c.precipitation.near_range_m}};
+    j["shutter_s"] = c.shutter_s;
     j["cirrus"] = {{"enabled", c.cirrus.enabled}, {"altitude_m", c.cirrus.altitude_m},
                    {"coverage", c.cirrus.coverage}, {"opacity", c.cirrus.opacity},
                    {"scale_m", c.cirrus.scale_m},
@@ -491,7 +503,9 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
         lightning.leader_fraction = s.value("leader_fraction", lightning.leader_fraction);
         lightning.horizontal_span_m = s.value("horizontal_span_m", lightning.horizontal_span_m);
         lightning.branching = s.value("branching", lightning.branching);
-        lightning.shutter_s = s.value("shutter_s", lightning.shutter_s);
+        // lightning.shutter_s before 2026-10-14: now the shared CloudState::
+        // shutter_s (a top-level key, when present, wins below).
+        c.shutter_s = s.value("shutter_s", c.shutter_s);
         lightning.channel_brightness = s.value("channel_brightness", lightning.channel_brightness);
         for (const char* key : {"color", "center_m"}) {
             if (!s.contains(key)) {
@@ -570,6 +584,10 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
             lw.terrain_suitability = s.value("terrain_suitability", lw.terrain_suitability);
             lw.fog_enabled = s.value("fog_enabled", lw.fog_enabled);
             lw.fog_strength = s.value("fog_strength", lw.fog_strength);
+            lw.fog_manual = s.value("fog_manual", lw.fog_manual);
+            lw.valley_fog = s.value("valley_fog", lw.valley_fog);
+            lw.valley_fog_lift = s.value("valley_fog_lift", lw.valley_fog_lift);
+            lw.post_rain_mist = s.value("post_rain_mist", lw.post_rain_mist);
         } catch (const std::exception& e) {
             return fail(error, std::string("local_weather: ") + e.what());
         }
@@ -592,6 +610,8 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
         const auto& s = j["precipitation"];
         c.precipitation.rate_mm_h = s.value("rate_mm_h", c.precipitation.rate_mm_h);
         c.precipitation.ground_fraction = s.value("ground_fraction", c.precipitation.ground_fraction);
+        c.precipitation.near_enabled = s.value("near_enabled", c.precipitation.near_enabled);
+        c.precipitation.near_range_m = s.value("near_range_m", c.precipitation.near_range_m);
         // air_temperature_c / lapse_rate_k_per_m / snow are derived from the
         // climate (World::rederiveClouds): read back, but every sync rewrites them.
         c.precipitation.air_temperature_c = s.value("air_temperature_c", c.precipitation.air_temperature_c);
@@ -637,6 +657,10 @@ bool cloudsFromJson(const nlohmann::json& j, CloudState& out, std::string* error
             s.value("realtime_interleave", c.quality.realtime_interleave);
         c.quality.rt_secondary_full_march =
             s.value("rt_secondary_full_march", c.quality.rt_secondary_full_march);
+    }
+    if (j.contains("shutter_s")) {
+        if (!j["shutter_s"].is_number()) return fail(error, "shutter_s must be a number");
+        c.shutter_s = j["shutter_s"].get<float>();
     }
     if (!validateClouds(c, error)) {
         out = CloudState{};
@@ -707,6 +731,10 @@ CloudState lerpClouds(const CloudState& a, const CloudState& b, float t) {
     r.storms.wall_cloud = lerpf(a.storms.wall_cloud, b.storms.wall_cloud, t);
     r.local_weather = t < 1.0f ? a.local_weather : b.local_weather;
     r.local_weather.fog_strength = lerpf(a.local_weather.fog_strength, b.local_weather.fog_strength, t);
+    // Keyed authored fog: a morning sequence fades the valley fog and lifts it.
+    r.local_weather.valley_fog = lerpf(a.local_weather.valley_fog, b.local_weather.valley_fog, t);
+    r.local_weather.valley_fog_lift = lerpf(a.local_weather.valley_fog_lift, b.local_weather.valley_fog_lift, t);
+    r.local_weather.post_rain_mist = lerpf(a.local_weather.post_rain_mist, b.local_weather.post_rain_mist, t);
     // Volume settings are a resource configuration, not a look: no blend.
     r.volumes = t < 1.0f ? a.volumes : b.volumes;
     r.storms.mammatus = lerpf(a.storms.mammatus, b.storms.mammatus, t);
@@ -727,6 +755,9 @@ CloudState lerpClouds(const CloudState& a, const CloudState& b, float t) {
     r.precipitation.air_temperature_c = lerpf(a.precipitation.air_temperature_c, b.precipitation.air_temperature_c, t);
     r.precipitation.lapse_rate_k_per_m = lerpf(a.precipitation.lapse_rate_k_per_m, b.precipitation.lapse_rate_k_per_m, t);
     r.precipitation.ground_fraction = lerpf(a.precipitation.ground_fraction, b.precipitation.ground_fraction, t);
+    r.precipitation.near_enabled = t < 1.0f ? a.precipitation.near_enabled : b.precipitation.near_enabled;
+    r.precipitation.near_range_m = lerpf(a.precipitation.near_range_m, b.precipitation.near_range_m, t);
+    r.shutter_s = lerpf(a.shutter_s, b.shutter_s, t);
     r.cirrus.enabled = t < 1.0f ? a.cirrus.enabled : b.cirrus.enabled;
     r.cirrus.altitude_m = lerpf(a.cirrus.altitude_m, b.cirrus.altitude_m, t);
     r.cirrus.coverage = lerpf(a.cirrus.coverage, b.cirrus.coverage, t);

@@ -1,6 +1,5 @@
 #include "PostProcess/PostSurface.h"
 #include "Backend/VulkanRecoveryPolicy.h"
-#include "Backend/WeatherClock.h"
 #include "Viewport/ViewportGpuWorkPolicy.h"
 #include "Viewport/ViewportPresentationStats.h"
 #include "PostProcess/PostService.h"
@@ -4546,12 +4545,6 @@ int main(int argc, char* argv[]) try {
             const float fps = static_cast<float>(std::max(1, render_settings.animation_fps));
             const float cloudTime = static_cast<float>(scene.timeline.current_frame) / fps;
             ray_renderer.world.setCloudTime(cloudTime);
-            Backend::syncWeatherClock(
-                g_backend.get(), g_viewport_backend.get(), cloudTime,
-                static_cast<float>(SDL_GetTicks()) / 1000.0f,
-                render_settings.realtime_weather_preview &&
-                (ui.viewport_settings.shading_mode == 1 || ui.viewport_settings.shading_mode == 2) &&
-                !render_settings.animation_is_playing && !render_settings.is_render_paused);
             // Local weather (ATMOSPHERE_LOCAL_WINDS_FOG.md §2-4): terrain copy,
             // birth environment and fog map. Before the push below: the cells
             // the push packs read the environment published here.
@@ -4587,6 +4580,11 @@ int main(int argc, char* argv[]) try {
                         vk->setCloudState(ray_renderer.world.getClouds(), cloudTime,
                                           ray_renderer.world.cloudWindOffset(),
                                           ray_renderer.world.cloudWindVelocity());
+                        // Wake RT here, before rendering, independently of the later playback-frame gate.
+                        if (b == g_backend.get() && vk->cloudRtRendering() &&
+                            ui.viewport_settings.shading_mode == 2) {
+                            start_render = true;
+                        }
                     }
                 }
             }
@@ -6807,13 +6805,6 @@ int main(int argc, char* argv[]) try {
         bool is_playing = ui_ctx.render_settings.animation_is_playing;
         bool is_paused = ui_ctx.render_settings.is_render_paused;
         const bool in_rendered_mode = (ui.viewport_settings.shading_mode == 2);
-        const WeatherParams preview_weather = ui_ctx.renderer.world.getWeatherParams();
-        const bool realtime_weather_preview_active =
-            ui_ctx.render_settings.realtime_weather_preview &&
-            in_rendered_mode &&
-            preview_weather.enabled != 0 &&
-            preview_weather.type != WEATHER_NONE &&
-            preview_weather.visual_mode != WEATHER_VISUAL_SURFACE_ONLY;
 
         if (scene.initialized &&
             !camera_moved_recently &&
@@ -6823,32 +6814,17 @@ int main(int argc, char* argv[]) try {
             !skip_backend_for_anim) {  // Don't accumulate when animation render owns backend
 
             if (in_rendered_mode) {
-                if (realtime_weather_preview_active) {
-                    const float preview_time = static_cast<float>(SDL_GetTicks()) / 1000.0f;
-                    if (g_backend) {
-                        g_backend->setTime(preview_time, preview_time);
-                        g_backend->resetAccumulation();
-                    }
-                    Backend::IBackend* activeViewportBackend =
-                        getActiveViewportBackendForShading(ui.viewport_settings.shading_mode);
-                    if (activeViewportBackend && activeViewportBackend != g_backend.get()) {
-                        activeViewportBackend->resetAccumulation();
-                    }
-                    ray_renderer.resetCPUAccumulation();
-                    start_render = true;
+                bool accumulation_complete = false;
+
+                if (isActiveRenderBackendGpu()) {
+                    accumulation_complete = g_backend ? g_backend->isAccumulationComplete() : false;
                 } else {
-                    bool accumulation_complete = false;
+                    accumulation_complete = ray_renderer.isCPUAccumulationComplete();
+                }
 
-                    if (isActiveRenderBackendGpu()) {
-                        accumulation_complete = g_backend ? g_backend->isAccumulationComplete() : false;
-                    } else {
-                        accumulation_complete = ray_renderer.isCPUAccumulationComplete();
-                    }
-
-                    if (!accumulation_complete) {
-                        // Automatically trigger next sample pass
-                        start_render = true;
-                    }
+                if (!accumulation_complete) {
+                    // Automatically trigger next sample pass
+                    start_render = true;
                 }
             } else {
                 Backend::IBackend* viewportBackend =

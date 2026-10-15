@@ -1,0 +1,1914 @@
+{
+  "measurement": "native mixer PCM callback RMS and peak, before OS/device",
+  "cases": [
+    {
+      "case": "baseline disabled",
+      "expected_amplitude_ratio": 1,
+      "rms": 0.04189995303750038,
+      "peak": 0.08177318423986435,
+      "rms_ratio": 1.0,
+      "peak_ratio": 1.0,
+      "live": null
+    },
+    {
+      "case": "clear",
+      "expected_amplitude_ratio": 1,
+      "rms": 0.04189995303750038,
+      "peak": 0.08177318423986435,
+      "rms_ratio": 1.0,
+      "peak_ratio": 1.0,
+      "live": {
+        "amplitude_gain": 0.9999999999999999,
+        "boundary_mode": "object_barrier",
+        "enabled": true,
+        "id": "audio_source_2",
+        "meters_per_unit": 1,
+        "report": {
+          "ambiguous_boundary": false,
+          "boundary_mode": "object_barrier",
+          "coverage": "authored_flat_mesh_only",
+          "delay_seconds": 0.029154518950437316,
+          "distance_meters": 10.0,
+          "frequencies_hz": [
+            125,
+            250,
+            500,
+            1000,
+            2000,
+            4000
+          ],
+          "geometrically_obstructed": false,
+          "hidden_objects_skipped": 0,
+          "hits": [],
+          "include_hidden": true,
+          "listener_position": [
+            11.0,
+            8.0,
+            14.0
+          ],
+          "materials_revision": 2534385332957796997,
+          "meters_per_unit": 1.0,
+          "object_barrier_assumption": true,
+          "snapshot_complete": true,
+          "sound_speed_mps": 343.0,
+          "source_pose": "authored_world",
+          "source_position": [
+            21.0,
+            8.0,
+            14.0
+          ],
+          "thin_surface_assumption": false,
+          "transient_objects": 0,
+          "transmission_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "transmission_status": "clear",
+          "triangles": 36,
+          "unsupported_objects": 0
+        },
+        "status": "clear"
+      }
+    },
+    {
+      "case": "one closed object",
+      "expected_amplitude_ratio": 0.5,
+      "rms": 0.02094997651875019,
+      "peak": 0.040886592119932175,
+      "rms_ratio": 0.5,
+      "peak_ratio": 0.5,
+      "live": {
+        "amplitude_gain": 0.49999999999999994,
+        "boundary_mode": "object_barrier",
+        "enabled": true,
+        "id": "audio_source_2",
+        "meters_per_unit": 1,
+        "report": {
+          "ambiguous_boundary": false,
+          "boundary_mode": "object_barrier",
+          "coverage": "authored_flat_mesh_only",
+          "delay_seconds": 0.029154518950437316,
+          "distance_meters": 10.0,
+          "frequencies_hz": [
+            125,
+            250,
+            500,
+            1000,
+            2000,
+            4000
+          ],
+          "geometrically_obstructed": true,
+          "hidden_objects_skipped": 0,
+          "hits": [
+            {
+              "distance_meters": 5.850000381469727,
+              "material": {
+                "acoustics": {
+                  "bands": [
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    }
+                  ],
+                  "defined": true,
+                  "frequencies_hz": [
+                    125,
+                    250,
+                    500,
+                    1000,
+                    2000,
+                    4000
+                  ],
+                  "quantity": "energy_fraction"
+                },
+                "binding": {
+                  "overrides": {
+                    "burn_rate_scale": 1.0,
+                    "fuel_capacity_scale": 1.0,
+                    "ignition_kelvin": 573.0,
+                    "override_ignition": false
+                  },
+                  "substance": "Acoustic acceptance 1792098569901659300"
+                },
+                "conflict": false,
+                "exists": true,
+                "object": "AcousticAcceptanceWall0_1792098570901726400",
+                "resolved": true,
+                "source": "object"
+              },
+              "normal": [
+                1.0,
+                0.0,
+                0.0
+              ],
+              "position": [
+                15.149999618530273,
+                8.0,
+                14.0
+              ]
+            },
+            {
+              "distance_meters": 6.149999618530273,
+              "material": {
+                "acoustics": {
+                  "bands": [
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    }
+                  ],
+                  "defined": true,
+                  "frequencies_hz": [
+                    125,
+                    250,
+                    500,
+                    1000,
+                    2000,
+                    4000
+                  ],
+                  "quantity": "energy_fraction"
+                },
+                "binding": {
+                  "overrides": {
+                    "burn_rate_scale": 1.0,
+                    "fuel_capacity_scale": 1.0,
+                    "ignition_kelvin": 573.0,
+                    "override_ignition": false
+                  },
+                  "substance": "Acoustic acceptance 1792098569901659300"
+                },
+                "conflict": false,
+                "exists": true,
+                "object": "AcousticAcceptanceWall0_1792098570901726400",
+                "resolved": true,
+                "source": "object"
+              },
+              "normal": [
+                -1.0,
+                0.0,
+                0.0
+              ],
+              "position": [
+                14.850000381469727,
+                8.0,
+                14.0
+              ]
+            }
+          ],
+          "include_hidden": true,
+          "listener_position": [
+            11.0,
+            8.0,
+            14.0
+          ],
+          "materials_revision": 2534385332957796997,
+          "meters_per_unit": 1.0,
+          "object_barrier_assumption": true,
+          "snapshot_complete": true,
+          "sound_speed_mps": 343.0,
+          "source_pose": "authored_world",
+          "source_position": [
+            21.0,
+            8.0,
+            14.0
+          ],
+          "thin_surface_assumption": false,
+          "transient_objects": 0,
+          "transmission_energy": [
+            0.25,
+            0.25,
+            0.25,
+            0.25,
+            0.25,
+            0.25
+          ],
+          "transmission_status": "evaluated_object_barrier",
+          "triangles": 36,
+          "unsupported_objects": 0
+        },
+        "status": "evaluated_object_barrier"
+      }
+    },
+    {
+      "case": "two separate closed objects",
+      "expected_amplitude_ratio": 0.25,
+      "rms": 0.010474988259375095,
+      "peak": 0.020443296059966087,
+      "rms_ratio": 0.25,
+      "peak_ratio": 0.25,
+      "live": {
+        "amplitude_gain": 0.24999999999999997,
+        "boundary_mode": "object_barrier",
+        "enabled": true,
+        "id": "audio_source_2",
+        "meters_per_unit": 1,
+        "report": {
+          "ambiguous_boundary": false,
+          "boundary_mode": "object_barrier",
+          "coverage": "authored_flat_mesh_only",
+          "delay_seconds": 0.029154518950437316,
+          "distance_meters": 10.0,
+          "frequencies_hz": [
+            125,
+            250,
+            500,
+            1000,
+            2000,
+            4000
+          ],
+          "geometrically_obstructed": true,
+          "hidden_objects_skipped": 0,
+          "hits": [
+            {
+              "distance_meters": 2.8500003814697266,
+              "material": {
+                "acoustics": {
+                  "bands": [
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    }
+                  ],
+                  "defined": true,
+                  "frequencies_hz": [
+                    125,
+                    250,
+                    500,
+                    1000,
+                    2000,
+                    4000
+                  ],
+                  "quantity": "energy_fraction"
+                },
+                "binding": {
+                  "overrides": {
+                    "burn_rate_scale": 1.0,
+                    "fuel_capacity_scale": 1.0,
+                    "ignition_kelvin": 573.0,
+                    "override_ignition": false
+                  },
+                  "substance": "Acoustic acceptance 1792098569901659300"
+                },
+                "conflict": false,
+                "exists": true,
+                "object": "AcousticAcceptanceWall1_1792098571464063400",
+                "resolved": true,
+                "source": "object"
+              },
+              "normal": [
+                1.0,
+                0.0,
+                0.0
+              ],
+              "position": [
+                18.149999618530273,
+                8.0,
+                14.0
+              ]
+            },
+            {
+              "distance_meters": 3.1499996185302734,
+              "material": {
+                "acoustics": {
+                  "bands": [
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    }
+                  ],
+                  "defined": true,
+                  "frequencies_hz": [
+                    125,
+                    250,
+                    500,
+                    1000,
+                    2000,
+                    4000
+                  ],
+                  "quantity": "energy_fraction"
+                },
+                "binding": {
+                  "overrides": {
+                    "burn_rate_scale": 1.0,
+                    "fuel_capacity_scale": 1.0,
+                    "ignition_kelvin": 573.0,
+                    "override_ignition": false
+                  },
+                  "substance": "Acoustic acceptance 1792098569901659300"
+                },
+                "conflict": false,
+                "exists": true,
+                "object": "AcousticAcceptanceWall1_1792098571464063400",
+                "resolved": true,
+                "source": "object"
+              },
+              "normal": [
+                -1.0,
+                0.0,
+                0.0
+              ],
+              "position": [
+                17.850000381469727,
+                8.0,
+                14.0
+              ]
+            },
+            {
+              "distance_meters": 5.850000381469727,
+              "material": {
+                "acoustics": {
+                  "bands": [
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    }
+                  ],
+                  "defined": true,
+                  "frequencies_hz": [
+                    125,
+                    250,
+                    500,
+                    1000,
+                    2000,
+                    4000
+                  ],
+                  "quantity": "energy_fraction"
+                },
+                "binding": {
+                  "overrides": {
+                    "burn_rate_scale": 1.0,
+                    "fuel_capacity_scale": 1.0,
+                    "ignition_kelvin": 573.0,
+                    "override_ignition": false
+                  },
+                  "substance": "Acoustic acceptance 1792098569901659300"
+                },
+                "conflict": false,
+                "exists": true,
+                "object": "AcousticAcceptanceWall0_1792098570901726400",
+                "resolved": true,
+                "source": "object"
+              },
+              "normal": [
+                1.0,
+                0.0,
+                0.0
+              ],
+              "position": [
+                15.149999618530273,
+                8.0,
+                14.0
+              ]
+            },
+            {
+              "distance_meters": 6.149999618530273,
+              "material": {
+                "acoustics": {
+                  "bands": [
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    }
+                  ],
+                  "defined": true,
+                  "frequencies_hz": [
+                    125,
+                    250,
+                    500,
+                    1000,
+                    2000,
+                    4000
+                  ],
+                  "quantity": "energy_fraction"
+                },
+                "binding": {
+                  "overrides": {
+                    "burn_rate_scale": 1.0,
+                    "fuel_capacity_scale": 1.0,
+                    "ignition_kelvin": 573.0,
+                    "override_ignition": false
+                  },
+                  "substance": "Acoustic acceptance 1792098569901659300"
+                },
+                "conflict": false,
+                "exists": true,
+                "object": "AcousticAcceptanceWall0_1792098570901726400",
+                "resolved": true,
+                "source": "object"
+              },
+              "normal": [
+                -1.0,
+                0.0,
+                0.0
+              ],
+              "position": [
+                14.850000381469727,
+                8.0,
+                14.0
+              ]
+            }
+          ],
+          "include_hidden": true,
+          "listener_position": [
+            11.0,
+            8.0,
+            14.0
+          ],
+          "materials_revision": 2534385332957796997,
+          "meters_per_unit": 1.0,
+          "object_barrier_assumption": true,
+          "snapshot_complete": true,
+          "sound_speed_mps": 343.0,
+          "source_pose": "authored_world",
+          "source_position": [
+            21.0,
+            8.0,
+            14.0
+          ],
+          "thin_surface_assumption": false,
+          "transient_objects": 0,
+          "transmission_energy": [
+            0.0625,
+            0.0625,
+            0.0625,
+            0.0625,
+            0.0625,
+            0.0625
+          ],
+          "transmission_status": "evaluated_object_barrier",
+          "triangles": 36,
+          "unsupported_objects": 0
+        },
+        "status": "evaluated_object_barrier"
+      }
+    },
+    {
+      "case": "closed cube as two thin boundaries",
+      "expected_amplitude_ratio": 0.25,
+      "rms": 0.010474988259375095,
+      "peak": 0.020443296059966087,
+      "rms_ratio": 0.25,
+      "peak_ratio": 0.25,
+      "live": {
+        "amplitude_gain": 0.24999999999999997,
+        "boundary_mode": "thin_surface",
+        "enabled": true,
+        "id": "audio_source_2",
+        "meters_per_unit": 1,
+        "report": {
+          "ambiguous_boundary": false,
+          "boundary_mode": "thin_surface",
+          "coverage": "authored_flat_mesh_only",
+          "delay_seconds": 0.029154518950437316,
+          "distance_meters": 10.0,
+          "frequencies_hz": [
+            125,
+            250,
+            500,
+            1000,
+            2000,
+            4000
+          ],
+          "geometrically_obstructed": true,
+          "hidden_objects_skipped": 0,
+          "hits": [
+            {
+              "distance_meters": 5.850000381469727,
+              "material": {
+                "acoustics": {
+                  "bands": [
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    }
+                  ],
+                  "defined": true,
+                  "frequencies_hz": [
+                    125,
+                    250,
+                    500,
+                    1000,
+                    2000,
+                    4000
+                  ],
+                  "quantity": "energy_fraction"
+                },
+                "binding": {
+                  "overrides": {
+                    "burn_rate_scale": 1.0,
+                    "fuel_capacity_scale": 1.0,
+                    "ignition_kelvin": 573.0,
+                    "override_ignition": false
+                  },
+                  "substance": "Acoustic acceptance 1792098569901659300"
+                },
+                "conflict": false,
+                "exists": true,
+                "object": "AcousticAcceptanceWall0_1792098570901726400",
+                "resolved": true,
+                "source": "object"
+              },
+              "normal": [
+                1.0,
+                0.0,
+                0.0
+              ],
+              "position": [
+                15.149999618530273,
+                8.0,
+                14.0
+              ]
+            },
+            {
+              "distance_meters": 6.149999618530273,
+              "material": {
+                "acoustics": {
+                  "bands": [
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    }
+                  ],
+                  "defined": true,
+                  "frequencies_hz": [
+                    125,
+                    250,
+                    500,
+                    1000,
+                    2000,
+                    4000
+                  ],
+                  "quantity": "energy_fraction"
+                },
+                "binding": {
+                  "overrides": {
+                    "burn_rate_scale": 1.0,
+                    "fuel_capacity_scale": 1.0,
+                    "ignition_kelvin": 573.0,
+                    "override_ignition": false
+                  },
+                  "substance": "Acoustic acceptance 1792098569901659300"
+                },
+                "conflict": false,
+                "exists": true,
+                "object": "AcousticAcceptanceWall0_1792098570901726400",
+                "resolved": true,
+                "source": "object"
+              },
+              "normal": [
+                -1.0,
+                0.0,
+                0.0
+              ],
+              "position": [
+                14.850000381469727,
+                8.0,
+                14.0
+              ]
+            }
+          ],
+          "include_hidden": true,
+          "listener_position": [
+            11.0,
+            8.0,
+            14.0
+          ],
+          "materials_revision": 2534385332957796997,
+          "meters_per_unit": 1.0,
+          "object_barrier_assumption": false,
+          "snapshot_complete": true,
+          "sound_speed_mps": 343.0,
+          "source_pose": "authored_world",
+          "source_position": [
+            21.0,
+            8.0,
+            14.0
+          ],
+          "thin_surface_assumption": true,
+          "transient_objects": 0,
+          "transmission_energy": [
+            0.0625,
+            0.0625,
+            0.0625,
+            0.0625,
+            0.0625,
+            0.0625
+          ],
+          "transmission_status": "evaluated_thin_surface",
+          "triangles": 36,
+          "unsupported_objects": 0
+        },
+        "status": "evaluated_thin_surface"
+      }
+    },
+    {
+      "case": "unknown material bypass",
+      "expected_amplitude_ratio": 1,
+      "rms": 0.04189995303750038,
+      "peak": 0.08177318423986435,
+      "rms_ratio": 1.0,
+      "peak_ratio": 1.0,
+      "live": {
+        "amplitude_gain": 1,
+        "boundary_mode": "object_barrier",
+        "enabled": true,
+        "id": "audio_source_2",
+        "meters_per_unit": 1,
+        "report": {
+          "ambiguous_boundary": false,
+          "boundary_mode": "object_barrier",
+          "coverage": "authored_flat_mesh_only",
+          "delay_seconds": 0.029154518950437316,
+          "distance_meters": 10.0,
+          "frequencies_hz": [
+            125,
+            250,
+            500,
+            1000,
+            2000,
+            4000
+          ],
+          "geometrically_obstructed": true,
+          "hidden_objects_skipped": 0,
+          "hits": [
+            {
+              "distance_meters": 5.850000381469727,
+              "material": {
+                "acoustics": {
+                  "defined": false,
+                  "frequencies_hz": [
+                    125,
+                    250,
+                    500,
+                    1000,
+                    2000,
+                    4000
+                  ],
+                  "quantity": "energy_fraction"
+                },
+                "binding": {
+                  "overrides": {
+                    "burn_rate_scale": 1.0,
+                    "fuel_capacity_scale": 1.0,
+                    "ignition_kelvin": 573.0,
+                    "override_ignition": false
+                  },
+                  "substance": "Acoustic acceptance 1792098569901659300"
+                },
+                "conflict": false,
+                "exists": true,
+                "object": "AcousticAcceptanceWall0_1792098570901726400",
+                "resolved": true,
+                "source": "object"
+              },
+              "normal": [
+                1.0,
+                0.0,
+                0.0
+              ],
+              "position": [
+                15.149999618530273,
+                8.0,
+                14.0
+              ]
+            },
+            {
+              "distance_meters": 6.149999618530273,
+              "material": {
+                "acoustics": {
+                  "defined": false,
+                  "frequencies_hz": [
+                    125,
+                    250,
+                    500,
+                    1000,
+                    2000,
+                    4000
+                  ],
+                  "quantity": "energy_fraction"
+                },
+                "binding": {
+                  "overrides": {
+                    "burn_rate_scale": 1.0,
+                    "fuel_capacity_scale": 1.0,
+                    "ignition_kelvin": 573.0,
+                    "override_ignition": false
+                  },
+                  "substance": "Acoustic acceptance 1792098569901659300"
+                },
+                "conflict": false,
+                "exists": true,
+                "object": "AcousticAcceptanceWall0_1792098570901726400",
+                "resolved": true,
+                "source": "object"
+              },
+              "normal": [
+                -1.0,
+                0.0,
+                0.0
+              ],
+              "position": [
+                14.850000381469727,
+                8.0,
+                14.0
+              ]
+            }
+          ],
+          "include_hidden": true,
+          "listener_position": [
+            11.0,
+            8.0,
+            14.0
+          ],
+          "materials_revision": 15289118478566670916,
+          "meters_per_unit": 1.0,
+          "object_barrier_assumption": true,
+          "snapshot_complete": true,
+          "sound_speed_mps": 343.0,
+          "source_pose": "authored_world",
+          "source_position": [
+            21.0,
+            8.0,
+            14.0
+          ],
+          "thin_surface_assumption": false,
+          "transient_objects": 0,
+          "transmission_energy": null,
+          "transmission_status": "unknown_material",
+          "triangles": 36,
+          "unsupported_objects": 0
+        },
+        "status": "unknown_material"
+      }
+    },
+    {
+      "case": "unequal energy bands",
+      "expected_amplitude_ratio": 0.4813176359397884,
+      "rms": 0.020167186856269836,
+      "peak": 0.03935887664556503,
+      "rms_ratio": 0.48131764821359685,
+      "peak_ratio": 0.48131764723890524,
+      "live": {
+        "amplitude_gain": 0.48131763991287296,
+        "boundary_mode": "object_barrier",
+        "enabled": true,
+        "id": "audio_source_2",
+        "meters_per_unit": 1,
+        "report": {
+          "ambiguous_boundary": false,
+          "boundary_mode": "object_barrier",
+          "coverage": "authored_flat_mesh_only",
+          "delay_seconds": 0.029154518950437316,
+          "distance_meters": 10.0,
+          "frequencies_hz": [
+            125,
+            250,
+            500,
+            1000,
+            2000,
+            4000
+          ],
+          "geometrically_obstructed": true,
+          "hidden_objects_skipped": 0,
+          "hits": [
+            {
+              "distance_meters": 5.850000381469727,
+              "material": {
+                "acoustics": {
+                  "bands": [
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.7599999904632568,
+                      "specular_reflection": 0.7599999904632568,
+                      "transmission": 0.03999999910593033
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.7100000381469727,
+                      "specular_reflection": 0.7100000381469727,
+                      "transmission": 0.09000000357627869
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.6399999856948853,
+                      "specular_reflection": 0.6399999856948853,
+                      "transmission": 0.1599999964237213
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.4399999976158142,
+                      "specular_reflection": 0.4399999976158142,
+                      "transmission": 0.36000001430511475
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.3100000023841858,
+                      "specular_reflection": 0.3100000023841858,
+                      "transmission": 0.49000000953674316
+                    }
+                  ],
+                  "defined": true,
+                  "frequencies_hz": [
+                    125,
+                    250,
+                    500,
+                    1000,
+                    2000,
+                    4000
+                  ],
+                  "quantity": "energy_fraction"
+                },
+                "binding": {
+                  "overrides": {
+                    "burn_rate_scale": 1.0,
+                    "fuel_capacity_scale": 1.0,
+                    "ignition_kelvin": 573.0,
+                    "override_ignition": false
+                  },
+                  "substance": "Acoustic acceptance 1792098569901659300"
+                },
+                "conflict": false,
+                "exists": true,
+                "object": "AcousticAcceptanceWall0_1792098570901726400",
+                "resolved": true,
+                "source": "object"
+              },
+              "normal": [
+                1.0,
+                0.0,
+                0.0
+              ],
+              "position": [
+                15.149999618530273,
+                8.0,
+                14.0
+              ]
+            },
+            {
+              "distance_meters": 6.149999618530273,
+              "material": {
+                "acoustics": {
+                  "bands": [
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.7599999904632568,
+                      "specular_reflection": 0.7599999904632568,
+                      "transmission": 0.03999999910593033
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.7100000381469727,
+                      "specular_reflection": 0.7100000381469727,
+                      "transmission": 0.09000000357627869
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.6399999856948853,
+                      "specular_reflection": 0.6399999856948853,
+                      "transmission": 0.1599999964237213
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.550000011920929,
+                      "specular_reflection": 0.550000011920929,
+                      "transmission": 0.25
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.4399999976158142,
+                      "specular_reflection": 0.4399999976158142,
+                      "transmission": 0.36000001430511475
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.3100000023841858,
+                      "specular_reflection": 0.3100000023841858,
+                      "transmission": 0.49000000953674316
+                    }
+                  ],
+                  "defined": true,
+                  "frequencies_hz": [
+                    125,
+                    250,
+                    500,
+                    1000,
+                    2000,
+                    4000
+                  ],
+                  "quantity": "energy_fraction"
+                },
+                "binding": {
+                  "overrides": {
+                    "burn_rate_scale": 1.0,
+                    "fuel_capacity_scale": 1.0,
+                    "ignition_kelvin": 573.0,
+                    "override_ignition": false
+                  },
+                  "substance": "Acoustic acceptance 1792098569901659300"
+                },
+                "conflict": false,
+                "exists": true,
+                "object": "AcousticAcceptanceWall0_1792098570901726400",
+                "resolved": true,
+                "source": "object"
+              },
+              "normal": [
+                -1.0,
+                0.0,
+                0.0
+              ],
+              "position": [
+                14.850000381469727,
+                8.0,
+                14.0
+              ]
+            }
+          ],
+          "include_hidden": true,
+          "listener_position": [
+            11.0,
+            8.0,
+            14.0
+          ],
+          "materials_revision": 13918407189159152391,
+          "meters_per_unit": 1.0,
+          "object_barrier_assumption": true,
+          "snapshot_complete": true,
+          "sound_speed_mps": 343.0,
+          "source_pose": "authored_world",
+          "source_position": [
+            21.0,
+            8.0,
+            14.0
+          ],
+          "thin_surface_assumption": false,
+          "transient_objects": 0,
+          "transmission_energy": [
+            0.03999999910593033,
+            0.09000000357627869,
+            0.1599999964237213,
+            0.25,
+            0.36000001430511475,
+            0.49000000953674316
+          ],
+          "transmission_status": "evaluated_object_barrier",
+          "triangles": 36,
+          "unsupported_objects": 0
+        },
+        "status": "evaluated_object_barrier"
+      }
+    },
+    {
+      "case": "invalid config rejected",
+      "params": {
+        "meters_per_unit": 0
+      },
+      "error": "audio.acoustics_preview: meters_per_unit must be finite within 1e-6..1e6"
+    },
+    {
+      "case": "invalid config rejected",
+      "params": {
+        "enabled": 1
+      },
+      "error": "audio.acoustics_preview: acoustics_preview requires boolean enabled"
+    },
+    {
+      "case": "invalid config rejected",
+      "params": {
+        "boundary_mode": "bogus"
+      },
+      "error": "audio.acoustics_preview: Preview boundary_mode must be object_barrier or thin_surface"
+    },
+    {
+      "case": "zero transmission silence",
+      "expected_amplitude_ratio": 0,
+      "rms": 0.0,
+      "peak": 0.0,
+      "rms_ratio": 0.0,
+      "peak_ratio": 0.0,
+      "live": {
+        "amplitude_gain": 0.0,
+        "boundary_mode": "object_barrier",
+        "enabled": true,
+        "id": "audio_source_2",
+        "meters_per_unit": 1,
+        "report": {
+          "ambiguous_boundary": false,
+          "boundary_mode": "object_barrier",
+          "coverage": "authored_flat_mesh_only",
+          "delay_seconds": 0.029154518950437316,
+          "distance_meters": 10.0,
+          "frequencies_hz": [
+            125,
+            250,
+            500,
+            1000,
+            2000,
+            4000
+          ],
+          "geometrically_obstructed": true,
+          "hidden_objects_skipped": 0,
+          "hits": [
+            {
+              "distance_meters": 5.850000381469727,
+              "material": {
+                "acoustics": {
+                  "bands": [
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.800000011920929,
+                      "specular_reflection": 0.800000011920929,
+                      "transmission": 0.0
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.800000011920929,
+                      "specular_reflection": 0.800000011920929,
+                      "transmission": 0.0
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.800000011920929,
+                      "specular_reflection": 0.800000011920929,
+                      "transmission": 0.0
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.800000011920929,
+                      "specular_reflection": 0.800000011920929,
+                      "transmission": 0.0
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.800000011920929,
+                      "specular_reflection": 0.800000011920929,
+                      "transmission": 0.0
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.800000011920929,
+                      "specular_reflection": 0.800000011920929,
+                      "transmission": 0.0
+                    }
+                  ],
+                  "defined": true,
+                  "frequencies_hz": [
+                    125,
+                    250,
+                    500,
+                    1000,
+                    2000,
+                    4000
+                  ],
+                  "quantity": "energy_fraction"
+                },
+                "binding": {
+                  "overrides": {
+                    "burn_rate_scale": 1.0,
+                    "fuel_capacity_scale": 1.0,
+                    "ignition_kelvin": 573.0,
+                    "override_ignition": false
+                  },
+                  "substance": "Acoustic acceptance 1792098569901659300"
+                },
+                "conflict": false,
+                "exists": true,
+                "object": "AcousticAcceptanceWall0_1792098570901726400",
+                "resolved": true,
+                "source": "object"
+              },
+              "normal": [
+                1.0,
+                0.0,
+                0.0
+              ],
+              "position": [
+                15.149999618530273,
+                8.0,
+                14.0
+              ]
+            },
+            {
+              "distance_meters": 6.149999618530273,
+              "material": {
+                "acoustics": {
+                  "bands": [
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.800000011920929,
+                      "specular_reflection": 0.800000011920929,
+                      "transmission": 0.0
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.800000011920929,
+                      "specular_reflection": 0.800000011920929,
+                      "transmission": 0.0
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.800000011920929,
+                      "specular_reflection": 0.800000011920929,
+                      "transmission": 0.0
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.800000011920929,
+                      "specular_reflection": 0.800000011920929,
+                      "transmission": 0.0
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.800000011920929,
+                      "specular_reflection": 0.800000011920929,
+                      "transmission": 0.0
+                    },
+                    {
+                      "absorption": 0.20000000298023224,
+                      "diffuse_reflection": 0.0,
+                      "reflection": 0.800000011920929,
+                      "specular_reflection": 0.800000011920929,
+                      "transmission": 0.0
+                    }
+                  ],
+                  "defined": true,
+                  "frequencies_hz": [
+                    125,
+                    250,
+                    500,
+                    1000,
+                    2000,
+                    4000
+                  ],
+                  "quantity": "energy_fraction"
+                },
+                "binding": {
+                  "overrides": {
+                    "burn_rate_scale": 1.0,
+                    "fuel_capacity_scale": 1.0,
+                    "ignition_kelvin": 573.0,
+                    "override_ignition": false
+                  },
+                  "substance": "Acoustic acceptance 1792098569901659300"
+                },
+                "conflict": false,
+                "exists": true,
+                "object": "AcousticAcceptanceWall0_1792098570901726400",
+                "resolved": true,
+                "source": "object"
+              },
+              "normal": [
+                -1.0,
+                0.0,
+                0.0
+              ],
+              "position": [
+                14.850000381469727,
+                8.0,
+                14.0
+              ]
+            }
+          ],
+          "include_hidden": true,
+          "listener_position": [
+            11.0,
+            8.0,
+            14.0
+          ],
+          "materials_revision": 8226396261058474694,
+          "meters_per_unit": 1.0,
+          "object_barrier_assumption": true,
+          "snapshot_complete": true,
+          "sound_speed_mps": 343.0,
+          "source_pose": "authored_world",
+          "source_position": [
+            21.0,
+            8.0,
+            14.0
+          ],
+          "thin_surface_assumption": false,
+          "transient_objects": 0,
+          "transmission_energy": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "transmission_status": "evaluated_object_barrier",
+          "triangles": 36,
+          "unsupported_objects": 0
+        },
+        "status": "evaluated_object_barrier"
+      }
+    },
+    {
+      "case": "disabled restores PCM level",
+      "expected_amplitude_ratio": 1,
+      "rms": 0.04189995303750038,
+      "peak": 0.08177318423986435,
+      "rms_ratio": 1.0,
+      "peak_ratio": 1.0,
+      "live": null
+    },
+    {
+      "case": "source removal clears preview",
+      "passed": true
+    }
+  ],
+  "cleanup": [
+    {
+      "method": "scene.delete",
+      "ok": true,
+      "result": true
+    },
+    {
+      "method": "scene.delete",
+      "ok": true,
+      "result": true
+    },
+    {
+      "method": "audio.playback_update",
+      "ok": true,
+      "result": {
+        "mode": "timeline"
+      }
+    },
+    {
+      "method": "substance.remove",
+      "ok": false,
+      "result": "substance.remove: substance 'Acoustic acceptance 1792098569901659300' is still used by object material undo history"
+    }
+  ],
+  "passed": true,
+  "scaled_trace": {
+    "ambiguous_boundary": false,
+    "boundary_mode": "object_barrier",
+    "coverage": "authored_flat_mesh_only",
+    "delay_seconds": 0.05830903790087463,
+    "distance_meters": 20.0,
+    "frequencies_hz": [
+      125,
+      250,
+      500,
+      1000,
+      2000,
+      4000
+    ],
+    "geometrically_obstructed": true,
+    "hidden_objects_skipped": 0,
+    "hits": [
+      {
+        "distance_meters": 11.700000762939453,
+        "material": {
+          "acoustics": {
+            "bands": [
+              {
+                "absorption": 0.20000000298023224,
+                "diffuse_reflection": 0.0,
+                "reflection": 0.550000011920929,
+                "specular_reflection": 0.550000011920929,
+                "transmission": 0.25
+              },
+              {
+                "absorption": 0.20000000298023224,
+                "diffuse_reflection": 0.0,
+                "reflection": 0.550000011920929,
+                "specular_reflection": 0.550000011920929,
+                "transmission": 0.25
+              },
+              {
+                "absorption": 0.20000000298023224,
+                "diffuse_reflection": 0.0,
+                "reflection": 0.550000011920929,
+                "specular_reflection": 0.550000011920929,
+                "transmission": 0.25
+              },
+              {
+                "absorption": 0.20000000298023224,
+                "diffuse_reflection": 0.0,
+                "reflection": 0.550000011920929,
+                "specular_reflection": 0.550000011920929,
+                "transmission": 0.25
+              },
+              {
+                "absorption": 0.20000000298023224,
+                "diffuse_reflection": 0.0,
+                "reflection": 0.550000011920929,
+                "specular_reflection": 0.550000011920929,
+                "transmission": 0.25
+              },
+              {
+                "absorption": 0.20000000298023224,
+                "diffuse_reflection": 0.0,
+                "reflection": 0.550000011920929,
+                "specular_reflection": 0.550000011920929,
+                "transmission": 0.25
+              }
+            ],
+            "defined": true,
+            "frequencies_hz": [
+              125,
+              250,
+              500,
+              1000,
+              2000,
+              4000
+            ],
+            "quantity": "energy_fraction"
+          },
+          "binding": {
+            "overrides": {
+              "burn_rate_scale": 1.0,
+              "fuel_capacity_scale": 1.0,
+              "ignition_kelvin": 573.0,
+              "override_ignition": false
+            },
+            "substance": "Acoustic acceptance 1792098569901659300"
+          },
+          "conflict": false,
+          "exists": true,
+          "object": "AcousticAcceptanceWall0_1792098570901726400",
+          "resolved": true,
+          "source": "object"
+        },
+        "normal": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "position": [
+          15.149999618530273,
+          8.0,
+          14.0
+        ]
+      },
+      {
+        "distance_meters": 12.299999237060547,
+        "material": {
+          "acoustics": {
+            "bands": [
+              {
+                "absorption": 0.20000000298023224,
+                "diffuse_reflection": 0.0,
+                "reflection": 0.550000011920929,
+                "specular_reflection": 0.550000011920929,
+                "transmission": 0.25
+              },
+              {
+                "absorption": 0.20000000298023224,
+                "diffuse_reflection": 0.0,
+                "reflection": 0.550000011920929,
+                "specular_reflection": 0.550000011920929,
+                "transmission": 0.25
+              },
+              {
+                "absorption": 0.20000000298023224,
+                "diffuse_reflection": 0.0,
+                "reflection": 0.550000011920929,
+                "specular_reflection": 0.550000011920929,
+                "transmission": 0.25
+              },
+              {
+                "absorption": 0.20000000298023224,
+                "diffuse_reflection": 0.0,
+                "reflection": 0.550000011920929,
+                "specular_reflection": 0.550000011920929,
+                "transmission": 0.25
+              },
+              {
+                "absorption": 0.20000000298023224,
+                "diffuse_reflection": 0.0,
+                "reflection": 0.550000011920929,
+                "specular_reflection": 0.550000011920929,
+                "transmission": 0.25
+              },
+              {
+                "absorption": 0.20000000298023224,
+                "diffuse_reflection": 0.0,
+                "reflection": 0.550000011920929,
+                "specular_reflection": 0.550000011920929,
+                "transmission": 0.25
+              }
+            ],
+            "defined": true,
+            "frequencies_hz": [
+              125,
+              250,
+              500,
+              1000,
+              2000,
+              4000
+            ],
+            "quantity": "energy_fraction"
+          },
+          "binding": {
+            "overrides": {
+              "burn_rate_scale": 1.0,
+              "fuel_capacity_scale": 1.0,
+              "ignition_kelvin": 573.0,
+              "override_ignition": false
+            },
+            "substance": "Acoustic acceptance 1792098569901659300"
+          },
+          "conflict": false,
+          "exists": true,
+          "object": "AcousticAcceptanceWall0_1792098570901726400",
+          "resolved": true,
+          "source": "object"
+        },
+        "normal": [
+          -1.0,
+          0.0,
+          0.0
+        ],
+        "position": [
+          14.850000381469727,
+          8.0,
+          14.0
+        ]
+      }
+    ],
+    "include_hidden": true,
+    "listener_position": [
+      11.0,
+      8.0,
+      14.0
+    ],
+    "materials_revision": 2534385332957796997,
+    "meters_per_unit": 2.0,
+    "object_barrier_assumption": true,
+    "snapshot_complete": true,
+    "sound_speed_mps": 343.0,
+    "source_pose": "authored_world",
+    "source_position": [
+      21.0,
+      8.0,
+      14.0
+    ],
+    "thin_surface_assumption": false,
+    "transient_objects": 0,
+    "transmission_energy": [
+      0.25,
+      0.25,
+      0.25,
+      0.25,
+      0.25,
+      0.25
+    ],
+    "transmission_status": "evaluated_object_barrier",
+    "triangles": 36,
+    "unsupported_objects": 0
+  },
+  "remaining_objects": [
+    "Default_Cube"
+  ],
+  "original_objects": [
+    "Default_Cube"
+  ],
+  "final_audio": {
+    "assets": [],
+    "clips": [],
+    "emitters": [],
+    "mixer": {
+      "Ambience": {
+        "gain": 1.0,
+        "muted": false,
+        "pan": 0.0,
+        "solo": false
+      },
+      "Effects": {
+        "gain": 1.0,
+        "muted": false,
+        "pan": 0.0,
+        "solo": false
+      },
+      "Master": {
+        "gain": 1.0,
+        "muted": false,
+        "pan": 0.0,
+        "solo": false
+      },
+      "Music": {
+        "gain": 1.0,
+        "muted": false,
+        "pan": 0.0,
+        "solo": false
+      },
+      "Weather": {
+        "gain": 1.0,
+        "muted": false,
+        "pan": 0.0,
+        "solo": false
+      }
+    },
+    "next_id": 3,
+    "playback_mode": "timeline",
+    "playback_mode_explicit": true,
+    "telemetry": {
+      "enabled": false
+    },
+    "thunder": {
+      "crossover_m": 3000.0,
+      "enabled": false,
+      "far_assets": [],
+      "gain": 1.0,
+      "max_distance_m": 30000.0,
+      "near_assets": [],
+      "reference_distance_m": 500.0,
+      "sound_speed_mps": 343.0
+    },
+    "tracks": [],
+    "version": 1
+  },
+  "note": "Playback mode restored; explicit-mode flag and next_id may advance. Undo history preserved.",
+  "date_local": "2026-10-16",
+  "signal": {
+    "sample_rate": 48000,
+    "frequency_hz": 1000,
+    "format": "mono PCM16",
+    "source_gain": 0.5,
+    "rolloff": 0,
+    "loop": true
+  },
+  "scope": "Direct-path assembly approximation and actual native mixer callback PCM; not OS loopback, hardware SPL, spectral filtering or echo.",
+  "max_absolute_amplitude_ratio_error": 1.2273808469576153e-08
+}

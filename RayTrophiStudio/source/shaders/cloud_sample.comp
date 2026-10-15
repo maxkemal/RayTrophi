@@ -14,6 +14,17 @@
 //         8 ice pellets; cloudPrecipFormIdAt)
 // mode 5: storm cell volume signed distance (m, negative inside; 1e6 outside
 //         every box or with volumes off; cloudVolumeSdf)
+// mode 6: near-camera drop state at query.a.xyz (near_precip.glsl, the state
+//         the drawing uses), component query.a.w: 0 rate mm/h, 1 first form
+//         id, 2 second form id, 3/4 their shares, 5/6 their drops per m^3,
+//         7 first form streak length m (speed x shutter), 8 its fall speed
+//         m/s, 9 its drawn radius m, 10 drop range m (= where the camera
+//         ray's curtain starts; 0 = near drops off)
+// mode 7: the per-frame near-drop state for the renderers (NOT a query):
+//         one invocation evaluates nearStateCompute at cloudParams.nearState
+//         .camera and writes it at results[pc.pad ...]; here `results`
+//         aliases the params buffer itself (VulkanDevice::updateCloudRtParams,
+//         Backend::kCloudNearStateFloatOffset). Reads only camera / sun.
 
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
@@ -23,6 +34,7 @@ layout(local_size_x = 64) in;
 #define CLOUD_CELL_BINDING 7
 #define CLOUD_VOLUME_BINDING 8
 #include "cloud_common.glsl"
+#include "near_precip.glsl"
 
 struct CloudQuery { vec4 a; vec4 b; };
 layout(set = 0, binding = 5, std430) readonly buffer Queries { CloudQuery queries[]; };
@@ -48,6 +60,31 @@ void main() {
         results[i] = cloudPrecipAt(a);
     } else if (pc.mode == 4u) {
         results[i] = cloudPrecipFormIdAt(a);
+    } else if (pc.mode == 7u) {
+        if (i != 0u) return;
+        vec4 s[6];
+        nearStateCompute(cloudParams.nearState.camera.xyz, normalize(cloudParams.nearState.sun.xyz), s);
+        for (int k = 0; k < 6; ++k)
+            for (int c = 0; c < 4; ++c)
+                results[pc.pad + uint(k * 4 + c)] = s[k][c];
+    } else if (pc.mode == 6u) {
+        NearPrecipForm f0, f1;
+        float rate = nearPrecipForms(a, f0, f1);
+        int k = int(queries[i].a.w + 0.5);
+        vec3 v = cloudSurfaceWind() + vec3(0.0, -f0.fall, 0.0);
+        float r = 0.0;
+        if (k == 0) r = rate;
+        else if (k == 1) r = float(f0.id);
+        else if (k == 2) r = float(f1.id);
+        else if (k == 3) r = f0.share;
+        else if (k == 4) r = f1.share;
+        else if (k == 5) r = f0.density;
+        else if (k == 6) r = f1.density;
+        else if (k == 7) r = f0.id > 0 ? length(v) * cloudShutter() : 0.0;
+        else if (k == 8) r = f0.id > 0 ? f0.fall : 0.0;
+        else if (k == 9) r = f0.id > 0 ? f0.radius : 0.0;
+        else if (k == 10) r = cloudNearPrecipRange();
+        results[i] = r;
     } else if (pc.mode == 5u) {
         results[i] = cloudVolumesActive() ? cloudVolumeSdf(a, cloudAltitude(a)) : 1e6;
     } else {

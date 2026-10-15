@@ -3335,6 +3335,9 @@ Result cloudStatsJson(std::string& out_json);
 //           "points":[[x,y,z],...] | "segments":[[[a],[b]],...],
 //           "steps":256, "backend":"render"|"viewport"}
 // Reply: {"values":[...]} -- 1/m for density, 0..1 for transmittance.
+// Also "precipitation" (mm/h), "precipitation_form", "volume_sdf", and
+// "near_precip": reply {"points":[{rate_mm_h, dominant_form, forms, ...}]},
+// the state near_precip.glsl draws the near-camera drops from.
 Result sampleCloudsJson(const std::string& request_json, std::string& out_json);
 // Local weather (docs/dev/ATMOSPHERE_LOCAL_WINDS_FOG.md §2-4) at points.
 // Request: {"points":[[x,y,z],...]}. Reply: {"points":[{suitability:{value,

@@ -153,6 +153,12 @@ struct CloudPrecipitation {
     float air_temperature_c = 15.0f;     // at sea level
     float lapse_rate_k_per_m = 0.0065f;
     bool  snow = false;
+    // Near-camera drops (docs/dev/ATMOSPHERE_NEAR_PRECIP.md): this same
+    // precipitation, drawn as individual streaks / flakes out to near_range_m.
+    // The curtain march of camera rays starts there, so the mean extinction
+    // is counted once. Off: the curtain starts at the camera again.
+    bool  near_enabled = true;
+    float near_range_m = 15.0f;
 };
 
 // Deterministic timeline events, rendered through the shared Vulkan cloud path.
@@ -180,9 +186,6 @@ struct CloudLightning {
     float leader_fraction = 0.3f;
     float horizontal_span_m = 12000.0f;
     float branching = 0.75f;
-    // Camera exposure the flash is averaged over, s (0 = instantaneous).
-    // ~1/30: what a video frame integrates; removes re-stroke strobing.
-    float shutter_s = 1.0f / 30.0f;
     // Radiance of the channel core relative to the lit cloud (`intensity`).
     // A real channel is far brighter than the cloud it lights.
     float channel_brightness = 8.0f;
@@ -250,6 +253,15 @@ struct CloudLocalWeather {
     // sky), mist after rain and inside rain shafts. Drawn by the aerial froxel.
     bool fog_enabled = true;
     float fog_strength = 1.0f;   // 0..10, scales the derived extinctions
+    // Authored fog (ATMOSPHERE_LOCAL_WINDS_FOG.md §4): off = the fog follows
+    // the weather (radiation fog needs night x calm x humid x clear sky, mist
+    // needs recent rain). On = the three drivers below are set by hand -- a
+    // morning valley fog under a dry sky, for one. Same map, same pooling in
+    // the hollows, same shape and light; only where the potential comes from.
+    bool  fog_manual = false;
+    float valley_fog = 0.6f;       // 0..1 radiation-fog potential (replaces night x calm x humid x clear)
+    float valley_fog_lift = 0.0f;  // 0..1 lid lifting as it thins (replaces the sunrise burn-off)
+    float post_rain_mist = 0.0f;   // 0..1 ground mist (replaces the recent-rain term)
 };
 
 // Storm cell volumes (docs/dev/ATMOSPHERE_CLOUD_VOLUMES.md §3.3): each
@@ -330,6 +342,12 @@ struct CloudState {
     CloudStorms storms;
     CloudLocalWeather local_weather;
     CloudVolumes volumes;
+    // Frame exposure, s, of every time-integrated atmospheric effect: the
+    // lightning pulse is averaged over it (re-strokes at 30-60 fps strobed
+    // when sampled instantaneously) and a near drop sweeps a streak of
+    // velocity x shutter_s. ~1/30 = what a video frame integrates. One value:
+    // a flash and the rain it lights are seen by the same camera.
+    float shutter_s = 1.0f / 30.0f;
 
     bool anyEnabled() const;
 };

@@ -18,6 +18,10 @@
 // op
 #define CLOUD_CALL_RENDER 0u   // cloud transport along [0, tLimit]
 #define CLOUD_CALL_SUN_T  1u   // cloud transmittance toward the sun (surface NEE)
+// Near-camera drops in front of [0, tLimit] of a camera ray (near_precip.glsl):
+// in = origin (camera), dir, tLimit (surface hit), pixelAngle (rad / pixel);
+// out = inscatter (drop radiance in front), T (what lies behind is * T).
+#define CLOUD_CALL_NEAR_PRECIP 2u
 
 // flags (CLOUD_CALL_RENDER)
 #define CLOUD_CALL_CAMERA_RAY  1u   // camera segment: full steps / reference walk
@@ -36,7 +40,7 @@ struct CloudCall {
     float depth;       // out: first-collision / weighted depth, -1 = none
     uint  op;
     uint  flags;
-    float _pad;
+    float pixelAngle;  // CLOUD_CALL_NEAR_PRECIP only
 };
 
 #endif // CLOUD_CALL_TYPES_GLSL

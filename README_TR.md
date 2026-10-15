@@ -45,7 +45,7 @@ Bu bir render-farm eklentisi ya da kütüphane değil. Modern dock'lu bir arayü
 | **Proje kod / shader satırı** | ~635.000 |
 | **Proje kod / shader dosyası** | 1.682 |
 | **GPU çekirdek & shader dosyası** | 397 (CUDA, OptiX PTX, Vulkan GLSL/RT, compute) |
-| **IPC yüzeyi** | 667 statik denetlenmiş yol; 60 dinamik `audio.*` işlemi |
+| **IPC yüzeyi** | 667 statik denetlenmiş yol; 76 dinamik `audio.*` işlemi |
 | **Render backendleri** | CPU (Embree) · NVIDIA OptiX · Vulkan RT |
 | **Düğüm editörleri** | Arazi · Animasyon · Materyal · Simülasyon |
 | **Son kaynak/denetim yenilemesi** | 2026-10-14 — sahne sesi/Designer, birleşik Matter, atmosfer/bulut hacimleri; IPC ve shader-layout denetimi |
@@ -65,7 +65,7 @@ ayrı gösterir. Başarılı derleme; ses/görsel kalite veya çözücü eşitli
 | Alan | Eklenenler | Kabul ve sıradaki iş |
 |---|---|---|
 | Sahne sesi | Konumlu kaynaklar, dosya assetleri, hava/thunder tepkileri, sabit mixer bus'ları, timeline klipleri, waveform, fade, otomasyon, capture ve offline WAV | Temel playback/mixer, kısa WAV export ve küçük DEM RAM replay kabulü kayıtlı. Tam capture, save/reopen ve diğer kanal testleri açık. |
-| Ses tasarımcısı | DaisySP sentez/filtre, Signalsmith bağımsız perde/süre, bellekte orijinal/işlenmiş ön dinleme, zarf/filtre/spektrum ve adla kayıt | Kullanıcı 14 Ekim'de Studio derlemesini doğruladı. Yeni Designer dinleme/UI/IPC kabulü bekliyor; kesintisiz canlı DSP ve yeni presetler sırada. |
+| Ses tasarımcısı | Beş üretim katmanı türü, dokuz sıralı efekt, waveform/ADSR/EQ kontrolü, FFT/spectrogram, bağımsız perde/süre/formant, tarif geçmişi/yeniden kullanım ve adla kayıt | V2 derlemesi ve sentetik ön dinleme doğrulandı. Genişletilmiş v3 görsel araçlar kaynakta; yeni derleme/UI/dinleme/IPC kabulü bekliyor. Arka plan/canlı DSP sırada. |
 | Fizik ses telemetrisi | Ayrı DEM temas/sürtünme/yuvarlanma, sıvı/gaz aktivitesi ve MPM gerilme/hasar kanalları; sahne genelinde manuel ölçüm anahtarı | Varsayılan kapalı. Açık DEM ölçümü hâlâ tane başına readback maliyeti taşır; seçili kanal ölçümü ve GPU indirgeme sırada. |
 | Atmosfer | Ortak iklim/bulut verisi, fırtına hücreleri, yağış tipleri, yerel sis, sahne yıldırımı ve gecikmeli thunder; yeni hücre hacmi atlası/SDF yolu | Bulut hacmi V0–V2 ve V2b/V2c canlı kontrolleri kayıtlı. V2d gölge aydınlatması ve çoklu kule şekli shader/görsel kabul bekliyor. V3–V5 ve yüzey birikimi planlı. |
 | Birleşik Matter | Madde kütüphanesi/türetilmiş profiller, DEM/MPM/sıvı sahipliği, gizli ısı, yoğuşma, sis suyu ve yağmur envanteri; aşamalı compact sıvı MAC/FLIP depolama | T1/T3 hızlı kontroller ve T2 termal vakaları geçti. Uzatılmış karma sahip/ortak saat regresyonu, tam sparse göç ve performans kapıları açık. |
@@ -355,7 +355,7 @@ Yakınsama sonrası, path-traced sonucu + AOV tamponlarını okuyup; sahne geome
 - **Sound Designer:** sentetik karakter veya mono/stereo dosya asseti seç, bellekte
   ön dinle, orijinal/işlenmiş karşılaştır, ADSR/gürültü/modülasyon/filtre/doygunlukla
   şekillendir, perde ve süreyi bağımsız değiştir, loop birleşimini hazırla.
-  Waveform, sürüklenebilir zarf, filtre eğrisi ve örneklenmiş spektrum kontrolleri tamamlar.
+  Generate/Edit/Effects/Analyze sayfaları katmanlı sentez, sıralı efektler, waveform aralığı/zoom, sürüklenebilir ADSR/fade/EQ, tam FFT/spectrogram ve tarif undo/yeniden kullanımını sunar. [V3 araçları](docs/dev/AUDIO_DESIGN_TOOLS.md) yeni derleme bekliyor.
 - **Adla kayıt:** proje ses klasörü veya aktif asset kütüphanesi hedefi sağlar.
   Klasör seçici ve otomatik çakışma numaraları rutin path yazmayı kaldırır.
   Kaydedilen WAV ön dinleme PCM'ini ve tarif/kaynak metadata'sını taşır.
@@ -366,7 +366,7 @@ Yakınsama sonrası, path-traced sonucu + AOV tamponlarını okuyup; sahne geome
 UI, `rt.audio` ve `audio.*` IPC aynı servisi kullanır. Fizik telemetrisi elle açılır;
 Audio'yu açmak veya ses bağlamak ölçümü etkinleştirmez. Designer düzenlemeleri şimdilik
 kontrol bırakılınca render edilir ve ön dinleme yeniden başlar. Kesintisiz canlı DSP,
-GPU telemetri indirgeme, engellenme, yansıma ve oda yankısı sonraki işlerdir.
+GPU telemetri indirgeme, engellenme, yansıma ve sahne akustiği yankısı sonraki işlerdir. Designer içinde offline oda yankısı efekti vardır.
 
 Sözleşmeler ve kabul: [Sound Designer](docs/dev/AUDIO_SOUND_DESIGN.md),
 [Audio çalışma alanı](docs/dev/AUDIO_WORKSPACE_UI.md),

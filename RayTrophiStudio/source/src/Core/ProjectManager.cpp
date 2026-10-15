@@ -1,3 +1,4 @@
+#include "Atmosphere/LensWeatherState.h"
 #include "Fluid/MatterPoreAuthoring.h"
 #include "Fluid/MatterGrain.h"
 #include "Animation/RigBindingScope.h"
@@ -1839,6 +1840,7 @@ bool ProjectManager::saveProjectImpl(const std::string& filepath, SceneData& sce
         // Force Fields
         if (progress_callback) progress_callback(84, "Saving Force Fields...");
         root["force_fields"] = serializeForceFields(scene.force_field_manager);
+        root["object_substances"] = matter::saveObjectSubstances(scene);
         root["audio"] = scene.audio->save(pathFromUtf8(filepath));
         SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.force_field_manager.force_fields.size()) + " Force Fields.");
 
@@ -2657,6 +2659,10 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             if (!root["gas_volumes"].get(gas_el)) deserializeGasVolumes(sjsonToNlohmann(gas_el), scene);
             if (!root["force_fields"].get(ff_el)) deserializeForceFields(sjsonToNlohmann(ff_el), scene);
             simdjson::dom::element audio_el;
+            simdjson::dom::element object_substances_el;
+            matter::restoreObjectSubstances(scene,
+                root["object_substances"].get(object_substances_el) ? json::object() :
+                sjsonToNlohmann(object_substances_el));
             scene.audio->restore(root["audio"].get(audio_el) ? json() : sjsonToNlohmann(audio_el),
                                  pathFromUtf8(filepath).parent_path());
             if (!root["particle_simulation"].get(particles_el)) deserializeParticleSimulation(sjsonToNlohmann(particles_el), scene);
@@ -4320,6 +4326,7 @@ json ProjectManager::serializeCameras(const std::vector<std::shared_ptr<Camera>>
         c["dolly_pos"] = cam->dolly_position;
         c["lens_radius"] = cam->lens_radius;
         c["depth_of_field"] = cam->depth_of_field;
+        c["lens_weather"] = atmosphere::lensWeatherJson(cam->lens_weather);
         c["blade_count"] = cam->blade_count;
         c["distortion"] = cam->distortion;
         c["body_preset_index"] = cam->body_preset_index;
@@ -4350,6 +4357,8 @@ void ProjectManager::deserializeCameras(const json& j, SceneData& scene) {
         
         auto cam = std::make_shared<Camera>(position, target, up, fov, aspect, aperture, focus_dist, blade_count);
         cam->nodeName = c.value("name", "Camera");
+        cam->lens_weather = atmosphere::lensWeatherFromProjectJson(
+            c.value("lens_weather", json::object()));
         
         // Restore Extended Parameters
         cam->iso_preset_index = c.value("iso", 1);

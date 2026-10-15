@@ -13,7 +13,9 @@
 #include "imgui.h"
 #include "scene_data.h"
 #include "Api/RtApi.h"
+#include "json.hpp"
 #include <algorithm>
+#include <cstdio>
 #include <cmath>
 
 namespace {
@@ -353,12 +355,10 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         it->world.weather_intensity = weather.intensity;
                         it->world.weather_density = weather.density;
                         it->world.weather_precipitation_scale = weather.precipitation_scale;
-                        it->world.weather_visibility = weather.visibility;
                         it->world.weather_surface_wetness = weather.surface_wetness_output;
                         it->world.weather_surface_accumulation = weather.surface_accumulation_output;
                         it->world.weather_surface_settling = weather.surface_settling_output;
                         it->world.weather_surface_height = weather.surface_height_output;
-                        it->world.weather_visual_mode = weather.visual_mode;
                         it->world.weather_surface_response_enabled = weather.surface_response_enabled;
                         break;
                 }
@@ -460,12 +460,10 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     wk.weather_intensity = weather.intensity;
                     wk.weather_density = weather.density;
                     wk.weather_precipitation_scale = weather.precipitation_scale;
-                    wk.weather_visibility = weather.visibility;
                     wk.weather_surface_wetness = weather.surface_wetness_output;
                     wk.weather_surface_accumulation = weather.surface_accumulation_output;
                     wk.weather_surface_settling = weather.surface_settling_output;
                     wk.weather_surface_height = weather.surface_height_output;
-                    wk.weather_visual_mode = weather.visual_mode;
                     wk.weather_surface_response_enabled = weather.surface_response_enabled;
                     break;
             }
@@ -1097,7 +1095,8 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
     }
 
     // ═══════════════════════════════════════════════════════════
-    // Weather Controls (shared payload for CPU/OptiX/Vulkan)
+    // Weather: manual surface cover + lightning (falling precipitation is the
+    // Clouds section's, docs/dev/ATMOSPHERE_NEAR_PRECIP.md)
     // ═══════════════════════════════════════════════════════════
     ImGui::Spacing();
     if (UIWidgets::BeginSection("Weather", ImVec4(0.45f, 0.65f, 0.85f, 1.0f))) {
@@ -1110,37 +1109,30 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         }
         ImGui::SameLine();
         bool weatherEnabled = weather.enabled != 0;
-        if (ImGui::Checkbox("Enable Weather", &weatherEnabled)) {
+        if (ImGui::Checkbox("Surface weather (manual)", &weatherEnabled)) {
             weather.enabled = weatherEnabled ? 1 : 0;
             weatherChanged = true;
         }
+        UIWidgets::HelpMarker("Wetness and snow / dust buildup on materials, set by hand.\n"
+                              "Falling rain and snow are the atmosphere's: Clouds >\n"
+                              "Precipitation (shafts and the drops around the camera).");
 
-        const char* weatherTypes[] = { "None", "Rain", "Snow", "Dust", "Mist" };
-        int weatherType = std::clamp(weather.type, 0, 4);
-        if (ImGui::Combo("Type", &weatherType, weatherTypes, IM_ARRAYSIZE(weatherTypes))) {
+        const char* weatherTypes[] = { "None", "Wet", "Snow", "Dust" };
+        int weatherType = std::clamp(weather.type, 0, 3);
+        if (ImGui::Combo("Cover", &weatherType, weatherTypes, IM_ARRAYSIZE(weatherTypes))) {
             weather.type = weatherType;
             weatherChanged = true;
         }
 
-        if (SceneUI::DrawSmartFloat("wint", "Intensity", &weather.intensity, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
+        if (SceneUI::DrawSmartFloat("wint", "Deposit strength", &weather.intensity, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
             weatherChanged = true;
         }
-        if (SceneUI::DrawSmartFloat("wden", "Density", &weather.density, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
+        if (SceneUI::DrawSmartFloat("wden", "Deposit density", &weather.density, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
             weatherChanged = true;
         }
-        // Wind is climate state now (Climate section); weather reads it.
+        // Wind is climate state now (Climate section); the deposit reads it.
 
-        if (SceneUI::DrawSmartFloat("wpsc", "Precip Scale", &weather.precipitation_scale, 0.1f, 10.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
-            weatherChanged = true;
-        }
-        if (SceneUI::DrawSmartFloat("wvis", "Visibility", &weather.visibility, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
-            weatherChanged = true;
-        }
-
-        const char* weatherVisualModes[] = { "Airborne", "Surface Only" };
-        int weatherVisualMode = std::clamp(weather.visual_mode, 0, 1);
-        if (ImGui::Combo("Visual Mode", &weatherVisualMode, weatherVisualModes, IM_ARRAYSIZE(weatherVisualModes))) {
-            weather.visual_mode = weatherVisualMode;
+        if (SceneUI::DrawSmartFloat("wpsc", "Pattern scale", &weather.precipitation_scale, 0.1f, 10.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
             weatherChanged = true;
         }
 
@@ -1149,23 +1141,14 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             weather.surface_response_enabled = surfaceResponseEnabled ? 1 : 0;
             weatherChanged = true;
         }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Apply wetness or accumulation to surface shading even if the visual precipitation layer is disabled.");
-        }
 
         if (weather.type == WEATHER_RAIN) {
             if (SceneUI::DrawSmartFloat("wswt", "Surface Wetness", &weather.surface_wetness_output, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
                 weatherChanged = true;
             }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Surface wetness amount. This can stay high even when the atmospheric rain overlay is low or disabled.");
-            }
         } else if (weather.type == WEATHER_SNOW || weather.type == WEATHER_DUST) {
             if (SceneUI::DrawSmartFloat("wsac", "Surface Accum", &weather.surface_accumulation_output, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
                 weatherChanged = true;
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Surface buildup amount. Snow or dust can stay on the scene even after the atmospheric effect is reduced or disabled.");
             }
             if (SceneUI::DrawSmartFloat("wsst", "Surface Settling", &weather.surface_settling_output, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
                 weatherChanged = true;
@@ -1181,24 +1164,13 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             }
         }
 
-        bool realtimeWeatherPreview = ctx.render_settings.realtime_weather_preview;
-        if (ImGui::Checkbox("Realtime Weather Preview", &realtimeWeatherPreview)) {
-            ctx.render_settings.realtime_weather_preview = realtimeWeatherPreview;
-            changed = true;
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Continuously resets interactive accumulation so rain, snow, and dust keep moving even without keyframes or camera motion.");
-        }
-
         if (weatherChanged) {
             weather.intensity = std::clamp(weather.intensity, 0.0f, 1.0f);
             weather.density = std::clamp(weather.density, 0.0f, 1.0f);
-            weather.visibility = std::clamp(weather.visibility, 0.0f, 1.0f);
             weather.surface_wetness_output = std::clamp(weather.surface_wetness_output, 0.0f, 1.0f);
             weather.surface_accumulation_output = std::clamp(weather.surface_accumulation_output, 0.0f, 1.0f);
             weather.surface_settling_output = std::clamp(weather.surface_settling_output, 0.0f, 1.0f);
             weather.surface_height_output = std::clamp(weather.surface_height_output, 0.0f, 1.0f);
-            weather.visual_mode = std::clamp(weather.visual_mode, static_cast<int>(WEATHER_VISUAL_OVERLAY), static_cast<int>(WEATHER_VISUAL_SURFACE_ONLY));
             changed |= rtapi::setWeatherEffects(weather).ok;
         }
 
@@ -1320,6 +1292,50 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 } else {
                     ImGui::TextDisabled("Air %.1f C at sea level, inversion / isothermal%s",
                                         pr.air_temperature_c, pr.snow ? "  (frozen at the ground)" : "");
+                }
+            }
+            // Near camera (docs/dev/ATMOSPHERE_NEAR_PRECIP.md): the same
+            // precipitation as individual streaks / flakes; no rate or type of
+            // its own -- what falls here is what the shafts carry at the camera.
+            ImGui::SeparatorText("Near camera");
+            cloudsChanged |= ImGui::Checkbox("Drops around the camera##precip", &clouds.precipitation.near_enabled);
+            UIWidgets::HelpMarker("Streaks / flakes out to the drop range, lit like the shafts\n"
+                                  "(sun through the cloud above, sky, lightning). Rain is faint\n"
+                                  "against a dark background and bright when backlit - that is\n"
+                                  "real rain. Off: the shaft volume starts at the camera instead.");
+            ImGui::BeginDisabled(!clouds.precipitation.near_enabled);
+            cloudsChanged |= ImGui::DragFloat("Drop range (m)##precip", &clouds.precipitation.near_range_m,
+                                              0.1f, 2.0f, 60.0f, "%.1f");
+            ImGui::EndDisabled();
+            cloudsChanged |= ImGui::SliderFloat("Exposure (s)##atmosphere", &clouds.shutter_s, 0.0f, 0.5f, "%.3f");
+            UIWidgets::HelpMarker("Frame exposure shared by the atmosphere: a drop draws a streak of\n"
+                                  "speed x exposure, a lightning pulse is averaged over it.");
+            {
+                // Measured on the GPU with the shader's own function (the same
+                // call as world.sample_clouds mode near_precip).
+                static std::string s_nearReadout;
+                if (ImGui::SmallButton("Measure at camera##nearprecip") && ctx.scene.camera) {
+                    const Vec3 c = ctx.scene.camera->lookfrom;
+                    nlohmann::json req;
+                    req["mode"] = "near_precip";
+                    req["points"] = nlohmann::json::array({nlohmann::json::array({c.x, c.y, c.z})});
+                    std::string out;
+                    const rtapi::Result r = rtapi::sampleCloudsJson(req.dump(), out);
+                    if (!r.ok) {
+                        s_nearReadout = r.error;
+                    } else {
+                        const auto j = nlohmann::json::parse(out);
+                        const auto& p = j["points"][0];
+                        char buf[256];
+                        std::snprintf(buf, sizeof(buf), "%.2f mm/h, %s, %.0f drops/m3, streak %.2f m",
+                                      p.value("rate_mm_h", 0.0f), p.value("dominant_form", std::string("none")).c_str(),
+                                      p.value("number_density_per_m3", 0.0f), p.value("streak_length_m", 0.0f));
+                        s_nearReadout = buf;
+                    }
+                }
+                if (!s_nearReadout.empty()) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", s_nearReadout.c_str());
                 }
             }
             ImGui::TreePop();

@@ -4,6 +4,8 @@
 
 #include "Audio/AudioOffline.h"
 #include "Audio/AudioClips.h"
+#include "Audio/AudioTracks.h"
+#include "Audio/AudioTimelineMix.h"
 #include "Audio/AudioPcm.h"
 #include "Audio/AudioMixer.h"
 #include "Audio/AudioService.h"
@@ -72,29 +74,13 @@ void header(std::ofstream& output, std::uint32_t frames) {
     word(output, frames * 8, 4);
 }
 
-float sample(const AudioPcm& pcm, const json& clip, double seconds, unsigned channel) {
-    const auto start = static_cast<std::uint64_t>(std::llround(
-        clip.at("source_in_seconds").get<double>() * 48000));
-    const auto end = std::min(pcm.frames(), static_cast<std::uint64_t>(std::llround(
-        clip.at("source_out_seconds").get<double>() * 48000)));
-    const double frame = (seconds - clip.at("source_in_seconds").get<double>()) * 48000;
-    if (frame < 0 || end <= start || frame >= end - start) {
-        return 0;
-    }
-    const auto offset = static_cast<std::uint64_t>(frame);
-    const auto first = start + offset;
-    const auto second = first + 1 < end ? first + 1 :
-        (clip.at("loop").get<bool>() ? start : end - 1);
-    const unsigned sourceChannel = pcm.channels == 1 ? 0 : channel;
-    const double blend = frame - offset;
-    return static_cast<float>(pcm.samples[first * pcm.channels + sourceChannel] * (1 - blend) +
-                              pcm.samples[second * pcm.channels + sourceChannel] * blend);
-}
+
 }
 
 struct AudioOfflineJob::Impl {
     json report = {{"state", "idle"}};
     json clips = json::array(), mixer;
+    std::map<std::string, AudioTrackMix> trackMix;
     std::map<std::string, AudioPcm> assets;
     std::filesystem::path target, temporary;
     std::ofstream output;
@@ -152,6 +138,10 @@ json AudioOfflineJob::start(const json& scene, const json& params) {
     candidate->clips = AudioClips::validateCollection(scene.value("clips", json::array()),
                                                       scene.at("assets"));
     candidate->mixer = AudioMixer::validate(scene.at("mixer"));
+    const auto tracks = AudioTracks::validate(scene.value("tracks", json::array()));
+    for (const auto& clip : candidate->clips) {
+        candidate->trackMix[clip.at("id").get<std::string>()] = AudioTracks::mix(clip, tracks);
+    }
     candidate->first = candidate->cursor = first;
     candidate->last = last;
     candidate->target = target;
@@ -160,7 +150,8 @@ json AudioOfflineJob::start(const json& scene, const json& params) {
     for (const auto& clip : candidate->clips) {
         const double start = clip.at("start_seconds"), duration = clip.at("duration_seconds");
         if (start >= double(last) / 48000 || start + duration <= double(first) / 48000 ||
-            clip.at("muted").get<bool>()) {
+            clip.at("muted").get<bool>() ||
+            candidate->trackMix.at(clip.at("id").get<std::string>()).muted) {
             continue;
         }
         const std::string id = clip.at("asset_id");
@@ -210,7 +201,6 @@ void AudioOfflineJob::tick() {
         static_assert(std::endian::native == std::endian::little);
         const auto count = std::min<std::uint64_t>(4096, job.last - job.cursor);
         std::vector<float> block(static_cast<std::size_t>(count) * 2, 0);
-        const float master = AudioMixer::effectiveGain(job.mixer, "Master");
         for (const auto& clip : job.clips) {
             const double start = clip.at("start_seconds"), duration = clip.at("duration_seconds");
             if (start >= double(job.cursor + count) / 48000 || start + duration <= double(job.cursor) / 48000) {
@@ -220,27 +210,12 @@ void AudioOfflineJob::tick() {
             if (source == job.assets.end()) {
                 continue;
             }
-            const std::string bus = clip.at("bus");
-            const float busGain = bus == "Master"
-                ? master * AudioMixer::directMasterGain(job.mixer)
-                : AudioMixer::effectiveGain(job.mixer, bus) * master;
-            const float masterPan = job.mixer.at("Master").value("pan", 0.0f);
-            const float busPan = bus == "Master" ? 0.0f : job.mixer.at(bus).value("pan", 0.0f);
-            const float busLeft = std::min(1.0f, 1.0f - masterPan) *
-                std::min(1.0f, 1.0f - busPan);
-            const float busRight = std::min(1.0f, 1.0f + masterPan) *
-                std::min(1.0f, 1.0f + busPan);
+            const auto mix = timelineClipMix(clip,
+                job.trackMix.at(clip.at("id").get<std::string>()), job.mixer);
             for (std::uint64_t frame = 0; frame < count; ++frame) {
-                const auto control = AudioClips::evaluate(clip, double(job.cursor + frame) / 48000);
-                if (!control.active) {
-                    continue;
-                }
-                const float left = std::min(1.0f, 1.0f - control.pan) * busLeft;
-                const float right = std::min(1.0f, 1.0f + control.pan) * busRight;
-                block[2 * frame] += sample(source->second, clip, control.source_seconds, 0) *
-                                    control.gain * busGain * left;
-                block[2 * frame + 1] += sample(source->second, clip, control.source_seconds, 1) *
-                                        control.gain * busGain * right;
+                auto control = AudioClips::evaluate(clip, double(job.cursor + frame) / 48000);
+                accumulateTimelineClip(block[2 * frame], block[2 * frame + 1],
+                    source->second, clip, control, mix);
             }
         }
         for (const auto value : block) {

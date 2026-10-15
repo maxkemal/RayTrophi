@@ -112,12 +112,12 @@ struct VkWorldDataExtended {
     vec3  weatherWindDirection;
     float weatherWindSpeed;
     float weatherPrecipitationScale;
-    float weatherVisibility;
+    float _weatherPad0;
     float weatherSurfaceWetness;
     float weatherSurfaceAccumulation;
     float weatherSurfaceSettling;
     float weatherSurfaceHeight;
-    int   weatherVisualMode;
+    int   _weatherPad1;
     int   weatherSurfaceResponseEnabled;
     int   envTexSlot;
     float envIntensity;

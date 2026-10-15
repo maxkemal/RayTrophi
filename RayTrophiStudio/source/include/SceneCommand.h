@@ -14,6 +14,7 @@
 #include <array>
 #include <vector>
 #include <string>
+#include "json.hpp"
 #include "Hittable.h"
 #include "Triangle.h"
 #include "Texture.h"
@@ -100,6 +101,8 @@ private:
     // several meshes) so undo can restore them even after a save-time
     // compactPendingDeletedObjects() physically erased them from world.objects.
     std::vector<std::shared_ptr<TriangleMesh>> deleted_flat_meshes_;
+    nlohmann::json deleted_object_substance_;
+    std::shared_ptr<void> deleted_substance_references_;
 };
 
 // ============================================================================
@@ -138,6 +141,8 @@ private:
     // Exact created world objects. Supports both legacy per-face Triangle
     // groups and flat/direct-SoA TriangleMesh nodes.
     std::vector<std::shared_ptr<Hittable>> new_objects_;
+    nlohmann::json duplicated_object_substance_;
+    std::shared_ptr<void> duplicated_substance_references_;
 };
 
 // ============================================================================

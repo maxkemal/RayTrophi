@@ -1,3 +1,5 @@
+#include "RtLensWeatherBindings.h"
+#include "RtObjectSubstanceBindings.h"
 #include "RtPostBindings.h"
 #include "RtWeatherEffectsBindings.h"
 #include "RtPhaseGrid.h"
@@ -693,11 +695,19 @@ static json autosaveStatusJson(const rtapi::AutosaveStatus& st, const rtapi::Res
 }
 
 json dispatchMethod(const std::string& method, const json& params) {
+    json object_substance_result;
+    if (dispatchObjectSubstanceIpc(method, params,
+        [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
+        object_substance_result)) return object_substance_result;
     json audio_result;
     if (dispatchAudioIpc(method, params,
             [](RtIpcTemplateQuery q) { return enqueueQuery(std::move(q)); }, audio_result)) {
         return audio_result;
     }
+    json lens_weather_result;
+    if (dispatchLensWeatherIpc(method, params,
+        [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
+        lens_weather_result)) return lens_weather_result;
     json weather_effects_result;
     if (dispatchWeatherEffectsIpc(method, params,
         [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },

@@ -1,4 +1,5 @@
 #include "Audio/AudioClips.h"
+#include "Audio/AudioTracks.h"
 #include "Audio/AudioMixer.h"
 #include <algorithm>
 #include <cmath>
@@ -115,7 +116,7 @@ std::vector<std::string> AudioClips::parameters(const std::string& operation) {
     if (operation == "clip_remove" || operation == "clip_duplicate") {
         return {"id"};
     }
-    return {"id", "name", "asset_id", "start_seconds", "source_in_seconds", "source_out_seconds",
+    return {"id", "name", "asset_id", "track_id", "start_seconds", "source_in_seconds", "source_out_seconds",
         "duration_seconds", "phase_seconds", "loop", "gain", "pitch", "pan", "bus", "muted",
         "fade_in_seconds", "fade_out_seconds", "gain_curve", "pitch_curve", "pan_curve",
         "envelope_offset_seconds",
@@ -141,6 +142,9 @@ json AudioClips::validate(const json& input, const json& assets) {
     require(asset != nullptr, "Clip asset_id must name an imported audio asset");
     const double assetDuration = asset->at("duration");
     clip["asset_id"] = assetId;
+    require(!input.contains("track_id") || input.at("track_id").is_string(),
+            "Clip track_id must be a string");
+    clip["track_id"] = input.value("track_id", std::string());
     clip["name"] = input.value("name", std::string("Audio Clip"));
     require(clip["name"].get<std::string>().size() <= 256, "Clip name is too long");
     clip["start_seconds"] = number(input, "start_seconds", 0, 0, 86400);
@@ -334,7 +338,11 @@ json AudioClips::mutate(json& scene, const std::string& operation, const json& p
             throw std::invalid_argument("Unknown clip operation");
         }
     }
+    AudioTracks::bindClips(candidate);
     candidate["clips"] = validateCollection(clips, candidate.at("assets"));
+    if (result.is_object() && result.contains("id")) {
+        result = find(candidate["clips"], result.at("id").get<std::string>());
+    }
     scene = std::move(candidate);
     return result;
 }

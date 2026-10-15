@@ -17,7 +17,46 @@ struct RegisterAudioMethods {
             names.push_back("audio." + op);
         }
         static const MethodParam params[] = {
-            {"recipe", "object", true, "Validated sound design v2 recipe; see AUDIO_SOUND_DESIGN.md",
+            {"source_position", "array", false, "Explicit source world position; mutually exclusive with id", nullptr, nullptr},
+            {"listener_position", "array", false, "Listener world position; defaults to the active camera", nullptr, nullptr},
+            {"meters_per_unit", "float", false, "Scene unit scale, finite 1e-6..1e6", "1", nullptr},
+            {"sound_speed_mps", "float", false, "Authored sound speed, 100..2000 m/s", "343", nullptr},
+            {"max_triangles", "int", false, "Acoustic snapshot triangle budget, 1..500000", "100000", nullptr},
+            {"max_hits", "int", false, "Unique acoustic crossing limit, 1..256", "128", nullptr},
+            {"include_hidden", "bool", false, "Include render-hidden flat acoustic surfaces", "true", nullptr},
+            {"boundary_mode", "string", false, "Diagnostic or explicit independent thin-boundary model", "diagnostic", "diagnostic|thin_surface|object_barrier"},
+            {"kind", "string", false, "Background task kind", nullptr, "render|analysis"},
+            {"options", "object", false, "Background analysis options", nullptr, nullptr},
+            {"audition_start_seconds", "float", false, "Arrangement audition range start", "0", nullptr},
+            {"audition_end_seconds", "float", false, "Arrangement audition range end; span 0.05..30", "5", nullptr},
+            {"selected_clips", "array", false, "Unique existing clip IDs; primary belongs to selection", "[]", nullptr},
+            {"designer_envelope", "string", false, "Selected clip envelope view", "none", "none|gain|pan"},
+            {"action", "string", true, "Atomic selected-clip operation", nullptr, "move|duplicate|remove|align_start|align_end|update"},
+            {"delta_seconds", "float", false, "Signed batch movement; duplicate defaults to group width", nullptr, nullptr},
+            {"patch", "object", false, "Shared gain/pan/muted/bus/track_id patch for update", nullptr, nullptr},
+            {"selected_track", "string", false, "Existing track selection; empty clears", "", nullptr},
+            {"track_id", "string", false, "Clip track; empty keeps legacy bus routing", "", nullptr},
+            {"ids", "array", true, "Complete ordered track ID permutation", nullptr, nullptr},
+            {"clip_policy", "string", false, "Nonempty track removal policy", "reject", "reject|detach|delete"},
+            {"designer_edit_view", "string", false, "Source editor or existing clip arrangement",
+                "source", "source|arrange"},
+            {"designer_canvas_zoom", "float", false, "Shared canvas zoom 1..8", "1", nullptr},
+            {"designer_canvas_pan_x", "float", false, "Shared horizontal canvas pan 0..1", "0", nullptr},
+            {"designer_canvas_pan_y", "float", false, "Shared vertical canvas pan 0..1", "0", nullptr},
+            {"designer_layer", "int", false, "Selected production layer slot 0..7", "0", nullptr},
+            {"designer_tools_open", "bool", false, "Show bottom studio tools panel", "true", nullptr},
+            {"designer_properties_open", "bool", false, "Show bottom studio properties panel", "false", nullptr},
+            {"continuous", "bool", false, "Full STFT time coverage; false samples time_bins windows", "true", nullptr},
+            {"effect", "object", true, "Validated single effect for its visual control curve", nullptr, nullptr},
+            {"details", "bool", false, "Include rendered graphs; false returns transport/revision only", "true", nullptr},
+            {"fft_size", "int", false, "Power-of-two FFT size 512..8192", "2048", nullptr},
+            {"time_bins", "int", false, "Aggregated STFT time columns 4..128", "64", nullptr},
+            {"channel", "string", false, "Spectral channel; mix averages powers", "mix", "mix|left|right"},
+            {"designer_page", "string", false, "Sound designer workflow", "generate", "generate|edit|effects|analyze"},
+            {"designer_zoom", "float", false, "Source waveform zoom 1..2048", "1", nullptr},
+            {"designer_pan", "float", false, "Source waveform window placement 0..1", "0", nullptr},
+            {"designer_effect", "int", false, "Selected effect slot 0..7", "0", nullptr},
+            {"recipe", "object", true, "Validated sound design v3 recipe; see AUDIO_SOUND_DESIGN.md",
                 nullptr, nullptr},
             {"original", "bool", false, "Audition unprocessed input", "false", nullptr},
             {"folder", "string", false, "Output folder; defaults to current project/assets/audio/generated",
@@ -76,6 +115,7 @@ struct RegisterAudioMethods {
             {"gain", "float", false, "Linear amplitude 0..16", "1", nullptr},
             {"pitch", "float", false, "Playback pitch ratio 0.125..8", "1", nullptr},
             {"loop", "bool", false, "Repeat source", "false", nullptr},
+            {"background", "bool", false, "Render Arrange preview on worker", "false", nullptr},
             {"muted", "bool", false, "Preview output mute only", "false", nullptr},
             {"name", "string", false, "Source display name", "Audio Source", nullptr},
             {"parent", "string", false, "Flat scene node name; empty means world space", "", nullptr},
@@ -117,38 +157,44 @@ struct RegisterAudioMethods {
         };
         for (std::size_t i = 0; i < names.size(); ++i) {
             const auto& op = audio::AudioService::operations()[i];
-            const bool read = op == "list" || op == "get" || op == "status" || op == "domains" ||
-                              op == "mixer_get" || op == "clip_list" || op == "export_status" ||
+            const bool read = op == "acoustics_preview_status" || op == "acoustics_trace" || op == "list" || op == "get" || op == "status" || op == "domains" ||
+                              op == "mixer_get" || op == "arrange_status" || op == "track_list" || op == "clip_list" || op == "export_status" ||
                               op == "waveform" || op == "capture_status" || op == "workspace_get" ||
                               op == "synth_presets" || op == "telemetry_get" ||
-                              op == "design_status" || op == "design_destination";
+                              op == "design_job_status" || op == "design_status" || op == "design_destination" || op == "design_catalogue" ||
+                              op == "design_analyze" || op == "design_waveform" || op == "design_effect_visual";
             MethodDescriptor descriptor{};
             descriptor.name = names[i].c_str();
             descriptor.domain = "audio";
             descriptor.summary = "Scene audio service operation";
-            descriptor.notes = op == "telemetry_get" || op == "telemetry_update"
+            descriptor.notes = op.rfind("acoustics_preview", 0) == 0
+                ? "See docs/dev/SCENE_ACOUSTICS_PREVIEW.md. Session-only broadband audition."
+                : op == "acoustics_trace"
+                ? "See docs/dev/SCENE_ACOUSTICS_TRACE.md. Read-only snapshot; no audible propagation."
+                : op == "telemetry_get" || op == "telemetry_update"
                 ? "See docs/dev/SCENE_AUDIO_TELEMETRY_POLICY.md. Off by default; never auto-enabled."
                 : (op.rfind("design_", 0) == 0 ? "See docs/dev/AUDIO_SOUND_DESIGN.md. Transient preview; explicit asset save."
                 : "See docs/dev/AUDIO_PRE_UI_DELIVERY.md and SCENE_AUDIO_STAGE1_API.md.");
             descriptor.access = read ? "read" : "write";
-            const bool readsFile = op == "append" || op == "asset_import" || op == "asset_relink" ||
+            const bool readsFile = op == "arrange_preview" || (op.rfind("track_", 0) == 0 && op != "track_list") || op == "append" || op == "asset_import" || op == "asset_relink" ||
                                    op == "play" || op == "preview" || op == "preview_file" ||
                                    op == "environment_setup" || op == "create" || op == "update" ||
                                    op == "duplicate" || op == "thunder_setup" ||
                                    op == "thunder_update" || op == "thunder_event" ||
                                    op == "resume_automatic" || op == "playback_update" ||
-                                   op == "clip_create" || op == "clip_update" || op == "clip_duplicate" ||
+                                   op == "clip_batch" || op == "clip_create" || op == "clip_update" || op == "clip_duplicate" ||
                                    op == "clip_trim" || op == "clip_split" || op == "clip_resize" ||
                                    op == "capture_start" || op == "capture_finish";
             descriptor.capability = (op == "synth_generate" || op == "design_save") ? "SceneWrite|FilesRead|FilesWrite" :
-                op == "design_render" ? "SceneWrite|FilesRead" :
-                op == "design_destination" ? "Read|FilesRead" :
+                (op == "design_job_start" || op == "design_render" || op == "design_undo" || op == "design_redo" ||
+                 op == "design_reuse") ? "SceneWrite|FilesRead" :
+                (op == "design_destination" || op == "design_waveform") ? "Read|FilesRead" :
                 op == "export_cancel" ? "Read|FilesWrite" :
                 (op == "export_start" ? "Read|FilesRead|FilesWrite" :
                 (op == "waveform" ? "Read|FilesRead" :
                  (read ? "Read" : (readsFile ? "SceneWrite|FilesRead" : "SceneWrite"))));
             descriptor.undoable = audio::AudioService::isAuthoring(op);
-            descriptor.return_type = "object";
+            descriptor.return_type = op == "acoustics_preview_status" || op == "track_list" || op == "track_reorder" ? "array" : "object";
             descriptor.tags = "audio|scene|assets";
             descriptor.verify_with = op.rfind("design_", 0) == 0
                 ? "audio.design_status|audio.list" : "audio.list|audio.status";
@@ -160,9 +206,36 @@ struct RegisterAudioMethods {
                         param.required = key == "id" || key == "path" ||
                             (op == "preview_mute" && key == "muted") ||
                             key == "key" || key == "config" || key == "mode" ||
-                            key == "recipe" || key == "end_frame_exclusive" || key == "end_seconds" || key == "time_seconds" ||
+                            (key == "kind" && op == "design_job_start") || key == "action" || key == "ids" || key == "effect" || (key == "recipe" && op == "design_render") || key == "end_frame_exclusive" || key == "end_seconds" || key == "time_seconds" ||
                             (op == "clip_create" && key == "asset_id") ||
                             (op == "thunder_event" && key == "position");
+                        if (op == "acoustics_preview" && key == "enabled") {
+                            param.required = true;
+                            param.description = "Enable session-only broadband acoustic audition";
+                        }
+                        if (op == "acoustics_preview" && key == "boundary_mode") {
+                            param.default_value = "object_barrier";
+                            param.enum_values = "object_barrier|thin_surface";
+                        }
+                        if (op == "acoustics_trace" && key == "id") {
+                            param.required = false;
+                            param.description = "Authored source id; mutually exclusive with source_position";
+                        }
+                        if (op == "arrange_preview" && (key == "ids" || key == "end_seconds")) {
+                            param.required = false;
+                            param.default_value = key == "ids" ? "[]" : "5";
+                        }
+                        if (op == "clip_batch" && key == "time_seconds") {
+                            param.required = false;
+                        }
+                        if (op == "design_waveform" && (key == "start_seconds" || key == "end_seconds")) {
+                            param.required = false;
+                            param.default_value = nullptr;
+                        }
+                        if (op == "design_analyze" && key == "points") {
+                            param.default_value = "256";
+                            param.description = "Log-frequency columns 16..1024";
+                        }
                         if (op == "design_save" && key == "name") {
                             param.default_value = "Sound";
                             param.description = "Safe sound filename; collisions receive numeric suffixes";

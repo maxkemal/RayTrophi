@@ -169,6 +169,9 @@ Result cloudStatsJson(std::string& out_json) {
             r["noise_generations"] = vk->cloudNoiseGenerations();
             r["weather_generations"] = vk->cloudWeatherGenerations();
             r["sample_dispatches"] = vk->cloudSampleDispatches();
+            // Per-update near-drop camera state (ATMOSPHERE_NEAR_PRECIP.md):
+            // grows only while near drops can be drawn.
+            r["near_state_dispatches"] = vk->cloudNearStateDispatches();
             r["state_updates"] = vk->cloudStateRevisionsSeen();
             // The flag the RT shaders read: false while textures build, in a
             // non-Nishita world, or with every layer off.
@@ -315,7 +318,8 @@ Result sampleCloudsJson(const std::string& request_json, std::string& out_json) 
     else if (mode == "precipitation") modeId = 3;   // mm/h at points
     else if (mode == "precipitation_form") modeId = 4;   // dominant form id at points
     else if (mode == "volume_sdf") modeId = 5;   // storm cell volume signed distance (m), 1e6 = no volume
-    else return Result::fail("mode must be density|transmittance|base_density|precipitation|precipitation_form|volume_sdf");
+    else if (mode == "near_precip") modeId = 6;  // near-camera drop state (near_precip.glsl)
+    else return Result::fail("mode must be density|transmittance|base_density|precipitation|precipitation_form|volume_sdf|near_precip");
     const int steps = req.value("steps", 256);
     if (steps < 1 || steps > 100000) return Result::fail("steps must be within 1..100000");
 
@@ -349,6 +353,21 @@ Result sampleCloudsJson(const std::string& request_json, std::string& out_json) 
     }
     if (queries.empty()) return Result::fail("no points/segments given");
     if (queries.size() > 65536) return Result::fail("at most 65536 queries per call");
+    // near_precip: one GPU query per (point, component); a.w = component.
+    constexpr int kNearComponents = 11;
+    if (modeId == 6) {
+        if (queries.size() > 4096) return Result::fail("near_precip: at most 4096 points per call");
+        std::vector<Backend::CloudQueryGPU> expanded;
+        expanded.reserve(queries.size() * kNearComponents);
+        for (const auto& q : queries) {
+            for (int k = 0; k < kNearComponents; ++k) {
+                Backend::CloudQueryGPU e = q;
+                e.a[3] = static_cast<float>(k);
+                expanded.push_back(e);
+            }
+        }
+        queries.swap(expanded);
+    }
 
     const std::string role = req.value("backend", std::string("render"));
     Backend::IBackend* backend = role == "viewport"
@@ -369,6 +388,34 @@ Result sampleCloudsJson(const std::string& request_json, std::string& out_json) 
     nlohmann::json j;
     j["mode"] = mode;
     j["backend"] = role;
+    if (modeId == 6) {
+        // The state the near drops are drawn from, per point. Forms by name
+        // (ATMOSPHERE_PRECIP_TYPES.md); the first is the dominant one.
+        nlohmann::json points = nlohmann::json::array();
+        auto formName = [](float v) {
+            const int id = static_cast<int>(v + 0.5f);
+            return id <= 0 ? std::string("none") : std::string(atmosphere::precipFormName(id));
+        };
+        for (size_t p = 0; p + kNearComponents <= values.size(); p += kNearComponents) {
+            const float* c = values.data() + p;
+            nlohmann::json forms = nlohmann::json::array();
+            for (int f = 0; f < 2; ++f) {
+                if (c[1 + f] < 0.5f) continue;
+                // near_precip.glsl draws the second form only above a 5% share.
+                const bool drawn = f == 0 || c[4] > 0.05f;
+                forms.push_back({{"form", formName(c[1 + f])}, {"share", c[3 + f]},
+                                 {"number_density_per_m3", c[5 + f]}, {"drawn", drawn}});
+            }
+            points.push_back({{"rate_mm_h", c[0]}, {"dominant_form", formName(c[1])}, {"forms", forms},
+                              {"number_density_per_m3", c[5] + (c[4] > 0.05f ? c[6] : 0.0f)},
+                              {"streak_length_m", c[7]}, {"fall_speed_mps", c[8]}, {"radius_m", c[9]},
+                              {"near_range_m", c[10]}, {"curtain_start_m", c[10]}});
+        }
+        j["points"] = points;
+        j["shutter_s"] = w.getClouds().shutter_s;
+        out_json = j.dump();
+        return Result::success();
+    }
     j["values"] = values;
     if (modeId == 4) {
         // The ids by name (ATMOSPHERE_PRECIP_TYPES.md); 0 = no precipitation.
@@ -404,6 +451,8 @@ Result sampleWeatherLocalJson(const std::string& request_json, std::string& out_
         const Vec3 p(v[0].get<float>(), v[1].get<float>(), v[2].get<float>());
         const atmosphere::LocalWeatherPoint w = atmosphere::sampleLocalWeather(world, world.getCloudTime(), p);
         rows.push_back({
+            {"air_temperature_c", w.air_temperature_c},
+            {"frozen_surface_share", w.frozen_surface_share},
             {"suitability", {{"value", w.suitability.value}, {"orographic", w.suitability.orographic},
                              {"lee", w.suitability.lee}, {"ridge", w.suitability.ridge},
                              {"heating", w.suitability.heating}, {"terrain", w.suitability.terrain}}},
@@ -463,6 +512,14 @@ Result localWeatherStatsJson(std::string& out_json) {
                         {"drivers", {{"night", d.night}, {"burn_off", d.burn_off}, {"calm", d.calm},
                                      {"humidity", d.humidity}, {"layer_cover", d.layer_cover},
                                      {"cloud_base_y", d.cloud_base_y}}}};
+        // The drivers above are the WEATHER's; with local_weather.fog_manual
+        // the map was built from the authored values instead.
+        const atmosphere::CloudLocalWeather& lw = g_ctx->renderer.world.getClouds().local_weather;
+        j["fog_map"]["source"] = lw.fog_manual ? "authored" : "weather";
+        if (lw.fog_manual) {
+            j["fog_map"]["authored"] = {{"valley_fog", lw.valley_fog}, {"valley_fog_lift", lw.valley_fog_lift},
+                                        {"post_rain_mist", lw.post_rain_mist}};
+        }
     }
     // Per backend: the envelope the cloud march reads (cell-map sheet 3). A
     // revision behind the map's = this device has not received it yet.

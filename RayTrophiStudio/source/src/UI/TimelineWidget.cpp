@@ -32,6 +32,7 @@
 #include "Api/RtApi.h"
 #include "Audio/AudioService.h"
 #include "UI/AudioWorkspaceUI.h"
+#include "UI/AudioSoundDesignerUI.h"
 
 #include <thread>
 
@@ -553,7 +554,9 @@ void TimelineWidget::draw(UIContext& ctx) {
     float total_height = region.y;
     
     // --- PLAYBACK CONTROLS ---
-    drawPlaybackControls(ctx);
+    if (editor_mode != TimelineEditorMode::Audio || !AudioUI::isSoundDesignerOpen(ctx)) {
+        drawPlaybackControls(ctx);
+    }
     if (editor_mode == TimelineEditorMode::DopeSheet ||
         editor_mode == TimelineEditorMode::GraphEditor) {
         drawSelectedAnimGraphInspector(ctx);
@@ -1132,12 +1135,10 @@ void TimelineWidget::draw(UIContext& ctx) {
                     weather.intensity = evaluated.world.weather_intensity;
                     weather.density = evaluated.world.weather_density;
                     weather.precipitation_scale = evaluated.world.weather_precipitation_scale;
-                    weather.visibility = evaluated.world.weather_visibility;
                     weather.surface_wetness_output = evaluated.world.weather_surface_wetness;
                     weather.surface_accumulation_output = evaluated.world.weather_surface_accumulation;
                     weather.surface_settling_output = evaluated.world.weather_surface_settling;
                     weather.surface_height_output = evaluated.world.weather_surface_height;
-                    weather.visual_mode = evaluated.world.weather_visual_mode;
                     weather.surface_response_enabled = evaluated.world.weather_surface_response_enabled;
                     weatherChanged = true;
                 }

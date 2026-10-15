@@ -1,3 +1,4 @@
+#include "Backend/LensWeatherGpu.h"
 #include "PostProcess/VulkanExposure.h"
 /*
  * =========================================================================
@@ -1472,6 +1473,20 @@ public:
     // so every binding is valid while the clouds are still off.
     bool ensureCloudTextures();
     void writeRtCloudDescriptors();
+    bool ensureLensWeatherLayout();
+    bool loadLensWeatherPipelines(const std::string& directory);
+    VkDescriptorSetLayout lensWeatherLayout();
+    void setLensWeatherCamera(const Backend::CameraParams& camera);
+    void noteLensWeatherEnvironment(const atmosphere::CloudState& clouds, const Vec3& wind);
+    void recordLensWeather(VkCommandBuffer cmd, VkPipelineLayout postLayout,
+                           uint32_t width, uint32_t height);
+    nlohmann::json sampleLensWeather();
+    void destroyLensWeather();
+    struct LensWeatherResources;
+    std::shared_ptr<LensWeatherResources> m_lensWeather;
+    Backend::LensWeatherCamera m_lensWeatherCamera;
+    float m_lensWind[2] = {};
+    float m_lensTime = 0;
     void updateCloudRtParams(const Backend::CloudParamsGPU& params,
                              const Backend::CloudCellsGPU& cells);
     void destroyCloudPipelines();
@@ -1573,6 +1588,10 @@ public:
     VkDescriptorPool m_cloudDescPool = VK_NULL_HANDLE;
     VkDescriptorSet m_cloudNoiseDescSet = VK_NULL_HANDLE;
     VkDescriptorSet m_cloudSampleDescSet = VK_NULL_HANDLE;
+    // Same layout as the sample set, but params / results both bound to the
+    // RT params buffer: cloud_sample.comp mode 7 writes the per-frame
+    // near-drop state into it (updateCloudRtParams).
+    VkDescriptorSet m_cloudNearDescSet = VK_NULL_HANDLE;
     ImageHandle m_cloudBase;     // 128^3 RGBA8, GENERAL
     ImageHandle m_cloudDetail;   // 32^3 RGBA8
     ImageHandle m_cloudCurl;     // 128^2 RGBA8
@@ -1588,6 +1607,7 @@ public:
     uint64_t m_cloudNoiseGenerations = 0;    // world.cloud_stats counters
     uint64_t m_cloudWeatherGenerations = 0;
     uint64_t m_cloudSampleDispatches = 0;
+    uint64_t m_cloudNearStateDispatches = 0;   // per-update near-drop state (mode 7)
 
     // Per-slot persistent command buffer + fence for async submit. Lazy-init on first
     // submitTraceTonemapAsync. Cmd buffers are allocated from m_commandPool with
@@ -2359,13 +2379,14 @@ public:
     // lazy: a clear-sky scene generates nothing.
     void setCloudState(const atmosphere::CloudState& clouds, float time_seconds, const Vec3& drift_m,
                        const Vec3& wind_mps);
-    void setWeatherTime(float time_seconds);
     void recordCloudScenePass(VkCommandBuffer cmd, uint32_t width, uint32_t height,
                              float depthA, float depthB, float depthC);
     bool cloudSceneDepthAvailable() const {
         return m_device && m_device->m_cloudScenePipeline != VK_NULL_HANDLE;
     }
     Backend::CloudParamsGPU cloudParamsGPU() const;
+    nlohmann::json sampleLensWeather();
+    void updateLensWeather(const Camera& camera);
     // Synchronous measurement (world.sample_clouds). Builds the textures on
     // demand, so a query works with clouds off (and measures 0).
     bool sampleClouds(uint32_t mode, uint32_t steps, const std::vector<Backend::CloudQueryGPU>& queries,
@@ -2376,6 +2397,7 @@ public:
     uint64_t cloudNoiseGenerations() const { return m_device ? m_device->m_cloudNoiseGenerations : 0; }
     uint64_t cloudWeatherGenerations() const { return m_device ? m_device->m_cloudWeatherGenerations : 0; }
     uint64_t cloudSampleDispatches() const { return m_device ? m_device->m_cloudSampleDispatches : 0; }
+    uint64_t cloudNearStateDispatches() const { return m_device ? m_device->m_cloudNearStateDispatches : 0; }
     uint64_t cloudStateRevisionsSeen() const { return m_cloudStateUpdates; }
     // Local fog envelope in the cell map: uploaded revision (0 = none), uploads.
     uint64_t cloudFogRevision() const { return m_device ? m_device->m_cloudFogRevision : 0; }
@@ -2464,9 +2486,9 @@ protected:
     bool m_cloudPipelineAttempted = false;
     atmosphere::CloudState m_cachedClouds;
     float m_cloudTime = 0.0f;
-    float m_weatherTime = 0.0f;
     Vec3 m_cloudDrift = Vec3(0.0f, 0.0f, 0.0f);
     Vec3 m_cloudWind = Vec3(0.0f, 0.0f, 0.0f);
+    Vec3 m_cloudNearCamera = Vec3(1e30f, 1e30f, 1e30f);  // camera of the last near-drop state
     bool m_cloudStateSet = false;
     uint64_t m_cloudStateUpdates = 0;
     uint64_t m_cloudFogRevisionSeen = 0;     // local fog map revision of the last setCloudState

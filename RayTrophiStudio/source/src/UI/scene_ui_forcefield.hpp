@@ -3063,6 +3063,8 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                     // Every burning/thermal number is derived from this choice;
                     // there are no free-float overrides any more.
                     const auto library = RayTrophiSim::substanceProfiles();
+                    matter::drawObjectSubstance(ui_ctx, c.source_name);
+                    ImGui::BeginDisabled(scene.object_substances.contains(c.source_name));
                     if (ImGui::BeginCombo("Substance##CollTabMsf", c.msf_substance.c_str())) {
                         for (const auto* entry : library) {
                             const auto& profile = *entry;
@@ -3095,6 +3097,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                             ui_ctx.start_render = true;
                         }
                     }
+                    ImGui::EndDisabled();
                     // By value: the authoring numbers live on WorldThermalState
                     // (below) and this is the derived mapping, so there is only
                     // ever one thing to edit.
@@ -3139,6 +3142,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                     // the domain scale below — that is a calibration, so nudging
                     // it moves every material in the scene at once.
                     auto& ov = c.msf_override;
+                    ImGui::BeginDisabled(scene.object_substances.contains(c.source_name));
                     const auto& profile_ref = RayTrophiSim::findSubstance(c.msf_substance);
                     ImGui::BeginDisabled(!profile_ref.combustible);
                     if (ImGui::Checkbox("Override Ignition##CollTabMsf", &ov.override_ignition)) {
@@ -3165,6 +3169,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                         ImGui::TextDisabled("(overrides ignored — substance is non-combustible)");
                     }
 
+                    ImGui::EndDisabled();
                     ImGui::Checkbox("Generate Burn Mark##CollTabMsfMask",
                                     &c.msf_generate_char_mask);
                     if (ImGui::IsItemHovered()) {

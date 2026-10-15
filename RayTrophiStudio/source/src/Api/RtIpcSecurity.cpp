@@ -211,14 +211,19 @@ bool loadLocked(std::string& error) {
 }
 
 uint32_t requiredCapabilities(const std::string& method) {
+    if (method == "camera.sample_lens_weather") return Read;
     if (method.rfind("audio.", 0) == 0) {
-        if (method == "audio.design_status") {
+        if (method == "audio.acoustics_preview_status") return Read;
+        if (method == "audio.acoustics_trace") return Read;
+        if (method == "audio.design_status" || method == "audio.design_catalogue" ||
+            method == "audio.design_analyze" || method == "audio.design_effect_visual") {
             return Read;
         }
-        if (method == "audio.design_destination") {
+        if (method == "audio.design_destination" || method == "audio.design_waveform") {
             return Read | FilesRead;
         }
-        if (method == "audio.design_render") {
+        if (method == "audio.design_job_start" || method == "audio.design_render" || method == "audio.design_undo" ||
+            method == "audio.design_redo" || method == "audio.design_reuse") {
             return SceneWrite | FilesRead;
         }
         if (method == "audio.design_save") {
@@ -233,23 +238,26 @@ uint32_t requiredCapabilities(const std::string& method) {
         if (method == "audio.synth_generate") {
             return SceneWrite | FilesRead | FilesWrite;
         }
+        if (method == "audio.design_job_status") return Read;
         if (method == "audio.workspace_get") return Read;
         if (method == "audio.capture_status") return Read;
         if (method == "audio.capture_start" || method == "audio.capture_finish")
             return SceneWrite | FilesRead;
         if (method == "audio.waveform") return Read | FilesRead;
         if (method == "audio.export_start") return Read | FilesRead | FilesWrite;
-        if (method == "audio.export_status" || method == "audio.clip_list") return Read;
+        if (method == "audio.arrange_status" || method == "audio.track_list" || method == "audio.export_status" || method == "audio.clip_list") return Read;
         if (method == "audio.export_cancel") return Read | FilesWrite;
         if (method == "audio.list" || method == "audio.get" || method == "audio.status" ||
             method == "audio.domains" || method == "audio.mixer_get") return Read;
-        if (method == "audio.append" || method == "audio.asset_import" || method == "audio.asset_relink" ||
+        if (method == "audio.arrange_preview" || method == "audio.track_create" || method == "audio.track_update" ||
+            method == "audio.track_remove" || method == "audio.track_reorder" ||
+            method == "audio.append" || method == "audio.asset_import" || method == "audio.asset_relink" ||
             method == "audio.play" || method == "audio.preview" ||
             method == "audio.preview_file" || method == "audio.environment_setup" ||
             method == "audio.create" || method == "audio.update" || method == "audio.duplicate" ||
             method == "audio.thunder_setup" || method == "audio.thunder_update" ||
             method == "audio.thunder_event" || method == "audio.resume_automatic" ||
-            method == "audio.playback_update" || method == "audio.clip_create" ||
+            method == "audio.clip_batch" || method == "audio.playback_update" || method == "audio.clip_create" ||
             method == "audio.clip_update" || method == "audio.clip_duplicate" ||
             method == "audio.clip_trim" || method == "audio.clip_split" ||
             method == "audio.clip_resize")

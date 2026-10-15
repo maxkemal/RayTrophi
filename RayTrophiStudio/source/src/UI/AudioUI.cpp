@@ -2,6 +2,7 @@
 #include "UI/AudioPropertyLayout.h"
 #include "Audio/AudioService.h"
 #include "Audio/AudioAuthoring.h"
+#include "Audio/AcousticScene.h"
 #include "Audio/AudioWeatherBridge.h"
 #include "UI/AudioReactionUI.h"
 #include "UI/AudioThunderUI.h"
@@ -285,7 +286,21 @@ void drawSourceInspector(UIContext& ctx) {
             }
             ImGui::EndDisabled();
         }
+        ImGui::BeginDisabled(assetId.empty());
+        if (ImGui::Button("Audition asset")) {
+            call(ctx, "preview", {{"id", assetId}});
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Stop audition")) {
+            call(ctx, "preview_stop");
+        }
+        ImGui::EndDisabled();
+        if (ctx.scene.audio->transportPaused()) {
+            ImGui::TextWrapped("Scene Play waits while the timeline is paused. "
+                               "Audition asset listens immediately without spatial attenuation.");
+        }
         AudioReactionUI::draw(ctx, e);
+        audio::drawAcousticDiagnostics(ctx, e);
     }
 }
 
@@ -296,6 +311,7 @@ void updateListener(UIContext& ctx) {
     ctx.scene.audio->syncTransport(time, playing &&
                                   !rtapi::renderOutputPending());
     audio::syncScene(ctx);
+    audio::tickSceneAcoustics(ctx);
     if (!ctx.scene.camera) {
         audio::tickCloudThunder(ctx);
         return;

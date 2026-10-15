@@ -35,6 +35,20 @@ const std::vector<FieldAccess>& fieldTable() {
     static const std::vector<FieldAccess> table = {
         FieldAccess{{"category", Kind::Category, 0.0f, 0.0f, "", "Identity"}},
         FieldAccess{{"default_constitutive_model", Kind::Model, 0.0f, 0.0f, "", "Identity"}},
+        RT_BOOL(acoustic_defined, "Acoustics"),
+        RT_FLOAT(acoustic_absorption_125, 0, 1, "energy fraction", "Acoustics"),
+        RT_FLOAT(acoustic_transmission_125, 0, 1, "energy fraction", "Acoustics"),
+        RT_FLOAT(acoustic_absorption_250, 0, 1, "energy fraction", "Acoustics"),
+        RT_FLOAT(acoustic_transmission_250, 0, 1, "energy fraction", "Acoustics"),
+        RT_FLOAT(acoustic_absorption_500, 0, 1, "energy fraction", "Acoustics"),
+        RT_FLOAT(acoustic_transmission_500, 0, 1, "energy fraction", "Acoustics"),
+        RT_FLOAT(acoustic_absorption_1000, 0, 1, "energy fraction", "Acoustics"),
+        RT_FLOAT(acoustic_transmission_1000, 0, 1, "energy fraction", "Acoustics"),
+        RT_FLOAT(acoustic_absorption_2000, 0, 1, "energy fraction", "Acoustics"),
+        RT_FLOAT(acoustic_transmission_2000, 0, 1, "energy fraction", "Acoustics"),
+        RT_FLOAT(acoustic_absorption_4000, 0, 1, "energy fraction", "Acoustics"),
+        RT_FLOAT(acoustic_transmission_4000, 0, 1, "energy fraction", "Acoustics"),
+        RT_FLOAT(acoustic_scattering, 0, 1, "reflected energy fraction", "Acoustics"),
         RT_FLOAT(density, 1.0f, 30000.0f, "kg/m^3", "Thermal"),
         RT_FLOAT(specific_heat, 1.0f, 1.0e5f, "J/(kg K)", "Thermal"),
         RT_FLOAT(conductivity, 0.0f, 1000.0f, "W/(m K)", "Thermal"),
@@ -222,6 +236,18 @@ bool setField(SubstanceProfile& p, const FieldAccess& field, const json& value,
 // Rules spanning fields. Checked on every resolved profile, built-ins included,
 // so a derived substance cannot reach a state no built-in could.
 bool validateProfile(const SubstanceProfile& p, std::string& error) {
+    const float absorbed[] = {p.acoustic_absorption_125, p.acoustic_absorption_250,
+        p.acoustic_absorption_500, p.acoustic_absorption_1000, p.acoustic_absorption_2000,
+        p.acoustic_absorption_4000};
+    const float transmitted[] = {p.acoustic_transmission_125, p.acoustic_transmission_250,
+        p.acoustic_transmission_500, p.acoustic_transmission_1000, p.acoustic_transmission_2000,
+        p.acoustic_transmission_4000};
+    for (unsigned band = 0; band < 6; ++band) {
+        if (absorbed[band] + transmitted[band] > 1.0f) {
+            error = p.name + ": acoustic absorption + transmission must not exceed 1";
+            return false;
+        }
+    }
     if (p.meltable && !(p.melt_kelvin < p.boiling_kelvin)) {
         error = p.name + ": melt_kelvin must be below boiling_kelvin";
         return false;

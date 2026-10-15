@@ -1778,7 +1778,6 @@
     <ClCompile Include="source\src\Api\RtWeatherEffectsBindings.cpp" />
     <ClCompile Include="source\src\Backend\VulkanDeviceClouds.cpp" />
     <ClCompile Include="source\src\Backend\VulkanCloudScenePass.cpp" />
-    <ClCompile Include="source\src\Backend\VulkanWeatherClock.cpp" />
     <ClCompile Include="source\src\Api\RtApiSelect.cpp" />
     <ClCompile Include="source\src\Api\RtApiMaterial.cpp" />
     <ClCompile Include="source\src\Api\RtApiNodes.cpp" />
@@ -2414,6 +2413,10 @@
   <ItemGroup>
     <ClInclude Include="source\include\Audio\AudioMixer.h" />
     <ClInclude Include="source\include\Audio\AudioClips.h" />
+    <ClInclude Include="source\include\Audio\AudioTimelineMix.h" />
+    <ClInclude Include="source\include\Audio\AudioArrangementPreview.h" />
+    <ClInclude Include="source\include\Audio\AudioClipBatch.h" />
+    <ClInclude Include="source\include\Audio\AudioTracks.h" />
     <ClInclude Include="source\include\Audio\AudioClipRuntime.h" />
     <ClInclude Include="source\include\Audio\AudioTelemetryPolicy.h" />
     <ClInclude Include="source\include\Audio\AudioSynthesis.h" />
@@ -2452,11 +2455,124 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioArrangementPreview.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioTimelineMix.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioClipBatch.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioTracks.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
     <ClCompile Include="source\src\Scene\AudioClipRuntime.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <ClCompile Include="source\src\Scene\AudioTelemetryPolicy.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDesignEffects.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDesignLayers.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDesignAnalysis.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\Audio\AudioDesignDsp.h" />
+    <ClInclude Include="source\include\ObjectSubstance.h" />
+    <ClInclude Include="source\include\AcousticMaterial.h" />
+    <ClInclude Include="source\include\Audio\AcousticScene.h" />
+    <ClCompile Include="source\src\Scene\AcousticScene.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\Audio\AcousticPreview.h" />
+    <ClCompile Include="source\src\Scene\AcousticPreview.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticTrace.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioAcousticUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticMaterial.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\src\Api\RtObjectSubstanceBindings.h" />
+    <ClCompile Include="source\src\Scene\ObjectSubstance.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\ObjectSubstanceAuthoring.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\ObjectSubstanceHistory.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcObjectSubstance.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\ObjectSubstanceUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDesignSpectral.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\Atmosphere\LensWeatherSettings.h" />
+    <ClInclude Include="source\include\Atmosphere\LensWeatherState.h" />
+    <ClInclude Include="source\include\Atmosphere\LensWeatherService.h" />
+    <ClInclude Include="source\include\Backend\LensWeatherGpu.h" />
+    <ClInclude Include="source\include\UI\LensWeatherUI.h" />
+    <ClInclude Include="source\src\Api\RtLensWeatherBindings.h" />
+    <ClCompile Include="source\src\Atmosphere\LensWeatherState.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Atmosphere\LensWeatherService.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\LensWeatherCamera.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanLensWeather.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcLensWeather.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\LensWeatherUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\Audio\AudioDesignJobs.h" />
+    <ClCompile Include="source\src\Scene\AudioDesignJobs.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
@@ -2468,6 +2584,26 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
+    <ClCompile Include="source\src\UI\AudioDesignPanels.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioClipEnvelopeEditor.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioTrackPanels.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioDesignGenerationCanvas.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\UI\AudioDesignPanels.h" />
+    <ClInclude Include="source\include\UI\AudioClipEnvelopeEditor.h" />
+    <ClInclude Include="source\include\UI\AudioTrackPanels.h" />
+    <ClInclude Include="source\include\UI\AudioDesignView.h" />
     <ClCompile Include="source\src\UI\AudioSoundDesignerUI.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>

@@ -1,6 +1,7 @@
 #include "Audio/AudioAuthoring.h"
 #include "Audio/AudioService.h"
 #include "Audio/AudioDomainBridge.h"
+#include "Audio/AcousticScene.h"
 #include "AssetRegistry.h"
 #include "scene_ui.h"
 #include "scene_data.h"
@@ -129,6 +130,9 @@ nlohmann::json author(UIContext& ctx, SceneHistory* history, const std::string& 
     if (AudioService::isAuthoring(operation) && rtapi::renderOutputPending()) {
         throw std::runtime_error("Scene audio authoring is locked by the render job");
     }
+    if (operation == "acoustics_trace") {
+        return querySceneAcoustics(ctx, params);
+    }
     if (operation == "domains") {
         if (!params.is_object() || !params.empty()) {
             throw std::invalid_argument("audio.domains takes no parameters");
@@ -152,7 +156,8 @@ nlohmann::json author(UIContext& ctx, SceneHistory* history, const std::string& 
         }
         input["folder"] = pathUtf8(std::filesystem::absolute(root / "audio" / "generated"));
     }
-    if ((operation == "design_preview" || operation == "design_render") &&
+    if ((operation == "arrange_preview" || operation == "design_preview" || operation == "design_render" ||
+         operation == "design_undo" || operation == "design_redo" || operation == "design_reuse") &&
         rtapi::renderOutputPending()) {
         throw std::runtime_error("Sound design preview is locked by the render job");
     }

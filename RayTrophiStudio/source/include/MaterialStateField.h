@@ -189,6 +189,24 @@ struct SubstanceProfile {
         Fluid::MatterConstitutiveModel::Fluid;
     Fluid::MatterGranularTransport granular_transport = Fluid::MatterGranularTransport::Mpm;
 
+    // Optional authored boundary energy response, independent of render shaders.
+    // These are not measured built-in values. Geometry/thickness belongs to the
+    // object/assembly; unconfigured profiles must remain explicitly unresolved.
+    bool acoustic_defined = false;
+    float acoustic_absorption_125 = 0;
+    float acoustic_transmission_125 = 0;
+    float acoustic_absorption_250 = 0;
+    float acoustic_transmission_250 = 0;
+    float acoustic_absorption_500 = 0;
+    float acoustic_transmission_500 = 0;
+    float acoustic_absorption_1000 = 0;
+    float acoustic_transmission_1000 = 0;
+    float acoustic_absorption_2000 = 0;
+    float acoustic_transmission_2000 = 0;
+    float acoustic_absorption_4000 = 0;
+    float acoustic_transmission_4000 = 0;
+    float acoustic_scattering = 0;
+
     // ── Thermal ──────────────────────────────────────────────────────────────
     float density            = 1000.0f;  // kg/m^3
     float specific_heat      = 1000.0f;  // J/(kg·K)

@@ -1,3 +1,4 @@
+#include "Atmosphere/LensWeatherSettings.h"
 /*
  * =========================================================================
  * Project:       RayTrophi Studio
@@ -343,6 +344,9 @@ struct DenoiserFrameDataGPU {
 };
 
 struct CameraParams {
+    atmosphere::LensWeatherSettings lens_weather;
+    std::uint64_t lens_weather_identity = 0;
+    float lens_weather_blur_uv = 0.01f;
     Vec3 origin;
     Vec3 lookAt;
     Vec3 up = Vec3(0, 1, 0);

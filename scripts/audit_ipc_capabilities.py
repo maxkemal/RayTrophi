@@ -58,9 +58,13 @@ def namespace_table(source):
 
 def required(method, namespaces):
     """Mirror of RtIpcSecurity.cpp::requiredCapabilities (name-level only)."""
+    if method == "camera.sample_lens_weather":
+        return "Read"
     if method.startswith("audio."):
         operation = method[6:]
-        if operation in {"waveform", "design_destination"}:
+        if operation in ("acoustics_trace", "acoustics_preview_status"):
+            return "Read"
+        if operation in {"waveform", "design_destination", "design_waveform"}:
             return "Read|FilesRead"
         if operation in {"synth_generate", "design_save"}:
             return "SceneWrite|FilesRead|FilesWrite"
@@ -69,14 +73,15 @@ def required(method, namespaces):
         if operation == "export_cancel":
             return "Read|FilesWrite"
         if operation in {"list", "get", "status", "domains", "mixer_get",
-                         "clip_list", "export_status", "capture_status", "workspace_get", "synth_presets", "telemetry_get", "design_status", "design_destination"}:
+                         "arrange_status", "track_list", "clip_list", "export_status", "capture_status", "workspace_get", "synth_presets", "telemetry_get", "design_job_status", "design_status", "design_destination", "design_catalogue", "design_analyze", "design_effect_visual"}:
             return "Read"
         if operation in {"append", "asset_import", "asset_relink", "play", "preview",
                          "preview_file", "environment_setup", "create", "update",
                          "duplicate", "thunder_setup", "thunder_update", "thunder_event",
                          "resume_automatic", "playback_update", "clip_create", "clip_update",
-                         "clip_duplicate", "clip_trim", "clip_split", "clip_resize",
-                         "capture_start", "capture_finish", "design_render"}:
+                         "arrange_preview", "track_create", "track_update", "track_remove", "track_reorder",
+                         "clip_batch", "clip_duplicate", "clip_trim", "clip_split", "clip_resize",
+                         "capture_start", "capture_finish", "design_job_start", "design_render", "design_undo", "design_redo", "design_reuse"}:
             return "SceneWrite|FilesRead"
         return "SceneWrite"
     if method in ("fluid.grain_reference", "fluid.matter_models", "fluid.grain_settings"):

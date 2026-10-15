@@ -59,9 +59,9 @@ iyileşmesi esas olarak bundan sonraki reconstruction çalışmasına bağlı.
 
 ## Kanıt
 
-- [Varsayılan](sdf_m1_default_frame61.jpg)
-- [x2 kalite](sdf_m2_default_frame61.jpg)
-- [Anisotropi](sdf_m1_aniso_frame61.jpg)
+- Varsayılan (temporary capture removed)
+- x2 kalite (temporary capture removed)
+- Anisotropi (temporary capture removed)
 - [A/B ham sayaçlar](sdf_quality_ab_frame61_2026_10_10.json)
 - [Capture kapalı aynı-kare profiler](sdf_same_frame_perf_2026_10_10.json)
 - [Cache geçiş ölçümleri](sdf_cache_cost_live_2026_10_10.json)

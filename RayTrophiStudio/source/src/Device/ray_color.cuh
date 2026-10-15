@@ -1143,198 +1143,6 @@ __device__ float3 apply_atmospheric_fog(
     return lerp(sceneColor, fogColor, fogFactor);
 }
 
-__device__ float3 rc_weather_tint_color(int type) {
-    if (type == WEATHER_RAIN) return make_float3(0.50f, 0.56f, 0.62f);
-    if (type == WEATHER_SNOW) return make_float3(0.86f, 0.90f, 0.96f);
-    if (type == WEATHER_DUST) return make_float3(0.74f, 0.58f, 0.38f);
-    if (type == WEATHER_MIST) return make_float3(0.70f, 0.76f, 0.82f);
-    return make_float3(0.0f);
-}
-
-__device__ bool rc_weather_active(const WeatherParams& weather) {
-    return weather.enabled != 0 && weather.type != WEATHER_NONE &&
-           weather.intensity > 0.0f && weather.density > 0.0f;
-}
-
-__device__ bool rc_weather_visual_active(const WeatherParams& weather) {
-    return rc_weather_active(weather) && weather.visual_mode != WEATHER_VISUAL_SURFACE_ONLY;
-}
-
-__device__ float3 rc_apply_weather_sky(const WeatherParams& weather, float3 sky, float3 rayDir) {
-    if (!rc_weather_visual_active(weather)) return sky;
-
-    float visibilityLoss = fmaxf(0.0f, fminf(1.0f, 1.0f - weather.visibility));
-    float horizon = powf(fmaxf(0.0f, 1.0f - fabsf(rayDir.y)), 0.65f);
-    float amount = weather.intensity * (0.25f + weather.density * 0.75f + visibilityLoss * 0.65f);
-    amount = fmaxf(0.0f, fminf(0.85f, amount * (0.35f + horizon * 0.65f)));
-
-    float3 tint = rc_weather_tint_color(weather.type);
-    float3 dimmed = sky;
-    if (weather.type == WEATHER_RAIN) {
-        dimmed *= 0.72f;
-    } else if (weather.type == WEATHER_DUST) {
-        dimmed *= 0.82f;
-    } else if (weather.type == WEATHER_SNOW || weather.type == WEATHER_MIST) {
-        dimmed = dimmed * 0.90f + tint * 0.10f;
-    }
-    return dimmed * (1.0f - amount) + tint * amount;
-}
-
-__device__ float3 rc_apply_weather_atmosphere(
-    const WeatherParams& weather,
-    float3 color,
-    float3 rayDir,
-    float distance
-) {
-    if (!rc_weather_visual_active(weather)) return color;
-
-    float vis = fmaxf(0.02f, fminf(1.0f, weather.visibility));
-    float sigma = weather.intensity * weather.density * (0.00016f + (1.0f - vis) * 0.00034f);
-    float amount = 1.0f - expf(-fmaxf(distance, 0.0f) * sigma);
-    amount = fmaxf(0.0f, fminf(0.78f, amount));
-
-    float3 tint = rc_weather_tint_color(weather.type);
-    if (weather.type == WEATHER_RAIN) {
-        tint *= 0.72f;
-    } else if (weather.type == WEATHER_DUST) {
-        tint *= 1.12f;
-    }
-
-    float windLen2 = dot(weather.derived_wind_direction, weather.derived_wind_direction);
-    float3 windDir = (windLen2 > 1e-8f) ? normalize(weather.derived_wind_direction) : make_float3(1.0f, 0.0f, 0.0f);
-    float forward = powf(fmaxf(0.0f, dot(normalize(rayDir), windDir)), 4.0f);
-    amount = fminf(0.90f, amount + forward * weather.intensity * weather.density * 0.08f);
-    return color * (1.0f - amount) + tint * amount;
-}
-
-__device__ float rc_precip_hash(float x, float y) {
-    float v = sinf(x * 127.1f + y * 311.7f) * 43758.5453123f;
-    return v - floorf(v);
-}
-
-__device__ float rc_precip_noise(float x, float y) {
-    float cell_x = floorf(x);
-    float cell_y = floorf(y);
-    float frac_x = x - cell_x;
-    float frac_y = y - cell_y;
-    float smooth_x = frac_x * frac_x * (3.0f - 2.0f * frac_x);
-    float smooth_y = frac_y * frac_y * (3.0f - 2.0f * frac_y);
-    float n00 = rc_precip_hash(cell_x, cell_y);
-    float n10 = rc_precip_hash(cell_x + 1.0f, cell_y);
-    float n01 = rc_precip_hash(cell_x, cell_y + 1.0f);
-    float n11 = rc_precip_hash(cell_x + 1.0f, cell_y + 1.0f);
-    float nx0 = lerp(n00, n10, smooth_x);
-    float nx1 = lerp(n01, n11, smooth_x);
-    return lerp(nx0, nx1, smooth_y);
-}
-
-__device__ float rc_precip_smoothstep(float edge0, float edge1, float x) {
-    float t = fmaxf(0.0f, fminf(1.0f, (x - edge0) / fmaxf(edge1 - edge0, 1e-6f)));
-    if (edge1 < edge0) {
-        t = fmaxf(0.0f, fminf(1.0f, (edge0 - x) / fmaxf(edge0 - edge1, 1e-6f)));
-    }
-    return t * t * (3.0f - 2.0f * t);
-}
-
-__device__ float rc_precip_line(float u, float v, float windX, float windY, float time, float density, float scale) {
-    float windDrive = 1.0f + density * 0.85f;
-    float px = u * 74.0f / scale + windX * time * (6.5f + density * 4.0f);
-    float py = v * 22.0f / scale - time * (34.0f + density * 10.0f) + windY * time * (7.5f + density * 4.5f);
-    float cx = floorf(px);
-    float cy = floorf(py);
-    float fx = px - cx;
-    float fy = py - cy;
-    float rnd = rc_precip_hash(cx, cy);
-    float spawn = rc_precip_smoothstep(0.94f - density * 0.10f, 1.0f, rnd);
-    float x = fabsf(fx - 0.5f - (rnd - 0.5f) * (0.35f + 0.18f * windDrive));
-    float core = rc_precip_smoothstep(0.055f - density * 0.016f, 0.0f, x);
-    float trail = rc_precip_smoothstep(1.0f, 0.04f, fy);
-    return spawn * core * trail;
-}
-
-__device__ float rc_precip_flake(float u, float v, float windX, float windY, float time, float density, float scale) {
-    float px = u * 46.0f / scale + windX * time * (2.6f + density * 2.5f);
-    float py = v * 30.0f / scale - time * (2.8f + density * 0.9f) + windY * time * (1.1f + density * 0.9f);
-    float cx = floorf(px);
-    float cy = floorf(py);
-    float fx = px - cx;
-    float fy = py - cy;
-    float rnd = rc_precip_hash(cx, cy);
-    float spawn = rc_precip_smoothstep(0.84f - density * 0.22f, 1.0f, rnd);
-    float ox = rc_precip_hash(cx + 13.7f, cy + 13.7f) + sinf(time * 1.7f + rnd * 6.2831f) * (0.12f + density * 0.08f) + windX * 0.12f;
-    float oy = rc_precip_hash(cx + 41.3f, cy + 41.3f) + windY * 0.05f;
-    float radius = lerp(0.035f, 0.120f + density * 0.025f, rc_precip_hash(cx + 7.1f, cy + 7.1f));
-    float dx = fx - ox;
-    float dy = fy - oy;
-    return spawn * rc_precip_smoothstep(radius, 0.0f, sqrtf(dx * dx + dy * dy));
-}
-
-__device__ float rc_precip_dust(float u, float v, float windX, float windY, float time, float density, float scale) {
-    float advected_u = u / scale + windX * time * (0.24f + density * 0.08f);
-    float advected_v = v / scale + windY * time * (0.18f + density * 0.10f);
-    float streaks = rc_precip_noise(advected_u * 18.0f, advected_v * 7.5f);
-    float wisps = rc_precip_noise(advected_u * 33.0f + 19.4f, advected_v * 12.0f + 7.1f);
-    float grain = rc_precip_noise(advected_u * 95.0f + 3.7f, advected_v * 42.0f + 17.3f);
-    float elongated = rc_precip_smoothstep(0.52f, 0.98f, streaks * 0.72f + wisps * 0.28f);
-    float soft_grain = rc_precip_smoothstep(0.38f, 0.88f, grain);
-    return (elongated * (0.72f + density * 0.28f) + soft_grain * 0.18f) * density;
-}
-
-__device__ float3 rc_apply_weather_precipitation_overlay(
-    const WeatherParams& weather,
-    float3 color,
-    float3 rayDir,
-    float distance,
-    float time
-) {
-    if (!rc_weather_visual_active(weather)) return color;
-
-    float density = fmaxf(0.0f, fminf(1.0f,
-        powf(fmaxf(0.0f, fminf(1.0f, weather.intensity)), 0.82f) *
-        (0.28f + fmaxf(0.0f, fminf(1.0f, weather.density)) * 1.22f)));
-    if (density <= 0.001f) return color;
-
-    rayDir = normalize(rayDir);
-    float u = atan2f(rayDir.z, rayDir.x) * (1.0f / (2.0f * M_PIf)) + 0.5f;
-    float v = acosf(fmaxf(-1.0f, fminf(1.0f, rayDir.y))) * (1.0f / M_PIf);
-    float scale = fmaxf(weather.precipitation_scale, 0.25f);
-    float depthFade = rc_precip_smoothstep(0.6f, 18.0f, fmaxf(distance, 0.0f));
-    float horizonFade = fmaxf(0.35f, fminf(1.0f, 1.0f - fmaxf(rayDir.y, 0.0f) * 0.35f));
-    float windLen2 = weather.derived_wind_direction.x * weather.derived_wind_direction.x + weather.derived_wind_direction.z * weather.derived_wind_direction.z;
-    float invWindLen = windLen2 > 1e-8f ? rsqrtf(windLen2) : 0.0f;
-    float windAmount = fmaxf(0.0f, fminf(1.0f, weather.derived_wind_speed_mps / 35.0f));
-    float windX = (windLen2 > 1e-8f ? weather.derived_wind_direction.x * invWindLen : 1.0f) * windAmount;
-    float windY = (windLen2 > 1e-8f ? weather.derived_wind_direction.z * invWindLen : 0.0f) * windAmount;
-    float windVisual = 0.65f + windAmount * 0.9f;
-    float amount = 0.0f;
-    float3 tint = rc_weather_tint_color(weather.type);
-
-    if (weather.type == WEATHER_RAIN) {
-        amount = fminf(1.0f, rc_precip_line(u, v, windX, windY, time, density, scale) * (0.85f + density * 0.85f + windAmount * 0.35f));
-        color = lerp(color, color * 0.84f, amount * density * 0.24f * depthFade);
-        color += make_float3(0.45f, 0.55f, 0.66f) * amount * density * 0.28f * depthFade * horizonFade * windVisual;
-    } else if (weather.type == WEATHER_SNOW) {
-        amount = fminf(1.0f, rc_precip_flake(u, v, windX, windY, time, density, scale) * (0.80f + density * 0.95f + windAmount * 0.22f));
-        color = lerp(color, tint, amount * density * 0.34f * depthFade * horizonFade);
-        color += make_float3(0.85f, 0.92f, 1.0f) * amount * density * 0.16f * depthFade * windVisual;
-    } else if (weather.type == WEATHER_DUST) {
-        amount = fminf(1.0f, rc_precip_dust(u, v, windX, windY, time, density, scale) * (0.75f + density * 1.05f + windAmount * 0.45f));
-        color = lerp(color, tint, amount * 0.16f * depthFade * windVisual);
-        color += tint * amount * 0.075f * depthFade * windVisual;
-    } else if (weather.type == WEATHER_MIST) {
-        amount = fminf(1.0f, rc_precip_dust(u, v, windX * 0.25f, windY * 0.25f, time * 0.35f, density, scale * 1.4f) * (0.65f + density * 0.85f));
-        color = lerp(color, tint, amount * 0.11f * depthFade);
-    }
-
-    return color;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// VOLUMETRIC GOD RAYS - Ray-marched light shafts with proper occlusion
-// Objects will block god rays creating shadows in the volumetric effect
-// ═══════════════════════════════════════════════════════════════════════════
-
-// Forward declaration for shadow test
 __device__ bool trace_shadow_test(float3 origin, float3 direction, float maxDist);
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1657,7 +1465,7 @@ __device__ float3 rc_apply_nishita_environment_overlay(const WorldData& world, c
 
 __device__ float3 evaluate_background(const WorldData& world, const float3& origin, const float3& dir, curandState* rng, bool skip_cloud_overlay = false) {
     if (world.mode == 0) { // WORLD_MODE_COLOR
-        return rc_apply_weather_sky(world.weather, world.color, dir);
+        return world.color;
     }
     else if (world.mode == 1) { // WORLD_MODE_HDRI
         if (world.env_texture) {
@@ -1672,9 +1480,9 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& orig
             
             float4 tex = tex2D<float4>(world.env_texture, u, v);
             float3 hdri = make_float3(tex.x, tex.y, tex.z) * world.env_intensity;
-            return rc_apply_weather_sky(world.weather, hdri, dir);
+            return hdri;
         }
-        return rc_apply_weather_sky(world.weather, world.color, dir);
+        return world.color;
     }
     else if (world.mode == 2) { // WORLD_MODE_NISHITA
         // High-Quality LUT based Sky radiance
@@ -1758,10 +1566,10 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& orig
         // can read like dirt painted onto the material, while Vulkan's miss shader
         // returns only sky radiance here.
         radiance = rc_apply_nishita_environment_overlay(world, radiance, dir);
-        return rc_apply_weather_sky(world.weather, radiance, dir);
+        return radiance;
     }
 
-    return rc_apply_weather_sky(world.weather, make_float3(0,0,0), dir);
+    return make_float3(0,0,0);
 }
 
 __device__ float power_heuristic(float pdf_a, float pdf_b) {
@@ -3481,22 +3289,9 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         color = lerp(color, fogColor, fogFactor);
     }
 
-    if (rc_weather_active(world.weather)) {
-        float weatherDistance = (first_hit_t > 0.0f) ? first_hit_t : 12000.0f;
-        if (vol_depth > 0.0f) weatherDistance = fminf(weatherDistance, vol_depth);
-        weatherDistance *= (1.0f - first_hit_transmission);
-        color = rc_apply_weather_atmosphere(
-            world.weather,
-            color,
-            normalize(first_ray_dir),
-            weatherDistance);
-        color = rc_apply_weather_precipitation_overlay(
-            world.weather,
-            color,
-            normalize(first_ray_dir),
-            weatherDistance,
-            optixLaunchParams.water_time);
-    }
+    // Falling precipitation is the atmosphere's (Vulkan cloud march + near
+    // drops). OptiX is frozen: the old screen overlay was removed, no
+    // replacement (docs/dev/ATMOSPHERE_NEAR_PRECIP.md).
 
     // Final clamp - NaN ve Inf kontrolü
     color.x = isfinite(color.x) ? fminf(fmaxf(color.x, 0.0f), 100.0f) : 0.0f;

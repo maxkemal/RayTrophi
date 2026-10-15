@@ -12,6 +12,7 @@
 #define CAMERA_H
 
 #include <vector>
+#include "Atmosphere/LensWeatherSettings.h"
 #include <cmath>   // exposureFactor(): std::pow
 #include "Vec3.h"
 #include "Matrix4x4.h"
@@ -45,6 +46,7 @@ private:
     };
 
 public:
+    atmosphere::LensWeatherSettings lens_weather;
     Vec3 initialLookDirection;
     std::string nodeName;
     bool visible = true;

@@ -1,5 +1,7 @@
 # Workspace instructions
 
+- Agent verification screenshots are temporary artifacts, not repository assets. Store them in an ignored temporary directory (prefer `docs/dev/.captures/`), never commit or force-add them, and delete the screenshots you created when the task finishes. Preserve intentional product/documentation artwork outside this temporary capture workflow.
+
 - Do not run project builds or application compilation commands (including MSBuild, CMake build, shader compilation, or IDE builds). The user always performs builds.
 - Do not launch the RayTrophi Studio application for verification unless the user explicitly asks in that turn.
 - Codex may perform read-only inspection, static audits, and non-build source checks, then hand the exact build/test checklist to the user.

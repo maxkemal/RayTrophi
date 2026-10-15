@@ -8,13 +8,15 @@ nlohmann::json workspaceCall(UIContext& ctx, const std::string& operation,
 void drawWorkspace(UIContext& ctx);
 void drawInspectorDock(UIContext& ctx);
 void drawSourceInspector(UIContext& ctx);
+void drawSelectedAudioClipProperties(UIContext& ctx);
 void drawSynthesisControls(UIContext& ctx);
 void finishAudioTimelineGesture(UIContext& ctx);
 void drawAudioEditorNavigation(UIContext& ctx);
 void drawAudioBottomTabs(UIContext& ctx);
-void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidth);
+void drawAudioTimeline(UIContext& ctx, float& zoom, float& pan, float legendWidth, bool embedded = false);
 void drawMixerContent(UIContext& ctx);
 void drawOutputControls(UIContext& ctx);
 void selectClip(UIContext& ctx, const std::string& id);
+void selectAudioClips(UIContext& ctx, const nlohmann::json& ids);
 void addTimelineAsset(UIContext& ctx, const std::string& assetId);
 }

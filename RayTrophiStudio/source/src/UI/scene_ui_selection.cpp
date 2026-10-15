@@ -2372,6 +2372,7 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
                     auto newMesh = std::make_shared<TriangleMesh>();
                     newMesh->geometry = std::make_shared<DNA::GeometryDetail>(*srcFlat->geometry);
                     newMesh->nodeName = newName;
+                    matter::copyObjectSubstance(ctx.scene, targetName, newName);
                     auto newFlatTransform = std::make_shared<Transform>();
                     if (srcFlat->transform) *newFlatTransform = *srcFlat->transform;
                     newMesh->transform = newFlatTransform;

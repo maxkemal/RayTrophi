@@ -10,6 +10,7 @@
 */
 #pragma once
 #include "Audio/AudioService.h"
+#include "ObjectSubstance.h"
 #include <HittableList.h>
 #include "Fluid/MatterGrainGeometry.h"
 #include "Fluid/MatterPhaseConfig.h"
@@ -111,6 +112,8 @@ std::size_t simFrameCacheBudgetFromHardware();
 std::uint64_t queryAvailablePhysicalRamBytes();
 
 struct SceneData {
+    nlohmann::json object_substances = nlohmann::json::object();
+    std::uint64_t object_substance_revision = 1;
     std::shared_ptr<audio::AudioService> audio = std::make_shared<audio::AudioService>();
     RigAuthoring::ViewState rigView;
     SceneData() {
@@ -9764,6 +9767,7 @@ public:
     void* particle_vulkan_failed_device_ = nullptr;
 
     void syncSimulationWorld() {
+        matter::syncObjectSubstances(*this);
         simulation_world.setForceFieldManager(&force_field_manager);
 
         // GPU_Vulkan  (value 3) = the default for new domains whenever the device
@@ -9901,6 +9905,8 @@ public:
     // Clear all scene data
     // =========================================================================
     void clear() {
+        ++object_substance_revision;
+        object_substances = nlohmann::json::object();
         audio->clear();
         // Cancel and wait for all active background SDF bakes before destroying the scene objects
         g_cancel_sdf_bakes.store(true, std::memory_order_release);
