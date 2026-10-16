@@ -49,6 +49,15 @@ const std::vector<FieldAccess>& fieldTable() {
         RT_FLOAT(acoustic_absorption_4000, 0, 1, "energy fraction", "Acoustics"),
         RT_FLOAT(acoustic_transmission_4000, 0, 1, "energy fraction", "Acoustics"),
         RT_FLOAT(acoustic_scattering, 0, 1, "reflected energy fraction", "Acoustics"),
+        RT_FLOAT(acoustic_medium_density, 0, 30000, "kg/m^3", "Acoustic medium (fluid)"),
+        RT_FLOAT(acoustic_medium_speed, 0, 100000, "m/s", "Acoustic medium (fluid)"),
+        RT_FLOAT(acoustic_medium_loss_125, 0, 1000, "dB/m", "Acoustic medium (fluid)"),
+        RT_FLOAT(acoustic_medium_loss_250, 0, 1000, "dB/m", "Acoustic medium (fluid)"),
+        RT_FLOAT(acoustic_medium_loss_500, 0, 1000, "dB/m", "Acoustic medium (fluid)"),
+        RT_FLOAT(acoustic_medium_loss_1000, 0, 1000, "dB/m", "Acoustic medium (fluid)"),
+        RT_FLOAT(acoustic_medium_loss_2000, 0, 1000, "dB/m", "Acoustic medium (fluid)"),
+        RT_FLOAT(acoustic_medium_loss_4000, 0, 1000, "dB/m", "Acoustic medium (fluid)"),
+        RT_BOOL(acoustic_medium_defined, "Acoustic medium (fluid)"),
         RT_FLOAT(density, 1.0f, 30000.0f, "kg/m^3", "Thermal"),
         RT_FLOAT(specific_heat, 1.0f, 1.0e5f, "J/(kg K)", "Thermal"),
         RT_FLOAT(conductivity, 0.0f, 1000.0f, "W/(m K)", "Thermal"),
@@ -236,6 +245,12 @@ bool setField(SubstanceProfile& p, const FieldAccess& field, const json& value,
 // Rules spanning fields. Checked on every resolved profile, built-ins included,
 // so a derived substance cannot reach a state no built-in could.
 bool validateProfile(const SubstanceProfile& p, std::string& error) {
+    if (p.acoustic_medium_defined &&
+        (!std::isfinite(p.acoustic_medium_density) || !std::isfinite(p.acoustic_medium_speed) ||
+            p.acoustic_medium_density < 1e-6f || p.acoustic_medium_speed < 1e-3f)) {
+        error = p.name + ": acoustic medium requires density >= 1e-6 kg/m^3 and speed >= 1e-3 m/s";
+        return false;
+    }
     const float absorbed[] = {p.acoustic_absorption_125, p.acoustic_absorption_250,
         p.acoustic_absorption_500, p.acoustic_absorption_1000, p.acoustic_absorption_2000,
         p.acoustic_absorption_4000};

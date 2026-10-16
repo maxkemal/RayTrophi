@@ -7,7 +7,8 @@
 namespace audio {
 using json = nlohmann::json;
 json defaultAudioWorkspace() {
-    return {{"selected_clip", ""}, {"selected_clips", json::array()}, {"selected_track", ""}, {"snap", true}, {"waveforms", true},
+    return {{"acoustic_all_sources", false}, {"acoustic_band", -1},
+            {"acoustic_reflection_samples", 1}, {"selected_clip", ""}, {"selected_clips", json::array()}, {"selected_track", ""}, {"snap", true}, {"waveforms", true},
             {"inspector_open", false}, {"designer_open", false}, {"designer_page", "generate"}, {"designer_edit_view", "source"}, {"designer_envelope", "none"},
             {"audition_start_seconds", 0.0}, {"audition_end_seconds", 5.0},
             {"designer_canvas_zoom", 1.0}, {"designer_canvas_pan_x", 0.0},
@@ -86,6 +87,14 @@ json updateAudioWorkspace(const json& current, const json& patch, const json& cl
             if (page != "generate" && page != "edit" && page != "effects" && page != "analyze") {
                 throw std::invalid_argument("Unknown sound designer page");
             }
+        } else if (entry.key() == "acoustic_band" ||
+                   entry.key() == "acoustic_reflection_samples") {
+            const int low = entry.key() == "acoustic_band" ? -1 : 0;
+            const int high = entry.key() == "acoustic_band" ? 5 : 2;
+            if (!entry.value().is_number_integer() || entry.value().get<double>() < low ||
+                entry.value().get<double>() > high) {
+                throw std::invalid_argument("Acoustic band must be -1..5; reflection samples 0..2");
+            }
         } else if (entry.key() == "designer_effect" || entry.key() == "designer_layer") {
             if (!entry.value().is_number_integer() || entry.value().get<double>() < 0 ||
                 entry.value().get<double>() > 7) {
@@ -102,7 +111,7 @@ json updateAudioWorkspace(const json& current, const json& patch, const json& cl
                 entry.value().get<double>() < low || entry.value().get<double>() > high) {
                 throw std::invalid_argument("Designer view value outside finite bounds");
             }
-        } else if (entry.key() == "snap" || entry.key() == "waveforms" ||
+        } else if (entry.key() == "acoustic_all_sources" || entry.key() == "snap" || entry.key() == "waveforms" ||
                    entry.key() == "inspector_open" || entry.key() == "designer_open" ||
                    entry.key() == "designer_tools_open" || entry.key() == "designer_properties_open") {
             if (!entry.value().is_boolean()) {

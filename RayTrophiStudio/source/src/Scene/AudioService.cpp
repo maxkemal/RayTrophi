@@ -4,6 +4,7 @@
 
 #include "Audio/AudioService.h"
 #include "Audio/AcousticScene.h"
+#include "Audio/AcousticBoundary.h"
 #include "Audio/AcousticPreview.h"
 #include "Audio/AudioReaction.h"
 #include "Audio/AudioEnvironment.h"
@@ -475,7 +476,7 @@ const std::vector<std::string>& AudioService::operations() {
         "list", "get", "select", "status", "asset_import", "asset_relink", "asset_remove", "create", "update",
         "duplicate", "remove", "play", "pause", "stop", "stop_all", "preview", "preview_stop",
         "preview_mute", "preview_file", "append", "signal_set", "signals_clear",
-        "environment_setup", "resume_automatic", "domains", "acoustics_debug", "acoustics_trace", "acoustics_preview", "acoustics_preview_status", "thunder_setup", "thunder_update",
+        "environment_setup", "resume_automatic", "domains", "acoustics_boundary", "acoustics_debug", "acoustics_trace", "acoustics_preview", "acoustics_preview_status", "thunder_setup", "thunder_update",
         "thunder_event", "playback_update", "mixer_get", "mixer_update", "mixer_reset_peaks",
         "arrange_preview", "arrange_stop", "arrange_status",
         "track_list", "track_create", "track_update", "track_remove", "track_reorder",
@@ -514,6 +515,9 @@ std::vector<std::string> AudioService::parameters(const std::string& op) {
     }
     if (op == "acoustics_preview_status") {
         return {};
+    }
+    if (op == "acoustics_boundary") {
+        return {"from_substance", "to_substance", "incidence_degrees", "transmitted_distance_meters"};
     }
     if (op == "acoustics_debug") {
         return {"id"};
@@ -590,6 +594,7 @@ std::vector<std::string> AudioService::parameters(const std::string& op) {
     }
     if (op == "workspace_update") {
         return {"audition_start_seconds", "audition_end_seconds", "selected_clip", "selected_clips", "selected_track", "designer_envelope", "snap", "waveforms", "inspector_open", "designer_open", "designer_page", "designer_zoom", "designer_pan", "designer_effect", "designer_layer",
+                "acoustic_all_sources", "acoustic_band", "acoustic_reflection_samples",
                 "designer_tools_open", "designer_properties_open", "designer_canvas_zoom",
                 "designer_canvas_pan_x", "designer_canvas_pan_y", "designer_edit_view"};
     }
@@ -680,6 +685,9 @@ json AudioService::invoke(const std::string& op, const json& p) {
     for (auto it = p.begin(); it != p.end(); ++it) {
         require(std::find(allowed.begin(), allowed.end(), it.key()) != allowed.end(),
                 "Unknown audio parameter: " + it.key());
+    }
+    if (op == "acoustics_boundary") {
+        return queryAcousticBoundary(p);
     }
     if (op == "acoustics_preview_status") {
         return s.acousticPreview.status();

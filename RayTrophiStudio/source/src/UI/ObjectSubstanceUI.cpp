@@ -58,6 +58,8 @@ void drawObjectSubstance(UIContext& ctx, const std::string& object) {
         if (state.contains("acoustics") && !state.at("acoustics").value("defined", false)) {
             ImGui::TextWrapped("Acoustic response is not defined for this substance yet.");
         }
+        ImGui::TextWrapped("Acoustic medium data is optional. Configure density/sound speed "
+            "before enabling the equivalent-fluid model. GPU maps still use authored band coefficients.");
         auto assigned = label;
         if (SubstanceEditorUI::draw("ObjectSubstanceProfile", assigned) && assigned != label) {
             auto changed = binding;

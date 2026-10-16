@@ -45,6 +45,7 @@
 #include <mutex>
 #include "Backend/IBackend.h"
 #include "Backend/AcousticGpuPass.h"
+#include "Backend/AcousticSurfacePass.h"
 #include "Backend/IViewportBackend.h"
 #include "Backend/SceneTextureManager.h"
 // ProbeTexel is part of the probe producer signature below; the header is
@@ -655,6 +656,11 @@ public:
     VkAccelerationStructureKHR getTLASHandle() const { return m_tlas.accel; }
     uint32_t tlasInstanceCount() const { return m_tlasInstanceCount; }
     std::shared_ptr<AcousticGpuPass> acousticPass;
+    std::shared_ptr<AcousticSurfacePass> acousticSurfacePass;
+    VkImageView acousticSurfacePosition = VK_NULL_HANDLE;
+    VkImageView acousticSurfaceNormal = VK_NULL_HANDLE;
+    void recordAcousticSurface(VkCommandBuffer cmd, unsigned slot, unsigned width,
+        unsigned height, VkImageView output);
     bool submitAcousticOnly(uint32_t slot);
     bool frameSlotHasImage(uint32_t slot) const {
         return slot < kFrameSlotCount && !m_frameSlots[slot].acousticOnly;
@@ -2577,7 +2583,9 @@ protected:
     bool getRayFusionHitInstances(std::vector<RayFusion::HitInstance>& out) const;
     bool rayFusionAcousticGeometry(audio::AcousticGpuGeometry& out) const;
 public:
-    bool setAcousticRenderSource(const audio::AcousticRenderSource& source);
+    bool setAcousticSurface(audio::AcousticSurfaceBatch batch);
+    void disableAcousticSurface();
+    std::string acousticSurfaceError() const;
     audio::AcousticGpuGeometry acousticGpuGeometry() const;
     bool queueAcousticGpu(audio::AcousticGpuBatch batch, const std::string& revision);
     bool pollAcousticGpu(audio::AcousticGpuCompletion& result);
@@ -3002,7 +3010,7 @@ protected:
     bool  m_causticsVolDirect = false;
     float m_causticsVolNoise = 0.0f;
     // Debug Visualizer (Render Settings → Debug); see raygen CameraPC mode table
-    audio::AcousticRenderSource m_acousticRenderSource{};
+    std::string m_acousticSurfaceFailure;
     int   m_debugView = 0;
     float m_debugExposure = 1.0f;
     float m_debugOverlay = 0.0f;
@@ -3095,7 +3103,7 @@ protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapan
     uint64_t m_lastDisplayPostSignature = 0;
     // Views resolved at tonemap time from persistent AOVs — instant, reset-free.
     static bool isTonemapSideView(int v) {
-        return v == 6 || v == 7 || v == 8 || (v >= 10 && v <= 14);
+        return v == 6 || v == 7 || v == 8 || (v >= 10 && v <= 15);
     }
     // Push the current debug-view state down to the tonemap dispatch.
     void updateTonemapDebugState() {
@@ -3104,7 +3112,7 @@ protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapan
         float ovl = m_debugOverlay;
         ovl = (ovl < 0.0f) ? 0.0f : ((ovl > 1.0f) ? 1.0f : ovl);
         m_device->setTonemapDebug(
-            isTonemapSideView(m_debugView) ? (uint32_t)m_debugView : 0u,
+            isTonemapSideView(m_debugView) && m_debugView != 15 ? (uint32_t)m_debugView : 0u,
             e,
             (m_targetSamples > 0) ? (e / (float)m_targetSamples) : 0.0f,
             (m_maxBounces > 0) ? (e / (float)m_maxBounces) : 0.0f,

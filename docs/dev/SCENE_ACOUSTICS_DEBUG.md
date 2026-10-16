@@ -1,111 +1,71 @@
-# Acoustic surface render visualizer
+# Acoustic surface debug (view 15)
 
-The acoustic debug view lives in Render Settings beside Normal, Depth and Bounce
-Count. The previous screen-space information card has been removed.
+Render Settings > Acoustic Energy (six-band) now runs a dedicated GPU compute
+visualizer over the existing first-hit position/normal AOVs. Beauty continues
+accumulating underneath; source/settings changes refresh presentation without
+resetting beauty. The old solid-proxy shader is replaced.
 
-Choose **Acoustic Energy (solid proxy)** (view 15), then choose an **Acoustic
-source** in the same panel. This selects the source through the ordinary shared
-`audio.select` operation. Selecting a different kind of object disables the source
-field until an eligible source is selected again. This first version visualizes
-one spatial source with a manual reaction driver, on Vulkan RT only. Playback and
-acoustic listener-preview activation are optional.
+- Selected source or **Sum sources (max 4)**: incoherent authored energy sum;
+  spatial manual sources, including stopped sources. Gain/range/cone apply.
+- Band -1 averages six final band energies; 0..5 selects 125, 250, 500, 1000,
+  2000, 4000 Hz. Transmission multiplies once per canonical object along a path.
+- **First-bounce samples 0..2** adds a cosine-sampled, Lambertian single diffuse
+  reflection using diffuse share (1 - absorption - transmission) * scattering.
+  The remaining specular share uses finite-triangle image-source candidates,
+  validating both legs and using total reflected path length for source falloff.
+  Repeated coplanar candidates cannot count the same source path twice.
+  Candidate discovery is incomplete, not a complete specular-path solver.
+  This is a noisy, deterministic spatial estimator without temporal accumulation.
+  It adds surface energy only: no delayed audible echo, refraction or phase-resolved pressure,
+  diffraction, phase interference, source-spectrum analysis or calibrated SPL.
+- Receiving-surface incidence cosine applies. Purple/yellow spans -60..0 dB
+  relative authored energy. Magenta means missing material/unsupported intersection
+  or exhausted ray budget; grey means no source or unavailable/stale scene data.
 
-## Meaning of the image
+CPU geometry is never rebuilt: canonical flat-object coverage and current GPU AS
+metadata are reused. At most 4 sources, 32 unique barriers and 256 candidates per
+ray; reflected probes stop at 10000 scene units. At two reflection samples, at most
+30 ray queries/pixel. Ray-query support is required only by the optional compute
+pipeline. Two small mapped frame-slot uploads reuse render fences; no new waits,
+submissions or readback. Geometry metadata refresh is throttled to 250 ms and
+revalidated against the active AS before dispatch. Normal rendering modes add no
+surface queries. Gas/SDF/transient splats are excluded by the authored-solid mask.
 
-At each visible first-hit surface, the shader evaluates the authored source gain,
-inverse-distance-clamped attenuation and cone gain. The amplitude is squared to
-obtain relative energy. An extra finite source-to-surface ray checks active-AS
-authored solids as **solid blockers**; optical transparency is deliberately not reused
-as acoustic transmission. No camera-frustum culling is applied to that ray.
-
-- Purple to yellow represents -60 to 0 dB relative to unit amplitude, after Debug
-  Exposure scales energy. This is a normalized authored-level field, not measured
-  PCM loudness or calibrated sound pressure level.
-- Black means blocked/zero energy or no primary surface. Grey surfaces mean no
-  eligible source. Overlay Beauty mixes the result with the ordinary render.
-- Source max distance clamps attenuation; it does not silently become a hard
-  cutoff. Source gain and directivity apply; bus/master mixing and native playback
-  meters do not drive the field.
-
-This is a direct-field **solid geometry proxy**, distinct from the listener
-preview's six-band material-transmission solver. It does not yet show material
-transmission, reflections, diffraction, interference, pressure waves, band-specific
-energy or SDF/volume occlusion. Hidden/excluded geometry absent from the active
-render AS cannot block this view. Surface values are point samples of the relative
-field, not deposited acoustic irradiance. The query uses the existing authored-solid
-visibility bit (0x01); ordinary procedural solids can block, while transient splats
-(0x04), gas/fog (0x02) and SurfaceSDF (0x08) are excluded.
-
-The existing progressive rendering and display post chain present this view.
-Camera depth of field, antialiasing and display post controls can therefore affect
-its appearance, as with the existing raygen debug modes.
-
-## Cost and synchronization
-
-Off and other debug modes execute no additional acoustic surface rays. View 15
-adds at most one finite, terminate-on-first-hit ray per visible surface sample.
-It reuses the active TLAS and existing renderer submission/fences; no new AS,
-collider cooking, CPU BVH, per-pixel CPU download, fence or queue submission is
-introduced. It can cost significantly more than the four listener-preview rays.
-
-One 56-byte selected-source snapshot is appended to the existing camera push
-constants. The scalar host/shader ABI is 252 bytes inside the existing 256-byte
-RT pipeline range. No new descriptor, storage buffer or shader binary is required;
-`raygen.rgen` must be rebuilt by the normal user shader build because it now includes
-`acoustic_surface_debug.glsl`.
-
-Source changes restart the debug accumulation without synchronous GPU image
-clears: frame zero ignores old adaptive statistics and overwrites all pixels/AOVs
-through the existing frame path. Normal mode/camera changes retain the renderer's
-existing reset behavior.
-
-## Shared Python and IPC
+Shared UI / Python / IPC controls:
 
 ```python
-rt.audio.select(id="audio_source_2")
+rt.audio.workspace_update(acoustic_all_sources=True, acoustic_band=2,
+                          acoustic_reflection_samples=1)
 rt.render.set_settings(debug_view=15)
-state = rt.audio.acoustics_debug(id="audio_source_2")
-rt.render.set_settings(debug_view=0)
+state = rt.audio.acoustics_debug(id="audio_source_2")["surface_visualizer"]
 ```
 
-External IPC uses the same `audio.select`, `render.set_settings`,
-`render.get_settings` and `audio.acoustics_debug` methods. Both render panels call
-the shared render settings service. The read-only debug query requires exactly one
-string source ID, an existing source and a camera; invalid inputs do not mutate
-state. Its `surface_visualizer` object reports active mode, whether the queried
-source is selected/eligible, proxy model, relative dB range and zero extra readback.
-The existing `preview` entry remains a separate listener-path result.
-`result_pose_matches` checks its endpoint positions only, not complete scene
-freshness. The old overlay workspace toggle is removed.
+Workspace validation is atomic: boolean source-sum, integer band -1..5, integer
+reflection samples 0..2. Settings are session-only. The read query reports model,
+budgets, settings and backend error without dispatching work.
 
-Render settings accept debug views 0..15; values outside that range fail before
-mutating bounce settings or debug state. Mode 15 is named `acoustic_surface` in
-`render.get_settings`. Render writes keep SceneWrite permissions; the debug query
-requires Read and no file access.
+User build: rebuild Studio, raygen and new acoustic_surface.comp. Check a known
+six-band wall; compare selected vs summed sources, band changes, reflection 0 vs 1,
+unknown-material marking and source motion after convergence. No builds/live tests
+were run by the agent; only static source checks are performed in this workspace.
 
-## User-build acceptance
+## Optional medium / interface probe
 
-1. Build Studio and the normal RT shaders, including the changed raygen shader.
-2. In Vulkan RT, choose view 15 in either Render Settings entry point. Select a
-   spatial manual source from its source dropdown. Verify that the surface image
-   changes rather than adding a viewport information card.
-3. Put a wall between source and a visible receiving surface. Verify a black
-   obstruction region; move the wall aside and verify the field returns. Optical
-   glass is also solid in this explicitly approximate mode.
-4. Move the source or its parent, alter gain/range/cone, and verify the image
-   updates after convergence. Gain zero must give black; no eligible selection
-   must give grey surfaces. Stopped playback must still show the authored field.
-5. Compare at two distances with unit gain, rolloff 1 and distances between min/max:
-   doubling distance gives approximately -6.02 dB relative energy. Beyond max,
-   attenuation clamps instead of becoming silent.
-6. Toggle Normal, Bounce Count, view 15 and Off; verify original views and beauty
-   return. Verify Adaptive Sampling does not retain a previous source's pixels.
-7. Repeat source selection and mode switching through Python/external IPC. The
-   existing `rt_test_acoustics_preview_ipc.py` covers read contract, mode name,
-   invalid mode 16 rejection and mode restoration on its disposable audio-empty
-   test scene; it does not certify rendered pixel colors.
+Substance fields `acoustic_medium_density` (effective kg/m3), `acoustic_medium_speed`
+(m/s), `acoustic_medium_loss_125` .. `_4000` (dB/m) and `acoustic_medium_defined`
+are shared by the substance UI, Python/IPC, inheritance and project serialization.
+Built-ins remain undefined. Configure density/speed before enabling; invalid
+profiles reject atomically. Density is an acoustic effective property, not an
+implicit edit to simulation/thermal density.
 
-2026-10-16 user-build checkpoint: the user confirmed that the surface heatmap
-works, then confirmed the source-selection focus fix. Automated rendered pixel
-acceptance and surface-debug GPU performance measurement remain open. The agent
-performed static checks only and did not compile or launch Studio.
+Render Settings > Acoustic interface probe calls the same read-only service as
+`rt.audio.acoustics_boundary(from_substance="Medium A", to_substance="Medium B",
+incidence_degrees=30, transmitted_distance_meters=1)`. This uses lossless planar
+fluid-interface Snell/impedance conditions, complex pressure coefficients, normal
+energy flux ratios and post-interface band attenuation/delay/phase. It handles
+total internal reflection without fabricating a propagating ray. Coefficients
+are nondispersive at the interface; only bulk attenuation varies by band.
+No elastic shear conversion, diffraction, layered-wall resonance or GPU refracted
+path construction is claimed. GPU maps continue using authored band responses.
+This is a testable physical-interface kernel, not a complete wave-field solver.
+Reference: [intensity and phase conditions](https://doc.comsol.com/6.3/doc/com.comsol.help.aco/aco_ug_geometrical_aco.11.46.html).

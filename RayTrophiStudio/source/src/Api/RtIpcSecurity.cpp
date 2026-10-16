@@ -214,6 +214,7 @@ uint32_t requiredCapabilities(const std::string& method) {
     if (method == "camera.sample_lens_weather") return Read;
     if (method.rfind("audio.", 0) == 0) {
         if (method == "audio.acoustics_preview_status") return Read;
+        if (method == "audio.acoustics_boundary") return Read;
         if (method == "audio.acoustics_debug") return Read;
         if (method == "audio.acoustics_trace") return Read;
         if (method == "audio.design_status" || method == "audio.design_catalogue" ||

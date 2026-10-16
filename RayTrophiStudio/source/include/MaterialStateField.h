@@ -207,6 +207,19 @@ struct SubstanceProfile {
     float acoustic_transmission_4000 = 0;
     float acoustic_scattering = 0;
 
+    // Optional nondispersive equivalent-fluid medium. Unset on all built-ins.
+    // Effective acoustic density is independent of the thermal/solid density.
+    bool acoustic_medium_defined = false;
+    float acoustic_medium_density = 0;
+    float acoustic_medium_speed = 0;
+    float acoustic_medium_loss_125 = 0;
+    float acoustic_medium_loss_250 = 0;
+    float acoustic_medium_loss_500 = 0;
+    float acoustic_medium_loss_1000 = 0;
+    float acoustic_medium_loss_2000 = 0;
+    float acoustic_medium_loss_4000 = 0;
+
+
     // ── Thermal ──────────────────────────────────────────────────────────────
     float density            = 1000.0f;  // kg/m^3
     float specific_heat      = 1000.0f;  // J/(kg·K)

@@ -1827,7 +1827,7 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
                 "Photon Energy (surface)", "Caustic Cells", "Photon Directions",
                 "Bounce Count", "Transmission", "Absorption", "Medium Density (interior)",
                 "Normal (first hit)", "Albedo (first hit)", "Depth", "Material ID",
-                "Sample Heatmap", "Acoustic Energy (solid proxy)"
+                "Sample Heatmap", "Acoustic Energy (six-band)"
             };
             const char* dv_tips[] = {
                 "Normal beauty render — debug visualizer off.",
@@ -1862,8 +1862,7 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
                 "Per-pixel ACCUMULATED SAMPLE COUNT, read at display time — the beauty "
                 "render keeps accumulating underneath and toggling never resets it. Best "
                 "with Adaptive Sampling on; Exposure scales the ramp.",
-                "Selected-source direct acoustic energy on visible surfaces. Distance and cone "
-                "attenuation with solid geometry blockers; no reflections or wall transmission."
+                "Six-band material transmission, up to four sources, and sampled first diffuse bounce."
             };
             int dv = std::clamp(ctx.render_settings.debug_view, 0, 15);
             if (ImGui::BeginCombo("View Mode##dbgview", dv_items[dv])) {
@@ -3129,7 +3128,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                                 "Photon Energy (surface)", "Caustic Cells", "Photon Directions",
                                 "Bounce Count", "Transmission", "Absorption", "Medium Density (interior)",
                                 "Normal (first hit)", "Albedo (first hit)", "Depth", "Material ID",
-                                "Sample Heatmap", "Acoustic Energy (solid proxy)"
+                                "Sample Heatmap", "Acoustic Energy (six-band)"
                             };
                             const char* dv_tips2[] = {
                                 "Normal beauty render — debug visualizer off.",
@@ -3158,8 +3157,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                                 "Per-pixel accumulated sample count at display time — beauty "
                                 "keeps accumulating; toggling never resets. Best with Adaptive "
                                 "Sampling on.",
-                                "Selected-source surface energy with solid geometry blockers. "
-                                "No wall transmission, reflections or frequency response."
+                                "Six-band transmission, source sum and sampled first diffuse reflection."
                             };
                             int dv = std::clamp(ctx.render_settings.debug_view, 0, 15);
                             if (ImGui::BeginCombo("Debug View##dbgview2", dv_items2[dv])) {

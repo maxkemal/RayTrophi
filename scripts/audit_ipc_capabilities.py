@@ -62,7 +62,7 @@ def required(method, namespaces):
         return "Read"
     if method.startswith("audio."):
         operation = method[6:]
-        if operation in ("acoustics_debug", "acoustics_trace", "acoustics_preview_status"):
+        if operation in ("acoustics_boundary", "acoustics_debug", "acoustics_trace", "acoustics_preview_status"):
             return "Read"
         if operation in {"waveform", "design_destination", "design_waveform"}:
             return "Read|FilesRead"

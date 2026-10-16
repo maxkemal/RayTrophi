@@ -1,5 +1,6 @@
 #include "Audio/AcousticScene.h"
 #include "Audio/AcousticRenderDebug.h"
+#include "Audio/AcousticSurface.h"
 #include "SceneSelection.h"
 #include "Audio/AudioAuthoring.h"
 #include "ObjectSubstance.h"
@@ -203,11 +204,10 @@ json queryAcousticDebug(UIContext& ctx, const json& params) {
     const auto surface = acousticRenderSource(ctx);
     const bool selected = ctx.selection.selected.type == SelectableType::AudioSource &&
         ctx.selection.selected.audio_source_id == params.at("id").get<std::string>();
-    return {{"surface_visualizer", {{"view", kAcousticSurfaceDebugView},
-        {"active", ctx.render_settings.debug_view == kAcousticSurfaceDebugView},
-        {"source_selected", selected}, {"source_eligible", selected && surface[7] > 0.5f},
-        {"model", "direct_solid_geometry_proxy"}, {"calibrated_spl", false},
-        {"db_range", {-60, 0}}, {"extra_gpu_readback_bytes", 0}}},
+    auto visualizer = acousticSurfaceStatus(ctx);
+    visualizer["source_selected"] = selected;
+    visualizer["source_eligible"] = selected && surface[7] > 0.5f;
+    return {{"surface_visualizer", visualizer},
         {"id", params.at("id")}, {"source_position", position},
         {"listener_position", listener}, {"distance_scene_units", std::sqrt(squared)},
         {"min_distance", emitter.at("min_distance")},

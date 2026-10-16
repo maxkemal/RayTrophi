@@ -1,0 +1,245 @@
+#version 460
+#extension GL_EXT_shader_image_load_formatted : require
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_scalar_block_layout : require
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform accelerationStructureEXT sceneAS;
+struct Instance {
+    uint64_t positions;
+    uint64_t indices;
+    uvec4 meta;
+    vec4 transmission0;
+    vec4 transmission1;
+    vec4 reflection0;
+    vec4 reflection1;
+    vec4 specular0;
+    vec4 specular1;
+};
+struct Source { vec4 positionGain; vec4 range; vec4 directionInner; vec4 outer; };
+layout(std430, set = 0, binding = 1) readonly buffer Instances { Instance instances[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Sources { Source sources[]; };
+layout(set = 0, binding = 3) uniform readonly image2D positions;
+layout(set = 0, binding = 4) uniform readonly image2D normals;
+layout(set = 0, binding = 5, rgba8) uniform image2D outputImage;
+layout(push_constant) uniform Push {
+    uint width, height, sourceCount, instanceCount;
+    int band;
+    uint reflections;
+    float exposure, overlay;
+} pc;
+layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Floats { float v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Indices { uint v[]; };
+const float PI = 3.14159265359;
+
+float response(vec4 a, vec4 b) {
+    if (pc.band >= 0 && pc.band < 6) return pc.band < 4 ? a[pc.band] : b[pc.band - 4];
+    return (a.x + a.y + a.z + a.w + b.x + b.y) / 6.0;
+}
+// Band products must be averaged AFTER traversing all barriers.
+bool transmission(vec3 from, vec3 to, out vec4 t0, out vec4 t1) {
+    vec3 delta = to - from;
+    float distance = length(delta);
+    float epsilon = max(0.0001, distance * 1e-6);
+    t0 = vec4(1);
+    t1 = vec4(1);
+    if (distance < 4.0 * epsilon) return true;
+    uint objects[32];
+    uint count = 0, candidates = 0;
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, sceneAS, gl_RayFlagsNoOpaqueEXT, 0x01u,
+        from, epsilon, delta / distance, distance - epsilon);
+    while (rayQueryProceedEXT(query)) {
+        if (++candidates > 256u || rayQueryGetIntersectionTypeEXT(query, false) !=
+            gl_RayQueryCandidateIntersectionTriangleEXT) return false;
+        uint index = rayQueryGetIntersectionInstanceIdEXT(query, false);
+        if (index >= pc.instanceCount) return false;
+        Instance item = instances[index];
+        if (item.meta.w == 0u) return false;
+        bool seen = false;
+        for (uint i = 0; i < count; ++i) seen = seen || objects[i] == item.meta.z;
+        if (seen) continue;
+        if (count == 32u) return false;
+        objects[count++] = item.meta.z;
+        t0 *= item.transmission0;
+        t1 *= item.transmission1;
+    }
+    return true;
+}
+float sourceEnergyPath(Source source, vec3 point, float pathDistance) {
+    vec3 delta = point - source.positionGain.xyz;
+    float distance = length(delta);
+    float minimum = max(source.range.x, 0.001);
+    float attenuation = minimum / (minimum + source.range.z *
+        (clamp(pathDistance, minimum, max(minimum, source.range.y)) - minimum));
+    float amplitude = source.positionGain.w * attenuation;
+    float directionLength = length(source.directionInner.xyz);
+    if (distance > 1e-6 && directionLength > 1e-6 && source.outer.x < PI) {
+        float angle = acos(clamp(dot(delta / distance,
+            source.directionInner.xyz / directionLength), -1.0, 1.0));
+        float inner = source.directionInner.w;
+        float blend = source.outer.x > inner ?
+            clamp((angle - inner) / (source.outer.x - inner), 0.0, 1.0) :
+            (angle > inner ? 1.0 : 0.0);
+        amplitude *= mix(1.0, source.outer.y, blend);
+    }
+    return amplitude * amplitude;
+}
+float sourceEnergy(Source source, vec3 point) {
+    return sourceEnergyPath(source, point, length(point - source.positionGain.xyz));
+}
+#include "acoustic_surface_specular.glsl"
+
+vec3 vertex(Instance item, uint corner) {
+    Floats p = Floats(item.positions);
+    return vec3(p.v[corner * 3], p.v[corner * 3 + 1], p.v[corner * 3 + 2]);
+}
+// 0 = escaped; 1 = triangle; -1 = unsupported / budget / invalid geometry.
+int reflector(vec3 from, vec3 direction, out vec3 point, out vec3 normal, out uint instance,
+    out vec3 a, out vec3 b, out vec3 c) {
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, sceneAS, gl_RayFlagsNoOpaqueEXT, 0x01u,
+        from, 0.0001, direction, 10000.0);
+    uint candidates = 0;
+    while (rayQueryProceedEXT(query)) {
+        if (++candidates > 256u || rayQueryGetIntersectionTypeEXT(query, false) !=
+            gl_RayQueryCandidateIntersectionTriangleEXT) return -1;
+        rayQueryConfirmIntersectionEXT(query);
+    }
+    if (rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+        return 0;
+    }
+    instance = rayQueryGetIntersectionInstanceIdEXT(query, true);
+    if (instance >= pc.instanceCount) return -1;
+    Instance item = instances[instance];
+    uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(query, true);
+    if (item.positions == uint64_t(0) || primitive >= item.meta.y || item.meta.w == 0u) return -1;
+    uvec3 corners = uvec3(primitive * 3u) + uvec3(0, 1, 2);
+    if (item.indices != uint64_t(0)) {
+        Indices indices = Indices(item.indices);
+        corners = uvec3(indices.v[corners.x], indices.v[corners.y], indices.v[corners.z]);
+    }
+    if (any(greaterThanEqual(corners, uvec3(item.meta.x)))) return -1;
+    mat4x3 transform = rayQueryGetIntersectionObjectToWorldEXT(query, true);
+    a = transform * vec4(vertex(item, corners.x), 1);
+    b = transform * vec4(vertex(item, corners.y), 1);
+    c = transform * vec4(vertex(item, corners.z), 1);
+    vec3 crossNormal = cross(b - a, c - a);
+    float magnitude = length(crossNormal);
+    if (magnitude <= 1e-12 || isnan(magnitude) || isinf(magnitude)) return -1;
+    normal = crossNormal / magnitude;
+    if (dot(normal, direction) > 0.0) normal = -normal;
+    point = from + direction * rayQueryGetIntersectionTEXT(query, true);
+    return 1;
+}
+uint hash(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    return x ^ (x >> 16);
+}
+vec3 bounceDirection(vec3 normal, uvec2 pixel, uint sampleIndex) {
+    uint seed = hash(pixel.x ^ hash(pixel.y + sampleIndex * 1973u));
+    float u = (float(seed & 65535u) + 0.5) / 65536.0;
+    float v = (float(hash(seed) & 65535u) + 0.5) / 65536.0;
+    vec3 tangent = normalize(cross(abs(normal.z) < 0.9 ? vec3(0, 0, 1) : vec3(0, 1, 0), normal));
+    vec3 bitangent = cross(normal, tangent);
+    float radius = sqrt(u), angle = 2.0 * PI * v;
+    return tangent * (radius * cos(angle)) + bitangent * (radius * sin(angle)) +
+        normal * sqrt(1.0 - u);
+}
+vec3 heat(float t) {
+    // Continuous purple -> cyan/green -> yellow diagnostic ramp.
+    return t < 0.5 ? mix(vec3(0.28, 0.01, 0.34), vec3(0.10, 0.58, 0.55), t * 2.0) :
+        mix(vec3(0.10, 0.58, 0.55), vec3(0.99, 0.91, 0.14), t * 2.0 - 1.0);
+}
+void main() {
+    uvec2 pixel = gl_GlobalInvocationID.xy;
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+    ivec2 p = ivec2(pixel);
+    if (any(greaterThanEqual(p, imageSize(positions))) ||
+        any(greaterThanEqual(p, imageSize(normals))) ||
+        any(greaterThanEqual(p, imageSize(outputImage)))) return;
+    vec4 position = imageLoad(positions, p);
+    vec4 beauty = imageLoad(outputImage, p);
+    vec3 color = vec3(0);
+    bool valid = true;
+    if (position.a > 0.5) {
+        color = vec3(0.12);
+        if (pc.sourceCount > 0u && pc.instanceCount > 0u) {
+            vec3 normal = imageLoad(normals, p).xyz * 2.0 - 1.0;
+            float magnitude = length(normal);
+            valid = magnitude > 1e-6 && !isnan(magnitude) && !isinf(magnitude);
+            if (valid) normal /= magnitude;
+            float total = 0.0;
+            bool emitting = false;
+            for (uint i = 0u; i < pc.sourceCount && i < 4u && valid; ++i) {
+                emitting = emitting || sources[i].positionGain.w > 0.0;
+                vec3 delta = sources[i].positionGain.xyz - position.xyz;
+                float distance = length(delta);
+                float cosine = distance > 1e-6 ? max(0.0, dot(normal, delta / distance)) : 1.0;
+                float incoming = sourceEnergy(sources[i], position.xyz) * cosine;
+                if (incoming <= 0.0) continue;
+                vec4 transfer0, transfer1;
+                valid = transmission(position.xyz, sources[i].positionGain.xyz, transfer0, transfer1);
+                total += incoming * response(transfer0, transfer1);
+            }
+            vec3 priorNormal = vec3(0), priorPoint = vec3(0);
+            uint priorObject = 0xFFFFFFFFu, solvedSources = 0u;
+            bool priorPlane = false;
+            for (uint sampleIndex = 0u; sampleIndex < min(pc.reflections, 2u) && valid && emitting;
+                ++sampleIndex) {
+                vec3 direction = bounceDirection(normal, pixel, sampleIndex);
+                vec3 bounce, bounceNormal, a, b, c;
+                uint index;
+                int hit = reflector(position.xyz + normal * 0.0002, direction,
+                    bounce, bounceNormal, index, a, b, c);
+                if (hit < 0) { valid = false; break; }
+                if (hit == 0) continue;
+                Instance wall = instances[index];
+                bool samePlane = priorPlane && priorObject == wall.meta.z &&
+                    dot(priorNormal, bounceNormal) > 0.99999 &&
+                    abs(dot(bounce - priorPoint, bounceNormal)) < 0.0001;
+                if (!samePlane) solvedSources = 0u;
+                priorPlane = true;
+                priorObject = wall.meta.z;
+                priorNormal = bounceNormal;
+                priorPoint = bounce;
+                float reflected = 0.0;
+                for (uint i = 0u; i < pc.sourceCount && i < 4u && valid; ++i) {
+                    vec3 delta = sources[i].positionGain.xyz - bounce;
+                    float distance = length(delta);
+                    if (distance <= 0.0004) continue;
+                    float cosine = max(0.0, dot(bounceNormal, delta / distance));
+                    float incoming = sourceEnergy(sources[i], bounce) * cosine;
+                    if (incoming > 0.0 && response(wall.reflection0, wall.reflection1) > 0.0) {
+                        vec4 transfer0, transfer1;
+                        valid = transmission(bounce + bounceNormal * 0.0002,
+                            sources[i].positionGain.xyz, transfer0, transfer1);
+                        reflected += incoming * response(transfer0 * wall.reflection0,
+                            transfer1 * wall.reflection1);
+                    }
+                    if (valid && (solvedSources & (1u << i)) == 0u) {
+                        float specularEnergy;
+                        bool found;
+                        valid = specularPath(sources[i], position.xyz, normal,
+                            a, b, c, bounceNormal, wall, specularEnergy, found);
+                        total += specularEnergy;
+                        if (found) solvedSources |= 1u << i;
+                    }
+                }
+                // Cosine-weighted receiver sampling cancels Lambertian 1/pi.
+                total += reflected / float(max(pc.reflections, 1u));
+            }
+            float energy = total * max(pc.exposure, 0.0);
+            if (isnan(energy) || isinf(energy)) valid = false;
+            color = !valid ? vec3(1, 0, 1) : energy <= 0.0 ? vec3(0) :
+                heat(clamp((10.0 * log2(max(energy, 1e-6)) / log2(10.0) + 60.0) / 60.0, 0.0, 1.0));
+        }
+    }
+    vec3 srgb = mix(12.92 * color, 1.055 * pow(max(color, vec3(0)), vec3(1.0 / 2.4)) - 0.055,
+        step(vec3(0.0031308), color));
+    imageStore(outputImage, p, vec4(mix(srgb, beauty.rgb, clamp(pc.overlay, 0.0, 1.0)), beauty.a));
+}

@@ -1,6 +1,7 @@
 #include "Audio/AcousticScene.h"
 #include "Audio/AcousticRenderDebug.h"
 #include "Audio/AcousticGpu.h"
+#include "Audio/AcousticSurface.h"
 #include "Audio/AudioAuthoring.h"
 #include "Audio/AudioService.h"
 #include "Backend/VulkanBackend.h"
@@ -136,6 +137,10 @@ AcousticGpuRay ray(const json& source, const Vec3& listener, const json& entry) 
     }
     return result;
 }
+}
+
+void resolveAcousticGpuResponses(UIContext& ctx, AcousticGpuGeometry& geometry) {
+    responses(ctx, geometry);
 }
 
 void tickSceneAcoustics(UIContext& ctx) {

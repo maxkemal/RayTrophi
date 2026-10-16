@@ -40,6 +40,13 @@ struct RegisterAudioMethods {
             {"clip_policy", "string", false, "Nonempty track removal policy", "reject", "reject|detach|delete"},
             {"designer_edit_view", "string", false, "Source editor or existing clip arrangement",
                 "source", "source|arrange"},
+            {"from_substance", "string", true, "Defined incident acoustic medium", nullptr, nullptr},
+            {"to_substance", "string", true, "Defined transmitted acoustic medium", nullptr, nullptr},
+            {"incidence_degrees", "float", false, "Angle from boundary normal, 0..89.999", "0", nullptr},
+            {"transmitted_distance_meters", "float", false, "Path length in transmitted medium, 0..1e6", "0", nullptr},
+            {"acoustic_all_sources", "bool", false, "Sum up to four spatial manual sources", "false", nullptr},
+            {"acoustic_band", "int", false, "-1 broadband or band index 0..5 (125..4000 Hz)", "-1", nullptr},
+            {"acoustic_reflection_samples", "int", false, "First diffuse bounce samples 0..2", "1", nullptr},
             {"designer_canvas_zoom", "float", false, "Shared canvas zoom 1..8", "1", nullptr},
             {"designer_canvas_pan_x", "float", false, "Shared horizontal canvas pan 0..1", "0", nullptr},
             {"designer_canvas_pan_y", "float", false, "Shared vertical canvas pan 0..1", "0", nullptr},
@@ -157,7 +164,7 @@ struct RegisterAudioMethods {
         };
         for (std::size_t i = 0; i < names.size(); ++i) {
             const auto& op = audio::AudioService::operations()[i];
-            const bool read = op == "acoustics_debug" || op == "acoustics_preview_status" || op == "acoustics_trace" || op == "list" || op == "get" || op == "status" || op == "domains" ||
+            const bool read = op == "acoustics_boundary" || op == "acoustics_debug" || op == "acoustics_preview_status" || op == "acoustics_trace" || op == "list" || op == "get" || op == "status" || op == "domains" ||
                               op == "mixer_get" || op == "arrange_status" || op == "track_list" || op == "clip_list" || op == "export_status" ||
                               op == "waveform" || op == "capture_status" || op == "workspace_get" ||
                               op == "synth_presets" || op == "telemetry_get" ||
@@ -169,6 +176,8 @@ struct RegisterAudioMethods {
             descriptor.summary = "Scene audio service operation";
             descriptor.notes = op.rfind("acoustics_preview", 0) == 0
                 ? "See docs/dev/SCENE_ACOUSTICS_PREVIEW.md. Session-only broadband audition."
+                : op == "acoustics_boundary"
+                ? "Planar equivalent-fluid interface probe; no GPU paths or scene mutation. See SCENE_ACOUSTICS_DEBUG.md."
                 : op == "acoustics_debug"
                 ? "See docs/dev/SCENE_ACOUSTICS_DEBUG.md. Read existing results; no GPU dispatch."
                 : op == "acoustics_trace"
@@ -206,6 +215,8 @@ struct RegisterAudioMethods {
                     if (key == definition.name) {
                         auto param = definition;
                         param.required = key == "id" || key == "path" ||
+                            (op == "acoustics_boundary" &&
+                                (key == "from_substance" || key == "to_substance")) ||
                             (op == "preview_mute" && key == "muted") ||
                             key == "key" || key == "config" || key == "mode" ||
                             (key == "kind" && op == "design_job_start") || key == "action" || key == "ids" || key == "effect" || (key == "recipe" && op == "design_render") || key == "end_frame_exclusive" || key == "end_seconds" || key == "time_seconds" ||

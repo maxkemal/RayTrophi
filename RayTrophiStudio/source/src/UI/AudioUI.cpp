@@ -261,6 +261,15 @@ void drawSourceInspector(UIContext& ctx) {
             }
             ImGui::EndCombo();
         }
+        const auto playbackMode = data.at("playback_mode").get<std::string>();
+        if (ImGui::BeginCombo(property("Scene playback").c_str(), playbackMode.c_str())) {
+            for (const char* mode : {"timeline", "continuous"}) {
+                if (ImGui::Selectable(mode, playbackMode == mode)) {
+                    call(ctx, "playback_update", {{"mode", mode}});
+                }
+            }
+            ImGui::EndCombo();
+        }
         bool firstAction = true;
         for (const char* op : {"play", "pause", "stop", "duplicate", "remove"}) {
             const float width = ImGui::CalcTextSize(op).x + ImGui::GetStyle().FramePadding.x * 2;
