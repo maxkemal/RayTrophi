@@ -7,6 +7,7 @@
 #include "ObjectSubstance.h"
 #include "globals.h"
 #include "imgui.h"
+#include "UI/AudioPropertyLayout.h"
 #include <exception>
 
 namespace audio {
@@ -39,9 +40,9 @@ void drawAcousticDiagnostics(UIContext& ctx, const nlohmann::json& emitter) {
     if (!live.is_null()) {
         metersPerUnit = live.at("meters_per_unit").get<float>();
     }
-    const bool changedUnits = ImGui::InputFloat("Meters per scene unit", &metersPerUnit,
+    const bool changedUnits = ImGui::InputFloat(AudioUI::property("Meters per scene unit").c_str(), &metersPerUnit,
         0, 0, "%.6g");
-    const bool changedModel = ImGui::Combo("Boundary model", &model,
+    const bool changedModel = ImGui::Combo(AudioUI::property("Boundary model").c_str(), &model,
         "One barrier per object\0Independent thin surfaces\0");
     const bool changedEnabled = ImGui::Checkbox("Audition scene obstruction", &enabled);
     try {

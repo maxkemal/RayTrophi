@@ -2535,6 +2535,25 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
+    <ClInclude Include="source\include\Audio\AcousticBoundary.h" />
+    <ClCompile Include="source\src\Scene\AcousticBoundary.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AcousticBoundaryUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\Audio\AcousticSurface.h" />
+    <ClInclude Include="source\include\Backend\AcousticSurfacePass.h" />
+    <ClCompile Include="source\src\Backend\AcousticSurfacePass.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticSurfaceScene.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
     <ClInclude Include="source\include\Audio\AcousticRenderDebug.h" />
     <ClCompile Include="source\src\Scene\AcousticRenderDebug.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>

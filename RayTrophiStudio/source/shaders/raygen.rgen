@@ -317,7 +317,6 @@ layout(push_constant) uniform CameraPC {
     float debugExposure;  // false-color / energy gain
     uint  debugFlags;     // reserved
     float debugParam;     // overlay: 0 = pure debug … 1 = pure beauty
-    float acousticSource[14]; // scalar stride 4; total push size 252 bytes
 } cam;
 
 // ============================================================
@@ -650,8 +649,6 @@ vec3 dvCellColor(ivec3 c) {
 // ============================================================
 // Main
 // ============================================================
-#include "acoustic_surface_debug.glsl"
-
 void main() {
     uvec2 pixel      = gl_LaunchIDEXT.xy;
     uvec2 screenSize = gl_LaunchSizeEXT.xy;
@@ -1080,14 +1077,10 @@ void main() {
     // Views 6-8, 10-13 and 14 are AOV/ACCUMULATION-STATE views resolved in
     // tonemap.comp — raygen must keep rendering beauty for those (that is what
     // makes them instant and reset-free).
-    if ((cam.debugView >= 1u && cam.debugView <= 5u) || cam.debugView == 9u || cam.debugView == 15u) {
+    if ((cam.debugView >= 1u && cam.debugView <= 5u) || cam.debugView == 9u) {
         vec3 dbg = vec3(0.0);
 
-        if (cam.debugView == 15u) {
-            dbg = firstHitValid && !primaryVolumeHit ?
-                acousticSurfaceDebug(firstHitPos) : vec3(0.0);
-        }
-        else if (cam.debugView == 1u) {
+        if (cam.debugView == 1u) {
             // PHOTON GRID — march the primary segment, raw volume-grid energy
             // density (verifies shaft/deposit placement; Faz 2V Dilim V1 view).
             float passes = float(photonVolGrid.h.frameSeed + 1u);

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * VulkanDevice compute-pipeline creation helpers.
  * Extracted from VulkanBackend.cpp without changing the public backend API.
  */
@@ -473,6 +473,8 @@ bool VulkanDevice::updateTonemapDescriptors(const VulkanRT::ImageHandle& hdrImag
                                             const VulkanRT::ImageHandle* aovNormal,
                                             const VulkanRT::ImageHandle* aovPosition,
                                             const VulkanRT::ImageHandle* aovStats) {
+    acousticSurfacePosition = aovPosition ? aovPosition->view : VK_NULL_HANDLE;
+    acousticSurfaceNormal = aovNormal ? aovNormal->view : VK_NULL_HANDLE;
     if (m_tonemapDescSet == VK_NULL_HANDLE) return false;
     if (!hdrImage.view || !ldrImage.view) return false;
 

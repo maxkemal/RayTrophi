@@ -29,9 +29,11 @@ def main():
     camera = client.call("camera.get")["position"]
     objects = client.call("scene.list_objects")
     render_settings = client.call("render.get_settings")
+    workspace = client.call("audio.workspace_get")
     mode = initial["playback_mode"]
     walls, source, asset = [], None, None
     material = "Acoustic acceptance " + str(time.time_ns())
+    medium_name = material + " medium"
     bands = (125, 250, 500, 1000, 2000, 4000)
     baseline = None
 
@@ -101,7 +103,33 @@ def main():
 
     try:
         client.call("substance.derive", name=material, based_on="Wood (Oak)")
-        client.call("substance.set", name=material, fields=fields([0.25] * 6))
+        client.call("substance.set", name=material, fields={**fields([0.25] * 6),
+                    "acoustic_medium_defined": True, "acoustic_medium_density": 1000,
+                    "acoustic_medium_speed": 1000})
+        client.call("substance.derive", name=medium_name, based_on=material)
+        client.call("substance.set", name=medium_name, fields={"acoustic_medium_speed": 2000,
+                    "acoustic_medium_loss_1000": 3})
+        matched = client.call("audio.acoustics_boundary", from_substance=material,
+                              to_substance=material, incidence_degrees=30)
+        assert matched["reflection_energy"] < 1e-12
+        assert abs(matched["transmission_energy"] - 1) < 1e-12
+        normal = client.call("audio.acoustics_boundary", from_substance=material,
+                             to_substance=medium_name, transmitted_distance_meters=2)
+        assert abs(normal["reflection_energy"] - 1 / 9) < 1e-12
+        assert abs(normal["transmission_energy"] - 8 / 9) < 1e-12
+        assert abs(normal["bands"][3]["transmitted_energy_after_distance"] -
+                   (8 / 9) * 10 ** (-6 / 10)) < 1e-12
+        tir = client.call("audio.acoustics_boundary", from_substance=material,
+                          to_substance=medium_name, incidence_degrees=45)
+        assert tir["total_internal_reflection"] and tir["transmission_energy"] == 0
+        assert tir["transmitted_angle_degrees"] is None and tir["delay_seconds"] is None
+        ok, _ = client.try_call("substance.set", name=material,
+                                fields={"acoustic_medium_speed": 0})
+        assert not ok, "Invalid enabled medium was accepted"
+        ok, _ = client.try_call("audio.acoustics_boundary", from_substance="Wood (Oak)",
+                                to_substance=medium_name)
+        assert not ok, "Undefined built-in silently acquired acoustic data"
+
         for index, offset in enumerate((4, 7)):
             wall = client.call("scene.add_primitive", type="cube",
                                name=f"AcousticAcceptanceWall{index}_{time.time_ns()}", size=1)
@@ -126,6 +154,13 @@ def main():
                     pass
                 else:
                     raise AssertionError(("Invalid debug parameters accepted", invalid))
+            configured = client.call("audio.workspace_update", acoustic_all_sources=True,
+                                     acoustic_band=2, acoustic_reflection_samples=1)
+            assert configured["acoustic_band"] == 2
+            for bad in ({"acoustic_band": 6}, {"acoustic_reflection_samples": 3},
+                        {"acoustic_all_sources": 1}):
+                ok, _ = client.try_call("audio.workspace_update", **bad)
+                assert not ok and client.call("audio.workspace_get") == configured
             client.call("audio.select", id=source)
             client.call("render.set_settings", debug_view=15)
             state = client.call("render.get_settings")
@@ -134,7 +169,7 @@ def main():
             assert visualizer["active"] and visualizer["source_selected"]
             assert visualizer["source_eligible"] and not visualizer["calibrated_spl"]
             assert visualizer["extra_gpu_readback_bytes"] == 0
-            assert visualizer["model"] == "direct_solid_geometry_proxy"
+            assert visualizer["model"] == "six_band_direct_and_first_bounce"
             ok, _ = client.try_call("render.set_settings", debug_view=16)
             assert not ok and client.call("render.get_settings")["debug_view"] == 15
             client.call("render.set_settings", debug_view=render_settings["debug_view"])
@@ -145,6 +180,22 @@ def main():
             sample("clear", 1, "clear", 0)
             place(walls[0], 4)
             sample("one closed object", 0.5, "evaluated_object_barrier", 2)
+            # Moving within the same barrier region must not open the sound path
+            # while the asynchronous GPU query is pending.
+            refresh_states = []
+            try:
+                for index in range(12):
+                    moved = list(camera)
+                    moved[1] += 0.01 * (index % 2)
+                    client.call("camera.set_position", position=moved)
+                    time.sleep(0.075)
+                    live = next(e for e in client.call("audio.acoustics_preview_status")
+                                if e["id"] == source)
+                    refresh_states.append(live["status"])
+                    assert abs(live["amplitude_gain"] - 0.5) < 1e-5, live
+            finally:
+                client.call("camera.set_position", position=camera)
+            report["camera_refresh_states"] = refresh_states
             trace = client.call("audio.acoustics_trace", id=source, meters_per_unit=2,
                                 boundary_mode="object_barrier")
             assert abs(trace["distance_meters"] - 20) < 1e-5, trace
@@ -192,8 +243,10 @@ def main():
             [("audio.remove", {"id": source})] if source else []
         ) + ([("audio.asset_remove", {"id": asset})] if asset else []) + [
             ("scene.delete", {"name": wall}) for wall in reversed(walls)
-        ] + [("render.set_settings", {"debug_view": render_settings["debug_view"]}),
+        ] + [("audio.workspace_update", workspace),
+             ("render.set_settings", {"debug_view": render_settings["debug_view"]}),
              ("audio.playback_update", {"mode": mode}),
+             ("substance.remove", {"name": medium_name}),
              ("substance.remove", {"name": material})]:
             ok, result = client.try_call(method, **params)
             report["cleanup"].append({"method": method, "ok": ok, "result": result})

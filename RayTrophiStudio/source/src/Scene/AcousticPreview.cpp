@@ -61,8 +61,13 @@ void AcousticPreview::update(const std::string& id, const json& report) {
     if (report.contains("solver")) {
         entry["solver"] = report.at("solver");
     }
-    entry["amplitude_gain"] = 1;
     entry["status"] = report.value("transmission_status", "error");
+    // An asynchronous pose refresh has no new transmission estimate yet.
+    // Keep the last gain until completion instead of briefly opening the barrier.
+    if (entry.at("status") == "pending") {
+        return;
+    }
+    entry["amplitude_gain"] = 1;
     const auto energy = report.value("transmission_energy", json());
     if (!energy.is_array() || energy.size() != 6) {
         return;

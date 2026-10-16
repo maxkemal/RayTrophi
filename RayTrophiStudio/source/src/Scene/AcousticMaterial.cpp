@@ -1,11 +1,13 @@
 #include "AcousticMaterial.h"
+#include "Audio/AcousticBoundary.h"
 #include "SubstanceLibrary.h"
 #include <algorithm>
 
 namespace audio {
 nlohmann::json acousticMaterialResponse(const RayTrophiSim::SubstanceProfile& profile) {
     using json = nlohmann::json;
-    json result = {{"defined", profile.acoustic_defined},
+    json result = {{"medium", acousticMediumState(profile)},
+        {"defined", profile.acoustic_defined},
         {"frequencies_hz", {125, 250, 500, 1000, 2000, 4000}},
         {"quantity", "energy_fraction"}};
     if (!profile.acoustic_defined) {

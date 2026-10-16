@@ -857,6 +857,7 @@ void VulkanDevice::shutdown() {
         vkDeviceWaitIdle(m_device);
 
         acousticPass.reset();
+        acousticSurfacePass.reset();
 
         {
             std::lock_guard<std::mutex> lock(m_rtDescriptorMutex);
@@ -6529,6 +6530,8 @@ bool VulkanDevice::traceRaysTonemapAndReadback(uint32_t w, uint32_t h,
     const uint32_t gy = (h + 7) / 8;
     vkCmdDispatch(cmd, gx, gy, 1);
 
+    recordAcousticSurface(cmd, 0, w, h, ldrImage.view);
+
     // ── 4. Barrier: compute write → transfer read on LDR image ───────────────
     VkImageMemoryBarrier ldrBarrier{};
     ldrBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -7189,6 +7192,8 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
     const uint32_t gx = (w + 7) / 8;
     const uint32_t gy = (h + 7) / 8;
     vkCmdDispatch(cmd, gx, gy, 1);
+
+    recordAcousticSurface(cmd, slot, w, h, ldrImage.view);
 
     // ── 4. Compute write → transfer read on LDR image ────────────────────────
     VkImageMemoryBarrier ldrBarrier{};
@@ -18790,13 +18795,10 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         float    debugExposure; // false-color / energy gain
         uint32_t debugFlags;    // reserved
         float    debugParam;    // overlay: 0 = pure debug … 1 = pure beauty
-        float acousticSource[14]; // Audio/AcousticRenderDebug.h; scalar array stride 4
     };
 
-    static_assert(sizeof(CameraPushConstants) == 252, "CameraPC acoustic debug ABI");
+    static_assert(sizeof(CameraPushConstants) == 196, "CameraPC acoustic debug ABI");
     CameraPushConstants pushConst{};
-    std::copy(m_acousticRenderSource.begin(), m_acousticRenderSource.end(),
-        pushConst.acousticSource);
     
     // Camera image plane from m_camera. ★ ONE formula (AerialFroxelParams.h),
     // shared with the RayFusion aerial froxel: raygen projects hit directions
@@ -18868,7 +18870,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
     pushConst.diffuseBounces = (uint32_t)std::clamp(m_diffuseBounces, 1, m_maxBounces);
     pushConst.transmissionBounces = (uint32_t)std::clamp(m_transmissionBounces, 1, m_maxBounces);
 
-    pushConst.debugView = (uint32_t)std::max(0, m_debugView);
+    pushConst.debugView = m_debugView == 15 ? 0u : (uint32_t)std::max(0, m_debugView);
     pushConst.debugExposure = std::max(0.0f, m_debugExposure);
     // bits 0-1: volume temporal write slot and valid-history flag.
     pushConst.debugFlags = m_volumeTemporal.writeIndex()
