@@ -1,0 +1,131 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_scalar_block_layout : require
+
+// A bounded direct-path query. No PBR, texture, lighting or audio PCM resources.
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0) uniform accelerationStructureEXT sceneAS;
+struct Instance {
+    uint64_t positions;
+    uint64_t indices;
+    uvec4 meta; // vertex count, triangle count, shared object ID, response defined
+    vec4 energy0;
+    vec4 energy1;
+};
+struct Ray { vec4 source; vec4 listener; };
+struct Summary { vec4 energy0; vec4 energy1; vec4 path; uvec4 state; };
+layout(std430, set = 0, binding = 1) readonly buffer Instances { Instance instances[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Rays { Ray rays[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer Results { Summary results[]; };
+layout(push_constant) uniform Push { uint rayCount; uint instanceCount; } pc;
+layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Floats { float v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Indices { uint v[]; };
+
+vec3 position(Instance item, uint vertex) {
+    Floats p = Floats(item.positions);
+    return vec3(p.v[vertex * 3], p.v[vertex * 3 + 1], p.v[vertex * 3 + 2]);
+}
+
+void main() {
+    uint lane = gl_GlobalInvocationID.x;
+    if (lane >= pc.rayCount) return;
+    Ray inputRay = rays[lane];
+    vec3 delta = inputRay.listener.xyz - inputRay.source.xyz;
+    float distanceUnits = length(delta);
+    float metres = distanceUnits * inputRay.source.w;
+    Summary result = Summary(vec4(1), vec4(1), vec4(metres, metres / 343.0, 0, 0), uvec4(0));
+    if (isnan(metres) || isinf(metres) || metres < 0.0001) {
+        result.state.x = 5u;
+        results[lane] = result;
+        return;
+    }
+    vec3 direction = delta / distanceUnits;
+    float epsilon = max(0.00001 / inputRay.source.w, distanceUnits * 1e-7);
+    uint objects[128];
+    float distances[128];
+    vec3 normals[128];
+    uint count = 0u;
+    uint raw = 0u;
+    rayQueryEXT query;
+    // No confirmation: enumerate candidates without closest-hit pruning.
+    // No visual alpha test and no terminate-on-first-hit flags.
+    rayQueryInitializeEXT(query, sceneAS, gl_RayFlagsNoOpaqueEXT, 0xFFu,
+        inputRay.source.xyz, epsilon, direction, distanceUnits - epsilon);
+    while (rayQueryProceedEXT(query)) {
+        if (++raw > 1024u) {
+            result.state.x = 2u;
+            break;
+        }
+        if (rayQueryGetIntersectionTypeEXT(query, false) !=
+            gl_RayQueryCandidateIntersectionTriangleEXT) {
+            result.state.x = 4u;
+            break;
+        }
+        // RT customIndex can be shared (or reserved for volume slots).
+        // InstanceId is the actual TLAS array position in both providers.
+        uint index = rayQueryGetIntersectionInstanceIdEXT(query, false);
+        uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(query, false);
+        if (index >= pc.instanceCount) {
+            result.state.x = 4u;
+            break;
+        }
+        Instance item = instances[index];
+        if (item.positions == uint64_t(0) || primitive >= item.meta.y) {
+            result.state.x = 4u;
+            break;
+        }
+        uvec3 corners = uvec3(primitive * 3u) + uvec3(0, 1, 2);
+        if (item.indices != uint64_t(0)) {
+            Indices indices = Indices(item.indices);
+            corners = uvec3(indices.v[corners.x], indices.v[corners.y], indices.v[corners.z]);
+        }
+        if (any(greaterThanEqual(corners, uvec3(item.meta.x)))) {
+            result.state.x = 4u;
+            break;
+        }
+        mat4x3 transform = rayQueryGetIntersectionObjectToWorldEXT(query, false);
+        vec3 a = transform * vec4(position(item, corners.x), 1);
+        vec3 b = transform * vec4(position(item, corners.y), 1);
+        vec3 c = transform * vec4(position(item, corners.z), 1);
+        vec3 normal = cross(b - a, c - a);
+        float magnitude = length(normal);
+        if (isnan(magnitude) || isinf(magnitude) || magnitude <= 0) {
+            result.state.x = 5u;
+            break;
+        }
+        normal /= magnitude;
+        float distance = rayQueryGetIntersectionTEXT(query, false);
+        bool duplicate = false;
+        bool priorObject = false;
+        for (uint i = 0u; i < count; ++i) {
+            if (objects[i] != item.meta.z) continue;
+            priorObject = true;
+            if (abs(distances[i] - distance) <= epsilon) {
+                if (abs(dot(normals[i], normal)) < 0.99999) result.state.x = 3u;
+                else duplicate = true;
+            }
+        }
+        if (result.state.x > 1u) break;
+        if (duplicate) continue;
+        if (count == 128u) {
+            result.state.x = 2u;
+            break;
+        }
+        objects[count] = item.meta.z;
+        distances[count] = distance;
+        normals[count++] = normal;
+        if (item.meta.w == 0u) {
+            result.state.x = 1u;
+            continue;
+        }
+        if (inputRay.listener.w < 0.5 || !priorObject) {
+            result.energy0 *= item.energy0;
+            result.energy1 *= item.energy1;
+        }
+    }
+    result.state.y = count;
+    result.state.z = raw;
+    results[lane] = result;
+}

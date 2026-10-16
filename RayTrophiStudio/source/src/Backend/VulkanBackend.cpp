@@ -1,4 +1,4 @@
-﻿#include "PostProcess/Exposure.h"
+#include "PostProcess/Exposure.h"
 #include "Viewport/AutomaticCutout.h"
 /*
  * =========================================================================
@@ -855,6 +855,8 @@ void VulkanDevice::shutdown() {
         // First: a compile worker still uses the device, the layouts and the cache.
         shutdownRTPipelineBuild();
         vkDeviceWaitIdle(m_device);
+
+        acousticPass.reset();
 
         {
             std::lock_guard<std::mutex> lock(m_rtDescriptorMutex);
@@ -6877,6 +6879,7 @@ bool VulkanDevice::ensureFrameSlotsCreated() {
 void VulkanDevice::destroyFrameSlots() {
     for (auto& slot : m_frameSlots) {
         if (slot.fence) {
+            if (acousticPass) acousticPass->retireFence(slot.fence);
             vkDestroyFence(m_device, slot.fence, nullptr);
             slot.fence = VK_NULL_HANDLE;
         }
@@ -7090,6 +7093,7 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
         if (wr != VK_SUCCESS) return false;
     }
     m_exposureMeter.consume(slot);
+    if (acousticPass) acousticPass->collect(fs.fence);
     vkResetFences(m_device, 1, &fs.fence);
 
     if (vkResetCommandBuffer(fs.cmd, 0) != VK_SUCCESS) return false;
@@ -7221,13 +7225,19 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         0, 0, nullptr, 0, nullptr, 1, &ldrBarrier);
 
-    if (vkEndCommandBuffer(cmd) != VK_SUCCESS) return false;
+    if (acousticPass) acousticPass->record(cmd, fs.fence);
+    if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
+        if (acousticPass) acousticPass->submitted(fs.fence, false);
+        return false;
+    }
 
     VkSubmitInfo submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cmd;
     const VkResult submitResult = vkQueueSubmit(m_computeQueue, 1, &submit, fs.fence);
+    fs.acousticOnly = false;
+    if (acousticPass) acousticPass->submitted(fs.fence, submitResult == VK_SUCCESS);
     if (submitResult != VK_SUCCESS) {
         // Measured as a per-frame flood after a memory-pressure recreate, with
         // no result code -- the one thing needed to tell OOM from device loss.
@@ -18189,6 +18199,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
     }
 
     if (this->m_currentSamples >= this->m_targetSamples) {
+        if (!m_tonemapRefreshPending) serviceAcousticGpuIdle();
         bool tonemapRefreshed = false;
         // ── TONEMAP-ONLY PRESENTATION REFRESH ────────────────────────────────
         // The sample-heatmap view (14) resolves at tonemap time; toggling it
@@ -18779,9 +18790,13 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         float    debugExposure; // false-color / energy gain
         uint32_t debugFlags;    // reserved
         float    debugParam;    // overlay: 0 = pure debug … 1 = pure beauty
+        float acousticSource[14]; // Audio/AcousticRenderDebug.h; scalar array stride 4
     };
 
+    static_assert(sizeof(CameraPushConstants) == 252, "CameraPC acoustic debug ABI");
     CameraPushConstants pushConst{};
+    std::copy(m_acousticRenderSource.begin(), m_acousticRenderSource.end(),
+        pushConst.acousticSource);
     
     // Camera image plane from m_camera. ★ ONE formula (AerialFroxelParams.h),
     // shared with the RayFusion aerial froxel: raygen projects hit directions
@@ -19177,7 +19192,8 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             // 2. Consume the previously-submitted slot's staging if any. This is where
             //    overlap happens: while CPU memcpy + SDL update run, GPU is already
             //    chewing on submitSlot's command buffer.
-            const bool canConsume = m_tonemappedSlotInFlight[consumeSlot];
+            const bool canConsume = m_tonemappedSlotInFlight[consumeSlot] &&
+                m_device->frameSlotHasImage(consumeSlot);
             bool consumed = false;
             auto consumeTonemappedSlot = [&](uint32_t slot) {
                 if (!m_device->waitFrameSlot(slot)) return;

@@ -1,5 +1,26 @@
 # Scene acoustics: shared-material direction
 
+2026-10-16 surface-debug source update: Render Settings view 15 now provides a
+selected-source **Acoustic Energy (solid proxy)** surface field on Vulkan RT,
+replacing the screen-space information card. Shared source selection and render
+settings are available through UI/Python/IPC. This first field uses distance/cone
+attenuation and solid geometry visibility, not the six-band transmission solver or
+reflection physics. The user confirmed the built surface view and source-selection focus fix; quantitative
+rendered acceptance remains open. See
+[visualizer contract and checklist](SCENE_ACOUSTICS_DEBUG.md).
+
+Next design checkpoint after neighborhood measurements:
+[relevance, bbox/SDF proxies and debug views](SCENE_ACOUSTICS_PROPAGATION_DEBUG_PLAN.md).
+Bounds are candidate filters or explicit approximations; they do not silently
+become exact acoustic walls. Phase-aware wave work remains distinct from the
+current six-band energy/direct-path preview.
+
+2026-10-16 acceptance update: the user-built mask-cast correction passed all
+13 Vulkan RT external GPU/native PCM cases after the separately accepted
+RayFusion run. See [GPU acceptance record](SCENE_ACOUSTICS_GPU.md). Small-scene
+direct-path acceptance is recorded for both; lifecycle stress, large-scene
+performance and subsequent propagation stages remain open.
+
 2026-10-15: user extended the audio target to object interaction, obstruction,
 transmission and physical echoes. Shared object materials precede propagation;
 see OBJECT_SUBSTANCE_BINDINGS.md for the implemented source checkpoint. Test
@@ -12,6 +33,19 @@ is ready for the user's build. Object-barrier mode counts a named object once as
 an explicit assembly approximation; closed-wall thickness, spectral filtering,
 background solving and reflections remain incomplete. The 2026-10-16 external IPC/native PCM acceptance passed for the direct-path
 preview; this does not validate the remaining physics stages.
+
+2026-10-16 next implementation slice:
+[GPU-first bounded solver](SCENE_ACOUSTICS_BACKGROUND_PLAN.md). Reuse existing GPU
+AS/hit infrastructure with asynchronous result collection, explicit acoustic
+coverage and stale-result rejection. Do not force lazy CPU BVH updates for live
+audio. This supersedes the CPU-worker proposal. The first
+[GPU source delivery](SCENE_ACOUSTICS_GPU.md) is implemented; user shader/Studio
+build and final external/manual acceptance remain pending.
+
+2026-10-16 follow-up: user-built RayFusion GPU/native PCM acceptance passed
+13 cases; see [GPU acceptance checkpoint](SCENE_ACOUSTICS_GPU.md). Vulkan RT,
+in-flight stress, large-scene performance and remaining propagation stages are
+still separate acceptance gates.
 
 1. **Shared material authority:** object -> SubstanceLibrary profile and explicit
    overrides; domain-independent binding, MSF compatibility, project/history and

@@ -18,6 +18,7 @@
 #include "UI/GizmoOcclusion.h"
 #include "PerfProfile.h"
 #include "UI/AudioUI.h"
+#include "Audio/AcousticRenderDebug.h"
 #include "UI/AudioWorkspaceUI.h"
 #include "UI/StormGizmoUI.h"
 #include "Autosave.h"
@@ -1826,7 +1827,7 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
                 "Photon Energy (surface)", "Caustic Cells", "Photon Directions",
                 "Bounce Count", "Transmission", "Absorption", "Medium Density (interior)",
                 "Normal (first hit)", "Albedo (first hit)", "Depth", "Material ID",
-                "Sample Heatmap"
+                "Sample Heatmap", "Acoustic Energy (solid proxy)"
             };
             const char* dv_tips[] = {
                 "Normal beauty render — debug visualizer off.",
@@ -1860,15 +1861,17 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
                 "check. Only 'no hit' is black (material ID 0 is valid).",
                 "Per-pixel ACCUMULATED SAMPLE COUNT, read at display time — the beauty "
                 "render keeps accumulating underneath and toggling never resets it. Best "
-                "with Adaptive Sampling on; Exposure scales the ramp."
+                "with Adaptive Sampling on; Exposure scales the ramp.",
+                "Selected-source direct acoustic energy on visible surfaces. Distance and cone "
+                "attenuation with solid geometry blockers; no reflections or wall transmission."
             };
-            int dv = std::clamp(ctx.render_settings.debug_view, 0, 14);
+            int dv = std::clamp(ctx.render_settings.debug_view, 0, 15);
             if (ImGui::BeginCombo("View Mode##dbgview", dv_items[dv])) {
-                for (int i = 0; i < 15; ++i) {
-                    const bool unavailable = false; // all 15 views live
+                for (int i = 0; i < 16; ++i) {
+                    const bool unavailable = false; // all registered views live
                     if (unavailable) ImGui::BeginDisabled();
                     if (ImGui::Selectable(dv_items[i], dv == i)) {
-                        ctx.render_settings.debug_view = i;
+                        (void)rtapi::setRenderBudget(std::nullopt, std::nullopt, std::nullopt, i);
                         // Kick one render-loop pass even when accumulation is
                         // complete — the change tracker only runs inside the
                         // render block, and the tonemap-only refresh (heatmap)
@@ -1883,6 +1886,7 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
                 }
                 ImGui::EndCombo();
             }
+            audio::drawAcousticRenderDebugControls(ctx);
             if (dv != 0) {
                 ImGui::PushTextWrapPos(0.0f);
                 ImGui::TextDisabled("%s", dv_tips[dv]);
@@ -3125,7 +3129,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                                 "Photon Energy (surface)", "Caustic Cells", "Photon Directions",
                                 "Bounce Count", "Transmission", "Absorption", "Medium Density (interior)",
                                 "Normal (first hit)", "Albedo (first hit)", "Depth", "Material ID",
-                                "Sample Heatmap"
+                                "Sample Heatmap", "Acoustic Energy (solid proxy)"
                             };
                             const char* dv_tips2[] = {
                                 "Normal beauty render — debug visualizer off.",
@@ -3153,15 +3157,17 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                                 "(material ID 0 is valid).",
                                 "Per-pixel accumulated sample count at display time — beauty "
                                 "keeps accumulating; toggling never resets. Best with Adaptive "
-                                "Sampling on."
+                                "Sampling on.",
+                                "Selected-source surface energy with solid geometry blockers. "
+                                "No wall transmission, reflections or frequency response."
                             };
-                            int dv = std::clamp(ctx.render_settings.debug_view, 0, 14);
+                            int dv = std::clamp(ctx.render_settings.debug_view, 0, 15);
                             if (ImGui::BeginCombo("Debug View##dbgview2", dv_items2[dv])) {
-                                for (int i = 0; i < 15; ++i) {
-                                    const bool unavailable = false; // all 15 views live
+                                for (int i = 0; i < 16; ++i) {
+                                    const bool unavailable = false; // all registered views live
                                     if (unavailable) ImGui::BeginDisabled();
                                     if (ImGui::Selectable(dv_items2[i], dv == i)) {
-                                        ctx.render_settings.debug_view = i;
+                                        (void)rtapi::setRenderBudget(std::nullopt, std::nullopt, std::nullopt, i);
                                         ctx.start_render = true; // change tracker runs only inside the render block
                                     }
                                     if (unavailable) ImGui::EndDisabled();
@@ -3171,6 +3177,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                                 }
                                 ImGui::EndCombo();
                             }
+                            audio::drawAcousticRenderDebugControls(ctx);
                             if (dv != 0) {
                                 ImGui::PushTextWrapPos(0.0f);
                                 ImGui::TextDisabled("%s", dv_tips2[dv]);

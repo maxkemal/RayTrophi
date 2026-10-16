@@ -1,4 +1,6 @@
 #include "Audio/AcousticScene.h"
+#include "Audio/AcousticRenderDebug.h"
+#include "SceneSelection.h"
 #include "Audio/AudioAuthoring.h"
 #include "ObjectSubstance.h"
 #include "scene_ui.h"
@@ -164,5 +166,54 @@ json querySceneAcoustics(UIContext& ctx, const json& params) {
     result["boundary_mode"] = mode;
     result["materials_revision"] = matter::objectSubstanceFingerprint(ctx.scene);
     return result;
+}
+json queryAcousticDebug(UIContext& ctx, const json& params) {
+    require(params.is_object() && params.size() == 1 && params.contains("id") &&
+        params.at("id").is_string(), "acoustics_debug requires only a string id");
+    require(ctx.scene.camera != nullptr, "Acoustic debug requires a listener camera");
+    const auto data = ctx.scene.audio->snapshot();
+    json emitter;
+    for (const auto& candidate : data.at("emitters")) {
+        if (candidate.at("id") == params.at("id")) {
+            emitter = candidate;
+            break;
+        }
+    }
+    require(!emitter.is_null(), "Acoustic debug source does not exist");
+    const auto position = worldPose(ctx, emitter).at("position");
+    const auto& camera = ctx.scene.camera->lookfrom;
+    const json listener = {camera.x, camera.y, camera.z};
+    double squared = 0;
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        const double delta = position.at(axis).get<double>() - listener.at(axis).get<double>();
+        squared += delta * delta;
+    }
+    json preview = nullptr;
+    for (const auto& entry : ctx.scene.audio->invoke("acoustics_preview_status", json::object())) {
+        if (entry.at("id") == params.at("id")) {
+            preview = entry;
+            break;
+        }
+    }
+    const auto report = preview.is_null() ? json::object() :
+        preview.value("report", json::object());
+    const bool matches = report.contains("source_position") &&
+        report.at("source_position") == position &&
+        report.value("listener_position", json()) == listener;
+    const auto surface = acousticRenderSource(ctx);
+    const bool selected = ctx.selection.selected.type == SelectableType::AudioSource &&
+        ctx.selection.selected.audio_source_id == params.at("id").get<std::string>();
+    return {{"surface_visualizer", {{"view", kAcousticSurfaceDebugView},
+        {"active", ctx.render_settings.debug_view == kAcousticSurfaceDebugView},
+        {"source_selected", selected}, {"source_eligible", selected && surface[7] > 0.5f},
+        {"model", "direct_solid_geometry_proxy"}, {"calibrated_spl", false},
+        {"db_range", {-60, 0}}, {"extra_gpu_readback_bytes", 0}}},
+        {"id", params.at("id")}, {"source_position", position},
+        {"listener_position", listener}, {"distance_scene_units", std::sqrt(squared)},
+        {"min_distance", emitter.at("min_distance")},
+        {"max_distance", emitter.at("max_distance")}, {"preview", preview},
+        {"result_pose_matches", matches}, {"range_is_hard_cutoff", false},
+        {"representation", "direct_path_summary"},
+        {"hit_positions_available", false}, {"issues_gpu_query", false}};
 }
 } // namespace audio

@@ -59,6 +59,7 @@ public:
     // measures the vkQueueSubmit itself, which must NOT include a fence wait.
     bool submitFrame(const VulkanRT::ImageHandle& colorImage,
                      double* submitMs = nullptr);
+    bool submitAcousticOnly();
 
     // Copies the newest completed, not-yet-consumed slot to dst. Never waits.
     // false means the host should keep presenting its cached previous frame.

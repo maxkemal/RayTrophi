@@ -28,6 +28,7 @@ def main():
     assert not client.call("audio.acoustics_preview_status"), "Active preview exists"
     camera = client.call("camera.get")["position"]
     objects = client.call("scene.list_objects")
+    render_settings = client.call("render.get_settings")
     mode = initial["playback_mode"]
     walls, source, asset = [], None, None
     material = "Acoustic acceptance " + str(time.time_ns())
@@ -62,7 +63,20 @@ def main():
             assert live and live["status"] == status, (label, live)
             assert abs(live["amplitude_gain"] - expected) < 1e-5, (label, live)
             if hits is not None:
-                assert len(live["report"]["hits"]) == hits, (label, live)
+                path = live["report"]
+                crossings = path.get("crossings", len(path.get("hits", [])))
+                assert crossings == hits, (label, live)
+                if "solver" in path:
+                    expected_state = "failed" if status == "unknown_material" else "ready"
+                    assert path["solver"]["state"] == expected_state, (label, live)
+                    assert path["solver"]["cpu_bvh"] is False, (label, live)
+                    assert path["solver"]["result_bytes_per_source"] == 64, (label, live)
+        debug = client.call("audio.acoustics_debug", id=source)
+        assert debug["id"] == source and debug["issues_gpu_query"] is False
+        assert debug["range_is_hard_cutoff"] is False
+        assert debug["hit_positions_available"] is False
+        assert len(debug["source_position"]) == len(debug["listener_position"]) == 3
+        assert debug["distance_scene_units"] >= 0
         time.sleep(0.4)
         readings = []
         for _ in range(16):
@@ -104,6 +118,26 @@ def main():
             source = client.call("audio.create", name="Acoustic acceptance tone", asset_id=asset,
                                  position=[camera[0] + 10, camera[1], camera[2]],
                                  spatial=True, rolloff=0, loop=True, gain=0.5)["id"]
+            for invalid in ({}, {"id": 7}, {"id": "__missing_acoustic_source__"},
+                            {"id": source, "extra": True}):
+                try:
+                    client.call("audio.acoustics_debug", **invalid)
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError(("Invalid debug parameters accepted", invalid))
+            client.call("audio.select", id=source)
+            client.call("render.set_settings", debug_view=15)
+            state = client.call("render.get_settings")
+            assert state["debug_view"] == 15 and state["debug_view_name"] == "acoustic_surface"
+            visualizer = client.call("audio.acoustics_debug", id=source)["surface_visualizer"]
+            assert visualizer["active"] and visualizer["source_selected"]
+            assert visualizer["source_eligible"] and not visualizer["calibrated_spl"]
+            assert visualizer["extra_gpu_readback_bytes"] == 0
+            assert visualizer["model"] == "direct_solid_geometry_proxy"
+            ok, _ = client.try_call("render.set_settings", debug_view=16)
+            assert not ok and client.call("render.get_settings")["debug_view"] == 15
+            client.call("render.set_settings", debug_view=render_settings["debug_view"])
             client.call("audio.playback_update", mode="continuous")
             client.call("audio.play", id=source)
             sample("baseline disabled", 1)
@@ -158,13 +192,16 @@ def main():
             [("audio.remove", {"id": source})] if source else []
         ) + ([("audio.asset_remove", {"id": asset})] if asset else []) + [
             ("scene.delete", {"name": wall}) for wall in reversed(walls)
-        ] + [("audio.playback_update", {"mode": mode}),
+        ] + [("render.set_settings", {"debug_view": render_settings["debug_view"]}),
+             ("audio.playback_update", {"mode": mode}),
              ("substance.remove", {"name": material})]:
             ok, result = client.try_call(method, **params)
             report["cleanup"].append({"method": method, "ok": ok, "result": result})
-        report["remaining_objects"] = client.call("scene.list_objects")
+        ok, result = client.try_call("scene.list_objects")
+        report["remaining_objects"] = result if ok else {"unavailable": result}
         report["original_objects"] = objects
-        report["final_audio"] = client.call("audio.list")
+        ok, result = client.try_call("audio.list")
+        report["final_audio"] = result if ok else {"unavailable": result}
         report["note"] = "Playback mode restored; explicit-mode flag and next_id may advance. Undo history preserved."
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")

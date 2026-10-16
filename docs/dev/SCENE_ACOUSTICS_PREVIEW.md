@@ -1,5 +1,10 @@
 # Scene acoustics: first listening checkpoint
 
+2026-10-16 GPU source revision: automatic preview now uses the active backend's
+fenced GPU query path; see [GPU contract and build checklist](SCENE_ACOUSTICS_GPU.md).
+The synchronous capture/BVH description below records the earlier accepted CPU
+implementation. Its PCM acceptance is not acceptance of the new GPU revision.
+
 2026-10-15 source delivery. 2026-10-16: after the user built Studio and explicitly
 requested measurements, external IPC acceptance passed in the running application.
 [Raw report](acoustics_acceptance_20261016.json) records 13 cases, including actual

@@ -5425,8 +5425,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                                              opt(transmission_bounces), opt(debug_view)));
     }, py::arg("max_bounces") = py::none(), py::arg("diffuse_bounces") = py::none(),
        py::arg("transmission_bounces") = py::none(), py::arg("debug_view") = py::none(),
-       "Set the bounce budget (1..64) and/or the Debug Visualizer view (0..14, "
-       "6 = Bounce Count). Omitted arguments are unchanged; sub-budgets are "
+       "Set the bounce budget (1..64) and/or the Debug Visualizer view (0..15, "
+       "6 = Bounce Count, 15 = Acoustic Surface). Omitted arguments are unchanged; sub-budgets are "
        "clamped to max_bounces like the panel does.");
     render.def("volume_stats", [] {
         const rtapi::VolumeInstrumentationInfo s = rtapi::volumeStats();

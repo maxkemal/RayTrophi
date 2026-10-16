@@ -1,5 +1,13 @@
 # Audio sound design and preview
 
+2026-10-16 continuation: direct-path acoustic preview passed external IPC/native
+PCM acceptance; see [the acoustic roadmap](SCENE_ACOUSTICS_ROADMAP.md). The next
+implementation slice is specified in
+[the background solver plan](SCENE_ACOUSTICS_BACKGROUND_PLAN.md). The subsequent
+[GPU source delivery](SCENE_ACOUSTICS_GPU.md) implements fenced direct queries;
+user shader/Studio build and live acceptance remain pending. Spectral propagation
+and reflections remain future work.
+
 2026-10-15 scope extension: user requested physical scene acoustics and approved
 domain-independent object substances first. The source checkpoint is documented in
 [OBJECT_SUBSTANCE_BINDINGS.md](OBJECT_SUBSTANCE_BINDINGS.md); propagation stages are

@@ -26,7 +26,8 @@ void drawAcousticDiagnostics(UIContext& ctx, const nlohmann::json& emitter) {
         error.clear();
     }
     ImGui::TextWrapped("Direct path preview affects spatial manual sources in this session. "
-                       "Unknown materials or incomplete geometry bypass attenuation.");
+                       "It uses the active GPU scene; unavailable queries, unknown materials "
+                       "or incomplete geometry bypass attenuation.");
     json live;
     for (const auto& entry : ctx.scene.audio->invoke("acoustics_preview_status", json::object())) {
         if (entry.at("id") == emitter.at("id")) {

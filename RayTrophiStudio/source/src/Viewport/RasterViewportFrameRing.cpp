@@ -1,6 +1,7 @@
 #include "Viewport/RasterViewportFrameRing.h"
 
 #include "Backend/VulkanBackend.h"
+#include "Backend/VulkanFailureReporting.h"
 
 #include <array>
 #include <chrono>
@@ -56,6 +57,7 @@ struct RasterViewportFrameRing::Impl {
                 device->destroyBuffer(slot.readback);
             }
             if (slot.fence != VK_NULL_HANDLE) {
+                if (device->acousticPass) device->acousticPass->retireFence(slot.fence);
                 vkDestroyFence(vkDevice, slot.fence, nullptr);
                 slot.fence = VK_NULL_HANDLE;
             }
@@ -202,6 +204,7 @@ VkCommandBuffer RasterViewportFrameRing::beginFrame(double* slotWaitMs) {
         slot.inFlight = false;
     }
 
+    if (impl_->device->acousticPass) impl_->device->acousticPass->collect(slot.fence);
     const VkResult resetFenceResult = vkResetFences(vkDevice, 1, &slot.fence);
     if (resetFenceResult != VK_SUCCESS) {
         impl_->lastResult = resetFenceResult;
@@ -286,8 +289,12 @@ bool RasterViewportFrameRing::submitFrame(const VulkanRT::ImageHandle& colorImag
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         0, 0, nullptr, 0, nullptr, 1, &toGeneral);
 
+    if (impl_->device->acousticPass) impl_->device->acousticPass->record(cmd, slot.fence);
     const VkResult endResult = vkEndCommandBuffer(cmd);
     if (endResult != VK_SUCCESS) {
+        if (impl_->device->acousticPass) {
+            impl_->device->acousticPass->submitted(slot.fence, false);
+        }
         impl_->lastResult = endResult;
         impl_->activeSlot = kNoSlot;
         return false;
@@ -300,6 +307,9 @@ bool RasterViewportFrameRing::submitFrame(const VulkanRT::ImageHandle& colorImag
     const auto submitStart = std::chrono::steady_clock::now();
     const VkResult submitResult = vkQueueSubmit(impl_->device->getComputeQueue(), 1,
                                                 &submitInfo, slot.fence);
+    if (impl_->device->acousticPass) {
+        impl_->device->acousticPass->submitted(slot.fence, submitResult == VK_SUCCESS);
+    }
     const auto submitEnd = std::chrono::steady_clock::now();
     if (submitMs) {
         *submitMs = std::chrono::duration<double, std::milli>(
@@ -317,6 +327,58 @@ bool RasterViewportFrameRing::submitFrame(const VulkanRT::ImageHandle& colorImag
     impl_->submitSlot = (impl_->activeSlot + 1u) % kSlotCount;
     impl_->activeSlot = kNoSlot;
     return true;
+}
+
+bool RasterViewportFrameRing::submitAcousticOnly() {
+    if (!impl_->device || !impl_->device->acousticPass || impl_->activeSlot != kNoSlot) {
+        return false;
+    }
+    auto& device = *impl_->device;
+    auto& pass = *device.acousticPass;
+    if (!pass.hasPending()) {
+        return false;
+    }
+    for (auto& slot : impl_->slots) {
+        if (slot.serial > impl_->consumedSerial) {
+            continue;
+        }
+        if (slot.inFlight && vkGetFenceStatus(device.getDevice(), slot.fence) != VK_SUCCESS) {
+            continue;
+        }
+        pass.collect(slot.fence);
+        if (vkResetCommandBuffer(slot.commandBuffer, 0) != VK_SUCCESS) {
+            return false;
+        }
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (vkBeginCommandBuffer(slot.commandBuffer, &begin) != VK_SUCCESS) {
+            return false;
+        }
+        const bool recorded = pass.record(slot.commandBuffer, slot.fence);
+        const bool ended = vkEndCommandBuffer(slot.commandBuffer) == VK_SUCCESS;
+        if (!recorded || !ended) {
+            pass.submitted(slot.fence, false);
+            return false;
+        }
+        if (vkResetFences(device.getDevice(), 1, &slot.fence) != VK_SUCCESS) {
+            pass.submitted(slot.fence, false);
+            return false;
+        }
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &slot.commandBuffer;
+        const auto result = VulkanRT::reportVulkanDeviceFailure(
+            vkQueueSubmit(device.getComputeQueue(), 1, &submit, slot.fence),
+            "RasterViewportFrameRing/submitAcousticOnly");
+        impl_->lastResult = result;
+        pass.submitted(slot.fence, result == VK_SUCCESS);
+        slot.inFlight = result == VK_SUCCESS;
+        slot.serial = 0; // No image was produced; never publish old staging as a new frame.
+        return result == VK_SUCCESS;
+    }
+    return false; // Busy ring: keep pending work without blocking rendering.
 }
 
 bool RasterViewportFrameRing::consumeNewestReady(void* dst,

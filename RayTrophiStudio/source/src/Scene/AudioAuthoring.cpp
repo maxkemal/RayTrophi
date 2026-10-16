@@ -130,6 +130,9 @@ nlohmann::json author(UIContext& ctx, SceneHistory* history, const std::string& 
     if (AudioService::isAuthoring(operation) && rtapi::renderOutputPending()) {
         throw std::runtime_error("Scene audio authoring is locked by the render job");
     }
+    if (operation == "acoustics_debug") {
+        return queryAcousticDebug(ctx, params);
+    }
     if (operation == "acoustics_trace") {
         return querySceneAcoustics(ctx, params);
     }
@@ -227,9 +230,6 @@ nlohmann::json author(UIContext& ctx, SceneHistory* history, const std::string& 
         }
         ctx.selection.multi_selection.push_back(item);
         ctx.scene.audio->invoke("workspace_update", {{"selected_clip", ""}});
-        if (ctx.scene_ui_ptr) {
-            ctx.scene_ui_ptr->tab_to_focus = "Audio";
-        }
     }
     syncScene(ctx);
     if (mutation) {
