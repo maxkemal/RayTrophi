@@ -1,9 +1,6 @@
 #include "Audio/AcousticPreview.h"
-#include "Audio/AcousticScene.h"
-#include "Audio/AudioService.h"
-#include "scene_ui.h"
-#include "scene_data.h"
-#include <chrono>
+#include <atomic>
+#include <cstdint>
 #include <cmath>
 #include <stdexcept>
 
@@ -39,7 +36,9 @@ json AcousticPreview::configure(const json& emitter, const json& params) {
     require(eligible(emitter), "Acoustic preview requires a spatial source with manual reaction");
     require(entries_.contains(id) || entries_.size() < 4,
         "Acoustic preview supports at most four sources; disable another first");
+    static std::atomic<std::uint64_t> revision{0};
     entries_[id] = {{"id", id}, {"enabled", true}, {"meters_per_unit", units},
+        {"preview_revision", ++revision},
         {"boundary_mode", mode}, {"amplitude_gain", 1}, {"status", "pending"}};
     return entries_.at(id);
 }
@@ -59,6 +58,9 @@ void AcousticPreview::update(const std::string& id, const json& report) {
     }
     auto& entry = found->second;
     entry["report"] = report;
+    if (report.contains("solver")) {
+        entry["solver"] = report.at("solver");
+    }
     entry["amplitude_gain"] = 1;
     entry["status"] = report.value("transmission_status", "error");
     const auto energy = report.value("transmission_energy", json());
@@ -88,30 +90,4 @@ float AcousticPreview::gain(const json& emitter) const {
         found->second.at("amplitude_gain").get<float>();
 }
 
-void tickSceneAcoustics(UIContext& ctx) {
-    static auto next = std::chrono::steady_clock::time_point{};
-    const auto now = std::chrono::steady_clock::now();
-    if (now < next) {
-        return;
-    }
-    next = now + std::chrono::milliseconds(250);
-    const auto entries = ctx.scene.audio->invoke("acoustics_preview_status", json::object());
-    for (const auto& entry : entries) {
-        const std::string id = entry.at("id");
-        json report;
-        try {
-            const auto emitter = ctx.scene.audio->invoke("get", {{"id", id}});
-            if (!eligible(emitter)) {
-                report = {{"transmission_status", "source_ineligible"}};
-            } else {
-                report = querySceneAcoustics(ctx, {{"id", id},
-                    {"meters_per_unit", entry.at("meters_per_unit")},
-                    {"boundary_mode", entry.at("boundary_mode")}, {"max_triangles", 100000}});
-            }
-        } catch (const std::exception& error) {
-            report = {{"transmission_status", "error"}, {"error", error.what()}};
-        }
-        ctx.scene.audio->acousticPreviewResult(id, report);
-    }
-}
 }

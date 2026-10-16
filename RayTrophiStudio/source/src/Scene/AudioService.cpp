@@ -475,7 +475,7 @@ const std::vector<std::string>& AudioService::operations() {
         "list", "get", "select", "status", "asset_import", "asset_relink", "asset_remove", "create", "update",
         "duplicate", "remove", "play", "pause", "stop", "stop_all", "preview", "preview_stop",
         "preview_mute", "preview_file", "append", "signal_set", "signals_clear",
-        "environment_setup", "resume_automatic", "domains", "acoustics_trace", "acoustics_preview", "acoustics_preview_status", "thunder_setup", "thunder_update",
+        "environment_setup", "resume_automatic", "domains", "acoustics_debug", "acoustics_trace", "acoustics_preview", "acoustics_preview_status", "thunder_setup", "thunder_update",
         "thunder_event", "playback_update", "mixer_get", "mixer_update", "mixer_reset_peaks",
         "arrange_preview", "arrange_stop", "arrange_status",
         "track_list", "track_create", "track_update", "track_remove", "track_reorder",
@@ -514,6 +514,9 @@ std::vector<std::string> AudioService::parameters(const std::string& op) {
     }
     if (op == "acoustics_preview_status") {
         return {};
+    }
+    if (op == "acoustics_debug") {
+        return {"id"};
     }
     if (op == "acoustics_trace") {
         return acousticTraceParameters();
@@ -689,6 +692,9 @@ json AudioService::invoke(const std::string& op, const json& p) {
             s.apply(*voice->second, emitter);
         }
         return result;
+    }
+    if (op == "acoustics_debug") {
+        throw std::invalid_argument("acoustics_debug requires a scene-bound AudioAuthoring context");
     }
     if (op == "acoustics_trace") {
         throw std::invalid_argument("acoustics_trace requires a scene-bound AudioAuthoring context");

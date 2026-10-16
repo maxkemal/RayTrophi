@@ -297,7 +297,7 @@ struct RenderSettings {
     // 0=Off 1=Photon Grid(vol) 2=Light Shafts 3=Photon Energy 4=Caustic Cells
     // 5=Photon Directions(Faz2) 6=Bounce Count 7=Transmission 8=Absorption
     // 9=Medium Density(interior) 10=Normal 11=Albedo 12=Depth 13=Material ID
-    // 14=Sample Heatmap
+    // 14=Sample Heatmap 15=Acoustic Energy (solid triangle proxy, raygen)
     // 6-8, 10-13 ve 14 TONEMAP tarafında çözülür (kalıcı AOV'lardan): anında
     // açılır/kapanır, accumulation'a dokunmaz, reset tetiklemez. 1-4 ve 9
     // raygen tarafındadır (veri üretimini değiştirir) → geçişte reset gerekir.

@@ -3206,6 +3206,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
 }
 
 void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, int height, void* fb, void* tex) {
+    if (serviceAcousticGpuRasterIdle()) return;
     const auto frameStart = std::chrono::steady_clock::now();
     m_interactiveViewport.initialized = true;
     const ViewportMode requestedMode = m_viewportMode;

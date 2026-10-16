@@ -58,9 +58,6 @@ void select(UIContext& ctx, const std::string& id) {
     if (result.contains("id")) {
         selected = id;
         ctx.scene.audio->invoke("workspace_update", {{"selected_clip", ""}});
-        if (ctx.scene_ui_ptr) {
-            ctx.scene_ui_ptr->tab_to_focus = "Audio";
-        }
     }
 }
 void connectEnvironment(UIContext& ctx, const json& params = json::object()) {

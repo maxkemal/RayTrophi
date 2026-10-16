@@ -1,4 +1,5 @@
 #include "PostProcess/PostSurface.h"
+#include "Core/FatalSignalTrace.h"
 #include "Backend/VulkanRecoveryPolicy.h"
 #include "Viewport/ViewportGpuWorkPolicy.h"
 #include "Viewport/ViewportPresentationStats.h"
@@ -489,6 +490,7 @@ LONG CALLBACK vectoredExceptionHandler(PEXCEPTION_POINTERS exceptionInfo) {
 
 void signalHandler(int sig) {
     emergencyStartupLog("[FATAL] Signal received: " + std::to_string(sig));
+    writeFatalSignalTrace(sig);
     const int firstErr = rtOptixFirstCudaError();
     if (firstErr != 0) {
         emergencyStartupLog("[STATE] CUDA error latched at signal: code=" + std::to_string(firstErr) +

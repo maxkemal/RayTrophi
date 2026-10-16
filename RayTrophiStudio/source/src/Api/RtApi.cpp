@@ -1800,8 +1800,8 @@ const char* debugViewName(int v) {
         "off", "photon_grid", "light_shafts", "photon_energy", "caustic_cells",
         "photon_directions", "bounce_count", "transmission", "absorption",
         "medium_density", "normal", "albedo", "depth", "material_id",
-        "sample_heatmap"};
-    return (v >= 0 && v < 15) ? names[v] : "unknown";
+        "sample_heatmap", "acoustic_surface"};
+    return (v >= 0 && v < 16) ? names[v] : "unknown";
 }
 } // namespace
 
@@ -1826,13 +1826,16 @@ Result setRenderBudget(std::optional<int> max_bounces,
     auto inRange = [](const std::optional<int>& v) { return !v || (*v >= 1 && *v <= 64); };
     if (!inRange(max_bounces) || !inRange(diffuse_bounces) || !inRange(transmission_bounces))
         return Result::fail("bounce counts must be in [1, 64]");
-    if (debug_view && (*debug_view < 0 || *debug_view > 14))
-        return Result::fail("debug_view must be in [0, 14]");
+    if (debug_view && (*debug_view < 0 || *debug_view > 15))
+        return Result::fail("debug_view must be in [0, 15]");
     auto& rs = g_ctx->render_settings;
     if (max_bounces) rs.max_bounces = *max_bounces;
     if (diffuse_bounces) rs.diffuse_bounces = *diffuse_bounces;
     if (transmission_bounces) rs.transmission_bounces = *transmission_bounces;
-    if (debug_view) rs.debug_view = *debug_view;
+    if (debug_view) {
+        rs.debug_view = *debug_view;
+        g_ctx->start_render = true;
+    }
     // The panel clamps the sub-budgets to the total after every edit.
     rs.diffuse_bounces = std::clamp(rs.diffuse_bounces, 1, rs.max_bounces);
     rs.transmission_bounces = std::clamp(rs.transmission_bounces, 1, rs.max_bounces);

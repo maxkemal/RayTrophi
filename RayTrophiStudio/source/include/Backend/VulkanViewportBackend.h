@@ -23,6 +23,7 @@ public:
     bool getInteractiveViewportFrameTelemetry(RasterFrameTelemetry& out) const override;
 
 private:
+    bool serviceAcousticGpuRasterIdle();
     std::shared_ptr<RayFusion::ProbeOverlay> m_probeOverlay;
     void recordRayFusionProbeOverlay(VkCommandBuffer cmd, const Matrix4x4& viewProj);
     // Particle billboards (VulkanViewportParticles.cpp).

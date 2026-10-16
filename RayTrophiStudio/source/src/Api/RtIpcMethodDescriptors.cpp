@@ -6662,7 +6662,7 @@ static const MethodParam params_render_set_settings[] = {
 };
 static const MethodDescriptor desc_render_set_settings = {
     "render.set_settings", "render",
-    "Set the path tracer bounce budget (total, diffuse, transmission; 1..64) and/or the Debug Visualizer view (0..14, 6 = Bounce Count)",
+    "Set the path tracer bounce budget (total, diffuse, transmission; 1..64) and/or the Debug Visualizer view (0..15, 6 = Bounce Count, 15 = Acoustic Surface)",
     "Writes the same settings the panel edits; the main loop resets accumulation on change. diffuse/transmission are clamped to max_bounces like the panel does. Raising max_bounces also raises the free-pass cap (max_bounces + 32), so a fix by 'more bounces' does not by itself tell which budget was short -- read render.volume_stats paths_bounce_capped vs paths_pass_capped.",
     "render", "Render", false, "any",
     "render|set|settings|bounces|budget|debug|visualizer|quality",

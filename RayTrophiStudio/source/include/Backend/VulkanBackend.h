@@ -1,4 +1,5 @@
 #include "Backend/LensWeatherGpu.h"
+#include "Audio/AcousticRenderDebug.h"
 #include "PostProcess/VulkanExposure.h"
 /*
  * =========================================================================
@@ -43,6 +44,7 @@
 #include <functional>
 #include <mutex>
 #include "Backend/IBackend.h"
+#include "Backend/AcousticGpuPass.h"
 #include "Backend/IViewportBackend.h"
 #include "Backend/SceneTextureManager.h"
 // ProbeTexel is part of the probe producer signature below; the header is
@@ -651,6 +653,12 @@ public:
     // rebuild produces a NEW handle, and a descriptor still pointing at the old
     // one does not fail -- it traces a destroyed structure.
     VkAccelerationStructureKHR getTLASHandle() const { return m_tlas.accel; }
+    uint32_t tlasInstanceCount() const { return m_tlasInstanceCount; }
+    std::shared_ptr<AcousticGpuPass> acousticPass;
+    bool submitAcousticOnly(uint32_t slot);
+    bool frameSlotHasImage(uint32_t slot) const {
+        return slot < kFrameSlotCount && !m_frameSlots[slot].acousticOnly;
+    }
     
     // ========================================================================
     // Buffer Operations
@@ -1619,6 +1627,7 @@ public:
         VkCommandBuffer cmd = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;
         bool everSubmitted = false;
+        bool acousticOnly = false;
     };
     rtpost::VulkanExposure m_exposureMeter;
     FrameSlot m_frameSlots[kFrameSlotCount];
@@ -2279,9 +2288,9 @@ public:
     bool needsViewportRender() const override {
         if (shouldUseInteractiveViewport()) {
             return m_interactiveViewport.dirty || rayFusionProbeUpdatesPending() ||
-                   m_interactiveViewport.presentationPending;
+                   m_interactiveViewport.presentationPending || acousticGpuPending();
         }
-        return m_currentSamples < m_targetSamples;
+        return m_currentSamples < m_targetSamples || acousticGpuPending();
     }
 
     // ========================================================================
@@ -2566,6 +2575,17 @@ protected:
     RayFusion::BounceCounters rayFusionBounceCounters() const;
     bool rayFusionBounceBuffers(VulkanRT::BufferHandle (&buffers)[4]) const;
     bool getRayFusionHitInstances(std::vector<RayFusion::HitInstance>& out) const;
+    bool rayFusionAcousticGeometry(audio::AcousticGpuGeometry& out) const;
+public:
+    bool setAcousticRenderSource(const audio::AcousticRenderSource& source);
+    audio::AcousticGpuGeometry acousticGpuGeometry() const;
+    bool queueAcousticGpu(audio::AcousticGpuBatch batch, const std::string& revision);
+    bool pollAcousticGpu(audio::AcousticGpuCompletion& result);
+    void cancelAcousticGpu();
+    std::string acousticGpuError() const;
+    bool acousticGpuPending() const;
+protected:
+    void serviceAcousticGpuIdle();
     // ★★★ Emissive geometriyi orneklenebilir bir isik listesine cevirir, ve
     //   TLAS'a giren instance kumesinin TAM AYNISINDAN kurar: gizli ya da cap
     //   ile elenmis bir instance'i isik saymak, golge isininin bulamadigi --
@@ -2982,6 +3002,7 @@ protected:
     bool  m_causticsVolDirect = false;
     float m_causticsVolNoise = 0.0f;
     // Debug Visualizer (Render Settings → Debug); see raygen CameraPC mode table
+    audio::AcousticRenderSource m_acousticRenderSource{};
     int   m_debugView = 0;
     float m_debugExposure = 1.0f;
     float m_debugOverlay = 0.0f;

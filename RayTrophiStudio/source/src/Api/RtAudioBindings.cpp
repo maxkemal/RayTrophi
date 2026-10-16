@@ -157,7 +157,7 @@ struct RegisterAudioMethods {
         };
         for (std::size_t i = 0; i < names.size(); ++i) {
             const auto& op = audio::AudioService::operations()[i];
-            const bool read = op == "acoustics_preview_status" || op == "acoustics_trace" || op == "list" || op == "get" || op == "status" || op == "domains" ||
+            const bool read = op == "acoustics_debug" || op == "acoustics_preview_status" || op == "acoustics_trace" || op == "list" || op == "get" || op == "status" || op == "domains" ||
                               op == "mixer_get" || op == "arrange_status" || op == "track_list" || op == "clip_list" || op == "export_status" ||
                               op == "waveform" || op == "capture_status" || op == "workspace_get" ||
                               op == "synth_presets" || op == "telemetry_get" ||
@@ -169,6 +169,8 @@ struct RegisterAudioMethods {
             descriptor.summary = "Scene audio service operation";
             descriptor.notes = op.rfind("acoustics_preview", 0) == 0
                 ? "See docs/dev/SCENE_ACOUSTICS_PREVIEW.md. Session-only broadband audition."
+                : op == "acoustics_debug"
+                ? "See docs/dev/SCENE_ACOUSTICS_DEBUG.md. Read existing results; no GPU dispatch."
                 : op == "acoustics_trace"
                 ? "See docs/dev/SCENE_ACOUSTICS_TRACE.md. Read-only snapshot; no audible propagation."
                 : op == "telemetry_get" || op == "telemetry_update"

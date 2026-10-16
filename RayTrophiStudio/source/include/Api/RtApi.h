@@ -1469,7 +1469,7 @@ struct RenderBudgetInfo {
     int max_bounces = 0;
     int diffuse_bounces = 0;
     int transmission_bounces = 0;
-    int debug_view = 0;           // 0 = off, 6 = Bounce Count; see globals.h
+    int debug_view = 0;           // 0 = off, 6 = Bounce Count, 15 = Acoustic Surface; see globals.h
     std::string debug_view_name;
 };
 RenderBudgetInfo renderBudget();
