@@ -8,6 +8,8 @@
 #include "UI/AudioThunderUI.h"
 #include "UI/AudioMixerUI.h"
 #include "UI/AudioWorkspaceUI.h"
+#include "UI/GizmoOcclusion.h"
+#include "globals.h"
 #include "Audio/AudioThunderBridge.h"
 #include "scene_ui.h"
 #include "scene_data.h"
@@ -317,8 +319,8 @@ void updateListener(UIContext& ctx) {
     ctx.scene.audio->syncTransport(time, playing &&
                                   !rtapi::renderOutputPending());
     audio::syncScene(ctx);
-    audio::tickSceneAcoustics(ctx);
     if (!ctx.scene.camera) {
+        audio::tickSceneAcoustics(ctx);
         audio::tickCloudThunder(ctx);
         return;
     }
@@ -327,6 +329,7 @@ void updateListener(UIContext& ctx) {
     ctx.scene.audio->listener(camera.lookfrom.x, camera.lookfrom.y, camera.lookfrom.z,
         direction.x, direction.y, direction.z, camera.vup.x, camera.vup.y, camera.vup.z);
     audio::tickWeatherReactions(ctx);
+    audio::tickSceneAcoustics(ctx);
     audio::tickCloudThunder(ctx);
 }
 
@@ -349,15 +352,18 @@ void drawViewport(UIContext& ctx, bool ortho, bool showGizmos, bool& hit) {
     const Vec3 f = (cam.lookat - cam.lookfrom).normalize();
     const Vec3 r = f.cross(cam.vup).normalize();
     const Vec3 u = r.cross(f);
-    const float aspect = size.x / size.y;
+    const float aspect = image_width > 0 && image_height > 0 ?
+        static_cast<float>(image_width) / image_height :
+        size.x / size.y;
     const float tangent = std::tan(cam.vfov * 0.00872664626f);
     auto project = [&](const Vec3& p, ImVec2& screen) {
         const auto delta = p - cam.lookfrom;
         const float depth = delta.dot(f);
-        if (!ortho && depth <= 0.1f) {
+        if (!ortho && depth <= 0.01f) {
             return false;
         }
-        const float half = ortho ? cam.ortho_height * 0.5f : depth * tangent;
+        const float half = ortho ?
+            (cam.ortho_height > 1e-4f ? cam.ortho_height : 10.0f) * 0.5f : depth * tangent;
         if (half <= 1e-6f) {
             return false;
         }
@@ -374,7 +380,10 @@ void drawViewport(UIContext& ctx, bool ortho, bool showGizmos, bool& hit) {
         const std::string id = e.at("id");
         json pose;
         try {
-            pose = audio::worldPose(ctx, e);
+            pose = ctx.scene.audio->invoke("source_runtime", {{"id", id}});
+            if (!pose.at("valid").get<bool>()) {
+                continue;
+            }
         } catch (const std::exception&) {
             continue;
         }
@@ -383,13 +392,29 @@ void drawViewport(UIContext& ctx, bool ortho, bool showGizmos, bool& hit) {
         if (!project(p, screen)) {
             continue;
         }
-        draw->AddCircleFilled(screen, 7, selected == id ? IM_COL32(255, 185, 70, 255) :
-                                                       IM_COL32(80, 205, 255, 255));
-        draw->AddText(ImVec2(screen.x + 10, screen.y - 8), IM_COL32(80, 205, 255, 255), "Audio");
+        const float alpha = GizmoOcclusion::pointAlpha(p);
+        const int opacity = static_cast<int>(255 * alpha);
+        draw->AddCircleFilled(screen, 7, selected == id ? IM_COL32(255, 185, 70, opacity) :
+                                                       IM_COL32(80, 205, 255, opacity));
+        const std::string sourceName = e.value("name", std::string());
+        std::string assetName;
+        for (const auto& asset : data.at("assets")) {
+            if (asset.at("id") == e.at("asset_id")) {
+                assetName = asset.value("name", std::string());
+                break;
+            }
+        }
+        std::string label = "Audio: " + (sourceName.empty() ? id : sourceName);
+        if (!assetName.empty() && assetName != sourceName) {
+            label += " (" + assetName + ")";
+        }
+        draw->AddText(ImVec2(screen.x + 10, screen.y - 8),
+                      IM_COL32(80, 205, 255, opacity), label.c_str());
         const auto mouse = ImGui::GetIO().MousePos;
         const float dx = mouse.x - screen.x;
         const float dy = mouse.y - screen.y;
-        if (dx * dx + dy * dy < 144 && viewportInput && !ImGuizmo::IsUsing()) {
+        if (alpha >= 1.0f && dx * dx + dy * dy < 144 && viewportInput &&
+            !ImGuizmo::IsUsing()) {
             hit = true;
             if (ImGui::IsMouseClicked(0)) {
                 select(ctx, id);
@@ -402,15 +427,17 @@ void drawViewport(UIContext& ctx, bool ortho, bool showGizmos, bool& hit) {
         if (e.at("spatial").get<bool>()) {
             for (const char* key : {"min_distance", "max_distance"}) {
                 const float radius = e.at(key);
-                ImVec2 last;
+                Vec3 last;
                 bool valid = false;
                 for (int segment = 0; segment <= 64; ++segment) {
                     const float angle = segment * 0.09817477042f;
-                    ImVec2 point;
-                    const bool current = project(p + Vec3(std::cos(angle) * radius, 0,
-                                                         std::sin(angle) * radius), point);
+                    const Vec3 point = p + Vec3(std::cos(angle) * radius, 0,
+                                                std::sin(angle) * radius);
+                    ImVec2 projected;
+                    const bool current = project(point, projected);
                     if (current && valid) {
-                        draw->AddLine(last, point, IM_COL32(80, 205, 255, 100));
+                        GizmoOcclusion::drawSegment(draw, last, point,
+                            IM_COL32(80, 205, 255, 100), 1.0f, project);
                     }
                     last = point;
                     valid = current;
@@ -420,7 +447,8 @@ void drawViewport(UIContext& ctx, bool ortho, bool showGizmos, bool& hit) {
         const Vec3 direction(pose.at("direction")[0], pose.at("direction")[1], pose.at("direction")[2]);
         ImVec2 tip;
         if (project(p + direction.normalize() * 2, tip)) {
-            draw->AddLine(screen, tip, IM_COL32(255, 185, 70, 200), 2);
+            GizmoOcclusion::drawSegment(draw, p, p + direction.normalize() * 2,
+                IM_COL32(255, 185, 70, 200), 2.0f, project);
         }
         const Vec3 axis = direction.normalize();
         const Vec3 reference = std::abs(axis.y) > 0.99f ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
@@ -435,23 +463,29 @@ void drawViewport(UIContext& ctx, bool ortho, bool showGizmos, bool& hit) {
                 const float halfAngle = degrees * 0.00872664626f;
                 const Vec3 center = p + axis * (2 * std::cos(halfAngle));
                 const float radius = 2 * std::sin(halfAngle);
-                ImVec2 last;
+                Vec3 last;
                 bool valid = false;
                 for (int segment = 0; segment <= 32; ++segment) {
                     const float angle = segment * 0.19634954085f;
-                    ImVec2 point;
-                    const bool current = project(center + right * (radius * std::cos(angle)) +
-                                                  up * (radius * std::sin(angle)), point);
+                    const Vec3 point = center + right * (radius * std::cos(angle)) +
+                        up * (radius * std::sin(angle));
+                    ImVec2 projected;
+                    const bool current = project(point, projected);
                     if (current && valid) {
-                        draw->AddLine(last, point, IM_COL32(255, 185, 70, 120));
+                        GizmoOcclusion::drawSegment(draw, last, point,
+                            IM_COL32(255, 185, 70, 120), 1.0f, project);
                     }
                     if (current && segment % 8 == 0) {
-                        draw->AddLine(screen, point, IM_COL32(255, 185, 70, 120));
+                        GizmoOcclusion::drawSegment(draw, p, point,
+                            IM_COL32(255, 185, 70, 120), 1.0f, project);
                     }
                     last = point;
                     valid = current;
                 }
             }
+        }
+        if (pose.at("position_origin") == "reaction_world") {
+            continue;
         }
         if (ctx.selection.transform_mode == TransformMode::Scale) {
             continue;

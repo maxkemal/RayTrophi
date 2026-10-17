@@ -6,6 +6,8 @@
 #include "Audio/AcousticScene.h"
 #include "Audio/AcousticBoundary.h"
 #include "Audio/AcousticPreview.h"
+#include "Audio/AcousticPlayback.h"
+#include "Audio/AudioSourceRuntime.h"
 #include "Audio/AudioReaction.h"
 #include "Audio/AudioEnvironment.h"
 #include "Audio/AudioThunder.h"
@@ -139,6 +141,7 @@ struct AudioService::Impl {
     bool muted = false;
     std::string status = "not_initialized";
     std::map<std::string, std::unique_ptr<ma_sound>> sounds;
+    std::map<std::string, std::unique_ptr<AcousticPlayback>> acousticNodes;
     std::unique_ptr<ma_sound> preview;
     std::map<std::string, json> poses;
     AudioReaction reactions;
@@ -237,18 +240,10 @@ struct AudioService::Impl {
                 continue;
             }
             const auto& source = find("emitters", id);
-            json position = poses.contains(id) ? poses.at(id).at("position") : source.at("position");
-            const json direction = poses.contains(id) ? poses.at(id).at("direction") : source.at("direction");
-            float gain = source.at("gain"), pitch = source.at("pitch");
-            gain *= acousticPreview.gain(source);
-            if (const auto control = controls.find(id); control != controls.end()) {
-                gain *= control->second.gain;
-                pitch *= control->second.pitch;
-                if (!control->second.position.is_null()) {
-                    position = control->second.position;
-                }
-            }
-            voices.push_back(capturedVoice(id, source, *sound, position, direction, gain, pitch));
+            const auto runtime = sourceRuntime(source);
+            const float gain = runtime.at("effective_gain").get<float>() * acousticPreview.gain(source);
+            voices.push_back(capturedVoice(id, source, *sound, runtime.at("position"),
+                runtime.at("direction"), gain, runtime.at("effective_pitch").get<float>()));
         }
         for (const auto& voice : thunderVoices) {
             if (ma_sound_is_playing(voice.sound.get())) {
@@ -333,6 +328,7 @@ struct AudioService::Impl {
             ma_sound_uninit(item.second.get());
         }
         sounds.clear();
+        acousticNodes.clear();
         managed.clear();
         if (preview) {
             ma_sound_uninit(preview.get());
@@ -395,28 +391,39 @@ struct AudioService::Impl {
                 "Positional sources require mono assets; stereo uses spatial=false");
     }
 
+    json sourceRuntime(const json& e) const {
+        const std::string id = e.at("id");
+        const auto pose = poses.find(id);
+        const auto control = controls.find(id);
+        return resolveAudioSourceRuntime(e, pose == poses.end() ? nullptr : &pose->second,
+            control == controls.end() ? nullptr : &control->second);
+    }
+
     void apply(ma_sound& sound, const json& e) {
         const std::string id = e.at("id");
         const std::string bus = e.at("bus");
         if (!routedBuses.contains(id) || routedBuses.at(id) != bus) {
-            mixer.route(sound, bus);
+            if (acousticNodes.contains(id)) {
+                acousticNodes.at(id)->route(mixer.group(bus));
+            } else {
+                mixer.route(sound, bus);
+            }
             routedBuses[id] = bus;
         }
-        const auto control = controls.find(e.at("id").get<std::string>());
-        const auto modulation = control == controls.end() ? ReactionOutput{} : control->second;
-        const bool reactive = e.at("reaction").at("driver") != "manual";
-        const float gain = reactive && control == controls.end() ? 0 : modulation.gain;
+        const auto runtime = sourceRuntime(e);
         const float direct = bus == "Master" ? AudioMixer::directMasterGain(data.at("mixer")) : 1;
         ma_sound_set_volume(&sound,
-            e.at("gain").get<float>() * gain * direct * acousticPreview.gain(e));
-        ma_sound_set_pitch(&sound, std::clamp(e.at("pitch").get<float>() * modulation.pitch,
-                                            0.125f, 8.0f));
+            runtime.at("effective_gain").get<float>() * direct);
+        if (acousticNodes.contains(id)) {
+            acousticNodes.at(id)->response(acousticPreview.energy(e));
+            acousticNodes.at(id)->reflections(acousticPreview.reflections(e), e,
+                listenerPosition, runtime.at("position"));
+        }
+        ma_sound_set_pitch(&sound, runtime.at("effective_pitch").get<float>());
         ma_sound_set_looping(&sound, e.at("loop").get<bool>());
         ma_sound_set_spatialization_enabled(&sound, e.at("spatial").get<bool>());
-        const auto pose = poses.find(e.at("id").get<std::string>());
-        const json& resolved = pose == poses.end() ? e : pose->second;
-        const auto& p = modulation.position.is_null() ? resolved.at("position") : modulation.position;
-        const auto& d = resolved.at("direction");
+        const auto& p = runtime.at("position");
+        const auto& d = runtime.at("direction");
         ma_sound_set_position(&sound, p[0], p[1], p[2]);
         ma_sound_set_direction(&sound, d[0], d[1], d[2]);
         ma_sound_set_min_distance(&sound, e.at("min_distance"));
@@ -425,6 +432,39 @@ struct AudioService::Impl {
         constexpr float radians = 0.017453292519943295f;
         ma_sound_set_cone(&sound, e.at("cone_inner").get<float>() * radians,
                           e.at("cone_outer").get<float>() * radians, e.at("cone_gain"));
+    }
+
+    void reclaimCompleted() {
+        for (auto it = sounds.begin(); it != sounds.end();) {
+            if (ma_sound_at_end(it->second.get())) {
+                ma_sound_uninit(it->second.get());
+                acousticNodes.erase(it->first);
+                it = sounds.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    ma_sound& prepare(const json& e) {
+        const std::string id = e.at("id");
+        if (sounds.contains(id)) {
+            return *sounds.at(id);
+        }
+        require(sounds.size() + thunderVoices.size() + clips.voices() < 32,
+                "Stage 1 resident voice limit reached (32)");
+        auto sound = load(find("assets", e.at("asset_id")), e.at("bus"));
+        try {
+            auto acoustic = std::make_unique<AcousticPlayback>();
+            acoustic->initialize(engine, *sound, mixer.group(e.at("bus")));
+            acousticNodes[id] = std::move(acoustic);
+            apply(*sound, e);
+        } catch (...) {
+            ma_sound_uninit(sound.get());
+            acousticNodes.erase(id);
+            throw;
+        }
+        return *sounds.emplace(id, std::move(sound)).first->second;
     }
 
     std::unique_ptr<ma_sound> load(const json& asset, const std::string& bus = "") {
@@ -473,8 +513,9 @@ AudioService::~AudioService() = default;
 
 const std::vector<std::string>& AudioService::operations() {
     static const std::vector<std::string> names = {
-        "list", "get", "select", "status", "asset_import", "asset_relink", "asset_remove", "create", "update",
-        "duplicate", "remove", "play", "pause", "stop", "stop_all", "preview", "preview_stop",
+        "list", "get", "source_runtime", "select", "status", "asset_import", "asset_relink",
+        "asset_remove", "create", "update",
+        "duplicate", "remove", "play", "play_all", "pause", "stop", "stop_all", "preview", "preview_stop",
         "preview_mute", "preview_file", "append", "signal_set", "signals_clear",
         "environment_setup", "resume_automatic", "domains", "acoustics_boundary", "acoustics_debug", "acoustics_trace", "acoustics_preview", "acoustics_preview_status", "thunder_setup", "thunder_update",
         "thunder_event", "playback_update", "mixer_get", "mixer_update", "mixer_reset_peaks",
@@ -511,9 +552,10 @@ bool AudioService::isAuthoring(const std::string& op) {
 
 std::vector<std::string> AudioService::parameters(const std::string& op) {
     if (op == "acoustics_preview") {
-        return {"id", "enabled", "meters_per_unit", "boundary_mode"};
+        return {"id", "enabled", "meters_per_unit", "boundary_mode", "spectral",
+                "reflections", "diffuse"};
     }
-    if (op == "acoustics_preview_status") {
+    if (op == "play_all" || op == "acoustics_preview_status") {
         return {};
     }
     if (op == "acoustics_boundary") {
@@ -685,6 +727,63 @@ json AudioService::invoke(const std::string& op, const json& p) {
     for (auto it = p.begin(); it != p.end(); ++it) {
         require(std::find(allowed.begin(), allowed.end(), it.key()) != allowed.end(),
                 "Unknown audio parameter: " + it.key());
+    }
+    if (op == "source_runtime") {
+        auto result = s.sourceRuntime(s.find("emitters", p.at("id").get<std::string>()));
+        const auto voice = s.sounds.find(result.at("id").get<std::string>());
+        result["playing"] = voice != s.sounds.end() && ma_sound_is_playing(voice->second.get());
+        result["timeline_held"] = s.transportHeld.contains(result.at("id").get<std::string>());
+        return result;
+    }
+    if (op == "play_all") {
+        s.reclaimCompleted();
+        // Validate the whole selection before starting any voice. Unbound sources are skipped.
+        json ids = json::array();
+        std::size_t additions = 0;
+        for (const auto& source : s.data.at("emitters")) {
+            if (source.at("asset_id").get<std::string>().empty()) {
+                continue;
+            }
+            const auto id = source.at("id").get<std::string>();
+            const auto pose = s.poses.find(id);
+            require(pose == s.poses.end() || pose->second.at("valid").get<bool>(),
+                    "Audio parent is unavailable: " + id);
+            s.validateAsset(source);
+            additions += !s.sounds.contains(id);
+            ids.push_back(id);
+        }
+        require(s.sounds.size() + additions + s.thunderVoices.size() + s.clips.voices() <= 32,
+                "Stage 1 resident voice limit reached (32)");
+        std::vector<std::string> prepared;
+        try {
+            for (const auto& value : ids) {
+                const auto id = value.get<std::string>();
+                const bool exists = s.sounds.contains(id);
+                s.prepare(s.find("emitters", id));
+                if (!exists) {
+                    prepared.push_back(id);
+                }
+            }
+        } catch (...) {
+            for (const auto& id : prepared) {
+                ma_sound_uninit(s.sounds.at(id).get());
+                s.sounds.erase(id);
+                s.acousticNodes.erase(id);
+                s.routedBuses.erase(id);
+            }
+            throw;
+        }
+        const auto start = ids.empty() ? 0 : ma_engine_get_time_in_pcm_frames(&s.engine) + 2400;
+        for (const auto& id : ids) {
+            auto& sound = *s.sounds.at(id.get<std::string>());
+            if (!ma_sound_is_playing(&sound)) {
+                ma_sound_set_start_time_in_pcm_frames(&sound, start);
+            }
+        }
+        for (const auto& id : ids) {
+            invoke("play", {{"id", id}});
+        }
+        return {{"ok", true}, {"ids", ids}, {"transport_held", s.transport.paused()}};
     }
     if (op == "acoustics_boundary") {
         return queryAcousticBoundary(p);
@@ -1268,6 +1367,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
             if (voice != s.sounds.end()) {
                 ma_sound_uninit(voice->second.get());
                 s.sounds.erase(voice);
+                s.acousticNodes.erase(e.at("id").get<std::string>());
                 s.managed.erase(e.at("id").get<std::string>());
             }
         }
@@ -1296,6 +1396,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
             ma_sound_uninit(voice->second.get());
             s.sounds.erase(voice);
         }
+        s.acousticNodes.erase(id);
         auto& emitters = s.data["emitters"];
         emitters.erase(std::remove_if(emitters.begin(), emitters.end(), [&](const json& e) {
             return e.at("id") == id;
@@ -1346,22 +1447,9 @@ json AudioService::invoke(const std::string& op, const json& p) {
                 ma_sound_uninit(s.preview.get());
                 s.preview.reset();
             }
-            if (voice == s.sounds.end()) {
-                // Reclaim completed one-shot sounds before enforcing the resident voice budget.
-                for (auto it = s.sounds.begin(); it != s.sounds.end();) {
-                    if (ma_sound_at_end(it->second.get())) {
-                        ma_sound_uninit(it->second.get());
-                        it = s.sounds.erase(it);
-                    } else {
-                        ++it;
-                    }
-                }
-                require(s.sounds.size() + s.thunderVoices.size() + s.clips.voices() < 32,
-                        "Stage 1 resident voice limit reached (32)");
-                auto sound = s.load(s.find("assets", e.at("asset_id")), e.at("bus"));
-                s.apply(*sound, e);
-                voice = s.sounds.emplace(id, std::move(sound)).first;
-            }
+            s.reclaimCompleted();
+            s.prepare(e);
+            voice = s.sounds.find(id);
             if (ma_sound_at_end(voice->second.get())) {
                 ma_sound_seek_to_pcm_frame(voice->second.get(), 0);
             }
@@ -1386,6 +1474,7 @@ json AudioService::invoke(const std::string& op, const json& p) {
             if (op == "stop") {
                 ma_sound_uninit(voice->second.get());
                 s.sounds.erase(voice);
+                s.acousticNodes.erase(id);
                 s.managed.erase(id);
             }
         } else if (op == "pause" || op == "stop") {
@@ -1630,6 +1719,7 @@ void AudioService::tickReactions(float windMps, float rain) {
              activity <= config.at("stop_threshold").get<float>()))) {
             ma_sound_uninit(voice->second.get());
             impl_->sounds.erase(voice);
+            impl_->acousticNodes.erase(id);
             impl_->managed.erase(id);
             continue;
         }

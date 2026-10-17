@@ -167,8 +167,9 @@ struct AcousticGpuPass::Impl {
             if (vkAllocateDescriptorSets(device, &allocation, &slot.set) != VK_SUCCESS ||
                 !buffer(slot.instances,
                     audio::kAcousticGpuMaxInstances * sizeof(audio::AcousticGpuInstance)) ||
-                !buffer(slot.rays, 4 * sizeof(audio::AcousticGpuRay)) ||
-                !buffer(slot.results, 4 * sizeof(audio::AcousticGpuSummary))) {
+                !buffer(slot.rays, audio::kAcousticGpuMaxSources * sizeof(audio::AcousticGpuRay)) ||
+                !buffer(slot.results,
+                    audio::kAcousticGpuMaxSources * sizeof(audio::AcousticGpuSummary))) {
                 return false;
             }
         }
@@ -182,7 +183,8 @@ AcousticGpuPass::AcousticGpuPass(VulkanDevice& device) : impl_(std::make_unique<
 AcousticGpuPass::~AcousticGpuPass() = default;
 
 bool AcousticGpuPass::enqueue(audio::AcousticGpuBatch batch, const std::string& directory) {
-    if (batch.rays.empty() || batch.rays.size() > 4 || batch.ids.size() != batch.rays.size() ||
+    if (batch.rays.empty() || batch.rays.size() > audio::kAcousticGpuMaxSources ||
+        batch.ids.size() != batch.rays.size() ||
         batch.instances.empty() || batch.instances.size() > audio::kAcousticGpuMaxInstances) {
         impl_->failure = "Acoustic GPU batch exceeds the source/instance budget";
         return false;

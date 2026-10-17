@@ -106,6 +106,7 @@ audio::AcousticGpuGeometry VulkanBackendAdapter::acousticGpuGeometry() const {
         }
     }
     result.revision = revision.str();
+    result.boundaryRevision = result.revision;
     return result;
 }
 

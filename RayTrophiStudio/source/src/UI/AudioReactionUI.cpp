@@ -60,6 +60,14 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
     if (config.at("driver") != "manual") {
         ImGui::TextWrapped("Bind a sound asset and enable Automatic to start/stop with activity. "
                            "Pause/Stop suspend automation until Play or reconfiguration.");
+        const auto source = ctx.scene.audio->invoke("source_runtime", {{"id", id}});
+        const auto& position = source.at("position");
+        ImGui::Text("World position: %.2f, %.2f, %.2f", position.at(0).get<float>(),
+                    position.at(1).get<float>(), position.at(2).get<float>());
+        if (source.at("position_origin") == "reaction_world") {
+            ImGui::TextWrapped("Position follows the physics/signal input. Disable Follow position "
+                               "to place the source manually. Scene acoustics uses this same position.");
+        }
         bool automatic = config.at("automatic");
         if (ImGui::Checkbox(AudioUI::property("Automatic start / stop").c_str(), &automatic)) {
             auto edited = config;

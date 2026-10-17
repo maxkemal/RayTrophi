@@ -441,6 +441,10 @@ void drawWorkspace(UIContext& ctx) {
     if (ImGui::Checkbox("Mute preview output", &previewMuted)) {
         workspaceCall(ctx, "preview_mute", {{"muted", previewMuted}});
     }
+    if (ImGui::Button("Play all sources")) {
+        workspaceCall(ctx, "play_all");
+    }
+    ImGui::SameLine();
     if (ImGui::Button("Stop all")) {
         workspaceCall(ctx, "stop_all");
     }

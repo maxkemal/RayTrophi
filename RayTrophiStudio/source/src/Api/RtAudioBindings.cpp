@@ -5,11 +5,14 @@
 #include "RtIpcMethodRegistry.h"
 #include <pybind11/pybind11.h>
 #include <iterator>
+#include <deque>
 
 namespace {
 struct RegisterAudioMethods {
     std::vector<std::string> names;
     std::vector<std::vector<MethodParam>> schemas;
+    // The registry retains descriptor addresses for the lifetime of the process.
+    std::deque<MethodDescriptor> descriptors;
     RegisterAudioMethods() {
         names.reserve(audio::AudioService::operations().size());
         schemas.reserve(audio::AudioService::operations().size());
@@ -17,6 +20,9 @@ struct RegisterAudioMethods {
             names.push_back("audio." + op);
         }
         static const MethodParam params[] = {
+            {"spectral", "bool", false, "Frequency dependent live transmission", "true", nullptr},
+            {"reflections", "bool", false, "Audition up to six verified specular paths", "false", nullptr},
+            {"diffuse", "bool", false, "Single-bounce Lambert transport; omnidirectional sources only", "false", nullptr},
             {"source_position", "array", false, "Explicit source world position; mutually exclusive with id", nullptr, nullptr},
             {"listener_position", "array", false, "Listener world position; defaults to the active camera", nullptr, nullptr},
             {"meters_per_unit", "float", false, "Scene unit scale, finite 1e-6..1e6", "1", nullptr},
@@ -164,7 +170,10 @@ struct RegisterAudioMethods {
         };
         for (std::size_t i = 0; i < names.size(); ++i) {
             const auto& op = audio::AudioService::operations()[i];
-            const bool read = op == "acoustics_boundary" || op == "acoustics_debug" || op == "acoustics_preview_status" || op == "acoustics_trace" || op == "list" || op == "get" || op == "status" || op == "domains" ||
+            const bool read = op == "source_runtime" || op == "acoustics_boundary" ||
+                              op == "acoustics_debug" || op == "acoustics_preview_status" ||
+                              op == "acoustics_trace" || op == "list" || op == "get" ||
+                              op == "status" || op == "domains" ||
                               op == "mixer_get" || op == "arrange_status" || op == "track_list" || op == "clip_list" || op == "export_status" ||
                               op == "waveform" || op == "capture_status" || op == "workspace_get" ||
                               op == "synth_presets" || op == "telemetry_get" ||
@@ -174,8 +183,11 @@ struct RegisterAudioMethods {
             descriptor.name = names[i].c_str();
             descriptor.domain = "audio";
             descriptor.summary = "Scene audio service operation";
-            descriptor.notes = op.rfind("acoustics_preview", 0) == 0
-                ? "See docs/dev/SCENE_ACOUSTICS_PREVIEW.md. Session-only broadband audition."
+            descriptor.notes = op == "source_runtime"
+                ? "Resolved world pose and pre-mixer reaction controls. "
+                  "See SCENE_AUDIO_PHYSICS_SOURCES.md."
+                : op.rfind("acoustics_preview", 0) == 0
+                ? "See docs/dev/SCENE_ACOUSTICS_PREVIEW.md. Session spectral transmission and sparse reflections."
                 : op == "acoustics_boundary"
                 ? "Planar equivalent-fluid interface probe; no GPU paths or scene mutation. See SCENE_ACOUSTICS_DEBUG.md."
                 : op == "acoustics_debug"
@@ -188,7 +200,7 @@ struct RegisterAudioMethods {
                 : "See docs/dev/AUDIO_PRE_UI_DELIVERY.md and SCENE_AUDIO_STAGE1_API.md.");
             descriptor.access = read ? "read" : "write";
             const bool readsFile = op == "arrange_preview" || (op.rfind("track_", 0) == 0 && op != "track_list") || op == "append" || op == "asset_import" || op == "asset_relink" ||
-                                   op == "play" || op == "preview" || op == "preview_file" ||
+                                   op == "play" || op == "play_all" || op == "preview" || op == "preview_file" ||
                                    op == "environment_setup" || op == "create" || op == "update" ||
                                    op == "duplicate" || op == "thunder_setup" ||
                                    op == "thunder_update" || op == "thunder_event" ||
@@ -224,7 +236,7 @@ struct RegisterAudioMethods {
                             (op == "thunder_event" && key == "position");
                         if (op == "acoustics_preview" && key == "enabled") {
                             param.required = true;
-                            param.description = "Enable session-only broadband acoustic audition";
+                            param.description = "Enable session spectral/echo audition for a spatial source";
                         }
                         if (op == "acoustics_preview" && key == "boundary_mode") {
                             param.default_value = "object_barrier";
@@ -288,7 +300,8 @@ struct RegisterAudioMethods {
             descriptor.params = schemas.back().data();
             descriptor.param_count = int(schemas.back().size());
             descriptor.documented = true;
-            MethodRegistry::instance().registerMethod(descriptor);
+            descriptors.push_back(descriptor);
+            MethodRegistry::instance().registerMethod(descriptors.back());
         }
     }
 } registration;

@@ -11,17 +11,19 @@
 namespace audio {
 AcousticRenderSource acousticRenderSource(UIContext& ctx, const nlohmann::json& emitter) {
     AcousticRenderSource result{};
-    if (!emitter.value("spatial", false) ||
-        emitter.at("reaction").value("driver", "manual") != "manual") {
+    if (!emitter.value("spatial", false)) {
         return result;
     }
     try {
-        const auto pose = worldPose(ctx, emitter);
+        const auto pose = ctx.scene.audio->invoke("source_runtime", {{"id", emitter.at("id")}});
+        if (!pose.at("valid").get<bool>()) {
+            return {};
+        }
         for (unsigned axis = 0; axis < 3; ++axis) {
             result[axis] = pose.at("position").at(axis).get<float>();
             result[axis + 8] = pose.at("direction").at(axis).get<float>();
         }
-        result[3] = emitter.at("gain").get<float>();
+        result[3] = pose.at("effective_gain").get<float>();
         result[4] = emitter.at("min_distance").get<float>();
         result[5] = emitter.at("max_distance").get<float>();
         result[6] = emitter.at("rolloff").get<float>();

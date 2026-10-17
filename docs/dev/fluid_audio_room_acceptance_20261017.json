@@ -1,0 +1,410 @@
+{
+  "samples": [
+    {
+      "runtime": {
+        "activity": 0.03147296980023384,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.07983279973268509,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          -0.006215054541826248,
+          -0.038124024868011475,
+          0.02762630209326744
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.1774062216281891,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      },
+      "flow": {
+        "audio_error": "",
+        "carrier_count": 33,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 33,
+        "contact_power_w": 38.801653745765265,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          -0.006215054541826248,
+          -0.038124024868011475,
+          0.02762630209326744
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 38.801653745765265,
+        "value_units": "W",
+        "version": 3
+      }
+    },
+    {
+      "runtime": {
+        "activity": 0.060375068336725235,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.11057101935148239,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          -0.00884989183396101,
+          -0.06749212741851807,
+          0.031036190688610077
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.24571338295936584,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      },
+      "flow": {
+        "audio_error": "",
+        "carrier_count": 50,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 50,
+        "contact_power_w": 74.17235461842041,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          -0.00884989183396101,
+          -0.06749212741851807,
+          0.031036190688610077
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 74.17235461842041,
+        "value_units": "W",
+        "version": 4
+      }
+    },
+    {
+      "runtime": {
+        "activity": 0.09685404598712921,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.14004620909690857,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          -0.0014280048198997974,
+          -0.07597044855356216,
+          0.02171817049384117
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.31121382117271423,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      },
+      "flow": {
+        "audio_error": "",
+        "carrier_count": 66,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 66,
+        "contact_power_w": 118.90561027671694,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          -0.0014280048198997974,
+          -0.07597044855356216,
+          0.02171817049384117
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 118.90561027671694,
+        "value_units": "W",
+        "version": 5
+      }
+    },
+    {
+      "runtime": {
+        "activity": 0.1454346477985382,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.17161151766777039,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          -0.0028579903300851583,
+          -0.09607289731502533,
+          0.022188516333699226
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.38135895133018494,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      },
+      "flow": {
+        "audio_error": "",
+        "carrier_count": 83,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 83,
+        "contact_power_w": 178.4954956872078,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          -0.0028579903300851583,
+          -0.09607289731502533,
+          0.022188516333699226
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 178.4954956872078,
+        "value_units": "W",
+        "version": 6
+      }
+    }
+  ],
+  "meter": {
+    "audition_bypasses_mixer": true,
+    "buses": [
+      {
+        "effective_gain": 1.0,
+        "gain": 1.0,
+        "meter": {
+          "overload_blocks": 0,
+          "peak": 0.0,
+          "peak_dbfs": -120.0,
+          "peak_hold_dbfs": -23.29462242126465,
+          "ready": true,
+          "rms": 0.0,
+          "rms_dbfs": -120.0
+        },
+        "muted": false,
+        "name": "Master",
+        "output_gain": 1.0,
+        "pan": 0.0,
+        "solo": false
+      },
+      {
+        "effective_gain": 1.0,
+        "gain": 1.0,
+        "meter": {
+          "overload_blocks": 0,
+          "peak": 0.0,
+          "peak_dbfs": -120.0,
+          "peak_hold_dbfs": -120.0,
+          "ready": true,
+          "rms": 0.0,
+          "rms_dbfs": -120.0
+        },
+        "muted": false,
+        "name": "Weather",
+        "output_gain": 1.0,
+        "pan": 0.0,
+        "solo": false
+      },
+      {
+        "effective_gain": 1.0,
+        "gain": 1.0,
+        "meter": {
+          "overload_blocks": 0,
+          "peak": 0.0,
+          "peak_dbfs": -120.0,
+          "peak_hold_dbfs": -23.29462242126465,
+          "ready": true,
+          "rms": 0.0,
+          "rms_dbfs": -120.0
+        },
+        "muted": false,
+        "name": "Effects",
+        "output_gain": 1.0,
+        "pan": 0.0,
+        "solo": false
+      },
+      {
+        "effective_gain": 1.0,
+        "gain": 1.0,
+        "meter": {
+          "overload_blocks": 0,
+          "peak": 0.0,
+          "peak_dbfs": -120.0,
+          "peak_hold_dbfs": -120.0,
+          "ready": true,
+          "rms": 0.0,
+          "rms_dbfs": -120.0
+        },
+        "muted": false,
+        "name": "Ambience",
+        "output_gain": 1.0,
+        "pan": 0.0,
+        "solo": false
+      },
+      {
+        "effective_gain": 1.0,
+        "gain": 1.0,
+        "meter": {
+          "overload_blocks": 0,
+          "peak": 0.0,
+          "peak_dbfs": -120.0,
+          "peak_hold_dbfs": -120.0,
+          "ready": true,
+          "rms": 0.0,
+          "rms_dbfs": -120.0
+        },
+        "muted": false,
+        "name": "Music",
+        "output_gain": 1.0,
+        "pan": 0.0,
+        "solo": false
+      }
+    ],
+    "direct_master_gain": 1.0,
+    "meter_stage": "post_bus_fader_before_preview_mute",
+    "output_muted": false
+  },
+  "preview": [
+    {
+      "amplitude_gain": 1,
+      "band_energy": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "boundary_mode": "object_barrier",
+      "enabled": true,
+      "id": "audio_source_2",
+      "meters_per_unit": 1.0,
+      "preview_revision": 1,
+      "reflection_paths": [],
+      "reflections": true,
+      "report": {
+        "error": "Non-flat scene geometry is outside acoustic coverage",
+        "solver": {
+          "backend": "active_vulkan_as",
+          "cpu_bvh": false,
+          "result_bytes_per_source": 352,
+          "state": "failed"
+        },
+        "transmission_energy": null,
+        "transmission_status": "gpu_unavailable"
+      },
+      "solver": {
+        "backend": "active_vulkan_as",
+        "cpu_bvh": false,
+        "result_bytes_per_source": 352,
+        "state": "failed"
+      },
+      "spectral": true,
+      "status": "gpu_unavailable"
+    },
+    {
+      "amplitude_gain": 1,
+      "band_energy": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "boundary_mode": "object_barrier",
+      "enabled": true,
+      "id": "audio_source_4",
+      "meters_per_unit": 1.0,
+      "preview_revision": 2,
+      "reflection_paths": [],
+      "reflections": true,
+      "report": {
+        "error": "Non-flat scene geometry is outside acoustic coverage",
+        "solver": {
+          "backend": "active_vulkan_as",
+          "cpu_bvh": false,
+          "result_bytes_per_source": 352,
+          "state": "failed"
+        },
+        "transmission_energy": null,
+        "transmission_status": "gpu_unavailable"
+      },
+      "solver": {
+        "backend": "active_vulkan_as",
+        "cpu_bvh": false,
+        "result_bytes_per_source": 352,
+        "state": "failed"
+      },
+      "spectral": true,
+      "status": "gpu_unavailable"
+    }
+  ]
+}

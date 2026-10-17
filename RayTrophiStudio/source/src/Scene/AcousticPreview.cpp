@@ -1,4 +1,5 @@
 #include "Audio/AcousticPreview.h"
+#include "Audio/AcousticGpu.h"
 #include <atomic>
 #include <cstdint>
 #include <cmath>
@@ -13,15 +14,25 @@ void require(bool valid, const char* message) {
     }
 }
 bool eligible(const json& emitter) {
-    return emitter.value("spatial", false) &&
-        emitter.at("reaction").value("driver", "manual") == "manual";
+    return emitter.value("spatial", false);
 }
+}
+
+bool supportsDiffuseSource(const json& emitter) {
+    return emitter.at("cone_inner").get<float>() >= 360 &&
+        emitter.at("cone_outer").get<float>() >= 360;
 }
 
 json AcousticPreview::configure(const json& emitter, const json& params) {
     require(params.contains("enabled") && params.at("enabled").is_boolean(),
         "acoustics_preview requires boolean enabled");
     const std::string id = emitter.at("id");
+    const auto spectral = params.value("spectral", json(true));
+    require(spectral.is_boolean(), "spectral must be boolean");
+    const auto reflections = params.value("reflections", json(false));
+    require(reflections.is_boolean(), "reflections must be boolean");
+    const auto diffuse = params.value("diffuse", json(false));
+    require(diffuse.is_boolean(), "diffuse must be boolean");
     const auto units = params.value("meters_per_unit", json(1.0));
     require(units.is_number() && std::isfinite(units.get<double>()) &&
         units.get<double>() >= 1e-6 && units.get<double>() <= 1e6,
@@ -33,12 +44,17 @@ json AcousticPreview::configure(const json& emitter, const json& params) {
         entries_.erase(id);
         return {{"id", id}, {"enabled", false}, {"amplitude_gain", 1}};
     }
-    require(eligible(emitter), "Acoustic preview requires a spatial source with manual reaction");
-    require(entries_.contains(id) || entries_.size() < 4,
-        "Acoustic preview supports at most four sources; disable another first");
+    require(eligible(emitter), "Acoustic preview requires a spatial source");
+    require(!diffuse.get<bool>() || supportsDiffuseSource(emitter),
+        "Diffuse transport requires an omnidirectional source");
+    require(entries_.contains(id) || entries_.size() < kAcousticGpuMaxSources,
+        "Acoustic preview supports at most 32 sources; disable another first");
     static std::atomic<std::uint64_t> revision{0};
     entries_[id] = {{"id", id}, {"enabled", true}, {"meters_per_unit", units},
         {"preview_revision", ++revision},
+        {"spectral", spectral}, {"band_energy", json::array({1, 1, 1, 1, 1, 1})},
+        {"reflections", reflections}, {"reflection_paths", json::array()},
+        {"diffuse", diffuse},
         {"boundary_mode", mode}, {"amplitude_gain", 1}, {"status", "pending"}};
     return entries_.at(id);
 }
@@ -57,7 +73,6 @@ void AcousticPreview::update(const std::string& id, const json& report) {
         return;
     }
     auto& entry = found->second;
-    entry["report"] = report;
     if (report.contains("solver")) {
         entry["solver"] = report.at("solver");
     }
@@ -65,9 +80,21 @@ void AcousticPreview::update(const std::string& id, const json& report) {
     // An asynchronous pose refresh has no new transmission estimate yet.
     // Keep the last gain until completion instead of briefly opening the barrier.
     if (entry.at("status") == "pending") {
+        entry["pending_report"] = report;
         return;
     }
+    entry["report"] = report;
+    entry.erase("pending_report");
     entry["amplitude_gain"] = 1;
+    entry["band_energy"] = json::array({1, 1, 1, 1, 1, 1});
+    entry["reflection_paths"] = json::array();
+    // A reflection can remain valid when the direct path is blocked/unknown.
+    for (const auto& path : report.value("reflections", json::array())) {
+        const bool diffuse = path.value("kind", "specular") == "diffuse";
+        if (entry.value(diffuse ? "diffuse" : "reflections", false)) {
+            entry["reflection_paths"].push_back(path);
+        }
+    }
     const auto energy = report.value("transmission_energy", json());
     if (!energy.is_array() || energy.size() != 6) {
         return;
@@ -83,6 +110,7 @@ void AcousticPreview::update(const std::string& id, const json& report) {
     }
     // Transmission coefficients are energy fractions; sound volume is amplitude.
     entry["amplitude_gain"] = std::sqrt(mean);
+    entry["band_energy"] = energy;
 }
 
 void AcousticPreview::forget(const std::string& id) {
@@ -93,6 +121,29 @@ float AcousticPreview::gain(const json& emitter) const {
     const auto found = entries_.find(emitter.at("id").get<std::string>());
     return found == entries_.end() || !eligible(emitter) ? 1.0f :
         found->second.at("amplitude_gain").get<float>();
+}
+
+json AcousticPreview::energy(const json& emitter) const {
+    const auto found = entries_.find(emitter.at("id").get<std::string>());
+    if (found == entries_.end() || !eligible(emitter)) {
+        return json::array({1, 1, 1, 1, 1, 1});
+    }
+    const auto& entry = found->second;
+    if (entry.value("spectral", true)) {
+        return entry.at("band_energy");
+    }
+    const float amplitude = entry.at("amplitude_gain");
+    return json::array({amplitude * amplitude, amplitude * amplitude,
+        amplitude * amplitude, amplitude * amplitude, amplitude * amplitude,
+        amplitude * amplitude});
+}
+
+json AcousticPreview::reflections(const json& emitter) const {
+    const auto found = entries_.find(emitter.at("id").get<std::string>());
+    if (found == entries_.end() || !eligible(emitter)) {
+        return json::array();
+    }
+    return found->second.at("reflection_paths");
 }
 
 }

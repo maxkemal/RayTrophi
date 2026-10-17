@@ -1,6 +1,7 @@
 #include "Audio/AcousticScene.h"
 #include "Audio/AcousticRenderDebug.h"
 #include "Audio/AcousticSurface.h"
+#include "Audio/AcousticGeometryPolicy.h"
 #include "SceneSelection.h"
 #include "Audio/AudioAuthoring.h"
 #include "ObjectSubstance.h"
@@ -52,6 +53,10 @@ AcousticSceneSnapshot capture(UIContext& ctx, unsigned maximum, bool includeHidd
     std::map<std::string, std::size_t> objects;
     for (const auto& object : ctx.scene.world.objects) {
         if (!object) {
+            continue;
+        }
+        if (isAcousticSimulationVisual(*object)) {
+            ++result.ignoredSimulationVisuals;
             continue;
         }
         if (!includeHidden && !object->visible) {
@@ -134,8 +139,9 @@ json querySceneAcoustics(UIContext& ctx, const json& params) {
     auto sourceValue = params.value("source_position", json());
     if (params.contains("id")) {
         require(params.at("id").is_string(), "Acoustic source id must be a string");
-        const auto emitter = ctx.scene.audio->invoke("get", {{"id", params.at("id")}});
-        sourceValue = worldPose(ctx, emitter).at("position");
+        const auto runtime = ctx.scene.audio->invoke("source_runtime", {{"id", params.at("id")}});
+        require(runtime.at("valid").get<bool>(), "Acoustic source pose is unavailable");
+        sourceValue = runtime.at("position");
     }
     auto listenerValue = params.value("listener_position", json());
     if (!params.contains("listener_position")) {
@@ -162,7 +168,7 @@ json querySceneAcoustics(UIContext& ctx, const json& params) {
     const auto scene = capture(ctx, maxTriangles, params.value("include_hidden", true));
     auto result = traceAcousticSegment(scene, source, listener, units, speed, maxHits,
                                       mode == "thin_surface", mode == "object_barrier");
-    result["source_pose"] = params.contains("id") ? "authored_world" : "explicit_world";
+    result["source_pose"] = params.contains("id") ? "runtime_world" : "explicit_world";
     result["include_hidden"] = params.value("include_hidden", true);
     result["boundary_mode"] = mode;
     result["materials_revision"] = matter::objectSubstanceFingerprint(ctx.scene);
@@ -181,7 +187,8 @@ json queryAcousticDebug(UIContext& ctx, const json& params) {
         }
     }
     require(!emitter.is_null(), "Acoustic debug source does not exist");
-    const auto position = worldPose(ctx, emitter).at("position");
+    const auto runtime = ctx.scene.audio->invoke("source_runtime", {{"id", emitter.at("id")}});
+    const auto position = runtime.at("position");
     const auto& camera = ctx.scene.camera->lookfrom;
     const json listener = {camera.x, camera.y, camera.z};
     double squared = 0;
@@ -209,6 +216,7 @@ json queryAcousticDebug(UIContext& ctx, const json& params) {
     visualizer["source_eligible"] = selected && surface[7] > 0.5f;
     return {{"surface_visualizer", visualizer},
         {"id", params.at("id")}, {"source_position", position},
+        {"source_runtime", runtime},
         {"listener_position", listener}, {"distance_scene_units", std::sqrt(squared)},
         {"min_distance", emitter.at("min_distance")},
         {"max_distance", emitter.at("max_distance")}, {"preview", preview},

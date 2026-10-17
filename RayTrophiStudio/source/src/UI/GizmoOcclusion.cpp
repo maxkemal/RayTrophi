@@ -14,6 +14,7 @@
 #include <vector>
 
 extern std::atomic<uint64_t> g_scene_geometry_generation;
+extern bool g_bvh_rebuild_pending;
 
 namespace GizmoOcclusion {
 namespace {
@@ -97,7 +98,7 @@ ImU32 faded(ImU32 color, float alpha_scale) {
 } // namespace
 
 bool beginFrame(const SceneData& scene, bool enabled, float hidden_alpha, bool orthographic,
-                int timeline_frame) {
+                int timeline_frame, bool scene_busy) {
     // Publish the frame that just ended, start counting the new one.
     g_building.rays = g_frame.rays;
     g_building.cache_entries = g_cache.size();
@@ -108,6 +109,8 @@ bool beginFrame(const SceneData& scene, bool enabled, float hidden_alpha, bool o
 
     if (!enabled) {
         g_building.inactive_reason = "disabled by setting (x-ray gizmos)";
+    } else if (scene_busy || g_bvh_rebuild_pending) {
+        g_building.inactive_reason = "scene BVH is being updated";
     } else if (!scene.camera) {
         g_building.inactive_reason = "no active camera";
     } else if (!scene.bvh) {
@@ -215,6 +218,27 @@ void drawSegment(ImDrawList* draw_list, const Vec3& a, const Vec3& b, ImU32 colo
 
 const Stats& stats() {
     return g_stats;
+}
+
+float pointAlpha(const Vec3& point) {
+    if (!g_frame.enabled) {
+        return 1.0f;
+    }
+    const uint64_t key = mixVec(0x43e71b9920a6d55full, point);
+    auto found = g_cache.find(key);
+    if (found == g_cache.end()) {
+        if (g_frame.rays >= kRayBudget) {
+            g_building.budget_exhausted = true;
+            return 1.0f;
+        }
+        found = g_cache.emplace(key, std::vector<uint8_t>{
+            static_cast<uint8_t>(pointVisible(point) ? 1 : 0)}).first;
+    }
+    if (found->second.front() != 0) {
+        return 1.0f;
+    }
+    ++g_building.hidden_pieces;
+    return std::clamp(g_frame.hidden_alpha, 0.0f, 1.0f);
 }
 
 } // namespace GizmoOcclusion

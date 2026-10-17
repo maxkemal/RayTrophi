@@ -1,5 +1,10 @@
 # Scene acoustics: first listening checkpoint
 
+2026-10-17: the current unbuilt spectral/reflection and concurrent-playback delivery
+is documented in [Live acoustic playback](SCENE_ACOUSTICS_PLAYBACK.md). The broadband
+implementation and acceptance below are historical; the regression probe now
+requests `spectral=false` explicitly.
+
 2026-10-16 GPU source revision: automatic preview now uses the active backend's
 fenced GPU query path; see [GPU contract and build checklist](SCENE_ACOUSTICS_GPU.md).
 The synchronous capture/BVH description below records the earlier accepted CPU

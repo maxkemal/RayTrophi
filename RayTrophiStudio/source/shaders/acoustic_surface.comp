@@ -12,6 +12,10 @@ struct Instance {
     uvec4 meta;
     vec4 transmission0;
     vec4 transmission1;
+    vec4 playbackSpecular0;
+    vec4 playbackSpecular1;
+    vec4 playbackDiffuse0;
+    vec4 playbackDiffuse1;
     vec4 reflection0;
     vec4 reflection1;
     vec4 specular0;
@@ -56,6 +60,7 @@ bool transmission(vec3 from, vec3 to, out vec4 t0, out vec4 t1) {
         uint index = rayQueryGetIntersectionInstanceIdEXT(query, false);
         if (index >= pc.instanceCount) return false;
         Instance item = instances[index];
+        if (item.meta.w == 2u) continue;
         if (item.meta.w == 0u) return false;
         bool seen = false;
         for (uint i = 0; i < count; ++i) seen = seen || objects[i] == item.meta.z;
@@ -105,6 +110,9 @@ int reflector(vec3 from, vec3 direction, out vec3 point, out vec3 normal, out ui
     while (rayQueryProceedEXT(query)) {
         if (++candidates > 256u || rayQueryGetIntersectionTypeEXT(query, false) !=
             gl_RayQueryCandidateIntersectionTriangleEXT) return -1;
+        uint candidateIndex = rayQueryGetIntersectionInstanceIdEXT(query, false);
+        if (candidateIndex >= pc.instanceCount) return -1;
+        if (instances[candidateIndex].meta.w == 2u) continue;
         rayQueryConfirmIntersectionEXT(query);
     }
     if (rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT) {

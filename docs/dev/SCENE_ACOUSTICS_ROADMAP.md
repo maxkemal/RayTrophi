@@ -1,5 +1,108 @@
 # Scene acoustics: shared-material direction
 
+## Current continuation and UI follow-up — 2026-10-17
+
+2026-10-18 next source slice: [single-bounce diffuse transport](SCENE_ACOUSTICS_DIFFUSE.md)
+adds opt-in Lambert source-ray quadrature, receiver visibility, eight delay-energy
+bins and approximate live auralization, using the existing scattering split.
+UI/Python/IPC share the same configuration and source validation. After the user's
+build, bounded fluid-room acceptance passed zero/full/half scattering energy,
+moving-fluid reports, type/cone rejection and native PCM output without overload.
+Long-run, convergence and performance acceptance remain open. Multi-bounce / late
+reverb, diffraction and phase-resolved wave physics remain future layers.
+
+Source delivery: [physics-driven spatial sources](SCENE_AUDIO_PHYSICS_SOURCES.md)
+connect existing reactive asset voices to shared runtime pose, spectral filtering,
+GPU early reflections and diagnostics. Moving-query polling and source isolation
+are included. The user rebuilt; real-fluid automatic start/stop, runtime position
+following and Stop All/resume passed. Scene filter/echo acceptance remains open
+because live queries encountered undefined acoustic materials/AS coverage limits.
+Real-time fluid/fire/fracture sound generation is not part of this slice.
+
+Core continuation: transient simulation visuals are now outside the explicitly
+reported authored-flat-environment boundary scope. Raster TLAS slots remain stable
+and direct/reflection/debug shaders filter simulation display geometry consistently.
+CPU trace shares object classification. This source change needs a C++ rebuild and
+both acoustic shaders rebuilt; the saved [fluid room](FLUID_AUDIO_ROOM.md) remains
+the acceptance fixture. No new live success is claimed before that build.
+
+2026-10-18 rebuild verification: the fluid room now completes both previews across
+eight real solver steps without the reproduced revision error; seven post-warmup
+samples retained five paths each. A temporary authored-wall move changed the
+reflection distance and restoration returned it to baseline. See the room document
+for evidence and limits. Continuous timeline/cache replay and PCM/performance
+acceptance remain open; this closes the bounded step-driven revision regression.
+
+User-built early-reflection playback is audible in the echo/voice rooms; see
+[the live lab](ECHO_ROOMS_LAB.md). This does not close full physics-driven playback,
+export parity, multibounce/late reverb or 16/32-source performance acceptance.
+The current source slice connects automatic/reactive sources to the same acoustic
+processing path; after acoustic acceptance, continue with fluid-flow/splash-driven
+faucet sound generation. Source preview eligibility now includes spatial reactive
+sources. Real-fluid control acceptance is recorded in the physics-sources document;
+manual-room echo acceptance and real-fluid control acceptance are separate checks.
+
+User-requested UI work is queued alongside that continuation, not implemented by
+this planning checkpoint:
+
+- Reorganize the general shared Substance editor into logical tabs and a bounded
+  body across object properties, domains, flow sources and colliders, not only
+  audio. Preserve one field registry/service/editor and context-specific binding
+  semantics; see [shared Substance UI direction](SHARED_SUBSTANCE_UI_ROADMAP.md).
+
+- Compact the left main-panel asset section as libraries grow: fixed/bounded
+  list height with independent scrolling, search/type filters and collapsed
+  categories; use clipped/virtualized rows for large lists. Avoid an endlessly
+  growing vertical asset list, keep selection/details contextual, and preserve
+  the viewport-first left rail/right dock/bottom editor structure. This is a
+  recorded UI follow-up, not part of the physics-source implementation slice.
+
+- Clarify shared transport: existing `audio.play_all` / **Play all sources** starts
+  bound scene sources, including those with an enabled acoustic preview. It does
+  not enable acoustic processing on every source. Existing `stop_all` stops them
+  together. File/asset audition is a separate exclusive preview.
+- Modernize value entry in both the main panel and contextual inspector with
+  consistent audio controls: sliders paired with precise numeric entry, visible
+  units/ranges, appropriate logarithmic mapping for frequency/time where useful,
+  and a clearly stated linear-gain/dB display convention (including mute at zero).
+  Preserve keyboard entry, reset-to-default and shared validation; avoid knobs or
+  sliders that conceal the actual value or change stored units implicitly.
+- Consolidate scattered Play/Pause/Stop controls for asset audition, scene sources
+  and preview into a consistent transport layout in the existing Audio editor.
+  Always show the target/scope and currently active source or audition. Use
+  persistent text/icon states for playing, paused, stopped, timeline-held and
+  automatic-suspended, with enabled/disabled actions and selected scope visible;
+  do not rely on color alone. Distinguish acoustic processing enablement from
+  playback state and show when exclusive asset audition stops scene playback.
+  Main panel and inspector must reflect the same shared service state, with no
+  competing UI-local transport flags. State/scope changes and any new canonical
+  operations require scripting/IPC parity and documented transition tests.
+- Provide explicit selected/group/scene playback scope, batch acoustic processing
+  enable/disable, and a dry/processed A/B for the same scope. A room demo's script
+  batch is not a finished generic group authoring system. Preserve each source's
+  authored gain/loop/binding and clearly show playing/held, processing enabled,
+  pending/ready/bypassed/error states. Validate eligibility and budgets for a
+  whole batch before mutation; define atomic failure semantics.
+- Keep viewport labels compact: short source name or readable fallback, a bounded
+  screen width with ellipsis, and full source/asset names on hover or in the
+  contextual inspector. Avoid appending long asset filenames to every visible
+  marker. Offer full detail for selection without flooding the viewport, and
+  handle overlapping labels. Display truncation must not rename assets or sources
+  or alter stable IDs/picking. This refines the first combined-label fix in
+  [audio gizmo visibility](AUDIO_GIZMO_VISIBILITY.md).
+- Use the existing Audio bottom editor/contextual inspector and shared core
+  operations through UI/Python/IPC. No permanent shelf or UI-only batch logic.
+  Deliver scope/validation documentation and relevant batch regressions with
+  implementation; user build plus manual label/transport checks remain required.
+
+## Earlier checkpoints
+
+2026-10-17 source update: [live spectral playback, sparse verified specular echoes
+and concurrent source transport](SCENE_ACOUSTICS_PLAYBACK.md) are wired through
+UI/Python/IPC. This revision requires both acoustic shader and Studio builds;
+listening, GPU lifecycle and performance acceptance remain open. Full reflected
+spatial arrival, export parity and broader reflection discovery remain roadmap work.
+
 2026-10-16 surface-debug source update: Render Settings view 15 now provides a
 selected-source **Acoustic Energy (solid proxy)** surface field on Vulkan RT,
 replacing the screen-space information card. Shared source selection and render

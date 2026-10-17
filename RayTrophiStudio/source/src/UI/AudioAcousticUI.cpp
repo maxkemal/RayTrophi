@@ -26,7 +26,7 @@ void drawAcousticDiagnostics(UIContext& ctx, const nlohmann::json& emitter) {
         key.clear();
         error.clear();
     }
-    ImGui::TextWrapped("Direct path preview affects spatial manual sources in this session. "
+    ImGui::TextWrapped("Direct path preview affects spatial sources, including physics reactions. "
                        "It uses the active GPU scene; unavailable queries, unknown materials "
                        "or incomplete geometry bypass attenuation.");
     json live;
@@ -45,10 +45,19 @@ void drawAcousticDiagnostics(UIContext& ctx, const nlohmann::json& emitter) {
     const bool changedModel = ImGui::Combo(AudioUI::property("Boundary model").c_str(), &model,
         "One barrier per object\0Independent thin surfaces\0");
     const bool changedEnabled = ImGui::Checkbox("Audition scene obstruction", &enabled);
+    bool spectral = live.is_null() || live.value("spectral", true);
+    const bool changedSpectral = ImGui::Checkbox("Frequency dependent transmission", &spectral);
+    bool reflections = !live.is_null() && live.value("reflections", false);
+    const bool changedReflections = ImGui::Checkbox("Early specular reflections", &reflections);
+    bool diffuse = !live.is_null() && live.value("diffuse", false);
+    const bool changedDiffuse = ImGui::Checkbox("Diffuse surface scattering", &diffuse);
     try {
-        if (changedEnabled || (enabled && (changedUnits || changedModel))) {
+        if (changedEnabled || (enabled && (changedUnits || changedModel ||
+                                          changedSpectral || changedReflections || changedDiffuse))) {
             author(ctx, nullptr, "acoustics_preview", {{"id", emitter.at("id")},
-                {"enabled", enabled}, {"meters_per_unit", metersPerUnit},
+                {"enabled", enabled}, {"meters_per_unit", metersPerUnit}, {"spectral", spectral},
+                {"reflections", reflections},
+                {"diffuse", diffuse},
                 {"boundary_mode", model == 0 ? "object_barrier" : "thin_surface"}});
             error.clear();
         }
@@ -61,16 +70,28 @@ void drawAcousticDiagnostics(UIContext& ctx, const nlohmann::json& emitter) {
         if (live.contains("report") && live.at("report").contains("error")) {
             ImGui::TextWrapped("%s", live.at("report").at("error").get<std::string>().c_str());
         }
+        if (live.contains("report") && live.at("report").contains("diffuse")) {
+            const auto& scatter = live.at("report").at("diffuse");
+            if (scatter.value("enabled", false)) {
+                ImGui::Text("Diffuse: %u / %u samples contributed | %s",
+                    scatter.value("contributions", 0u), scatter.value("samples", 0u),
+                    scatter.value("complete", false) ? "estimated" : "partial estimate");
+            }
+        }
     }
-    ImGui::TextWrapped("Broadband level approximation; no muffling, echo or diffraction yet. "
+    ImGui::TextWrapped("Six complementary frequency bands; optional broadband comparison. "
+        "Specular reflections sample six planes. Diffuse scattering uses 64 source rays, "
+        "Lambert weighting and eight delay bins; omnidirectional sources only. "
+        "Both models are single bounce, with up to one second of excess delay. "
         "Object model applies transmission once per named object, regardless of thickness. "
-        "Keep separate walls as separate objects. Up to four sources, about 4 updates/second.");
+        "Keep separate walls as separate objects. Up to 32 sources, about 4 updates/second.");
     std::string current;
     try {
         if (ctx.scene.camera) {
             const auto& listener = ctx.scene.camera->lookfrom;
             current = json{{"id", emitter.at("id")},
-                {"position", worldPose(ctx, emitter).at("position")},
+                {"position", ctx.scene.audio->invoke("source_runtime",
+                    {{"id", emitter.at("id")}}).at("position")},
                 {"listener", {listener.x, listener.y, listener.z}}, {"units", metersPerUnit},
                 {"boundary_model", model},
                 {"geometry", g_scene_geometry_generation.load()},

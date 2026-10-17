@@ -49,10 +49,13 @@ struct Stats {
 // Once per UI frame, before any drawSegment. Returns whether occlusion is on
 // for this frame; when off, drawSegment draws plain lines.
 bool beginFrame(const SceneData& scene, bool enabled, float hidden_alpha, bool orthographic,
-                int timeline_frame);
+                int timeline_frame, bool scene_busy = false);
 
 void drawSegment(ImDrawList* draw_list, const Vec3& a, const Vec3& b, ImU32 color,
                  float thickness, const ProjectFn& project);
+
+// Point markers/labels share the segment cache, ray budget and hidden opacity.
+float pointAlpha(const Vec3& point);
 
 const Stats& stats();
 

@@ -370,6 +370,7 @@
     <None Include="source\shaders\shadow_miss.rmiss" />
     <None Include="source\shaders\volume_closesthit.rchit" />
     <None Include="source\shaders\volume_overlap_selection.glsl" />
+    <None Include="source\shaders\acoustic_diffuse.glsl" />
     <None Include="source\shaders\volume_intersection.rint" />
     <None Include="source\src\Device\hair_bsdf.cuh" />
     <None Include="source\src\Device\hair_intersect.cuh" />
@@ -2524,6 +2525,17 @@
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <ClCompile Include="source\src\Scene\AcousticGpuPreview.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\Audio\AcousticPlayback.h" />
+    <ClInclude Include="source\include\Audio\AcousticGeometryPolicy.h" />
+    <ClInclude Include="source\include\Audio\AudioSourceRuntime.h" />
+    <ClCompile Include="source\src\Scene\AudioSourceRuntime.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticPlayback.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>

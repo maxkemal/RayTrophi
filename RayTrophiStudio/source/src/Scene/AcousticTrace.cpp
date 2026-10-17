@@ -211,6 +211,8 @@ nlohmann::json traceAcousticSegment(const AcousticSceneSnapshot& scene, Point so
         {"geometrically_obstructed", !hits.empty()}, {"triangles", scene.faces.size()},
         {"coverage", "authored_flat_mesh_only"}, {"snapshot_complete", covered},
         {"unsupported_objects", scene.unsupported}, {"transient_objects", scene.transient},
+        {"ignored_simulation_visuals", scene.ignoredSimulationVisuals},
+        {"simulation_visuals_are_boundaries", false},
         {"hidden_objects_skipped", scene.hidden},
         {"hits", json::array()}, {"transmission_energy", nullptr},
         {"transmission_status", "requires_boundary_model"}};

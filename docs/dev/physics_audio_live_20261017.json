@@ -1,0 +1,1242 @@
+{
+  "samples": [
+    {
+      "domain": {
+        "audio_error": "",
+        "carrier_count": 16,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 16,
+        "contact_power_w": 8.35240837122496,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          0.00362628442235291,
+          0.04524756595492363,
+          0.024609846994280815
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 8.35240837122496,
+        "value_units": "W",
+        "version": 68
+      },
+      "runtime": {
+        "activity": 0.03508549928665161,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.03746224567294121,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          0.00362628442235291,
+          0.04524756595492363,
+          0.024609846994280815
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.18731123208999634,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      }
+    },
+    {
+      "domain": {
+        "audio_error": "",
+        "carrier_count": 33,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 33,
+        "contact_power_w": 22.256887595141837,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          0.007066548801958561,
+          -0.009168989956378937,
+          0.016636723652482033
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 22.256887595141837,
+        "value_units": "W",
+        "version": 69
+      },
+      "runtime": {
+        "activity": 0.04200941324234009,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.04099239781498909,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          0.007066548801958561,
+          -0.009168989956378937,
+          0.016636723652482033
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.20496198534965515,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      }
+    },
+    {
+      "domain": {
+        "audio_error": "",
+        "carrier_count": 50,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 50,
+        "contact_power_w": 43.83920467913026,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          0.012713152915239334,
+          -0.027313627302646637,
+          0.0046209185384213924
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 43.83920467913026,
+        "value_units": "W",
+        "version": 70
+      },
+      "runtime": {
+        "activity": 0.04201000928878784,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.04099268838763237,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          0.012713152915239334,
+          -0.027313627302646637,
+          0.0046209185384213924
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.20496343076229095,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      }
+    },
+    {
+      "domain": {
+        "audio_error": "",
+        "carrier_count": 66,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 66,
+        "contact_power_w": 74.75372227796282,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          0.005325428210198879,
+          -0.04524409770965576,
+          -0.0032221737783402205
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 74.75372227796282,
+        "value_units": "W",
+        "version": 71
+      },
+      "runtime": {
+        "activity": 0.04201000928878784,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.04099268838763237,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          0.005325428210198879,
+          -0.04524409770965576,
+          -0.0032221737783402205
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.20496343076229095,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      }
+    },
+    {
+      "domain": {
+        "audio_error": "",
+        "carrier_count": 83,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 83,
+        "contact_power_w": 117.61139501635041,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          0.00791719276458025,
+          -0.06017104536294937,
+          -0.00778743764385581
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 117.61139501635041,
+        "value_units": "W",
+        "version": 72
+      },
+      "runtime": {
+        "activity": 0.04201000928878784,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.04099268838763237,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          0.00791719276458025,
+          -0.06017104536294937,
+          -0.00778743764385581
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.20496343076229095,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      }
+    },
+    {
+      "domain": {
+        "audio_error": "",
+        "carrier_count": 100,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 100,
+        "contact_power_w": 173.83311004690694,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          0.006096424534916878,
+          -0.08080888539552689,
+          -0.007222835905849934
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 173.83311004690694,
+        "value_units": "W",
+        "version": 73
+      },
+      "runtime": {
+        "activity": 0.04201000928878784,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.04099268838763237,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          0.006096424534916878,
+          -0.08080888539552689,
+          -0.007222835905849934
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.20496343076229095,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      }
+    },
+    {
+      "domain": {
+        "audio_error": "",
+        "carrier_count": 116,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 116,
+        "contact_power_w": 247.36955941555337,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          0.005336918402463198,
+          -0.10393606126308441,
+          -0.008790652267634869
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 247.36955941555337,
+        "value_units": "W",
+        "version": 74
+      },
+      "runtime": {
+        "activity": 0.04201000928878784,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.04099268838763237,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          0.005336918402463198,
+          -0.10393606126308441,
+          -0.008790652267634869
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.20496343076229095,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      }
+    },
+    {
+      "domain": {
+        "audio_error": "",
+        "carrier_count": 133,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 133,
+        "contact_power_w": 340.45184101238493,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          0.004555541556328535,
+          -0.12539373338222504,
+          -0.009154879488050938
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 340.45184101238493,
+        "value_units": "W",
+        "version": 75
+      },
+      "runtime": {
+        "activity": 0.04201000928878784,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.04099268838763237,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          0.004555541556328535,
+          -0.12539373338222504,
+          -0.009154879488050938
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.20496343076229095,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      }
+    },
+    {
+      "domain": {
+        "audio_error": "",
+        "carrier_count": 150,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 150,
+        "contact_power_w": 455.6747111909475,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          0.003648411948233843,
+          -0.14823313057422638,
+          -0.008718716911971569
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 455.6747111909475,
+        "value_units": "W",
+        "version": 76
+      },
+      "runtime": {
+        "activity": 0.04201000928878784,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.04099268838763237,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          0.003648411948233843,
+          -0.14823313057422638,
+          -0.008718716911971569
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.20496343076229095,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      }
+    },
+    {
+      "domain": {
+        "audio_error": "",
+        "carrier_count": 166,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 166,
+        "contact_power_w": 595.12604239967,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          0.00321677653118968,
+          -0.1746814250946045,
+          -0.00838188361376524
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 595.12604239967,
+        "value_units": "W",
+        "version": 77
+      },
+      "runtime": {
+        "activity": 0.04201000928878784,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.04099268838763237,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          0.00321677653118968,
+          -0.1746814250946045,
+          -0.00838188361376524
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.20496343076229095,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      }
+    },
+    {
+      "domain": {
+        "audio_error": "",
+        "carrier_count": 183,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 183,
+        "contact_power_w": 762.7040863740291,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          0.0030767021235078573,
+          -0.20152072608470917,
+          -0.009162213653326035
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 762.7040863740291,
+        "value_units": "W",
+        "version": 78
+      },
+      "runtime": {
+        "activity": 0.04201000928878784,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.04099268838763237,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          0.0030767021235078573,
+          -0.20152072608470917,
+          -0.009162213653326035
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.20496343076229095,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      }
+    },
+    {
+      "domain": {
+        "audio_error": "",
+        "carrier_count": 200,
+        "contact_energy_j": 0.0,
+        "contact_pairs": 200,
+        "contact_power_w": 958.8322773467744,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "enabled": true,
+        "energy_measured": false,
+        "material_pairs_available": false,
+        "measured": true,
+        "measurement": "fluid_kinetic_transport_activity",
+        "measurement_duration_seconds": 0.01666666753590107,
+        "position": [
+          0.0020372741855680943,
+          -0.229700967669487,
+          -0.00923081487417221
+        ],
+        "position_semantics": "activity_weighted_center",
+        "power_measured": true,
+        "reason": "available",
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "system_id": 1,
+        "system_name": "Particle System 1",
+        "telemetry_enabled": true,
+        "valid": true,
+        "value": 958.8322773467744,
+        "value_units": "W",
+        "version": 79
+      },
+      "runtime": {
+        "activity": 0.04201000928878784,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.04099268838763237,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          0.0020372741855680943,
+          -0.229700967669487,
+          -0.00923081487417221
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.20496343076229095,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      }
+    }
+  ],
+  "preview": [
+    {
+      "amplitude_gain": 1,
+      "band_energy": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "boundary_mode": "object_barrier",
+      "enabled": true,
+      "id": "audio_source_2",
+      "meters_per_unit": 1.0,
+      "pending_report": {
+        "solver": {
+          "backend": "active_vulkan_as",
+          "cpu_bvh": false,
+          "result_bytes_per_source": 352,
+          "state": "pending"
+        },
+        "transmission_energy": null,
+        "transmission_status": "pending"
+      },
+      "preview_revision": 1,
+      "reflection_paths": [],
+      "reflections": true,
+      "solver": {
+        "backend": "active_vulkan_as",
+        "cpu_bvh": false,
+        "result_bytes_per_source": 352,
+        "state": "pending"
+      },
+      "spectral": true,
+      "status": "pending"
+    }
+  ],
+  "discovery": {
+    "agent_methods": [
+      "agent.discover",
+      "agent.describe",
+      "agent.search_capabilities",
+      "agent.get_examples",
+      "agent.get_state_summary",
+      "agent.list_methods",
+      "agent.roles",
+      "agent.chat_send",
+      "agent.chat_poll"
+    ],
+    "app": "RayTrophi Studio",
+    "description": "Path tracing renderer with APIC fluid and gas simulation, rigid-body destruction, material substance thermochemistry, terrain, hair, particles and node graphs.",
+    "discovery_version": 2,
+    "documented_coverage": 0.9753566980361938,
+    "documented_methods": 752,
+    "domains": [
+      {
+        "method_count": 4,
+        "name": "addons",
+        "summary": "Addon modules"
+      },
+      {
+        "method_count": 10,
+        "name": "agent",
+        "summary": "Discovery, measurement and chat for automated callers"
+      },
+      {
+        "method_count": 24,
+        "name": "anim",
+        "summary": "Character animation, clips and keyframes"
+      },
+      {
+        "method_count": 2,
+        "name": "attr"
+      },
+      {
+        "method_count": 87,
+        "name": "audio"
+      },
+      {
+        "method_count": 1,
+        "name": "batch"
+      },
+      {
+        "method_count": 24,
+        "name": "camera",
+        "summary": "Camera placement and lens"
+      },
+      {
+        "method_count": 6,
+        "name": "collider"
+      },
+      {
+        "method_count": 3,
+        "name": "debris",
+        "summary": "Ash and debris particles"
+      },
+      {
+        "method_count": 4,
+        "name": "editor",
+        "summary": "Which editors are open and what they are showing"
+      },
+      {
+        "method_count": 5,
+        "name": "flow_source",
+        "summary": "Emitters that feed fluid and gas domains"
+      },
+      {
+        "method_count": 33,
+        "name": "fluid",
+        "summary": "APIC liquid domains, seeding and substances"
+      },
+      {
+        "method_count": 7,
+        "name": "forcefield",
+        "summary": "Spatial force fields: wind, vortex, drag, noise"
+      },
+      {
+        "method_count": 16,
+        "name": "gas",
+        "summary": "Gas domains: smoke, fire, buoyancy, blast"
+      },
+      {
+        "method_count": 5,
+        "name": "geometry_cache"
+      },
+      {
+        "method_count": 15,
+        "name": "hair",
+        "summary": "Hair and fur grooms"
+      },
+      {
+        "method_count": 12,
+        "name": "ipc",
+        "summary": "IPC tokens, sessions and audit log (admin)"
+      },
+      {
+        "method_count": 11,
+        "name": "lights",
+        "summary": "Scene lights"
+      },
+      {
+        "method_count": 12,
+        "name": "material",
+        "summary": "Material creation, assignment and parameters"
+      },
+      {
+        "method_count": 1,
+        "name": "matter"
+      },
+      {
+        "method_count": 36,
+        "name": "mesh"
+      },
+      {
+        "method_count": 5,
+        "name": "modifiers",
+        "summary": "Object modifier stacks"
+      },
+      {
+        "method_count": 1,
+        "name": "msf",
+        "summary": "Material substance library and live material state fields"
+      },
+      {
+        "method_count": 18,
+        "name": "nodes",
+        "summary": "Node graphs for materials, geometry and terrain"
+      },
+      {
+        "method_count": 16,
+        "name": "paint",
+        "summary": "Texture painting layers and channels"
+      },
+      {
+        "method_count": 31,
+        "name": "particle",
+        "summary": "Particle systems, emitters and solver settings"
+      },
+      {
+        "method_count": 8,
+        "name": "perf"
+      },
+      {
+        "method_count": 23,
+        "name": "physics",
+        "summary": "Rigid bodies, fracture and destruction"
+      },
+      {
+        "method_count": 13,
+        "name": "post",
+        "summary": "Post-processing: exposure, tone mapping, grade"
+      },
+      {
+        "method_count": 6,
+        "name": "project",
+        "summary": "Project open, save and current path"
+      },
+      {
+        "method_count": 13,
+        "name": "rayfusion"
+      },
+      {
+        "method_count": 1,
+        "name": "redo"
+      },
+      {
+        "method_count": 1,
+        "name": "redo_description"
+      },
+      {
+        "method_count": 15,
+        "name": "render",
+        "summary": "Final renders, sequences and frame measurement"
+      },
+      {
+        "method_count": 1,
+        "name": "request_render"
+      },
+      {
+        "method_count": 1,
+        "name": "reset_accumulation"
+      },
+      {
+        "method_count": 96,
+        "name": "rig"
+      },
+      {
+        "method_count": 11,
+        "name": "scatter",
+        "summary": "Instancing objects over surfaces"
+      },
+      {
+        "method_count": 17,
+        "name": "scene",
+        "summary": "Objects in the scene: create, delete, transform, inspect"
+      },
+      {
+        "method_count": 1,
+        "name": "script",
+        "summary": "Running Python scripts in-process"
+      },
+      {
+        "method_count": 4,
+        "name": "sculpt",
+        "summary": "Mesh sculpting and masks"
+      },
+      {
+        "method_count": 6,
+        "name": "select",
+        "summary": "Selection state"
+      },
+      {
+        "method_count": 2,
+        "name": "sim"
+      },
+      {
+        "method_count": 3,
+        "name": "sim_cache",
+        "summary": "Simulation bake cache"
+      },
+      {
+        "method_count": 14,
+        "name": "sim_graph",
+        "summary": "Simulation node graphs, scoped to an owner"
+      },
+      {
+        "method_count": 15,
+        "name": "spline"
+      },
+      {
+        "method_count": 10,
+        "name": "substance"
+      },
+      {
+        "method_count": 11,
+        "name": "templates",
+        "summary": "Scene templates and the Template Hub"
+      },
+      {
+        "method_count": 42,
+        "name": "terrain",
+        "summary": "Terrain heightfields, erosion and rivers"
+      },
+      {
+        "method_count": 2,
+        "name": "timeline",
+        "summary": "Playhead; stepping it advances the solvers"
+      },
+      {
+        "method_count": 1,
+        "name": "undo"
+      },
+      {
+        "method_count": 1,
+        "name": "undo_description"
+      },
+      {
+        "method_count": 1,
+        "name": "version"
+      },
+      {
+        "method_count": 32,
+        "name": "viewport",
+        "summary": "Viewport capture, convergence and status"
+      },
+      {
+        "method_count": 2,
+        "name": "water"
+      },
+      {
+        "method_count": 29,
+        "name": "world",
+        "summary": "Sky, sun and background environment"
+      }
+    ],
+    "getting_started": [
+      "agent.search_capabilities with the goal in plain words",
+      "agent.describe on each method the recipe names",
+      "call the methods",
+      "agent.get_state_summary or render.probe to verify"
+    ],
+    "protocol": "json-rpc-like (request: method/params/id, response: result or error)",
+    "registered_methods": 771,
+    "registry_source": "generated from dispatch by scripts/gen_ipc_descriptors.py; scripts/audit_ipc_capabilities.py fails the build if they drift",
+    "roles": [
+      "manager",
+      "controller",
+      "worker"
+    ],
+    "version": "0.5.0"
+  },
+  "after_measurement_expiry": {
+    "activity": 0.0,
+    "automatic": true,
+    "control_ready": true,
+    "direction": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "driver": "domain_contact",
+    "effective_gain": 0.0,
+    "effective_pitch": 1.0,
+    "id": "audio_source_2",
+    "playing": false,
+    "position": [
+      0.0020372741855680943,
+      -0.229700967669487,
+      -0.00923081487417221
+    ],
+    "position_origin": "reaction_world",
+    "reaction_gain": 0.0,
+    "spatial": true,
+    "timeline_held": false,
+    "valid": true
+  },
+  "preview_after_material_view": [
+    {
+      "amplitude_gain": 1,
+      "band_energy": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "boundary_mode": "object_barrier",
+      "enabled": true,
+      "id": "audio_source_2",
+      "meters_per_unit": 1.0,
+      "preview_revision": 1,
+      "reflection_paths": [],
+      "reflections": true,
+      "report": {
+        "coverage": "active_gpu_as_flat_mesh",
+        "crossings": 10,
+        "delay_seconds": 0.11458498984575272,
+        "distance_meters": 39.302650451660156,
+        "listener_position": [
+          22.151287078857422,
+          15.856588363647461,
+          28.192546844482422
+        ],
+        "pose_policy": "sampled_runtime_world",
+        "position_origin": "reaction_world",
+        "raw_candidates": 10,
+        "reflections": [],
+        "result_age_ms": 516.1558,
+        "snapshot_complete": false,
+        "solver": {
+          "backend": "active_vulkan_as",
+          "cpu_bvh": false,
+          "result_bytes_per_source": 352,
+          "state": "failed"
+        },
+        "source_position": [
+          0.0020372741855680943,
+          -0.229700967669487,
+          -0.00923081487417221
+        ],
+        "transmission_energy": null,
+        "transmission_status": "unknown_material"
+      },
+      "solver": {
+        "backend": "active_vulkan_as",
+        "cpu_bvh": false,
+        "result_bytes_per_source": 352,
+        "state": "failed"
+      },
+      "spectral": true,
+      "status": "unknown_material"
+    }
+  ],
+  "restart": {
+    "activity": 0.9560630917549133,
+    "automatic": true,
+    "control_ready": true,
+    "direction": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "driver": "domain_contact",
+    "effective_gain": 0.19555696845054626,
+    "effective_pitch": 1.0,
+    "id": "audio_source_2",
+    "playing": true,
+    "position": [
+      0.0015289350412786007,
+      -0.2601243555545807,
+      -0.009481929242610931
+    ],
+    "position_origin": "reaction_world",
+    "reaction_gain": 0.9777848124504089,
+    "spatial": true,
+    "timeline_held": false,
+    "valid": true
+  },
+  "stop_all": {
+    "activity": 0.0018456317484378815,
+    "automatic": true,
+    "control_ready": true,
+    "direction": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "driver": "domain_contact",
+    "effective_gain": 0.00859216321259737,
+    "effective_pitch": 1.0,
+    "id": "audio_source_2",
+    "playing": false,
+    "position": [
+      0.0015289350412786007,
+      -0.2601243555545807,
+      -0.009481929242610931
+    ],
+    "position_origin": "reaction_world",
+    "reaction_gain": 0.042960815131664276,
+    "spatial": true,
+    "timeline_held": false,
+    "valid": true
+  },
+  "stop_all_after_fresh_step": {
+    "activity": 0.9560666680335999,
+    "automatic": true,
+    "control_ready": true,
+    "direction": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "driver": "domain_contact",
+    "effective_gain": 0.19555732607841492,
+    "effective_pitch": 1.0,
+    "id": "audio_source_2",
+    "playing": false,
+    "position": [
+      0.0006865193718113005,
+      -0.2911984920501709,
+      -0.009953957051038742
+    ],
+    "position_origin": "reaction_world",
+    "reaction_gain": 0.9777866005897522,
+    "spatial": true,
+    "timeline_held": false,
+    "valid": true
+  },
+  "resume": {
+    "activity": 0.9561442136764526,
+    "automatic": true,
+    "control_ready": true,
+    "direction": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "driver": "domain_contact",
+    "effective_gain": 0.19556526839733124,
+    "effective_pitch": 1.0,
+    "id": "audio_source_2",
+    "playing": true,
+    "position": [
+      0.00048579287249594927,
+      -0.3247251808643341,
+      -0.010439344681799412
+    ],
+    "position_origin": "reaction_world",
+    "reaction_gain": 0.9778262972831726,
+    "spatial": true,
+    "timeline_held": false,
+    "valid": true
+  },
+  "telemetry_off": {
+    "activity": 8.109817281365395e-05,
+    "automatic": true,
+    "control_ready": true,
+    "direction": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "driver": "domain_contact",
+    "effective_gain": 0.0018010905478149652,
+    "effective_pitch": 1.0,
+    "id": "audio_source_2",
+    "playing": false,
+    "position": [
+      0.00048579287249594927,
+      -0.3247251808643341,
+      -0.010439344681799412
+    ],
+    "position_origin": "reaction_world",
+    "reaction_gain": 0.009005452506244183,
+    "spatial": true,
+    "timeline_held": false,
+    "valid": true
+  },
+  "final_mode": "timeline",
+  "note": "Real solver steps; no synthetic signal injection. Temporary mono wood sound tests transport only, not water synthesis. Geometry/material authoring untouched; material viewport selected."
+}
