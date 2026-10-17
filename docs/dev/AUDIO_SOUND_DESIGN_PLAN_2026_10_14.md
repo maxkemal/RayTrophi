@@ -1,5 +1,14 @@
 # Audio sound design and preview
 
+2026-10-17 continuation: the user-built spectral/early-reflection path is audible
+with procedural fixtures and real CC0 voices. Reactive-source acoustic parity is
+now delivered in source, with user C++ build/live acceptance pending; see
+[physics-driven sources](SCENE_AUDIO_PHYSICS_SOURCES.md). Faucet sound generation
+remains subsequent work. The same continuation queues
+explicit grouped playback/processing controls and compact viewport labels; see
+[the current acoustic roadmap](SCENE_ACOUSTICS_ROADMAP.md). Earlier checkpoints
+below retain their original acceptance scope.
+
 2026-10-16 continuation: direct-path acoustic preview passed external IPC/native
 PCM acceptance; see [the acoustic roadmap](SCENE_ACOUSTICS_ROADMAP.md). The next
 implementation slice is specified in

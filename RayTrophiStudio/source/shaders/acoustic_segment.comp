@@ -3,6 +3,7 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_scalar_block_layout : require
+#extension GL_GOOGLE_include_directive : require
 
 // A bounded direct-path query. No PBR, texture, lighting or audio PCM resources.
 layout(local_size_x = 1) in;
@@ -13,9 +14,21 @@ struct Instance {
     uvec4 meta; // vertex count, triangle count, shared object ID, response defined
     vec4 energy0;
     vec4 energy1;
+    vec4 reflection0;
+    vec4 reflection1;
+    vec4 diffuse0;
+    vec4 diffuse1;
 };
-struct Ray { vec4 source; vec4 listener; };
-struct Summary { vec4 energy0; vec4 energy1; vec4 path; uvec4 state; };
+struct Ray { vec4 source; vec4 listener; vec4 options; };
+struct Reflection { vec4 energy0; vec4 energy1; vec4 path; };
+struct Summary {
+    vec4 energy0;
+    vec4 energy1;
+    vec4 path;
+    uvec4 state;
+    Reflection reflections[14];
+    uvec4 diffuseState;
+};
 layout(std430, set = 0, binding = 1) readonly buffer Instances { Instance instances[]; };
 layout(std430, set = 0, binding = 2) readonly buffer Rays { Ray rays[]; };
 layout(std430, set = 0, binding = 3) writeonly buffer Results { Summary results[]; };
@@ -28,6 +41,192 @@ vec3 position(Instance item, uint vertex) {
     return vec3(p.v[vertex * 3], p.v[vertex * 3 + 1], p.v[vertex * 3 + 2]);
 }
 
+// Conservative visibility for reflected paths: any intervening surface rejects the path.
+// The direct solver still handles transmissive barriers independently.
+bool visible(vec3 origin, vec3 target, float epsilon, out bool complete) {
+    complete = true;
+    vec3 delta = target - origin;
+    float span = length(delta);
+    if (span <= 4.0 * epsilon) return false;
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, sceneAS,
+        gl_RayFlagsNoOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu,
+        origin, epsilon, delta / span, span - 2.0 * epsilon);
+    // rayQueryEXT must stay local: glslc rejects out/inout opaque parameters.
+    uint candidates = 0u;
+    while (rayQueryProceedEXT(query)) {
+        if (++candidates > 1024u) {
+            complete = false;
+            return false;
+        }
+        uint index = rayQueryGetIntersectionInstanceIdEXT(query, false);
+        if (index >= pc.instanceCount) {
+            complete = false;
+            return false;
+        }
+        if (instances[index].meta.w == 2u) continue;
+        if (rayQueryGetIntersectionTypeEXT(query, false) !=
+            gl_RayQueryCandidateIntersectionTriangleEXT) {
+            complete = false;
+            return false;
+        }
+        rayQueryConfirmIntersectionEXT(query);
+    }
+    return rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+bool visible(vec3 origin, vec3 target, float epsilon) {
+    bool complete;
+    return visible(origin, target, epsilon, complete);
+}
+
+void reflectedPaths(Ray source, inout Summary result) {
+    if (source.options.x < 0.5) return;
+    const vec3 directions[6] = vec3[6](vec3(1, 0, 0), vec3(-1, 0, 0),
+        vec3(0, 1, 0), vec3(0, -1, 0), vec3(0, 0, 1), vec3(0, 0, -1));
+    vec3 planes[6];
+    float offsets[6];
+    uint planeCount = 0u;
+    float units = source.source.w;
+    float epsilon = max(0.0001 / units,
+        length(source.listener.xyz - source.source.xyz) * 1e-6);
+    float horizon = (result.path.x + 343.0 * source.options.y) / units;
+    for (uint slot = 0u; slot < 6u; ++slot) {
+        rayQueryEXT query;
+        rayQueryInitializeEXT(query, sceneAS, gl_RayFlagsNoOpaqueEXT, 0xFFu,
+            source.source.xyz, epsilon, directions[slot], horizon);
+        uint candidates = 0u;
+        bool validQuery = true;
+        while (rayQueryProceedEXT(query)) {
+            if (++candidates > 1024u) {
+                validQuery = false;
+                break;
+            }
+            uint candidateIndex = rayQueryGetIntersectionInstanceIdEXT(query, false);
+            if (candidateIndex >= pc.instanceCount) {
+                validQuery = false;
+                break;
+            }
+            if (instances[candidateIndex].meta.w == 2u) continue;
+            if (rayQueryGetIntersectionTypeEXT(query, false) !=
+                gl_RayQueryCandidateIntersectionTriangleEXT) {
+                validQuery = false;
+                break;
+            }
+            rayQueryConfirmIntersectionEXT(query);
+        }
+        if (!validQuery) continue;
+        if (rayQueryGetIntersectionTypeEXT(query, true) !=
+            gl_RayQueryCommittedIntersectionTriangleEXT) continue;
+        uint index = rayQueryGetIntersectionInstanceIdEXT(query, true);
+        uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(query, true);
+        if (index >= pc.instanceCount) continue;
+        Instance wall = instances[index];
+        if (wall.meta.w == 0u || wall.positions == uint64_t(0) ||
+            primitive >= wall.meta.y) continue;
+        uvec3 corners = uvec3(primitive * 3u) + uvec3(0, 1, 2);
+        if (wall.indices != uint64_t(0)) {
+            Indices indices = Indices(wall.indices);
+            corners = uvec3(indices.v[corners.x], indices.v[corners.y], indices.v[corners.z]);
+        }
+        if (any(greaterThanEqual(corners, uvec3(wall.meta.x)))) continue;
+        mat4x3 transform = rayQueryGetIntersectionObjectToWorldEXT(query, true);
+        vec3 a = transform * vec4(position(wall, corners.x), 1);
+        vec3 b = transform * vec4(position(wall, corners.y), 1);
+        vec3 c = transform * vec4(position(wall, corners.z), 1);
+        vec3 normal = cross(b - a, c - a);
+        float magnitude = length(normal);
+        if (isnan(magnitude) || isinf(magnitude) || magnitude < 1e-12) continue;
+        normal /= magnitude;
+        float side = dot(source.source.xyz - a, normal);
+        if (side < 0.0) {
+            normal = -normal;
+            side = -side;
+        }
+        float listenerSide = dot(source.listener.xyz - a, normal);
+        if (side <= epsilon || listenerSide <= epsilon) continue;
+        vec3 image = source.source.xyz - 2.0 * side * normal;
+        vec3 delta = image - source.listener.xyz;
+        float denominator = dot(delta, normal);
+        if (abs(denominator) < 1e-9) continue;
+        float t = -listenerSide / denominator;
+        if (t <= 0.0 || t >= 1.0) continue;
+        vec3 point = source.listener.xyz + t * delta;
+        // Confirm that the image-source point is on actual geometry of this plane.
+        // Discovery triangle can differ from the triangle containing the specular point.
+        vec3 first = point - source.source.xyz;
+        float firstLength = length(first);
+        float secondLength = length(point - source.listener.xyz);
+        if (firstLength <= 4.0 * epsilon || secondLength <= 4.0 * epsilon) continue;
+        rayQueryEXT endpoint;
+        rayQueryInitializeEXT(endpoint, sceneAS, gl_RayFlagsNoOpaqueEXT, 0xFFu,
+            source.source.xyz, epsilon, first / firstLength, firstLength + epsilon);
+        uint endpointCandidates = 0u;
+        bool validEndpoint = true;
+        while (rayQueryProceedEXT(endpoint)) {
+            if (++endpointCandidates > 1024u) {
+                validEndpoint = false;
+                break;
+            }
+            uint candidateIndex = rayQueryGetIntersectionInstanceIdEXT(endpoint, false);
+            if (candidateIndex >= pc.instanceCount) {
+                validEndpoint = false;
+                break;
+            }
+            if (instances[candidateIndex].meta.w == 2u) continue;
+            if (rayQueryGetIntersectionTypeEXT(endpoint, false) !=
+                gl_RayQueryCandidateIntersectionTriangleEXT) {
+                validEndpoint = false;
+                break;
+            }
+            rayQueryConfirmIntersectionEXT(endpoint);
+        }
+        if (!validEndpoint) continue;
+        if (rayQueryGetIntersectionTypeEXT(endpoint, true) !=
+            gl_RayQueryCommittedIntersectionTriangleEXT) continue;
+        uint endpointIndex = rayQueryGetIntersectionInstanceIdEXT(endpoint, true);
+        if (endpointIndex >= pc.instanceCount ||
+            instances[endpointIndex].meta.z != wall.meta.z ||
+            abs(rayQueryGetIntersectionTEXT(endpoint, true) - firstLength) > 2.0 * epsilon) continue;
+        Instance endpointWall = instances[endpointIndex];
+        uint endpointPrimitive = rayQueryGetIntersectionPrimitiveIndexEXT(endpoint, true);
+        if (endpointWall.positions == uint64_t(0) || endpointPrimitive >= endpointWall.meta.y) continue;
+        uvec3 endpointCorners = uvec3(endpointPrimitive * 3u) + uvec3(0, 1, 2);
+        if (endpointWall.indices != uint64_t(0)) {
+            Indices indices = Indices(endpointWall.indices);
+            endpointCorners = uvec3(indices.v[endpointCorners.x], indices.v[endpointCorners.y],
+                indices.v[endpointCorners.z]);
+        }
+        if (any(greaterThanEqual(endpointCorners, uvec3(endpointWall.meta.x)))) continue;
+        mat4x3 endpointTransform = rayQueryGetIntersectionObjectToWorldEXT(endpoint, true);
+        vec3 endpointA = endpointTransform * vec4(position(endpointWall, endpointCorners.x), 1);
+        vec3 endpointB = endpointTransform * vec4(position(endpointWall, endpointCorners.y), 1);
+        vec3 endpointC = endpointTransform * vec4(position(endpointWall, endpointCorners.z), 1);
+        vec3 endpointNormal = cross(endpointB - endpointA, endpointC - endpointA);
+        float endpointMagnitude = length(endpointNormal);
+        if (isnan(endpointMagnitude) || isinf(endpointMagnitude) || endpointMagnitude < 1e-12 ||
+            abs(dot(endpointNormal / endpointMagnitude, normal)) < 0.99999) continue;
+        if (!visible(source.source.xyz, point, epsilon) ||
+            !visible(source.listener.xyz, point, epsilon)) continue;
+        float metres = (firstLength + secondLength) * units;
+        float delay = (metres - result.path.x) / 343.0;
+        if (delay < 0.0 || delay > source.options.y) continue;
+        bool duplicate = false;
+        float offset = dot(a, normal);
+        for (uint prior = 0u; prior < planeCount; ++prior) {
+            if (dot(planes[prior], normal) > 0.99999 &&
+                abs(offsets[prior] - offset) < epsilon) duplicate = true;
+        }
+        if (duplicate) continue;
+        planes[planeCount] = normal;
+        offsets[planeCount++] = offset;
+        result.reflections[slot] = Reflection(wall.reflection0, wall.reflection1,
+            vec4(metres, delay, 1, 0));
+    }
+}
+
+#include "acoustic_diffuse.glsl"
+
 void main() {
     uint lane = gl_GlobalInvocationID.x;
     if (lane >= pc.rayCount) return;
@@ -35,7 +234,15 @@ void main() {
     vec3 delta = inputRay.listener.xyz - inputRay.source.xyz;
     float distanceUnits = length(delta);
     float metres = distanceUnits * inputRay.source.w;
-    Summary result = Summary(vec4(1), vec4(1), vec4(metres, metres / 343.0, 0, 0), uvec4(0));
+    Summary result;
+    result.energy0 = vec4(1);
+    result.energy1 = vec4(1);
+    result.path = vec4(metres, metres / 343.0, 0, 0);
+    result.state = uvec4(0);
+    for (uint slot = 0u; slot < 14u; ++slot) {
+        result.reflections[slot] = Reflection(vec4(0), vec4(0), vec4(0));
+    }
+    result.diffuseState = uvec4(0);
     if (isnan(metres) || isinf(metres) || metres < 0.0001) {
         result.state.x = 5u;
         results[lane] = result;
@@ -72,6 +279,7 @@ void main() {
             break;
         }
         Instance item = instances[index];
+        if (item.meta.w == 2u) continue;
         if (item.positions == uint64_t(0) || primitive >= item.meta.y) {
             result.state.x = 4u;
             break;
@@ -127,5 +335,7 @@ void main() {
     }
     result.state.y = count;
     result.state.z = raw;
+    reflectedPaths(inputRay, result);
+    diffusePaths(inputRay, result);
     results[lane] = result;
 }

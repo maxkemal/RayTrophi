@@ -19,6 +19,7 @@ struct AcousticSceneSnapshot {
     nlohmann::json objects = nlohmann::json::array();
     std::size_t unsupported = 0;
     std::size_t transient = 0;
+    std::size_t ignoredSimulationVisuals = 0;
     std::size_t hidden = 0;
 };
 std::vector<std::string> acousticTraceParameters();

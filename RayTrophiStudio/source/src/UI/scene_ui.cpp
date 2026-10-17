@@ -5726,7 +5726,7 @@ bool SceneUI::drawOverlays(UIContext& ctx)
                                viewport_settings.gizmo_hidden_alpha,
                                ctx.scene.camera && ctx.scene.camera->orthographic &&
                                    viewport_settings.shading_mode != 2,
-                               timeline.getCurrentFrame());
+                               timeline.getCurrentFrame(), ctx.is_animation_mode);
     if (!(ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active) && ctx.scene.camera && ctx.selection.show_gizmo) {
         drawLightGizmos(ctx, gizmo_hit);
         drawForceFieldGizmos(ctx, gizmo_hit);

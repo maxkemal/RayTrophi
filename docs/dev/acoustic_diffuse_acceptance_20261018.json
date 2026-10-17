@@ -1,0 +1,5433 @@
+{
+  "profile": "Fluid Audio Room - hard diagnostic",
+  "prior_scattering": 0.019999999552965164,
+  "arms": {
+    "0": [
+      {
+        "amplitude_gain": 0.9999999999999999,
+        "band_energy": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "boundary_mode": "object_barrier",
+        "diffuse": true,
+        "enabled": true,
+        "id": "audio_source_2",
+        "meters_per_unit": 1.0,
+        "preview_revision": 1,
+        "reflection_paths": [
+          {
+            "distance_meters": 23.38620948791504,
+            "energy": [
+              0.9599999785423279,
+              0.9599999785423279,
+              0.949999988079071,
+              0.9399999976158142,
+              0.9200000166893005,
+              0.8999999761581421
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.015580336563289165,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 24.82184600830078,
+            "energy": [
+              0.9599999785423279,
+              0.9599999785423279,
+              0.949999988079071,
+              0.9399999976158142,
+              0.9200000166893005,
+              0.8999999761581421
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.019765865057706833,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 26.188072204589844,
+            "energy": [
+              0.9599999785423279,
+              0.9599999785423279,
+              0.949999988079071,
+              0.9399999976158142,
+              0.9200000166893005,
+              0.8999999761581421
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.023749032989144325,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 77.99549102783203,
+            "energy": [
+              0.9599999785423279,
+              0.9599999785423279,
+              0.949999988079071,
+              0.9399999976158142,
+              0.9200000166893005,
+              0.8999999761581421
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.17479108273983002,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 42.044525146484375,
+            "energy": [
+              0.9599999785423279,
+              0.9599999785423279,
+              0.949999988079071,
+              0.9399999976158142,
+              0.9200000166893005,
+              0.8999999761581421
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.0699777603149414,
+            "kind": "specular"
+          }
+        ],
+        "reflections": true,
+        "report": {
+          "coverage": "authored_flat_environment",
+          "crossings": 0,
+          "delay_seconds": 0.05260103568434715,
+          "diffuse": {
+            "complete": true,
+            "contributions": 0,
+            "delay_bins": 8,
+            "enabled": true,
+            "maximum_excess_delay_seconds": 1.0,
+            "model": "single_bounce_lambert_nee",
+            "near_receiver_rejections": 0,
+            "phase_resolved": false,
+            "quadrature_samples": 64,
+            "receiver_energy_normalization": "free_field_direct",
+            "receiver_exclusion_radius_m": 0.1,
+            "rejected_queries": 0,
+            "samples": 64
+          },
+          "distance_meters": 18.04215431213379,
+          "ignored_simulation_instances": 0,
+          "ignored_simulation_objects": 0,
+          "listener_position": [
+            1.0813932418823242,
+            -1.0082155466079712,
+            -17.981475830078125
+          ],
+          "pose_policy": "sampled_runtime_world",
+          "position_origin": "authored_world",
+          "raw_candidates": 0,
+          "reflections": [
+            {
+              "distance_meters": 23.38620948791504,
+              "energy": [
+                0.9599999785423279,
+                0.9599999785423279,
+                0.949999988079071,
+                0.9399999976158142,
+                0.9200000166893005,
+                0.8999999761581421
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.015580336563289165,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 24.82184600830078,
+              "energy": [
+                0.9599999785423279,
+                0.9599999785423279,
+                0.949999988079071,
+                0.9399999976158142,
+                0.9200000166893005,
+                0.8999999761581421
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.019765865057706833,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.188072204589844,
+              "energy": [
+                0.9599999785423279,
+                0.9599999785423279,
+                0.949999988079071,
+                0.9399999976158142,
+                0.9200000166893005,
+                0.8999999761581421
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.023749032989144325,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 77.99549102783203,
+              "energy": [
+                0.9599999785423279,
+                0.9599999785423279,
+                0.949999988079071,
+                0.9399999976158142,
+                0.9200000166893005,
+                0.8999999761581421
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.17479108273983002,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 42.044525146484375,
+              "energy": [
+                0.9599999785423279,
+                0.9599999785423279,
+                0.949999988079071,
+                0.9399999976158142,
+                0.9200000166893005,
+                0.8999999761581421
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.0699777603149414,
+              "kind": "specular"
+            }
+          ],
+          "result_age_ms": 512.5124,
+          "simulation_visuals_are_boundaries": false,
+          "snapshot_complete": true,
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "ready"
+          },
+          "source_position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "transmission_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "transmission_status": "clear"
+        },
+        "solver": {
+          "backend": "active_vulkan_as",
+          "cpu_bvh": false,
+          "result_bytes_per_source": 752,
+          "state": "ready"
+        },
+        "spectral": true,
+        "status": "clear"
+      },
+      {
+        "amplitude_gain": 0.9999999999999999,
+        "band_energy": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "boundary_mode": "object_barrier",
+        "diffuse": true,
+        "enabled": true,
+        "id": "audio_source_4",
+        "meters_per_unit": 1.0,
+        "preview_revision": 2,
+        "reflection_paths": [
+          {
+            "distance_meters": 23.641071319580078,
+            "energy": [
+              0.9599999785423279,
+              0.9599999785423279,
+              0.949999988079071,
+              0.9399999976158142,
+              0.9200000166893005,
+              0.8999999761581421
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.013211103156208992,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 26.307971954345703,
+            "energy": [
+              0.9599999785423279,
+              0.9599999785423279,
+              0.949999988079071,
+              0.9399999976158142,
+              0.9200000166893005,
+              0.8999999761581421
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.020986324176192284,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 26.0275936126709,
+            "energy": [
+              0.9599999785423279,
+              0.9599999785423279,
+              0.949999988079071,
+              0.9399999976158142,
+              0.9200000166893005,
+              0.8999999761581421
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.02016889490187168,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 77.01318359375,
+            "energy": [
+              0.9599999785423279,
+              0.9599999785423279,
+              0.949999988079071,
+              0.9399999976158142,
+              0.9200000166893005,
+              0.8999999761581421
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.16881492733955383,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 43.07524108886719,
+            "energy": [
+              0.9599999785423279,
+              0.9599999785423279,
+              0.949999988079071,
+              0.9399999976158142,
+              0.9200000166893005,
+              0.8999999761581421
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.0698704943060875,
+            "kind": "specular"
+          }
+        ],
+        "reflections": true,
+        "report": {
+          "coverage": "authored_flat_environment",
+          "crossings": 0,
+          "delay_seconds": 0.05571330711245537,
+          "diffuse": {
+            "complete": true,
+            "contributions": 0,
+            "delay_bins": 8,
+            "enabled": true,
+            "maximum_excess_delay_seconds": 1.0,
+            "model": "single_bounce_lambert_nee",
+            "near_receiver_rejections": 0,
+            "phase_resolved": false,
+            "quadrature_samples": 64,
+            "receiver_energy_normalization": "free_field_direct",
+            "receiver_exclusion_radius_m": 0.1,
+            "rejected_queries": 0,
+            "samples": 64
+          },
+          "distance_meters": 19.109663009643555,
+          "ignored_simulation_instances": 0,
+          "ignored_simulation_objects": 0,
+          "listener_position": [
+            1.0813932418823242,
+            -1.0082155466079712,
+            -17.981475830078125
+          ],
+          "pose_policy": "sampled_runtime_world",
+          "position_origin": "authored_world",
+          "raw_candidates": 0,
+          "reflections": [
+            {
+              "distance_meters": 23.641071319580078,
+              "energy": [
+                0.9599999785423279,
+                0.9599999785423279,
+                0.949999988079071,
+                0.9399999976158142,
+                0.9200000166893005,
+                0.8999999761581421
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.013211103156208992,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.307971954345703,
+              "energy": [
+                0.9599999785423279,
+                0.9599999785423279,
+                0.949999988079071,
+                0.9399999976158142,
+                0.9200000166893005,
+                0.8999999761581421
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.020986324176192284,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.0275936126709,
+              "energy": [
+                0.9599999785423279,
+                0.9599999785423279,
+                0.949999988079071,
+                0.9399999976158142,
+                0.9200000166893005,
+                0.8999999761581421
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.02016889490187168,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 77.01318359375,
+              "energy": [
+                0.9599999785423279,
+                0.9599999785423279,
+                0.949999988079071,
+                0.9399999976158142,
+                0.9200000166893005,
+                0.8999999761581421
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.16881492733955383,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 43.07524108886719,
+              "energy": [
+                0.9599999785423279,
+                0.9599999785423279,
+                0.949999988079071,
+                0.9399999976158142,
+                0.9200000166893005,
+                0.8999999761581421
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.0698704943060875,
+              "kind": "specular"
+            }
+          ],
+          "result_age_ms": 512.5124,
+          "simulation_visuals_are_boundaries": false,
+          "snapshot_complete": true,
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "ready"
+          },
+          "source_position": [
+            1.0,
+            1.2000000476837158,
+            1.0
+          ],
+          "transmission_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "transmission_status": "clear"
+        },
+        "solver": {
+          "backend": "active_vulkan_as",
+          "cpu_bvh": false,
+          "result_bytes_per_source": 752,
+          "state": "ready"
+        },
+        "spectral": true,
+        "status": "clear"
+      }
+    ],
+    "1": [
+      {
+        "amplitude_gain": 0.9999999999999999,
+        "band_energy": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "boundary_mode": "object_barrier",
+        "diffuse": true,
+        "enabled": true,
+        "id": "audio_source_2",
+        "meters_per_unit": 1.0,
+        "preview_revision": 1,
+        "reflection_paths": [
+          {
+            "distance_meters": 23.38620948791504,
+            "energy": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.015580336563289165,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 24.82184600830078,
+            "energy": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.019765865057706833,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 26.188072204589844,
+            "energy": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.023749032989144325,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 77.99549102783203,
+            "energy": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.17479108273983002,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 42.044525146484375,
+            "energy": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.0699777603149414,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 28.938426971435547,
+            "energy": [
+              1.6232426166534424,
+              1.6232426166534424,
+              1.6063337326049805,
+              1.5894248485565186,
+              1.5556074380874634,
+              1.521789789199829
+            ],
+            "energy_reference": "receiver_relative_to_free_field_direct",
+            "excess_delay_seconds": 0.03176756948232651,
+            "kind": "diffuse"
+          },
+          {
+            "distance_meters": 77.82757568359375,
+            "energy": [
+              0.01890486106276512,
+              0.01890486106276512,
+              0.018707934767007828,
+              0.018511010333895683,
+              0.018117159605026245,
+              0.017723307013511658
+            ],
+            "energy_reference": "receiver_relative_to_free_field_direct",
+            "excess_delay_seconds": 0.17430151998996735,
+            "kind": "diffuse"
+          }
+        ],
+        "reflections": true,
+        "report": {
+          "coverage": "authored_flat_environment",
+          "crossings": 0,
+          "delay_seconds": 0.05260103568434715,
+          "diffuse": {
+            "complete": true,
+            "contributions": 62,
+            "delay_bins": 8,
+            "enabled": true,
+            "maximum_excess_delay_seconds": 1.0,
+            "model": "single_bounce_lambert_nee",
+            "near_receiver_rejections": 0,
+            "phase_resolved": false,
+            "quadrature_samples": 64,
+            "receiver_energy_normalization": "free_field_direct",
+            "receiver_exclusion_radius_m": 0.1,
+            "rejected_queries": 0,
+            "samples": 64
+          },
+          "distance_meters": 18.04215431213379,
+          "ignored_simulation_instances": 0,
+          "ignored_simulation_objects": 0,
+          "listener_position": [
+            1.0813932418823242,
+            -1.0082155466079712,
+            -17.981475830078125
+          ],
+          "pose_policy": "sampled_runtime_world",
+          "position_origin": "authored_world",
+          "raw_candidates": 0,
+          "reflections": [
+            {
+              "distance_meters": 23.38620948791504,
+              "energy": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.015580336563289165,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 24.82184600830078,
+              "energy": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.019765865057706833,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.188072204589844,
+              "energy": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.023749032989144325,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 77.99549102783203,
+              "energy": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.17479108273983002,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 42.044525146484375,
+              "energy": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.0699777603149414,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 28.938426971435547,
+              "energy": [
+                1.6232426166534424,
+                1.6232426166534424,
+                1.6063337326049805,
+                1.5894248485565186,
+                1.5556074380874634,
+                1.521789789199829
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.03176756948232651,
+              "kind": "diffuse"
+            },
+            {
+              "distance_meters": 77.82757568359375,
+              "energy": [
+                0.01890486106276512,
+                0.01890486106276512,
+                0.018707934767007828,
+                0.018511010333895683,
+                0.018117159605026245,
+                0.017723307013511658
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.17430151998996735,
+              "kind": "diffuse"
+            }
+          ],
+          "result_age_ms": 509.6549,
+          "simulation_visuals_are_boundaries": false,
+          "snapshot_complete": true,
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "ready"
+          },
+          "source_position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "transmission_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "transmission_status": "clear"
+        },
+        "solver": {
+          "backend": "active_vulkan_as",
+          "cpu_bvh": false,
+          "result_bytes_per_source": 752,
+          "state": "ready"
+        },
+        "spectral": true,
+        "status": "clear"
+      },
+      {
+        "amplitude_gain": 0.9999999999999999,
+        "band_energy": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "boundary_mode": "object_barrier",
+        "diffuse": true,
+        "enabled": true,
+        "id": "audio_source_4",
+        "meters_per_unit": 1.0,
+        "preview_revision": 2,
+        "reflection_paths": [
+          {
+            "distance_meters": 23.641071319580078,
+            "energy": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.013211103156208992,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 26.307971954345703,
+            "energy": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.020986324176192284,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 26.0275936126709,
+            "energy": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.02016889490187168,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 77.01318359375,
+            "energy": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.16881492733955383,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 43.07524108886719,
+            "energy": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.0698704943060875,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 28.395404815673828,
+            "energy": [
+              2.0992610454559326,
+              2.0992610454559326,
+              2.0773937702178955,
+              2.0555264949798584,
+              2.011791944503784,
+              1.9680572748184204
+            ],
+            "energy_reference": "receiver_relative_to_free_field_direct",
+            "excess_delay_seconds": 0.027072133496403694,
+            "kind": "diffuse"
+          },
+          {
+            "distance_meters": 78.66802978515625,
+            "energy": [
+              0.01815709099173546,
+              0.01815709099173546,
+              0.01796795427799225,
+              0.01777881756424904,
+              0.01740054413676262,
+              0.0170222707092762
+            ],
+            "energy_reference": "receiver_relative_to_free_field_direct",
+            "excess_delay_seconds": 0.17363958060741425,
+            "kind": "diffuse"
+          }
+        ],
+        "reflections": true,
+        "report": {
+          "coverage": "authored_flat_environment",
+          "crossings": 0,
+          "delay_seconds": 0.05571330711245537,
+          "diffuse": {
+            "complete": true,
+            "contributions": 62,
+            "delay_bins": 8,
+            "enabled": true,
+            "maximum_excess_delay_seconds": 1.0,
+            "model": "single_bounce_lambert_nee",
+            "near_receiver_rejections": 0,
+            "phase_resolved": false,
+            "quadrature_samples": 64,
+            "receiver_energy_normalization": "free_field_direct",
+            "receiver_exclusion_radius_m": 0.1,
+            "rejected_queries": 0,
+            "samples": 64
+          },
+          "distance_meters": 19.109663009643555,
+          "ignored_simulation_instances": 0,
+          "ignored_simulation_objects": 0,
+          "listener_position": [
+            1.0813932418823242,
+            -1.0082155466079712,
+            -17.981475830078125
+          ],
+          "pose_policy": "sampled_runtime_world",
+          "position_origin": "authored_world",
+          "raw_candidates": 0,
+          "reflections": [
+            {
+              "distance_meters": 23.641071319580078,
+              "energy": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.013211103156208992,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.307971954345703,
+              "energy": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.020986324176192284,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.0275936126709,
+              "energy": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.02016889490187168,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 77.01318359375,
+              "energy": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.16881492733955383,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 43.07524108886719,
+              "energy": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.0698704943060875,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 28.395404815673828,
+              "energy": [
+                2.0992610454559326,
+                2.0992610454559326,
+                2.0773937702178955,
+                2.0555264949798584,
+                2.011791944503784,
+                1.9680572748184204
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.027072133496403694,
+              "kind": "diffuse"
+            },
+            {
+              "distance_meters": 78.66802978515625,
+              "energy": [
+                0.01815709099173546,
+                0.01815709099173546,
+                0.01796795427799225,
+                0.01777881756424904,
+                0.01740054413676262,
+                0.0170222707092762
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.17363958060741425,
+              "kind": "diffuse"
+            }
+          ],
+          "result_age_ms": 509.6549,
+          "simulation_visuals_are_boundaries": false,
+          "snapshot_complete": true,
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "ready"
+          },
+          "source_position": [
+            1.0,
+            1.2000000476837158,
+            1.0
+          ],
+          "transmission_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "transmission_status": "clear"
+        },
+        "solver": {
+          "backend": "active_vulkan_as",
+          "cpu_bvh": false,
+          "result_bytes_per_source": 752,
+          "state": "ready"
+        },
+        "spectral": true,
+        "status": "clear"
+      }
+    ],
+    "0.5": [
+      {
+        "amplitude_gain": 0.9999999999999999,
+        "band_energy": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "boundary_mode": "object_barrier",
+        "diffuse": true,
+        "enabled": true,
+        "id": "audio_source_2",
+        "meters_per_unit": 1.0,
+        "preview_revision": 1,
+        "reflection_paths": [
+          {
+            "distance_meters": 23.38620948791504,
+            "energy": [
+              0.47999998927116394,
+              0.47999998927116394,
+              0.4749999940395355,
+              0.4699999988079071,
+              0.46000000834465027,
+              0.44999998807907104
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.015580336563289165,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 24.82184600830078,
+            "energy": [
+              0.47999998927116394,
+              0.47999998927116394,
+              0.4749999940395355,
+              0.4699999988079071,
+              0.46000000834465027,
+              0.44999998807907104
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.019765865057706833,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 26.188072204589844,
+            "energy": [
+              0.47999998927116394,
+              0.47999998927116394,
+              0.4749999940395355,
+              0.4699999988079071,
+              0.46000000834465027,
+              0.44999998807907104
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.023749032989144325,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 77.99549102783203,
+            "energy": [
+              0.47999998927116394,
+              0.47999998927116394,
+              0.4749999940395355,
+              0.4699999988079071,
+              0.46000000834465027,
+              0.44999998807907104
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.17479108273983002,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 42.044525146484375,
+            "energy": [
+              0.47999998927116394,
+              0.47999998927116394,
+              0.4749999940395355,
+              0.4699999988079071,
+              0.46000000834465027,
+              0.44999998807907104
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.0699777603149414,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 28.938426971435547,
+            "energy": [
+              0.8116213083267212,
+              0.8116213083267212,
+              0.8031668663024902,
+              0.7947124242782593,
+              0.7778037190437317,
+              0.7608948945999146
+            ],
+            "energy_reference": "receiver_relative_to_free_field_direct",
+            "excess_delay_seconds": 0.03176756948232651,
+            "kind": "diffuse"
+          },
+          {
+            "distance_meters": 77.82757568359375,
+            "energy": [
+              0.00945243053138256,
+              0.00945243053138256,
+              0.009353967383503914,
+              0.009255505166947842,
+              0.009058579802513123,
+              0.008861653506755829
+            ],
+            "energy_reference": "receiver_relative_to_free_field_direct",
+            "excess_delay_seconds": 0.17430151998996735,
+            "kind": "diffuse"
+          }
+        ],
+        "reflections": true,
+        "report": {
+          "coverage": "authored_flat_environment",
+          "crossings": 0,
+          "delay_seconds": 0.05260103568434715,
+          "diffuse": {
+            "complete": true,
+            "contributions": 62,
+            "delay_bins": 8,
+            "enabled": true,
+            "maximum_excess_delay_seconds": 1.0,
+            "model": "single_bounce_lambert_nee",
+            "near_receiver_rejections": 0,
+            "phase_resolved": false,
+            "quadrature_samples": 64,
+            "receiver_energy_normalization": "free_field_direct",
+            "receiver_exclusion_radius_m": 0.1,
+            "rejected_queries": 0,
+            "samples": 64
+          },
+          "distance_meters": 18.04215431213379,
+          "ignored_simulation_instances": 0,
+          "ignored_simulation_objects": 0,
+          "listener_position": [
+            1.0813932418823242,
+            -1.0082155466079712,
+            -17.981475830078125
+          ],
+          "pose_policy": "sampled_runtime_world",
+          "position_origin": "authored_world",
+          "raw_candidates": 0,
+          "reflections": [
+            {
+              "distance_meters": 23.38620948791504,
+              "energy": [
+                0.47999998927116394,
+                0.47999998927116394,
+                0.4749999940395355,
+                0.4699999988079071,
+                0.46000000834465027,
+                0.44999998807907104
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.015580336563289165,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 24.82184600830078,
+              "energy": [
+                0.47999998927116394,
+                0.47999998927116394,
+                0.4749999940395355,
+                0.4699999988079071,
+                0.46000000834465027,
+                0.44999998807907104
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.019765865057706833,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.188072204589844,
+              "energy": [
+                0.47999998927116394,
+                0.47999998927116394,
+                0.4749999940395355,
+                0.4699999988079071,
+                0.46000000834465027,
+                0.44999998807907104
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.023749032989144325,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 77.99549102783203,
+              "energy": [
+                0.47999998927116394,
+                0.47999998927116394,
+                0.4749999940395355,
+                0.4699999988079071,
+                0.46000000834465027,
+                0.44999998807907104
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.17479108273983002,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 42.044525146484375,
+              "energy": [
+                0.47999998927116394,
+                0.47999998927116394,
+                0.4749999940395355,
+                0.4699999988079071,
+                0.46000000834465027,
+                0.44999998807907104
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.0699777603149414,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 28.938426971435547,
+              "energy": [
+                0.8116213083267212,
+                0.8116213083267212,
+                0.8031668663024902,
+                0.7947124242782593,
+                0.7778037190437317,
+                0.7608948945999146
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.03176756948232651,
+              "kind": "diffuse"
+            },
+            {
+              "distance_meters": 77.82757568359375,
+              "energy": [
+                0.00945243053138256,
+                0.00945243053138256,
+                0.009353967383503914,
+                0.009255505166947842,
+                0.009058579802513123,
+                0.008861653506755829
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.17430151998996735,
+              "kind": "diffuse"
+            }
+          ],
+          "result_age_ms": 514.1485,
+          "simulation_visuals_are_boundaries": false,
+          "snapshot_complete": true,
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "ready"
+          },
+          "source_position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "transmission_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "transmission_status": "clear"
+        },
+        "solver": {
+          "backend": "active_vulkan_as",
+          "cpu_bvh": false,
+          "result_bytes_per_source": 752,
+          "state": "ready"
+        },
+        "spectral": true,
+        "status": "clear"
+      },
+      {
+        "amplitude_gain": 0.9999999999999999,
+        "band_energy": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "boundary_mode": "object_barrier",
+        "diffuse": true,
+        "enabled": true,
+        "id": "audio_source_4",
+        "meters_per_unit": 1.0,
+        "preview_revision": 2,
+        "reflection_paths": [
+          {
+            "distance_meters": 23.641071319580078,
+            "energy": [
+              0.47999998927116394,
+              0.47999998927116394,
+              0.4749999940395355,
+              0.4699999988079071,
+              0.46000000834465027,
+              0.44999998807907104
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.013211103156208992,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 26.307971954345703,
+            "energy": [
+              0.47999998927116394,
+              0.47999998927116394,
+              0.4749999940395355,
+              0.4699999988079071,
+              0.46000000834465027,
+              0.44999998807907104
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.020986324176192284,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 26.0275936126709,
+            "energy": [
+              0.47999998927116394,
+              0.47999998927116394,
+              0.4749999940395355,
+              0.4699999988079071,
+              0.46000000834465027,
+              0.44999998807907104
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.02016889490187168,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 77.01318359375,
+            "energy": [
+              0.47999998927116394,
+              0.47999998927116394,
+              0.4749999940395355,
+              0.4699999988079071,
+              0.46000000834465027,
+              0.44999998807907104
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.16881492733955383,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 43.07524108886719,
+            "energy": [
+              0.47999998927116394,
+              0.47999998927116394,
+              0.4749999940395355,
+              0.4699999988079071,
+              0.46000000834465027,
+              0.44999998807907104
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.0698704943060875,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 28.395404815673828,
+            "energy": [
+              1.0496305227279663,
+              1.0496305227279663,
+              1.0386968851089478,
+              1.0277632474899292,
+              1.005895972251892,
+              0.9840286374092102
+            ],
+            "energy_reference": "receiver_relative_to_free_field_direct",
+            "excess_delay_seconds": 0.027072133496403694,
+            "kind": "diffuse"
+          },
+          {
+            "distance_meters": 78.66802978515625,
+            "energy": [
+              0.00907854549586773,
+              0.00907854549586773,
+              0.008983977138996124,
+              0.00888940878212452,
+              0.00870027206838131,
+              0.0085111353546381
+            ],
+            "energy_reference": "receiver_relative_to_free_field_direct",
+            "excess_delay_seconds": 0.17363958060741425,
+            "kind": "diffuse"
+          }
+        ],
+        "reflections": true,
+        "report": {
+          "coverage": "authored_flat_environment",
+          "crossings": 0,
+          "delay_seconds": 0.05571330711245537,
+          "diffuse": {
+            "complete": true,
+            "contributions": 62,
+            "delay_bins": 8,
+            "enabled": true,
+            "maximum_excess_delay_seconds": 1.0,
+            "model": "single_bounce_lambert_nee",
+            "near_receiver_rejections": 0,
+            "phase_resolved": false,
+            "quadrature_samples": 64,
+            "receiver_energy_normalization": "free_field_direct",
+            "receiver_exclusion_radius_m": 0.1,
+            "rejected_queries": 0,
+            "samples": 64
+          },
+          "distance_meters": 19.109663009643555,
+          "ignored_simulation_instances": 0,
+          "ignored_simulation_objects": 0,
+          "listener_position": [
+            1.0813932418823242,
+            -1.0082155466079712,
+            -17.981475830078125
+          ],
+          "pose_policy": "sampled_runtime_world",
+          "position_origin": "authored_world",
+          "raw_candidates": 0,
+          "reflections": [
+            {
+              "distance_meters": 23.641071319580078,
+              "energy": [
+                0.47999998927116394,
+                0.47999998927116394,
+                0.4749999940395355,
+                0.4699999988079071,
+                0.46000000834465027,
+                0.44999998807907104
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.013211103156208992,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.307971954345703,
+              "energy": [
+                0.47999998927116394,
+                0.47999998927116394,
+                0.4749999940395355,
+                0.4699999988079071,
+                0.46000000834465027,
+                0.44999998807907104
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.020986324176192284,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.0275936126709,
+              "energy": [
+                0.47999998927116394,
+                0.47999998927116394,
+                0.4749999940395355,
+                0.4699999988079071,
+                0.46000000834465027,
+                0.44999998807907104
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.02016889490187168,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 77.01318359375,
+              "energy": [
+                0.47999998927116394,
+                0.47999998927116394,
+                0.4749999940395355,
+                0.4699999988079071,
+                0.46000000834465027,
+                0.44999998807907104
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.16881492733955383,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 43.07524108886719,
+              "energy": [
+                0.47999998927116394,
+                0.47999998927116394,
+                0.4749999940395355,
+                0.4699999988079071,
+                0.46000000834465027,
+                0.44999998807907104
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.0698704943060875,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 28.395404815673828,
+              "energy": [
+                1.0496305227279663,
+                1.0496305227279663,
+                1.0386968851089478,
+                1.0277632474899292,
+                1.005895972251892,
+                0.9840286374092102
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.027072133496403694,
+              "kind": "diffuse"
+            },
+            {
+              "distance_meters": 78.66802978515625,
+              "energy": [
+                0.00907854549586773,
+                0.00907854549586773,
+                0.008983977138996124,
+                0.00888940878212452,
+                0.00870027206838131,
+                0.0085111353546381
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.17363958060741425,
+              "kind": "diffuse"
+            }
+          ],
+          "result_age_ms": 514.1485,
+          "simulation_visuals_are_boundaries": false,
+          "snapshot_complete": true,
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "ready"
+          },
+          "source_position": [
+            1.0,
+            1.2000000476837158,
+            1.0
+          ],
+          "transmission_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "transmission_status": "clear"
+        },
+        "solver": {
+          "backend": "active_vulkan_as",
+          "cpu_bvh": false,
+          "result_bytes_per_source": 752,
+          "state": "ready"
+        },
+        "spectral": true,
+        "status": "clear"
+      }
+    ]
+  },
+  "restored": [
+    {
+      "amplitude_gain": 0.9999999999999999,
+      "band_energy": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "boundary_mode": "object_barrier",
+      "diffuse": true,
+      "enabled": true,
+      "id": "audio_source_2",
+      "meters_per_unit": 1.0,
+      "preview_revision": 1,
+      "reflection_paths": [
+        {
+          "distance_meters": 23.38620948791504,
+          "energy": [
+            0.9407999515533447,
+            0.9407999515533447,
+            0.9309999942779541,
+            0.9211999773979187,
+            0.9016000032424927,
+            0.8819999694824219
+          ],
+          "energy_reference": "material_fraction",
+          "excess_delay_seconds": 0.015580336563289165,
+          "kind": "specular"
+        },
+        {
+          "distance_meters": 24.82184600830078,
+          "energy": [
+            0.9407999515533447,
+            0.9407999515533447,
+            0.9309999942779541,
+            0.9211999773979187,
+            0.9016000032424927,
+            0.8819999694824219
+          ],
+          "energy_reference": "material_fraction",
+          "excess_delay_seconds": 0.019765865057706833,
+          "kind": "specular"
+        },
+        {
+          "distance_meters": 26.188072204589844,
+          "energy": [
+            0.9407999515533447,
+            0.9407999515533447,
+            0.9309999942779541,
+            0.9211999773979187,
+            0.9016000032424927,
+            0.8819999694824219
+          ],
+          "energy_reference": "material_fraction",
+          "excess_delay_seconds": 0.023749032989144325,
+          "kind": "specular"
+        },
+        {
+          "distance_meters": 77.99549102783203,
+          "energy": [
+            0.9407999515533447,
+            0.9407999515533447,
+            0.9309999942779541,
+            0.9211999773979187,
+            0.9016000032424927,
+            0.8819999694824219
+          ],
+          "energy_reference": "material_fraction",
+          "excess_delay_seconds": 0.17479108273983002,
+          "kind": "specular"
+        },
+        {
+          "distance_meters": 42.044525146484375,
+          "energy": [
+            0.9407999515533447,
+            0.9407999515533447,
+            0.9309999942779541,
+            0.9211999773979187,
+            0.9016000032424927,
+            0.8819999694824219
+          ],
+          "energy_reference": "material_fraction",
+          "excess_delay_seconds": 0.0699777603149414,
+          "kind": "specular"
+        },
+        {
+          "distance_meters": 28.938425064086914,
+          "energy": [
+            0.03246484696865082,
+            0.03246484696865082,
+            0.03212667256593704,
+            0.03178849816322327,
+            0.031112149357795715,
+            0.030435796827077866
+          ],
+          "energy_reference": "receiver_relative_to_free_field_direct",
+          "excess_delay_seconds": 0.03176756575703621,
+          "kind": "diffuse"
+        },
+        {
+          "distance_meters": 77.82758331298828,
+          "energy": [
+            0.00037809720379300416,
+            0.00037809720379300416,
+            0.0003741586988326162,
+            0.00037022019387222826,
+            0.0003623431839514524,
+            0.00035446614492684603
+          ],
+          "energy_reference": "receiver_relative_to_free_field_direct",
+          "excess_delay_seconds": 0.17430153489112854,
+          "kind": "diffuse"
+        }
+      ],
+      "reflections": true,
+      "report": {
+        "coverage": "authored_flat_environment",
+        "crossings": 0,
+        "delay_seconds": 0.05260103568434715,
+        "diffuse": {
+          "complete": true,
+          "contributions": 62,
+          "delay_bins": 8,
+          "enabled": true,
+          "maximum_excess_delay_seconds": 1.0,
+          "model": "single_bounce_lambert_nee",
+          "near_receiver_rejections": 0,
+          "phase_resolved": false,
+          "quadrature_samples": 64,
+          "receiver_energy_normalization": "free_field_direct",
+          "receiver_exclusion_radius_m": 0.1,
+          "rejected_queries": 0,
+          "samples": 64
+        },
+        "distance_meters": 18.04215431213379,
+        "ignored_simulation_instances": 0,
+        "ignored_simulation_objects": 0,
+        "listener_position": [
+          1.0813932418823242,
+          -1.0082155466079712,
+          -17.981475830078125
+        ],
+        "pose_policy": "sampled_runtime_world",
+        "position_origin": "authored_world",
+        "raw_candidates": 0,
+        "reflections": [
+          {
+            "distance_meters": 23.38620948791504,
+            "energy": [
+              0.9407999515533447,
+              0.9407999515533447,
+              0.9309999942779541,
+              0.9211999773979187,
+              0.9016000032424927,
+              0.8819999694824219
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.015580336563289165,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 24.82184600830078,
+            "energy": [
+              0.9407999515533447,
+              0.9407999515533447,
+              0.9309999942779541,
+              0.9211999773979187,
+              0.9016000032424927,
+              0.8819999694824219
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.019765865057706833,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 26.188072204589844,
+            "energy": [
+              0.9407999515533447,
+              0.9407999515533447,
+              0.9309999942779541,
+              0.9211999773979187,
+              0.9016000032424927,
+              0.8819999694824219
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.023749032989144325,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 77.99549102783203,
+            "energy": [
+              0.9407999515533447,
+              0.9407999515533447,
+              0.9309999942779541,
+              0.9211999773979187,
+              0.9016000032424927,
+              0.8819999694824219
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.17479108273983002,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 42.044525146484375,
+            "energy": [
+              0.9407999515533447,
+              0.9407999515533447,
+              0.9309999942779541,
+              0.9211999773979187,
+              0.9016000032424927,
+              0.8819999694824219
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.0699777603149414,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 28.938425064086914,
+            "energy": [
+              0.03246484696865082,
+              0.03246484696865082,
+              0.03212667256593704,
+              0.03178849816322327,
+              0.031112149357795715,
+              0.030435796827077866
+            ],
+            "energy_reference": "receiver_relative_to_free_field_direct",
+            "excess_delay_seconds": 0.03176756575703621,
+            "kind": "diffuse"
+          },
+          {
+            "distance_meters": 77.82758331298828,
+            "energy": [
+              0.00037809720379300416,
+              0.00037809720379300416,
+              0.0003741586988326162,
+              0.00037022019387222826,
+              0.0003623431839514524,
+              0.00035446614492684603
+            ],
+            "energy_reference": "receiver_relative_to_free_field_direct",
+            "excess_delay_seconds": 0.17430153489112854,
+            "kind": "diffuse"
+          }
+        ],
+        "result_age_ms": 513.4219,
+        "simulation_visuals_are_boundaries": false,
+        "snapshot_complete": true,
+        "solver": {
+          "backend": "active_vulkan_as",
+          "cpu_bvh": false,
+          "result_bytes_per_source": 752,
+          "state": "ready"
+        },
+        "source_position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "transmission_energy": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "transmission_status": "clear"
+      },
+      "solver": {
+        "backend": "active_vulkan_as",
+        "cpu_bvh": false,
+        "result_bytes_per_source": 752,
+        "state": "ready"
+      },
+      "spectral": true,
+      "status": "clear"
+    },
+    {
+      "amplitude_gain": 0.9999999999999999,
+      "band_energy": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "boundary_mode": "object_barrier",
+      "diffuse": true,
+      "enabled": true,
+      "id": "audio_source_4",
+      "meters_per_unit": 1.0,
+      "preview_revision": 2,
+      "reflection_paths": [
+        {
+          "distance_meters": 23.641071319580078,
+          "energy": [
+            0.9407999515533447,
+            0.9407999515533447,
+            0.9309999942779541,
+            0.9211999773979187,
+            0.9016000032424927,
+            0.8819999694824219
+          ],
+          "energy_reference": "material_fraction",
+          "excess_delay_seconds": 0.013211103156208992,
+          "kind": "specular"
+        },
+        {
+          "distance_meters": 26.307971954345703,
+          "energy": [
+            0.9407999515533447,
+            0.9407999515533447,
+            0.9309999942779541,
+            0.9211999773979187,
+            0.9016000032424927,
+            0.8819999694824219
+          ],
+          "energy_reference": "material_fraction",
+          "excess_delay_seconds": 0.020986324176192284,
+          "kind": "specular"
+        },
+        {
+          "distance_meters": 26.0275936126709,
+          "energy": [
+            0.9407999515533447,
+            0.9407999515533447,
+            0.9309999942779541,
+            0.9211999773979187,
+            0.9016000032424927,
+            0.8819999694824219
+          ],
+          "energy_reference": "material_fraction",
+          "excess_delay_seconds": 0.02016889490187168,
+          "kind": "specular"
+        },
+        {
+          "distance_meters": 77.01318359375,
+          "energy": [
+            0.9407999515533447,
+            0.9407999515533447,
+            0.9309999942779541,
+            0.9211999773979187,
+            0.9016000032424927,
+            0.8819999694824219
+          ],
+          "energy_reference": "material_fraction",
+          "excess_delay_seconds": 0.16881492733955383,
+          "kind": "specular"
+        },
+        {
+          "distance_meters": 43.07524108886719,
+          "energy": [
+            0.9407999515533447,
+            0.9407999515533447,
+            0.9309999942779541,
+            0.9211999773979187,
+            0.9016000032424927,
+            0.8819999694824219
+          ],
+          "energy_reference": "material_fraction",
+          "excess_delay_seconds": 0.0698704943060875,
+          "kind": "specular"
+        },
+        {
+          "distance_meters": 28.39540672302246,
+          "energy": [
+            0.04198521748185158,
+            0.04198521748185158,
+            0.04154787212610245,
+            0.041110534220933914,
+            0.040235839784145355,
+            0.039361145347356796
+          ],
+          "energy_reference": "receiver_relative_to_free_field_direct",
+          "excess_delay_seconds": 0.027072131633758545,
+          "kind": "diffuse"
+        },
+        {
+          "distance_meters": 78.66803741455078,
+          "energy": [
+            0.00036314179305918515,
+            0.00036314179305918515,
+            0.0003593590809032321,
+            0.0003555763396434486,
+            0.0003480109153315425,
+            0.0003404454328119755
+          ],
+          "energy_reference": "receiver_relative_to_free_field_direct",
+          "excess_delay_seconds": 0.17363958060741425,
+          "kind": "diffuse"
+        }
+      ],
+      "reflections": true,
+      "report": {
+        "coverage": "authored_flat_environment",
+        "crossings": 0,
+        "delay_seconds": 0.05571330711245537,
+        "diffuse": {
+          "complete": true,
+          "contributions": 62,
+          "delay_bins": 8,
+          "enabled": true,
+          "maximum_excess_delay_seconds": 1.0,
+          "model": "single_bounce_lambert_nee",
+          "near_receiver_rejections": 0,
+          "phase_resolved": false,
+          "quadrature_samples": 64,
+          "receiver_energy_normalization": "free_field_direct",
+          "receiver_exclusion_radius_m": 0.1,
+          "rejected_queries": 0,
+          "samples": 64
+        },
+        "distance_meters": 19.109663009643555,
+        "ignored_simulation_instances": 0,
+        "ignored_simulation_objects": 0,
+        "listener_position": [
+          1.0813932418823242,
+          -1.0082155466079712,
+          -17.981475830078125
+        ],
+        "pose_policy": "sampled_runtime_world",
+        "position_origin": "authored_world",
+        "raw_candidates": 0,
+        "reflections": [
+          {
+            "distance_meters": 23.641071319580078,
+            "energy": [
+              0.9407999515533447,
+              0.9407999515533447,
+              0.9309999942779541,
+              0.9211999773979187,
+              0.9016000032424927,
+              0.8819999694824219
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.013211103156208992,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 26.307971954345703,
+            "energy": [
+              0.9407999515533447,
+              0.9407999515533447,
+              0.9309999942779541,
+              0.9211999773979187,
+              0.9016000032424927,
+              0.8819999694824219
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.020986324176192284,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 26.0275936126709,
+            "energy": [
+              0.9407999515533447,
+              0.9407999515533447,
+              0.9309999942779541,
+              0.9211999773979187,
+              0.9016000032424927,
+              0.8819999694824219
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.02016889490187168,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 77.01318359375,
+            "energy": [
+              0.9407999515533447,
+              0.9407999515533447,
+              0.9309999942779541,
+              0.9211999773979187,
+              0.9016000032424927,
+              0.8819999694824219
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.16881492733955383,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 43.07524108886719,
+            "energy": [
+              0.9407999515533447,
+              0.9407999515533447,
+              0.9309999942779541,
+              0.9211999773979187,
+              0.9016000032424927,
+              0.8819999694824219
+            ],
+            "energy_reference": "material_fraction",
+            "excess_delay_seconds": 0.0698704943060875,
+            "kind": "specular"
+          },
+          {
+            "distance_meters": 28.39540672302246,
+            "energy": [
+              0.04198521748185158,
+              0.04198521748185158,
+              0.04154787212610245,
+              0.041110534220933914,
+              0.040235839784145355,
+              0.039361145347356796
+            ],
+            "energy_reference": "receiver_relative_to_free_field_direct",
+            "excess_delay_seconds": 0.027072131633758545,
+            "kind": "diffuse"
+          },
+          {
+            "distance_meters": 78.66803741455078,
+            "energy": [
+              0.00036314179305918515,
+              0.00036314179305918515,
+              0.0003593590809032321,
+              0.0003555763396434486,
+              0.0003480109153315425,
+              0.0003404454328119755
+            ],
+            "energy_reference": "receiver_relative_to_free_field_direct",
+            "excess_delay_seconds": 0.17363958060741425,
+            "kind": "diffuse"
+          }
+        ],
+        "result_age_ms": 513.4219,
+        "simulation_visuals_are_boundaries": false,
+        "snapshot_complete": true,
+        "solver": {
+          "backend": "active_vulkan_as",
+          "cpu_bvh": false,
+          "result_bytes_per_source": 752,
+          "state": "ready"
+        },
+        "source_position": [
+          1.0,
+          1.2000000476837158,
+          1.0
+        ],
+        "transmission_energy": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "transmission_status": "clear"
+      },
+      "solver": {
+        "backend": "active_vulkan_as",
+        "cpu_bvh": false,
+        "result_bytes_per_source": 752,
+        "state": "ready"
+      },
+      "spectral": true,
+      "status": "clear"
+    }
+  ],
+  "moving": [
+    {
+      "runtime": {
+        "activity": 0.014543171040713787,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.05426777899265289,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": false,
+        "position": [
+          0.06733712553977966,
+          -0.017999839037656784,
+          0.04058711975812912
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.1205950677394867,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      },
+      "preview": [
+        {
+          "amplitude_gain": 0.9999999999999999,
+          "band_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "boundary_mode": "object_barrier",
+          "diffuse": true,
+          "enabled": true,
+          "id": "audio_source_2",
+          "meters_per_unit": 1.0,
+          "pending_report": {
+            "solver": {
+              "backend": "active_vulkan_as",
+              "cpu_bvh": false,
+              "result_bytes_per_source": 752,
+              "state": "pending"
+            },
+            "transmission_energy": null,
+            "transmission_status": "pending"
+          },
+          "preview_revision": 1,
+          "reflection_paths": [
+            {
+              "distance_meters": 23.38620948791504,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.015580336563289165,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 24.82184600830078,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.019765865057706833,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.188072204589844,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.023749032989144325,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 77.99549102783203,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.17479108273983002,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 42.044525146484375,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.0699777603149414,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 28.938425064086914,
+              "energy": [
+                0.03246484696865082,
+                0.03246484696865082,
+                0.03212667256593704,
+                0.03178849816322327,
+                0.031112149357795715,
+                0.030435796827077866
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.03176756575703621,
+              "kind": "diffuse"
+            },
+            {
+              "distance_meters": 77.82758331298828,
+              "energy": [
+                0.00037809720379300416,
+                0.00037809720379300416,
+                0.0003741586988326162,
+                0.00037022019387222826,
+                0.0003623431839514524,
+                0.00035446614492684603
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.17430153489112854,
+              "kind": "diffuse"
+            }
+          ],
+          "reflections": true,
+          "report": {
+            "coverage": "authored_flat_environment",
+            "crossings": 0,
+            "delay_seconds": 0.05260103568434715,
+            "diffuse": {
+              "complete": true,
+              "contributions": 62,
+              "delay_bins": 8,
+              "enabled": true,
+              "maximum_excess_delay_seconds": 1.0,
+              "model": "single_bounce_lambert_nee",
+              "near_receiver_rejections": 0,
+              "phase_resolved": false,
+              "quadrature_samples": 64,
+              "receiver_energy_normalization": "free_field_direct",
+              "receiver_exclusion_radius_m": 0.1,
+              "rejected_queries": 0,
+              "samples": 64
+            },
+            "distance_meters": 18.04215431213379,
+            "ignored_simulation_instances": 0,
+            "ignored_simulation_objects": 0,
+            "listener_position": [
+              1.0813932418823242,
+              -1.0082155466079712,
+              -17.981475830078125
+            ],
+            "pose_policy": "sampled_runtime_world",
+            "position_origin": "authored_world",
+            "raw_candidates": 0,
+            "reflections": [
+              {
+                "distance_meters": 23.38620948791504,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.015580336563289165,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 24.82184600830078,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.019765865057706833,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 26.188072204589844,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.023749032989144325,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 77.99549102783203,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.17479108273983002,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 42.044525146484375,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.0699777603149414,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 28.938425064086914,
+                "energy": [
+                  0.03246484696865082,
+                  0.03246484696865082,
+                  0.03212667256593704,
+                  0.03178849816322327,
+                  0.031112149357795715,
+                  0.030435796827077866
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.03176756575703621,
+                "kind": "diffuse"
+              },
+              {
+                "distance_meters": 77.82758331298828,
+                "energy": [
+                  0.00037809720379300416,
+                  0.00037809720379300416,
+                  0.0003741586988326162,
+                  0.00037022019387222826,
+                  0.0003623431839514524,
+                  0.00035446614492684603
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.17430153489112854,
+                "kind": "diffuse"
+              }
+            ],
+            "result_age_ms": 513.4219,
+            "simulation_visuals_are_boundaries": false,
+            "snapshot_complete": true,
+            "solver": {
+              "backend": "active_vulkan_as",
+              "cpu_bvh": false,
+              "result_bytes_per_source": 752,
+              "state": "ready"
+            },
+            "source_position": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "transmission_energy": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "transmission_status": "clear"
+          },
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "pending"
+          },
+          "spectral": true,
+          "status": "pending"
+        },
+        {
+          "amplitude_gain": 0.9999999999999999,
+          "band_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "boundary_mode": "object_barrier",
+          "diffuse": true,
+          "enabled": true,
+          "id": "audio_source_4",
+          "meters_per_unit": 1.0,
+          "pending_report": {
+            "solver": {
+              "backend": "active_vulkan_as",
+              "cpu_bvh": false,
+              "result_bytes_per_source": 752,
+              "state": "pending"
+            },
+            "transmission_energy": null,
+            "transmission_status": "pending"
+          },
+          "preview_revision": 2,
+          "reflection_paths": [
+            {
+              "distance_meters": 23.641071319580078,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.013211103156208992,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.307971954345703,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.020986324176192284,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.0275936126709,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.02016889490187168,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 77.01318359375,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.16881492733955383,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 43.07524108886719,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.0698704943060875,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 28.39540672302246,
+              "energy": [
+                0.04198521748185158,
+                0.04198521748185158,
+                0.04154787212610245,
+                0.041110534220933914,
+                0.040235839784145355,
+                0.039361145347356796
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.027072131633758545,
+              "kind": "diffuse"
+            },
+            {
+              "distance_meters": 78.66803741455078,
+              "energy": [
+                0.00036314179305918515,
+                0.00036314179305918515,
+                0.0003593590809032321,
+                0.0003555763396434486,
+                0.0003480109153315425,
+                0.0003404454328119755
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.17363958060741425,
+              "kind": "diffuse"
+            }
+          ],
+          "reflections": true,
+          "report": {
+            "coverage": "authored_flat_environment",
+            "crossings": 0,
+            "delay_seconds": 0.05571330711245537,
+            "diffuse": {
+              "complete": true,
+              "contributions": 62,
+              "delay_bins": 8,
+              "enabled": true,
+              "maximum_excess_delay_seconds": 1.0,
+              "model": "single_bounce_lambert_nee",
+              "near_receiver_rejections": 0,
+              "phase_resolved": false,
+              "quadrature_samples": 64,
+              "receiver_energy_normalization": "free_field_direct",
+              "receiver_exclusion_radius_m": 0.1,
+              "rejected_queries": 0,
+              "samples": 64
+            },
+            "distance_meters": 19.109663009643555,
+            "ignored_simulation_instances": 0,
+            "ignored_simulation_objects": 0,
+            "listener_position": [
+              1.0813932418823242,
+              -1.0082155466079712,
+              -17.981475830078125
+            ],
+            "pose_policy": "sampled_runtime_world",
+            "position_origin": "authored_world",
+            "raw_candidates": 0,
+            "reflections": [
+              {
+                "distance_meters": 23.641071319580078,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.013211103156208992,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 26.307971954345703,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.020986324176192284,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 26.0275936126709,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.02016889490187168,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 77.01318359375,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.16881492733955383,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 43.07524108886719,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.0698704943060875,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 28.39540672302246,
+                "energy": [
+                  0.04198521748185158,
+                  0.04198521748185158,
+                  0.04154787212610245,
+                  0.041110534220933914,
+                  0.040235839784145355,
+                  0.039361145347356796
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.027072131633758545,
+                "kind": "diffuse"
+              },
+              {
+                "distance_meters": 78.66803741455078,
+                "energy": [
+                  0.00036314179305918515,
+                  0.00036314179305918515,
+                  0.0003593590809032321,
+                  0.0003555763396434486,
+                  0.0003480109153315425,
+                  0.0003404454328119755
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.17363958060741425,
+                "kind": "diffuse"
+              }
+            ],
+            "result_age_ms": 513.4219,
+            "simulation_visuals_are_boundaries": false,
+            "snapshot_complete": true,
+            "solver": {
+              "backend": "active_vulkan_as",
+              "cpu_bvh": false,
+              "result_bytes_per_source": 752,
+              "state": "ready"
+            },
+            "source_position": [
+              1.0,
+              1.2000000476837158,
+              1.0
+            ],
+            "transmission_energy": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "transmission_status": "clear"
+          },
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "pending"
+          },
+          "spectral": true,
+          "status": "pending"
+        }
+      ],
+      "mixer": {
+        "audition_bypasses_mixer": true,
+        "buses": [
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 1.2770562035692187e-37,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -27.35957908630371,
+              "ready": true,
+              "rms": 1.2624218271349503e-37,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Master",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 0.0,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -120.0,
+              "ready": true,
+              "rms": 0.0,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Weather",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 1.2770562035692187e-37,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -27.35957908630371,
+              "ready": true,
+              "rms": 1.2624218271349503e-37,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Effects",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 0.0,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -120.0,
+              "ready": true,
+              "rms": 0.0,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Ambience",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 0.0,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -120.0,
+              "ready": true,
+              "rms": 0.0,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Music",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          }
+        ],
+        "direct_master_gain": 1.0,
+        "meter_stage": "post_bus_fader_before_preview_mute",
+        "output_muted": false
+      }
+    },
+    {
+      "runtime": {
+        "activity": 0.03325112536549568,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.08205700665712357,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          0.025074683129787445,
+          -0.007934404537081718,
+          0.006158611737191677
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.18234890699386597,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      },
+      "preview": [
+        {
+          "amplitude_gain": 0.9999999999999999,
+          "band_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "boundary_mode": "object_barrier",
+          "diffuse": true,
+          "enabled": true,
+          "id": "audio_source_2",
+          "meters_per_unit": 1.0,
+          "preview_revision": 1,
+          "reflection_paths": [
+            {
+              "distance_meters": 23.374618530273438,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.015534259378910065,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 24.843244552612305,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.019815968349575996,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.197038650512695,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.023762889206409454,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 77.98888397216797,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.17475952208042145,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 42.04985427856445,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.06998101621866226,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 28.960695266723633,
+              "energy": [
+                0.032478950917720795,
+                0.032478950917720795,
+                0.03214063495397568,
+                0.03180231153964996,
+                0.031125668436288834,
+                0.030449021607637405
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.03182020038366318,
+              "kind": "diffuse"
+            },
+            {
+              "distance_meters": 77.83143615722656,
+              "energy": [
+                0.00037819708813913167,
+                0.00037819708813913167,
+                0.0003742575063370168,
+                0.00037031801184639335,
+                0.00036243890644982457,
+                0.00035455977194942534
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.17430049180984497,
+              "kind": "diffuse"
+            }
+          ],
+          "reflections": true,
+          "report": {
+            "coverage": "authored_flat_environment",
+            "crossings": 0,
+            "delay_seconds": 0.05261331796646118,
+            "diffuse": {
+              "complete": true,
+              "contributions": 63,
+              "delay_bins": 8,
+              "enabled": true,
+              "maximum_excess_delay_seconds": 1.0,
+              "model": "single_bounce_lambert_nee",
+              "near_receiver_rejections": 0,
+              "phase_resolved": false,
+              "quadrature_samples": 64,
+              "receiver_energy_normalization": "free_field_direct",
+              "receiver_exclusion_radius_m": 0.1,
+              "rejected_queries": 0,
+              "samples": 64
+            },
+            "distance_meters": 18.046367645263672,
+            "ignored_simulation_instances": 96,
+            "ignored_simulation_objects": 0,
+            "listener_position": [
+              1.0813932418823242,
+              -1.0082155466079712,
+              -17.981475830078125
+            ],
+            "pose_policy": "sampled_runtime_world",
+            "position_origin": "reaction_world",
+            "raw_candidates": 0,
+            "reflections": [
+              {
+                "distance_meters": 23.374618530273438,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.015534259378910065,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 24.843244552612305,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.019815968349575996,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 26.197038650512695,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.023762889206409454,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 77.98888397216797,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.17475952208042145,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 42.04985427856445,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.06998101621866226,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 28.960695266723633,
+                "energy": [
+                  0.032478950917720795,
+                  0.032478950917720795,
+                  0.03214063495397568,
+                  0.03180231153964996,
+                  0.031125668436288834,
+                  0.030449021607637405
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.03182020038366318,
+                "kind": "diffuse"
+              },
+              {
+                "distance_meters": 77.83143615722656,
+                "energy": [
+                  0.00037819708813913167,
+                  0.00037819708813913167,
+                  0.0003742575063370168,
+                  0.00037031801184639335,
+                  0.00036243890644982457,
+                  0.00035455977194942534
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.17430049180984497,
+                "kind": "diffuse"
+              }
+            ],
+            "result_age_ms": 504.6313,
+            "simulation_visuals_are_boundaries": false,
+            "snapshot_complete": true,
+            "solver": {
+              "backend": "active_vulkan_as",
+              "cpu_bvh": false,
+              "result_bytes_per_source": 752,
+              "state": "ready"
+            },
+            "source_position": [
+              0.025074683129787445,
+              -0.007934404537081718,
+              0.006158611737191677
+            ],
+            "transmission_energy": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "transmission_status": "clear"
+          },
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "ready"
+          },
+          "spectral": true,
+          "status": "clear"
+        },
+        {
+          "amplitude_gain": 0.9999999999999999,
+          "band_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "boundary_mode": "object_barrier",
+          "diffuse": true,
+          "enabled": true,
+          "id": "audio_source_4",
+          "meters_per_unit": 1.0,
+          "preview_revision": 2,
+          "reflection_paths": [
+            {
+              "distance_meters": 23.641071319580078,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.013211103156208992,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.307971954345703,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.020986324176192284,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.0275936126709,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.02016889490187168,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 77.01318359375,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.16881492733955383,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 43.07524108886719,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.0698704943060875,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 28.39540672302246,
+              "energy": [
+                0.04198521748185158,
+                0.04198521748185158,
+                0.04154787212610245,
+                0.041110534220933914,
+                0.040235839784145355,
+                0.039361145347356796
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.027072131633758545,
+              "kind": "diffuse"
+            },
+            {
+              "distance_meters": 78.66803741455078,
+              "energy": [
+                0.00036314179305918515,
+                0.00036314179305918515,
+                0.0003593590809032321,
+                0.0003555763396434486,
+                0.0003480109153315425,
+                0.0003404454328119755
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.17363958060741425,
+              "kind": "diffuse"
+            }
+          ],
+          "reflections": true,
+          "report": {
+            "coverage": "authored_flat_environment",
+            "crossings": 0,
+            "delay_seconds": 0.05571330711245537,
+            "diffuse": {
+              "complete": true,
+              "contributions": 62,
+              "delay_bins": 8,
+              "enabled": true,
+              "maximum_excess_delay_seconds": 1.0,
+              "model": "single_bounce_lambert_nee",
+              "near_receiver_rejections": 0,
+              "phase_resolved": false,
+              "quadrature_samples": 64,
+              "receiver_energy_normalization": "free_field_direct",
+              "receiver_exclusion_radius_m": 0.1,
+              "rejected_queries": 0,
+              "samples": 64
+            },
+            "distance_meters": 19.109663009643555,
+            "ignored_simulation_instances": 96,
+            "ignored_simulation_objects": 0,
+            "listener_position": [
+              1.0813932418823242,
+              -1.0082155466079712,
+              -17.981475830078125
+            ],
+            "pose_policy": "sampled_runtime_world",
+            "position_origin": "authored_world",
+            "raw_candidates": 0,
+            "reflections": [
+              {
+                "distance_meters": 23.641071319580078,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.013211103156208992,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 26.307971954345703,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.020986324176192284,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 26.0275936126709,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.02016889490187168,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 77.01318359375,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.16881492733955383,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 43.07524108886719,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.0698704943060875,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 28.39540672302246,
+                "energy": [
+                  0.04198521748185158,
+                  0.04198521748185158,
+                  0.04154787212610245,
+                  0.041110534220933914,
+                  0.040235839784145355,
+                  0.039361145347356796
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.027072131633758545,
+                "kind": "diffuse"
+              },
+              {
+                "distance_meters": 78.66803741455078,
+                "energy": [
+                  0.00036314179305918515,
+                  0.00036314179305918515,
+                  0.0003593590809032321,
+                  0.0003555763396434486,
+                  0.0003480109153315425,
+                  0.0003404454328119755
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.17363958060741425,
+                "kind": "diffuse"
+              }
+            ],
+            "result_age_ms": 504.6313,
+            "simulation_visuals_are_boundaries": false,
+            "snapshot_complete": true,
+            "solver": {
+              "backend": "active_vulkan_as",
+              "cpu_bvh": false,
+              "result_bytes_per_source": 752,
+              "state": "ready"
+            },
+            "source_position": [
+              1.0,
+              1.2000000476837158,
+              1.0
+            ],
+            "transmission_energy": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "transmission_status": "clear"
+          },
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "ready"
+          },
+          "spectral": true,
+          "status": "clear"
+        }
+      ],
+      "mixer": {
+        "audition_bypasses_mixer": true,
+        "buses": [
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 1.2770562035692187e-37,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -27.35957908630371,
+              "ready": true,
+              "rms": 1.2624218271349503e-37,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Master",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 0.0,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -120.0,
+              "ready": true,
+              "rms": 0.0,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Weather",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 1.2770562035692187e-37,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -27.35957908630371,
+              "ready": true,
+              "rms": 1.2624218271349503e-37,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Effects",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 0.0,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -120.0,
+              "ready": true,
+              "rms": 0.0,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Ambience",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 0.0,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -120.0,
+              "ready": true,
+              "rms": 0.0,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Music",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          }
+        ],
+        "direct_master_gain": 1.0,
+        "meter_stage": "post_bus_fader_before_preview_mute",
+        "output_muted": false
+      }
+    },
+    {
+      "runtime": {
+        "activity": 0.06080777943134308,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.11096654832363129,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          0.025405200198292732,
+          -0.02366471290588379,
+          0.015003741718828678
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.24659232795238495,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      },
+      "preview": [
+        {
+          "amplitude_gain": 0.9999999999999999,
+          "band_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "boundary_mode": "object_barrier",
+          "diffuse": true,
+          "enabled": true,
+          "id": "audio_source_2",
+          "meters_per_unit": 1.0,
+          "preview_revision": 1,
+          "reflection_paths": [
+            {
+              "distance_meters": 23.38054847717285,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.015528426505625248,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 24.8492488861084,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.019810352474451065,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.21451759338379,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.02379072830080986,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 77.97984313964844,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.17471005022525787,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 42.05831527709961,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.06998255848884583,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 28.9860897064209,
+              "energy": [
+                0.03243091702461243,
+                0.03243091702461243,
+                0.032093096524477005,
+                0.031755272299051285,
+                0.03107963688671589,
+                0.0304039865732193
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.03187111020088196,
+              "kind": "diffuse"
+            },
+            {
+              "distance_meters": 77.84044647216797,
+              "energy": [
+                0.00037838195567019284,
+                0.00037838195567019284,
+                0.00037444045301526785,
+                0.0003704990085680038,
+                0.00036261603236198425,
+                0.0003547330852597952
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.17430363595485687,
+              "kind": "diffuse"
+            }
+          ],
+          "reflections": true,
+          "report": {
+            "coverage": "authored_flat_environment",
+            "crossings": 0,
+            "delay_seconds": 0.052636440843343735,
+            "diffuse": {
+              "complete": true,
+              "contributions": 63,
+              "delay_bins": 8,
+              "enabled": true,
+              "maximum_excess_delay_seconds": 1.0,
+              "model": "single_bounce_lambert_nee",
+              "near_receiver_rejections": 0,
+              "phase_resolved": false,
+              "quadrature_samples": 64,
+              "receiver_energy_normalization": "free_field_direct",
+              "receiver_exclusion_radius_m": 0.1,
+              "rejected_queries": 0,
+              "samples": 64
+            },
+            "distance_meters": 18.054298400878906,
+            "ignored_simulation_instances": 168,
+            "ignored_simulation_objects": 0,
+            "listener_position": [
+              1.0813932418823242,
+              -1.0082155466079712,
+              -17.981475830078125
+            ],
+            "pose_policy": "sampled_runtime_world",
+            "position_origin": "reaction_world",
+            "raw_candidates": 0,
+            "reflections": [
+              {
+                "distance_meters": 23.38054847717285,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.015528426505625248,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 24.8492488861084,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.019810352474451065,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 26.21451759338379,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.02379072830080986,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 77.97984313964844,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.17471005022525787,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 42.05831527709961,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.06998255848884583,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 28.9860897064209,
+                "energy": [
+                  0.03243091702461243,
+                  0.03243091702461243,
+                  0.032093096524477005,
+                  0.031755272299051285,
+                  0.03107963688671589,
+                  0.0304039865732193
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.03187111020088196,
+                "kind": "diffuse"
+              },
+              {
+                "distance_meters": 77.84044647216797,
+                "energy": [
+                  0.00037838195567019284,
+                  0.00037838195567019284,
+                  0.00037444045301526785,
+                  0.0003704990085680038,
+                  0.00036261603236198425,
+                  0.0003547330852597952
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.17430363595485687,
+                "kind": "diffuse"
+              }
+            ],
+            "result_age_ms": 504.765,
+            "simulation_visuals_are_boundaries": false,
+            "snapshot_complete": true,
+            "solver": {
+              "backend": "active_vulkan_as",
+              "cpu_bvh": false,
+              "result_bytes_per_source": 752,
+              "state": "ready"
+            },
+            "source_position": [
+              0.025405200198292732,
+              -0.02366471290588379,
+              0.015003741718828678
+            ],
+            "transmission_energy": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "transmission_status": "clear"
+          },
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "ready"
+          },
+          "spectral": true,
+          "status": "clear"
+        },
+        {
+          "amplitude_gain": 0.9999999999999999,
+          "band_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "boundary_mode": "object_barrier",
+          "diffuse": true,
+          "enabled": true,
+          "id": "audio_source_4",
+          "meters_per_unit": 1.0,
+          "preview_revision": 2,
+          "reflection_paths": [
+            {
+              "distance_meters": 23.641071319580078,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.013211103156208992,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.307971954345703,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.020986324176192284,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.0275936126709,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.02016889490187168,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 77.01318359375,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.16881492733955383,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 43.07524108886719,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.0698704943060875,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 28.39540672302246,
+              "energy": [
+                0.04198521748185158,
+                0.04198521748185158,
+                0.04154787212610245,
+                0.041110534220933914,
+                0.040235839784145355,
+                0.039361145347356796
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.027072131633758545,
+              "kind": "diffuse"
+            },
+            {
+              "distance_meters": 78.66803741455078,
+              "energy": [
+                0.00036314179305918515,
+                0.00036314179305918515,
+                0.0003593590809032321,
+                0.0003555763396434486,
+                0.0003480109153315425,
+                0.0003404454328119755
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.17363958060741425,
+              "kind": "diffuse"
+            }
+          ],
+          "reflections": true,
+          "report": {
+            "coverage": "authored_flat_environment",
+            "crossings": 0,
+            "delay_seconds": 0.05571330711245537,
+            "diffuse": {
+              "complete": true,
+              "contributions": 62,
+              "delay_bins": 8,
+              "enabled": true,
+              "maximum_excess_delay_seconds": 1.0,
+              "model": "single_bounce_lambert_nee",
+              "near_receiver_rejections": 0,
+              "phase_resolved": false,
+              "quadrature_samples": 64,
+              "receiver_energy_normalization": "free_field_direct",
+              "receiver_exclusion_radius_m": 0.1,
+              "rejected_queries": 0,
+              "samples": 64
+            },
+            "distance_meters": 19.109663009643555,
+            "ignored_simulation_instances": 168,
+            "ignored_simulation_objects": 0,
+            "listener_position": [
+              1.0813932418823242,
+              -1.0082155466079712,
+              -17.981475830078125
+            ],
+            "pose_policy": "sampled_runtime_world",
+            "position_origin": "authored_world",
+            "raw_candidates": 0,
+            "reflections": [
+              {
+                "distance_meters": 23.641071319580078,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.013211103156208992,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 26.307971954345703,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.020986324176192284,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 26.0275936126709,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.02016889490187168,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 77.01318359375,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.16881492733955383,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 43.07524108886719,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.0698704943060875,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 28.39540672302246,
+                "energy": [
+                  0.04198521748185158,
+                  0.04198521748185158,
+                  0.04154787212610245,
+                  0.041110534220933914,
+                  0.040235839784145355,
+                  0.039361145347356796
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.027072131633758545,
+                "kind": "diffuse"
+              },
+              {
+                "distance_meters": 78.66803741455078,
+                "energy": [
+                  0.00036314179305918515,
+                  0.00036314179305918515,
+                  0.0003593590809032321,
+                  0.0003555763396434486,
+                  0.0003480109153315425,
+                  0.0003404454328119755
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.17363958060741425,
+                "kind": "diffuse"
+              }
+            ],
+            "result_age_ms": 504.765,
+            "simulation_visuals_are_boundaries": false,
+            "snapshot_complete": true,
+            "solver": {
+              "backend": "active_vulkan_as",
+              "cpu_bvh": false,
+              "result_bytes_per_source": 752,
+              "state": "ready"
+            },
+            "source_position": [
+              1.0,
+              1.2000000476837158,
+              1.0
+            ],
+            "transmission_energy": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "transmission_status": "clear"
+          },
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "ready"
+          },
+          "spectral": true,
+          "status": "clear"
+        }
+      ],
+      "mixer": {
+        "audition_bypasses_mixer": true,
+        "buses": [
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 1.88079096131566e-37,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -27.35957908630371,
+              "ready": true,
+              "rms": 1.1812654584177628e-37,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Master",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 0.0,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -120.0,
+              "ready": true,
+              "rms": 0.0,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Weather",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 1.88079096131566e-37,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -27.35957908630371,
+              "ready": true,
+              "rms": 1.182564966561639e-37,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Effects",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 0.0,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -120.0,
+              "ready": true,
+              "rms": 0.0,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Ambience",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 0.0,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -120.0,
+              "ready": true,
+              "rms": 0.0,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Music",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          }
+        ],
+        "direct_master_gain": 1.0,
+        "meter_stage": "post_bus_fader_before_preview_mute",
+        "output_muted": false
+      }
+    },
+    {
+      "runtime": {
+        "activity": 0.09641030430793762,
+        "automatic": true,
+        "control_ready": true,
+        "direction": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "driver": "domain_contact",
+        "effective_gain": 0.13972502946853638,
+        "effective_pitch": 1.0,
+        "id": "audio_source_2",
+        "playing": true,
+        "position": [
+          0.021442314609885216,
+          -0.043471258133649826,
+          0.01887735351920128
+        ],
+        "position_origin": "reaction_world",
+        "reaction_gain": 0.3105000853538513,
+        "spatial": true,
+        "timeline_held": false,
+        "valid": true
+      },
+      "preview": [
+        {
+          "amplitude_gain": 0.9999999999999999,
+          "band_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "boundary_mode": "object_barrier",
+          "diffuse": true,
+          "enabled": true,
+          "id": "audio_source_2",
+          "meters_per_unit": 1.0,
+          "preview_revision": 1,
+          "reflection_paths": [
+            {
+              "distance_meters": 23.38522720336914,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.015533247962594032,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 24.848548889160156,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.0197994913905859,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.231718063354492,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.023832054808735847,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 77.97576904296875,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.17468935251235962,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 42.06182861328125,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.06998398154973984,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 29.008899688720703,
+              "energy": [
+                0.03237420693039894,
+                0.03237420693039894,
+                0.032036975026130676,
+                0.03169974684715271,
+                0.03102528490126133,
+                0.03035082295536995
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.03192881494760513,
+              "kind": "diffuse"
+            },
+            {
+              "distance_meters": 77.85652923583984,
+              "energy": [
+                0.00037834359682165086,
+                0.00037834359682165086,
+                0.0003744025307241827,
+                0.0003704614646267146,
+                0.00036257930332794785,
+                0.00035469711292535067
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.17434170842170715,
+              "kind": "diffuse"
+            }
+          ],
+          "reflections": true,
+          "report": {
+            "coverage": "authored_flat_environment",
+            "crossings": 0,
+            "delay_seconds": 0.052645258605480194,
+            "diffuse": {
+              "complete": true,
+              "contributions": 63,
+              "delay_bins": 8,
+              "enabled": true,
+              "maximum_excess_delay_seconds": 1.0,
+              "model": "single_bounce_lambert_nee",
+              "near_receiver_rejections": 0,
+              "phase_resolved": false,
+              "quadrature_samples": 64,
+              "receiver_energy_normalization": "free_field_direct",
+              "receiver_exclusion_radius_m": 0.1,
+              "rejected_queries": 0,
+              "samples": 64
+            },
+            "distance_meters": 18.057323455810547,
+            "ignored_simulation_instances": 256,
+            "ignored_simulation_objects": 0,
+            "listener_position": [
+              1.0813932418823242,
+              -1.0082155466079712,
+              -17.981475830078125
+            ],
+            "pose_policy": "sampled_runtime_world",
+            "position_origin": "reaction_world",
+            "raw_candidates": 6,
+            "reflections": [
+              {
+                "distance_meters": 23.38522720336914,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.015533247962594032,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 24.848548889160156,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.0197994913905859,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 26.231718063354492,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.023832054808735847,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 77.97576904296875,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.17468935251235962,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 42.06182861328125,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.06998398154973984,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 29.008899688720703,
+                "energy": [
+                  0.03237420693039894,
+                  0.03237420693039894,
+                  0.032036975026130676,
+                  0.03169974684715271,
+                  0.03102528490126133,
+                  0.03035082295536995
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.03192881494760513,
+                "kind": "diffuse"
+              },
+              {
+                "distance_meters": 77.85652923583984,
+                "energy": [
+                  0.00037834359682165086,
+                  0.00037834359682165086,
+                  0.0003744025307241827,
+                  0.0003704614646267146,
+                  0.00036257930332794785,
+                  0.00035469711292535067
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.17434170842170715,
+                "kind": "diffuse"
+              }
+            ],
+            "result_age_ms": 505.2919,
+            "simulation_visuals_are_boundaries": false,
+            "snapshot_complete": true,
+            "solver": {
+              "backend": "active_vulkan_as",
+              "cpu_bvh": false,
+              "result_bytes_per_source": 752,
+              "state": "ready"
+            },
+            "source_position": [
+              0.021442314609885216,
+              -0.043471258133649826,
+              0.01887735351920128
+            ],
+            "transmission_energy": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "transmission_status": "clear"
+          },
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "ready"
+          },
+          "spectral": true,
+          "status": "clear"
+        },
+        {
+          "amplitude_gain": 0.9999999999999999,
+          "band_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "boundary_mode": "object_barrier",
+          "diffuse": true,
+          "enabled": true,
+          "id": "audio_source_4",
+          "meters_per_unit": 1.0,
+          "preview_revision": 2,
+          "reflection_paths": [
+            {
+              "distance_meters": 23.641071319580078,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.013211103156208992,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.307971954345703,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.020986324176192284,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 26.0275936126709,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.02016889490187168,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 77.01318359375,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.16881492733955383,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 43.07524108886719,
+              "energy": [
+                0.9407999515533447,
+                0.9407999515533447,
+                0.9309999942779541,
+                0.9211999773979187,
+                0.9016000032424927,
+                0.8819999694824219
+              ],
+              "energy_reference": "material_fraction",
+              "excess_delay_seconds": 0.0698704943060875,
+              "kind": "specular"
+            },
+            {
+              "distance_meters": 28.39540672302246,
+              "energy": [
+                0.04198521748185158,
+                0.04198521748185158,
+                0.04154787212610245,
+                0.041110534220933914,
+                0.040235839784145355,
+                0.039361145347356796
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.027072131633758545,
+              "kind": "diffuse"
+            },
+            {
+              "distance_meters": 78.66803741455078,
+              "energy": [
+                0.00036314179305918515,
+                0.00036314179305918515,
+                0.0003593590809032321,
+                0.0003555763396434486,
+                0.0003480109153315425,
+                0.0003404454328119755
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.17363958060741425,
+              "kind": "diffuse"
+            }
+          ],
+          "reflections": true,
+          "report": {
+            "coverage": "authored_flat_environment",
+            "crossings": 0,
+            "delay_seconds": 0.05571330711245537,
+            "diffuse": {
+              "complete": true,
+              "contributions": 62,
+              "delay_bins": 8,
+              "enabled": true,
+              "maximum_excess_delay_seconds": 1.0,
+              "model": "single_bounce_lambert_nee",
+              "near_receiver_rejections": 0,
+              "phase_resolved": false,
+              "quadrature_samples": 64,
+              "receiver_energy_normalization": "free_field_direct",
+              "receiver_exclusion_radius_m": 0.1,
+              "rejected_queries": 0,
+              "samples": 64
+            },
+            "distance_meters": 19.109663009643555,
+            "ignored_simulation_instances": 256,
+            "ignored_simulation_objects": 0,
+            "listener_position": [
+              1.0813932418823242,
+              -1.0082155466079712,
+              -17.981475830078125
+            ],
+            "pose_policy": "sampled_runtime_world",
+            "position_origin": "authored_world",
+            "raw_candidates": 0,
+            "reflections": [
+              {
+                "distance_meters": 23.641071319580078,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.013211103156208992,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 26.307971954345703,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.020986324176192284,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 26.0275936126709,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.02016889490187168,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 77.01318359375,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.16881492733955383,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 43.07524108886719,
+                "energy": [
+                  0.9407999515533447,
+                  0.9407999515533447,
+                  0.9309999942779541,
+                  0.9211999773979187,
+                  0.9016000032424927,
+                  0.8819999694824219
+                ],
+                "energy_reference": "material_fraction",
+                "excess_delay_seconds": 0.0698704943060875,
+                "kind": "specular"
+              },
+              {
+                "distance_meters": 28.39540672302246,
+                "energy": [
+                  0.04198521748185158,
+                  0.04198521748185158,
+                  0.04154787212610245,
+                  0.041110534220933914,
+                  0.040235839784145355,
+                  0.039361145347356796
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.027072131633758545,
+                "kind": "diffuse"
+              },
+              {
+                "distance_meters": 78.66803741455078,
+                "energy": [
+                  0.00036314179305918515,
+                  0.00036314179305918515,
+                  0.0003593590809032321,
+                  0.0003555763396434486,
+                  0.0003480109153315425,
+                  0.0003404454328119755
+                ],
+                "energy_reference": "receiver_relative_to_free_field_direct",
+                "excess_delay_seconds": 0.17363958060741425,
+                "kind": "diffuse"
+              }
+            ],
+            "result_age_ms": 505.2919,
+            "simulation_visuals_are_boundaries": false,
+            "snapshot_complete": true,
+            "solver": {
+              "backend": "active_vulkan_as",
+              "cpu_bvh": false,
+              "result_bytes_per_source": 752,
+              "state": "ready"
+            },
+            "source_position": [
+              1.0,
+              1.2000000476837158,
+              1.0
+            ],
+            "transmission_energy": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "transmission_status": "clear"
+          },
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "ready"
+          },
+          "spectral": true,
+          "status": "clear"
+        }
+      ],
+      "mixer": {
+        "audition_bypasses_mixer": true,
+        "buses": [
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 1.2770562035692187e-37,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -27.35957908630371,
+              "ready": true,
+              "rms": 1.2624218271349503e-37,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Master",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 0.0,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -120.0,
+              "ready": true,
+              "rms": 0.0,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Weather",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 1.2770562035692187e-37,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -27.35957908630371,
+              "ready": true,
+              "rms": 1.2624218271349503e-37,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Effects",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 0.0,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -120.0,
+              "ready": true,
+              "rms": 0.0,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Ambience",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          },
+          {
+            "effective_gain": 1.0,
+            "gain": 1.0,
+            "meter": {
+              "overload_blocks": 0,
+              "peak": 0.0,
+              "peak_dbfs": -120.0,
+              "peak_hold_dbfs": -120.0,
+              "ready": true,
+              "rms": 0.0,
+              "rms_dbfs": -120.0
+            },
+            "muted": false,
+            "name": "Music",
+            "output_gain": 1.0,
+            "pan": 0.0,
+            "solo": false
+          }
+        ],
+        "direct_master_gain": 1.0,
+        "meter_stage": "post_bus_fader_before_preview_mute",
+        "output_muted": false
+      }
+    }
+  ],
+  "invalid_type_atomic": true,
+  "restored_playback_mode": "timeline",
+  "pcm": {
+    "dry": {
+      "meters": [
+        {
+          "overload_blocks": 0,
+          "peak": 0.0038088529836386442,
+          "peak_dbfs": -48.384117126464844,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.0011626912746578455,
+          "rms_dbfs": -58.690711975097656
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.0008819504291750491,
+          "peak_dbfs": -61.09111785888672,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.00024184580252040178,
+          "rms_dbfs": -72.32923126220703
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.001693976460956037,
+          "peak_dbfs": -55.421852111816406,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.0004933864693157375,
+          "rms_dbfs": -66.1362533569336
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.0006568388198502362,
+          "peak_dbfs": -63.650821685791016,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.0001928877318277955,
+          "rms_dbfs": -74.29390716552734
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.0001944351097336039,
+          "peak_dbfs": -74.22450256347656,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 5.999063796480186e-05,
+          "rms_dbfs": -84.4383316040039
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.0012144299689680338,
+          "peak_dbfs": -58.31254959106445,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.000321226310916245,
+          "rms_dbfs": -69.86377716064453
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.0007335301488637924,
+          "peak_dbfs": -62.69164276123047,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.0002239182504126802,
+          "rms_dbfs": -72.99820709228516
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.001985403476282954,
+          "peak_dbfs": -54.043025970458984,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.0005183539469726384,
+          "rms_dbfs": -65.70747375488281
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.0007682667928747833,
+          "peak_dbfs": -62.289756774902344,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.00014374023885466158,
+          "rms_dbfs": -76.84843444824219
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.0015279622748494148,
+          "peak_dbfs": -56.3177490234375,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.0005108644254505634,
+          "rms_dbfs": -65.8338851928711
+        }
+      ],
+      "mean_square": 2.3982354116909453e-07,
+      "entry": {
+        "amplitude_gain": 0.9999999999999999,
+        "band_energy": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "boundary_mode": "object_barrier",
+        "diffuse": false,
+        "enabled": true,
+        "id": "audio_source_4",
+        "meters_per_unit": 1.0,
+        "preview_revision": 3,
+        "reflection_paths": [],
+        "reflections": false,
+        "report": {
+          "coverage": "authored_flat_environment",
+          "crossings": 0,
+          "delay_seconds": 0.05571330711245537,
+          "diffuse": {
+            "complete": true,
+            "contributions": 0,
+            "delay_bins": 8,
+            "enabled": false,
+            "maximum_excess_delay_seconds": 1.0,
+            "model": "single_bounce_lambert_nee",
+            "near_receiver_rejections": 0,
+            "phase_resolved": false,
+            "quadrature_samples": 64,
+            "receiver_energy_normalization": "free_field_direct",
+            "receiver_exclusion_radius_m": 0.1,
+            "rejected_queries": 0,
+            "samples": 0
+          },
+          "distance_meters": 19.109663009643555,
+          "ignored_simulation_instances": 240,
+          "ignored_simulation_objects": 1,
+          "listener_position": [
+            1.0813932418823242,
+            -1.0082155466079712,
+            -17.981475830078125
+          ],
+          "pose_policy": "sampled_runtime_world",
+          "position_origin": "authored_world",
+          "raw_candidates": 0,
+          "reflections": [],
+          "result_age_ms": 503.0689,
+          "simulation_visuals_are_boundaries": false,
+          "snapshot_complete": true,
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "ready"
+          },
+          "source_position": [
+            1.0,
+            1.2000000476837158,
+            1.0
+          ],
+          "transmission_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "transmission_status": "clear"
+        },
+        "solver": {
+          "backend": "active_vulkan_as",
+          "cpu_bvh": false,
+          "result_bytes_per_source": 752,
+          "state": "ready"
+        },
+        "spectral": true,
+        "status": "clear"
+      }
+    },
+    "diffuse": {
+      "meters": [
+        {
+          "overload_blocks": 0,
+          "peak": 0.0038774956483393908,
+          "peak_dbfs": -48.228973388671875,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.001178225502371788,
+          "rms_dbfs": -58.57543182373047
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.0009422469884157181,
+          "peak_dbfs": -60.51670455932617,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.00027347111608833075,
+          "rms_dbfs": -71.26177215576172
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.0020164167508482933,
+          "peak_dbfs": -53.90839385986328,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.0004811282560694963,
+          "rms_dbfs": -66.35478210449219
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.0014145186869427562,
+          "peak_dbfs": -56.987823486328125,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.00039431476034224033,
+          "rms_dbfs": -68.08313751220703
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.0007235512603074312,
+          "peak_dbfs": -62.810611724853516,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.00017522199777886271,
+          "rms_dbfs": -75.12822723388672
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.0017514375504106283,
+          "peak_dbfs": -55.13210678100586,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.00040340781561098993,
+          "rms_dbfs": -67.88511657714844
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.0014476063661277294,
+          "peak_dbfs": -56.786991119384766,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.00031532644061371684,
+          "rms_dbfs": -70.02478790283203
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.002346097258850932,
+          "peak_dbfs": -52.59307861328125,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.0006500232848338783,
+          "rms_dbfs": -63.74142074584961
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.0006105664651840925,
+          "peak_dbfs": -64.28533935546875,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.00012526566570159048,
+          "rms_dbfs": -78.0433578491211
+        },
+        {
+          "overload_blocks": 0,
+          "peak": 0.0027100183069705963,
+          "peak_dbfs": -51.34055709838867,
+          "peak_hold_dbfs": -27.35957908630371,
+          "ready": true,
+          "rms": 0.0005902459379285574,
+          "rms_dbfs": -64.57933807373047
+        }
+      ],
+      "mean_square": 2.929453718208895e-07,
+      "entry": {
+        "amplitude_gain": 0.9999999999999999,
+        "band_energy": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "boundary_mode": "object_barrier",
+        "diffuse": true,
+        "enabled": true,
+        "id": "audio_source_4",
+        "meters_per_unit": 1.0,
+        "preview_revision": 4,
+        "reflection_paths": [
+          {
+            "distance_meters": 28.395404815673828,
+            "energy": [
+              2.0992610454559326,
+              2.0992610454559326,
+              2.0773937702178955,
+              2.0555264949798584,
+              2.011791944503784,
+              1.9680572748184204
+            ],
+            "energy_reference": "receiver_relative_to_free_field_direct",
+            "excess_delay_seconds": 0.027072133496403694,
+            "kind": "diffuse"
+          },
+          {
+            "distance_meters": 78.66802978515625,
+            "energy": [
+              0.01815709099173546,
+              0.01815709099173546,
+              0.01796795427799225,
+              0.01777881756424904,
+              0.01740054413676262,
+              0.0170222707092762
+            ],
+            "energy_reference": "receiver_relative_to_free_field_direct",
+            "excess_delay_seconds": 0.17363958060741425,
+            "kind": "diffuse"
+          }
+        ],
+        "reflections": false,
+        "report": {
+          "coverage": "authored_flat_environment",
+          "crossings": 0,
+          "delay_seconds": 0.05571330711245537,
+          "diffuse": {
+            "complete": true,
+            "contributions": 62,
+            "delay_bins": 8,
+            "enabled": true,
+            "maximum_excess_delay_seconds": 1.0,
+            "model": "single_bounce_lambert_nee",
+            "near_receiver_rejections": 0,
+            "phase_resolved": false,
+            "quadrature_samples": 64,
+            "receiver_energy_normalization": "free_field_direct",
+            "receiver_exclusion_radius_m": 0.1,
+            "rejected_queries": 0,
+            "samples": 64
+          },
+          "distance_meters": 19.109663009643555,
+          "ignored_simulation_instances": 240,
+          "ignored_simulation_objects": 1,
+          "listener_position": [
+            1.0813932418823242,
+            -1.0082155466079712,
+            -17.981475830078125
+          ],
+          "pose_policy": "sampled_runtime_world",
+          "position_origin": "authored_world",
+          "raw_candidates": 0,
+          "reflections": [
+            {
+              "distance_meters": 28.395404815673828,
+              "energy": [
+                2.0992610454559326,
+                2.0992610454559326,
+                2.0773937702178955,
+                2.0555264949798584,
+                2.011791944503784,
+                1.9680572748184204
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.027072133496403694,
+              "kind": "diffuse"
+            },
+            {
+              "distance_meters": 78.66802978515625,
+              "energy": [
+                0.01815709099173546,
+                0.01815709099173546,
+                0.01796795427799225,
+                0.01777881756424904,
+                0.01740054413676262,
+                0.0170222707092762
+              ],
+              "energy_reference": "receiver_relative_to_free_field_direct",
+              "excess_delay_seconds": 0.17363958060741425,
+              "kind": "diffuse"
+            }
+          ],
+          "result_age_ms": 501.9298,
+          "simulation_visuals_are_boundaries": false,
+          "snapshot_complete": true,
+          "solver": {
+            "backend": "active_vulkan_as",
+            "cpu_bvh": false,
+            "result_bytes_per_source": 752,
+            "state": "ready"
+          },
+          "source_position": [
+            1.0,
+            1.2000000476837158,
+            1.0
+          ],
+          "transmission_energy": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "transmission_status": "clear"
+        },
+        "solver": {
+          "backend": "active_vulkan_as",
+          "cpu_bvh": false,
+          "result_bytes_per_source": 752,
+          "state": "ready"
+        },
+        "spectral": true,
+        "status": "clear"
+      }
+    }
+  },
+  "directional_rejection": {
+    "error": "audio.acoustics_preview: Diffuse transport requires an omnidirectional source",
+    "revision_unchanged": true
+  },
+  "final_sources": [
+    {
+      "asset_id": "audio_asset_1",
+      "bus": "Effects",
+      "cone_gain": 1.0,
+      "cone_inner": 360.0,
+      "cone_outer": 360.0,
+      "direction": [
+        0,
+        0,
+        -1
+      ],
+      "environment_role": "",
+      "gain": 0.44999998807907104,
+      "id": "audio_source_2",
+      "loop": true,
+      "max_distance": 100.0,
+      "min_distance": 5.0,
+      "name": "Water - solver flow",
+      "parent": "",
+      "pitch": 1.0,
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "reaction": {
+        "automatic": true,
+        "domain_channel": "fluid_flow",
+        "domain_name": "Physics Domain 1",
+        "driver": "domain_contact",
+        "follow_position": true,
+        "gain_max": 1.0,
+        "gain_min": 0.0,
+        "input_max": 1000.0,
+        "input_metric": "power_w",
+        "input_min": 0.0,
+        "pitch_max": 1.0,
+        "pitch_min": 1.0,
+        "response_seconds": 0.15000000596046448,
+        "signal_key": "@domain/fluid_flow/1/Physics Domain 1",
+        "source_material": "",
+        "start_threshold": 0.019999999552965164,
+        "stop_threshold": 0.004999999888241291,
+        "system_id": 1,
+        "target_material": ""
+      },
+      "rolloff": 0.699999988079071,
+      "spatial": true
+    },
+    {
+      "asset_id": "audio_asset_3",
+      "bus": "Effects",
+      "cone_gain": 1.0,
+      "cone_inner": 360.0,
+      "cone_outer": 360.0,
+      "direction": [
+        0,
+        0,
+        -1
+      ],
+      "environment_role": "",
+      "gain": 0.4000000059604645,
+      "id": "audio_source_4",
+      "loop": true,
+      "max_distance": 100.0,
+      "min_distance": 5.0,
+      "name": "Clap - echo reference",
+      "parent": "",
+      "pitch": 1.0,
+      "position": [
+        1,
+        1.2,
+        1
+      ],
+      "reaction": {
+        "automatic": false,
+        "domain_channel": "mixed_contact",
+        "domain_name": "",
+        "driver": "manual",
+        "follow_position": false,
+        "gain_max": 1.0,
+        "gain_min": 0.0,
+        "input_max": 1.0,
+        "input_metric": "energy_j",
+        "input_min": 0.0,
+        "pitch_max": 1.0,
+        "pitch_min": 1.0,
+        "response_seconds": 0.25,
+        "signal_key": "",
+        "source_material": "",
+        "start_threshold": 0.019999999552965164,
+        "stop_threshold": 0.004999999888241291,
+        "system_id": 0,
+        "target_material": ""
+      },
+      "rolloff": 0.699999988079071,
+      "spatial": true
+    }
+  ],
+  "final_scattering": 0.019999999552965164
+}

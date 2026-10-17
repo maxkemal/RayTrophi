@@ -130,6 +130,12 @@ acoustic response. No propagation, audible occlusion or echo playback is claimed
 
 ## Final build and acceptance backlog
 
+2026-10-18 UI follow-up: the shared editor should use logical tabs and a bounded
+internal body across objects, domain defaults, flow sources and collider contexts.
+This is broader than audio. See [shared Substance UI direction](SHARED_SUBSTANCE_UI_ROADMAP.md)
+for grouping, context/assignment semantics, pending edits and acceptance. It is a
+recorded UI task, not part of the current acoustics-core implementation.
+
 User build: Studio C++ only for this change, no new shader. Source checks cover
 new-source delimiter/size/whitespace, VS XML/registration, all 14 acoustic schema
 fields and five IPC methods including their parameter/capability descriptors.

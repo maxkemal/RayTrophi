@@ -50,7 +50,7 @@ void updateAcousticRenderDebug(UIContext& ctx) {
                 for (std::size_t i = 0; i < instances->size(); ++i) {
                     auto& item = instances->at(i);
                     item.geometry = geometry.instances[i];
-                    if (!item.geometry.defined) {
+                    if (item.geometry.defined != 1) {
                         continue;
                     }
                     const auto& name = geometry.names[i];
@@ -121,6 +121,8 @@ nlohmann::json acousticSurfaceStatus(UIContext& ctx) {
         {"band", workspace.value("acoustic_band", -1)},
         {"reflection_samples", workspace.value("acoustic_reflection_samples", 1)},
         {"model", "six_band_direct_and_first_bounce"},
+        {"boundary_scope", "authored_flat_environment"},
+        {"simulation_visuals_are_boundaries", false},
         {"specular_model", "bounded_image_source_candidates"},
         {"phase_resolved", false}, {"refraction", false}, {"diffraction", false},
         {"source_budget", 4}, {"barrier_budget", 32}, {"candidate_budget", 256},

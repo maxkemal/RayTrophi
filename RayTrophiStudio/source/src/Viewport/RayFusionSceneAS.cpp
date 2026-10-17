@@ -372,10 +372,11 @@ uint64_t acousticCompatibleGeometrySignature(const Meshes& meshes,
 }
 
 template <typename Instances>
-uint64_t acousticCompatiblePlacementSignature(const Instances& instances) {
+uint64_t acousticCompatiblePlacementSignature(const Instances& instances,
+    bool environmentOnly = false) {
     uint64_t signature = 1469598103934665603ull;
     for (const auto& instance : instances) {
-        if (instance.rayFusionExcluded) {
+        if (instance.rayFusionExcluded || (environmentOnly && instance.simPoolSlot)) {
             continue;
         }
         signature = hashMix(signature, instance.meshKey.data(), instance.meshKey.size());
@@ -392,6 +393,7 @@ public:
     std::unordered_map<std::string, uint32_t> meshToBlas;
     std::vector<std::string> hitMeshKeys; // exact TLAS customIndex order
     std::vector<std::string> acousticNodeNames;
+    std::vector<bool> acousticSimulationVisuals;
     // ★★★★★ Emissive uggen listesi ICIN, ve neden ayni dongude toplandigi
     //   onemli: emissive geometri bir ISIK olarak orneklenecek, ama AS'te
     //   OLMAYAN bir ucgeni isik saymak, golgesiz -- yani hicbir seyin
@@ -407,6 +409,8 @@ public:
     //   depends on.
     uint64_t geometrySignature = 0;  // which BLASes must exist
     uint64_t instanceSignature = 0;  // what the TLAS must contain
+    uint64_t acousticGeometrySignature = 0;
+    uint64_t acousticPlacementSignature = 0;
     // Traced-scene world box, filled by the SAME loop that fills the TLAS.
     bool worldBoundsValid = false;
     float worldMin[3]{}, worldMax[3]{};
@@ -781,6 +785,7 @@ bool VulkanBackendAdapter::rebuildRayFusionTLAS() {
     tlasInfo.allowUpdate = false;
     state->hitMeshKeys.clear();
     state->acousticNodeNames.clear();
+    state->acousticSimulationVisuals.clear();
     state->hitTransforms.clear();
     state->instancesSkipped = 0;
     state->instancesHidden = 0;
@@ -819,6 +824,7 @@ bool VulkanBackendAdapter::rebuildRayFusionTLAS() {
         tlasInfo.instances.push_back(entry);
         state->hitMeshKeys.push_back(instance.meshKey);
         state->acousticNodeNames.push_back(instance.nodeName);
+        state->acousticSimulationVisuals.push_back(instance.simPoolSlot);
         state->hitTransforms.push_back(instance.transform);
         // `worldBBox` zaten instance kurulurken hesaplanmis; burada yalnizca
         // indirgeniyor. Sonsuz/NaN bir kutu TEK BASINA butun sahneyi yutar ve
@@ -878,6 +884,17 @@ bool VulkanBackendAdapter::rebuildRayFusionTLAS() {
         return false;
     }
 
+    std::unordered_set<std::string> environmentKeys;
+    for (const auto& instance : m_rasterInstances) {
+        if (!instance.rayFusionExcluded && !instance.simPoolSlot) {
+            environmentKeys.insert(instance.meshKey);
+        }
+    }
+    state->acousticGeometrySignature =
+        acousticCompatibleGeometrySignature(m_rasterMeshes, environmentKeys);
+    state->acousticPlacementSignature =
+        acousticCompatiblePlacementSignature(m_rasterInstances, true);
+
     return true;
 }
 
@@ -894,18 +911,21 @@ bool VulkanBackendAdapter::rayFusionAcousticGeometry(audio::AcousticGpuGeometry&
     }
     std::unordered_set<std::string> keys;
     for (const auto& instance : m_rasterInstances) {
-        if (!instance.rayFusionExcluded) {
+        if (!instance.rayFusionExcluded && !instance.simPoolSlot) {
             keys.insert(instance.meshKey);
         }
     }
-    if (acousticCompatiblePlacementSignature(m_rasterInstances) != state->instanceSignature ||
-        acousticCompatibleGeometrySignature(m_rasterMeshes, keys) != state->geometrySignature) {
+    if (acousticCompatiblePlacementSignature(m_rasterInstances, true) !=
+            state->acousticPlacementSignature ||
+        acousticCompatibleGeometrySignature(m_rasterMeshes, keys) !=
+            state->acousticGeometrySignature) {
         out.error = "Raster AS has not incorporated current geometry/instance placements";
         return false;
     }
     if (state->instancesSkipped || state->instancesHidden || state->meshesSkipped ||
         state->hairInstanceCount ||
         state->acousticNodeNames.size() != state->hitMeshKeys.size() ||
+        state->acousticSimulationVisuals.size() != state->hitMeshKeys.size() ||
         state->hitMeshKeys.empty() ||
         state->hitMeshKeys.size() > audio::kAcousticGpuMaxInstances ||
         state->instanceCount != state->hitMeshKeys.size()) {
@@ -913,6 +933,15 @@ bool VulkanBackendAdapter::rayFusionAcousticGeometry(audio::AcousticGpuGeometry&
         return false;
     }
     for (std::size_t i = 0; i < state->hitMeshKeys.size(); ++i) {
+        if (state->acousticSimulationVisuals[i]) {
+            // Preserve the exact TLAS slot for shader candidate filtering.
+            audio::AcousticGpuInstance ignored;
+            ignored.defined = audio::kAcousticIgnoredVisual;
+            out.instances.push_back(ignored);
+            out.names.emplace_back();
+            ++out.ignoredSimulationInstances;
+            continue;
+        }
         const auto found = m_rasterMeshes.find(state->hitMeshKeys[i]);
         if (found == m_rasterMeshes.end() || state->acousticNodeNames[i].empty()) {
             out.error = "Raster AS object identity is unavailable";
@@ -936,6 +965,9 @@ bool VulkanBackendAdapter::rayFusionAcousticGeometry(audio::AcousticGpuGeometry&
     }
     out.revision = std::to_string(state->geometrySignature) + ":" +
         std::to_string(state->instanceSignature) + ":" + std::to_string(state->skinRefits);
+    out.boundaryRevision = std::to_string(state->acousticGeometrySignature) + ":" +
+        std::to_string(state->acousticPlacementSignature) + ":" +
+        std::to_string(state->builtGeometryGeneration) + ":" + std::to_string(state->skinRefits);
     return true;
 }
 

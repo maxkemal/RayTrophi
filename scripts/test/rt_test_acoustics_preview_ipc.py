@@ -49,7 +49,7 @@ def main():
 
     def configure(enabled=True, model="object_barrier"):
         return client.call("audio.acoustics_preview", id=source, enabled=enabled,
-                           boundary_mode=model, meters_per_unit=1)
+                           boundary_mode=model, meters_per_unit=1, spectral=False)
 
     def sample(label, expected, status=None, hits=None):
         nonlocal baseline
@@ -72,7 +72,7 @@ def main():
                     expected_state = "failed" if status == "unknown_material" else "ready"
                     assert path["solver"]["state"] == expected_state, (label, live)
                     assert path["solver"]["cpu_bvh"] is False, (label, live)
-                    assert path["solver"]["result_bytes_per_source"] == 64, (label, live)
+                    assert path["solver"]["result_bytes_per_source"] == 752, (label, live)
         debug = client.call("audio.acoustics_debug", id=source)
         assert debug["id"] == source and debug["issues_gpu_query"] is False
         assert debug["range_is_hard_cutoff"] is False

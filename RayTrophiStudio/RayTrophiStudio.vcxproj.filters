@@ -2,6 +2,7 @@
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <None Include="source\src\Physics\Fluid\APICFluidStep.inl" />
+    <None Include="source\shaders\acoustic_diffuse.glsl" />
     <Filter Include="Kaynak Dosyalar">
       <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
       <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
@@ -2794,9 +2795,14 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Audio\AudioMixer.h" />
+    <ClInclude Include="source\include\Audio\AcousticPlayback.h" />
+    <ClInclude Include="source\include\Audio\AcousticGeometryPolicy.h" />
+    <ClInclude Include="source\include\Audio\AudioSourceRuntime.h" />
     <ClInclude Include="source\include\Audio\AudioMixerRuntime.h" />
     <ClInclude Include="source\include\UI\AudioMixerUI.h" />
     <ClCompile Include="source\src\Scene\AudioMixer.cpp" />
+    <ClCompile Include="source\src\Scene\AcousticPlayback.cpp" />
+    <ClCompile Include="source\src\Scene\AudioSourceRuntime.cpp" />
     <ClCompile Include="source\src\Scene\AudioMixerRuntime.cpp" />
     <ClCompile Include="source\src\UI\AudioMixerUI.cpp" />
   </ItemGroup>

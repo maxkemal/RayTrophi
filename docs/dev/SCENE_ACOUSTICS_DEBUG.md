@@ -1,5 +1,10 @@
 # Acoustic surface debug (view 15)
 
+2026-10-17 source follow-up: [reactive-source parity](SCENE_AUDIO_PHYSICS_SOURCES.md)
+uses the shared runtime position/direction and effective reaction gain for manual
+and physics-driven spatial sources. C++ build/live acceptance remain pending.
+The earlier manual-only coverage description below records the previous build.
+
 Render Settings > Acoustic Energy (six-band) now runs a dedicated GPU compute
 visualizer over the existing first-hit position/normal AOVs. Beauty continues
 accumulating underneath; source/settings changes refresh presentation without

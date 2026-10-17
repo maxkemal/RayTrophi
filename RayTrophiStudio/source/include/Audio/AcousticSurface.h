@@ -11,7 +11,7 @@ struct alignas(16) AcousticSurfaceInstance {
     float reflection[8]{}; // diffuse share only; total reflection is split by scattering
     float specular[8]{};
 };
-static_assert(sizeof(AcousticSurfaceInstance) == 128, "Acoustic surface shader ABI");
+static_assert(sizeof(AcousticSurfaceInstance) == 192, "Acoustic surface shader ABI");
 struct AcousticSurfaceBatch {
     std::shared_ptr<const std::vector<AcousticSurfaceInstance>> instances;
     std::array<AcousticRenderSource, 4> sources{};

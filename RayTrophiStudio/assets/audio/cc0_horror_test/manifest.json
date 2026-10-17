@@ -1,0 +1,79 @@
+{
+  "pack": "CC0 human voice echo tests",
+  "originals": [
+    {
+      "original": "yell1.wav",
+      "author": "HaelDB",
+      "source_page": "https://opengameart.org/content/male-gruntyelling-sounds",
+      "license": "CC0-1.0",
+      "license_verified_date": "2026-10-17",
+      "sha256": "ce6ddb412e2c562be70f7cd1ca8f5c8cdb8cc321d9f23d596bf796c6d2da1a16"
+    },
+    {
+      "original": "1yell3.wav",
+      "author": "HaelDB",
+      "source_page": "https://opengameart.org/content/male-gruntyelling-sounds",
+      "license": "CC0-1.0",
+      "license_verified_date": "2026-10-17",
+      "sha256": "a2cf791abecb62affff1d2691f2b883f61b1558e9fe3e80a10765add5006ba6d"
+    },
+    {
+      "original": "undead-1.ogg",
+      "author": "AntumDeluge",
+      "source_page": "https://opengameart.org/content/undead-moans",
+      "license": "CC0-1.0",
+      "license_verified_date": "2026-10-17",
+      "sha256": "6e2f45883c07b00345270e92bd21545dae7caec864045537c65e3eea093dd916"
+    },
+    {
+      "original": "undead-3.ogg",
+      "author": "AntumDeluge",
+      "source_page": "https://opengameart.org/content/undead-moans",
+      "license": "CC0-1.0",
+      "license_verified_date": "2026-10-17",
+      "sha256": "73c60abc7641518dd871ba4abbdfd3e15f93207147ed3bd012e62eff97e35457"
+    }
+  ],
+  "transformation": "Mono mean; trim quiet edges; 48 kHz; peak 0.7; 3 ms fades; 24-second cycle with silence. No added echo or reverb.",
+  "assets": [
+    {
+      "name": "human_shouts",
+      "file": "human_shouts_spaced_mono.wav",
+      "sha256": "4115563ee844ee6f483636227b2fa440a4419dd64f547cbb9069ec5b4d76ecbe",
+      "members": [
+        "yell1.wav",
+        "1yell3.wav"
+      ],
+      "onsets_seconds": [
+        1,
+        13
+      ]
+    },
+    {
+      "name": "human_moans_a",
+      "file": "human_moans_a_spaced_mono.wav",
+      "sha256": "ce1050cb20c819aa066cf2817141469c43a1d62f198805701b5217be21c48eea",
+      "members": [
+        "undead-1.ogg",
+        "undead-3.ogg"
+      ],
+      "onsets_seconds": [
+        1,
+        13
+      ]
+    },
+    {
+      "name": "human_moans_b",
+      "file": "human_moans_b_spaced_mono.wav",
+      "sha256": "05d2d57d42c247b65d03516d89512c753a104b493929ca92298523c5ade1320f",
+      "members": [
+        "undead-3.ogg",
+        "undead-1.ogg"
+      ],
+      "onsets_seconds": [
+        7,
+        19
+      ]
+    }
+  ]
+}
