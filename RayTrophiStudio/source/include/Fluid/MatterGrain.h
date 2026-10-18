@@ -280,6 +280,13 @@ struct MatterGrainStepReport {
     double unmatched_impulse = 0.0;  // reaction with no liquid mass to take it
     float max_drag_coefficient = 0.0f;
     float max_submerged_fraction = 0.0f;
+    // Gas drag (exchangeMatterGrainGasDrag): the domain's own gas lane.
+    std::size_t gas_coupled_grains = 0;
+    Vec3 gas_drag_impulse;            // sum over grains, N*s
+    Vec3 gas_reaction;                // impulse returned to the gas faces, N*s
+    double gas_momentum_residual = 0.0;  // |grain gain + gas gain|, N*s
+    std::size_t gas_limited_cells = 0;   // cells held at the mixture equilibrium
+    float gas_max_relative_speed = 0.0f; // |u_gas - v_grain|, m/s
     // B5 volume exclusion
     bool volume_exclusion = false;
     bool pressure_force = false;      // false: hydrostatic buoyancy was used

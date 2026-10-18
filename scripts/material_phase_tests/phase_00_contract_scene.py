@@ -78,7 +78,7 @@ field = fields[cube]
 assert field["substance"] == SUBSTANCE
 assert field["element_count"] > 0
 assert field["topology_generation"] > 0
-assert set(("temperature", "moisture", "fuel_remaining", "char", "melt", "mass_loss")) <= set(field["semantics"])
+assert set(("temperature", "surface_water_kg_m2", "fuel_remaining", "char", "melt", "mass_loss")) <= set(field["semantics"])
 
 print({
     "result": "PASS",

@@ -1581,6 +1581,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["thermal_condensation_splits"] = info.thermal_condensation_splits;
         d["thermal_solid_contact_particles"] = info.thermal_solid_contact_particles;
         d["thermal_heat_to_solid_j"] = info.thermal_heat_to_solid_j;
+        d["thermal_contact_shell_kelvin"] = info.thermal_contact_shell_kelvin;
+        d["thermal_contact_parcel_kelvin"] = info.thermal_contact_parcel_kelvin;
+        d["thermal_contact_shell_cells"] = info.thermal_contact_shell_cells;
         d["thermal_contact_cooled_particles"] = info.thermal_contact_cooled_particles;
         d["thermal_min_kelvin"] = info.thermal_min_kelvin;
         d["thermal_mean_kelvin"] = info.thermal_mean_kelvin;
@@ -1866,6 +1869,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["thermal_condensation_splits"] = info.thermal_condensation_splits;
         d["thermal_solid_contact_particles"] = info.thermal_solid_contact_particles;
         d["thermal_heat_to_solid_j"] = info.thermal_heat_to_solid_j;
+        d["thermal_contact_shell_kelvin"] = info.thermal_contact_shell_kelvin;
+        d["thermal_contact_parcel_kelvin"] = info.thermal_contact_parcel_kelvin;
+        d["thermal_contact_shell_cells"] = info.thermal_contact_shell_cells;
         d["thermal_contact_cooled_particles"] = info.thermal_contact_cooled_particles;
         d["thermal_min_kelvin"] = info.thermal_min_kelvin;
         d["thermal_mean_kelvin"] = info.thermal_mean_kelvin;
@@ -2133,6 +2139,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["thermal_condensation_splits"] = info.thermal_condensation_splits;
         d["thermal_solid_contact_particles"] = info.thermal_solid_contact_particles;
         d["thermal_heat_to_solid_j"] = info.thermal_heat_to_solid_j;
+        d["thermal_contact_shell_kelvin"] = info.thermal_contact_shell_kelvin;
+        d["thermal_contact_parcel_kelvin"] = info.thermal_contact_parcel_kelvin;
+        d["thermal_contact_shell_cells"] = info.thermal_contact_shell_cells;
         d["thermal_contact_cooled_particles"] = info.thermal_contact_cooled_particles;
         d["thermal_min_kelvin"] = info.thermal_min_kelvin;
         d["thermal_mean_kelvin"] = info.thermal_mean_kelvin;
@@ -2874,7 +2883,6 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["gpu_msf_ms"] = s.gpu_msf_ms;
         d["gpu_surface_exchange_ms"] = s.gpu_surface_exchange_ms;
         d["gpu_source_upload_ms"] = s.gpu_source_upload_ms;
-        d["gpu_fluid_combustion_ms"] = s.gpu_fluid_combustion_ms;
         d["gpu_velocity_advect_ms"] = s.gpu_velocity_advect_ms;
         d["gpu_scalar_advect_ms"] = s.gpu_scalar_advect_ms;
         d["gpu_combustion_ms"] = s.gpu_combustion_ms;
@@ -2908,6 +2916,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["total_blocks"] = s.total_blocks;
         d["grid_memory_bytes"] = s.grid_memory_bytes;
         d["burning_cells"] = s.burning_cells;
+        d["combustion_measured"] = s.combustion_measured;
+        d["combustion_burning_cells"] = s.combustion_burning_cells;
+        d["combustion_inerted_cells"] = s.combustion_inerted_cells;
+        d["combustion_steam_masked_cells"] = s.combustion_steam_masked_cells;
+        d["combustion_min_oxygen_fraction"] = s.combustion_min_oxygen_fraction;
+        d["combustion_burned_fuel"] = s.combustion_burned_fuel;
         d["solid_cells"] = s.solid_cells;
         d["liquid_boundary_cells"] = s.liquid_boundary_cells;
         d["liquid_boundary_mean_velocity"] =
@@ -3494,6 +3508,22 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     substance.def("remove", [](const std::string& name) {
         requireResult(rtapi::removeSubstance(name));
     }, py::arg("name"), "Remove a project substance nothing references");
+    msf.def("water_budget", [] {
+        rtapi::SurfaceWaterBudgetInfo b;
+        requireResult(rtapi::getSurfaceWaterBudget(b));
+        py::dict d;
+        d["ran"] = b.ran;
+        d["stale"] = b.stale;
+        d["surface_water_kg"] = b.surface_water_kg;
+        d["absorbed_kg"] = b.absorbed_kg;
+        d["evaporated_kg"] = b.evaporated_kg;
+        d["evaporation_latent_j"] = b.evaporation_latent_j;
+        d["vapour_vented_kg"] = b.vapour_vented_kg;
+        d["mean_kg_m2"] = b.mean_kg_m2;
+        d["max_kg_m2"] = b.max_kg_m2;
+        d["wet_elements"] = b.wet_elements;
+        return d;
+    }, "Surface-water budget of the last frame: absorbed, evaporated, vented (kg)");
     msf.def("fields", [] {
         std::vector<rtapi::MaterialFieldInfo> fields;
         requireResult(rtapi::listMaterialFields(fields));
@@ -3515,6 +3545,10 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["pyrolyzed_mass"] = f.pyrolyzed_mass;
             d["molten_reservoir_mass"] = f.molten_reservoir_mass;
             d["transferred_mass"] = f.transferred_mass;
+            d["thermal_depth_m"] = f.thermal_depth_m;
+            d["surface_area_m2"] = f.surface_area_m2;
+            d["surface_water_kg"] = f.surface_water_kg;
+            d["max_water_saturation"] = f.max_water_saturation;
             d["mass_conservation_error"] = f.mass_conservation_error;
             d["mass_budget_overflow"] = f.mass_budget_overflow;
             d["mass_negative"] = f.mass_negative;

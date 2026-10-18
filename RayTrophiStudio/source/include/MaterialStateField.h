@@ -151,7 +151,7 @@ struct WorldThermalState {
     float ambientNormalized() const { return scale().toNormalized(ambientKelvin()); }
 
     // Evaporation runs on the vapour-pressure DEFICIT, so a substance's
-    // dry_rate is its rate in dry air and humid air scales it by (1 - RH).
+    // surface water evaporates against the air's vapour, humidity = 1 - this.
     // Only with inheritance on: a local (lab) room has no humidity authority,
     // and scaling there would change every existing scene's drying by 0.9.
     float dryingScale() const {
@@ -245,10 +245,13 @@ struct SubstanceProfile {
     // high = a sponge (cloth, paper). This is what makes "hose down the wooden
     // crate" and "hose down the iron beam" behave differently.
     float absorbency         = 0.0f;
-    // Passive drying toward zero, per second, at the surface's own temperature.
-    // Scaled up sharply once the surface is hot — a wet plank next to a fire
-    // dries in seconds, one in a cold room takes far longer.
-    float dry_rate           = 0.03f;
+    // ★ Surface water the material can hold, kg per m^2 of surface (2026-10-18:
+    // moisture became MASS). A film on metal is ~0.05 (50 um); oak's soaked
+    // surface layer ~1. Drying is no longer a material rate: water leaves by
+    // the same Hertz-Knudsen flux as an open pan and pays its latent heat out
+    // of the surface (MaterialStateFieldSystem::stepSurfaceWater), so a porous
+    // material dries slower because it HOLDS more, not because a knob says so.
+    float water_capacity_kg_m2 = 0.05f;
 
     // ── Combustion ───────────────────────────────────────────────────────────
     bool  combustible        = false;
@@ -461,12 +464,10 @@ struct MaterialSubstance {
     float char_rate            = 1.0f;
     // ── Phase 5 ──────────────────────────────────────────────────────────────
     float absorbency           = 0.0f;
-    float dry_rate             = 0.03f;
-    // Water's boiling point in the solver's normalized units. Derived here, in
-    // the one conversion point, rather than hard-coded in a shader: it is what
-    // pins a wet surface's temperature until the water is gone, and a shader
-    // constant would silently mean a different temperature at every calibration.
-    float boil_normalized      = 0.23f;
+    // Surface water capacity, kg/m^2. The gather throttles pyrolysis by the
+    // saturation water/capacity; the boiling-point clamp it used to apply is
+    // gone, because the latent heat is now paid on the host (stepSurfaceWater).
+    float water_capacity_kg_m2 = 0.05f;
     // ── Phase 6b ─────────────────────────────────────────────────────────────
     // The substance's melting point in solver units. A NON-meltable substance
     // gets a sentinel far above any reachable temperature rather than a separate
@@ -537,12 +538,18 @@ struct MaterialStateFieldStats {
     float    ambient_ms       = 0.0f;
     uint32_t thermal_sources  = 0;  // Thermal force fields fed to the ambient pass
     uint32_t ambient_zones    = 0;  // domains overriding ambient inside their box
-    // ── Phase 5: moisture ────────────────────────────────────────────────────
-    float    mean_moisture    = 0.0f;
-    float    max_moisture     = 0.0f;
-    uint32_t wet_elements     = 0;  // above the "suppresses burning" threshold
-    uint32_t wetting_domains  = 0;  // liquid domains that wetted anything this step
-    float    wetting_ms       = 0.0f;
+    // ── Surface water (2026-10-18: kg, not a 0..1 moisture) ──────────────────
+    float    mean_surface_water_kg_m2 = 0.0f;
+    float    max_surface_water_kg_m2  = 0.0f;
+    uint32_t wet_elements     = 0;  // saturation above the "suppresses burning" threshold
+    // Host water budget of the last pass (stepSurfaceWater + deposits).
+    bool     water_budget_ran = false;
+    bool     water_budget_stale = false;  // host copy not fresh: budget skipped
+    double   surface_water_kg = 0.0;       // held on all surfaces (host copy)
+    double   absorbed_kg      = 0.0;       // taken from liquid since the last pass
+    double   evaporated_kg    = 0.0;       // left as vapour this pass
+    double   evaporation_latent_j = 0.0;   // paid out of the surfaces
+    double   vapour_vented_kg = 0.0;       // evaporated outside every gas domain
     // ── Phase 6b: melting ────────────────────────────────────────────────────
     float    mean_melt        = 0.0f;
     float    max_melt         = 0.0f;
@@ -727,6 +734,12 @@ public:
     std::vector<float> heat_input;
     ComputeBufferHandle gpu_heat_input;
     bool heat_input_pending = false;
+    // Surface water queued for the next ambient pass, kg/m^2 per element
+    // (absorbed minus evaporated). The device adds it; the host budget that
+    // produced it already holds every kilogram in the ledger.
+    std::vector<float> water_input;
+    ComputeBufferHandle gpu_water_input;
+    bool water_input_pending = false;
 
     // Grow-only device buffers: the allocation may be larger than the current
     // element count after a mesh shrinks. Every upload/dispatch MUST be sized by
@@ -774,7 +787,7 @@ struct MaterialStateFieldSnapshot {
     std::vector<float> temperature;
     std::vector<float> fuel;
     std::vector<float> charred;
-    std::vector<float> moisture;   // Phase 5
+    std::vector<float> surface_water_kg_m2;   // cache v16; older caches read as dry
     std::vector<float> melt;       // Phase 6
     std::vector<float> mass_loss;  // Phase 7
     std::vector<float> transferred_mass; // Phase 6 APIC debit ledger
@@ -782,7 +795,7 @@ struct MaterialStateFieldSnapshot {
     bool valid() const {
         const std::size_t n = element_count;
         return n > 0 && temperature.size() == n && fuel.size() == n &&
-               charred.size() == n && moisture.size() == n &&
+               charred.size() == n && surface_water_kg_m2.size() == n &&
                melt.size() == n && mass_loss.size() == n &&
                transferred_mass.size() == n;
     }
@@ -899,27 +912,58 @@ public:
                      float dt,
                      float max_temperature);
 
-    // ── Phase 5: liquid contact -> moisture ──────────────────────────────────
+    // ── Surface water (2026-10-18) ───────────────────────────────────────────
+    // Moisture is MASS now: state[3] is kg of water per m^2 of surface. Every
+    // kilogram comes from a liquid parcel and leaves as vapour into a gas
+    // inventory, with its latent heat paid by the surface. The device only adds
+    // the queued water_input; the budget runs on the host copy, like the
+    // contact heat below, because that is where the ledger and the parcels are.
     //
-    // Raises `moisture` where the surface sits inside a liquid domain's occupied
-    // cells. Called once per FLUID domain, from that domain's branch, because the
-    // occupancy grid it reads is per-domain and only valid after that domain has
-    // splatted its density.
-    //
-    // ★ Per-domain is correct HERE, unlike the cooling that Phase 4 had to move
-    // out of the gather: wetting is a monotonic SOURCE, so two overlapping water
-    // tanks wetting the same plank is physically fine. A relaxation applied twice
-    // is not. The distinction is the rule, not the special case.
-    //
-    // Moisture is only ever REMOVED by the ambient pass. One process, one owner —
-    // splitting evaporation between here and the gather is exactly how the
-    // double-cooling bug happened.
-    bool stepWetting(SimulationComputeContext& compute,
-                     ComputeBufferHandle liquid_occupancy,
-                     int nx, int ny, int nz,
-                     const Vec3& grid_origin,
-                     float voxel_size,
-                     float dt);
+    // gatherWaterContact bins, per liquid-grid cell, how much more water the
+    // absorbent elements there can take (kg) and how fast (kg/s: absorbency *
+    // remaining capacity * area). depositWaterContact queues what the liquid
+    // actually gave, split by each element's share of the cell's deficit.
+    bool gatherWaterContact(const Vec3& origin, float voxel, int nx, int ny, int nz,
+                            std::vector<float>& cell_deficit_kg,
+                            std::vector<float>& cell_rate_kg_s,
+                            std::vector<float>& cell_kelvin) const;
+    void depositWaterContact(const Vec3& origin, float voxel, int nx, int ny, int nz,
+                             const MaterialTemperatureScale& scale,
+                             const std::vector<float>& cell_deficit_kg,
+                             const std::vector<float>& cell_absorbed_kg,
+                             const std::vector<float>& cell_absorbed_heat_j);
+
+    // Evaporation of the held water, once per frame BEFORE stepAmbient (which
+    // applies what this queues). Below boiling: the open-pan Hertz-Knudsen flux
+    // against the air's humidity (the same coefficient as the liquid surface
+    // exchange). Above boiling: everything the surface holds above 373.15 K
+    // goes into the phase change. Each kilogram costs L out of the surface
+    // (heat_input), and comes back as a VapourRelease for the caller to put into
+    // a gas domain's inventory. Runs only on a FRESH host copy (the readback
+    // after the last dispatch); dt is the time since the last budget, so a
+    // throttled readback does not lose drying. Requests the next readback while
+    // any surface is wet.
+    struct VapourRelease {
+        Vec3 position;          // element centre, world
+        float mass_kg = 0.0f;
+        float energy_j = 0.0f;  // sensible (c_w T) + latent, as the inventory keeps it
+        float kelvin = 0.0f;    // surface temperature it left at
+    };
+    bool stepSurfaceWater(const WorldThermalState& world, float dt,
+                          std::vector<VapourRelease>& released);
+    void noteVapourVented(double kg) { stats_.vapour_vented_kg += kg; }
+    // stepAmbient owns (and resets) the stats block; the budget that ran
+    // before it hands its water counters across.
+    void carryWaterStats(const MaterialStateFieldStats& from) {
+        stats_.water_budget_ran = from.water_budget_ran;
+        stats_.water_budget_stale = from.water_budget_stale;
+        stats_.surface_water_kg = from.surface_water_kg;
+        stats_.evaporated_kg = from.evaporated_kg;
+        stats_.evaporation_latent_j = from.evaporation_latent_j;
+        stats_.vapour_vented_kg = from.vapour_vented_kg;
+        stats_.absorbed_kg = from.absorbed_kg;
+    }
+    void noteAbsorbed(double kg) { stats_.absorbed_kg += kg; }
 
     // Stats need the device state back. That costs a stall, so it only happens
     // when something actually wants to look (stats panel / debug view) — never
@@ -1095,6 +1139,8 @@ private:
     std::vector<std::string> synced_this_pass_;
     MaterialStateFieldStats stats_;
     bool readback_requested_ = false;
+    // Time since the surface-water budget last ran (it needs a fresh host copy).
+    float water_budget_seconds_ = 0.0f;
     // The Kelvin mapping in force at the last step, carried to the readback so the
     // mask is quantized in absolute units rather than guessed at render time.
     MaterialTemperatureScale readback_scale_;

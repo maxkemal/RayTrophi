@@ -443,6 +443,9 @@ void fillFluidSolidPhase(const RayTrophiSim::SimulationGridDomainState& state,
     info.thermal_condensation_splits = static_cast<uint64_t>(ts.condensation_splits);
     info.thermal_solid_contact_particles = static_cast<uint64_t>(ts.solid_contact_particles);
     info.thermal_heat_to_solid_j = ts.heat_to_solid_j;
+    info.thermal_contact_shell_kelvin = ts.solid_contact_shell_kelvin;
+    info.thermal_contact_parcel_kelvin = ts.solid_contact_parcel_kelvin;
+    info.thermal_contact_shell_cells = static_cast<uint64_t>(ts.solid_contact_shell_cells);
     info.thermal_contact_cooled_particles = static_cast<uint64_t>(ts.contact_cooled_particles);
     info.thermal_min_kelvin = ts.min_kelvin;
     info.thermal_mean_kelvin = ts.mean_kelvin;
@@ -911,6 +914,25 @@ Result setFluidSplatMaterial(const std::string& domain_id_or_name,
     return setFluidSplatMaterialImpl(domain_id_or_name, material_name);
 }
 
+Result getSurfaceWaterBudget(SurfaceWaterBudgetInfo& out) {
+    if (!g_ctx) return notBound();
+    out = SurfaceWaterBudgetInfo{};
+    auto& runtime = scriptSimulationRuntime();
+    runtime.requestMaterialStateFieldReadback();
+    const auto& s = runtime.materialStateFieldStats();
+    out.ran = s.water_budget_ran;
+    out.stale = s.water_budget_stale;
+    out.surface_water_kg = s.surface_water_kg;
+    out.absorbed_kg = s.absorbed_kg;
+    out.evaporated_kg = s.evaporated_kg;
+    out.evaporation_latent_j = s.evaporation_latent_j;
+    out.vapour_vented_kg = s.vapour_vented_kg;
+    out.mean_kg_m2 = s.mean_surface_water_kg_m2;
+    out.max_kg_m2 = s.max_surface_water_kg_m2;
+    out.wet_elements = s.wet_elements;
+    return Result::success();
+}
+
 Result listMaterialFields(std::vector<MaterialFieldInfo>& out_fields) {
     if (!g_ctx) return notBound();
     out_fields.clear();
@@ -932,6 +954,27 @@ Result listMaterialFields(std::vector<MaterialFieldInfo>& out_fields) {
         info.element_count = static_cast<uint32_t>(field.elementCount());
         info.mask_resolution = field.mask_resolution;
         info.centers_dirty = field.centers_dirty;
+        info.thermal_depth_m = field.thermal_depth_m;
+        {
+            double area = 0.0, water = 0.0;
+            float saturation = 0.0f;
+            const std::size_t n = field.elementCount();
+            constexpr std::size_t kStride = RayTrophiSim::MaterialStateField::kStateStride;
+            const bool host = field.state.size() >= n * kStride;
+            const float capacity = std::max(
+                RayTrophiSim::findSubstance(field.substance_name).water_capacity_kg_m2, 1e-6f);
+            for (std::size_t e = 0; e < n; ++e) {
+                const float a = std::max(0.0f, field.centers[e * 4u + 3u]);
+                area += a;
+                if (!host) continue;
+                const float held = std::max(0.0f, field.state[e * kStride + 3u]);
+                water += double(held) * a;
+                saturation = std::max(saturation, held / capacity);
+            }
+            info.surface_area_m2 = static_cast<float>(area);
+            info.surface_water_kg = water;
+            info.max_water_saturation = saturation;
+        }
         const auto integrity =
             RayTrophiSim::MaterialStateFieldSystem::summarizeIntegrity(field);
         if (integrity.valid) {
@@ -974,7 +1017,7 @@ Result listMaterialFields(std::vector<MaterialFieldInfo>& out_fields) {
         }
         info.semantics = {
             RayTrophiSim::fieldSemanticName(RayTrophiSim::FieldSemantic::Temperature),
-            RayTrophiSim::fieldSemanticName(RayTrophiSim::FieldSemantic::Moisture),
+            RayTrophiSim::fieldSemanticName(RayTrophiSim::FieldSemantic::SurfaceWater),
             RayTrophiSim::fieldSemanticName(RayTrophiSim::FieldSemantic::FuelRemaining),
             RayTrophiSim::fieldSemanticName(RayTrophiSim::FieldSemantic::Char),
             RayTrophiSim::fieldSemanticName(RayTrophiSim::FieldSemantic::Melt),

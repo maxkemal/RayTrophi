@@ -989,7 +989,6 @@ struct SimulationGasStats {
     float gpu_msf_ms = 0.0f;               // Material State Field thermal gather
     float gpu_surface_exchange_ms = 0.0f;
     float gpu_source_upload_ms = 0.0f;     // host scalar sources -> device
-    float gpu_fluid_combustion_ms = 0.0f;  // combustible liquid surface deposit
     float gpu_velocity_advect_ms = 0.0f;
     float gpu_scalar_advect_ms = 0.0f;
     float gpu_combustion_ms = 0.0f;
@@ -1036,13 +1035,15 @@ struct SimulationGasStats {
     bool turbulence_on_gpu = false;
     bool dissipation_on_gpu = false;
     bool pressure_on_gpu = false;
-    bool fluid_combustion_on_gpu = false;
 
     // ── Field measurements (post-step scan) ──────────────────────────────────
     std::size_t cell_count = 0;
     std::size_t active_density_cells = 0; // gas density only; never liquid SDF
     std::size_t active_fuel_cells = 0;   // fuel > 1e-4
     std::size_t burning_cells = 0;       // flame/interaction field lit
+    // The combustion pass itself (FG1): cells that burned, were throttled by
+    // oxygen, or read hot only through steam's virtual temperature.
+    GridFluid::CombustionStats combustion;
     std::size_t solid_cells = 0;         // collider-occupied cells
     std::size_t liquid_boundary_cells = 0;
     Vec3 liquid_boundary_mean_velocity;
@@ -1500,12 +1501,10 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle fluid_mask_solid_indices;
     // APIC Wind surface-drag: one ordered-float height per XZ grid column.
     ComputeBufferHandle fluid_surface_columns;
-    // Two float planes per fluid cell: thermally accumulated surface
-    // temperature followed by remaining combustible fuel. The fuel plane uses
-    // -1 as a lazy initialization marker so material edits/reset/resize are
-    // deterministic without a CPU readback.
-    ComputeBufferHandle fluid_combustion_state;
-    bool fluid_combustion_state_needs_reset = true;
+    // sim_gas_combustion counters (FG1): burning / inerted / steam-masked
+    // cells, the lowest oxygen fraction and the burned fuel, 20 bytes read
+    // after the stage.
+    ComputeBufferHandle gas_combustion_counters;
     // Gas collider coupling (all GPU backends): cell-centred solid occupancy
     // (0=open, 1=solid) plus moving-wall linear velocity components.
     ComputeBufferHandle gas_solid_mask;
@@ -2611,6 +2610,10 @@ private:
                                     bool in_step);
     void releaseResidentBuffers(SimulationComputeContext& compute);
     void forgetResidentBuffers();
+    // Surface-water vapour (MaterialStateFieldSystem::stepSurfaceWater) into the
+    // gas inventory it rises in, with one ledger row per destination.
+    void routeSurfaceWaterVapour(
+        const std::vector<MaterialStateFieldSystem::VapourRelease>& released);
     void ensureComputeBuffer(SimulationComputeContext& compute,
                              ComputeBufferHandle& handle,
                              const char* name,

@@ -3337,7 +3337,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                     {
                         UIWidgets::PerfBlock blk("Material State Field",
                                                  st.readback_ms + st.dispatch_ms +
-                                                 st.ambient_ms + st.wetting_ms);
+                                                 st.ambient_ms);
                         blk.Section("Simulation");
                         blk.Value("Objects / elements", "%u / %u",
                                   st.field_count, st.element_count);
@@ -3498,12 +3498,12 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                         blk.Value("Char  max / mean", "%.3f / %.3f",
                                   st.max_char, st.mean_char);
                         blk.Value("Fuel remaining", "%.2f", st.fuel_remaining);
-                        blk.Value("Moisture  max / mean", "%.3f / %.3f  (%u wet)",
-                                  st.max_moisture, st.mean_moisture, st.wet_elements);
-                        // 0 liquid domains with a wet object means the moisture
-                        // came from somewhere else (a cached frame), which is a
-                        // different situation from "the water never reached it".
-                        blk.Value("Wetting liquid domains", "%u", st.wetting_domains);
+                        blk.Value("Surface water  max / mean", "%.3f / %.3f kg/m^2  (%u wet)",
+                                  st.max_surface_water_kg_m2, st.mean_surface_water_kg_m2,
+                                  st.wet_elements);
+                        // The host water budget (msf.water_budget reads the same).
+                        blk.Value("Water absorbed / evaporated / vented", "%.4g / %.4g / %.4g kg",
+                                  st.absorbed_kg, st.evaporated_kg, st.vapour_vented_kg);
                         blk.Value("Melt  max / mean", "%.3f / %.3f  (%u melting, %u molten)",
                                   st.max_melt, st.mean_melt,
                                   st.melting_elements, st.molten_elements);
@@ -3559,7 +3559,6 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                         // ambient pass is once per frame, the dispatch row is once
                         // per gas domain.
                         blk.Time("ambient (world/domain/thermal/dry)", st.ambient_ms, "GPU", 1);
-                        blk.Time("wetting (per liquid domain)", st.wetting_ms, "GPU", 1);
                         blk.Time("dispatch (gather+scatter+resolve)", st.dispatch_ms, "GPU", 1);
                         blk.Time("mask readback", st.readback_ms, "CPU", 1);
                         blk.End();

@@ -1,3 +1,43 @@
+# 2026-10-18 (2. build): gaz↔tane + FG1 yakıt sayacı + Ek 11 aleti + yüzey suyu kütlesi — TOPLU TEST
+
+Yeni dosyalar: `Fluid/MatterGrainGasCoupling.cpp/.h`, `Fluid/FluidSurfaceWater.cpp/.h`
+(vcxproj'ta). Shader'lar (paket gerekli): `sim_gas_combustion` (sayaç 5 uint),
+`sim_msf_ambient` (6 tampon), `sim_msf_gather`; `sim_msf_wet` SİLİNDİ. SimCache v16. C++: ısı/yanma
+sayaçları, tane adımı imzası. 12:32 build'inin sonuçları BIRLESIK devir tablosunda.
+Sıra: bağımsız ve hızlı olan önce.
+
+1. **Kuru ateş sayacı (hızlı):** `python scripts/test/rt_test_fire_steam_quench_ipc.py`
+   → kuru kolda `inerted` 0 ve `fuel_dry` > 0. Bozuksa (`inerted` == `burning`):
+   `.spv` eski, shader paketi derlenmedi.
+2. **Aynı koşu, FG1 iddiası:** 8/8; `steam_reduces_burned_fuel` asıl kapı.
+   FAIL ise ve `steam_dilutes_oxygen` PASS ise: buhar O2'yi düşürüyor ama kaynayan
+   suyun gaza verdiği ısı yanmayı daha çok hücreye yayıyor — fizikte ısı çekme
+   (yüzey alışverişi) zayıf demektir, sayaç değil.
+3. **Gaz↔tane:** `python scripts/test/rt_test_grain_gas_drag_ipc.py` → 6/6.
+   ★ `still_air_does_not_couple` FAIL ise kapı çalışmıyor ve BÜTÜN tane
+   kabulleri hava direnciyle kaymıştır — önce bunu düzelt, H1 suite'ine güvenme.
+4. **H1 regresyonu (uzun, 3'ten sonra):** `python scripts/test/rt_h1_grain_suite.py`
+   — gaz kaynağı olmayan sahnelerde öncekiyle aynı sonuçlar.
+5. **Ek 11 aleti:** `python scripts/test/rt_test_contact_heat_ipc.py` → örneklerde
+   `shell_seen_kelvin` / `parcel_seen_kelvin`. Kabuk görülen ≈ 293 K ise ıslak
+   hücrelerin kabuğu soğuk (ısınan yüzler suda değil ya da host kopyası bayat);
+   ≈ 320+ K ise film/alan hesabına bak. Test hâlâ 3/6 beklenir — alet, düzeltme değil.
+6. **Yüzey suyu (kütle):** `python scripts/test/rt_test_surface_water_ipc.py` → 6/6.
+   `water_mass_closes` asıl kapı (tutulan ≈ emilen − buharlaşan − vent).
+   `budget_not_starved` FAIL ise readback isteği çalışmıyor (host hiç taze değil).
+   ★ Sinsi olan: `hot_surface_dries_into_domain` PASS ama `water_mass_closes` FAIL
+   ve tutulan > defter ise ambient yine host'u taze bırakıyor ve su iki kez
+   harcanmıyor ama bütçe de çalışmıyor; tutulan < defter ise aynı su iki kez
+   buharlaşıyor — `host_state_fresh` sıfırlamasını kontrol et.
+7. **Eski veriler:** eski bir projeyi aç → log'da `retired field 'dry_rate' dropped`
+   (override varsa) ve proje AÇILMALI. Eski bir bake'i oynat → yüzeyler kuru.
+   `python scripts/test/rt_test_sim_substance.py` (kanal adı `surface_water_kg_m2`).
+8. ★ Sinsi olan: `pair_cancels` PASS ama `gas_limited_cells` her adım çok büyükse,
+   taneler gazı sürekli denge hızına çakıyor demektir (yoğun bulut, hafif hücre):
+   fizik doğru ama sürükleme gaz hücresi çözünürlüğüne bağlı — voxel'i değiştirince
+   sonuç değişiyorsa not et.
+---
+
 # 2026-10-15: ORTAK atmosfer sıcaklığı — SON kaynak teslimi
 
 **Yeni derleme / RT Play canlı ölçümü:** Kullanıcı derleyip açtı. Dört dış IPC

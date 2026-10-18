@@ -285,7 +285,7 @@ public:
 //   Element attribute — per-particle / per-texel / per-vertex data that ALREADY
 //                       exists as parallel arrays (temperature, mass_fraction,
 //                       substance_tag, granular_softening, granular_bond_scale,
-//                       MSF melt/moisture/char). These are an attribute system
+//                       MSF melt/surface water/char). These are an attribute system
 //                       already; what was missing is only the NAMING layer.
 //
 // ★★★ Name at the boundary, index in the loop. The name is resolved ONCE when
@@ -886,7 +886,7 @@ public:
 // ★★ TWO PLANNED NODES ARE DELIBERATELY ABSENT, and their absence is the
 // honest answer rather than an omission:
 //
-//   Moisture — has NO authored knob. Moisture is WRITTEN by fluid contact
+//   Surface water — has NO authored knob. It is WRITTEN by fluid contact
 //     (Phase 5) and evaporates against the ambient. A "Moisture node" would
 //     have to invent an authoring surface the solver does not have, which is
 //     precisely the failure D.0 forbids: a node inventing physics. It is
@@ -1010,7 +1010,7 @@ public:
 };
 
 // Reads per-element MSF state for one object: temperature, char, melt,
-// moisture, fuel.
+// surface_water_kg_m2, fuel.
 //
 // ★★ This is the naming layer from D.3 reaching per-TEXEL data, and it needed
 // no new storage either: MSF already keeps parallel arrays. Same FieldStats,
@@ -1035,7 +1035,7 @@ public:
         metadata.displayName = "Surface Inspect";
         metadata.description =
             "Measures per-texel MSF state on the incoming object -- "
-            "temperature, char, melt, moisture, fuel. Reports whether the "
+            "temperature, char, melt, surface_water_kg_m2, fuel. Reports whether the "
             "reading is fresh. ";
         metadata.category = "Simulation";
         addInput("Surface", DataType::SurfaceField);

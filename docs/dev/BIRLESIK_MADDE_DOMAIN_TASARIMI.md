@@ -1,6 +1,6 @@
 # Birleşik madde domain'i — gaz/sıvı ayrımı olmayan simülasyon ve render
 
-> **Durum:** AKTİF — 2026-10-11: T2 gizli ısı + yüzey yoğuşması (§4.7, MADDE_TIPLERI §6f), sis suyu/doygunluk (§4.8) ve yağmur: otokonversiyon, sis tavanı, düşüş, iniş (§4.8b) CANLI PASS; commit `01284ef`. Açık: sis/yağmur render'a bağlı değil (bulut işiyle), yağmur parsel doğumlarının yeri ölçülmedi. 2026-10-08: Madde T1/T3 kullanıcı build'i ve hızlı
+> **Durum:** AKTİF — 2026-10-18: FG1 kaynakta (yanma hava sıcaklığı + buhar oksijen seyreltmesi, eski söndürme söküldü; derlenmedi). Hızlı tur: regresyonlar PASS, Ek 11 3/6, MSF alan sızıntısı düzeltildi (derlenmedi). 2026-10-11: T2 gizli ısı + yüzey yoğuşması (§4.7, MADDE_TIPLERI §6f), sis suyu/doygunluk (§4.8) ve yağmur: otokonversiyon, sis tavanı, düşüş, iniş (§4.8b) CANLI PASS; commit `01284ef`. Açık: sis/yağmur render'a bağlı değil (bulut işiyle), yağmur parsel doğumlarının yeri ölçülmedi. 2026-10-08: Madde T1/T3 kullanıcı build'i ve hızlı
 > dış IPC kabulü PASS; legacy/save-open/görsel kabul ve T2 hal/model birleşmesi açık.
 > C5/C6/C7 fiziksel yakınsama ve H1 maliyet kapıları bu testlerle kapanmaz.
 > Uzman Gas/Liquid domain'leri T0 eşitlik ölçümü olmadan kaldırılmaz.
@@ -29,6 +29,17 @@ model/obstacle/ν(T) çekirdeği ve `granular_transport` sahipliği kaynakta.
 contact kaynakta; önceki kullanıcı build PASS, yeni shader/C++ kabulü açık.
 Ortak zamanlayıcı/porous owner izolasyonu, karma elastik MPM, gaz↔grain ve T6 kapıları açık. Güncel kaynak/kabul
 ayrıntısı [MADDE_T2_T3_HANDOFF.md](MADDE_T2_T3_HANDOFF.md)'nin ilk checkpoint'idir.
+
+## 2026-10-18 hızlı canlı tur (exe 10-18 11:16, boş sahne)
+
+| Konu | Sonuç |
+|---|---|
+| Regresyon | Madde kütüphanesi, domain maddesi, ısı alışverişi 8/8, sis+yağmur 10/10, kaynama 6/6, değişim defteri PASS (kütle/enerji hatası 0). Füzyon/yoğuşma 8/8 (500 sn zaman aşımını aşıyor; sınırsız koşuldu). |
+| Defter testi bayattı | `rt_test_matter_exchange_ledger_ipc.py` 10-02'den beri 7 türü tanıyordu; kod 11 tür üretiyor (`absorption`, `drainage`, `autoconversion`, `precipitation` eksikti). Test güncellendi — kod hatası değil. |
+| Ek 11 sıvı↔collider ısısı | 12:32 build'inde yine **3/6**. `thermal_depth_m` = 0,100 m, `surface_area_m2` = 2,16: kabuk modeli DOĞRU, aşağıdaki "1 mm sac" hipotezi YANLIŞ çıktı. Kalan şüpheli: ıslak hücrelerin gördüğü kabuk sıcaklığı (host kopyası/readback gecikmesi ya da ısınan yüzlerin suya değmemesi) — ölçen sayaç yok. Eski metin: **3/6** (10-10: 4/6). Kabuk 349,3 K (eşik 350), su→katı ısı −17,8 J'den −1,8 J'ye sönüyor; beklenen ~−400 J/adım. Sönüm eğrisi 1 mm sac modeline uyuyor; `thermal_depth_m` dışarıdan okunamadığı için kök kesin değil → `msf.fields`'e `thermal_depth_m` + `surface_area_m2` eklendi (derlenmedi). |
+| ★ MSF alan sızıntısı | **CANLI PASS (12:32 build):** silinen küpün alanı domain'li ilk adımda budandı. Domain yokken `fluid.step` senkron koduna ulaşmaz, alan o zamana kadar listede kalır (beklenen). Kök: `MaterialStateFieldSystem::endSyncPass` hiç çağrılmıyordu (git geçmişinde de hiç): silinen collider'ın alanı sahnede sıcak kalıyor, `msf.fields`'te listeleniyor ve sıvıyla ısı alışverişine girebiliyordu. Kanıt: test temizliğinden sonra `T_ContactCube` 324 K ile duruyordu. Çağrı eklendi (derlenmedi). |
+| FG1 | Kaynakta yazıldı, derlenmedi: aşağıdaki "FG1 kaynak teslimi". Eski fenomenolojik söndürme söküldü. |
+| Not düzeltmesi | "Öncelikli sonraki düzeltmeler" 1. madde (rejime göre yoğunluk) kodda yapılmış: `densityForParticle` Granular→`density`, Fluid→`liquid_density`. |
 
 ## Güncel kısa devir — 2026-10-11
 
@@ -1772,8 +1783,172 @@ Uygulama odaklı modüllerde yapılır; 2000 satır üstü kaynaklarda yalnız k
 entegrasyon olur. Build/shader derlemesi kullanıcıda; canlı testler uygulama
 açıkken ayrı süreçte scripts/test/rt_ipc.py ile yürütülür.
 
+### FG1 kaynak teslimi — 2026-10-18 (DERLENMEDİ)
+
+**Bulgu 1 — yanma sanal sıcaklığı okuyordu.** Gaz sıcaklık alanı Tv tutuyor
+(§4.8c); 373 K saf buhar orada ~600 K. Üç yanma yolu da (GPU `sim_gas_combustion`,
+CPU yedeği, `GridFluid::processCombustion`) tutuşmayı bu alandan karşılaştırıyordu:
+kaynayan suyun buharı yanmaya "sıcak hava" gibi görünüyordu. Hiçbir yol oksijen
+de okumuyordu.
+
+**Bulgu 2 — eski söndürme fizik değildi.** `runGpuFluidSurfaceQuench` gaz ısısını,
+yakıtı ve alevi `(1 − fuel_capacity·dt)` ile çarpıyordu: oran sıvının *yüzey yakıt
+kapasitesinden* geliyordu, çekilen ısı hiçbir deftere yazılmıyordu ve yalnız ayrı
+Fluid+Gas çiftinde çalışıyordu. Aynı shader'ın yanıcı yarısı zaten ölüydü
+(`fluid_extinguishing` kapısı olmadan dispatch edilmiyordu).
+
+**Yeni model (`GridFluid::CombustionAir`, CPU referansı `GridFluid::burnFuel`, GPU
+aynı matematik):**
+- Tutuşma ve ısı salımı **hava sıcaklığında**: Tv, hücrenin buhar kütlesiyle
+  `airKelvinFromVirtual` ile T'ye çevrilir; açığa çıkan ısı alana Tv FARKI olarak
+  yazılır (doygunluk/yüzey alışverişiyle aynı sözleşme).
+- **Buhar oksijeni seyreltir:** 1 atm'de hücrenin molü sabit, x_O2 = 0,2095 ·
+  oxygen · (1 − x_buhar). Yanma hızı x_O2 = 0,13'te (buharla seyreltilmiş
+  hidrokarbon LOC'u, N2 0,12 ile CO2 0,145 arası) sıfıra doğrusal iner.
+- **Oksijen tek otorite:** MSF pirolizinin okuduğu dünya/domain oksijeni artık gaz
+  yanmasına da uygulanıyor. Varsayılan 1,0 → mevcut sahneler değişmez.
+- Isı çekme işi zaten defterde olan fiziklerde: yüzey ısı alışverişi ve kaynama
+  (gizli ısı dahil). Söndürme seçimi maddenin buhar verisinden geliyor; domain
+  bayrağı yok. Buhar yoksa (vapour_molar 0 / depo yok) davranış FG1 öncesiyle
+  bit bit aynı.
+- Sayaçlar `gas.step_stats` (+ Python, panel): `combustion_measured`,
+  `combustion_burning_cells`, `combustion_inerted_cells`,
+  `combustion_steam_masked_cells`, `combustion_min_oxygen_fraction`. GPU 16 bayt,
+  aşamanın zaten beklediği fence'ten sonra.
+
+**Söküldü:** `runGpuFluidSurfaceQuench`, `sim_fluid_surface_combustion.comp`,
+`fluid_combustion_state` tamponu ve sıfırlama bayrakları, `gpu_fluid_combustion_ms`
+/ `fluid_combustion_on_gpu` (API/IPC/Python/UI). Paneldeki "Extinguishing liquid
+active" ve "extinguishes fire" yazıları kaldırıldı/düzeltildi (artık termal zincir
+kapalıysa "inert to fire").
+
+**Bilinen sınırlar:**
+- Yoğuşmayan havuz (`gas_phase_foreign_kg`) seyreltmeye sayılmıyor: yakıt buharı
+  ile yanma ürünü aynı havuzda, ayrılamıyor.
+- Ortam nemi (envantersiz arka plan buharı) sayılmıyor (20 °C'de x ≈ %2).
+- Oksijen tüketimi izlenmiyor (O2 alanı yok); seyreltme yalnız buhardan.
+- Termal zincir kapalı bir sıvı artık ateşe hiçbir şey yapmıyor — eski ayrı
+  Fluid+Gas sahnelerinde su ateşi söndürmeyi bırakabilir. Bilinçli: eski yol
+  enerji yok ediyordu.
+- GPU envanteri cihazdayken yanma CPU'ya düşerse kuru hava sayar (log'a bir kez).
+
+**Açık karar (kullanıcı):** `fluid_extinguishing` madde bayrağı artık hiçbir
+söndürmeyi sürmüyor; kalan tek etkisi `transferFluidCombustionToGas` içinde
+"yanıcı değil" kapısı (`fluid_flammable` zaten bunu söylüyor). Tam söküm ~15
+dosya + serileştirici + madde override doğrulaması; kayıtlı override'ı olan
+projeleri reddetmemesi için derlemeyle birlikte yapılmalı.
+
+Kabul: `scripts/test/rt_test_fire_steam_quench_ipc.py` (iki kol: kuru kontrol /
+kaynayan tank). Kontrol listesi: [NEXT_BUILD_CHECKS.md](NEXT_BUILD_CHECKS.md).
+
+**Canlı ilk koşu (2026-10-18, 12:32 build) — 6/7.**
+- Kuru kol: yanıyor (340→852 hücre/adım), en düşük O2 = 0,2095 (tam hava).
+- Islak kol: buhar 4–9 kg, en düşük O2 = **0,0** (saf buhar hücreleri), oksijen
+  sınırlı hücre 854–1942/adım, **2423** hücre-adım "yalnız buharın Tv'si yüzünden
+  sıcak" — FG1 öncesi bunlar yanıyordu. Defter dengede. Kaynama/sis/ısı/defter
+  regresyonları PASS.
+- Tek FAIL bir ölçü hatasıydı: `dry_not_oxygen_limited` — kuru havada her yanan
+  hücre "sınırlı" sayıldı. GLSL bölmesi doğru yuvarlanmıyor, a/a = 0,99999994 <
+  1. Yanma hızına etkisi ~1e-7; sayaç eşiği 0,9999'a alındı (shader + CPU),
+  **yeniden derleme bekliyor**.
+- ★ Dürüst sınır: ıslak kolda yanan HÜCRE sayısı kurudan fazla (oran 0,53).
+  Kaynayan su gazı ısıtıyor, ateş daha çok hücreye yayılıyor; test hücre sayıyor,
+  yakılan yakıt MİKTARINI saymıyor. "Ateş söndü" iddiası bu ölçüyle kanıtlanmış
+  değil; yalnızca "buhar oksijeni düşürüp yanmayı kısıyor" kanıtlandı. Yakılan
+  yakıt toplamı sayacı ve pilotu buhar sütununun içine alan bir sahne açık.
+
+### Parti 2026-10-18b — gaz↔tane sürüklemesi + FG1/Ek 11 ölçü aletleri (DERLENDİ, canlı 2026-10-18)
+
+**Canlı sonuç (2026-10-18, 2. build):**
+- FG1 **8/8**: yakılan yakıt kuru 41,97 → ıslak 2,21 (×0,053); 303 hücre-adım "yalnız buharın Tv'si yüzünden sıcak"; kuru kolda oksijen sınırı 0.
+- Yüzey suyu **6/6**: emilen 1,206 kg, buharlaşan 0,023 kg (sıcak üst yüz 636 K), tutulan 1,181 kg = defter 1,183 kg (fark 0,0018 < tolerans 0,014); bayat kare 0.
+- Gaz↔tane **4/6**: durgun hava açmıyor, rüzgâr açıyor, çift tam iptal (tepki = −sürükleme). FAIL iki x kolu SAHNE: dürtü çoğunlukla +y (düşen taneye hava direnci, 0,147 N·s), x −0,007 — kapalı kutuda rüzgâr taneye ulaşmıyor (dönüş akışı). Test sahnesi açık yan duvarla ya da rüzgârı tanenin içinden geçirerek yeniden kurulmalı.
+- Ek 11 hâlâ 4/6; **alet kökü gösterdi**: ıslak hücrelerin kabuğu 294,2 K (kabuk ortalaması ~320 K). Isınan yüzler suya değmiyor ya da host kopyası bayat — film/alan hesabı değil.
+
+
+Kullanıcı kararı (2026-10-18): kod büyük adımlarla ilerler, testler partinin
+sonunda topluca koşulur.
+
+**T5a gaz↔tane (`Fluid/MatterGrainGasCoupling.cpp`).** Tane şeridi bugüne kadar
+yalnız sıvıyı örnekliyordu; rüzgâr/duman/ateş yükselişi kumu taşımıyor, kum havayı
+itmiyordu.
+- Di Felice sürüklemesi (sıvıyla aynı `matterGrainDragCoefficient`, boşluk 1),
+  hava yoğunluğu doğrudan Tv'den (ρ = P·Ma/(R·Tv), buhar defteri gerekmez),
+  Sutherland viskozitesi.
+- Kare üzerinde tam çözüm `Δv = (u − v)(1 − e^{−k·dt/m})`, DEM alt adımlarına
+  **kuvvet** olarak (`external_acceleration`): hız dürtmesi değil, böylece
+  duran yığını statik sürtünme tutabilir.
+- Hücre başına topak sınırlayıcı: tanelerin toplam dürtüsü gazı karışım denge
+  hızının ötesine itemez; aynı çarpan tanelere de uygulanır → çift tam zıt.
+- Tepki −J, gaz MAC yüzlerine trilineer örneklemenin eşleniğiyle (momentum/ρV).
+  Kare sırası: gaz geçen kare adım attı + host'a senkronlandı → taneler → gaz
+  bu kare (host düzenlemesini yükler).
+- ★ Kapı: yalnız gaz şeridi önceki karede adım attıysa VE hareket ediyorsa
+  (`max_speed > 1e-4`). Durgun/boşta hava her tane sahnesine sürükleme ekler ve
+  vakumda kalibre edilmiş bütün kabulleri (serbest düşüş, şev, CPU referansı)
+  kaydırırdı. "Hava, domain'in onu simüle ettiği yerde vardır."
+- Raporda (`grain_diagnostics.liquid`, panel): `gas_coupled_grains`,
+  `gas_drag_impulse_n_s`, `gas_reaction_n_s`, `gas_momentum_residual_n_s`,
+  `gas_limited_cells`, `gas_max_relative_speed_m_s`.
+- Sınırlar: havada kaldırma (ρ_hava/ρ_tane ~ 5e-4), tanelerin gaz
+  projeksiyonundaki hacmi, sürükleme ısısı yok. **Tane domain'i termal sıvı
+  zincirini reddediyor**, yani tane + ateş + kaynayan su tek domain'de bugün
+  kurulamaz (FG1 matrisinin ateş+Sand kolu bu sınırda).
+- Kabul: `scripts/test/rt_test_grain_gas_drag_ipc.py` (durgun/rüzgâr kolu).
+
+**FG1 yakıt miktarı.** `combustion_burned_fuel` (GPU 1e-4 birim sabit nokta,
+CPU double). İlk koşu hücre saydığı için "ateş söndü"yü kanıtlayamamıştı; test
+artık `steam_reduces_burned_fuel` (ıslak < 0,9 × kuru) ile miktarı kapılıyor ve
+pilot buhar sütununun içinde (y 0,42, r 0,12).
+
+**Ek 11 ölçü aleti.** `fluid.list_domains` → `thermal_contact_shell_kelvin`,
+`thermal_contact_parcel_kelvin`, `thermal_contact_shell_cells`: temas eden
+parsellerin GÖRDÜĞÜ kabuk/parsel sıcaklığı (temas ağırlıklı). Kabuk ≈ su ise
+sorun ısınan yüzlerin suya değmemesi ya da host kopyasının bayat olması; kabuk
+sıcak ama ısı küçükse film/alan hesabı.
+
+**MSF yüzey suyu artık KÜTLE (aynı parti, kullanıcı isteği).** Eskiden
+`sim_msf_wet` 0..1 nemi sıvı doluluğundan yoktan yükseltiyor, `sim_msf_ambient`
+gizli ısı ödemeden siliyor, gather ıslak yüzeyi kaynamada kelepçeleyip gelen
+ısıyı atıyordu. Şimdi:
+- Durum `[3]` = **kg/m² su**; madde alanı `water_capacity_kg_m2` (metal/plastik
+  film 0,02–0,05, meşe 1, kumaş 0,3, taş/et 0,5, kum 1,5, toprak 2).
+  `absorbency` doygunluğa yaklaşma hızı olarak kaldı.
+- **Islanma** (`Fluid/FluidSurfaceWater.cpp`, sıvı dalının sonunda): emici
+  yüzeyin hücresine/komşusuna değen *Water* parselleri kütle verir; hücre en çok
+  min(eksik, emicilik·eksik·dt) alır, parsel adım başına en çok yarısını verir ve
+  canlı/ölü sınırında bırakılmaz. Defter: `absorption` Water → `surface`.
+  Getirdiği duyulur ısı yüzeye `heat_input` olarak gider.
+- **Kuruma** (`stepSurfaceWater`, kare başına, `stepAmbient`'ten önce, TAZE host
+  kopyasında): 373 K üstündeki ısının tamamı buharlaşmaya (`C·(T−Tb)/L`), altında
+  açık tava Hertz–Knudsen akısı (katsayı 4e-5, dünya nemi). Her kg L'yi yüzeyden
+  öder. Buhar, konumunu içeren gaz domain'inin envanterine (vapour havuzu Water
+  değilse yoğuşmayan havuza) gider; domain dışında `atmosphere`'e vent edilir.
+  Defter: `vaporization` `surface` → domain/atmosphere, gizli ısı iki tarafta.
+- Cihaz yalnız kuyruğu ekler (`water_input`, ambient binding 5); GPU kuruma,
+  kaynama kelepçesi ve `sim_msf_wet` SÖKÜLDÜ. Piroliz doygunlukla (su/kapasite)
+  kısılıyor.
+- ★ Bulunan hata: `host_state_fresh` yalnız gather dispatch'inde sıfırlanıyordu;
+  gaz domain'i olmayan sahnede host kopyası sonsuza dek "taze" sayılırdı ve bütçe
+  aynı suyu her kare yeniden buharlaştırıp yoktan buhar yapardı. Ambient
+  dispatch'i de sıfırlıyor.
+- Readback: yalnız yüzeyde su varken ya da sıvı emici yüzeye değerken her kare
+  istenir (kuru sahne 0,2 sn kısmasında kalır); bütçe son taze kopyadan beri geçen
+  süreyle çalışır, kısma kuruma kaybettirmez.
+- Yeniden adlandırma (kural 5): semantik `moisture` → `surface_water_kg_m2`
+  (sim node kanalı, `msf.fields` semantics, panel listesi); önbellek **v16**
+  (v11–v15'teki 0..1 nem okunur ve atılır, yüzey kuru oynatılır).
+- `dry_rate` madde alanı SÖKÜLDÜ: yüklemede override'dan loglanıp düşülür
+  (proje reddedilmez, geri yazılmaz), düzenlemede açıklamalı hata.
+- IPC: `msf.water_budget` (yeni; dört katman + yetki + overlay),
+  `msf.fields` → `surface_water_kg`, `max_water_saturation`.
+- Sınırlar: tutulan suyun kendi ısı kapasitesi yüzey C'sine katılmıyor; yalnız
+  Water emiliyor (yağ emmiyor); damlama/akma yok (doygunluk üstü su kalmaz çünkü
+  alım eksikle sınırlı); kar/buz `absorbency` 0.
+- Kabul: `scripts/test/rt_test_surface_water_ipc.py`.
+
 ## Öncelikli sonraki düzeltmeler
-1. FluidPhysicalMass.cpp densityForParticle yalnız liquid_density kullanıyor.
+1. ✔ (kodda yapılmış, 2026-10-18'de doğrulandı) FluidPhysicalMass.cpp densityForParticle yalnız liquid_density kullanıyor.
    Sand/Gravel/Soil bu alanı override etmiyor (default 1000); dry density alanı
    Sand 1600, Gravel 1750, Soil 1450. Gözlenen Soil 0.125 kg/parcel, Water
    ~0.124625 kg/parcel. Rejim-aware mass initialization yapılmalı: Granular dry

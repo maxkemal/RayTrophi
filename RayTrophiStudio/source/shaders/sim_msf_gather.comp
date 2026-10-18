@@ -18,12 +18,12 @@ layout(push_constant) uniform PC {
     vec4  material1;     // (reserved, was cooling_rate), char_rate, dt, max_temperature
     // melt_enthalpy_span = latent heat of fusion expressed as the normalized
     // temperature span whose energy equals it (L/c / kelvin_per_unit).
-    vec4  material2;     // boil_normalized, melt_normalized, melt_enthalpy_span, mass_capacity
+    vec4  material2;     // water_capacity_kg_m2, melt_normalized, melt_enthalpy_span, mass_capacity
 } pc;
 
 layout(set=0, binding=0) readonly buffer Centers { vec4 centers[]; };  // xyz world, w area
 // Two vec4 per element:
-//   [2i+0] x=temperature y=fuel_remaining z=char w=moisture
+//   [2i+0] x=temperature y=fuel_remaining z=char w=surface water (kg/m^2)
 //   [2i+1] x=released_this_step y=melt z=mass_loss w=transferred_mass
 // Slot [2i+1] is what sim_msf_scatter consumes. melt/mass_loss are written by
 // later phases; they are allocated now so the stride never changes again.
@@ -141,27 +141,15 @@ void main() {
     st.x = mix(st.x, gas, transfer);
     st.x = min(st.x, pc.material1.w);
 
-    // ── Moisture gate (Phase 5) ──────────────────────────────────────────────
-    // ★ This is the physical reason wet things do not burn, not an arbitrary
-    // "if wet then skip" rule: the water has to boil off first, and while it does
-    // it pins the surface at water's boiling point. All the incoming heat goes
-    // into the phase change, so the surface simply cannot reach its ignition
-    // temperature until it is dry.
-    //
-    // Written as a clamp rather than as an ignition-threshold offset because it
-    // is the TEMPERATURE that is really held down — which is also what the render
-    // bridge reads for incandescence. A wet iron bar in a furnace must not glow.
-    //
-    // The moisture itself is consumed by the ambient pass (the single sink), and
-    // the surface's now-elevated temperature is what makes it dry fast there.
-    float moisture = st.w;
-    if (moisture > 0.0) {
-        // Blend rather than a hard clamp: a nearly-dry surface should be allowed
-        // to start climbing again instead of snapping free at exactly 0.
-        float boil = pc.material2.x;
-        float wetness = clamp(moisture, 0.0, 1.0);
-        st.x = mix(st.x, min(st.x, boil), wetness);
-    }
+    // ── Surface water (2026-10-18) ───────────────────────────────────────────
+    // The boiling-point clamp that used to sit here threw the incoming heat
+    // away. The water now pays for itself: the host budget (stepSurfaceWater)
+    // turns everything above 373 K into evaporation and takes the latent heat
+    // back out of the surface, so the energy that "pinned" the temperature is
+    // accounted for instead of deleted. Only the saturation is read here, to
+    // throttle pyrolysis below.
+    float water_capacity = max(pc.material2.x, 1e-6);
+    float moisture = clamp(max(st.w, 0.0) / water_capacity, 0.0, 1.0);
 
     // ── Melting: a latent-heat ENERGY BUDGET (Phase 6b, reworked) ────────────
     // ★ Deliberately the SAME SHAPE as the moisture gate above, because it is the

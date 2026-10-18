@@ -479,6 +479,15 @@
     <ClInclude Include="source\include\Fluid\GasSaturation.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Fluid\GasCombustionAir.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterGrainGasCoupling.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidSurfaceWater.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Fluid\GasInventoryFrameCapture.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
@@ -1369,6 +1378,9 @@
     <ClCompile Include="source\src\Physics\Fluid\GasSurfaceGeometry.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\GasSurfaceExchangePlan.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\GasSurfaceExchangeCpu.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\GasCombustionAir.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainGasCoupling.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\FluidSurfaceWater.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\GasPhaseMomentum.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\WhitewaterRuntime.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\SurfaceWorkTiles.cpp" />

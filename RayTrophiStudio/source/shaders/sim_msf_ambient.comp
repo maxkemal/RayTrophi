@@ -21,15 +21,15 @@
 layout(local_size_x = 256) in;
 
 layout(push_constant) uniform PC {
-    ivec4 counts;   // element_count, source_count, zone_count, unused
+    ivec4 counts;   // element_count, source_count, zone_count, input bits (1 heat, 2 water)
     vec4  params;   // dt, relax_rate, reference_K (normalized 0), inv_kelvin_per_unit
-    vec4  params2;  // max_temperature, dry_rate, boil_normalized, world_ambient_K
+    vec4  params2;  // max_temperature, unused, unused, world_ambient_K
 } pc;
 
 layout(set=0, binding=0) readonly buffer Centers { vec4 centers[]; };  // xyz world, w area
-// Two vec4 per element; only [2i+0].x (temperature) is touched here. char, fuel
-// and mass loss are deliberately left alone — ambient conditions never un-burn
-// anything, which is the whole reason MSF exists.
+// Two vec4 per element; [2i+0].x (temperature) and .w (surface water, kg/m^2)
+// are touched here. char, fuel and mass loss are deliberately left alone —
+// ambient conditions never un-burn anything, which is the whole reason MSF exists.
 layout(set=0, binding=1)          buffer State   { vec4 state[]; };
 
 // Thermal force fields, 96 B each (MaterialStateFieldSystem::ThermalSource).
@@ -49,8 +49,12 @@ layout(set=0, binding=3) readonly buffer Zones { AmbientZone zones[]; };
 
 // Liquid contact heat since the last pass, normalized temperature delta per
 // element (MaterialStateFieldSystem::depositThermalContactHeat). Only read when
-// counts.w != 0; otherwise the state buffer is bound here as a dummy.
+// counts.w bit 1; otherwise the state buffer is bound here as a dummy.
 layout(set=0, binding=4) readonly buffer HeatIn { float heat_in[]; };
+// Surface water queued by the host budget, kg/m^2 per element (absorbed minus
+// evaporated, MaterialStateFieldSystem::depositWaterContact/stepSurfaceWater).
+// Only read when counts.w bit 2 is set.
+layout(set=0, binding=5) readonly buffer WaterIn { float water_in[]; };
 
 // Mirrors Physics::FalloffType / ForceField::calculateFalloff on the host. Kept
 // in the same order so the UI's falloff combo means the same thing for a heat
@@ -138,32 +142,20 @@ void main() {
     // Thermal field. Relaxation also cannot overshoot at any timestep.
     float k = max(0.0, pc.params.y);
     st.x = ambient + (st.x - ambient) * exp(-k * pc.params.x);
-    if (pc.counts.w != 0) st.x += heat_in[id];
+    if ((pc.counts.w & 1) != 0) st.x += heat_in[id];
 
     // A cold zone may legitimately sit below the world ambient, so the floor is
     // the local ambient rather than 0 — clamping at 0 would silently make every
     // freezer as warm as the room.
     st.x = clamp(st.x, min(ambient, 0.0), pc.params2.x);
 
-    // ── Drying (Phase 5) ─────────────────────────────────────────────────────
-    // ★ The ONLY place moisture is removed. sim_msf_wet adds it, the gather only
-    // reads it. A sink split between the per-frame pass and the per-domain gather
-    // would evaporate once per gas domain — the same shape as the double-cooling
-    // bug Phase 4 had to unpick, and just as invisible in a one-domain scene.
-    if (st.w > 0.0) {
-        // Drying accelerates sharply with the surface's own temperature: a plank
-        // held next to a fire dries in seconds, one in a cold room takes far
-        // longer. Normalized against water's boiling point so the curve means the
-        // same thing at any domain calibration.
-        float boil = max(pc.params2.z, 1e-4);
-        float heat = max(st.x, 0.0) / boil;
-        // 1 at ambient, 10x once the surface is at boiling point. Linear in
-        // temperature rather than exponential: this is bulk evaporation from a
-        // wet surface, not a reaction rate, and an exponential made a merely warm
-        // object flash dry.
-        float accel = 1.0 + 9.0 * clamp(heat, 0.0, 1.0);
-        st.w = max(0.0, st.w - max(pc.params2.y, 0.0) * accel * pc.params.x);
-    }
+    // ── Surface water (2026-10-18) ───────────────────────────────────────────
+    // ★ No drying here any more. Water is mass: the host budget took it from a
+    // liquid parcel or put it into a gas inventory, paid its latent heat
+    // (heat_in above) and recorded it in the ledger. This pass only adds what
+    // was queued. The floor at 0 only guards float rounding of a budget that
+    // never spends more than the host copy held.
+    if ((pc.counts.w & 2) != 0) st.w = max(0.0, st.w + water_in[id]);
 
     state[id * 2u] = st;
 }

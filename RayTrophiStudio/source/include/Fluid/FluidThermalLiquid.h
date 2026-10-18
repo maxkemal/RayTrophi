@@ -69,6 +69,12 @@ struct ThermalLiquidStats {
     std::size_t condensation_splits = 0;       // parcels grown past 2x canonical mass and split
     std::size_t solid_contact_particles = 0;   // parcels trading heat with a surface (MSF)
     double      heat_to_solid_j = 0.0;         // net heat liquid -> surfaces this step
+    // What the touching parcels SAW, contact-weighted (K; 0 = no contact).
+    // Tells "the shell looks cold where the water is" apart from "heat does
+    // not flow" when heat_to_solid_j is small (Ek 11, 2026-10-18).
+    double      solid_contact_shell_kelvin = 0.0;
+    double      solid_contact_parcel_kelvin = 0.0;
+    std::size_t solid_contact_shell_cells = 0;  // distinct shell cells touched
     float       min_kelvin = 0.0f;
     float       mean_kelvin = 0.0f;
     float       max_kelvin = 0.0f;

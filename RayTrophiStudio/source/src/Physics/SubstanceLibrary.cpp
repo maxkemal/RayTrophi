@@ -2,6 +2,7 @@
 // See SubstanceLibrary.h and docs/dev/MADDE_TIPLERI_TASARIMI.md.
 #include "SubstanceLibrary.h"
 #include "Fluid/SubstanceTag.h"
+#include "globals.h"
 
 #include <algorithm>
 #include <atomic>
@@ -67,7 +68,7 @@ const std::vector<FieldAccess>& fieldTable() {
         RT_FLOAT(liquid_density, 1.0f, 30000.0f, "kg/m^3", "Liquid"),
         RT_FLOAT(liquid_kinematic_viscosity, 0.0f, 1000.0f, "m^2/s", "Liquid"),
         RT_FLOAT(absorbency, 0.0f, 1.0f, "", "Moisture"),
-        RT_FLOAT(dry_rate, 0.0f, 10.0f, "1/s", "Moisture"),
+        RT_FLOAT(water_capacity_kg_m2, 0.0f, 100.0f, "kg/m^2", "Moisture"),
         RT_BOOL(combustible, "Combustion"),
         RT_FLOAT(ignition_kelvin, 0.0f, 10000.0f, "K", "Combustion"),
         RT_FLOAT(fuel_capacity, 0.0f, 1000.0f, "", "Combustion"),
@@ -152,6 +153,15 @@ const std::vector<FieldAccess>& fieldTable() {
 
 #undef RT_FLOAT
 #undef RT_BOOL
+
+// Fields that no longer exist, with why. A project naming one loads (the key is
+// dropped, once, with the reason in the error log) instead of being refused as
+// "unknown field": the old value has no meaning to translate into.
+//   dry_rate (2026-10-18): drying is the open-pan evaporation flux paying its
+//   latent heat; a per-material rate on a 0..1 moisture has no successor.
+bool retiredField(const std::string& key) {
+    return key == "dry_rate";
+}
 
 const FieldAccess* findField(const std::string& key) {
     for (const auto& field : fieldTable()) {
@@ -345,6 +355,7 @@ bool resolve(const std::vector<ProjectSubstance>& project,
             return false;
         }
         for (const auto& [key, value] : item.overrides.items()) {
+            if (retiredField(key)) continue;   // publish() strips and reports it
             const FieldAccess* field = findField(key);
             if (!field) {
                 error = "substance '" + item.name + "': unknown field '" + key + "'";
@@ -366,6 +377,20 @@ bool resolve(const std::vector<ProjectSubstance>& project,
 
 // Caller holds lib.write.
 bool publish(Library& lib, std::vector<ProjectSubstance> project, std::string& error) {
+    // A retired key is dropped here, once, so it is neither applied nor saved
+    // back into the project (see retiredField).
+    for (auto& item : project) {
+        if (!item.overrides.is_object()) continue;
+        for (auto it = item.overrides.begin(); it != item.overrides.end();) {
+            if (retiredField(it.key())) {
+                SCENE_LOG_WARN("[Substance] '" + item.name + "': retired field '" + it.key() +
+                               "' dropped (drying is now physical evaporation)");
+                it = item.overrides.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
     std::deque<SubstanceProfile> staged;
     std::unique_ptr<Snapshot> snapshot;
     if (!resolve(project, staged, snapshot, error)) return false;
@@ -514,7 +539,10 @@ bool patchSubstance(const std::string& name, const json& fields, std::string& er
     }
     for (const auto& [key, value] : fields.items()) {
         if (!findField(key)) {
-            error = "unknown substance field '" + key + "'";
+            error = retiredField(key)
+                ? "substance field '" + key + "' was retired (drying is now physical "
+                  "evaporation; set water_capacity_kg_m2 instead)"
+                : "unknown substance field '" + key + "'";
             return false;
         }
         if (value.is_null()) it->overrides.erase(key);

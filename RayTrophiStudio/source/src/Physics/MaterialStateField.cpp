@@ -20,6 +20,7 @@
 #include "Fluid/SubstanceTag.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <chrono>
 #include <cmath>
 #include <utility>
@@ -40,7 +41,7 @@ struct MsfGatherConstants {
     float origin_voxel[4] = {}; // xyz origin, w voxel size
     float material0[4] = {};    // ignition_T, fuel_capacity, burn_rate, thermal_response
     float material1[4] = {};    // (reserved, was cooling_rate), char_rate, dt, max_temperature
-    float material2[4] = {};    // boil_normalized, melt_normalized, melt_enthalpy_span, mass_capacity
+    float material2[4] = {};    // water_capacity_kg_m2, melt_normalized, melt_enthalpy_span, mass_capacity
 };
 static_assert(sizeof(MsfGatherConstants) == 80,
               "sim_msf_gather push-constant ABI changed");
@@ -64,28 +65,23 @@ static_assert(sizeof(MsfResolveConstants) == 32,
 struct MsfAmbientConstants {
     int   counts[4] = {};   // element_count, source_count, zone_count, unused
     float params[4] = {};   // dt, relax_rate, reference_K (normalized 0), inv_kelvin_per_unit
-    float params2[4] = {};  // max_temperature, dry_rate, boil_normalized, world_ambient_K
+    float params2[4] = {};  // max_temperature, unused, unused, world_ambient_K
 };
 static_assert(sizeof(MsfAmbientConstants) == 48,
               "sim_msf_ambient push-constant ABI changed");
+// counts[3] bits: which queued inputs the ambient pass adds.
+constexpr int kAmbientHeatInput = 1;
+constexpr int kAmbientWaterInput = 2;
 
-// Phase 5 wetting pass. Must match sim_msf_wet.comp's PC block exactly.
-struct MsfWetConstants {
-    int   dim[4] = {};          // fluid nx, ny, nz, element_count
-    float origin_voxel[4] = {}; // fluid grid origin xyz, w voxel size
-    float params[4] = {};       // absorbency, dt, liquid_threshold, unused
-};
-static_assert(sizeof(MsfWetConstants) == 48,
-              "sim_msf_wet push-constant ABI changed");
-
-// Liquid occupancy above which a cell counts as "there is water here". The fluid
-// domain's post-step density splat is normalized around 1.0 for a full cell, so
-// a fraction of that catches the free-surface band without treating a stray
-// splash particle's smear as a soaking.
-constexpr float kLiquidOccupancyThreshold = 0.35f;
-// Moisture above which pyrolysis is considered suppressed, for the stats row.
-// The shader gates continuously; this is only what "wet elements" counts.
+// Saturation (water / capacity) above which pyrolysis is considered suppressed,
+// for the stats row. The shader throttles continuously; this is only what
+// "wet elements" counts.
 constexpr float kWetElementThreshold = 0.05f;
+
+// Open-pan Hertz-Knudsen coefficient: the vapour must diffuse through the air
+// layer, and that resistance sets the rate (GasSurfaceExchangeCpu.cpp uses the
+// same value for a liquid surface in air).
+constexpr double kSurfaceWaterEvaporationCoefficient = 4.0e-5;
 
 // Fixed-point scale for the scatter accumulators.
 //
@@ -279,7 +275,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             SubstanceProfile p;
             p.name = "Wood (Oak)";
             // Phase 5 moisture: porous end grain drinks water and holds it.
-            p.absorbency = 0.55f; p.dry_rate = 0.025f;
+            p.absorbency = 0.55f; p.water_capacity_kg_m2 = 1.0f;
             p.density = 750.0f; p.specific_heat = 1700.0f; p.conductivity = 0.17f;
             p.emissivity = 0.9f;
             // Low conductivity: the surface heats and ignites long before the
@@ -298,7 +294,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.vapor_molar_mass_kg_mol = 0.05585f;
             p.thermal_expansion_per_k = 0.00012f;
             // Phase 5 moisture: water beads off and flashes away.
-            p.absorbency = 0.0f;  p.dry_rate = 0.30f;
+            p.absorbency = 0.0f;  p.water_capacity_kg_m2 = 0.05f;
             p.density = 7874.0f; p.specific_heat = 449.0f; p.conductivity = 80.4f;
             p.emissivity = 0.35f;
             // Metal follows the gas quickly (high conductivity) and sheds heat
@@ -320,7 +316,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.vapor_molar_mass_kg_mol = 0.05585f;
             p.thermal_expansion_per_k = 0.00012f;
             // Phase 5 moisture: same as iron.
-            p.absorbency = 0.0f;  p.dry_rate = 0.30f;
+            p.absorbency = 0.0f;  p.water_capacity_kg_m2 = 0.05f;
             p.density = 7850.0f; p.specific_heat = 490.0f; p.conductivity = 45.0f;
             p.emissivity = 0.4f;
             p.thermal_response = 5.5f; p.cooling_rate = 0.10f;
@@ -339,7 +335,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.vapor_molar_mass_kg_mol = 0.06355f;
             p.thermal_expansion_per_k = 0.0001f;
             // Phase 5 moisture: same, and sheds heat fastest.
-            p.absorbency = 0.0f;  p.dry_rate = 0.35f;
+            p.absorbency = 0.0f;  p.water_capacity_kg_m2 = 0.05f;
             p.density = 8960.0f; p.specific_heat = 385.0f; p.conductivity = 401.0f;
             p.emissivity = 0.15f;
             p.thermal_response = 8.0f; p.cooling_rate = 0.14f;
@@ -356,7 +352,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             SubstanceProfile p;
             p.name = "Paper";
             // Phase 5 moisture: soaks instantly, dries fast (thin).
-            p.absorbency = 0.95f; p.dry_rate = 0.12f;
+            p.absorbency = 0.95f; p.water_capacity_kg_m2 = 0.15f;
             p.density = 800.0f; p.specific_heat = 1340.0f; p.conductivity = 0.05f;
             p.thermal_response = 4.0f; p.cooling_rate = 0.10f;
             p.combustible = true;
@@ -369,7 +365,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             SubstanceProfile p;
             p.name = "Cloth";
             // Phase 5 moisture: the sponge of the library.
-            p.absorbency = 1.0f;  p.dry_rate = 0.08f;
+            p.absorbency = 1.0f;  p.water_capacity_kg_m2 = 0.30f;
             p.density = 400.0f; p.specific_heat = 1300.0f; p.conductivity = 0.06f;
             p.thermal_response = 3.5f; p.cooling_rate = 0.09f;
             p.combustible = true;
@@ -382,7 +378,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             SubstanceProfile p;
             p.name = "Plastic (PE)";
             // Phase 5 moisture: non-porous.
-            p.absorbency = 0.05f; p.dry_rate = 0.25f;
+            p.absorbency = 0.05f; p.water_capacity_kg_m2 = 0.03f;
             p.density = 950.0f; p.specific_heat = 1900.0f; p.conductivity = 0.4f;
             p.thermal_response = 3.0f; p.cooling_rate = 0.07f;
             p.combustible = true;
@@ -408,7 +404,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.vapor_molar_mass_kg_mol = 0.35f;
             p.thermal_expansion_per_k = 0.0007f;
             // Phase 5 moisture: hydrophobic by definition.
-            p.absorbency = 0.0f;  p.dry_rate = 0.30f;
+            p.absorbency = 0.0f;  p.water_capacity_kg_m2 = 0.02f;
             p.density = 900.0f; p.specific_heat = 2100.0f; p.conductivity = 0.25f;
             p.thermal_response = 3.5f; p.cooling_rate = 0.08f;
             p.combustible = true;
@@ -522,7 +518,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.specific_heat = 830.0f;
             p.conductivity = 0.27f;
             p.absorbency = 0.35f;
-            p.dry_rate = 0.015f;
+            p.water_capacity_kg_m2 = 1.5f;
             // Skeleton = the Sand fluid preset's solver-calibrated set (the table
             // carried 34 deg while the preset ran 35; one value now).
             p.granular_friction_degrees = 35.0f;
@@ -544,7 +540,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.specific_heat = 800.0f;
             p.conductivity = 0.35f;
             p.absorbency = 0.12f;
-            p.dry_rate = 0.03f;
+            p.water_capacity_kg_m2 = 0.5f;
             // Coarse angular grains interlock: high friction, strong dilatancy,
             // no cohesion (the Gravel preset's set; the table said 40 deg).
             p.granular_friction_degrees = 43.0f;
@@ -571,7 +567,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.specific_heat = 900.0f;
             p.conductivity = 0.25f;
             p.absorbency = 0.70f;
-            p.dry_rate = 0.01f;
+            p.water_capacity_kg_m2 = 2.0f;
             p.granular_friction_degrees = 30.0f;
             p.granular_cohesion = 800.0f;
             // No fluid preset ever carried soil; Sand's skeleton and hints.
@@ -594,7 +590,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.specific_heat = 2100.0f;
             p.conductivity = 0.3f;
             p.emissivity = 0.98f;
-            p.absorbency = 0.0f; p.dry_rate = 0.01f;
+            p.absorbency = 0.0f; p.water_capacity_kg_m2 = 0.05f;
             p.meltable = true;
             p.melt_kelvin = 273.15f; p.boiling_kelvin = 373.15f;
             p.latent_heat_fusion = 3.34e5f; p.melt_viscosity = 0.02f;
@@ -682,7 +678,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.vapor_molar_mass_kg_mol = 0.018015f;
             p.thermal_expansion_per_k = 0.00021f;
             // Phase 5 moisture: meltwater is not "moisture"; Phase 6 owns it.
-            p.absorbency = 0.0f;  p.dry_rate = 0.01f;
+            p.absorbency = 0.0f;  p.water_capacity_kg_m2 = 0.05f;
             p.density = 917.0f; p.specific_heat = 2100.0f; p.conductivity = 2.2f;
             p.emissivity = 0.97f;
             p.thermal_response = 4.5f; p.cooling_rate = 0.05f;
@@ -725,7 +721,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.vapor_molar_mass_kg_mol = 0.06008f;
             p.thermal_expansion_per_k = 0.0001f;
             // Phase 5 moisture: porous but slow both ways.
-            p.absorbency = 0.25f; p.dry_rate = 0.04f;
+            p.absorbency = 0.25f; p.water_capacity_kg_m2 = 0.5f;
             p.density = 2600.0f; p.specific_heat = 840.0f; p.conductivity = 2.5f;
             p.emissivity = 0.85f;
             p.thermal_response = 1.5f; p.cooling_rate = 0.04f;
@@ -739,7 +735,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             SubstanceProfile p;
             p.name = "Flesh";
             // Phase 5 moisture: mostly water already.
-            p.absorbency = 0.60f; p.dry_rate = 0.05f;
+            p.absorbency = 0.60f; p.water_capacity_kg_m2 = 0.5f;
             p.density = 1050.0f; p.specific_heat = 3500.0f; p.conductivity = 0.5f;
             p.thermal_response = 2.5f; p.cooling_rate = 0.07f;
             p.combustible = true;
@@ -761,11 +757,7 @@ MaterialSubstance MaterialSubstance::fromProfile(const SubstanceProfile& profile
     out.thermal_response = std::max(0.0f, profile.thermal_response);
     out.cooling_rate = std::max(0.0f, profile.cooling_rate);
     out.absorbency = std::max(0.0f, profile.absorbency);
-    out.dry_rate = std::max(0.0f, profile.dry_rate);
-    // The single Kelvin -> normalized conversion point, as for every other
-    // threshold. A shader-side constant would mean a different temperature at
-    // every domain calibration — the Phase 3d incandescence bug, repeated.
-    out.boil_normalized = scale.toNormalized(kWaterBoilingKelvin);
+    out.water_capacity_kg_m2 = std::max(0.0f, profile.water_capacity_kg_m2);
 
     // ── Phase 6b: melting ────────────────────────────────────────────────────
     // Sentinel rather than a bool for a non-meltable substance: the shader then
@@ -1089,10 +1081,10 @@ bool MaterialStateFieldSystem::step(SimulationComputeContext& compute,
         // The slot stays (the 64-byte ABI is shared with the .spv) and reads 0.
         pc.material1[0] = 0.0f;
         pc.material1[1] = std::max(0.0f, substance.char_rate);
-        // Phase 5: a wet surface cannot climb past water's boiling point until
-        // the water is gone, and cannot pyrolyse while wet. Derived Kelvin, not a
-        // shader constant — see MaterialSubstance::boil_normalized.
-        pc.material2[0] = substance.boil_normalized;
+        // Surface water capacity (kg/m^2): the gather throttles pyrolysis by
+        // water / capacity. The old boiling-point clamp in this slot is gone; the
+        // latent heat is paid on the host (stepSurfaceWater).
+        pc.material2[0] = substance.water_capacity_kg_m2;
         // Phase 6b. A non-meltable substance carries a sentinel melt point far
         // above anything reachable, so the shader needs no separate flag.
         pc.material2[1] = substance.melt_normalized;
@@ -1320,6 +1312,220 @@ void MaterialStateFieldSystem::depositThermalContactHeat(
     }
 }
 
+// ── Surface water (2026-10-18) ───────────────────────────────────────────────
+namespace {
+// Heat capacity of one element's body (J/K), as gatherThermalContact counts it.
+double elementHeatCapacity(const MaterialStateField& field, const SubstanceProfile& profile,
+                           float area) {
+    const double rho = profile.density > 0.0f ? profile.density : 1000.0;
+    const double c = profile.specific_heat > 0.0f ? profile.specific_heat : 1000.0;
+    return std::max(0.0f, area) * double(field.thermal_depth_m) * rho * c;
+}
+std::size_t elementCell(const float* ctr, const Vec3& origin, float inv, int nx, int ny,
+                        int nz) {
+    const int i = static_cast<int>(std::floor((ctr[0] - origin.x) * inv));
+    const int j = static_cast<int>(std::floor((ctr[1] - origin.y) * inv));
+    const int k = static_cast<int>(std::floor((ctr[2] - origin.z) * inv));
+    if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) return SIZE_MAX;
+    return (static_cast<std::size_t>(k) * ny + j) * nx + i;
+}
+} // namespace
+
+bool MaterialStateFieldSystem::gatherWaterContact(
+        const Vec3& origin, float voxel, int nx, int ny, int nz,
+        std::vector<float>& cell_deficit_kg, std::vector<float>& cell_rate_kg_s,
+        std::vector<float>& cell_kelvin) const {
+    const std::size_t cells = static_cast<std::size_t>(nx) * ny * nz;
+    cell_deficit_kg.assign(cells, 0.0f);
+    cell_rate_kg_s.assign(cells, 0.0f);
+    cell_kelvin.assign(cells, 0.0f);
+    if (cells == 0 || !(voxel > 0.0f)) return false;
+    const float inv = 1.0f / voxel;
+    constexpr std::size_t kStride = MaterialStateField::kStateStride;
+    bool any = false;
+    for (const auto& entry : fields_) {
+        const MaterialStateField& field = entry.second;
+        const std::size_t n = field.elementCount();
+        if (n == 0 || field.state.size() < n * kStride) continue;
+        const SubstanceProfile& profile = findSubstance(field.substance_name);
+        // Water runs off a non-absorbent surface: no uptake, no cost.
+        if (!(profile.absorbency > 0.0f) || !(profile.water_capacity_kg_m2 > 0.0f)) continue;
+        for (std::size_t e = 0; e < n; ++e) {
+            const float* ctr = &field.centers[e * 4u];
+            const std::size_t cell = elementCell(ctr, origin, inv, nx, ny, nz);
+            if (cell == SIZE_MAX) continue;
+            const float area = std::max(0.0f, ctr[3]);
+            const float held = std::max(0.0f, field.state[e * kStride + 3u]);
+            const float deficit = std::max(0.0f, profile.water_capacity_kg_m2 - held) * area;
+            if (!(deficit > 0.0f)) continue;
+            cell_deficit_kg[cell] += deficit;
+            cell_rate_kg_s[cell] += profile.absorbency * deficit;
+            cell_kelvin[cell] += deficit * readback_scale_.toKelvin(field.state[e * kStride]);
+            any = true;
+        }
+    }
+    for (std::size_t c = 0; c < cells; ++c) {
+        if (cell_deficit_kg[c] > 0.0f) cell_kelvin[c] /= cell_deficit_kg[c];
+    }
+    return any;
+}
+
+void MaterialStateFieldSystem::depositWaterContact(
+        const Vec3& origin, float voxel, int nx, int ny, int nz,
+        const MaterialTemperatureScale& scale,
+        const std::vector<float>& cell_deficit_kg,
+        const std::vector<float>& cell_absorbed_kg,
+        const std::vector<float>& cell_absorbed_heat_j) {
+    const std::size_t cells = static_cast<std::size_t>(nx) * ny * nz;
+    if (cell_deficit_kg.size() != cells || cell_absorbed_kg.size() != cells ||
+        cell_absorbed_heat_j.size() != cells || !(voxel > 0.0f) ||
+        !(scale.kelvin_per_unit > 0.0f)) {
+        return;
+    }
+    const float inv = 1.0f / voxel;
+    constexpr std::size_t kStride = MaterialStateField::kStateStride;
+    for (auto& entry : fields_) {
+        MaterialStateField& field = entry.second;
+        const std::size_t n = field.elementCount();
+        if (n == 0 || field.state.size() < n * kStride) continue;
+        const SubstanceProfile& profile = findSubstance(field.substance_name);
+        if (!(profile.absorbency > 0.0f) || !(profile.water_capacity_kg_m2 > 0.0f)) continue;
+        bool touched = false;
+        for (std::size_t e = 0; e < n; ++e) {
+            const float* ctr = &field.centers[e * 4u];
+            const std::size_t cell = elementCell(ctr, origin, inv, nx, ny, nz);
+            if (cell == SIZE_MAX || !(cell_absorbed_kg[cell] > 0.0f) ||
+                !(cell_deficit_kg[cell] > 0.0f)) {
+                continue;
+            }
+            const float area = std::max(0.0f, ctr[3]);
+            if (!(area > 0.0f)) continue;
+            // The same per-element deficit gatherWaterContact summed, so the
+            // shares of one cell add up to exactly what the liquid gave.
+            const float held = std::max(0.0f, field.state[e * kStride + 3u]);
+            const float deficit = std::max(0.0f, profile.water_capacity_kg_m2 - held) * area;
+            if (!(deficit > 0.0f)) continue;
+            const float share = deficit / cell_deficit_kg[cell];
+            if (field.water_input.size() != n) field.water_input.assign(n, 0.0f);
+            field.water_input[e] += cell_absorbed_kg[cell] * share / area;
+            const double capacity = elementHeatCapacity(field, profile, area);
+            if (capacity > 0.0 && cell_absorbed_heat_j[cell] != 0.0f) {
+                if (field.heat_input.size() != n) field.heat_input.assign(n, 0.0f);
+                field.heat_input[e] += static_cast<float>(
+                    cell_absorbed_heat_j[cell] * share / capacity / scale.kelvin_per_unit);
+                field.heat_input_pending = true;
+            }
+            touched = true;
+        }
+        if (touched) field.water_input_pending = true;
+    }
+}
+
+bool MaterialStateFieldSystem::stepSurfaceWater(const WorldThermalState& world, float dt,
+                                                std::vector<VapourRelease>& released) {
+    released.clear();
+    stats_.water_budget_ran = false;
+    stats_.water_budget_stale = false;
+    stats_.surface_water_kg = 0.0;
+    stats_.evaporated_kg = 0.0;
+    stats_.evaporation_latent_j = 0.0;
+    stats_.absorbed_kg = 0.0;
+    stats_.vapour_vented_kg = 0.0;
+    if (std::isfinite(dt) && dt > 0.0f) water_budget_seconds_ += dt;
+    if (fields_.empty() || !(water_budget_seconds_ > 0.0f)) return false;
+
+    const SubstanceProfile& water = findSubstance("Water");
+    const double latent = water.latent_heat_vaporization > 0.0f
+        ? water.latent_heat_vaporization : 2.257e6;
+    const double molar = water.vapor_molar_mass_kg_mol > 0.0f
+        ? water.vapor_molar_mass_kg_mol : 0.018015;
+    const double boil = water.boiling_kelvin > 0.0f ? water.boiling_kelvin : kWaterBoilingKelvin;
+    const double c_water = water.specific_heat > 0.0f ? water.specific_heat : 4186.0;
+    constexpr double kGas = 8.314462, kAtm = 101325.0, kPi = 3.14159265358979;
+    const double a = latent * molar / kGas;
+    const auto psat = [&](double kelvin) {
+        return kAtm * std::exp(std::clamp(a * (1.0 / boil - 1.0 / std::max(kelvin, 1.0)),
+                                          -80.0, 30.0));
+    };
+    const MaterialTemperatureScale scale = world.scale();
+    const double ambient = world.ambientKelvin();
+    // The air's own vapour, from the world humidity (dryingScale = 1 - RH).
+    const double humidity = std::clamp(1.0 - double(world.dryingScale()), 0.0, 1.0);
+    const double air_vapour_pressure = humidity * psat(ambient);
+    const double seconds = water_budget_seconds_;
+    constexpr std::size_t kStride = MaterialStateField::kStateStride;
+
+    bool any_wet = false, any_fresh = false;
+    for (auto& entry : fields_) {
+        MaterialStateField& field = entry.second;
+        const std::size_t n = field.elementCount();
+        if (n == 0 || field.state.size() < n * kStride) continue;
+        bool wet = false;
+        for (std::size_t e = 0; e < n && !wet; ++e) wet = field.state[e * kStride + 3u] > 0.0f;
+        if (!wet) continue;
+        any_wet = true;
+        if (!field.host_state_fresh) {
+            // The device has moved since this copy: spending its water again
+            // would make vapour from nothing. Wait for the readback.
+            stats_.water_budget_stale = true;
+            continue;
+        }
+        any_fresh = true;
+        const SubstanceProfile& profile = findSubstance(field.substance_name);
+        bool touched = false;
+        for (std::size_t e = 0; e < n; ++e) {
+            const float held = field.state[e * kStride + 3u];
+            if (!(held > 0.0f)) continue;
+            const float* ctr = &field.centers[e * 4u];
+            const float area = std::max(0.0f, ctr[3]);
+            if (!(area > 0.0f)) continue;
+            const double mass = double(held) * area;
+            stats_.surface_water_kg += mass;
+            const double kelvin = scale.toKelvin(field.state[e * kStride]);
+            const double capacity = elementHeatCapacity(field, profile, area);
+            // Above boiling: everything above 373 K goes into the phase change.
+            double dm = 0.0;
+            if (kelvin > boil && capacity > 0.0) dm = capacity * (kelvin - boil) / latent;
+            // Below (and at) boiling: the open-pan flux against the air's vapour.
+            const double t_surface = std::min(kelvin, boil);
+            const double flux = kSurfaceWaterEvaporationCoefficient *
+                std::max(0.0, psat(t_surface) - air_vapour_pressure) *
+                std::sqrt(molar / (2.0 * kPi * kGas * std::max(t_surface, 1.0)));
+            dm += flux * area * seconds;
+            // Nor more than the surface holds, nor so much latent heat that the
+            // surface would fall below 1 K.
+            if (capacity > 0.0) dm = std::min(dm, capacity * std::max(kelvin - 1.0, 0.0) / latent);
+            dm = std::min(dm, mass);
+            if (!(dm > 1e-12)) continue;
+            if (field.water_input.size() != n) field.water_input.assign(n, 0.0f);
+            if (field.heat_input.size() != n) field.heat_input.assign(n, 0.0f);
+            field.water_input[e] -= static_cast<float>(dm / area);
+            if (capacity > 0.0) {
+                field.heat_input[e] -= static_cast<float>(dm * latent / capacity /
+                                                          scale.kelvin_per_unit);
+                field.heat_input_pending = true;
+            }
+            touched = true;
+            VapourRelease r;
+            r.position = Vec3(ctr[0], ctr[1], ctr[2]);
+            r.mass_kg = static_cast<float>(dm);
+            r.kelvin = static_cast<float>(t_surface);
+            r.energy_j = static_cast<float>(dm * (c_water * t_surface + latent));
+            released.push_back(r);
+            stats_.evaporated_kg += dm;
+            stats_.evaporation_latent_j += dm * latent;
+        }
+        if (touched) field.water_input_pending = true;
+    }
+    if (any_fresh) {
+        water_budget_seconds_ = 0.0f;
+        stats_.water_budget_ran = true;
+    }
+    // Wet surfaces need the next copy; a dry scene keeps its throttled readback.
+    if (any_wet) requestReadback();
+    return any_fresh;
+}
+
 bool MaterialStateFieldSystem::stepAmbient(SimulationComputeContext& compute,
                                            const WorldThermalState& world,
                                            const std::vector<ThermalSource>& sources,
@@ -1389,13 +1595,13 @@ bool MaterialStateFieldSystem::stepAmbient(SimulationComputeContext& compute,
         pc.params[2] = world.reference_kelvin;
         pc.params[3] = 1.0f / kelvin_per_unit;
         pc.params2[0] = std::max(1.0f, max_temperature);
-        // ★ Drying lives HERE and nowhere else. Moisture has exactly one sink,
-        // for the same reason cooling now has exactly one: a process split across
-        // the per-frame pass and the per-domain gather runs once per gas domain
-        // and silently scales with domain count.
-        pc.params2[1] = std::max(0.0f, profile.dry_rate) * world.dryingScale();
-        pc.params2[2] = scale.toNormalized(kWaterBoilingKelvin);
+        // Drying left the device (2026-10-18): stepSurfaceWater runs it on the
+        // host with mass and latent heat, and hands the result over as
+        // water_input / heat_input below.
+        pc.params2[1] = 0.0f;
+        pc.params2[2] = 0.0f;
         pc.params2[3] = world_ambient_kelvin;
+        (void)scale;
 
         // Liquid contact heat queued since the last pass (binding 4). The
         // state buffer stands in as a never-read dummy when there is none.
@@ -1415,101 +1621,55 @@ bool MaterialStateFieldSystem::stepAmbient(SimulationComputeContext& compute,
             heat_in = field.gpu_heat_input.valid() &&
                 compute.uploadBuffer(field.gpu_heat_input, field.heat_input.data(), bytes);
         }
-        pc.counts[3] = heat_in ? 1 : 0;
-        ComputeBufferHandle bufs[5] = {
+        bool water_in = false;
+        if (field.water_input_pending && field.water_input.size() == element_count) {
+            const std::size_t bytes = element_count * sizeof(float);
+            if (!field.gpu_water_input.valid() ||
+                compute.getBufferSize(field.gpu_water_input) < bytes) {
+                if (field.gpu_water_input.valid()) compute.destroyBuffer(field.gpu_water_input);
+                ComputeBufferDesc desc;
+                desc.debug_name = "MsfWaterInput";
+                desc.size_bytes = bytes;
+                desc.usage = ComputeBufferUsage::Storage | ComputeBufferUsage::Upload |
+                             ComputeBufferUsage::ReadOnly;
+                field.gpu_water_input = compute.createBuffer(desc);
+            }
+            water_in = field.gpu_water_input.valid() &&
+                compute.uploadBuffer(field.gpu_water_input, field.water_input.data(), bytes);
+        }
+        pc.counts[3] = (heat_in ? kAmbientHeatInput : 0) | (water_in ? kAmbientWaterInput : 0);
+        ComputeBufferHandle bufs[6] = {
             field.gpu_centers, field.gpu_state,
             gpu_thermal_sources_, gpu_ambient_zones_,
-            heat_in ? field.gpu_heat_input : field.gpu_state
+            heat_in ? field.gpu_heat_input : field.gpu_state,
+            water_in ? field.gpu_water_input : field.gpu_state
         };
         ComputeDispatch ambient;
         ambient.kernel = "sim_msf_ambient";
         ambient.buffers = bufs;
-        ambient.buffer_count = 5;
+        ambient.buffer_count = 6;
         ambient.constants = &pc;
         ambient.constants_size = sizeof(pc);
         ambient.groups.groups_x = (static_cast<uint32_t>(element_count) + 255u) / 256u;
+        // ★ The device copy moves on here too, not only in the gather. Without
+        // this a scene with no gas domain kept a host copy "fresh" forever, and
+        // the surface-water budget would evaporate the same stale water every
+        // frame - vapour created from nothing.
+        field.host_state_fresh = false;
         if (!compute.dispatch(ambient)) { all_ok = false; continue; }
         if (heat_in) {
             std::fill(field.heat_input.begin(), field.heat_input.end(), 0.0f);
             field.heat_input_pending = false;
+        }
+        if (water_in) {
+            std::fill(field.water_input.begin(), field.water_input.end(), 0.0f);
+            field.water_input_pending = false;
         }
         stats_.ambient_stepped = true;
     }
 
     stats_.ambient_ms = elapsedMs(start, Clock::now());
     return all_ok;
-}
-
-bool MaterialStateFieldSystem::stepWetting(SimulationComputeContext& compute,
-                                           ComputeBufferHandle liquid_occupancy,
-                                           int nx, int ny, int nz,
-                                           const Vec3& grid_origin,
-                                           float voxel_size,
-                                           float dt) {
-    if (fields_.empty() || !liquid_occupancy.valid()) return false;
-    if (compute.backendType() != ComputeBackendType::VulkanCompute ||
-        !compute.supportsDispatch()) {
-        return false;
-    }
-    if (nx <= 0 || ny <= 0 || nz <= 0) return false;
-    if (!(voxel_size > 0.0f) || !(dt > 0.0f) || !std::isfinite(dt)) return false;
-
-    const auto start = Clock::now();
-    bool any = false;
-
-    for (auto& entry : fields_) {
-        MaterialStateField& field = entry.second;
-        const std::size_t element_count = field.elementCount();
-        if (element_count == 0 || !field.gpu_centers.valid() || !field.gpu_state.valid()) {
-            continue;
-        }
-        // Absorbency is a material property, resolved per field like every other
-        // one since Phase 3e. A non-absorbent substance is skipped outright
-        // rather than dispatched with a zero rate: water running off an iron beam
-        // should cost nothing, not a no-op pass over every texel of it.
-        const SubstanceProfile& profile = findSubstance(field.substance_name);
-        if (!(profile.absorbency > 0.0f)) continue;
-
-        // Positions must be current: the wetting test is purely spatial, so a
-        // stale centre samples the water the object used to be standing in.
-        if (field.centers_dirty) {
-            if (!compute.uploadBuffer(field.gpu_centers, field.centers.data(),
-                                      element_count * 4u * sizeof(float))) {
-                continue;
-            }
-            field.centers_dirty = false;
-        }
-
-        MsfWetConstants pc;
-        pc.dim[0] = nx; pc.dim[1] = ny; pc.dim[2] = nz;
-        pc.dim[3] = static_cast<int>(element_count);
-        pc.origin_voxel[0] = grid_origin.x;
-        pc.origin_voxel[1] = grid_origin.y;
-        pc.origin_voxel[2] = grid_origin.z;
-        pc.origin_voxel[3] = voxel_size;
-        pc.params[0] = profile.absorbency;
-        pc.params[1] = dt;
-        pc.params[2] = kLiquidOccupancyThreshold;
-
-        ComputeBufferHandle bufs[3] = {
-            field.gpu_centers, field.gpu_state, liquid_occupancy
-        };
-        ComputeDispatch wet;
-        wet.kernel = "sim_msf_wet";
-        wet.buffers = bufs;
-        wet.buffer_count = 3;
-        wet.constants = &pc;
-        wet.constants_size = sizeof(pc);
-        wet.groups.groups_x = (static_cast<uint32_t>(element_count) + 255u) / 256u;
-        if (!compute.dispatch(wet)) continue;
-        any = true;
-    }
-
-    if (any) stats_.wetting_domains += 1u;
-    // Accumulates: this runs once per LIQUID domain, so assigning would report
-    // only the last tank's cost.
-    stats_.wetting_ms += elapsedMs(start, Clock::now());
-    return any;
 }
 
 void MaterialStateFieldSystem::flushReadback(SimulationComputeContext& compute) {
@@ -1844,7 +2004,7 @@ std::vector<MaterialStateFieldSnapshot> MaterialStateFieldSystem::captureSnapsho
         snap.mask_resolution = field.mask_resolution;
         snap.element_count = static_cast<uint32_t>(n);
         snap.temperature.resize(n); snap.fuel.resize(n);
-        snap.charred.resize(n);     snap.moisture.resize(n);
+        snap.charred.resize(n);     snap.surface_water_kg_m2.resize(n);
         snap.melt.resize(n);        snap.mass_loss.resize(n);
         snap.transferred_mass.resize(n);
         for (std::size_t i = 0; i < n; ++i) {
@@ -1852,7 +2012,7 @@ std::vector<MaterialStateFieldSnapshot> MaterialStateFieldSystem::captureSnapsho
             snap.temperature[i] = s[0];
             snap.fuel[i]        = s[1];
             snap.charred[i]     = s[2];
-            snap.moisture[i]    = s[3];
+            snap.surface_water_kg_m2[i] = s[3];
             // s[4] is released_this_step — transient scratch, deliberately not
             // stored: the gather zeroes it every step and scatter consumes it
             // within the same frame.
@@ -1879,7 +2039,7 @@ bool MaterialStateFieldSystem::applySnapshot(const MaterialStateFieldSnapshot& s
         s[0] = snap.temperature[i];
         s[1] = snap.fuel[i];
         s[2] = snap.charred[i];
-        s[3] = snap.moisture[i];
+        s[3] = snap.surface_water_kg_m2[i];
         s[4] = 0.0f;                  // released_this_step: per-step scratch
         s[5] = snap.melt[i];
         s[6] = snap.mass_loss[i];
@@ -1920,7 +2080,7 @@ void MaterialStateFieldSystem::readback(SimulationComputeContext& compute) {
     double temperature_sum = 0.0;
     double char_sum = 0.0;
     double fuel_sum = 0.0;
-    double moisture_sum = 0.0;
+    double surface_water_sum = 0.0;
     double melt_sum = 0.0;
     uint32_t counted = 0u;
 
@@ -1930,11 +2090,14 @@ void MaterialStateFieldSystem::readback(SimulationComputeContext& compute) {
         constexpr std::size_t kStride = MaterialStateField::kStateStride;
         if (element_count == 0) continue;
         if (!refreshHostState(compute, field)) continue;
+        const float water_capacity = std::max(
+            findSubstance(field.substance_name).water_capacity_kg_m2, 1e-6f);
         for (std::size_t i = 0; i < element_count; ++i) {
             const float t = field.state[i * kStride + 0u];
             const float fuel = field.state[i * kStride + 1u];
             const float charred = field.state[i * kStride + 2u];
-            const float wet = field.state[i * kStride + 3u];
+            const float water = std::max(0.0f, field.state[i * kStride + 3u]);
+            const float wet = water / water_capacity;   // saturation
             const float molten = field.state[i * kStride + 5u];
             melt_sum += molten;
             stats_.max_melt = std::max(stats_.max_melt, molten);
@@ -1943,10 +2106,10 @@ void MaterialStateFieldSystem::readback(SimulationComputeContext& compute) {
             temperature_sum += t;
             char_sum += charred;
             fuel_sum += std::max(0.0f, fuel);
-            moisture_sum += wet;
+            surface_water_sum += water;
             stats_.max_temperature = std::max(stats_.max_temperature, t);
             stats_.max_char = std::max(stats_.max_char, charred);
-            stats_.max_moisture = std::max(stats_.max_moisture, wet);
+            stats_.max_surface_water_kg_m2 = std::max(stats_.max_surface_water_kg_m2, water);
             if (wet > kWetElementThreshold) stats_.wet_elements += 1u;
             // ★ "Burning" now also requires the surface to be dry. A wet element
             // with leftover char would otherwise be counted as still burning
@@ -1978,7 +2141,7 @@ void MaterialStateFieldSystem::readback(SimulationComputeContext& compute) {
     if (counted > 0u) {
         stats_.mean_temperature = static_cast<float>(temperature_sum / counted);
         stats_.mean_char = static_cast<float>(char_sum / counted);
-        stats_.mean_moisture = static_cast<float>(moisture_sum / counted);
+        stats_.mean_surface_water_kg_m2 = static_cast<float>(surface_water_sum / counted);
         stats_.mean_melt = static_cast<float>(melt_sum / counted);
     }
     stats_.fuel_remaining = static_cast<float>(fuel_sum);

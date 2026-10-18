@@ -671,7 +671,12 @@
                             }, matter_exchange_ledger_, colliders_,
                             grain_collider_mesh_resolver_, collider_velocities_, kinematic_samples,
                             context.force_snapshot, context.force_compute_buffer,
-                            motion_mag > 1e-7f, mixed_error);
+                            motion_mag > 1e-7f,
+                            Fluid::MatterGrainGasAir{
+                                fluidDomainAmbientKelvin(grid_domains_[i], world_thermal_),
+                                world_thermal_.ambientNormalized(),
+                                world_thermal_.scale().kelvin_per_unit},
+                            mixed_error);
                     } else if (step_params.grain.enabled) {
                         mixed_error = "grain Vulkan compute buffers unavailable";
                     } else if (!fluid_gpu_requested) {
@@ -1586,30 +1591,53 @@
                     forces_loc + ".";
             }
 
-            // ── Material State Field: liquid contact -> moisture (Phase 5) ────
-            // Placed at the very end of the fluid branch, after the density splat
-            // that this reads as liquid occupancy. Running it earlier would test
-            // against the PREVIOUS frame's water, which shows up as an object
-            // getting wet a frame after being submerged and — far worse — staying
-            // dry for the frame a splash actually reaches it.
-            //
-            // Per-FLUID-domain on purpose. Wetting is a monotonic source, so two
-            // overlapping tanks soaking the same plank is fine; the Phase 4
-            // cooling had to leave the per-domain loop precisely because a
-            // relaxation is not. Drying stays in the once-per-frame ambient pass.
-            if (msf_fields_live && context.compute &&
-                i < grid_domain_compute_buffers_.size()) {
-                material_state_fields_.stepWetting(
-                    *context.compute,
-                    grid_domain_compute_buffers_[i].density,
-                    state.grid.nx, state.grid.ny, state.grid.nz,
-                    state.grid.origin,
-                    state.grid.voxel_size,
-                    dt);
-                noteCoupling("fluid_to_surface_moisture", "fluid", "surface",
-                             i < grid_domains_.size() ? grid_domains_[i].name
-                                                      : std::string(),
-                             std::string());
+            // ── Material State Field: liquid -> surface water (2026-10-18) ────
+            // At the very end of the fluid branch, on the parcels' end-of-step
+            // positions. Per-FLUID-domain: two tanks soaking one plank is fine,
+            // because every kilogram now comes out of a parcel (the old pass
+            // raised a 0..1 moisture from occupancy and the liquid lost nothing).
+            // The surfaces' deficit is read from the host MSF copy; what the
+            // liquid gives is queued for the next ambient pass, and drying is
+            // the once-per-frame host budget (stepSurfaceWater).
+            if (msf_fields_live && i < grid_domains_.size()) {
+                static std::vector<float> s_water_deficit, s_water_rate, s_water_kelvin;
+                static std::vector<float> s_water_taken, s_water_heat;
+                if (material_state_fields_.gatherWaterContact(
+                        state.grid.origin, state.grid.voxel_size,
+                        state.grid.nx, state.grid.ny, state.grid.nz,
+                        s_water_deficit, s_water_rate, s_water_kelvin)) {
+                    const Fluid::SurfaceWaterExchangeStats soaked =
+                        Fluid::exchangeLiquidSurfaceWater(
+                            state.particles, state.grid, grid_domains_[i].fluid_params, dt,
+                            s_water_deficit, s_water_rate, s_water_kelvin,
+                            s_water_taken, s_water_heat);
+                    // The deficit was read from the host copy; ask for the next
+                    // one while anything is in contact.
+                    material_state_fields_.requestReadback();
+                    if (soaked.absorbed_kg > 0.0) {
+                        material_state_fields_.depositWaterContact(
+                            state.grid.origin, state.grid.voxel_size,
+                            state.grid.nx, state.grid.ny, state.grid.nz,
+                            world_thermal_.scale(), s_water_deficit, s_water_taken,
+                            s_water_heat);
+                        material_state_fields_.noteAbsorbed(soaked.absorbed_kg);
+                        MatterExchangeRecord record;
+                        record.event_id = (matter_exchange_step_ << 32u) |
+                            (static_cast<uint64_t>(i & 0xffffu) << 16u) | uint64_t{0xD100u};
+                        record.kind = MatterExchangeKind::Absorption;
+                        record.source = grid_domains_[i].name;
+                        record.target = "surface";
+                        record.substance = "Water";
+                        record.source_mass_kg = soaked.absorbed_kg;
+                        record.target_mass_kg = soaked.absorbed_kg;
+                        record.source_energy_j = soaked.energy_j;
+                        record.target_energy_j = soaked.energy_j;
+                        matter_exchange_ledger_.record(std::move(record));
+                        ++state.version;
+                        noteCoupling("fluid_to_surface_water", "fluid", "surface",
+                                     grid_domains_[i].name, std::string());
+                    }
+                }
             }
             // Fluid::step is split into two calls on the Vulkan path. Its own
             // total_ms is therefore only the second, tiny tail call. Publish

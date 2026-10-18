@@ -91,7 +91,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     const std::vector<KinematicProxySample>& kinematic,
     const SimulationForceFieldSnapshot* forces,
     const SimulationForceFieldComputeBuffer* force_buffer,
-    bool domain_moving, std::string& error) {
+    bool domain_moving, const Fluid::MatterGrainGasAir& gas_air, std::string& error) {
     const auto step_start = std::chrono::steady_clock::now();
     if (!compute || params.boundary != Fluid::APICSolverParams::BoundaryMode::Closed ||
         params.pore_exchange.enabled || params.pore_exchange.wet_response_enabled ||
@@ -489,6 +489,23 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
                 report.field_acceleration_max = std::max(report.field_acceleration_max, a.length());
             }
             report.host_motion_ms += ms_since(field_start);
+        }
+        // The domain's own gas lane drags the grains and takes the reaction
+        // (T5). Only a Matter domain carries one; its host grid is current
+        // because the gas step ends with a host sync and runs after this.
+        // ★ Gated on a gas lane that stepped last frame AND moves: still or
+        // idle air would add drag to every grain scene and shift every
+        // vacuum-calibrated acceptance (free fall, repose, CPU reference)
+        // without anyone having asked for air. "Air exists where the domain
+        // simulates it" - an authored domain without gas stays a vacuum.
+        if (state.type == SimulationDomainType::Matter && state.gas_stats.stepped &&
+            state.gas_stats.max_speed > 1.0e-4f) {
+            Fluid::exchangeMatterGrainGasDrag(grains, params.grain.radius_m,
+                Fluid::gasGrid(state), gas_air, dt, motion.external_acceleration, report);
+            if (report.gas_coupled_grains == 0 && !(forces && !forces->empty())) {
+                // Nothing to carry: an empty row keeps the no-field fast path.
+                motion.external_acceleration.clear();
+            }
         }
         float coupling_ms = ms_since(coupling_start);
         std::vector<Fluid::MatterGrainCouplingOutput> drag;

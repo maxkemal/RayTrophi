@@ -2958,6 +2958,9 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"thermal_condensation_splits", info.thermal_condensation_splits},
                         {"thermal_solid_contact_particles", info.thermal_solid_contact_particles},
                         {"thermal_heat_to_solid_j", info.thermal_heat_to_solid_j},
+                        {"thermal_contact_shell_kelvin", info.thermal_contact_shell_kelvin},
+                        {"thermal_contact_parcel_kelvin", info.thermal_contact_parcel_kelvin},
+                        {"thermal_contact_shell_cells", info.thermal_contact_shell_cells},
                         {"thermal_contact_cooled_particles", info.thermal_contact_cooled_particles},
                         {"thermal_min_kelvin", info.thermal_min_kelvin},
                         {"thermal_mean_kelvin", info.thermal_mean_kelvin},
@@ -3176,6 +3179,9 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"thermal_condensation_splits", info.thermal_condensation_splits},
                         {"thermal_solid_contact_particles", info.thermal_solid_contact_particles},
                         {"thermal_heat_to_solid_j", info.thermal_heat_to_solid_j},
+                        {"thermal_contact_shell_kelvin", info.thermal_contact_shell_kelvin},
+                        {"thermal_contact_parcel_kelvin", info.thermal_contact_parcel_kelvin},
+                        {"thermal_contact_shell_cells", info.thermal_contact_shell_cells},
                         {"thermal_contact_cooled_particles", info.thermal_contact_cooled_particles},
                         {"thermal_min_kelvin", info.thermal_min_kelvin},
                         {"thermal_mean_kelvin", info.thermal_mean_kelvin},
@@ -4013,6 +4019,22 @@ json dispatchMethod(const std::string& method, const json& params) {
         const std::string name = requireString(params, "name");
         return enqueueResult([name](UIContext&) { return rtapi::removeSubstance(name); });
     }
+    if (method == "msf.water_budget") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::SurfaceWaterBudgetInfo b;
+            auto r = rtapi::getSurfaceWaterBudget(b);
+            if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
+            return nlohmann::json{
+                {"ok", true}, {"ran", b.ran}, {"stale", b.stale},
+                {"surface_water_kg", b.surface_water_kg},
+                {"absorbed_kg", b.absorbed_kg},
+                {"evaporated_kg", b.evaporated_kg},
+                {"evaporation_latent_j", b.evaporation_latent_j},
+                {"vapour_vented_kg", b.vapour_vented_kg},
+                {"mean_kg_m2", b.mean_kg_m2}, {"max_kg_m2", b.max_kg_m2},
+                {"wet_elements", b.wet_elements}};
+        });
+    }
     if (method == "msf.fields") {
         return enqueueQuery([](UIContext&) {
             std::vector<rtapi::MaterialFieldInfo> fields;
@@ -4036,6 +4058,10 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"pyrolyzed_mass", f.pyrolyzed_mass},
                     {"molten_reservoir_mass", f.molten_reservoir_mass},
                     {"transferred_mass", f.transferred_mass},
+                    {"thermal_depth_m", f.thermal_depth_m},
+                    {"surface_area_m2", f.surface_area_m2},
+                    {"surface_water_kg", f.surface_water_kg},
+                    {"max_water_saturation", f.max_water_saturation},
                     {"mass_conservation_error", f.mass_conservation_error},
                     {"mass_budget_overflow", f.mass_budget_overflow},
                     {"mass_negative", f.mass_negative},
@@ -6884,7 +6910,6 @@ json dispatchMethod(const std::string& method, const json& params) {
                 j["gpu_msf_ms"] = s.gpu_msf_ms;
                 j["gpu_surface_exchange_ms"] = s.gpu_surface_exchange_ms;
                 j["gpu_source_upload_ms"] = s.gpu_source_upload_ms;
-                j["gpu_fluid_combustion_ms"] = s.gpu_fluid_combustion_ms;
                 j["gpu_velocity_advect_ms"] = s.gpu_velocity_advect_ms;
                 j["gpu_scalar_advect_ms"] = s.gpu_scalar_advect_ms;
                 j["gpu_combustion_ms"] = s.gpu_combustion_ms;
@@ -6918,6 +6943,12 @@ json dispatchMethod(const std::string& method, const json& params) {
                 j["total_blocks"] = s.total_blocks;
                 j["grid_memory_bytes"] = s.grid_memory_bytes;
                 j["burning_cells"] = s.burning_cells;
+                j["combustion_measured"] = s.combustion_measured;
+                j["combustion_burning_cells"] = s.combustion_burning_cells;
+                j["combustion_inerted_cells"] = s.combustion_inerted_cells;
+                j["combustion_steam_masked_cells"] = s.combustion_steam_masked_cells;
+                j["combustion_min_oxygen_fraction"] = s.combustion_min_oxygen_fraction;
+                j["combustion_burned_fuel"] = s.combustion_burned_fuel;
                 j["solid_cells"] = s.solid_cells;
                 j["liquid_boundary_cells"] = s.liquid_boundary_cells;
                 j["liquid_boundary_mean_velocity"] = json::array({

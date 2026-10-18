@@ -12,7 +12,7 @@ enum class FieldDomain : uint8_t { SurfaceUV, Vertex, VolumeGrid, Terrain2D };
 enum class FieldFormat : uint8_t { UNorm8, Float16, Float32, Vec2Float32, Vec3Float32 };
 enum class FieldSemantic : uint16_t {
     Unknown = 0,
-    Temperature, Moisture, FuelRemaining, Char, Melt, MassLoss,
+    Temperature, SurfaceWater, FuelRemaining, Char, Melt, MassLoss,
     Integrity, FractureDamage, Support, Thickness,
     Selection, MaterialMask, Displacement, Stiffness, Pin, ErosionResistance,
     Height, Hardness, Wetness, Sediment, Flow, FuelLoad,

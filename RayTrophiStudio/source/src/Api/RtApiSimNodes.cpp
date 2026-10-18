@@ -441,13 +441,15 @@ struct SurfaceAttributeBinding {
 };
 
 // state layout, 8 floats per element:
-//   [0..3] temperature, fuel_remaining, char, moisture
+//   [0..3] temperature, fuel_remaining, char, surface water (kg/m^2)
 //   [4..7] released_this_step, melt, mass_loss, transferred_mass
 const SurfaceAttributeBinding kSurfaceAttributes[] = {
     {"temperature",      0},
     {"fuel_remaining",   1},
     {"char",             2},
-    {"moisture",         3},
+    // 2026-10-18: kg of water per m^2, no longer a 0..1 moisture (renamed so
+    // an old reader cannot take kilograms for a fraction).
+    {"surface_water_kg_m2", 3},
     {"released",         4},
     {"melt",             5},
     {"mass_loss",        6},

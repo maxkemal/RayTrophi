@@ -70,7 +70,8 @@ def main():
         shell = [f for f in call('msf.fields')['fields'] if f['substance'] == 'Iron']
         data['shell_before_fill'] = shell[0] if shell else None
         print(json.dumps({'shell_before_fill': {k: shell[0].get(k) for k in
-                          ('mean_kelvin', 'max_kelvin', 'temperature_valid')} if shell else None}),
+                          ('mean_kelvin', 'max_kelvin', 'temperature_valid',
+                           'thermal_depth_m', 'surface_area_m2')} if shell else None}),
               flush=True)
         call('forcefield.remove', field=field)
         field = None
@@ -83,7 +84,11 @@ def main():
                      'contact': r.get('thermal_solid_contact_particles', 0),
                      'heat_to_solid_j': r.get('thermal_heat_to_solid_j', 0.0),
                      'max_kelvin': r['particle_max_kelvin'],
-                     'field_heated': r.get('thermal_field_heated_particles', 0)}
+                     'field_heated': r.get('thermal_field_heated_particles', 0),
+                     # What the touching parcels saw (2026-10-18 instrument).
+                     'shell_seen_kelvin': r.get('thermal_contact_shell_kelvin'),
+                     'parcel_seen_kelvin': r.get('thermal_contact_parcel_kelvin'),
+                     'shell_cells': r.get('thermal_contact_shell_cells')}
                 data['samples'].append(s)
                 print(json.dumps(s), flush=True)
         shell_before = data['shell_before_fill'] or {}

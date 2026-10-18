@@ -297,6 +297,13 @@ void drawMatterGrainReport(const SimulationGridDomainDesc& domain,
     ImGui::Text("Transfers: %s, up %zu B, down %zu B, %d batches",
         r.state_resident ? "resident" : "uploaded", r.upload_bytes, r.download_bytes,
         r.transfer_batches);
+    if (r.gas_coupled_grains > 0) {
+        ImGui::SeparatorText("Gas coupling");
+        ImGui::Text("Grains in moving air %zu, max relative speed %.3g m/s",
+            r.gas_coupled_grains, r.gas_max_relative_speed);
+        ImGui::Text("Drag impulse %.4g N s, residual %.3g N s, held cells %zu",
+            r.gas_drag_impulse.length(), r.gas_momentum_residual, r.gas_limited_cells);
+    }
     if (r.coupling_enabled) {
         ImGui::SeparatorText("Liquid coupling");
         ImGui::Text("Coupled grains %zu, max submerged %.2f", r.coupled_grains,

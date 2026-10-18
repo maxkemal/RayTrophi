@@ -3,49 +3,67 @@
     {
       "step": 200,
       "contact": 2599,
-      "heat_to_solid_j": -16.988886015591984,
-      "max_kelvin": 293.00848388671875,
-      "field_heated": 0
+      "heat_to_solid_j": -17.77681475541225,
+      "max_kelvin": 293.0083923339844,
+      "field_heated": 0,
+      "shell_seen_kelvin": 294.1915274760606,
+      "parcel_seen_kelvin": 293.0013799807345,
+      "shell_cells": 400
     },
     {
       "step": 250,
-      "contact": 2324,
-      "heat_to_solid_j": -5.0487453277897085,
-      "max_kelvin": 293.0145568847656,
-      "field_heated": 0
+      "contact": 2353,
+      "heat_to_solid_j": -5.625314977870631,
+      "max_kelvin": 293.01544189453125,
+      "field_heated": 0,
+      "shell_seen_kelvin": 293.3373422024853,
+      "parcel_seen_kelvin": 293.00148477988796,
+      "shell_cells": 414
     },
     {
       "step": 300,
-      "contact": 2343,
-      "heat_to_solid_j": -3.434394662128734,
-      "max_kelvin": 293.02294921875,
-      "field_heated": 0
+      "contact": 2327,
+      "heat_to_solid_j": -4.0345007336772,
+      "max_kelvin": 293.0204162597656,
+      "field_heated": 0,
+      "shell_seen_kelvin": 293.242150125456,
+      "parcel_seen_kelvin": 293.00127255327334,
+      "shell_cells": 413
     },
     {
       "step": 350,
-      "contact": 2302,
-      "heat_to_solid_j": -2.509687793760033,
-      "max_kelvin": 293.0260314941406,
-      "field_heated": 0
+      "contact": 2288,
+      "heat_to_solid_j": -3.0518769534861843,
+      "max_kelvin": 293.02642822265625,
+      "field_heated": 0,
+      "shell_seen_kelvin": 293.1830461450022,
+      "parcel_seen_kelvin": 293.0012883908097,
+      "shell_cells": 414
     },
     {
       "step": 400,
-      "contact": 2300,
-      "heat_to_solid_j": -1.895490594402761,
-      "max_kelvin": 293.0284729003906,
-      "field_heated": 0
+      "contact": 2320,
+      "heat_to_solid_j": -2.416143283626267,
+      "max_kelvin": 293.0281066894531,
+      "field_heated": 0,
+      "shell_seen_kelvin": 293.1448436770154,
+      "parcel_seen_kelvin": 293.0011263104031,
+      "shell_cells": 414
     },
     {
       "step": 450,
-      "contact": 2307,
-      "heat_to_solid_j": -1.3346109830622797,
-      "max_kelvin": 293.02880859375,
-      "field_heated": 0
+      "contact": 2304,
+      "heat_to_solid_j": -1.8741240734167461,
+      "max_kelvin": 293.02923583984375,
+      "field_heated": 0,
+      "shell_seen_kelvin": 293.1124449901096,
+      "parcel_seen_kelvin": 293.00082983300763,
+      "shell_cells": 414
     }
   ],
   "shell_before_fill": {
     "centers_dirty": false,
-    "content_generation": 13,
+    "content_generation": 180,
     "domain": "surface_uv",
     "element_count": 99072,
     "initial_mass": 17.007843017578125,
@@ -55,9 +73,10 @@
     "mass_invalid_elements": 0,
     "mass_loss": 0.0,
     "mass_negative": 0.0,
-    "max_kelvin": 371.9931640625,
+    "max_kelvin": 396.17926025390625,
+    "max_water_saturation": 0.0,
     "mean_integrity": 1.0,
-    "mean_kelvin": 335.6138916015625,
+    "mean_kelvin": 347.70697021484375,
     "min_kelvin": 299.2346496582031,
     "minimum_integrity": 1.0,
     "molten_reservoir_mass": 0.0,
@@ -65,7 +84,7 @@
     "pyrolyzed_mass": 0.0,
     "semantics": [
       "temperature",
-      "moisture",
+      "surface_water_kg_m2",
       "fuel_remaining",
       "char",
       "melt",
@@ -74,8 +93,11 @@
     ],
     "solid_mass": 17.007843017578125,
     "substance": "Iron",
+    "surface_area_m2": 2.1600000858306885,
+    "surface_water_kg": 0.0,
     "temperature_valid": true,
-    "topology_generation": 2,
+    "thermal_depth_m": 0.10000000894069672,
+    "topology_generation": 7,
     "transferred_mass": 0.0
   },
   "verdicts": {

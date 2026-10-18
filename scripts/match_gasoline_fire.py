@@ -10,7 +10,7 @@ The beats, and which system owns each one:
                                    parented, not keyframed to a path.
   3. A moving hose pours petrol.   A fluid flow source parented to the hose,
                                    with a KEYED flow rate (valve open/close).
-  4. The pool catches and spreads. sim_fluid_surface_combustion: the liquid
+  4. The pool catches and spreads. transferFluidCombustionToGas: the liquid
                                    flashes -> vapour enters the gas fuel field
                                    -> the gas burns -> its heat flashes the
                                    NEXT surface cell. The spread is emergent,

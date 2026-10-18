@@ -6,6 +6,7 @@
 #include "Fluid/MatterGpuRuntime.h"
 #include "Fluid/MatterGrainBirth.h"
 #include "Fluid/MatterGrainCoupling.h"
+#include "Fluid/MatterGrainGasCoupling.h"
 #include "Fluid/MatterGrainMpmContact.h"
 #include "Fluid/MatterCommonClock.h"
 #include "Fluid/MatterGrainFluidGpuCoupling.h"
@@ -21,6 +22,8 @@
 #include "Fluid/FluidMistPhaseExchange.h"
 #include "Fluid/GasSurfaceExchangeGpu.h"
 #include "Fluid/GasSaturation.h"
+#include "Fluid/GasCombustionAir.h"
+#include "Fluid/FluidSurfaceWater.h"
 #include "Fluid/WhitewaterRuntime.h"
 #include "Fluid/GasPhaseMomentum.h"
 #include "Fluid/FluidCombustionExchange.h"
@@ -1550,7 +1553,18 @@ struct GasCombustionGpuConstants {
     float smoke_generation = 0.0f;
     float flame_decay = 1.0f;
     float max_temperature = 0.0f;
+    // The air (GridFluid::CombustionAir); vapour_molar 0 = dry.
+    float vapour_molar = 0.0f;
+    float cell_volume = 0.0f;
+    float ambient_kelvin = 293.15f;
+    float gas_ambient = 0.0f;
+    float kelvin_per_unit = 0.0f;
+    float oxygen = 1.0f;
+    float air_oxygen = 0.0f;
+    float limiting_oxygen = 0.0f;
 };
+static_assert(sizeof(GasCombustionGpuConstants) == 72,
+              "sim_gas_combustion push-constant ABI changed");
 struct GasScalarDissipationGpuConstants {
     int nx; int ny; int nz;
     float density_factor;
@@ -1580,8 +1594,6 @@ static_assert(sizeof(GasSurfaceDustGpuConstants) == 40,
               "bytes in SimulationComputeVulkan.cpp and declared in "
               "sim_gas_surface_dust.comp - all THREE must change together");
 
-static_assert(sizeof(GasCombustionGpuConstants) == 40,
-              "sim_gas_combustion push-constant ABI changed");
 
 struct FluidDensitySplatGpuConstants {
     int nx = 0;
@@ -3611,7 +3623,9 @@ bool runGpuCombustion(FluidSim::FluidGrid& grid,
                       const GridFluid::SolverParams& params,
                       float dt,
                       SimulationComputeContext* compute,
-                      SimulationGridDomainComputeBuffers& gpu_buffers) {
+                      SimulationGridDomainComputeBuffers& gpu_buffers,
+                      ComputeBufferHandle vapour) {
+    if (params.combustion_stats) *params.combustion_stats = GridFluid::CombustionStats{};
     if (!params.fire_enabled || grid.fuel.empty() || grid.temperature.empty()) {
         return true;
     }
@@ -3619,6 +3633,13 @@ bool runGpuCombustion(FluidSim::FluidGrid& grid,
     if (n == 0) return true;
 
     const float flame_decay = std::exp(-std::max(0.0f, params.flame_dissipation) * dt);
+    const GridFluid::CombustionAir& air = params.combustion_air;
+    // The kernel reads vapour only from the device pool. A host-owned pool
+    // with vapour in it must burn on the CPU instead: dry-air burning over a
+    // steam cloud is exactly the FG1 defect.
+    const bool humid = air.vapour_molar > 0.0f;
+    const bool device_vapour = humid && vapour.valid();
+    const bool host_vapour = humid && air.vapour_kg != nullptr;
     if (compute &&
         compute->backendType() == ComputeBackendType::VulkanCompute &&
         compute->supportsDispatch() &&
@@ -3626,20 +3647,41 @@ bool runGpuCombustion(FluidSim::FluidGrid& grid,
         gpu_buffers.temperature.valid() &&
         gpu_buffers.density.valid() &&
         gpu_buffers.interaction.valid() &&
+        (!host_vapour || device_vapour) &&
         grid.interaction.size() == n) {
-        ComputeBufferHandle buffers[4] = {
+        if (!gpu_buffers.gas_combustion_counters.valid() ||
+            gpu_buffers.gas_combustion_counters.backend != compute->backendType() ||
+            compute->getBufferSize(gpu_buffers.gas_combustion_counters) < 5 * sizeof(uint32_t)) {
+            if (gpu_buffers.gas_combustion_counters.valid() &&
+                gpu_buffers.gas_combustion_counters.backend == compute->backendType()) {
+                compute->destroyBuffer(gpu_buffers.gas_combustion_counters);
+            }
+            ComputeBufferDesc desc;
+            desc.debug_name = "GridDomainGasCombustionCounters";
+            desc.size_bytes = 5 * sizeof(uint32_t);
+            desc.usage = ComputeBufferUsage::Storage | ComputeBufferUsage::Upload |
+                         ComputeBufferUsage::Download | ComputeBufferUsage::ReadWrite;
+            gpu_buffers.gas_combustion_counters = compute->createBuffer(desc);
+        }
+        ComputeBufferHandle buffers[6] = {
             gpu_buffers.fuel,
             gpu_buffers.temperature,
             gpu_buffers.density,
-            gpu_buffers.interaction
+            gpu_buffers.interaction,
+            // Dry air never reads binding 4; any live buffer satisfies the layout.
+            device_vapour ? vapour : gpu_buffers.fuel,
+            gpu_buffers.gas_combustion_counters
         };
         // ***** THE LEDGER'S READ SIDE. Fixing the readback sites only stops
         // the ledger being wiped; these four lines are where the saving is
         // actually taken. The previous stage downloaded these same fields, so
         // in the steady state all four uploads are skipped and this stage moves
         // 4 x 12.89 MB less per step.
+        uint32_t counters[5] = {0u, 0u, 0u, 0u, 0u};
+        const float no_oxygen_seen = 1.0f;
+        std::memcpy(&counters[3], &no_oxygen_seen, sizeof(float));
         compute->beginTransferBatch();
-        bool ok =
+        bool ok = buffers[5].valid() &&
             gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Fuel,
                               buffers[0], grid.fuel.data(), n * sizeof(float)) &&
             gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Temperature,
@@ -3647,7 +3689,8 @@ bool runGpuCombustion(FluidSim::FluidGrid& grid,
             gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Density,
                               buffers[2], grid.density.data(), n * sizeof(float)) &&
             gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Interaction,
-                              buffers[3], grid.interaction.data(), n * sizeof(float));
+                              buffers[3], grid.interaction.data(), n * sizeof(float)) &&
+            compute->uploadBuffer(buffers[5], counters, sizeof(counters));
         ok = compute->endTransferBatch() && ok;
         if (ok) {
             GasCombustionGpuConstants constants;
@@ -3661,10 +3704,18 @@ bool runGpuCombustion(FluidSim::FluidGrid& grid,
             constants.smoke_generation = params.smoke_generation;
             constants.flame_decay = flame_decay;
             constants.max_temperature = params.max_temperature;
+            constants.vapour_molar = device_vapour ? air.vapour_molar : 0.0f;
+            constants.cell_volume = air.cell_volume;
+            constants.ambient_kelvin = air.ambient_kelvin;
+            constants.gas_ambient = air.gas_ambient;
+            constants.kelvin_per_unit = air.kelvin_per_unit;
+            constants.oxygen = air.oxygen;
+            constants.air_oxygen = GridFluid::kAirOxygenFraction;
+            constants.limiting_oxygen = GridFluid::kSteamLimitingOxygenFraction;
             ComputeDispatch cmd;
             cmd.kernel = "sim_gas_combustion";
             cmd.buffers = buffers;
-            cmd.buffer_count = 4;
+            cmd.buffer_count = 6;
             cmd.constants = &constants;
             cmd.constants_size = sizeof(constants);
             cmd.groups.groups_x =
@@ -3688,34 +3739,36 @@ bool runGpuCombustion(FluidSim::FluidGrid& grid,
             gpu_buffers.markDeviceWrote(GasGridField::Density);
             gpu_buffers.markDeviceWrote(GasGridField::Interaction);
             gpu_buffers.gpu_resident_fields_valid = false;
+            // 20 bytes, after the fence this stage already waits on.
+            if (params.combustion_stats &&
+                compute->downloadBuffer(buffers[5], counters, sizeof(counters))) {
+                GridFluid::CombustionStats& stats = *params.combustion_stats;
+                float min_oxygen = no_oxygen_seen;
+                std::memcpy(&min_oxygen, &counters[3], sizeof(float));
+                stats.measured = true;
+                stats.burning_cells = counters[0];
+                stats.inerted_cells = counters[1];
+                stats.steam_masked_cells = counters[2];
+                stats.min_oxygen_fraction =
+                    min_oxygen < no_oxygen_seen ? min_oxygen : -1.0f;
+                stats.burned_fuel = counters[4] * GridFluid::kCombustionFuelQuantum;
+            }
             return true;
         }
     }
 
-    const float inv_dt = dt > 1e-5f ? 1.0f / dt : 0.0f;
-    #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t c = 0; c < static_cast<std::ptrdiff_t>(n); ++c) {
-        if (!grid.interaction.empty()) grid.interaction[c] *= flame_decay;
-
-        const float f = grid.fuel[c];
-        const float t = grid.temperature[c];
-        if (f <= 1e-5f || t < params.ignition_temperature) {
-            continue;
-        }
-
-        const float burned = std::min(f, std::max(0.0f, params.burn_rate) * f * dt);
-        if (burned <= 0.0f) {
-            continue;
-        }
-        grid.fuel[c] = f - burned;
-        grid.temperature[c] = std::min(t + params.heat_release * burned, params.max_temperature);
-        if (!grid.density.empty()) {
-            grid.density[c] += params.smoke_generation * burned;
-        }
-        if (!grid.interaction.empty()) {
-            grid.interaction[c] = std::min(1.0f, grid.interaction[c] + burned * inv_dt);
+    // CPU reference. Humid air reads the host vapour only while the host copy
+    // is the authority (gasCombustionAir leaves the pointer null otherwise), so
+    // a device-owned inventory burns here as dry air - said once in the log.
+    if (device_vapour && !host_vapour) {
+        static bool logged_dry_fallback = false;
+        if (!logged_dry_fallback) {
+            SCENE_LOG_WARN("[SimCompute] GPU combustion unavailable while the vapour "
+                           "inventory is on the device; CPU combustion treats the air as dry.");
+            logged_dry_fallback = true;
         }
     }
+    GridFluid::burnFuel(grid, params, dt);
 
     if (compute && compute->supportsDispatch()) {
         compute->beginTransferBatch();
@@ -4424,93 +4477,6 @@ struct GasColliderSourceGpuConstants {
 };
 static_assert(sizeof(GasColliderSourceGpuConstants)==20,
               "sim_gas_collider_source push-constant ABI changed");
-
-struct FluidSurfaceCombustionGpuConstants {
-    int fluid_dim[4] = {};
-    int gas_dim[4] = {};
-    float fluid_origin_voxel[4] = {};
-    float gas_origin_voxel[4] = {};
-    float material0[4] = {};
-    float material1[4] = {};
-};
-static_assert(sizeof(FluidSurfaceCombustionGpuConstants)==96,
-              "sim_fluid_surface_combustion push-constant ABI changed");
-
-bool runGpuFluidSurfaceQuench(
-    const SimulationGridDomainDesc& fluid_domain,
-    const FluidSim::FluidGrid& fluid_grid,
-    SimulationGridDomainComputeBuffers& fluid_buffers,
-    const SimulationGridDomainDesc& gas_domain,
-    const FluidSim::FluidGrid& gas_grid,
-    SimulationGridDomainComputeBuffers& gas_buffers,
-    float dt,
-    SimulationComputeContext* compute) {
-    if (!fluid_domain.fluid_extinguishing ||
-        fluid_domain.type != SimulationDomainType::Fluid ||
-        gas_domain.type != SimulationDomainType::Gas ||
-        !gas_domain.fire_enabled ||
-        fluid_domain.backend != SimulationDomainBackend::GPU_Vulkan ||
-        gas_domain.backend != SimulationDomainBackend::GPU_Vulkan ||
-        !compute ||
-        compute->backendType()!=ComputeBackendType::VulkanCompute ||
-        !compute->supportsDispatch() ||
-        !(dt>0.0f) || !std::isfinite(dt)) {
-        return false;
-    }
-    const Vec3 overlap_min=Vec3::max(fluid_domain.bounds_min,gas_domain.bounds_min);
-    const Vec3 overlap_max=Vec3::min(fluid_domain.bounds_max,gas_domain.bounds_max);
-    if(overlap_min.x>=overlap_max.x || overlap_min.y>=overlap_max.y ||
-       overlap_min.z>=overlap_max.z) return false;
-    ComputeBufferHandle buffers[9]={
-        // The post-step density splat is the authoritative liquid occupancy
-        // used by the SDF/render bridge. The pressure fluid_mask is transient
-        // solver scratch and can describe the pre-advect particle layout.
-        fluid_buffers.density,
-        fluid_buffers.fluid_combustion_state,
-        gas_buffers.density,
-        gas_buffers.temperature,
-        gas_buffers.fuel,
-        gas_buffers.interaction,
-        gas_buffers.vel_x,
-        gas_buffers.vel_y,
-        gas_buffers.vel_z};
-    for(const auto& handle:buffers) if(!handle.valid()) return false;
-
-    FluidSurfaceCombustionGpuConstants pc;
-    pc.fluid_dim[0]=fluid_grid.nx;
-    pc.fluid_dim[1]=fluid_grid.ny;
-    pc.fluid_dim[2]=fluid_grid.nz;
-    pc.gas_dim[0]=gas_grid.nx;
-    pc.gas_dim[1]=gas_grid.ny;
-    pc.gas_dim[2]=gas_grid.nz;
-    pc.fluid_origin_voxel[0]=fluid_grid.origin.x;
-    pc.fluid_origin_voxel[1]=fluid_grid.origin.y;
-    pc.fluid_origin_voxel[2]=fluid_grid.origin.z;
-    pc.fluid_origin_voxel[3]=fluid_grid.voxel_size;
-    pc.gas_origin_voxel[0]=gas_grid.origin.x;
-    pc.gas_origin_voxel[1]=gas_grid.origin.y;
-    pc.gas_origin_voxel[2]=gas_grid.origin.z;
-    pc.gas_origin_voxel[3]=gas_grid.voxel_size;
-    pc.material0[0]=std::max(0.0f,fluid_domain.fluid_ignition_temperature);
-    pc.material0[1]=std::max(0.0f,fluid_domain.fluid_evaporation_rate);
-    pc.material0[2]=std::max(0.0f,fluid_domain.fluid_surface_fuel_capacity);
-    pc.material0[3]=dt;
-    pc.material1[0]=std::max(0.0f,fluid_domain.fluid_combustion_heat_release);
-    pc.material1[1]=std::max(0.0f,fluid_domain.fluid_combustion_smoke_yield);
-    pc.material1[2]=std::max(0.0f,fluid_domain.fluid_surface_cooling);
-    pc.material1[3]=fluid_domain.fluid_extinguishing ? -1.0f :
-                    (fluid_domain.fluid_auto_ignite ? 1.0f : 0.0f);
-
-    ComputeDispatch cmd;
-    cmd.kernel="sim_fluid_surface_combustion";
-    cmd.buffers=buffers;
-    cmd.buffer_count=9;
-    cmd.constants=&pc;
-    cmd.constants_size=sizeof(pc);
-    cmd.groups.groups_x=
-        (static_cast<uint32_t>(fluid_grid.getCellCount())+255u)/256u;
-    return compute->dispatch(cmd);
-}
 
 bool runGpuColliderGasSource(FluidSim::FluidGrid& grid,
                              const GridFluid::SolverParams& params,
@@ -6525,12 +6491,10 @@ void ParticleSimulationSystem::resetGridDomainStates() {
     for (auto& buffers : grid_domain_compute_buffers_) {
         buffers.gpu_resident_fields_valid = false;
         buffers.invalidateDeviceCopies();
-        buffers.fluid_combustion_state_needs_reset = true;
     }
     for (auto& buffers : matter_liquid_compute_buffers_) {
         buffers.gpu_resident_fields_valid = false;
         buffers.invalidateDeviceCopies();
-        buffers.fluid_combustion_state_needs_reset = true;
     }
 }
 
@@ -6559,14 +6523,12 @@ void ParticleSimulationSystem::setGridDomainStates(std::vector<SimulationGridDom
         // back to the host sweep for one step rather than report the old speed.
         buffers.gas_velocity_max_abs_valid = false;
         buffers.gas_velocity_max_abs_host = -1.0f;
-        buffers.fluid_combustion_state_needs_reset = true;
     }
     for (auto& buffers : matter_liquid_compute_buffers_) {
         buffers.gpu_resident_fields_valid = false;
         buffers.invalidateDeviceCopies();
         buffers.gas_velocity_max_abs_valid = false;
         buffers.gas_velocity_max_abs_host = -1.0f;
-        buffers.fluid_combustion_state_needs_reset = true;
     }
 }
 
@@ -7446,6 +7408,11 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                                              collider.msf_override,
                                              *context.compute);
         }
+        // ★ The pass was opened but never closed, so a deleted collider's field
+        // lived forever: still listed by msf.fields, still hot, still trading
+        // contact heat with any liquid that reached its old cells, and handed
+        // back as-is to the next object created under the same name.
+        material_state_fields_.endSyncPass(*context.compute);
         // Asked of the system rather than tracked with a flag in the loop above:
         // a collider can pass every gate and still fail to produce a field (bad
         // UVs, buffer allocation failure), and gating the gas coupling on "we
@@ -7482,6 +7449,22 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 ambient_zones.push_back(zone);
             }
 
+            // ── Surface water drying (2026-10-18) ────────────────────────────
+            // BEFORE stepAmbient, which applies what this queues. The budget
+            // runs on the fresh host copy; its vapour goes into the inventory
+            // of the gas domain it rises in (or vents to the atmosphere when
+            // no domain holds it), with the latent heat already paid by the
+            // surface. stepAmbient below resets the stats block, so the water
+            // counters are copied across it.
+            {
+                static std::vector<MaterialStateFieldSystem::VapourRelease> s_vapour;
+                material_state_fields_.stepSurfaceWater(world_thermal_, dt, s_vapour);
+                if (!s_vapour.empty()) {
+                    routeSurfaceWaterVapour(s_vapour);
+                }
+            }
+            const MaterialStateFieldStats water_stats = material_state_fields_.stats();
+
             // ★ Called unconditionally, not only when a field exists. It owns the
             // MSF stats block for the frame, so skipping it would leave the panel
             // showing the last frame that DID have a field — a deleted object
@@ -7495,6 +7478,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 *context.compute, world_thermal_,
                 thermal_sources, ambient_zones,
                 dt, ambient_ceiling);
+            material_state_fields_.carryWaterStats(water_stats);
         }
     }
 
@@ -7768,6 +7752,14 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         params.channel_temperature = hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Temperature);
         params.channel_fuel = hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Fuel);
         params.channel_velocity = hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Velocity);
+        // FG1: fire burns against the air temperature and the oxygen the
+        // domain's vapour leaves (GridFluid::CombustionAir). Both burn paths,
+        // device and host, read these and report into the same stats.
+        if (i < grid_domains_.size()) {
+            params.combustion_air =
+                Fluid::gasCombustionAir(grid_domains_[i], state, world_thermal_);
+        }
+        params.combustion_stats = &state.gas_stats.combustion;
 
         const bool is_gpu_backend = (i < grid_domains_.size())
             ? (grid_domains_[i].backend == SimulationDomainBackend::GPU_CUDA ||
@@ -7865,7 +7857,6 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         bool gas_collider_source_pre_run = false;
         bool gas_surface_dust_pre_run = false;
         bool gas_scalar_dissipation_pre_run = false;
-        bool fluid_combustion_deposit_pre_run = false;
         bool gpu_velocity_post_ok = false;
         bool gpu_projection_ok = false;
         bool gas_tail_sync_ok = !gpu_grid_ready;
@@ -8131,37 +8122,13 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                              i < grid_domains_.size() ? grid_domains_[i].name
                                                       : std::string());
             }
-            // Extinguishing surface interaction remains a device operation: it
-            // removes heat/fuel from the already-uploaded gas fields. Flammable
-            // transfer ran above from the authoritative APIC parcel loss.
-            for(std::size_t fluid_index=0;
-                fluid_index<grid_domains_.size();
-                ++fluid_index) {
-                if(fluid_index==i ||
-                   fluid_index>=grid_domain_states_.size() ||
-                   fluid_index>=grid_domain_compute_buffers_.size() ||
-                   !grid_domain_states_[fluid_index].valid ||
-                   !grid_domains_[fluid_index].fluid_extinguishing) continue;
-                const bool ran = runGpuFluidSurfaceQuench(
-                    grid_domains_[fluid_index],
-                    grid_domain_states_[fluid_index].grid,
-                    grid_domain_compute_buffers_[fluid_index],
-                    grid_domains_[i],
-                    state.grid,
-                    *gpu_buffers,
-                    dt,
-                    context.compute);
-                // ★ Recorded only when it actually ran. The flag below is an OR
-                // across every fluid domain and cannot say WHICH pair coupled;
-                // the trace can, and the pair is what a graph declares.
-                if (ran) {
-                    noteCoupling("fluid_gas_quench", "fluid", "gas",
-                                 grid_domains_[fluid_index].name,
-                                 grid_domains_[i].name);
-                }
-                fluid_combustion_deposit_pre_run =
-                    ran || fluid_combustion_deposit_pre_run;
-            }
+            // FG1 2026-10-18: the extinguishing quench that used to run here
+            // scaled gas heat/fuel/flame by a rate taken from the liquid's
+            // surface fuel capacity, removed energy no ledger saw, and only ran
+            // for a separate Fluid+Gas pair. Water now puts a fire out through
+            // physics already on the books: surface heat exchange and boiling
+            // take the heat (latent included), and the steam they make dilutes
+            // the oxygen combustion burns in (GridFluid::CombustionAir).
             // ***** A DEVICE-ONLY DEPOSIT THAT NEVER TOLD THE LEDGER.
             //
             // MSF pyrolysis and liquid surface combustion write the gas fields
@@ -8179,13 +8146,12 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             // fed it exactly this flag. Replacing it with the ledger was right -
             // one boolean could not answer for three fields - but the ledger
             // only works if the PRODUCER is wired in too, and this one was not.
-            if (fluid_combustion_deposit_pre_run || msf_fields_live) {
+            if (msf_fields_live) {
                 gpu_buffers->markDeviceWrote(GasGridField::Density);
                 gpu_buffers->markDeviceWrote(GasGridField::Temperature);
                 gpu_buffers->markDeviceWrote(GasGridField::Fuel);
                 gpu_buffers->markDeviceWrote(GasGridField::Interaction);
             }
-            gas_gpu_mark(state.gas_stats.gpu_fluid_combustion_ms);
             gpu_velocity_advection_pre_run = runGpuVelocityAdvection(state.grid, params, dt, context.compute, *gpu_buffers);
             gas_gpu_mark(state.gas_stats.gpu_velocity_advect_ms);
             if (!gpu_velocity_advection_pre_run) {
@@ -8223,7 +8189,8 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                                      *gpu_buffers);
             gas_gpu_mark(state.gas_stats.gpu_surface_dust_ms);
             gas_combustion_pre_run =
-                runGpuCombustion(state.grid, params, dt, context.compute, *gpu_buffers);
+                runGpuCombustion(state.grid, params, dt, context.compute, *gpu_buffers,
+                                 Fluid::gasCombustionVapourBuffer(state));
             gas_gpu_mark(state.gas_stats.gpu_combustion_ms);
             // One host -> device velocity publication feeds every body-force
             // stage. The old path uploaded and read back the full MAC field
@@ -8573,7 +8540,6 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         state.gas_stats.turbulence_on_gpu = gas_turbulence_pre_run;
         state.gas_stats.dissipation_on_gpu = gpu_velocity_post_ok;
         state.gas_stats.pressure_on_gpu = gpu_projection_ok;
-        state.gas_stats.fluid_combustion_on_gpu = fluid_combustion_deposit_pre_run;
         state.gas_stats.total_ms =
             elapsedMilliseconds(gas_step_begin, SimulationClock::now());
 
@@ -8629,10 +8595,6 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     std::string("Partial GPU on ") +
                     context.compute->backendName() +
                     ": one or more stages used CPU fallback (see Console)";
-            }
-            if(fluid_combustion_deposit_pre_run) {
-                state.gas_compute_status +=
-                    "; combustible liquid surface GPU";
             }
         }
         audio_frame.publishGas(context.compute,
@@ -9637,6 +9599,81 @@ std::size_t ParticleSimulationSystem::findDeadSlot() const {
     return kInvalidParticle;
 }
 
+void ParticleSimulationSystem::routeSurfaceWaterVapour(
+        const std::vector<MaterialStateFieldSystem::VapourRelease>& released) {
+    // One ledger row per destination: a gas domain's inventory, or the
+    // atmosphere when the surface dries outside every domain.
+    struct Totals { double mass = 0.0, sensible = 0.0, latent = 0.0; };
+    std::vector<Totals> to_domain(grid_domains_.size());
+    Totals vented;
+    const SubstanceProfile& water = findSubstance("Water");
+    const double latent = water.latent_heat_vaporization > 0.0f
+        ? water.latent_heat_vaporization : 2.257e6;
+    for (const auto& r : released) {
+        if (!(r.mass_kg > 0.0f)) continue;
+        const double sensible = std::max(0.0, double(r.energy_j) - double(r.mass_kg) * latent);
+        bool placed = false;
+        for (std::size_t d = 0; d < grid_domains_.size() && d < grid_domain_states_.size(); ++d) {
+            auto& state = grid_domain_states_[d];
+            if (!grid_domains_[d].enabled || !state.valid ||
+                !simulationDomainHasGas(grid_domains_[d].type)) {
+                continue;
+            }
+            const auto& gas = Fluid::gasGrid(state);
+            if (!Fluid::gridContains(gas, r.position)) continue;
+            const Vec3 local = (r.position - gas.origin) / gas.voxel_size;
+            const int i = std::clamp(static_cast<int>(std::floor(local.x)), 0, gas.nx - 1);
+            const int j = std::clamp(static_cast<int>(std::floor(local.y)), 0, gas.ny - 1);
+            const int k = std::clamp(static_cast<int>(std::floor(local.z)), 0, gas.nz - 1);
+            const std::size_t cell = gas.cellIndex(i, j, k);
+            // The inventory's vapour pool is ONE substance; water joins it only
+            // when that substance is water, otherwise it is foreign gas there.
+            if (Fluid::resolveCondensableVapour(grid_domains_[d]).substance == "Water") {
+                Fluid::depositGasInventory(state, cell, r.mass_kg, r.energy_j);
+            } else {
+                Fluid::depositGasForeign(state, cell, r.mass_kg, r.energy_j);
+            }
+            to_domain[d].mass += r.mass_kg;
+            to_domain[d].sensible += sensible;
+            to_domain[d].latent += double(r.mass_kg) * latent;
+            placed = true;
+            break;
+        }
+        if (!placed) {
+            vented.mass += r.mass_kg;
+            vented.sensible += sensible;
+            vented.latent += double(r.mass_kg) * latent;
+        }
+    }
+    uint64_t event = (matter_exchange_step_ << 32u) | uint64_t{0xD200u};
+    const auto book = [&](const std::string& target, const Totals& t) {
+        if (!(t.mass > 0.0)) return;
+        MatterExchangeRecord record;
+        record.event_id = event++;
+        record.kind = MatterExchangeKind::Vaporization;
+        record.source = "surface";
+        record.target = target;
+        record.substance = "Water";
+        record.source_mass_kg = t.mass;
+        record.target_mass_kg = t.mass;
+        record.source_energy_j = t.sensible;
+        record.target_energy_j = t.sensible;
+        // Paid out of the surface's heat (stepSurfaceWater's heat_input).
+        record.latent_required_j = t.latent;
+        record.latent_accounted_j = t.latent;
+        matter_exchange_ledger_.record(std::move(record));
+    };
+    for (std::size_t d = 0; d < to_domain.size(); ++d) {
+        if (to_domain[d].mass > 0.0) {
+            book(grid_domains_[d].name, to_domain[d]);
+            noteCoupling("surface_water_to_gas", "surface", "gas", std::string(),
+                         grid_domains_[d].name);
+        }
+    }
+    book("atmosphere", vented);
+    material_state_fields_.noteVapourVented(vented.mass);
+}
+
 void ParticleSimulationSystem::ensureComputeBuffer(SimulationComputeContext& compute,
                                                    ComputeBufferHandle& handle,
                                                    const char* name,
@@ -9747,7 +9784,7 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.fluid_mask);
     destroy(buffers.fluid_mask_solid_indices);
     destroy(buffers.fluid_surface_columns);
-    destroy(buffers.fluid_combustion_state);
+    destroy(buffers.gas_combustion_counters);
     destroy(buffers.label_bin_counts);
     destroy(buffers.label_bin_items);
     destroy(buffers.label_flags);
@@ -9991,27 +10028,6 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
         static_cast<std::size_t>(std::max(1, grid.nx)) *
             static_cast<std::size_t>(std::max(1, grid.nz)) * sizeof(uint32_t),
         usage);
-    {
-        const bool initialize_combustion_state =
-            !buffers.fluid_combustion_state.valid() ||
-            compute.getBufferSize(buffers.fluid_combustion_state) < cell_bytes * 2u;
-        ensureComputeBuffer(
-            compute, buffers.fluid_combustion_state,
-            "GridDomainFluidCombustionState", cell_bytes * 2u, usage);
-        if ((initialize_combustion_state ||
-             buffers.fluid_combustion_state_needs_reset) &&
-            buffers.fluid_combustion_state.valid()) {
-            std::vector<float> initial_state(cell_count * 2u, 0.0f);
-            std::fill(
-                initial_state.begin() + static_cast<std::ptrdiff_t>(cell_count),
-                initial_state.end(), -1.0f);
-            compute.uploadBuffer(
-                buffers.fluid_combustion_state,
-                initial_state.data(),
-                initial_state.size() * sizeof(float));
-            buffers.fluid_combustion_state_needs_reset = false;
-        }
-    }
     ensureComputeBuffer(compute, buffers.gas_solid_mask,  "GridDomainGasSolidMask", cell_bytes, usage);
     ensureComputeBuffer(compute, buffers.gas_solid_vel_x, "GridDomainGasSolidVelX", cell_bytes, usage);
     ensureComputeBuffer(compute, buffers.gas_solid_vel_y, "GridDomainGasSolidVelY", cell_bytes, usage);

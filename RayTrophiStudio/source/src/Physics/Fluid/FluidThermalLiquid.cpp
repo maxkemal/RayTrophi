@@ -214,6 +214,10 @@ void exchangeLiquidSolidContact(FluidParticles& particles,
     const SubstanceProfile* profile = nullptr;
     std::size_t touched = 0;
     double heat_out = 0.0;
+    double seen_weight = 0.0, seen_shell = 0.0, seen_parcel = 0.0;
+    std::size_t shell_cells = 0;
+    static std::vector<uint8_t> s_shell_seen;
+    s_shell_seen.assign(cells, 0u);
     for (std::size_t p = 0; p < n; ++p) {
         if (!liveParcel(particles, p)) continue;
         double tp = particles.temperature[p];
@@ -245,6 +249,13 @@ void exchangeLiquidSolidContact(FluidParticles& particles,
         const double ts = solid_kelvin[shell];
         const double area = static_cast<double>(h) * h / std::max<int>(1, s_count[own]);
         const double g = kContactFilm * area;
+        seen_weight += g;
+        seen_shell += g * ts;
+        seen_parcel += g * tp;
+        if (!s_shell_seen[shell]) {
+            s_shell_seen[shell] = 1u;
+            ++shell_cells;
+        }
         const double decay = 1.0 - std::exp(-g * dt * (1.0 / cp + 1.0 / cs));
         const double eq = (cp * tp + cs * ts) / (cp + cs);
         const double dtp = (eq - tp) * decay;
@@ -257,6 +268,9 @@ void exchangeLiquidSolidContact(FluidParticles& particles,
     }
     stats.solid_contact_particles = touched;
     stats.heat_to_solid_j = heat_out;
+    stats.solid_contact_shell_cells = shell_cells;
+    stats.solid_contact_shell_kelvin = seen_weight > 0.0 ? seen_shell / seen_weight : 0.0;
+    stats.solid_contact_parcel_kelvin = seen_weight > 0.0 ? seen_parcel / seen_weight : 0.0;
 }
 
 double parcelHeatCapacity(const FluidParticles& particles, std::size_t p,

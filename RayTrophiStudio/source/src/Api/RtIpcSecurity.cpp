@@ -485,6 +485,7 @@ uint32_t requiredCapabilities(const std::string& method) {
         method == "anim.source_clips" || method == "anim.source_channels" ||
         method == "matter.exchanges" ||
         method == "msf.fields" ||
+        method == "msf.water_budget" ||
         method == "templates.refresh" || method == "templates.validate" ||
         method == "templates.prepare" ||
         // Atmosphere measurements: pure reads whose names match none of the
