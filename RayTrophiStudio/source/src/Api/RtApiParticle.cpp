@@ -1316,7 +1316,6 @@ Result getGasStepStats(const std::string& domain_id_or_name, GasStepStats& out) 
     out.gpu_msf_ms = gs.gpu_msf_ms;
     out.gpu_surface_exchange_ms = gs.gpu_surface_exchange_ms;
     out.gpu_source_upload_ms = gs.gpu_source_upload_ms;
-    out.gpu_fluid_combustion_ms = gs.gpu_fluid_combustion_ms;
     out.gpu_velocity_advect_ms = gs.gpu_velocity_advect_ms;
     out.gpu_scalar_advect_ms = gs.gpu_scalar_advect_ms;
     out.gpu_combustion_ms = gs.gpu_combustion_ms;
@@ -1347,6 +1346,12 @@ Result getGasStepStats(const std::string& domain_id_or_name, GasStepStats& out) 
     out.max_speed = gs.max_speed;
     out.cfl = gs.cfl;
     out.burning_cells = gs.burning_cells;
+    out.combustion_measured = gs.combustion.measured;
+    out.combustion_burning_cells = gs.combustion.burning_cells;
+    out.combustion_inerted_cells = gs.combustion.inerted_cells;
+    out.combustion_steam_masked_cells = gs.combustion.steam_masked_cells;
+    out.combustion_min_oxygen_fraction = gs.combustion.min_oxygen_fraction;
+    out.combustion_burned_fuel = gs.combustion.burned_fuel;
     out.solid_cells = gs.solid_cells;
     out.liquid_boundary_cells = gs.liquid_boundary_cells;
     out.liquid_boundary_mean_velocity = gs.liquid_boundary_mean_velocity;

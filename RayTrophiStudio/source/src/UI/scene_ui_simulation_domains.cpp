@@ -1944,7 +1944,8 @@ void drawSimulationDomainControls(
                         fp.granular_enabled ? "granular skeleton" : "liquid",
                         melt_text,
                         fp.fuel_profile.flammable ? "flammable"
-                            : fp.fuel_profile.extinguishing ? "extinguishes fire" : "inert");
+                            : fp.thermal_liquid_enabled ? "cools fire through heat and steam"
+                            : "inert to fire (thermal chain off)");
 
                     ImGui::SeparatorText("Solver tuning (numerical, per domain)");
                     // Written from the substance's solver hints when it was
@@ -2052,9 +2053,6 @@ void drawSimulationDomainControls(
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip(
                             "Exposes the liquid free surface to overlapping Vulkan Gas domains.\n"
                             "The liquid bulk remains incompressible; only the surface exchanges heat and vapor.");
-                        if (domain.fluid_extinguishing) {
-                            ImGui::TextDisabled("Extinguishing liquid active");
-                        }
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip(
                                 "Publishes only the exposed APIC free-surface band "
@@ -4314,7 +4312,7 @@ void drawSimulationDomainControls(
                     const float gpu_sum =
                         gs.gpu_collider_source_ms + gs.gpu_source_upload_ms +
                         gs.gpu_surface_exchange_ms +
-                        gs.gpu_fluid_combustion_ms + gs.gpu_velocity_advect_ms +
+                        gs.gpu_velocity_advect_ms +
                         gs.gpu_scalar_advect_ms + gs.gpu_combustion_ms +
                         gs.gpu_body_forces_ms + gs.gpu_dissipation_ms +
                         gs.gpu_pressure_ms + gs.gpu_publish_ms + gs.gpu_majorant_ms +
@@ -4342,6 +4340,22 @@ void drawSimulationDomainControls(
                         blk.Value("Fuel cells / total fuel", "%zu / %.2f",
                                   gs.active_fuel_cells, gs.total_fuel);
                         blk.Value("Burning cells", "%zu", gs.burning_cells);
+                    }
+                    // FG1: what the air let the fire do this step.
+                    if (gs.combustion.measured && gs.combustion.burned_fuel > 0.0) {
+                        blk.Value("Fuel burned this step", "%.4g", gs.combustion.burned_fuel);
+                    }
+                    if (gs.combustion.measured &&
+                        (gs.combustion.inerted_cells > 0 ||
+                         gs.combustion.steam_masked_cells > 0)) {
+                        blk.Value("Oxygen-limited cells", "%llu",
+                                  static_cast<unsigned long long>(gs.combustion.inerted_cells));
+                        blk.Value("Hot only through steam", "%llu",
+                                  static_cast<unsigned long long>(gs.combustion.steam_masked_cells));
+                        if (gs.combustion.min_oxygen_fraction >= 0.0f) {
+                            blk.Value("Lowest oxygen", "%.1f%%",
+                                      100.0 * gs.combustion.min_oxygen_fraction);
+                        }
                     }
                     if (gs.solid_cells > 0) {
                         blk.Value("Collider cells", "%zu  (%.1f%% blocked)",
@@ -4373,8 +4387,6 @@ void drawSimulationDomainControls(
                             blk.Time("surface heat / evaporation", gs.gpu_surface_exchange_ms, "GPU", 1);
                         if (gs.gpu_source_upload_ms > 0.0f)
                             blk.Time("source upload (host -> device)", gs.gpu_source_upload_ms, "GPU", 1);
-                        if (gs.fluid_combustion_on_gpu || gs.gpu_fluid_combustion_ms > 0.0f)
-                            blk.Time("liquid surface combustion", gs.gpu_fluid_combustion_ms, "GPU", 1);
                         blk.Time("velocity advection", gs.gpu_velocity_advect_ms,
                                  gs.velocity_advect_on_gpu ? "GPU" : "CPU", 1);
                         blk.Time("scalar advection", gs.gpu_scalar_advect_ms,

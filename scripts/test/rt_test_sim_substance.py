@@ -176,7 +176,7 @@ if not attrs:
             "the object carries no Material State Field yet; step a gas domain "
             "with this object inside it first")
 else:
-    check("moisture is exposed as a READING", "moisture" in attrs,
+    check("surface water is exposed as a READING", "surface_water_kg_m2" in attrs,
           "%s" % (attrs,))
     check("melt is exposed as a READING", "melt" in attrs, "%s" % (attrs,))
 

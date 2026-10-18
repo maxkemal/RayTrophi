@@ -4220,16 +4220,29 @@ static const MethodRegistration reg_modifiers_set_param(desc_modifiers_set_param
 
 static const MethodDescriptor desc_msf_fields = {
     "msf.fields", "msf",
-    "Report the live material state fields (temperature, moisture, char, mass) per object",
+    "Report the live material state fields (temperature, surface water kg/m2, char, mass) per object",
     "This is the measurement side of burning and melting: mass loss, integrity and mass-conservation error are reported here.",
     "read", "Read", false, "any",
-    "msf|fields|substance|thermal|burn|melt|measure|verify|temperature|moisture",
+    "msf|fields|substance|thermal|burn|melt|measure|verify|temperature|surface_water",
     "substance.list",
     nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
 static const MethodRegistration reg_msf_fields(desc_msf_fields);
+
+static const MethodDescriptor desc_msf_water_budget = {
+    "msf.water_budget", "msf",
+    "Report the last frame's surface-water budget: kg absorbed from liquid, evaporated, vented to the atmosphere, and the latent heat paid",
+    "Water on surfaces is mass (kg/m2). stale=true means a wet surface waited for a fresh host copy and the budget did not run that frame.",
+    "read", "Read", false, "any",
+    "msf|water|budget|substance|thermal|evaporation|measure|verify|ledger",
+    "msf.fields",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_msf_water_budget(desc_msf_water_budget);
 
 static const MethodParam params_nodes_add[] = {
     {"graph_name", "string", true, "", nullptr, nullptr},

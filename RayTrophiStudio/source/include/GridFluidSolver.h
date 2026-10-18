@@ -25,6 +25,8 @@
 #include "Vec3.h"
 #include "FluidGrid.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 
 namespace RayTrophiSim {
@@ -43,6 +45,52 @@ enum class Advection {
     SemiLagrange,
     MacCormack
 };
+
+// ── The air a flame burns in (FG1, 2026-10-18) ───────────────────────────────
+// The temperature field holds the VIRTUAL temperature Tv (GasSaturation.h):
+// boiling writes steam into it as light as 600 K air. Combustion compares the
+// AIR temperature with the ignition point, so it converts Tv with the cell's
+// vapour mass first. Before this, a kettle's steam read as a 600 K pilot, and a
+// water jet onto a fire could light fuel instead of putting it out.
+//
+// The same vapour displaces air: at 1 atm a cell's moles are fixed, so the
+// oxygen mole fraction is 0.2095 * oxygen * (1 - x_vapour). Burning slows
+// linearly to zero at the limiting oxygen concentration. This is how steam
+// smothers a fire; the heat it carries away is already paid by the surface
+// exchange and boiling passes, so nothing here removes energy.
+//
+// vapour_molar == 0 (no condensable vapour, or no inventory) leaves every cell
+// as dry air: identical to the solver before FG1.
+inline constexpr float kAirOxygenFraction = 0.2095f;
+// Limiting oxygen concentration (mole fraction) for a hydrocarbon flame
+// diluted by steam. Hydrocarbons lie near 0.12 (N2) to 0.145 (CO2); steam's
+// heat capacity sits between them.
+inline constexpr float kSteamLimitingOxygenFraction = 0.13f;
+
+struct CombustionAir {
+    const float* vapour_kg = nullptr;   // condensable vapour per cell (kg), host
+    std::size_t vapour_cells = 0;
+    float vapour_molar = 0.0f;          // kg/mol; 0 = dry air everywhere
+    float cell_volume = 0.0f;           // m^3
+    float ambient_kelvin = 293.15f;     // K at gas_ambient
+    float gas_ambient = 0.0f;           // normalized field value of the ambient
+    float kelvin_per_unit = 0.0f;       // K per normalized temperature unit
+    float oxygen = 1.0f;                // world/domain oxygen availability 0..1
+};
+
+// One combustion pass. Counts are cells; -1 oxygen = no fuel cell was hot.
+struct CombustionStats {
+    bool measured = false;
+    uint64_t burning_cells = 0;       // burned fuel this step
+    uint64_t inerted_cells = 0;       // hot enough, but oxygen throttled the burn
+    uint64_t steam_masked_cells = 0;  // Tv above ignition, air below: no light
+    float min_oxygen_fraction = -1.0f;
+    // Fuel consumed this step, in the field's fuel units (cells alone cannot
+    // tell a smothered fire from one that spread thinly). Device: 1e-4 units
+    // fixed point (kCombustionFuelQuantum).
+    double burned_fuel = 0.0;
+};
+inline constexpr double kCombustionFuelQuantum = 1.0e-4;
 
 struct SolverParams {
     Boundary boundary = Boundary::Open;
@@ -142,6 +190,8 @@ struct SolverParams {
     float smoke_generation = 0.6f;       // density added per unit fuel burned
     float flame_dissipation = 3.0f;      // flame (interaction) field decay / second
     float max_temperature = 10.0f;       // hard cap so heat release cannot run away
+    CombustionAir combustion_air;        // see CombustionAir above
+    CombustionStats* combustion_stats = nullptr;  // optional sink, overwritten
 
     // ── Thermal expansion (gas dilation) ─────────────────────────────────────
     // Hot gas expands. The pressure projection is given a positive divergence
@@ -200,6 +250,11 @@ void stepSparseVDB(FluidSim::FluidGrid& grid,
                    const SimulationForceFieldSnapshot* forces = nullptr,
                    float time_seconds = 0.0f,
                    GasSolverStats* stats = nullptr);
+
+/// @brief Run only the combustion stage (CPU reference of sim_gas_combustion).
+/// Burns against the AIR temperature and the oxygen left by the cell's vapour;
+/// see CombustionAir. Writes params.combustion_stats when it is set.
+void burnFuel(FluidSim::FluidGrid& grid, const SolverParams& params, float dt);
 
 /// @brief Run only the pressure projection stage in place on @p grid.
 void projectPressure(FluidSim::FluidGrid& grid,

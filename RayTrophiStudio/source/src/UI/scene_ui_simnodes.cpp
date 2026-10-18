@@ -768,7 +768,7 @@ void SceneUI::drawSimulationNodeProperties(NodeSystem::Sim::SimulationNodeGraph&
     else if (auto* surf = dynamic_cast<SurfaceInspectNode*>(selected)) {
         ImGui::TextUnformatted("Channel");
         static const char* kSurfaceChannels[] = {
-            "temperature", "char", "melt", "moisture", "fuel_remaining", "mass_loss"
+            "temperature", "char", "melt", "surface_water_kg_m2", "fuel_remaining", "mass_loss"
         };
         std::vector<std::string> channels(std::begin(kSurfaceChannels), std::end(kSurfaceChannels));
         std::string choice;

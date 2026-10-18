@@ -516,7 +516,7 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
         writeFloatArray(os, f.temperature);
         writeFloatArray(os, f.fuel);
         writeFloatArray(os, f.charred);
-        writeFloatArray(os, f.moisture);
+        writeFloatArray(os, f.surface_water_kg_m2);
         writeFloatArray(os, f.melt);
         writeFloatArray(os, f.mass_loss);
         writeFloatArray(os, f.transferred_mass);
@@ -734,7 +734,11 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         if (!readFloatArray(is, f.temperature, version)) return false;
         if (!readFloatArray(is, f.fuel, version))        return false;
         if (!readFloatArray(is, f.charred, version))     return false;
-        if (!readFloatArray(is, f.moisture, version))    return false;
+        if (!readFloatArray(is, f.surface_water_kg_m2, version)) return false;
+        if (version < 16u) {
+            // A 0..1 moisture, not kilograms: replay the surface dry.
+            std::fill(f.surface_water_kg_m2.begin(), f.surface_water_kg_m2.end(), 0.0f);
+        }
         if (!readFloatArray(is, f.melt, version))        return false;
         if (!readFloatArray(is, f.mass_loss, version))   return false;
         if (!readFloatArray(is, f.transferred_mass, version)) return false;

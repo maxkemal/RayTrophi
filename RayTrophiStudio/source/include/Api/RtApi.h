@@ -2493,7 +2493,7 @@ NodeSystem::Sim::SimulationNodeGraph* simulationGraph(const std::string& scope,
 // only way to learn an attribute existed was to read the solver source.
 std::vector<std::string> simListAttributes(const std::string& domain);
 // Same, for per-object surface (MSF) attributes: temperature, char, melt,
-// moisture, fuel_remaining, mass_loss. N5.
+// surface_water_kg_m2, fuel_remaining, mass_loss. N5.
 std::vector<std::string> simListSurfaceAttributes(const std::string& object);
 
 // ── Unified attribute discovery + measurement (rt.attr) ─────────────────────
@@ -3973,7 +3973,6 @@ struct GasStepStats {
     float gpu_msf_ms = 0.0f;
     float gpu_surface_exchange_ms = 0.0f;
     float gpu_source_upload_ms = 0.0f;
-    float gpu_fluid_combustion_ms = 0.0f;
     float gpu_velocity_advect_ms = 0.0f;
     float gpu_scalar_advect_ms = 0.0f;
     float gpu_combustion_ms = 0.0f;
@@ -4006,6 +4005,15 @@ struct GasStepStats {
     float max_speed = 0.0f;
     float cfl = 0.0f;            // > 1: the semi-Lagrangian trace smears detail
     std::size_t burning_cells = 0;
+    // The combustion pass (FG1). measured=false: fire off or no step. The air
+    // temperature, not the field's virtual temperature, gates ignition, and
+    // the oxygen left by the cell's vapour throttles the burn.
+    bool combustion_measured = false;
+    uint64_t combustion_burning_cells = 0;
+    uint64_t combustion_inerted_cells = 0;       // oxygen below a full burn
+    uint64_t combustion_steam_masked_cells = 0;  // hot only through steam's Tv
+    float combustion_min_oxygen_fraction = -1.0f;  // -1: no hot fuel cell
+    double combustion_burned_fuel = 0.0;           // fuel units this step
     std::size_t solid_cells = 0;
     std::size_t liquid_boundary_cells = 0;
     Vec3 liquid_boundary_mean_velocity;
@@ -4625,6 +4633,10 @@ struct FluidDomainInfo {
     uint64_t thermal_condensation_splits = 0;    // parcels grown past 2x mass and split
     uint64_t thermal_solid_contact_particles = 0; // parcels trading heat with MSF surfaces
     double   thermal_heat_to_solid_j = 0.0;        // net liquid -> surfaces this step
+    // Contact-weighted temperatures the touching parcels saw (K, 0 = none).
+    double   thermal_contact_shell_kelvin = 0.0;
+    double   thermal_contact_parcel_kelvin = 0.0;
+    uint64_t thermal_contact_shell_cells = 0;
     uint64_t thermal_contact_cooled_particles = 0;
     float    thermal_min_kelvin = 0.0f;
     float    thermal_mean_kelvin = 0.0f;
@@ -5113,6 +5125,17 @@ struct MaterialFieldInfo {
     float pyrolyzed_mass = 0.0f;
     float molten_reservoir_mass = 0.0f;
     float transferred_mass = 0.0f;
+    // Contact-heat body model: each element stands for area * thermal_depth_m
+    // of the body. A closed mesh gets volume/area (capped at the Biot depth),
+    // an open one a 1 mm sheet. surface_area_m2 * thermal_depth_m * rho * c is
+    // the heat capacity the liquid sees, so "hot iron in water" can tell a
+    // solid block from a hollow shell without guessing from the decay curve.
+    float thermal_depth_m = 0.0f;
+    float surface_area_m2 = 0.0f;
+    // Surface water held now (host copy), kg, and the wettest element's
+    // saturation water / water_capacity_kg_m2 (2026-10-18).
+    double surface_water_kg = 0.0;
+    float max_water_saturation = 0.0f;
     // ★ Read the header comment on MaterialMassBudgetSummary before treating
     // mass_conservation_error as a pass/fail gate. It is now measured on the RAW
     // field, so it can be non-zero — that is the whole point. It used to be
@@ -5136,6 +5159,24 @@ struct MaterialFieldInfo {
 
 // Read-only Phase-0 field-contract view used by scripts and diagnostics.
 Result listMaterialFields(std::vector<MaterialFieldInfo>& out_fields);
+
+// The host surface-water budget of the last frame (2026-10-18): water is mass,
+// taken from liquid parcels (absorbed) and released as vapour into a gas
+// inventory or the atmosphere (vented), its latent heat paid by the surface.
+// stale = a wet surface waited for a fresh host copy (the budget did not run).
+struct SurfaceWaterBudgetInfo {
+    bool ran = false;
+    bool stale = false;
+    double surface_water_kg = 0.0;
+    double absorbed_kg = 0.0;
+    double evaporated_kg = 0.0;
+    double evaporation_latent_j = 0.0;
+    double vapour_vented_kg = 0.0;
+    float mean_kg_m2 = 0.0f;
+    float max_kg_m2 = 0.0f;
+    uint32_t wet_elements = 0;
+};
+Result getSurfaceWaterBudget(SurfaceWaterBudgetInfo& out);
 
 struct MoltenMassTransferInfo {
     uint64_t queued = 0, completed = 0;

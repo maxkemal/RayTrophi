@@ -1,4 +1,7 @@
 // Bounded one-way fuel combustion for gas domains.
+// CPU reference: GridFluid::burnFuel (GridFluidSolver.cpp). Both burn against
+// the AIR temperature (the field holds the virtual temperature Tv, see
+// GasSaturation.h) and the oxygen the cell's condensable vapour leaves.
 #version 450
 layout(local_size_x = 256) in;
 
@@ -11,12 +14,52 @@ layout(push_constant) uniform PC {
     float smoke_generation;
     float flame_decay;
     float max_temperature;
+    // Air (GridFluid::CombustionAir). vapour_molar == 0: dry air everywhere,
+    // and the vapour binding is a placeholder that is never read.
+    float vapour_molar;       // kg/mol
+    float cell_volume;        // m^3
+    float ambient_kelvin;     // K at gas_ambient
+    float gas_ambient;        // normalized field value of the ambient
+    float kelvin_per_unit;
+    float oxygen;             // availability 0..1
+    float air_oxygen;         // kAirOxygenFraction
+    float limiting_oxygen;    // kSteamLimitingOxygenFraction
 } pc;
 
 layout(set=0,binding=0) buffer Fuel        { float fuel[]; };
 layout(set=0,binding=1) buffer Temperature { float temperature[]; };
 layout(set=0,binding=2) buffer Density     { float density[]; };
 layout(set=0,binding=3) buffer Flame       { float flame[]; };
+layout(set=0,binding=4) readonly buffer Vapour { float vapour[]; };
+// [0] burning cells, [1] inerted cells, [2] steam-masked cells,
+// [3] min oxygen fraction as float bits (positive floats order as uints),
+// [4] burned fuel in 1e-4 units (GridFluid::kCombustionFuelQuantum).
+layout(set=0,binding=5) buffer Counters    { uint counters[]; };
+
+const float kGasConstant = 8.314462;
+const float kAtmosphere = 101325.0;
+const float kAirMolar = 0.028965;
+
+// Same closed forms as virtualKelvinFromAir / airKelvinFromVirtual.
+float virtualFromAir(float air, float m) {
+    float t = max(air, 1.0);
+    if (!(m > 0.0)) return t;
+    float k = m * kGasConstant / (pc.vapour_molar * kAtmosphere * pc.cell_volume);
+    float x = min(k * t, 1.0);
+    return t * kAirMolar / (x * pc.vapour_molar + (1.0 - x) * kAirMolar);
+}
+float airFromVirtual(float tv_in, float m) {
+    float tv = max(tv_in, 1.0);
+    if (!(m > 0.0)) return tv;
+    float k = m * kGasConstant / (pc.vapour_molar * kAtmosphere * pc.cell_volume);
+    float denominator = kAirMolar + tv * k * (kAirMolar - pc.vapour_molar);
+    float t = tv * pc.vapour_molar / kAirMolar;
+    if (denominator > 1.0e-12) {
+        float mixed = tv * kAirMolar / denominator;
+        if (k * mixed < 1.0) t = mixed;
+    }
+    return max(t, min(tv, pc.ambient_kelvin));
+}
 
 void main(){
     uint id=gl_GlobalInvocationID.x;
@@ -24,11 +67,42 @@ void main(){
     if(id>=count) return;
     flame[id]*=pc.flame_decay;
     float f=fuel[id],t=temperature[id];
-    if(f<=1e-5||t<pc.ignition_temperature) return;
-    float burned=min(f,max(0.0,pc.burn_rate)*f*pc.dt);
+    if(f<=1e-5) return;
+
+    float air_t=t, air_k=0.0, m=0.0, x_vapour=0.0;
+    bool humid = pc.vapour_molar > 0.0 && pc.cell_volume > 0.0 && pc.kelvin_per_unit > 0.0;
+    if (humid) m = max(vapour[id], 0.0);
+    if (m > 0.0) {
+        float tv_k = max(1.0, pc.ambient_kelvin + (t - pc.gas_ambient) * pc.kelvin_per_unit);
+        air_k = airFromVirtual(tv_k, m);
+        air_t = pc.gas_ambient + (air_k - pc.ambient_kelvin) / pc.kelvin_per_unit;
+        x_vapour = min(1.0, m * kGasConstant * air_k /
+                            (pc.vapour_molar * kAtmosphere * pc.cell_volume));
+    }
+    if (air_t < pc.ignition_temperature) {
+        if (t >= pc.ignition_temperature) atomicAdd(counters[2], 1u);
+        return;
+    }
+    float o2 = pc.air_oxygen * clamp(pc.oxygen, 0.0, 1.0) * (1.0 - x_vapour);
+    atomicMin(counters[3], floatBitsToUint(max(o2, 0.0)));
+    float supply = clamp((o2 - pc.limiting_oxygen) /
+                         max(pc.air_oxygen - pc.limiting_oxygen, 1e-6), 0.0, 1.0);
+    // GLSL division is not correctly rounded: dry air gives 0.99999994, not 1.
+    // Counted as throttled only with a real oxygen deficit.
+    if (supply < 0.9999) atomicAdd(counters[1], 1u);
+
+    float burned=min(f,max(0.0,pc.burn_rate)*f*pc.dt*supply);
     if(burned<=0.0) return;
+    atomicAdd(counters[0], 1u);
+    atomicAdd(counters[4], uint(burned * 1.0e4 + 0.5));
     fuel[id]=f-burned;
-    temperature[id]=min(t+pc.heat_release*burned,pc.max_temperature);
+    float heated = t + pc.heat_release*burned;
+    if (m > 0.0) {
+        // The heat warms the AIR; the field takes its Tv difference.
+        float after_k = air_k + pc.heat_release*burned*pc.kelvin_per_unit;
+        heated = t + (virtualFromAir(after_k, m) - virtualFromAir(air_k, m)) / pc.kelvin_per_unit;
+    }
+    temperature[id]=min(heated,pc.max_temperature);
     density[id]+=pc.smoke_generation*burned;
     float inv_dt=pc.dt>1e-5 ? 1.0/pc.dt : 0.0;
     flame[id]=min(1.0,flame[id]+burned*inv_dt);

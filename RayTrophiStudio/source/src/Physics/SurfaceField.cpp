@@ -26,7 +26,7 @@ const char* fieldFormatName(FieldFormat v) {
 const char* fieldSemanticName(FieldSemantic v) {
     switch (v) {
         case FieldSemantic::Temperature: return "temperature";
-        case FieldSemantic::Moisture: return "moisture";
+        case FieldSemantic::SurfaceWater: return "surface_water_kg_m2";
         case FieldSemantic::FuelRemaining: return "fuel_remaining";
         case FieldSemantic::Char: return "char";
         case FieldSemantic::Melt: return "melt";

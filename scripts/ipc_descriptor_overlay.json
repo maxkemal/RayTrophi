@@ -1815,10 +1815,16 @@
     "summary": "Delete an emitter",
     "tags": "simulation|emitter|remove"
   },
+  "msf.water_budget": {
+    "summary": "Report the last frame's surface-water budget: kg absorbed from liquid, evaporated, vented to the atmosphere, and the latent heat paid",
+    "notes": "Water on surfaces is mass (kg/m2). stale=true means a wet surface waited for a fresh host copy and the budget did not run that frame.",
+    "tags": "substance|thermal|water|evaporation|measure|verify|ledger",
+    "related": "msf.fields"
+  },
   "msf.fields": {
-    "summary": "Report the live material state fields (temperature, moisture, char, mass) per object",
+    "summary": "Report the live material state fields (temperature, surface water kg/m2, char, mass) per object",
     "notes": "This is the measurement side of burning and melting: mass loss, integrity and mass-conservation error are reported here.",
-    "tags": "substance|thermal|burn|melt|measure|verify|temperature|moisture",
+    "tags": "substance|thermal|burn|melt|measure|verify|temperature|surface_water",
     "related": "substance.list"
   },
   "matter.exchanges": {

@@ -11,6 +11,7 @@
 
 #include "SimulationWorld.h" // SimulationForceFieldSnapshot, SimulationSystemKind
 #include "CurlNoise.h"       // Physics::Noise::curlFBM_animated
+#include "Fluid/GasSaturation.h"  // Tv <-> air temperature (CombustionAir)
 
 #include <algorithm>
 #include <chrono>
@@ -881,35 +882,7 @@ void clampVelocity(FluidGrid& grid, float max_velocity) {
 // fire moves only because advection transports hot temperature into fuel.
 // ─────────────────────────────────────────────────────────────────────────
 void processCombustion(FluidGrid& grid, const SolverParams& params, float dt) {
-    if (!params.fire_enabled || !params.channel_fuel || grid.fuel.empty() || grid.temperature.empty()) {
-        return;
-    }
-    const std::size_t n = grid.getCellCount();
-    const float flame_decay = std::exp(-std::max(0.0f, params.flame_dissipation) * dt);
-    const float inv_dt = dt > 1e-5f ? 1.0f / dt : 0.0f;
-
-    for (std::size_t c = 0; c < n; ++c) {
-        // Flame field always relaxes; re-lit below where fuel actually burns.
-        grid.interaction[c] *= flame_decay;
-
-        const float f = grid.fuel[c];
-        const float t = grid.temperature[c];
-        if (f <= 1e-5f || t < params.ignition_temperature) {
-            continue;
-        }
-
-        // Consume a bounded fraction of the available fuel this step.
-        const float burned = std::min(f, std::max(0.0f, params.burn_rate) * f * dt);
-        if (burned <= 0.0f) {
-            continue;
-        }
-        grid.fuel[c] = f - burned;
-        grid.temperature[c] = std::min(t + params.heat_release * burned, params.max_temperature);
-        if (!grid.density.empty()) {
-            grid.density[c] += params.smoke_generation * burned;
-        }
-        grid.interaction[c] = std::min(1.0f, grid.interaction[c] + burned * inv_dt);
-    }
+    burnFuel(grid, params, dt);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1791,6 +1764,89 @@ void advectPassiveScalarField(FluidGrid& grid,
     }
     advectScalar(grid, params, field, background, dt,
                  min_i, min_j, min_k, max_i, max_j, max_k);
+}
+
+void burnFuel(FluidGrid& grid, const SolverParams& params, float dt) {
+    CombustionStats stats;
+    if (!params.fire_enabled || !params.channel_fuel || grid.fuel.empty() ||
+        grid.temperature.empty()) {
+        if (params.combustion_stats) *params.combustion_stats = stats;
+        return;
+    }
+    const std::size_t n = grid.getCellCount();
+    const float flame_decay = std::exp(-std::max(0.0f, params.flame_dissipation) * dt);
+    const float inv_dt = dt > 1e-5f ? 1.0f / dt : 0.0f;
+    const CombustionAir& air = params.combustion_air;
+    const bool humid = air.vapour_kg && air.vapour_cells == n &&
+        air.vapour_molar > 0.0f && air.cell_volume > 0.0f && air.kelvin_per_unit > 0.0f;
+    constexpr float kGasConstant = 8.314462f, kAtmosphere = 101325.0f;
+    const float oxygen = std::clamp(air.oxygen, 0.0f, 1.0f);
+    const float oxygen_span = kAirOxygenFraction - kSteamLimitingOxygenFraction;
+    const bool has_flame = grid.interaction.size() == n;
+    int64_t burning = 0, inerted = 0, masked = 0;
+    double burned_total = 0.0;
+    float min_oxygen = 2.0f;
+    // Serial: the CPU reference. MSVC OpenMP 2.0 has no reduction(min:).
+    for (std::ptrdiff_t ci = 0; ci < static_cast<std::ptrdiff_t>(n); ++ci) {
+        const std::size_t c = static_cast<std::size_t>(ci);
+        // Flame field always relaxes; re-lit below where fuel actually burns.
+        if (has_flame) grid.interaction[c] *= flame_decay;
+        const float f = grid.fuel[c];
+        const float t = grid.temperature[c];
+        if (f <= 1e-5f) continue;
+        // Air temperature and vapour mole fraction of this cell.
+        float air_t = t, air_k = 0.0f, vapour = 0.0f, x_vapour = 0.0f;
+        if (humid) vapour = std::max(0.0f, air.vapour_kg[c]);
+        if (vapour > 0.0f) {
+            const float tv_k = std::max(1.0f,
+                air.ambient_kelvin + (t - air.gas_ambient) * air.kelvin_per_unit);
+            air_k = Fluid::airKelvinFromVirtual(tv_k, vapour, air.cell_volume,
+                                                air.vapour_molar, air.ambient_kelvin);
+            air_t = air.gas_ambient + (air_k - air.ambient_kelvin) / air.kelvin_per_unit;
+            x_vapour = std::min(1.0f, vapour * kGasConstant * air_k /
+                                      (air.vapour_molar * kAtmosphere * air.cell_volume));
+        }
+        if (air_t < params.ignition_temperature) {
+            if (t >= params.ignition_temperature) ++masked;
+            continue;
+        }
+        const float o2 = kAirOxygenFraction * oxygen * (1.0f - x_vapour);
+        min_oxygen = std::min(min_oxygen, o2);
+        const float supply = std::clamp(
+            (o2 - kSteamLimitingOxygenFraction) / oxygen_span, 0.0f, 1.0f);
+        // Same tolerance as the shader, whose division is not correctly rounded.
+        if (supply < 0.9999f) ++inerted;
+        // Consume a bounded fraction of the available fuel this step.
+        const float burned = std::min(f, std::max(0.0f, params.burn_rate) * f * dt * supply);
+        if (burned <= 0.0f) continue;
+        ++burning;
+        burned_total += burned;
+        grid.fuel[c] = f - burned;
+        float heated = t + params.heat_release * burned;
+        if (vapour > 0.0f) {
+            // The heat warms the AIR; the field takes its Tv difference.
+            const float after_k = air_k + params.heat_release * burned * air.kelvin_per_unit;
+            heated = t + (Fluid::virtualKelvinFromAir(after_k, vapour, air.cell_volume,
+                                                      air.vapour_molar) -
+                          Fluid::virtualKelvinFromAir(air_k, vapour, air.cell_volume,
+                                                      air.vapour_molar)) /
+                         air.kelvin_per_unit;
+        }
+        grid.temperature[c] = std::min(heated, params.max_temperature);
+        if (!grid.density.empty()) {
+            grid.density[c] += params.smoke_generation * burned;
+        }
+        if (has_flame) {
+            grid.interaction[c] = std::min(1.0f, grid.interaction[c] + burned * inv_dt);
+        }
+    }
+    stats.measured = true;
+    stats.burning_cells = static_cast<uint64_t>(burning);
+    stats.inerted_cells = static_cast<uint64_t>(inerted);
+    stats.steam_masked_cells = static_cast<uint64_t>(masked);
+    stats.min_oxygen_fraction = min_oxygen <= 1.0f ? min_oxygen : -1.0f;
+    stats.burned_fuel = burned_total;
+    if (params.combustion_stats) *params.combustion_stats = stats;
 }
 
 } // namespace GridFluid

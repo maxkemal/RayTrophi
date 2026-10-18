@@ -59,7 +59,9 @@ def main():
             assert row["kind"] in {
                 "melting", "freezing", "vaporization", "combustion",
                 "pyrolysis", "mist_to_gas", "condensation",
-            }
+                # C5 pores and the 2026-10-11 rain microphysics.
+                "absorption", "drainage", "autoconversion", "precipitation",
+            }, row["kind"]
             assert row["source_mass_kg"] >= 0.0
             assert row["target_mass_kg"] >= 0.0
             assert len(row["source_momentum_kg_m_s"]) == 3

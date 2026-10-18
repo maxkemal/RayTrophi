@@ -1081,7 +1081,6 @@ private:
             { "sim_fluid_granular_settle",          "sim_fluid_granular_settle.spv",        3, 32 },
             { "sim_fluid_advect_tail",              "sim_fluid_advect_tail.spv",           9, 80 },
             { "sim_fluid_occupancy",                "sim_fluid_occupancy.spv",             4, 36 },
-            { "sim_fluid_surface_combustion",       "sim_fluid_surface_combustion.spv",    9, 96 },
             // GridProjectionGpuConstants = 13 fields x 4 = 52. The shaders may
             // declare only the leading fields; the pipeline range must cover the
             // full struct the host pushes (old 36 made vkCmdPushConstants exceed
@@ -1240,7 +1239,8 @@ private:
             // ParticleBallisticGpuConstants = 40 B, ParticleSpawnGpuConstants = 16 B.
             { "sim_particle_ballistic",              "sim_particle_ballistic.spv",           10, 56 },
             { "sim_particle_spawn",                  "sim_particle_spawn.spv",               12, 16 },
-            { "sim_gas_combustion",                 "sim_gas_combustion.spv",               4, 40 },
+            // GasCombustionGpuConstants = 18 x 4 = 72 (FG1 air inputs).
+            { "sim_gas_combustion",                 "sim_gas_combustion.spv",               6, 72 },
             // VelocityMaxAbsGpuConstants = 4 uints = 16
             { "sim_grid_velocity_max_abs",          "sim_grid_velocity_max_abs.spv",        4, 16 },
             { "sim_gas_scalar_dissipate",           "sim_gas_scalar_dissipate.spv",         3, 36 },
@@ -1266,11 +1266,8 @@ private:
             // centers + state + thermal sources + domain ambient zones (4 SSBO,
             // 48B). This is what gives an object outside every domain a defined
             // temperature.
-            { "sim_msf_ambient",                    "sim_msf_ambient.spv",                  5, 48 },
-            // Liquid contact -> moisture (Phase 5). Runs per FLUID domain, reads
-            // that domain's density splat as liquid occupancy: centers + state +
-            // occupancy (3 SSBO, 48B). Pure source; drying is the ambient pass's.
-            { "sim_msf_wet",                        "sim_msf_wet.spv",                      3, 48 },
+            // + queued heat + queued surface water (2026-10-18: 6 SSBO).
+            { "sim_msf_ambient",                    "sim_msf_ambient.spv",                  6, 48 },
             // Block-max majorant for the live dense gas RT path. 2 SSBO
             // (density in, per-block max out) + 32B push constant.
             { "sim_gas_majorant",                   "sim_gas_majorant.spv",                 5, 40 },

@@ -1,0 +1,84 @@
+{
+  "samples": [
+    {
+      "step": 40,
+      "absorbed_kg": 0.25263910214801955,
+      "evaporated_kg": 0.0005213861994084745,
+      "vented_kg": 0.0,
+      "held_kg": 0.24370814413724326,
+      "max_saturation": 0.30351489782333374,
+      "max_kelvin": 297.108154296875,
+      "budget_ran": true,
+      "stale": false
+    },
+    {
+      "step": 80,
+      "absorbed_kg": 0.5950368707015599,
+      "evaporated_kg": 0.0019409329946144006,
+      "vented_kg": 0.0,
+      "held_kg": 0.5862479534599105,
+      "max_saturation": 0.5197170376777649,
+      "max_kelvin": 518.5171508789062,
+      "budget_ran": true,
+      "stale": false
+    },
+    {
+      "step": 120,
+      "absorbed_kg": 0.8311168864554225,
+      "evaporated_kg": 0.010402113813507283,
+      "vented_kg": 0.0,
+      "held_kg": 0.8151763819536709,
+      "max_saturation": 0.6687846779823303,
+      "max_kelvin": 698.617431640625,
+      "budget_ran": true,
+      "stale": false
+    },
+    {
+      "step": 160,
+      "absorbed_kg": 1.0032187550416423,
+      "evaporated_kg": 0.01587533107301265,
+      "vented_kg": 0.0,
+      "held_kg": 0.9840381697280478,
+      "max_saturation": 0.7715641856193542,
+      "max_kelvin": 603.5567016601562,
+      "budget_ran": true,
+      "stale": false
+    },
+    {
+      "step": 200,
+      "absorbed_kg": 1.1239449489527447,
+      "evaporated_kg": 0.019596111895216036,
+      "vented_kg": 0.0,
+      "held_kg": 1.1018541734346536,
+      "max_saturation": 0.8424288630485535,
+      "max_kelvin": 619.396240234375,
+      "budget_ran": true,
+      "stale": false
+    },
+    {
+      "step": 240,
+      "absorbed_kg": 1.206409215518589,
+      "evaporated_kg": 0.023093426305181367,
+      "vented_kg": 0.0,
+      "held_kg": 1.1814819399469123,
+      "max_saturation": 0.8912889957427979,
+      "max_kelvin": 635.8489990234375,
+      "budget_ran": true,
+      "stale": false
+    }
+  ],
+  "absorbed_kg": 1.206409215518589,
+  "evaporated_kg": 0.023093426305181367,
+  "vented_kg": 0.0,
+  "books_kg": 1.1833157892134076,
+  "tolerance_kg": 0.01395935784653903,
+  "stale_frames": 0,
+  "verdicts": {
+    "surface_soaks_from_liquid": true,
+    "surface_holds_water": true,
+    "hot_surface_dries_into_domain": true,
+    "latent_booked": true,
+    "water_mass_closes": true,
+    "budget_not_starved": true
+  }
+}

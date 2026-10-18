@@ -385,7 +385,9 @@ birbirini görmez.
   içinden geçiyor ama "çalışıyor" görünüyor).
 
 **Bilinen sınırlar (2026-10-07, aynı konunun yanı):**
-- **Gaz ↔ grain bağlantısı yok.** Gaz şeridi aynı domain'de koşar ama tane yalnız sıvı alanını
+- ◐ 2026-10-18: gaz→tane sürüklemesi + tepki YAZILDI, derlenmedi
+  (`MatterGrainGasCoupling.cpp`, BIRLESIK "Parti 2026-10-18b"); kapı: hareketli gaz.
+  Eski metin: **Gaz ↔ grain bağlantısı yok.** Gaz şeridi aynı domain'de koşar ama tane yalnız sıvı alanını
   örnekler (`buildMatterGrainLiquidField`); duman/sıcak hava/rüzgâr kumu sürüklemez, tane gazı
   itmez. Yapılacaksa: gaz hız alanından aynı implicit sürükleme (ρ_gaz, μ_gaz), tepki gaz
   momentumuna; çift sayım dersi burada da geçerli.
