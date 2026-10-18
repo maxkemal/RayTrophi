@@ -8,6 +8,7 @@
 #include "UI/AudioClipEnvelopeEditor.h"
 #include "UI/AudioWorkspaceUI.h"
 #include "UI/AudioPropertyLayout.h"
+#include "UI/AudioEditorChrome.h"
 #include "Audio/AudioService.h"
 #include "Audio/AudioAuthoring.h"
 #include "Api/RtApi.h"
@@ -354,15 +355,29 @@ bool isSoundDesignerOpen(UIContext& ctx) {
     return ctx.scene.audio->invoke("workspace_get", json::object()).value("designer_open", false);
 }
 
-void openSoundDesigner(UIContext& ctx, const std::string& assetId) {
+void openSoundDesigner(UIContext& ctx, const std::string& assetId, bool equalizer) {
     sync(ctx);
     if (!assetId.empty()) {
         const auto scene = ctx.scene.audio->snapshot();
         for (const auto& asset : scene.at("assets")) {
             if (asset.at("id").get<std::string>() == assetId) {
+                if (state.renderJob != 0) {
+                    call(ctx, "design_job_cancel");
+                    state.renderJob = 0;
+                }
+                state.previewWhenReady = false;
+                state.saveWhenReady = false;
+                state.savedPath.clear();
+                state.error.clear();
                 state.recipe = {{"mode", "asset"}, {"asset_id", assetId},
                     {"source_in_seconds", 0},
-                    {"source_out_seconds", std::min(10.0, asset.at("duration").get<double>())}};
+                    {"source_out_seconds", std::min(30.0, asset.at("duration").get<double>())}};
+                if (equalizer) {
+                    const auto catalogue = ctx.scene.audio->invoke("design_catalogue", json::object());
+                    state.recipe["effects"] = json::array({{
+                        {"type", "eq"}, {"enabled", true}, {"mix", 1}, {"output_db", 0},
+                        {"bands", catalogue.at("eq_presets")[0].at("bands")}}});
+                }
                 std::snprintf(state.name, sizeof(state.name), "%s edited",
                                asset.at("name").get<std::string>().c_str());
                 state.dirty = true;
@@ -374,7 +389,9 @@ void openSoundDesigner(UIContext& ctx, const std::string& assetId) {
     }
     finishAudioTimelineGesture(ctx);
     workspaceCall(ctx, "workspace_update", {{"designer_open", true},
-        {"designer_page", state.recipe.value("mode", "synth") == "asset" ? "edit" : "generate"}});
+        {"designer_page", equalizer ? "effects" :
+            state.recipe.value("mode", "synth") == "asset" ? "edit" : "generate"},
+        {"designer_edit_view", "source"}, {"designer_effect", 0}});
     rtapi::setBottomEditor("audio");
     if (ctx.scene_ui_ptr) {
         ctx.scene_ui_ptr->tab_to_focus = "Audio";
@@ -387,6 +404,42 @@ void reuseSoundRecipe(UIContext& ctx, const std::string& assetId) {
     if (result.contains("id")) {
         followRecipeJob(result);
         openSoundDesigner(ctx);
+    }
+}
+
+static void drawSaveAssetControls(UIContext& ctx) {
+    ImGui::Separator();
+    ImGui::InputText(property("Sound name").c_str(), state.name, sizeof(state.name));
+    const auto destination = call(ctx, "design_destination", state.folder.empty() ?
+        json::object() : json{{"folder", state.folder}});
+    const auto folder = destination.value("folder", std::string());
+    ImGui::TextWrapped("Folder: %s", folder.c_str());
+    if (ImGui::Button("Choose folder...")) {
+        const auto folder = SceneUI::selectFolderDialogW(L"Save designed sounds in");
+        if (!folder.empty()) {
+            state.folder = folder;
+        }
+    }
+    if (ImGui::Button("Use project folder")) {
+        state.folder.clear();
+    }
+    ImGui::Checkbox("Insert clip at playhead", &state.insertClip);
+    ImGui::BeginDisabled(rtapi::renderOutputPending() || state.name[0] == 0 || state.renderJob != 0);
+    if (ImGui::Button("Save as new asset", ImVec2(-1, 0))) {
+        if (state.dirty) {
+            requestRender(ctx, false);
+            state.saveWhenReady = state.renderJob != 0;
+        } else {
+            saveAsset(ctx);
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::TextWrapped("Names are numbered automatically when a file already exists.");
+    if (!state.savedPath.empty()) {
+        ImGui::TextWrapped("Saved: %s", state.savedPath.c_str());
+    }
+    if (!state.error.empty()) {
+        ImGui::TextWrapped("%s", state.error.c_str());
     }
 }
 
@@ -554,39 +607,7 @@ static void drawSoundDesignControls(UIContext& ctx, bool primary = false) {
     if (!primary) {
         return;
     }
-    ImGui::Separator();
-    ImGui::InputText(property("Sound name").c_str(), state.name, sizeof(state.name));
-    const auto destination = call(ctx, "design_destination", state.folder.empty() ?
-        json::object() : json{{"folder", state.folder}});
-    const auto folder = destination.value("folder", std::string());
-    ImGui::TextWrapped("Folder: %s", folder.c_str());
-    if (ImGui::Button("Choose folder...")) {
-        const auto folder = SceneUI::selectFolderDialogW(L"Save designed sounds in");
-        if (!folder.empty()) {
-            state.folder = folder;
-        }
-    }
-    if (ImGui::Button("Use project folder")) {
-        state.folder.clear();
-    }
-    ImGui::Checkbox("Insert clip at playhead", &state.insertClip);
-    ImGui::BeginDisabled(rtapi::renderOutputPending() || state.name[0] == 0 || state.renderJob != 0);
-    if (ImGui::Button("Save asset", ImVec2(-1, 0))) {
-        if (state.dirty) {
-            requestRender(ctx, false);
-            state.saveWhenReady = state.renderJob != 0;
-        } else {
-            saveAsset(ctx);
-        }
-    }
-    ImGui::EndDisabled();
-    ImGui::TextWrapped("Names are numbered automatically when a file already exists.");
-    if (!state.savedPath.empty()) {
-        ImGui::TextWrapped("Saved: %s", state.savedPath.c_str());
-    }
-    if (!state.error.empty()) {
-        ImGui::TextWrapped("%s", state.error.c_str());
-    }
+    drawSaveAssetControls(ctx);
 }
 
 void drawSoundDesignInspector(UIContext& ctx) {
@@ -696,64 +717,64 @@ void drawSoundDesigner(UIContext& ctx) {
         }
         ImGui::EndCombo();
     }
-    nextButton("View");
-    bool toolsOpen = view.value("designer_tools_open", true);
-    bool propertiesOpen = view.value("designer_properties_open", false);
-    if (ImGui::SmallButton("View")) {
-        ImGui::OpenPopup("DesignerViewMenu");
-    }
-    if (ImGui::BeginPopup("DesignerViewMenu")) {
-        if (ImGui::MenuItem("Tools", nullptr, &toolsOpen)) {
-            workspaceCall(ctx, "workspace_update", {{"designer_tools_open", toolsOpen}});
-        }
-        if (ImGui::MenuItem("Properties", nullptr, &propertiesOpen)) {
-            workspaceCall(ctx, "workspace_update", {{"designer_properties_open", propertiesOpen}});
-        }
-        if (page == "edit") {
-            ImGui::Separator();
+    const bool toolsOpen = view.value("designer_tools_open", true);
+    const bool propertiesOpen = view.value("designer_properties_open", true);
+    if (page == "edit") {
+        nextButton("Edit view");
+        ImGui::SetNextItemWidth(100);
+        const auto editView = view.value("designer_edit_view", std::string("source"));
+        if (ImGui::BeginCombo("##DesignerEditView", editView.c_str())) {
             for (const char* mode : {"source", "arrange"}) {
-                if (ImGui::MenuItem(mode, nullptr,
-                    view.value("designer_edit_view", std::string("source")) == mode)) {
+                if (ImGui::Selectable(mode, editView == mode)) {
                     finishAudioTimelineGesture(ctx);
                     workspaceCall(ctx, "workspace_update", {{"designer_edit_view", mode}});
                 }
             }
+            ImGui::EndCombo();
         }
+    }
+    nextButton("Save as asset...");
+    if (ImGui::SmallButton("Save as asset...")) {
+        ImGui::OpenPopup("Save designed asset");
+    }
+    if (ImGui::BeginPopup("Save designed asset")) {
+        ImGui::PushItemWidth(240);
+        drawSaveAssetControls(ctx);
+        ImGui::PopItemWidth();
         ImGui::EndPopup();
+    }
+    nextButton("Panel zoom");
+    float panelZoom = view.value("designer_panel_zoom", 1.0f);
+    ImGui::SetNextItemWidth(110);
+    if (ImGui::SliderFloat("##DesignerPanelZoom", &panelZoom, 0.5f, 1.5f, "Panel %.2fx")) {
+        workspaceCall(ctx, "workspace_update", {{"designer_panel_zoom", panelZoom}});
+        view["designer_panel_zoom"] = panelZoom;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Whole panel scale / Alt+wheel: zoom / Middle drag: pan");
     }
     nextButton("Fit");
     if (ImGui::SmallButton("Fit")) {
         state.fitCanvasRequested = true;
         workspaceCall(ctx, "workspace_update", {{"designer_canvas_zoom", 1},
+            {"designer_panel_zoom", 1}, {"designer_panel_pan_x", 0}, {"designer_panel_pan_y", 0},
             {"designer_canvas_pan_x", 0}, {"designer_canvas_pan_y", 0},
             {"designer_zoom", 1}, {"designer_pan", 0}});
         view = ctx.scene.audio->invoke("workspace_get", json::object());
+        panelZoom = 1;
     }
     ImGui::Separator();
     const bool wide = ImGui::GetContentRegionAvail().x >= 720;
     const auto before = state.recipe;
     bool completed = false;
-    const int columns = 1 + (wide && toolsOpen ? 1 : 0) + (wide && propertiesOpen ? 1 : 0);
-    const bool table = ImGui::BeginTable("DesignerStudioWorkspace", columns,
-        ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp);
-    if (!table) {
-        return;
-    }
+    static float toolsWidth = 220;
+    static float propertiesWidth = 250;
+    const float workspaceWidth = ImGui::GetContentRegionAvail().x;
+    const float maxSideWidth = std::max(160.0f, (workspaceWidth - 300) * 0.5f);
+    const float visibleToolsWidth = std::min(toolsWidth, maxSideWidth);
+    const float visiblePropertiesWidth = std::min(propertiesWidth, maxSideWidth);
     if (wide && toolsOpen) {
-        ImGui::TableSetupColumn("Tools", ImGuiTableColumnFlags_WidthFixed, 240);
-    }
-    ImGui::TableSetupColumn("Sound canvas", ImGuiTableColumnFlags_WidthStretch);
-    if (wide && propertiesOpen) {
-        ImGui::TableSetupColumn("Properties", ImGuiTableColumnFlags_WidthFixed, 280);
-    }
-    ImGui::TableNextRow();
-    int canvasColumn = 0;
-    if (wide && toolsOpen) {
-        ImGui::TableSetColumnIndex(0);
-        ImGui::BeginChild("DesignerTools", ImVec2(0, 0), false);
-        if (ImGui::SmallButton("x##CloseTools")) {
-            workspaceCall(ctx, "workspace_update", {{"designer_tools_open", false}});
-        }
+        ImGui::BeginChild("DesignerTools", ImVec2(visibleToolsWidth, 0), false);
         if (page == "generate" || page == "effects") {
             completed |= drawDesignModules(ctx, state.recipe, page == "effects", 1);
         } else if (page == "edit") {
@@ -804,58 +825,97 @@ void drawSoundDesigner(UIContext& ctx) {
                 }
             }
         } else {
-            ImGui::TextWrapped("Wheel zooms; middle drag pans; Fit resets the canvas.");
+            ImGui::TextWrapped("Wheel scrolls; Ctrl+wheel zooms; middle drag pans; Fit resets the canvas.");
         }
         ImGui::EndChild();
-        canvasColumn = 1;
     }
-    if (wide && propertiesOpen) {
-        ImGui::TableSetColumnIndex(canvasColumn + 1);
-        ImGui::BeginChild("DesignerProperties", ImVec2(0, 0), false);
-        if (ImGui::SmallButton("x##CloseProperties")) {
-            workspaceCall(ctx, "workspace_update", {{"designer_properties_open", false}});
+    if (wide) {
+        if (toolsOpen) {
+            audioPanelSplitter("##DesignerToolsSplitter", toolsWidth, true, 160, maxSideWidth);
+            ImGui::SameLine(0, 0);
         }
-        if (page == "generate" || page == "effects") {
-            completed |= drawDesignModules(ctx, state.recipe, page == "effects", 2);
+        if (audioPanelToggleStrip("##DesignerToolsToggle", toolsOpen, true, "tools")) {
+            workspaceCall(ctx, "workspace_update", {{"designer_tools_open", !toolsOpen}});
         }
-        if (arrange) {
-            if (!drawSelectedAudioTrackProperties(ctx)) {
-                drawSelectedAudioClipProperties(ctx);
+        ImGui::SameLine(0, 0);
+    }
+    const float rightReserve = wide ? 13 +
+        (propertiesOpen ? visiblePropertiesWidth + 6 : 0) : 0;
+    const float canvasWidth = wide ?
+        std::max(200.0f, ImGui::GetContentRegionAvail().x - rightReserve) : 0;
+    const auto canvasPosition = ImGui::GetCursorScreenPos();
+    if (wide) {
+        ImGui::SetCursorScreenPos(ImVec2(canvasPosition.x + canvasWidth, canvasPosition.y));
+        if (audioPanelToggleStrip("##DesignerPropertiesToggle", propertiesOpen, false,
+                "properties")) {
+            workspaceCall(ctx, "workspace_update", {{"designer_properties_open", !propertiesOpen}});
+        }
+        if (propertiesOpen) {
+            audioPanelSplitter("##DesignerPropertiesSplitter", propertiesWidth, false,
+                160, maxSideWidth);
+            ImGui::SameLine(0, 0);
+            ImGui::BeginChild("DesignerProperties", ImVec2(visiblePropertiesWidth, 0), false);
+            if (page == "generate" || page == "effects") {
+                completed |= drawDesignModules(ctx, state.recipe, page == "effects", 2);
             }
-        } else {
-            drawSoundDesignControls(ctx);
+            // Mark shared edits before the controls poll any outstanding render.
+            if (before != state.recipe) {
+                state.dirty = true;
+            }
+            if (arrange) {
+                if (!drawSelectedAudioTrackProperties(ctx)) {
+                    drawSelectedAudioClipProperties(ctx);
+                }
+            } else {
+                drawSoundDesignControls(ctx);
+            }
+            ImGui::EndChild();
         }
-        ImGui::EndChild();
     }
-    ImGui::TableSetColumnIndex(canvasColumn);
+    ImGui::SetCursorScreenPos(canvasPosition);
     status = currentReport(ctx);
-    const auto viewportSize = ImGui::GetContentRegionAvail();
+    const auto viewportSize = ImVec2(wide ? canvasWidth : ImGui::GetContentRegionAvail().x,
+        ImGui::GetContentRegionAvail().y);
     float canvasZoom = view.value("designer_canvas_zoom", 1.0f);
     ImGui::SetNextWindowContentSize(ImVec2(
-        std::max(1.0f, viewportSize.x - 20) * (arrange ? 1.0f : canvasZoom), 0));
-    ImGui::BeginChild("SoundDesignCanvas", ImVec2(0, 0), false,
-        ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        std::max(1.0f, viewportSize.x - 20) *
+            (arrange ? 1.0f : panelZoom * (page == "effects" ? 1.0f : canvasZoom)), 0));
+    ImGui::BeginChild("SoundDesignCanvas", ImVec2(canvasWidth, 0), false,
+        ImGuiWindowFlags_HorizontalScrollbar);
+    designPanelScale = arrange ? 1.0f : panelZoom;
+    ImGui::SetWindowFontScale(designPanelScale);
+    static std::string appliedPanelView;
+    const auto panelViewKey = std::to_string(ctx.scene.audio->generation()) + ":" +
+        std::to_string(panelZoom) + ":" +
+        std::to_string(view.value("designer_panel_pan_x", 0.0f)) + ":" +
+        std::to_string(view.value("designer_panel_pan_y", 0.0f));
+    if (!arrange && appliedPanelView != panelViewKey) {
+        ImGui::SetScrollX(view.value("designer_panel_pan_x", 0.0f) * ImGui::GetScrollMaxX());
+        ImGui::SetScrollY(view.value("designer_panel_pan_y", 0.0f) * ImGui::GetScrollMaxY());
+        appliedPanelView = panelViewKey;
+    }
     const float graphBudget = std::max(60.0f, viewportSize.y -
         (page == "analyze" ? 190.0f : page == "generate" ? 180.0f : 150.0f));
     const float nominalGraphs = page == "generate" ? 455.0f :
         page == "effects" ? 335.0f : page == "analyze" ? 225.0f : 230.0f;
-    designViewScale = std::clamp(graphBudget / nominalGraphs, 0.2f, 1.0f) * canvasZoom;
+    designViewScale = std::clamp(graphBudget / nominalGraphs, 0.2f, 1.0f) *
+        (page == "effects" ? panelZoom : canvasZoom * panelZoom);
     static std::string appliedView;
     const auto viewKey = std::to_string(canvasZoom) + ":" +
         std::to_string(view.value("designer_canvas_pan_x", 0.0f)) + ":" +
         std::to_string(view.value("designer_canvas_pan_y", 0.0f));
-    if (appliedView != viewKey || state.fitCanvasRequested) {
+    if (page != "effects" && (appliedView != viewKey || state.fitCanvasRequested)) {
         ImGui::SetScrollX(view.value("designer_canvas_pan_x", 0.0f) * ImGui::GetScrollMaxX());
         ImGui::SetScrollY(view.value("designer_canvas_pan_y", 0.0f) * ImGui::GetScrollMaxY());
         appliedView = viewKey;
         state.fitCanvasRequested = false;
     }
-    if (!wide && toolsOpen && ImGui::CollapsingHeader("Tools")) {
+    if (!wide && ImGui::CollapsingHeader("Tools", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (page == "generate" || page == "effects") {
             completed |= drawDesignModules(ctx, state.recipe, page == "effects", 1);
         }
     }
-    if (!wide && propertiesOpen && ImGui::CollapsingHeader("Properties")) {
+    if (!wide && ImGui::CollapsingHeader("Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (page == "generate" || page == "effects") {
             completed |= drawDesignModules(ctx, state.recipe, page == "effects", 2);
         }
@@ -867,6 +927,22 @@ void drawSoundDesigner(UIContext& ctx) {
             drawSoundDesignControls(ctx);
         }
         status = currentReport(ctx);
+    }
+    if (state.recipe.value("mode", "synth") == "asset") {
+        const auto assets = ctx.scene.audio->snapshot().at("assets");
+        for (const auto& asset : assets) {
+            if (asset.at("id") == state.recipe.at("asset_id")) {
+                ImGui::TextWrapped("Source: %s | %.2f - %.2f s | original file preserved",
+                    asset.at("name").get<std::string>().c_str(),
+                    state.recipe.value("source_in_seconds", 0.0),
+                    state.recipe.value("source_out_seconds", 0.0));
+                if (asset.at("duration").get<double>() > 30) {
+                    ImGui::TextWrapped("Designer processes up to 30 seconds per sound. "
+                        "Choose the source range in Edit before applying effects.");
+                }
+                break;
+            }
+        }
     }
     if (page == "generate") {
         completed |= drawDesignGenerationCanvas(ctx, state.recipe);
@@ -912,6 +988,14 @@ void drawSoundDesigner(UIContext& ctx) {
         const bool original = status.at("playing").get<bool>() ?
                               status.at("audition_original").get<bool>() : state.original;
         const auto& report = status.at(original ? "original" : "processed");
+        if (!original && status.contains("processing") &&
+            status.at("processing").value("clamped_samples_before_loop_join", 0ULL) > 0) {
+            const auto& processing = status.at("processing");
+            ImGui::TextColored(ImVec4(1, 0.45f, 0.25f, 1), "Rendered output clipped");
+            ImGui::TextWrapped("Before output clipping: %.1f dBFS. Lower EQ output trim "
+                "or the final output level and render again.",
+                processing.value("peak_before_output_clip_dbfs", 0.0));
+        }
         if (report.at("rms").get<double>() < 1e-7) {
             ImGui::TextWrapped("Rendered audio is silent. Check enabled layers, source range, "
                                "effect mix and output level.");
@@ -921,8 +1005,10 @@ void drawSoundDesigner(UIContext& ctx) {
             report.at("channels").get<int>(), report.at("peak").get<double>(),
             report.at("rms").get<double>(), state.dirty ? " | changes pending" : "");
         const float width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
-        waveform(report, ImVec2(width, designViewPixels(page == "generate" ? 120 : 80)),
-                  status.at("cursor_seconds"), status.at("playing"));
+        if (page != "effects" || ImGui::CollapsingHeader("Rendered waveform")) {
+            waveform(report, ImVec2(width, designViewPixels(page == "generate" ? 120 : 80)),
+                status.at("cursor_seconds"), status.at("playing"));
+        }
         if (page == "edit" && !original) {
             completed |= fadeControls(state.recipe, report);
         }
@@ -943,19 +1029,29 @@ void drawSoundDesigner(UIContext& ctx) {
     if (!state.error.empty()) {
         ImGui::TextWrapped("%s", state.error.c_str());
     }
-    if (!arrange && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) {
+    if (!arrange && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) &&
+        !ImGui::GetIO().KeyShift) {
         const auto& io = ImGui::GetIO();
-        if (!io.KeyCtrl && io.MouseWheel != 0) {
-            canvasZoom = std::clamp(canvasZoom * std::pow(1.25f, io.MouseWheel), 1.0f, 8.0f);
-            workspaceCall(ctx, "workspace_update", {{"designer_canvas_zoom", canvasZoom}});
+        if (io.KeyAlt && io.MouseWheel != 0) {
+            panelZoom = std::clamp(panelZoom * std::pow(1.1f, io.MouseWheel), 0.5f, 1.5f);
+            workspaceCall(ctx, "workspace_update", {{"designer_panel_zoom", panelZoom}});
         }
-        if (!io.KeyCtrl && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+        if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
             const float x = ImGui::GetScrollMaxX() > 0 ? std::clamp(
                 (ImGui::GetScrollX() - io.MouseDelta.x) / ImGui::GetScrollMaxX(), 0.0f, 1.0f) : 0;
             const float y = ImGui::GetScrollMaxY() > 0 ? std::clamp(
                 (ImGui::GetScrollY() - io.MouseDelta.y) / ImGui::GetScrollMaxY(), 0.0f, 1.0f) : 0;
-            workspaceCall(ctx, "workspace_update", {{"designer_canvas_pan_x", x},
-                {"designer_canvas_pan_y", y}});
+            workspaceCall(ctx, "workspace_update", {{"designer_panel_pan_x", x},
+                {"designer_panel_pan_y", y}});
+            ImGui::SetScrollX(x * ImGui::GetScrollMaxX());
+            ImGui::SetScrollY(y * ImGui::GetScrollMaxY());
+        }
+    }
+    if (!arrange && page != "effects" && !ImGui::GetIO().KeyAlt && ImGui::IsWindowHovered()) {
+        const auto& io = ImGui::GetIO();
+        if (io.KeyCtrl && io.MouseWheel != 0) {
+            canvasZoom = std::clamp(canvasZoom * std::pow(1.25f, io.MouseWheel), 1.0f, 8.0f);
+            workspaceCall(ctx, "workspace_update", {{"designer_canvas_zoom", canvasZoom}});
         }
         if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Middle)) {
             state.fitCanvasRequested = true;
@@ -964,7 +1060,9 @@ void drawSoundDesigner(UIContext& ctx) {
         }
     }
     designViewScale = 1;
+    designPanelScale = 1;
+    ImGui::SetWindowFontScale(1);
     ImGui::EndChild();
-    ImGui::EndTable();
+
 }
 } // namespace AudioUI

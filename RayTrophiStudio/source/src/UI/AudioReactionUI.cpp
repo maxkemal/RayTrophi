@@ -25,7 +25,7 @@ void call(UIContext& ctx, const std::string& op, const nlohmann::json& p) {
 }
 void draw(UIContext& ctx, const nlohmann::json& emitter) {
     using json = nlohmann::json;
-    if (!ImGui::TreeNode("Reactive Audio")) {
+    if (!ImGui::TreeNodeEx("Activity connection", ImGuiTreeNodeFlags_DefaultOpen)) {
         return;
     }
     const std::string id = emitter.at("id");
@@ -58,7 +58,7 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
         ImGui::EndCombo();
     }
     if (config.at("driver") != "manual") {
-        ImGui::TextWrapped("Bind a sound asset and enable Automatic to start/stop with activity. "
+        ImGui::TextWrapped("Choose a file or generated sound and enable Automatic to follow activity. "
                            "Pause/Stop suspend automation until Play or reconfiguration.");
         const auto source = ctx.scene.audio->invoke("source_runtime", {{"id", id}});
         const auto& position = source.at("position");
@@ -74,15 +74,18 @@ void draw(UIContext& ctx, const nlohmann::json& emitter) {
             edited["automatic"] = automatic;
             call(ctx, "update", {{"id", id}, {"reaction", edited}, {"loop", true}});
         }
-        for (const char* key : {"input_min", "input_max", "gain_min", "gain_max",
-                                "pitch_min", "pitch_max", "response_seconds", "start_threshold",
-                                "stop_threshold"}) {
-            float value = config.at(key);
-            if (ImGui::InputFloat(AudioUI::property(key).c_str(), &value, 0, 0, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue)) {
-                auto edited = config;
-                edited[key] = value;
-                call(ctx, "update", {{"id", id}, {"reaction", edited}});
+        if (ImGui::TreeNode("Advanced response mapping")) {
+            for (const char* key : {"input_min", "input_max", "gain_min", "gain_max",
+                                    "pitch_min", "pitch_max", "response_seconds", "start_threshold",
+                                    "stop_threshold"}) {
+                float value = config.at(key);
+                if (ImGui::InputFloat(AudioUI::property(key).c_str(), &value, 0, 0, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    auto edited = config;
+                    edited[key] = value;
+                    call(ctx, "update", {{"id", id}, {"reaction", edited}});
+                }
             }
+            ImGui::TreePop();
         }
         if (config.at("driver") == "domain_contact") {
             const auto policy = ctx.scene.audio->invoke("telemetry_get", json::object());

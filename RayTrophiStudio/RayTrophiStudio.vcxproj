@@ -2537,6 +2537,75 @@
     <ClInclude Include="source\include\Audio\AcousticPlayback.h" />
     <ClInclude Include="source\include\Audio\AcousticGeometryPolicy.h" />
     <ClInclude Include="source\include\Audio\AudioSourceRuntime.h" />
+    <ClInclude Include="source\include\Audio\AudioScope.h" />
+    <ClInclude Include="source\include\Audio\PhysicalAudioSource.h" />
+    <ClInclude Include="source\include\Audio\AudioEmitterSchema.h" />
+    <ClInclude Include="source\include\Audio\AudioAcousticSettings.h" />
+    <ClInclude Include="source\include\Audio\AudioParametricEq.h" />
+    <ClCompile Include="source\src\Scene\AudioParametricEq.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\UI\AudioEqEditorUI.h" />
+    <ClInclude Include="source\include\UI\AudioEditorChrome.h" />
+    <ClCompile Include="source\src\UI\AudioEqEditorUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioAcousticSettings.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\UI\AudioAcousticSettingsUI.h" />
+    <ClCompile Include="source\src\UI\AudioAcousticSettingsUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\Audio\AudioRequestValidation.h" />
+    <ClCompile Include="source\src\Scene\AudioRequestValidation.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioEmitterSchema.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\Audio\PhysicalAudioDsp.h" />
+    <ClInclude Include="source\include\Audio\PhysicalAudioTimeline.h" />
+    <ClInclude Include="source\include\Audio\PhysicalAudioBake.h" />
+    <ClInclude Include="source\include\Audio\PhysicalAudioHistory.h" />
+    <ClInclude Include="source\include\Audio\PhysicalAudioSchedule.h" />
+    <ClCompile Include="source\src\Scene\PhysicalAudioSchedule.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioReplay.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioHistory.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioDsp.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioTimeline.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioBake.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioSource.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\UI\AudioScopeControls.h" />
+    <ClInclude Include="source\include\UI\AudioViewportLabels.h" />
+    <ClInclude Include="source\include\UI\AudioVisualLanguage.h" />
     <ClCompile Include="source\src\Scene\AudioSourceRuntime.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>

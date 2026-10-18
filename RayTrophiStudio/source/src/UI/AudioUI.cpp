@@ -8,6 +8,8 @@
 #include "UI/AudioThunderUI.h"
 #include "UI/AudioMixerUI.h"
 #include "UI/AudioWorkspaceUI.h"
+#include "UI/AudioViewportLabels.h"
+#include "UI/AudioVisualLanguage.h"
 #include "UI/GizmoOcclusion.h"
 #include "globals.h"
 #include "Audio/AudioThunderBridge.h"
@@ -21,9 +23,11 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "ImGuizmo.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 namespace AudioUI {
 namespace {
@@ -135,14 +139,35 @@ void drawHierarchy(UIContext& ctx) {
         return;
     }
     const auto data = ctx.scene.audio->snapshot();
+    static ImGuiTextFilter filter;
+    filter.Draw("Search sources##audio_hierarchy");
+    std::vector<const json*> visible;
     for (const auto& e : data.at("emitters")) {
-        const std::string id = e.at("id");
-        const bool active = ctx.selection.selected.type == SelectableType::AudioSource &&
-                            ctx.selection.selected.audio_source_id == id;
-        if (ImGui::Selectable((e.at("name").get<std::string>() + "##audio_tree_" + id).c_str(), active)) {
-            select(ctx, id);
+        const auto search = e.at("name").get<std::string>() + " " +
+            e.at("id").get<std::string>();
+        if (filter.PassFilter(search.c_str())) {
+            visible.push_back(&e);
         }
     }
+    ImGui::TextDisabled("%d / %d sources", static_cast<int>(visible.size()),
+                        static_cast<int>(data.at("emitters").size()));
+    ImGui::BeginChild("Audio source list", ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 8),
+                      true);
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(visible.size()));
+    while (clipper.Step()) {
+        for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+            const auto& e = *visible[row];
+            const std::string id = e.at("id");
+            const bool active = ctx.selection.selected.type == SelectableType::AudioSource &&
+                ctx.selection.selected.audio_source_id == id;
+            const auto label = e.at("name").get<std::string>() + "##audio_tree_" + id;
+            if (ImGui::Selectable(label.c_str(), active)) {
+                select(ctx, id);
+            }
+        }
+    }
+    ImGui::EndChild();
     ImGui::TreePop();
 }
 
@@ -155,6 +180,13 @@ void drawProperties(UIContext& ctx) {
 }
 
 void drawSourceInspector(UIContext& ctx) {
+    const auto output = ctx.scene.audio->invoke("status", json::object());
+    if (output.value("preview_muted", false)) {
+        ImGui::TextWrapped("Output is muted. Scene sounds and asset previews are silent.");
+        if (ImGui::Button("Unmute output")) {
+            call(ctx, "preview_mute", {{"muted", false}});
+        }
+    }
     if (ctx.selection.selected.type == SelectableType::AudioSource) {
         selected = ctx.selection.selected.audio_source_id;
     } else {
@@ -192,16 +224,14 @@ void drawSourceInspector(UIContext& ctx) {
             ImGui::TextWrapped("This environment source is bound to a thunder variation. "
                                "Choose a continuous wind/rain file in Asset.");
         }
-        if (assetId.empty()) {
+        const bool procedural = !e.value("generator", json()).is_null();
+        const auto runtime = ctx.scene.audio->invoke("source_runtime", {{"id", id}});
+        sourceStatus(e, runtime);
+        if (assetId.empty() && !procedural) {
             ImGui::TextWrapped("No audio file is linked. Import a file, then choose it in Asset.");
         } else if (stereoAsset) {
             ImGui::TextWrapped("Stereo asset: ambience playback is enabled. "
                                "For 3D positioning, choose a mono asset.");
-        }
-        char parent[256]{};
-        std::snprintf(parent, sizeof(parent), "%s", e.value("parent", std::string()).c_str());
-        if (ImGui::InputText(property("Parent object").c_str(), parent, sizeof(parent), ImGuiInputTextFlags_EnterReturnsTrue)) {
-            call(ctx, "update", {{"id", id}, {"parent", parent}});
         }
         char name[256]{};
         const auto text = e.at("name").get<std::string>();
@@ -209,106 +239,171 @@ void drawSourceInspector(UIContext& ctx) {
         if (ImGui::InputText(property("Source name").c_str(), name, sizeof(name), ImGuiInputTextFlags_EnterReturnsTrue)) {
             call(ctx, "update", {{"id", id}, {"name", name}});
         }
-        if (ImGui::BeginCombo(property("Asset").c_str(), assetLabel.c_str())) {
-            for (const auto& asset : data.at("assets")) {
-                const auto label = asset.at("name").get<std::string>() + "##" +
-                                   asset.at("id").get<std::string>();
-                if (ImGui::Selectable(label.c_str(), asset.at("id") == assetId)) {
-                    call(ctx, "update", {{"id", id}, {"asset_id", asset.at("id")},
-                        {"spatial", environmentRole.empty() && asset.at("channels") == 1}});
-                }
-            }
-            if (ImGui::Selectable("Unbound")) {
-                call(ctx, "update", {{"id", id}, {"asset_id", ""}});
-            }
-            ImGui::EndCombo();
+        ImGui::BeginDisabled(assetId.empty() && !procedural);
+        if (stateButton(runtime.value("playing", false) ? "Pause" : "Play",
+            runtime.value("playing", false), "Source playback follows the scene transport")) {
+            call(ctx, runtime.value("playing", false) ? "pause" : "play", {{"id", id}});
         }
-        if (ImGui::CollapsingHeader("Spatial settings")) {
-            for (const char* key : {"position", "direction"}) {
-                float v[3] = {e.at(key)[0], e.at(key)[1], e.at(key)[2]};
-                if (ImGui::InputFloat3(property(key).c_str(), v, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue)) {
-                    call(ctx, "update", {{"id", id}, {key, json::array({v[0], v[1], v[2]})}});
-                }
-            }
-            for (const char* key : {"min_distance", "max_distance", "rolloff",
-                                    "cone_inner", "cone_outer", "cone_gain"}) {
-                float value = e.at(key);
-                if (ImGui::InputFloat(property(key).c_str(), &value, 0, 0, "%.3f",
-                                      ImGuiInputTextFlags_EnterReturnsTrue)) {
-                    call(ctx, "update", {{"id", id}, {key, value}});
-                }
-            }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Stop")) {
+            call(ctx, "stop", {{"id", id}});
         }
-        for (const char* key : {"gain", "pitch"}) {
-            float value = e.at(key);
-            if (ImGui::InputFloat(property(key).c_str(), &value, 0, 0, "%.3f",
-                                  ImGuiInputTextFlags_EnterReturnsTrue)) {
-                call(ctx, "update", {{"id", id}, {key, value}});
-            }
+        ImGui::SameLine();
+        if (ImGui::Button("Actions...")) {
+            ImGui::OpenPopup("Source actions");
         }
-        for (const char* key : {"loop", "spatial"}) {
-            bool value = e.at(key);
-            const bool spatial = std::strcmp(key, "spatial") == 0;
-            ImGui::BeginDisabled(spatial && stereoAsset);
-            if (ImGui::Checkbox(property(spatial ? "3D positional (mono)" : "Loop").c_str(), &value)) {
-                call(ctx, "update", {{"id", id}, {key, value}});
-            }
-            ImGui::EndDisabled();
-        }
-        if (ImGui::BeginCombo(property("Bus").c_str(), e.at("bus").get<std::string>().c_str())) {
-            for (const char* bus : {"Master", "Weather", "Effects", "Ambience", "Music"}) {
-                if (ImGui::Selectable(bus, e.at("bus") == bus)) {
-                    call(ctx, "update", {{"id", id}, {"bus", bus}});
-                }
-            }
-            ImGui::EndCombo();
-        }
-        const auto playbackMode = data.at("playback_mode").get<std::string>();
-        if (ImGui::BeginCombo(property("Scene playback").c_str(), playbackMode.c_str())) {
-            for (const char* mode : {"timeline", "continuous"}) {
-                if (ImGui::Selectable(mode, playbackMode == mode)) {
-                    call(ctx, "playback_update", {{"mode", mode}});
-                }
-            }
-            ImGui::EndCombo();
-        }
-        bool firstAction = true;
-        for (const char* op : {"play", "pause", "stop", "duplicate", "remove"}) {
-            const float width = ImGui::CalcTextSize(op).x + ImGui::GetStyle().FramePadding.x * 2;
-            const float contentRight = ImGui::GetCursorScreenPos().x +
-                ImGui::GetContentRegionAvail().x;
-            if (!firstAction && contentRight - ImGui::GetItemRectMax().x > width +
-                ImGui::GetStyle().ItemSpacing.x) {
-                ImGui::SameLine();
-            }
-            firstAction = false;
-            ImGui::BeginDisabled(std::strcmp(op, "play") == 0 && assetId.empty());
-            if (ImGui::Button(op)) {
-                const auto result = call(ctx, op, {{"id", id}});
-                if (op == std::string("duplicate") && result.contains("id")) {
+        if (ImGui::BeginPopup("Source actions")) {
+            if (ImGui::MenuItem("Duplicate source")) {
+                const auto result = call(ctx, "duplicate", {{"id", id}});
+                if (result.contains("id")) {
                     select(ctx, result.at("id"));
-                } else if (op == std::string("remove") && result.value("ok", false)) {
+                }
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Delete source")) {
+                const auto result = call(ctx, "remove", {{"id", id}});
+                if (result.value("ok", false)) {
                     selected.clear();
                     ctx.selection.clearSelection();
                 }
             }
-            ImGui::EndDisabled();
+            ImGui::EndPopup();
         }
-        ImGui::BeginDisabled(assetId.empty());
-        if (ImGui::Button("Audition asset")) {
-            call(ctx, "preview", {{"id", assetId}});
+        ImGui::Spacing();
+        ImGui::PushID(id.c_str());
+        if (ImGui::BeginTabBar("Source properties")) {
+            if (ImGui::BeginTabItem("Sound")) {
+                if (procedural) {
+                    ImGui::TextWrapped("Generated sound. Choosing a file replaces the generator "
+                        "and its stored history.");
+                }
+                if (ImGui::BeginCombo(property("Asset").c_str(), assetLabel.c_str())) {
+                    static ImGuiTextFilter assetFilter;
+                    assetFilter.Draw("Search assets##audio_binding");
+                    for (const auto& asset : data.at("assets")) {
+                        const auto search = asset.at("name").get<std::string>() + " " +
+                            asset.at("id").get<std::string>();
+                        if (!assetFilter.PassFilter(search.c_str())) {
+                            continue;
+                        }
+                        const auto label = asset.at("name").get<std::string>() + "##" +
+                                           asset.at("id").get<std::string>();
+                        if (ImGui::Selectable(label.c_str(), asset.at("id") == assetId)) {
+                            call(ctx, "update", {{"id", id}, {"asset_id", asset.at("id")},
+                                {"spatial", environmentRole.empty() && asset.at("channels") == 1},
+                                {"generator", nullptr}, {"generator_history", nullptr}});
+                        }
+                    }
+                    if (!procedural && ImGui::Selectable("Unbound")) {
+                        call(ctx, "update", {{"id", id}, {"asset_id", ""}});
+                    }
+                    ImGui::EndCombo();
+                }
+                for (const char* key : {"gain", "pitch"}) {
+                    float value = e.at(key);
+                    const bool gain = std::strcmp(key, "gain") == 0;
+                    if (slider(gain ? "Volume" : "Pitch", value, gain ? 0.0f : 0.125f,
+                        gain ? 16.0f : 8.0f, gain ? "%.2f x" : "%.2f x",
+                        ImGuiSliderFlags_Logarithmic)) {
+                        call(ctx, "update", {{"id", id}, {key, value}});
+                    }
+                }
+                for (const char* key : {"loop", "spatial"}) {
+                    bool value = e.at(key);
+                    const bool spatial = std::strcmp(key, "spatial") == 0;
+                    ImGui::BeginDisabled(spatial && stereoAsset);
+                    if (ImGui::Checkbox(property(spatial ? "3D positional (mono)" : "Loop").c_str(), &value)) {
+                        call(ctx, "update", {{"id", id}, {key, value}});
+                    }
+                    ImGui::EndDisabled();
+                }
+                if (ImGui::BeginCombo(property("Bus").c_str(), e.at("bus").get<std::string>().c_str())) {
+                    for (const char* bus : {"Master", "Weather", "Effects", "Ambience", "Music"}) {
+                        if (ImGui::Selectable(bus, e.at("bus") == bus)) {
+                            call(ctx, "update", {{"id", id}, {"bus", bus}});
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                drawInspectorMixerLink(ctx, e);
+                ImGui::BeginDisabled(assetId.empty());
+                if (ImGui::Button("Audition asset")) {
+                    call(ctx, "preview", {{"id", assetId}});
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Stop audition")) {
+                    call(ctx, "preview_stop");
+                }
+                ImGui::EndDisabled();
+                if (ctx.scene.audio->transportPaused()) {
+                    ImGui::TextWrapped("Scene Play waits while the timeline is paused. "
+                                       "Audition asset listens immediately without spatial attenuation.");
+                }
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Space")) {
+                char parent[256]{};
+                std::snprintf(parent, sizeof(parent), "%s", e.value("parent", std::string()).c_str());
+                if (ImGui::InputText(property("Parent object").c_str(), parent, sizeof(parent), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    call(ctx, "update", {{"id", id}, {"parent", parent}});
+                }
+                if (ImGui::CollapsingHeader("Spatial settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    for (const char* key : {"position", "direction"}) {
+                        float v[3] = {e.at(key)[0], e.at(key)[1], e.at(key)[2]};
+                        if (dragVector(std::strcmp(key, "position") == 0 ? "Position" :
+                            "Direction", v, std::strcmp(key, "position") == 0 ? 0.1f : 0.01f)) {
+                            call(ctx, "update", {{"id", id}, {key, json::array({v[0], v[1], v[2]})}});
+                        }
+                    }
+                    for (const char* key : {"min_distance", "max_distance", "rolloff",
+                                            "cone_inner", "cone_outer", "cone_gain"}) {
+                        float value = e.at(key);
+                        const std::string field = key;
+                        const bool minimum = field == "min_distance";
+                        const bool maximum = field == "max_distance";
+                        const bool distance = minimum || maximum;
+                        const bool angle = field == "cone_inner" || field == "cone_outer";
+                        const char* label = minimum ? "Full-volume distance" :
+                            maximum ? "Maximum distance" : field == "rolloff" ? "Distance falloff" :
+                            field == "cone_inner" ? "Inner cone angle" :
+                            field == "cone_outer" ? "Outer cone angle" : "Outside-cone volume";
+                        const float low = maximum ? e.at("min_distance").get<float>() :
+                            field == "cone_outer" ? e.at("cone_inner").get<float>() :
+                            distance ? 0.001f : 0.0f;
+                        const float high = minimum ? e.at("max_distance").get<float>() :
+                            maximum ? 1000000.0f : field == "cone_inner" ?
+                            e.at("cone_outer").get<float>() : angle ? 360.0f :
+                            field == "rolloff" ? 10.0f : 1.0f;
+                        if (slider(label, value, low, high,
+                            angle ? "%.0f deg" : "%.3f",
+                            distance ? ImGuiSliderFlags_Logarithmic : ImGuiSliderFlags_None)) {
+                            call(ctx, "update", {{"id", id}, {key, value}});
+                        }
+                    }
+                }
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Response")) {
+                const auto playbackMode = data.at("playback_mode").get<std::string>();
+                if (ImGui::BeginCombo(property("Scene playback").c_str(), playbackMode.c_str())) {
+                    for (const char* mode : {"timeline", "continuous"}) {
+                        if (ImGui::Selectable(mode, playbackMode == mode)) {
+                            call(ctx, "playback_update", {{"mode", mode}});
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                AudioReactionUI::draw(ctx, e);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Acoustics")) {
+                audio::drawAcousticDiagnostics(ctx, e);
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
         }
-        ImGui::SameLine();
-        if (ImGui::Button("Stop audition")) {
-            call(ctx, "preview_stop");
-        }
-        ImGui::EndDisabled();
-        if (ctx.scene.audio->transportPaused()) {
-            ImGui::TextWrapped("Scene Play waits while the timeline is paused. "
-                               "Audition asset listens immediately without spatial attenuation.");
-        }
-        AudioReactionUI::draw(ctx, e);
-        audio::drawAcousticDiagnostics(ctx, e);
+        ImGui::PopID();
     }
 }
 
@@ -376,7 +471,17 @@ void drawViewport(UIContext& ctx, bool ortho, bool showGizmos, bool& hit) {
     const bool viewportInput = !ImGui::GetIO().WantCaptureMouse ||
         (hovered && (std::strcmp(hovered->Name, "##ViewportAssetDropTarget") == 0 ||
                      std::strcmp(hovered->Name, "##RayTrophiDockHost") == 0));
-    for (const auto& e : data.at("emitters")) {
+    ViewportLabels labels;
+    std::vector<const json*> ordered;
+    for (const auto& source : data.at("emitters")) {
+        ordered.push_back(&source);
+    }
+    std::stable_partition(ordered.begin(), ordered.end(), [&](const json* source) {
+        return source->at("id") == selected;
+    });
+    bool tooltipShown = false;
+    for (const auto* source : ordered) {
+        const auto& e = *source;
         const std::string id = e.at("id");
         json pose;
         try {
@@ -404,18 +509,27 @@ void drawViewport(UIContext& ctx, bool ortho, bool showGizmos, bool& hit) {
                 break;
             }
         }
-        std::string label = "Audio: " + (sourceName.empty() ? id : sourceName);
-        if (!assetName.empty() && assetName != sourceName) {
-            label += " (" + assetName + ")";
+        if (alpha > 0 && screen.x >= 0 && screen.x <= size.x &&
+            screen.y >= 0 && screen.y <= size.y) {
+            labels.draw(draw, screen, size, sourceName.empty() ? id : sourceName,
+                        IM_COL32(80, 205, 255, opacity));
         }
-        draw->AddText(ImVec2(screen.x + 10, screen.y - 8),
-                      IM_COL32(80, 205, 255, opacity), label.c_str());
         const auto mouse = ImGui::GetIO().MousePos;
         const float dx = mouse.x - screen.x;
         const float dy = mouse.y - screen.y;
         if (alpha >= 1.0f && dx * dx + dy * dy < 144 && viewportInput &&
             !ImGuizmo::IsUsing()) {
             hit = true;
+            if (!tooltipShown) {
+                ImGui::BeginTooltip();
+                ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+                ImGui::TextUnformatted(sourceName.empty() ? id.c_str() : sourceName.c_str());
+                ImGui::Text("Source: %s", id.c_str());
+                ImGui::TextWrapped("Asset: %s", assetName.empty() ? "Unbound" : assetName.c_str());
+                ImGui::PopTextWrapPos();
+                ImGui::EndTooltip();
+                tooltipShown = true;
+            }
             if (ImGui::IsMouseClicked(0)) {
                 select(ctx, id);
             }

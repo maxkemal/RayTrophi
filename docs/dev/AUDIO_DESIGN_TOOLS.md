@@ -1,5 +1,12 @@
 # Sound designer v3: visual production tools
 
+2026-10-18 source continuation: [Parametric EQ](AUDIO_PARAMETRIC_EQ.md) extracts
+shared checked coefficients for processing/response, adds wet output trim,
+per-band curves, selected-band authoring and explicit pre-output-clip metrics.
+Rack order/bypass are clearer. Core/UI changes require the next user build;
+the existing external tools test was extended, not run. This is Designer EQ,
+not realtime bus inserts or a claim of full professional-audio acceptance.
+
 2026-10-15 continuation: [background paths](AUDIO_BACKGROUND_JOBS.md) now include
 Arrange mix, source waveform and history/reuse;
 [spectral region editing](AUDIO_SPECTRAL_EDITING.md) adds real PCM masks and Analyze selection.
@@ -318,3 +325,15 @@ Arrangement now has canonical multi-selection/batch edits, graphic gain/pan enve
 and independent bounded mixed audition with loop/range/cursor. See the multitrack
 plan for the exact contract and final acceptance checklist. This last source revision
 was not built or live-tested; no new test script was written at the user request.
+
+### Designer side panels (2026-10-18)
+
+Tools and Properties default to expanded. Each side has an always-visible arrow rail
+for collapsing and restoring it; the View popup and X close buttons are removed.
+Expanded layouts retain resizable columns. Narrow layouts use inline collapsible sections.
+The existing workspace scripting/IPC fields `designer_tools_open` and
+`designer_properties_open` control expansion. Source/arrange is a direct Edit selector.
+
+Manual verification after the user build: collapse/restore both sides independently,
+resize expanded columns, switch workflow and source/arrange, and check narrow layouts.
+No application build or live verification was performed for this UI adjustment.

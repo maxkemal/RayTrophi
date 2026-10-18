@@ -2,6 +2,20 @@
 
 ## Current continuation and UI follow-up — 2026-10-17
 
+2026-10-18 source delivery: [scoped transport and acoustic A/B](AUDIO_SCOPED_CONTROLS.md)
+adds explicit selected/group/scene operations, staged acoustic batch configuration
+and recipe-preserving dry/processed bypass through shared UI/Python/IPC services.
+Group membership is a transient target list, not persistent project authoring.
+Existing playback acceptance was extended without a new script or live run.
+User C++ build and consolidated acceptance remain pending; no shader change.
+This supersedes the queued scope/batch/A-B item below only to this bounded extent.
+
+2026-10-18 continuation planning: [physics-driven fluid synthesis](AUDIO_FLUID_SYNTHESIS_PLAN.md)
+defines continuous flow generation first, then scene-clock/replay/capture closure,
+then measured splash/contact events. Existing flow activity does not measure
+splashes or acoustic power. This is a source-audited implementation plan, not a
+new runtime delivery or acceptance result; queued UI work below remains open.
+
 2026-10-18 next source slice: [single-bounce diffuse transport](SCENE_ACOUSTICS_DIFFUSE.md)
 adds opt-in Lambert source-ray quadrature, receiver visibility, eight delay-energy
 bins and approximate live auralization, using the existing scattering split.
