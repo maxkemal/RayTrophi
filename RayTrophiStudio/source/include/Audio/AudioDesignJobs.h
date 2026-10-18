@@ -29,6 +29,8 @@ public:
         nlohmann::json files;
         AudioDesignResult design;
         nlohmann::json analysis;
+        // Optional worker-owned artifact cleanup, including cancelled/stale results.
+        std::shared_ptr<void> lifetime;
     };
     using Task = std::function<Result(const AudioCancelCheck&)>;
 

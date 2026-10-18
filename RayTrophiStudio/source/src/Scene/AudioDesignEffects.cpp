@@ -2,6 +2,7 @@
 #define NOMINMAX
 #endif
 #include "Audio/AudioDesignDsp.h"
+#include "Audio/AudioParametricEq.h"
 #include "../../../external/DaisySP/Source/Effects/chorus.h"
 #include "../../../external/DaisySP/Source/Effects/phaser.h"
 #include "../../../external/DaisySP/Source/Effects/overdrive.h"
@@ -76,62 +77,6 @@ json normalize(const json& input, const json& fields, const std::vector<std::str
     return result;
 }
 
-struct Biquad {
-    double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
-    double z1[2] = {}, z2[2] = {};
-
-    explicit Biquad(const json& band) {
-        const double w = 2 * pi * band.at("frequency_hz").get<double>() / rate;
-        const double c = std::cos(w), s = std::sin(w);
-        const double alpha = s / (2 * band.at("q").get<double>());
-        const double a = std::pow(10.0, band.at("gain_db").get<double>() / 40);
-        const auto mode = band.at("mode").get<std::string>();
-        double a0;
-        if (mode == "highpass" || mode == "lowpass") {
-            const double sign = mode == "highpass" ? 1 : -1;
-            b0 = (1 + sign * c) / 2;
-            b1 = -sign * (1 + sign * c);
-            b2 = b0;
-            a0 = 1 + alpha;
-            a1 = -2 * c;
-            a2 = 1 - alpha;
-        } else if (mode == "lowshelf" || mode == "highshelf") {
-            const double sign = mode == "highshelf" ? 1 : -1;
-            const double beta = 2 * std::sqrt(a) * alpha;
-            b0 = a * ((a + 1) + sign * (a - 1) * c + beta);
-            b1 = -2 * sign * a * ((a - 1) + sign * (a + 1) * c);
-            b2 = a * ((a + 1) + sign * (a - 1) * c - beta);
-            a0 = (a + 1) - sign * (a - 1) * c + beta;
-            a1 = 2 * sign * ((a - 1) - sign * (a + 1) * c);
-            a2 = (a + 1) - sign * (a - 1) * c - beta;
-        } else {
-            b0 = 1 + alpha * a;
-            b1 = -2 * c;
-            b2 = 1 - alpha * a;
-            a0 = 1 + alpha / a;
-            a1 = -2 * c;
-            a2 = 1 - alpha / a;
-        }
-        b0 /= a0;
-        b1 /= a0;
-        b2 /= a0;
-        a1 /= a0;
-        a2 /= a0;
-    }
-
-    float process(float sample, unsigned channel) {
-        const double output = sample * b0 + z1[channel];
-        z1[channel] = sample * b1 - output * a1 + z2[channel];
-        z2[channel] = sample * b2 - output * a2;
-        return static_cast<float>(output);
-    }
-
-    double response(double frequency) const {
-        const auto z = std::polar(1.0, -2 * pi * frequency / rate);
-        return std::abs((b0 + b1 * z + b2 * z * z) / (1.0 + a1 * z + a2 * z * z));
-    }
-};
-
 struct Delay {
     std::vector<float> values;
     std::size_t cursor = 0;
@@ -186,7 +131,8 @@ json designDspCatalogue() {
         {"requires_asset", true}});
 
     json effects = json::array();
-    effects.push_back({{"type", "eq"}, {"name", "Parametric EQ"}, {"fields", json::object()}});
+    effects.push_back({{"type", "eq"}, {"name", "Parametric EQ"}, {"fields", {
+        {"output_db", field("Output trim", 0, -24, 24, "dB")}}}});
     effects.push_back({{"type", "filter"}, {"name", "Resonant filter"}, {"fields", {
         {"mode", choice("Mode", "lowpass", {"lowpass", "highpass", "bandpass", "notch"})},
         {"cutoff_hz", field("Cutoff", 4000, 20, 16000, "Hz", true)},
@@ -239,6 +185,12 @@ json designDspCatalogue() {
         {"gain_db", field("Gain", 0, -24, 24, "dB")}, {"q", field("Q", 0.707, 0.1, 10)}};
     return {{"version", 3}, {"max_layers", 8}, {"max_effects", 8}, {"max_eq_bands", 8},
         {"layers", layers}, {"effects", effects}, {"eq_band_fields", bandFields},
+        {"eq_presets", json::array({{{"name", "Bass / Body / Brightness (flat)"},
+            {"bands", json::array({
+                {{"mode", "lowshelf"}, {"frequency_hz", 120}, {"gain_db", 0}, {"q", 0.707}, {"enabled", true}},
+                {{"mode", "peak"}, {"frequency_hz", 1000}, {"gain_db", 0}, {"q", 0.707}, {"enabled", true}},
+                {{"mode", "highshelf"}, {"frequency_hz", 6000}, {"gain_db", 0}, {"q", 0.707}, {"enabled", true}}
+            })}}})},
         {"presets", json::array({
             {{"name", "Warm layered tone"}, {"recipe", {{"mode", "synth"}, {"preset", "tone"},
                 {"layers", json::array({{{"type", "oscillator"}, {"wave", "saw"}, {"frequency_hz", 110}},
@@ -304,6 +256,8 @@ void validateDesignDsp(const json& input, json& recipe) {
                     auto normalizedBand = normalize(prepared, catalogue.at("eq_band_fields"),
                                                     {"type", "enabled"});
                     normalizedBand.erase("type");
+                    const EqBiquad coefficients(normalizedBand);
+                    (void)coefficients;
                     module["bands"].push_back(normalizedBand);
                 }
             } else {
@@ -329,21 +283,7 @@ void applyDesignEffects(AudioPcm& pcm, const json& effects, const AudioCancelChe
         if (type == "spectral_region") {
             applyDesignSpectralRegion(pcm, effect, check);
         } else if (type == "eq") {
-            for (const auto& band : effect.at("bands")) {
-                if (!band.at("enabled").get<bool>()) {
-                    continue;
-                }
-                Biquad filter(band);
-                for (std::size_t frame = 0; frame < pcm.frames(); ++frame) {
-                    if (check && frame % 1024 == 0) {
-                        check();
-                    }
-                    for (unsigned channel = 0; channel < pcm.channels; ++channel) {
-                        auto& value = pcm.samples[frame * pcm.channels + channel];
-                        value = filter.process(value, channel);
-                    }
-                }
-            }
+            applyParametricEq(pcm, effect, check);
         } else if (type == "compressor") {
             const double threshold = effect.at("threshold_db"), ratio = effect.at("ratio");
             const double knee = effect.at("knee_db");
@@ -513,27 +453,21 @@ void applyDesignEffects(AudioPcm& pcm, const json& effects, const AudioCancelChe
 }
 
 json designEqResponse(const json& effects) {
-    json response = json::array();
-    for (unsigned point = 0; point < 256; ++point) {
-        const double frequency = 20 * std::pow(1000.0, point / 255.0);
-        std::complex<double> responseValue(1, 0);
-        for (const auto& effect : effects) {
-            if (effect.at("type") != "eq" || !effect.at("enabled").get<bool>()) {
-                continue;
-            }
-            std::complex<double> wet(1, 0);
-            for (const auto& band : effect.at("bands")) {
-                if (band.at("enabled").get<bool>()) {
-                    const Biquad filter(band);
-                    const auto z = std::polar(1.0, -2 * pi * frequency / rate);
-                    wet *= (filter.b0 + filter.b1 * z + filter.b2 * z * z) /
-                           (1.0 + filter.a1 * z + filter.a2 * z * z);
-                }
-            }
-            const double mix = effect.at("mix");
-            responseValue *= (1 - mix) + mix * wet;
+    std::array<std::complex<double>, 256> combined;
+    combined.fill({1, 0});
+    for (const auto& effect : effects) {
+        if (effect.at("type") != "eq") {
+            continue;
         }
-        response.push_back({frequency, 20 * std::log10(std::max(1e-9, std::abs(responseValue)))});
+        const auto curve = parametricEqCurve(effect);
+        for (unsigned point = 0; point < combined.size(); ++point) {
+            combined[point] *= curve[point];
+        }
+    }
+    json response = json::array();
+    for (unsigned point = 0; point < combined.size(); ++point) {
+        response.push_back({20 * std::pow(1000.0, point / 255.0),
+            20 * std::log10(std::max(1e-12, std::abs(combined[point])))});
     }
     return response;
 }
@@ -550,8 +484,9 @@ json designEffectVisual(const json& input) {
         result["fft_size"] = 2048;
         result["hop_frames"] = 512;
     } else if (type == "eq") {
+        result = parametricEqVisual(effect);
         result["kind"] = "eq";
-        result["points"] = designEqResponse(recipe.at("effects"));
+        result["effect"] = effect;
     } else if (type == "filter") {
         result["kind"] = "filter";
         result["points"] = json::array();

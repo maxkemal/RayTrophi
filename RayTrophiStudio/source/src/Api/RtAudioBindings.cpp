@@ -20,6 +20,29 @@ struct RegisterAudioMethods {
             names.push_back("audio." + op);
         }
         static const MethodParam params[] = {
+            {"generator_history", "object", false,
+                "Nullable versioned duration_seconds/controls/events history stored with a procedural source",
+                "null", nullptr},
+            {"store", "bool", false, "Persist a finished physical take on its source", "false", nullptr},
+            {"start_frame", "int", false, "Physical replay seek/preroll start, within the sample range",
+                "0", nullptr},
+            {"controls", "array", false, "Physical bake sample-frame/activity/gain control history",
+                "[]", nullptr},
+            {"events", "array", false, "Physical bake sample-frame/sequence/energy_j events",
+                "[]", nullptr},
+            {"sequence", "int", true, "Monotonic per-resident-source event identity, 0..2^53-1",
+                nullptr, nullptr},
+            {"energy_j", "float", true, "Positive excitation energy in joules, at most 1e9",
+                nullptr, nullptr},
+            {"generator", "object", false,
+                "Nullable procedural recipe: flow/friction/rolling, contact_activity, deformation, fracture_activity or impact; see PHYSICAL_AUDIO_GENERATION.md",
+                "null", nullptr},
+            {"scope", "string", false, "Source scope; selected/group require explicit ids",
+                "selected", "selected|group|scene"},
+            {"acoustics", "object", false,
+                "Persistent source acoustic policy: mode scene/custom/off and config", nullptr, nullptr},
+            {"mixer_bus", "string", false, "Mixer channel to highlight", nullptr,
+                "Master|Weather|Effects|Ambience|Music"},
             {"spectral", "bool", false, "Frequency dependent live transmission", "true", nullptr},
             {"reflections", "bool", false, "Audition up to six verified specular paths", "false", nullptr},
             {"diffuse", "bool", false, "Single-bounce Lambert transport; omnidirectional sources only", "false", nullptr},
@@ -57,8 +80,8 @@ struct RegisterAudioMethods {
             {"designer_canvas_pan_x", "float", false, "Shared horizontal canvas pan 0..1", "0", nullptr},
             {"designer_canvas_pan_y", "float", false, "Shared vertical canvas pan 0..1", "0", nullptr},
             {"designer_layer", "int", false, "Selected production layer slot 0..7", "0", nullptr},
-            {"designer_tools_open", "bool", false, "Show bottom studio tools panel", "true", nullptr},
-            {"designer_properties_open", "bool", false, "Show bottom studio properties panel", "false", nullptr},
+            {"designer_tools_open", "bool", false, "Expand bottom studio tools panel", "true", nullptr},
+            {"designer_properties_open", "bool", false, "Expand bottom studio properties panel", "true", nullptr},
             {"continuous", "bool", false, "Full STFT time coverage; false samples time_bins windows", "true", nullptr},
             {"effect", "object", true, "Validated single effect for its visual control curve", nullptr, nullptr},
             {"details", "bool", false, "Include rendered graphs; false returns transport/revision only", "true", nullptr},
@@ -69,6 +92,13 @@ struct RegisterAudioMethods {
             {"designer_zoom", "float", false, "Source waveform zoom 1..2048", "1", nullptr},
             {"designer_pan", "float", false, "Source waveform window placement 0..1", "0", nullptr},
             {"designer_effect", "int", false, "Selected effect slot 0..7", "0", nullptr},
+            {"designer_eq_band", "int", false, "Shared selected EQ band 0..7", "0", nullptr},
+            {"designer_eq_range_db", "float", false, "EQ vertical half-range, 6..288 dB", "24", nullptr},
+            {"designer_eq_auto_range", "bool", false, "Fit EQ response vertically", "true", nullptr},
+            {"designer_eq_height", "float", false, "EQ frame height 180..600", "280", nullptr},
+            {"designer_panel_zoom", "float", false, "Designer panel scale 0.5..1.5", "1", nullptr},
+            {"designer_panel_pan_x", "float", false, "Whole-panel horizontal scroll 0..1", "0", nullptr},
+            {"designer_panel_pan_y", "float", false, "Whole-panel vertical scroll 0..1", "0", nullptr},
             {"recipe", "object", true, "Validated sound design v3 recipe; see AUDIO_SOUND_DESIGN.md",
                 nullptr, nullptr},
             {"original", "bool", false, "Audition unprocessed input", "false", nullptr},
@@ -170,7 +200,9 @@ struct RegisterAudioMethods {
         };
         for (std::size_t i = 0; i < names.size(); ++i) {
             const auto& op = audio::AudioService::operations()[i];
-            const bool read = op == "source_runtime" || op == "acoustics_boundary" ||
+            const bool read = op == "acoustics_get" || op == "source_runtime" || op == "acoustics_boundary" ||
+                              op == "physical_bake_status" || op == "physical_history_status" ||
+                              op == "physical_replay_status" ||
                               op == "acoustics_debug" || op == "acoustics_preview_status" ||
                               op == "acoustics_trace" || op == "list" || op == "get" ||
                               op == "status" || op == "domains" ||
@@ -183,9 +215,24 @@ struct RegisterAudioMethods {
             descriptor.name = names[i].c_str();
             descriptor.domain = "audio";
             descriptor.summary = "Scene audio service operation";
-            descriptor.notes = op == "source_runtime"
+            descriptor.notes = op == "acoustics_get" || op == "acoustics_update" ||
+                op == "acoustics_reset_sources" || op == "acoustics_preview" || op == "acoustics_batch"
+                ? "Persistent scene defaults and source scene/custom/off policies. "
+                  "Dry/processed bypass is session-only. See docs/dev/AUDIO_ACOUSTIC_SETTINGS.md."
+                : op == "source_runtime"
                 ? "Resolved world pose and pre-mixer reaction controls. "
                   "See SCENE_AUDIO_PHYSICS_SOURCES.md."
+                : op == "physical_impact"
+                ? "Explicit energy excitation for an impact generator. Monotonic resident-source "
+                  "sequence deduplication; not an automatic solver-contact event. "
+                  "See docs/dev/PHYSICAL_AUDIO_GENERATION.md."
+                : op.rfind("physical_replay_", 0) == 0
+                ? "Worker-prepared, sample-scheduled native generator replay. Stop the source first; "
+                  "explicit apply begins playback. See docs/dev/PHYSICAL_AUDIO_REPLAY.md."
+                : op.rfind("physical_bake_", 0) == 0 || op.rfind("physical_history_", 0) == 0
+                ? "Bounded sampled control history and worker dry-mono bake using the shared "
+                  "physical DSP. Explicit apply imports an asset; no acoustic export parity. "
+                  "See docs/dev/PHYSICAL_AUDIO_BAKE.md."
                 : op.rfind("acoustics_preview", 0) == 0
                 ? "See docs/dev/SCENE_ACOUSTICS_PREVIEW.md. Session spectral transmission and sparse reflections."
                 : op == "acoustics_boundary"
@@ -200,7 +247,7 @@ struct RegisterAudioMethods {
                 : "See docs/dev/AUDIO_PRE_UI_DELIVERY.md and SCENE_AUDIO_STAGE1_API.md.");
             descriptor.access = read ? "read" : "write";
             const bool readsFile = op == "arrange_preview" || (op.rfind("track_", 0) == 0 && op != "track_list") || op == "append" || op == "asset_import" || op == "asset_relink" ||
-                                   op == "play" || op == "play_all" || op == "preview" || op == "preview_file" ||
+                                   op == "play" || op == "play_all" || op == "transport_batch" || op == "preview" || op == "preview_file" ||
                                    op == "environment_setup" || op == "create" || op == "update" ||
                                    op == "duplicate" || op == "thunder_setup" ||
                                    op == "thunder_update" || op == "thunder_event" ||
@@ -208,7 +255,10 @@ struct RegisterAudioMethods {
                                    op == "clip_batch" || op == "clip_create" || op == "clip_update" || op == "clip_duplicate" ||
                                    op == "clip_trim" || op == "clip_split" || op == "clip_resize" ||
                                    op == "capture_start" || op == "capture_finish";
-            descriptor.capability = (op == "synth_generate" || op == "design_save") ? "SceneWrite|FilesRead|FilesWrite" :
+            descriptor.capability = (op == "synth_generate" || op == "design_save" ||
+                op == "physical_bake_start" || op == "physical_bake_apply" ||
+                op == "physical_bake_cancel" || op == "physical_history_finish") ?
+                "SceneWrite|FilesRead|FilesWrite" :
                 (op == "design_job_start" || op == "design_render" || op == "design_undo" || op == "design_redo" ||
                  op == "design_reuse") ? "SceneWrite|FilesRead" :
                 (op == "design_destination" || op == "design_waveform") ? "Read|FilesRead" :
@@ -237,6 +287,58 @@ struct RegisterAudioMethods {
                         if (op == "acoustics_preview" && key == "enabled") {
                             param.required = true;
                             param.description = "Enable session spectral/echo audition for a spatial source";
+                        }
+                        if (op == "physical_impact") {
+                            param.required = true;
+                        }
+                        if (op == "physical_bake_start" &&
+                            (key == "id" || key == "ids" || key == "end_frame_exclusive")) {
+                            param.required = false;
+                            param.default_value = nullptr;
+                        }
+                        if (op == "physical_bake_start") {
+                            if (key == "start_frame" || key == "end_frame_exclusive") {
+                                param.description = "48 kHz history sample index; output range is half-open";
+                            } else if (key == "ids") {
+                                param.description = "Unique procedural source IDs; group accepts 1..32";
+                            } else if (key == "scope") {
+                                param.default_value = nullptr;
+                                param.description = "Alternative to id; every scoped source must be procedural";
+                            }
+                        }
+                        if ((op == "physical_bake_start" || op == "physical_replay_start") &&
+                            key == "duration_seconds") {
+                            param.description = "Physical history output duration, 0.05..60 seconds";
+                            param.default_value = "2";
+                        }
+                        if (op == "physical_history_start" && key == "duration_seconds") {
+                            param.description = "Maximum sampled take duration, 0.05..60 seconds";
+                            param.default_value = "60";
+                        }
+                        if (op == "physical_history_finish" && key == "path") {
+                            param.required = false;
+                            param.default_value = nullptr;
+                            param.description = "Optional new WAV path; starts a bake job from the finished take";
+                        }
+                        if (op == "acoustics_reset_sources") {
+                            param.required = false;
+                        }
+                        if (op == "acoustics_update" && key == "config") {
+                            param.description = "Patch of saved scene acoustic defaults";
+                        }
+                        if (op == "transport_batch" || op == "acoustics_batch") {
+                            param.required = key == "action";
+                            if (key == "ids") {
+                                param.description = "Unique source IDs; selected=1, group=1..32, scene omits ids";
+                                param.default_value = "[]";
+                            } else if (key == "action") {
+                                param.description = "Scoped runtime operation";
+                                param.enum_values = op == "transport_batch" ? "play|pause|stop" :
+                                    "configure|dry|processed";
+                            } else if (key == "config") {
+                                param.description = "Configure only: enabled plus acoustic preview controls";
+                                param.default_value = nullptr;
+                            }
                         }
                         if (op == "acoustics_preview" && key == "boundary_mode") {
                             param.default_value = "object_barrier";

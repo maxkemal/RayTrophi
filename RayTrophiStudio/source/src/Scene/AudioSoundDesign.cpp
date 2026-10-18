@@ -304,6 +304,7 @@ AudioPcm transform(const AudioPcm& original, const json& recipe, json& processin
     const double fadeIn = recipe.at("fade_in_seconds").get<double>() * rate;
     const double fadeOut = recipe.at("fade_out_seconds").get<double>() * rate;
     std::uint64_t clamped = 0;
+    double peakBeforeClip = 0;
     for (std::size_t frame = 0; frame < result.frames(); ++frame) {
         if (check && frame % 1024 == 0) {
             check();
@@ -324,6 +325,8 @@ AudioPcm transform(const AudioPcm& original, const json& recipe, json& processin
                                              std::tanh(1 + drive * 15));
             }
             const double output = sample * gain * envelope;
+            require(std::isfinite(output), "Nonfinite sound design output before clipping");
+            peakBeforeClip = std::max(peakBeforeClip, std::abs(output));
             clamped += std::abs(output) > 1;
             sample = static_cast<float>(std::clamp(output, -1.0, 1.0));
             require(std::isfinite(sample), "Nonfinite sound design sample");
@@ -352,6 +355,9 @@ AudioPcm transform(const AudioPcm& original, const json& recipe, json& processin
         result = std::move(loop);
     }
     processing = {{"clamped_samples_before_loop_join", clamped},
+        {"peak_before_output_clip", peakBeforeClip},
+        {"peak_before_output_clip_dbfs", peakBeforeClip > 0 ?
+            20 * std::log10(peakBeforeClip) : -120.0},
         {"effects", recipe.at("effects").size()}, {"layers", recipe.at("layers").size()}};
     return result;
 }

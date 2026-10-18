@@ -2,12 +2,15 @@
 #define NOMINMAX
 #endif
 #include "UI/AudioWorkspaceUI.h"
+#include "UI/AudioVisualLanguage.h"
+#include "UI/AudioAcousticSettingsUI.h"
 #include "UI/AudioSoundDesignerUI.h"
 #include "UI/AudioPropertyLayout.h"
 #include "UI/AudioUI.h"
 #include "UI/AudioThunderUI.h"
 #include "Audio/AudioAuthoring.h"
 #include "Audio/AudioService.h"
+#include "UI/AudioScopeControls.h"
 #include "Api/RtApi.h"
 #include "scene_ui.h"
 #include "scene_data.h"
@@ -413,50 +416,66 @@ void drawOutputControls(UIContext& ctx) {
 
 void drawWorkspace(UIContext& ctx) {
     ImGui::TextUnformatted("Scene Audio");
+    ImGui::TextDisabled("Create, place and listen");
+    const auto workspace = ctx.scene.audio->invoke("workspace_get", json::object());
+    const auto status = ctx.scene.audio->invoke("status", json::object());
     if (ImGui::Button("Add source")) {
         addSource(ctx);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Import sound")) {
-        const auto path = SceneUI::openFileDialogW(
-            L"Audio Files\0*.wav;*.flac;*.mp3\0");
+    if (ImGui::Button("Import audio")) {
+        const auto path = SceneUI::openFileDialogW(L"Audio Files\0*.wav;*.flac;*.mp3\0");
         if (!path.empty()) {
             workspaceCall(ctx, "asset_import", {{"path", path}});
         }
     }
-    if (ImGui::Button("Audio timeline")) {
-        openBottom("audio");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Mixer")) {
-        openBottom("audio_mixer");
-    }
-    const auto workspace = ctx.scene.audio->invoke("workspace_get", json::object());
-    bool inspectorOpen = workspace.at("inspector_open");
-    if (ImGui::Checkbox("Audio inspector", &inspectorOpen)) {
-        workspaceCall(ctx, "workspace_update", {{"inspector_open", inspectorOpen}});
-    }
-    const auto status = ctx.scene.audio->invoke("status", json::object());
-    bool previewMuted = status.at("preview_muted");
-    if (ImGui::Checkbox("Mute preview output", &previewMuted)) {
-        workspaceCall(ctx, "preview_mute", {{"muted", previewMuted}});
-    }
-    if (ImGui::Button("Play all sources")) {
+    if (ImGui::Button("Play scene sounds")) {
         workspaceCall(ctx, "play_all");
     }
     ImGui::SameLine();
     if (ImGui::Button("Stop all")) {
         workspaceCall(ctx, "stop_all");
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Resume automatic")) {
+    if (!status.at("automatic_suspended").empty() &&
+        ImGui::Button("Resume automatic sounds")) {
         workspaceCall(ctx, "resume_automatic");
     }
-    ImGui::Separator();
+    bool inspectorOpen = workspace.at("inspector_open");
+    if (ImGui::Checkbox("Source inspector", &inspectorOpen)) {
+        workspaceCall(ctx, "workspace_update", {{"inspector_open", inspectorOpen}});
+    }
+    const auto mixer = ctx.scene.audio->invoke("mixer_get", json::object());
+    for (const auto& bus : mixer.at("buses")) {
+        if (bus.at("name") != "Master") {
+            continue;
+        }
+        const float db = bus.at("meter").value("peak_dbfs", -120.0f);
+        char level[64];
+        std::snprintf(level, sizeof(level), "Master signal  %.1f dBFS", db);
+        ImGui::ProgressBar(std::clamp((db + 60.0f) / 60.0f, 0.0f, 1.0f),
+            ImVec2(-1, 0), level);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Signal before output mute. This is the combined scene mix.");
+        }
+    }
+    bool previewMuted = status.at("preview_muted");
+    if (ImGui::Checkbox("Mute output", &previewMuted)) {
+        workspaceCall(ctx, "preview_mute", {{"muted", previewMuted}});
+    }
+    if (previewMuted) {
+        ImGui::TextWrapped("Output is muted. Scene sounds and asset previews are silent.");
+    }
+    if (ImGui::CollapsingHeader("Group listening / acoustics")) {
+        drawAudioScopeControls(ctx);
+    }
+    ImGui::Spacing();
     const auto data = ctx.scene.audio->snapshot();
     if (ImGui::BeginTabBar("AudioWorkspaceSections")) {
         if (ImGui::BeginTabItem("Sources")) {
             sourceFilter.Draw("Search sources", -1);
+            ImGui::BeginChild("Workspace source list",
+                ImVec2(0, std::max(180.0f, ImGui::GetContentRegionAvail().y -
+                    ImGui::GetTextLineHeightWithSpacing() * 4)), true);
             for (const auto& source : data.at("emitters")) {
                 const auto name = source.at("name").get<std::string>();
                 const auto id = source.at("id").get<std::string>();
@@ -471,6 +490,7 @@ void drawWorkspace(UIContext& ctx) {
                     workspaceCall(ctx, "workspace_update", {{"selected_clip", ""}});
                 }
                 ImGui::TextDisabled("%s | %s", source.at("bus").get<std::string>().c_str(),
+                    !source.value("generator", json()).is_null() ? "Generated sound" :
                     source.at("asset_id").get<std::string>().empty() ? "Unbound" :
                     source.at("asset_id").get<std::string>().c_str());
                 for (const auto& voice : status.at("voices")) {
@@ -480,6 +500,7 @@ void drawWorkspace(UIContext& ctx) {
                 }
                 ImGui::PopID();
             }
+            ImGui::EndChild();
             if (data.at("emitters").empty()) {
                 ImGui::TextWrapped("Add a positional source or connect the atmosphere below.");
             }
@@ -487,7 +508,15 @@ void drawWorkspace(UIContext& ctx) {
         }
         if (ImGui::BeginTabItem("Assets")) {
             drawSynthesisControls(ctx);
+            static ImGuiTextFilter assetSearch;
+            assetSearch.Draw("Search assets", -1);
+            ImGui::BeginChild("Workspace asset list",
+                ImVec2(0, std::max(180.0f, ImGui::GetContentRegionAvail().y -
+                    ImGui::GetTextLineHeightWithSpacing() * 4)), true);
             for (const auto& asset : data.at("assets")) {
+                if (!assetSearch.PassFilter(asset.at("name").get<std::string>().c_str())) {
+                    continue;
+                }
                 const auto id = asset.at("id").get<std::string>();
                 ImGui::PushID(id.c_str());
                 ImGui::TextWrapped("%s", asset.at("name").get<std::string>().c_str());
@@ -497,44 +526,56 @@ void drawWorkspace(UIContext& ctx) {
                     workspaceCall(ctx, "preview", {{"id", id}});
                 }
                 ImGui::SameLine();
-                if (ImGui::SmallButton("Design / process")) {
-                    openSoundDesigner(ctx, id);
-                }
-                if (asset.value("source", std::string()).rfind("RayTrophi sound design v", 0) == 0 &&
-                    ImGui::SmallButton("Reuse recipe")) {
-                    reuseSoundRecipe(ctx, id);
-                }
-                if (ImGui::SmallButton("Add clip")) {
-                    addTimelineAsset(ctx, id);
-                }
-                if (ImGui::SmallButton("Add scene source")) {
-                    const auto added = workspaceCall(ctx, "append", {
-                        {"path", asset.at("path")}, {"name", asset.at("name")},
-                        {"license", asset.value("license", "")}, {"author", asset.value("author", "")},
-                        {"source", asset.value("source", "")}, {"tags", asset.value("tags", json::array())}});
-                    if (added.contains("id")) {
-                        workspaceCall(ctx, "select", {{"id", added.at("id")}});
-                    }
-                }
-                if (ImGui::SmallButton("Relink")) {
-                    const auto path = SceneUI::openFileDialogW(L"Audio Files\0*.wav;*.flac;*.mp3\0");
-                    if (!path.empty()) {
-                        workspaceCall(ctx, "asset_relink", {{"id", id}, {"path", path}});
-                    }
+                if (ImGui::SmallButton("EQ / Edit")) {
+                    openSoundDesigner(ctx, id, true);
                 }
                 ImGui::SameLine();
-                if (ImGui::SmallButton("Remove asset")) {
-                    workspaceCall(ctx, "asset_remove", {{"id", id}});
+                if (ImGui::SmallButton("Actions...")) {
+                    ImGui::OpenPopup("Asset actions");
+                }
+                if (ImGui::BeginPopup("Asset actions")) {
+                    if (ImGui::MenuItem("Design / process")) {
+                        openSoundDesigner(ctx, id);
+                    }
+                    if (asset.value("source", std::string()).rfind("RayTrophi sound design v", 0) == 0 &&
+                        ImGui::MenuItem("Reuse recipe")) {
+                        reuseSoundRecipe(ctx, id);
+                    }
+                    if (ImGui::MenuItem("Add clip")) {
+                        addTimelineAsset(ctx, id);
+                    }
+                    if (ImGui::MenuItem("Add scene source")) {
+                        const auto added = workspaceCall(ctx, "append", {
+                            {"path", asset.at("path")}, {"name", asset.at("name")},
+                            {"license", asset.value("license", "")}, {"author", asset.value("author", "")},
+                            {"source", asset.value("source", "")}, {"tags", asset.value("tags", json::array())}});
+                        if (added.contains("id")) {
+                            workspaceCall(ctx, "select", {{"id", added.at("id")}});
+                        }
+                    }
+                    if (ImGui::MenuItem("Relink")) {
+                        const auto path = SceneUI::openFileDialogW(L"Audio Files\0*.wav;*.flac;*.mp3\0");
+                        if (!path.empty()) {
+                            workspaceCall(ctx, "asset_relink", {{"id", id}, {"path", path}});
+                        }
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Remove asset")) {
+                        workspaceCall(ctx, "asset_remove", {{"id", id}});
+                    }
+                    ImGui::EndPopup();
                 }
                 ImGui::Separator();
                 ImGui::PopID();
             }
+            ImGui::EndChild();
             if (ImGui::Button("Stop audition")) {
                 workspaceCall(ctx, "preview_stop");
             }
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Scene")) {
+            drawSceneAcousticSettings(ctx);
             const auto telemetry = ctx.scene.audio->invoke("telemetry_get", json::object());
             bool collect = telemetry.at("enabled");
             if (ImGui::Checkbox("Collect physics audio telemetry", &collect)) {

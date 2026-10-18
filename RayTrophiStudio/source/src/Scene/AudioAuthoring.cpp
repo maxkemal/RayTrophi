@@ -1,5 +1,6 @@
 #include "Audio/AudioAuthoring.h"
 #include "Audio/AudioService.h"
+#include "Audio/AudioRequestValidation.h"
 #include "Audio/AudioDomainBridge.h"
 #include "Audio/AcousticScene.h"
 #include "AssetRegistry.h"
@@ -183,6 +184,7 @@ nlohmann::json author(UIContext& ctx, SceneHistory* history, const std::string& 
         !input.contains("assets_root")) {
         input["assets_root"] = pathUtf8(AssetRegistry::resolveDefaultRoot());
     }
+    validateAudioRequest(operation, input);
     if (input.contains("reaction") && input.at("reaction").value("driver", std::string()) ==
         "domain_contact") {
         const auto& reaction = input.at("reaction");

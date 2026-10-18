@@ -213,7 +213,17 @@ bool loadLocked(std::string& error) {
 uint32_t requiredCapabilities(const std::string& method) {
     if (method == "camera.sample_lens_weather") return Read;
     if (method.rfind("audio.", 0) == 0) {
-        if (method == "audio.acoustics_preview_status") return Read;
+        if (method == "audio.physical_bake_status") return Read;
+        if (method == "audio.physical_history_status") return Read;
+        if (method == "audio.physical_replay_status") return Read;
+        if (method == "audio.physical_bake_start" || method == "audio.physical_bake_apply" ||
+            method == "audio.physical_bake_cancel" || method == "audio.physical_history_finish") {
+            return SceneWrite | FilesRead | FilesWrite;
+        }
+        if (method == "audio.acoustics_get" || method == "audio.acoustics_preview_status") return Read;
+        if (method == "audio.acoustics_update" || method == "audio.acoustics_reset_sources") {
+            return SceneWrite;
+        }
         if (method == "audio.acoustics_boundary") return Read;
         if (method == "audio.acoustics_debug") return Read;
         if (method == "audio.acoustics_trace") return Read;
@@ -254,7 +264,8 @@ uint32_t requiredCapabilities(const std::string& method) {
         if (method == "audio.arrange_preview" || method == "audio.track_create" || method == "audio.track_update" ||
             method == "audio.track_remove" || method == "audio.track_reorder" ||
             method == "audio.append" || method == "audio.asset_import" || method == "audio.asset_relink" ||
-            method == "audio.play" || method == "audio.preview" ||
+            method == "audio.play" || method == "audio.play_all" ||
+            method == "audio.transport_batch" || method == "audio.preview" ||
             method == "audio.preview_file" || method == "audio.environment_setup" ||
             method == "audio.create" || method == "audio.update" || method == "audio.duplicate" ||
             method == "audio.thunder_setup" || method == "audio.thunder_update" ||

@@ -43,6 +43,13 @@ not use the impact decay control; seed influences noisy presets, not pure tone.
 
 ## Next synthesis stage (not implemented)
 
+2026-10-18 partial source continuation:
+[runtime physical activity generation](PHYSICAL_AUDIO_GENERATION.md) now generates
+file-free continuous liquid/gas flow and friction/rolling PCM. It reuses shared
+reaction, spatial, mixer and acoustic paths through source generator recipes in
+Python/IPC. No build/live acceptance is claimed. The remaining runtime targets
+below, especially impact events, resonators, replay and capture/export, stay open.
+
 A runtime generator driven by canonical DEM normal/friction/rolling, liquid/gas and
 MPM telemetry: bounded impact scheduling, material/size resonators, continuously
 controlled flow/friction textures, gain smoothing, voice budget, deterministic scene

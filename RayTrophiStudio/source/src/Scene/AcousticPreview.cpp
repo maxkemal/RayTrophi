@@ -1,5 +1,6 @@
 #include "Audio/AcousticPreview.h"
 #include "Audio/AcousticGpu.h"
+#include "Audio/AudioScope.h"
 #include <atomic>
 #include <cstdint>
 #include <cmath>
@@ -67,6 +68,52 @@ json AcousticPreview::status() const {
     return result;
 }
 
+json AcousticPreview::batch(const json& emitters, const json& params) {
+    require(params.contains("action"), "Acoustic batch requires action");
+    const auto ids = resolveAudioScope(emitters, params);
+    const auto action = params.value("action", json("configure"));
+    require(action.is_string() && (action == "configure" || action == "dry" ||
+        action == "processed"), "Acoustic batch action must be configure, dry or processed");
+    const auto config = params.value("config", json::object());
+    require(config.is_object(), "config must be an object");
+    require(action == "configure" || !params.contains("config"),
+        "dry/processed must omit config; they preserve the current recipe");
+    for (auto field = config.begin(); field != config.end(); ++field) {
+        require(field.key() == "enabled" || field.key() == "spectral" ||
+            field.key() == "reflections" || field.key() == "diffuse" ||
+            field.key() == "meters_per_unit" || field.key() == "boundary_mode",
+            "Unknown acoustic batch config field");
+    }
+    // Stage every validation and budget change before replacing live entries.
+    if (action == "configure") {
+        AcousticPreview validator;
+        validator.configure({{"id", "validation"}, {"spatial", true},
+            {"cone_inner", 360}, {"cone_outer", 360}}, config);
+    }
+    // Revision tokens may have gaps after rejection; published entries do not change.
+    auto staged = *this;
+    auto results = json::array();
+    for (const auto& id : ids) {
+        if (action != "configure") {
+            const auto found = staged.entries_.find(id.get<std::string>());
+            require(found != staged.entries_.end(),
+                "Configure every scoped source before dry/processed comparison");
+            found->second["bypassed"] = action == "dry";
+            results.push_back(found->second);
+            continue;
+        }
+        for (const auto& emitter : emitters) {
+            if (emitter.at("id") == id) {
+                results.push_back(staged.configure(emitter, config));
+                break;
+            }
+        }
+    }
+    entries_.swap(staged.entries_);
+    return {{"ok", true}, {"scope", params.value("scope", "selected")},
+        {"ids", ids}, {"action", action}, {"entries", results}};
+}
+
 void AcousticPreview::update(const std::string& id, const json& report) {
     auto found = entries_.find(id);
     if (found == entries_.end()) {
@@ -119,13 +166,14 @@ void AcousticPreview::forget(const std::string& id) {
 
 float AcousticPreview::gain(const json& emitter) const {
     const auto found = entries_.find(emitter.at("id").get<std::string>());
-    return found == entries_.end() || !eligible(emitter) ? 1.0f :
+    return found == entries_.end() || !eligible(emitter) ||
+        found->second.value("bypassed", false) ? 1.0f :
         found->second.at("amplitude_gain").get<float>();
 }
 
 json AcousticPreview::energy(const json& emitter) const {
     const auto found = entries_.find(emitter.at("id").get<std::string>());
-    if (found == entries_.end() || !eligible(emitter)) {
+    if (found == entries_.end() || !eligible(emitter) || found->second.value("bypassed", false)) {
         return json::array({1, 1, 1, 1, 1, 1});
     }
     const auto& entry = found->second;
@@ -140,7 +188,7 @@ json AcousticPreview::energy(const json& emitter) const {
 
 json AcousticPreview::reflections(const json& emitter) const {
     const auto found = entries_.find(emitter.at("id").get<std::string>());
-    if (found == entries_.end() || !eligible(emitter)) {
+    if (found == entries_.end() || !eligible(emitter) || found->second.value("bypassed", false)) {
         return json::array();
     }
     return found->second.at("reflection_paths");

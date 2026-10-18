@@ -23,6 +23,7 @@ def main():
     args = parser.parse_args()
     client = RtIpc()
     initial = client.call("audio.list")
+    initial_workspace = client.call("audio.workspace_get")
     assert not initial["emitters"] and not initial["clips"], "Use an audio-empty scene"
     assert not client.call("scene.list_objects"), "Use a geometry-empty scene"
     assert not client.call("audio.status")["preview_muted"], "Unmute preview before testing"
@@ -77,10 +78,49 @@ def main():
                     wav.writeframes(b"".join(struct.pack("<h", round(8000 * math.sin(
                         2 * math.pi * frequency * n / 48000))) for n in range(48000)))
                 assets.append(client.call("audio.asset_import", path=str(path))["id"])
+            client.call("audio.acoustics_update", config={"enabled": True, "spectral": True,
+                        "reflections": False, "diffuse": False, "meters_per_unit": 1,
+                        "boundary_mode": "object_barrier"})
             for index in range(args.sources):
                 sources.append(client.call("audio.create", name=f"Concurrent {index}",
                     asset_id=assets[index % 2], loop=True, spatial=True, rolloff=0,
                     gain=0.03, position=[camera[0] + 10, camera[1], camera[2]])["id"])
+            # Saved scene defaults and source exceptions use the same core as UI.
+            client.call("audio.acoustics_update", config={"enabled": True,
+                        "spectral": True, "reflections": False})
+            settings = client.call("audio.acoustics_get")
+            assert settings["config"]["enabled"]
+            assert all(e["policy"]["mode"] == "scene" and e["effective"]["enabled"]
+                       for e in settings["sources"])
+            client.call("audio.update", id=sources[0], acoustics={"mode": "custom",
+                        "config": {"enabled": False}})
+            client.call("audio.update", id=sources[1], acoustics={"mode": "off"})
+            client.call("audio.acoustics_update", config={"reflections": True})
+            settings = client.call("audio.acoustics_get")
+            by_id = {e["id"]: e for e in settings["sources"]}
+            assert not by_id[sources[0]]["effective"]["enabled"]
+            assert not by_id[sources[1]]["effective"]["enabled"]
+            assert client.call("audio.list")["acoustics"]["reflections"]
+            before = client.call("audio.list")
+            for method, params in (
+                ("audio.acoustics_update", {"config": {"enabled": "yes"}}),
+                ("audio.acoustics_update", {"config": {"unknown": 1}}),
+                ("audio.update", {"id": sources[0], "acoustics": {"mode": "unknown"}}),
+                ("audio.acoustics_reset_sources", {"scope": "group", "ids": ["missing"]})):
+                ok, error = client.try_call(method, **params)
+                assert not ok, (method, error)
+                assert client.call("audio.list") == before
+            client.call("audio.acoustics_reset_sources", scope="scene")
+            assert all(e["policy"]["mode"] == "scene"
+                       for e in client.call("audio.acoustics_get")["sources"])
+            client.call("audio.acoustics_update", config={"enabled": False,
+                        "reflections": False})
+            assert not client.call("audio.acoustics_preview_status")
+            client.call("audio.workspace_update", mixer_bus="Effects")
+            assert client.call("audio.workspace_get")["mixer_bus"] == "Effects"
+            ok, error = client.try_call("audio.workspace_update", mixer_bus="unknown")
+            assert not ok and client.call("audio.workspace_get")["mixer_bus"] == "Effects"
+            report["cases"].append({"case": "scene acoustic defaults, source exceptions, mixer focus"})
             missing = Path(folder) / "4000.wav"
             hidden = missing.with_suffix(".hidden")
             missing.rename(hidden)
@@ -101,12 +141,41 @@ def main():
             cursors = [v["cursor_frames"] for v in voices]
             assert max(cursors) - min(cursors) < 2048, voices
             report["cases"].append({"case": "concurrent", "voices": voices, "rms": rms()})
-            for source in sources:
-                preview(source)
+            client.call("audio.acoustics_batch", scope="group", ids=sources,
+                        action="configure", config={"enabled": True, "spectral": True})
             entries = [ready(source) for source in sources]
             assert len(entries) == args.sources
             report["cases"].append({"case": "concurrent spectral GPU batch",
                                     "sources": len(entries), "rms": rms()})
+            revisions = {e["id"]: e["preview_revision"] for e in entries}
+            authored = client.call("audio.list")
+            for action in ("dry", "processed"):
+                batch = client.call("audio.acoustics_batch", scope="group", ids=sources,
+                                    action=action)
+                assert batch["ids"] == sources
+                assert all(e.get("bypassed", False) == (action == "dry")
+                           for e in batch["entries"]), batch
+                assert {e["id"]: e["preview_revision"] for e in batch["entries"]} == revisions
+                assert client.call("audio.list") == authored, "A/B changed saved settings"
+            for method, params in (
+                ("audio.acoustics_batch", dict(scope="group", ids=sources + ["missing"],
+                                              action="configure", config={"enabled": False})),
+                ("audio.acoustics_batch", dict(scope="group", ids=sources,
+                                              action="configure", config={"enabled": "yes"})),
+                ("audio.transport_batch", dict(scope="group", ids=[sources[0], sources[0]],
+                                              action="stop")),
+            ):
+                ok, error = client.try_call(method, **params)
+                assert not ok, (method, params)
+                assert {e["id"]: e["preview_revision"] for e in
+                        client.call("audio.acoustics_preview_status")} == revisions
+                assert all(v["playing"] for v in client.call("audio.status")["voices"])
+            for action in ("pause", "play"):
+                client.call("audio.transport_batch", scope="group", ids=sources, action=action)
+                time.sleep(0.15)
+                assert all(v["playing"] == (action == "play")
+                           for v in client.call("audio.status")["voices"])
+            report["cases"].append({"case": "scoped A/B, revision preservation, atomic rejection, transport"})
             for source in sources:
                 client.call("audio.acoustics_preview", id=source, enabled=False)
             client.call("audio.stop_all")
@@ -222,6 +291,8 @@ def main():
         actions += [("audio.asset_remove", {"id": asset}) for asset in assets]
         actions += ([("scene.delete", {"name": wall})] if wall else [])
         actions += [("substance.remove", {"name": material}),
+                    ("audio.acoustics_update", {"config": initial["acoustics"]}),
+                    ("audio.workspace_update", {"mixer_bus": initial_workspace["mixer_bus"]}),
                     ("audio.playback_update", {"mode": initial["playback_mode"]})]
         for method, params in actions:
             ok, result = client.try_call(method, **params)

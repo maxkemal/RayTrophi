@@ -3,6 +3,28 @@
 #include <cmath>
 
 namespace audio {
+nlohmann::json decorateAudioPlaybackState(nlohmann::json runtime, bool playing, bool held,
+    bool suspended, bool pausedVoice, const nlohmann::json& generator) {
+    runtime["playing"] = playing;
+    runtime["timeline_held"] = held;
+    runtime["automatic_suspended"] = suspended;
+    std::string state = "stopped";
+    if (held) {
+        state = "timeline_held";
+    } else if (playing) {
+        state = "playing";
+    } else if (suspended) {
+        state = "automatic_suspended";
+    } else if (pausedVoice) {
+        state = "paused";
+    }
+    runtime["playback_state"] = state;
+    if (!generator.is_null()) {
+        runtime["generator_runtime"] = generator;
+    }
+    return runtime;
+}
+
 nlohmann::json resolveAudioSourceRuntime(const nlohmann::json& emitter,
     const nlohmann::json* resolvedPose, const ReactionOutput* control) {
     using json = nlohmann::json;
@@ -27,6 +49,8 @@ nlohmann::json resolveAudioSourceRuntime(const nlohmann::json& emitter,
     const float pitch = reactive && control ? control->pitch : 1;
     const float activity = reactive ? (control ? control->activity : 0) : 1;
     return {{"id", emitter.at("id")}, {"position", position}, {"direction", direction},
+        {"input_kind", emitter.contains("generator") && !emitter.at("generator").is_null() ?
+            "procedural" : "asset"},
         {"valid", valid}, {"control_ready", ready}, {"driver", reaction.at("driver")},
         {"automatic", reaction.at("automatic")}, {"activity", activity},
         {"spatial", emitter.at("spatial")}, {"reaction_gain", gain},

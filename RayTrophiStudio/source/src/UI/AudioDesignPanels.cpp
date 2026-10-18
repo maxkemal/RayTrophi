@@ -2,6 +2,7 @@
 #define NOMINMAX
 #endif
 #include "UI/AudioDesignPanels.h"
+#include "UI/AudioEqEditorUI.h"
 #include "UI/AudioDesignView.h"
 #include "UI/AudioWorkspaceUI.h"
 #include "UI/AudioPropertyLayout.h"
@@ -184,6 +185,26 @@ bool drawDesignModules(UIContext& ctx, json& recipe, bool effects, int layout) {
     const auto view = ctx.scene.audio->invoke("workspace_get", json::object());
     const auto selected = modules.empty() ? 0 : std::min<std::size_t>(
         view.value(selectionKey, 0u), modules.size() - 1);
+    if (effects && layout == 1 && !modules.empty()) {
+        ImGui::TextDisabled("Signal chain / top to bottom");
+        ImGui::BeginDisabled(selected == 0);
+        if (ImGui::SmallButton("Move selected up")) {
+            std::swap(modules[selected], modules[selected - 1]);
+            workspaceCall(ctx, "workspace_update", {{selectionKey, selected - 1}});
+            ImGui::EndDisabled();
+            return true;
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(selected + 1 >= modules.size());
+        if (ImGui::SmallButton("Move selected down")) {
+            std::swap(modules[selected], modules[selected + 1]);
+            workspaceCall(ctx, "workspace_update", {{selectionKey, selected + 1}});
+            ImGui::EndDisabled();
+            return true;
+        }
+        ImGui::EndDisabled();
+    }
     if (!effects && modules.empty()) {
         ImGui::TextWrapped("No explicit layers: the character generator is active. Adding a layer "
                            "switches to the layered engine, with the same global envelope.");
@@ -210,7 +231,8 @@ bool drawDesignModules(UIContext& ctx, json& recipe, bool effects, int layout) {
         }
         ImGui::SameLine();
         const auto title = std::to_string(index + 1) + ". " +
-            definition->at("name").get<std::string>();
+            definition->at("name").get<std::string>() +
+            (effects && !module.value("enabled", true) ? " / Bypassed" : "");
         if (ImGui::Selectable(title.c_str(), index == selected)) {
             workspaceCall(ctx, "workspace_update", {{selectionKey, index}});
         }
@@ -237,7 +259,7 @@ bool drawDesignModules(UIContext& ctx, json& recipe, bool effects, int layout) {
             }
         }
         if (layout != 1) {
-            if (effects && ImGui::SmallButton("Visual controls")) {
+            if (effects && ImGui::SmallButton(type == "eq" ? "Open visual equalizer" : "Visual controls")) {
                 workspaceCall(ctx, "workspace_update", {{"designer_effect", index}, {"designer_page", "effects"}});
             }
             if (ImGui::SmallButton("Up") && index > 0) {
@@ -260,7 +282,10 @@ bool drawDesignModules(UIContext& ctx, json& recipe, bool effects, int layout) {
                 return true;
             }
         }
-        if (layout == 2 || (layout == 0 && ImGui::CollapsingHeader("Parameters"))) {
+        const bool showParameters = type == "eq" ?
+            (layout != 1 && ImGui::CollapsingHeader("EQ precision parameters")) :
+            (layout == 2 || (layout == 0 && ImGui::CollapsingHeader("Parameters")));
+        if (showParameters) {
             completed |= fields(module, definition->at("fields"));
             if (type == "asset") {
                 const auto scene = ctx.scene.audio->snapshot();
@@ -292,13 +317,25 @@ bool drawDesignModules(UIContext& ctx, json& recipe, bool effects, int layout) {
                 ImGui::EndDisabled();
                 for (std::size_t band = 0; band < bands.size(); ++band) {
                     ImGui::PushID(static_cast<int>(band));
-                    if (ImGui::TreeNode("Band", "Band %zu", band + 1)) {
+                    const bool selectedBand = view.value("designer_eq_band", 0u) == band;
+                    const bool bandOpen = ImGui::TreeNodeEx("Band",
+                        selectedBand ? ImGuiTreeNodeFlags_Selected : ImGuiTreeNodeFlags_None,
+                        "Band %zu", band + 1);
+                    const bool bandClicked = ImGui::IsItemClicked();
+                    if (bandClicked) {
+                        workspaceCall(ctx, "workspace_update", {{"designer_eq_band", band}});
+                    }
+                    if (bandOpen) {
+                        const auto beforeBand = bands[band];
                         bool active = bands[band].value("enabled", true);
                         if (ImGui::Checkbox("Band enabled", &active)) {
                             bands[band]["enabled"] = active;
                             completed = true;
                         }
                         completed |= fields(bands[band], library.at("eq_band_fields"));
+                        if (bands[band] != beforeBand) {
+                            workspaceCall(ctx, "workspace_update", {{"designer_eq_band", band}});
+                        }
                         if (ImGui::Button("Remove band")) {
                             bands.erase(bands.begin() + band);
                             ImGui::TreePop();
@@ -476,6 +513,12 @@ bool drawDesignEffectGraph(UIContext& ctx, json& recipe) {
     auto view = ctx.scene.audio->invoke("workspace_get", json::object());
     const auto selected = std::min<std::size_t>(view.value("designer_effect", 0u), effects.size() - 1);
     auto& effect = effects[selected];
+    if (effect.at("type") == "eq") {
+        ImGui::PushID(static_cast<int>(selected));
+        const bool completed = drawParametricEqEditor(ctx, effect);
+        ImGui::PopID();
+        return completed;
+    }
     static json visualEffect;
     static json visual;
     if (visualEffect != effect || visual.empty()) {
@@ -525,66 +568,9 @@ bool drawDesignEffectGraph(UIContext& ctx, json& recipe) {
              kind == "modulation" ? -1 : -120,
              kind == "eq" ? 24 : kind == "filter" ? 12 : kind == "transfer" ? 6 :
              kind == "modulation" ? 1 : 0, frequencyPlot);
-    static int bandHandle = -1;
-    static std::size_t bandEffect = 0;
-    if (bandEffect != selected) {
-        bandHandle = -1;
-        bandEffect = selected;
-    }
     bool completed = false;
     const auto mouse = ImGui::GetIO().MousePos;
-    if (kind == "eq") {
-        auto& bands = effect["bands"];
-        int hoveredBand = -1;
-        for (std::size_t band = 0; band < bands.size(); ++band) {
-            const double frequency = bands[band].value("frequency_hz", 1000.0);
-            const double gain = bands[band].value("gain_db", 0.0);
-            const ImVec2 point(first.x + static_cast<float>(std::log(frequency / 20) / std::log(1000.0)) * width,
-                               first.y + static_cast<float>((24 - gain) / 48) * height);
-            const float dx = mouse.x - point.x, dy = mouse.y - point.y;
-            ImGui::GetWindowDrawList()->AddCircleFilled(point, 6,
-                ImGui::GetColorU32(bands[band].value("enabled", true) ?
-                                   ImGuiCol_SliderGrabActive : ImGuiCol_TextDisabled));
-            if (ImGui::IsItemHovered() && dx * dx + dy * dy < 225) {
-                hoveredBand = static_cast<int>(band);
-                ImGui::SetTooltip("Band %zu | %.0f Hz | %.1f dB | Q %.2f", band + 1,
-                    frequency, gain, bands[band].value("q", 0.707));
-                if (ImGui::IsMouseClicked(0)) {
-                    bandHandle = static_cast<int>(band);
-                }
-                if (ImGui::GetIO().KeyCtrl && ImGui::GetIO().MouseWheel != 0) {
-                    bands[band]["q"] = std::clamp(bands[band].value("q", 0.707) *
-                        std::pow(1.1, ImGui::GetIO().MouseWheel), 0.1, 10.0);
-                    completed = true;
-                }
-            }
-        }
-        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
-            hoveredBand < 0 && bands.size() < 8) {
-            bands.push_back({{"mode", "peak"}, {"enabled", true}, {"q", 0.707},
-                {"frequency_hz", 20 * std::pow(1000.0,
-                    std::clamp((mouse.x - first.x) / width, 0.0f, 1.0f))},
-                {"gain_db", std::clamp(24 - (mouse.y - first.y) / height * 48, -24.0f, 24.0f)}});
-            completed = true;
-        }
-        if (hoveredBand >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-            bands.erase(bands.begin() + hoveredBand);
-            bandHandle = -1;
-            completed = true;
-        }
-        if (bandHandle >= 0 && bandHandle < static_cast<int>(bands.size()) && ImGui::IsItemActive()) {
-            bands[bandHandle]["frequency_hz"] = 20 * std::pow(1000.0,
-                std::clamp((mouse.x - first.x) / width, 0.0f, 1.0f));
-            const auto mode = bands[bandHandle].value("mode", std::string("peak"));
-            if (mode != "lowpass" && mode != "highpass") {
-                bands[bandHandle]["gain_db"] = std::clamp(24 - (mouse.y - first.y) / height * 48, -24.0f, 24.0f);
-            }
-        }
-        if (bandHandle >= 0 && ImGui::IsItemDeactivated()) {
-            bandHandle = -1;
-            completed = true;
-        }
-    } else if ((type == "compressor" || type == "limiter") && ImGui::IsItemActive()) {
+    if ((type == "compressor" || type == "limiter") && ImGui::IsItemActive()) {
         effect[type == "compressor" ? "threshold_db" : "ceiling_db"] =
             std::clamp(-60.0 + (mouse.x - first.x) / width * 66,
                        type == "compressor" ? -60.0 : -12.0, 0.0);

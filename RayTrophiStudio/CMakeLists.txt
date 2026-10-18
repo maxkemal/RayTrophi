@@ -384,6 +384,10 @@ if(MSVC)
         source/src/Api/RtPythonPressure.cpp
         source/src/Api/RtPythonDebris.cpp
         source/src/Api/RtPythonMassTransfer.cpp
+        source/src/Scene/AudioAcousticSettings.cpp
+        source/src/Scene/AudioParametricEq.cpp
+        source/src/UI/AudioEqEditorUI.cpp
+        source/src/UI/AudioAcousticSettingsUI.cpp
         PROPERTIES COMPILE_OPTIONS "/EHsc")
 endif()
 

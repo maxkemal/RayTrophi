@@ -289,3 +289,133 @@ Studio build, external IPC probe and listening/visual acceptance remain pending.
 2026-10-14 latest build: user confirmed Studio compilation after Sound Designer
 MSVC fixes. New Designer listening/UI/external IPC results are pending. This does
 not close shader telemetry, full capture/replay, video/player or geometry-acoustics gates.
+## 2026-10-18 ana plan üzerinden toplu ilerleme
+
+Akustik sahipliği ve mixer UI devamı: [Saved acoustic settings](AUDIO_ACOUSTIC_SETTINGS.md)
+ile sahne varsayılanları ve kaynak scene/custom/off politikaları mevcut proje
+snapshot/restore/undo yoluna bağlandı. A/B bypass ve hesaplanmış sorgu sonuçları
+oturumluk kalır. Yeni uygun kaynaklar sahne ayarını devralır; custom/off istisnaları
+açık reset işlemiyle geri alınır. Ortak Python/IPC get/update/reset ve legacy
+preview/batch servisleri aynı çekirdeği kullanır. Inspector aynı mixer kanalının
+seviye/mute/metresini gösterir; alt Mixer'a ilgili kanal seçimiyle geçiş sağlar.
+Bu kaynak teslimi için statik kontroller geçti; yeni kullanıcı derlemesi, kayıt
+round-trip/undo ve UI/canlı kabulü bekleniyor. Önceki 20-case kabul bu yeni özellikleri
+doğrulamış sayılmaz; mevcut acoustic-playback scripti yeni senaryolarla genişletildi.
+
+UI başlangıç kabul eşiği: kullanıcı son kaynakları derleyip boş test sahnesini
+açtı. Dış IPC reactive-acoustics kabulü 20 senaryoyla geçti; 28 hatalı istek,
+yedi sürekli üretici, dört impact rezonatörü, akustik tepki, grup kuru karışım,
+birebir sample crop, farklı history uzunlukları, stale reddi, bake/replay ve
+sampled history/store zinciri doğrulandı. Rapor:
+`audio_physical_acceptance_20261018.json` (`passed=true`). Test materyali undo
+geçmişine bağlı olduğundan silinemedi; test geometrisi ve sesleri kaldırıldı.
+Bu, mevcut çekirdek için kararlaştırılan UI geçiş eşiğini kapatır. Tekil solver
+event/cache, tam akustikli offline parity, streaming/player ve bütün sistemin
+nihai kabulü açık kalır; canlı ölçülmüş MPM/DEM/fluid olay testi yerine injected
+control fixture kullanıldığı unutulmamalıdır. UI görsel/dinleme kabulü ayrıdır.
+
+Toplu fiziksel çıktı paketi: `physical_bake_start` mevcut tek kaynak sözleşmesine
+ek olarak selected/group/scene kapsamını (toplam 1..32 procedural kaynak), kaynak
+başına saklanan history'yi, farklı history uzunluklarını ve örnek aralığı çıktısını
+destekler. Ortak schedule ile worker preroll, kaynak ID sırasına göre deterministik
+toplama, tüm kaynaklarda stale denetimi, tek dosya/asset yayını ve range provenance
+aynı servis/Python/IPC yolundadır. Kısa history sessizlikle tamamlanır. Mikser ve
+sahne akustiği bu kuru karışıma dahil değildir; tam offline parity açık kalır.
+Mevcut kabul scriptine permutation, gain toplamı, birebir crop, kısa-history kuyruğu,
+hatalı istek atomikliği ve grup stale kontrolleri eklendi. Build/canlı test yapılmadı.
+Detaylar: [Physical audio bake](PHYSICAL_AUDIO_BAKE.md).
+
+MPM ses çekirdeği devamı: deformation mevcut pozitif stress-power ölçümünü,
+fracture_activity ise mevcut kütle ağırlıklı damage-growth rate ölçümünü kullanır.
+Ortak canlı/bake/replay DSP yolu ve rezonatör kontrolleri korunur. Tekil solver
+kırılma olayı veya enerji kalibrasyonu iddiası yoktur. Birleşik domain solver ve
+test dosyaları değiştirilmedi; UI toplu son aşamada kalır.
+
+UI öncesi kaynak devamı: [kalıcı fizik geçmişi ve temas dokusu](PHYSICAL_AUDIO_STORED_HISTORY.md)
+generator_history verisini ortak emitter şemasıyla proje/undo/duplicate hattına
+bağlar; bake/replay saklanan history'yi doğrudan okuyabilir. Finish(store=True)
+aynı update servisini kullanır. contact_activity mevcut DEM/mixed temas sönüm
+gücünden sürekli rezonans üretir; tekil çarpışma olayı uydurmaz. Bu dilim birleşik
+domain üreticilerini veya shader ABI'sini değiştirmez. UI, build ve canlı test
+yoktur; otomatik tekil solver event/cache ve tam akustik export parity hâlâ açıktır.
+
+Replay kaynak devamı: [Physical audio replay](PHYSICAL_AUDIO_REPLAY.md) ile aynı
+tipli sample schedule hem bake hem native üreticide kullanılmaktadır. Geçmiş ve
+seek/preroll worker'da hazırlanır; explicit apply ortak native transportu başlatır.
+Callback JSON/bellek tahsisi yapmaz. Süre sonunda drain ve otomatik voice bırakma
+vardır. Bu teslim oturum içi history replay'dir; solver'ın substep event cache'i,
+kalıcı scene-time bağlama ve tam acoustic export parity hâlâ açıktır. UI, derleme
+ve canlı test eklenmedi; birleşik domain testleri bağımsız sürmektedir.
+
+Derleme beklemeden kaynak devamı: [Physical audio bake](PHYSICAL_AUDIO_BAKE.md)
+ile canlı/offline ortak DSP, örnek-kareli deterministik history evaluator,
+iptal/ownership/stale denetimli worker WAV üretimi ve explicit apply ile asset
+ithali eklendi. Sınırlı sampled-control take start/status/finish/cancel işlemleri
+Python/IPC üzerinden aynı servisle bu bake yoluna bağlanır. Bu yalnız kuru mono
+üretici yoludur; sahne akustik export parity, substep solver replay ve cihaz PCM
+eşliği tamamlanmış sayılmaz. Yeni UI/derleme/canlı test turu yoktur. Birleşik domain
+çekirdeği ve testlerine dokunulmaz; mevcut audio kabul scriptine ilgili kontroller
+eklenir ve toplu test kapısına bırakılır.
+
+Fizik audio yaşam döngüsü devamı: pasif sürekli üretici ve sönmüş impact için
+1.25 saniyelik transport tabanlı boşaltma/otomatik voice bırakma kaynakta eklendi.
+Yeni etkinlik/olay boşaltmayı iptal eder. Otomatik bırakma sonrası impact sıra
+kimliği korunur; aynı olay yeni voice açmaz. Açık stop/scene/recipe reset yeni
+epoch başlatır. generator_runtime tanıları mevcut script/IPC source_runtime
+yolundadır. Birleşik domain solver/test dosyaları bu dilimde değiştirilmedi;
+statik kaynak kontrolü dışında test çalıştırılmadı. Ayrıntı PHYSICAL_AUDIO_GENERATION.md.
+
+Son çekirdek kaynak dilimi: impact generator için altı modlu sönümlü rezonatör,
+wood/metal/stone/glass timbre profilleri, boyut/sönüm/enerji referansı ve sabit
+32 olaylık callback kuyruğu eklendi. Ortak Python/IPC physical_impact işlemi
+sequence/energy_j doğrular ve aynı resident kaynakta tekrarları eler. Bu explicit
+enerji olayı API'sidir; solver'ın tekil temas zaman/kimlik/malzeme köprüsü henüz
+tamamlanmadı. Ayrıntı PHYSICAL_AUDIO_GENERATION.md içinde. Yeni UI veya canlı
+test eklenmedi; mevcut kabul scripti genişletildi, derleme kullanıcıya ait.
+
+Kullanıcı düzeltmesi: temel fiziksel ses üretimi önce tamamlanacak; UI topluca en
+sona kalacak. Aşağıdaki authoring/UI öncelikli sıra bu kararla geçersizdir; mevcut
+UI kaynak değişiklikleri korunur, yeni UI işi açılmaz. İlk çekirdek kaynak teslimi
+[PHYSICAL_AUDIO_GENERATION.md](PHYSICAL_AUDIO_GENERATION.md): fluid/gas flow ve
+DEM friction/rolling etkinliğinden dosyasız sürekli PCM, ortak reaction/transport/
+acoustic yoluna bağlandı. Python/IPC create/update generator alanını paylaşır.
+Bu teslim ölçülmüş impact/splash event sentezi, history/export veya fiziksel
+kalibrasyonu tamamlamaz; C++ build ve canlı kabul yapılmadı. Sıradaki çekirdek
+işler ölçülmüş olay uyarımı, malzeme rezonansları ve clock/history/capture/export;
+testler anlamlı toplu kapılarda, UI bunların ardından ele alınır.
+
+Kullanıcı ana audio sisteminin tamamına yönelik daha büyük uygulama paketleri ve
+daha seyrek test/script turları istedi. Fluid synthesis planı yalnız bir alt iş
+olarak kalır; ana kapsamı daraltmaz. Yeni script ve canlı kabul her küçük kaynak
+değişikliğinde tekrarlanmaz. Mevcut testler mümkün olduğunca genişletilir; kritik
+saat/örnek, sahiplik ve atomiklik sözleşmeleri uygulama sırasında statik incelenir.
+Derleme ve canlı kabul anlamlı paket sonlarına toplanır; derlemeyi kullanıcı yapar.
+
+Devam sırası:
+
+1. **Çoklu kaynak authoring ve ortak kontrol:** kısa/çakışma yönetimli viewport
+   etiketleri, sınırlı/aranabilir listeler; ardından selected/group/scene transport,
+   atomik toplu acoustic enable ve dry/processed A/B. Mevcut servisler yeniden
+   kullanılır; yeni işlemler UI/script/IPC ile birlikte teslim edilir.
+2. **Runtime üretim ve yaşam döngüsü:** sürekli fluid flow sentezi, ortak voice
+   bütçesi, durma/kuyruk yönetimi, clock/replay; ölçülmüş splash olayları ayrı kaynak
+   verisi gerektirir. Streaming/voice sanallaştırma açık ana-plan işleri olarak kalır.
+3. **Deterministik çıktı ve taşınabilirlik:** live/offline ortak evaluator,
+   acoustic filtre/yansıma parity, kayıt/control history, asset/lisans paketi,
+   video adaptörü ve player bağlantısı. Mevcut kuru export tam acoustic parity
+   olarak sunulmaz; player teslimi EXE altyapısına bağımlıdır.
+4. **Toplu kabul:** mevcut IPC araçlarıyla yaşam döngüsü/scene round-trip/replay,
+   ses kalitesi, 1/8/16/32-source maliyet ve cihaz/çıktı kontrolleri. Kaynak teslimi
+   ile kullanıcı build/canlı kabul durumları ayrı raporlanır.
+
+İlk kaynak dilimi: Audio Sources hierarchy sekiz satırlık scroll alanı, arama ve
+clipped satırlar kullanır; source asset picker arama içerir. Viewport etiketleri
+180 px ile sınırlıdır, UTF-8 adları bölmeden kısaltır, seçili kaynağa öncelik verir
+ve çakışan etiketleri yakındaki boş satırlara taşır veya gizler. Marker hover tam
+source/asset bilgisini gösterir. Bunlar yalnız sunum değişiklikleridir; mevcut
+select/update servisleri ve script/IPC authoring sözleşmeleri korunur. Genel asset
+library filtreleme ve ortak transport kapsamı henüz bu dilimde uygulanmadı.
+
+Yeni test scripti veya canlı test turu yapılmadı. Paket sonunda kullanıcı Studio
+C++ derlemesiyle dar/geniş dock, uzun/Unicode adlar, kalabalık kaynaklar, arama,
+seçim ve gizmo occlusion kontrolü yapmalı; bu dilimde shader değişmedi.

@@ -13,7 +13,9 @@ void require(bool condition, const std::string& message) {
     }
 }
 float field(const json& p, const char* key, float fallback, float low, float high) {
-    const float value = p.value(key, fallback);
+    const auto input = p.value(key, json(fallback));
+    require(input.is_number(), std::string(key) + " must be numeric");
+    const float value = input.get<float>();
     require(std::isfinite(value) && value >= low && value <= high,
             std::string(key) + " must be finite and in range");
     return value;
@@ -32,6 +34,15 @@ nlohmann::json AudioReaction::validate(const json& p) {
              "pitch_max", "response_seconds", "signal_key", "follow_position",
              "source_material", "target_material", "automatic", "start_threshold",
              "stop_threshold", "system_id", "domain_name", "input_metric", "domain_channel"});
+    for (const auto* key : {"driver", "signal_key", "source_material", "target_material",
+        "domain_name", "input_metric", "domain_channel"}) {
+        require(!p.contains(key) || p.at(key).is_string(),
+            std::string(key) + " must be a string");
+    }
+    for (const auto* key : {"follow_position", "automatic"}) {
+        require(!p.contains(key) || p.at(key).is_boolean(),
+            std::string(key) + " must be boolean");
+    }
     json result;
     const std::string driver = p.value("driver", std::string("manual"));
     require(driver == "manual" || driver == "wind" || driver == "rain" || driver == "signal" ||

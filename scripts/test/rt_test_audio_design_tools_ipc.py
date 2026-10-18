@@ -38,7 +38,8 @@ def main():
         assert {item["type"] for item in catalogue["layers"]} == {
             "oscillator", "noise", "fm", "resonator", "asset"}
         assert {item["type"] for item in catalogue["effects"]} == {
-            "eq", "filter", "compressor", "delay", "reverb", "chorus", "phaser", "saturation", "limiter"}
+            "eq", "filter", "compressor", "delay", "reverb", "chorus", "phaser", "saturation", "limiter",
+            "spectral_region"}
         with tempfile.TemporaryDirectory(prefix="rt_design_tools_", dir=args.output_dir) as text:
             folder = Path(text).resolve()
             source = folder / "source.wav"
@@ -84,6 +85,77 @@ def main():
                 assert len(visual["points"]) >= 64 and all(
                     math.isfinite(value) for point in visual["points"] for value in point)
 
+            # EQ curve and PCM must agree, including output trim and parallel mix.
+            for mode in ("peak", "lowshelf", "highshelf", "highpass", "lowpass"):
+                for hz in (20, 20000):
+                    for q in (0.1, 10):
+                        for gain in (-24, 24):
+                            curve = client.call("audio.design_effect_visual", effect={"type": "eq",
+                                "bands": [{"mode": mode, "frequency_hz": hz,
+                                           "q": q, "gain_db": gain}]})
+                            assert curve["sample_rate"] == 48000 and len(curve["band_curves"]) == 1
+                            assert all(math.isfinite(value) for point in curve["points"] for value in point)
+            quiet_path = folder / "eq_stereo_probe.wav"
+            with wave.open(str(quiet_path), "wb") as wav:
+                wav.setparams((2, 2, 48000, 0, "NONE", "not compressed"))
+                wav.writeframes(b"".join(struct.pack("<hh",
+                    int(800 * math.sin(2 * math.pi * 1000 * frame / 48000)), 0)
+                    for frame in range(24000)))
+            original_eq_bytes = quiet_path.read_bytes()
+            quiet = client.call("audio.asset_import", path=str(quiet_path))
+            assets.append(quiet["id"])
+            eq_recipe = dict(mode="asset", asset_id=quiet["id"], source_out_seconds=0.5,
+                             fade_in_seconds=0, fade_out_seconds=0)
+            eq_neutral = client.call("audio.design_render", recipe=eq_recipe)
+            probe = {"type": "eq", "bands": [{"frequency_hz": 1000, "gain_db": 6, "q": 0.707}]}
+            boosted = client.call("audio.design_render", recipe={**eq_recipe, "effects": [probe]})
+            ratio = boosted["processed"]["rms"] / eq_neutral["processed"]["rms"]
+            assert abs(20 * math.log10(ratio) - 6) < 0.05
+            for trim, mix in ((-6, 1), (6, 0.5)):
+                effect = {"type": "eq", "bands": [], "output_db": trim, "mix": mix}
+                expected = (1 - mix) + mix * 10 ** (trim / 20)
+                rendered = client.call("audio.design_render", recipe={**eq_recipe, "effects": [effect]})
+                ratio = rendered["processed"]["rms"] / eq_neutral["processed"]["rms"]
+                assert abs(ratio - expected) < 1e-5
+                curve = client.call("audio.design_effect_visual", effect=effect)
+                assert all(abs(point[1] - 20 * math.log10(expected)) < 1e-8
+                           for point in curve["points"])
+            # A parallel high-pass mix has phase cancellation: dB/magnitude blending
+            # would predict the wrong PCM level here.
+            phase_probe = {"type": "eq", "mix": 0.5,
+                           "bands": [{"mode": "highpass", "frequency_hz": 2000, "q": 0.707}]}
+            phase_pcm = client.call("audio.design_render", recipe={**eq_recipe, "effects": [phase_probe]})
+            points = client.call("audio.design_effect_visual", effect=phase_probe)["points"]
+            upper = next(i for i, point in enumerate(points) if point[0] >= 1000)
+            low, high = points[upper - 1], points[upper]
+            fraction = math.log(1000 / low[0]) / math.log(high[0] / low[0])
+            expected_db = low[1] + fraction * (high[1] - low[1])
+            measured_db = 20 * math.log10(phase_pcm["processed"]["rms"] /
+                                        eq_neutral["processed"]["rms"])
+            assert abs(measured_db - expected_db) < 0.05, (measured_db, expected_db)
+            client.call("audio.design_render", recipe={**eq_recipe, "effects": [probe]})
+            exported = client.call("audio.design_save", path=str(folder / "eq_processed.wav"))
+            assets.append(exported["asset"]["id"])
+            assert exported["asset"]["id"] != quiet["id"]
+            assert Path(exported["asset"]["path"]).resolve() != quiet_path.resolve()
+            assert quiet_path.read_bytes() == original_eq_bytes
+            recalled_eq = client.call("audio.design_reuse", id=exported["asset"]["id"])
+            assert recalled_eq["recipe"]["asset_id"] == quiet["id"]
+            assert recalled_eq["recipe"]["effects"][0]["type"] == "eq"
+            assert recalled_eq["processed"]["pcm_hash"] == exported["design"]["pcm_hash"]
+            data = Path(exported["asset"]["path"]).read_bytes()
+            offset = 12
+            while data[offset:offset + 4] != b"data":
+                size = struct.unpack_from("<I", data, offset + 4)[0]
+                offset += 8 + size + (size & 1)
+            size = struct.unpack_from("<I", data, offset + 4)[0]
+            samples = list(struct.iter_unpack("<ff", data[offset + 8:offset + 8 + size]))
+            assert len(samples) == 24000 and all(right == 0 for left, right in samples)
+            assert max(abs(left) for left, right in samples) > 0
+            clipping = client.call("audio.design_render", recipe={**eq_recipe, "effects": [
+                {"type": "eq", "bands": [{"frequency_hz": 1000, "gain_db": 24}] * 8}]})
+            assert clipping["processing"]["clamped_samples_before_loop_join"] > 0
+            assert clipping["processing"]["peak_before_output_clip"] > 1
             first = {"type": "eq", "bands": [{"mode": "lowpass", "frequency_hz": 300}]}
             second = {"type": "saturation", "drive": 0.8}
             ordered = client.call("audio.design_render", recipe={**neutral["recipe"], "effects": [first, second]})
@@ -95,6 +167,9 @@ def main():
             for patch in ({"layers": [{"type": "missing"}]}, {"effects": [{"type": "eq", "oops": 1}]},
                           {"effects": [{"type": "delay", "feedback": 1}]},
                           {"effects": [{"type": "eq", "bands": [{"q": 0}]}]},
+                          {"effects": [{"type": "eq", "output_db": 25}]},
+                          {"effects": [{"type": "eq", "output_db": "loud"}]},
+                          {"effects": [{"type": "eq", "bands": [{"enabled": 1}]}]},
                           {"layers": [{"type": "noise", "enabled": 1}]},
                           {"effects": [{"type": "limiter"}] * 9}, {"gain_db": True},
                           {"tail_seconds": 6}, {"formant_compensate": 1},
@@ -178,13 +253,24 @@ def main():
                           {"designer_canvas_zoom": 0}, {"designer_canvas_zoom": 9},
                           {"designer_canvas_pan_x": -1}, {"designer_canvas_pan_y": 2},
                           {"designer_canvas_zoom": True}, {"designer_layer": 8}, {"designer_layer": -1}, {"designer_layer": True},
-                          {"designer_tools_open": 1}, {"designer_properties_open": "yes"}):
+                          {"designer_tools_open": 1}, {"designer_properties_open": "yes"},
+                          {"designer_eq_band": -1}, {"designer_eq_band": 8},
+                          {"designer_eq_band": True}, {"designer_eq_range_db": 5},
+                          {"designer_eq_range_db": 289}, {"designer_eq_range_db": True},
+                          {"designer_eq_range_db": "24"}, {"designer_eq_auto_range": 1},
+                          {"designer_panel_zoom": 0.4}, {"designer_panel_zoom": 1.6},
+                          {"designer_panel_zoom": True}, {"designer_eq_height": 179},
+                          {"designer_eq_height": 601}, {"designer_eq_height": "280"},
+                          {"designer_panel_pan_x": -1}, {"designer_panel_pan_y": 2}):
                 rejected(client, "audio.workspace_update", **patch)
                 assert client.call("audio.workspace_get") == view
             client.call("audio.workspace_update", designer_page="effects", designer_zoom=4,
                         designer_pan=0.25, designer_effect=0, designer_layer=3, designer_tools_open=False,
                         designer_properties_open=True, designer_edit_view="arrange", designer_canvas_zoom=2,
-                        designer_canvas_pan_x=0.25, designer_canvas_pan_y=0.75)
+                        designer_canvas_pan_x=0.25, designer_canvas_pan_y=0.75,
+                        designer_eq_band=2, designer_eq_range_db=96, designer_eq_auto_range=False,
+                        designer_panel_zoom=0.75, designer_eq_height=220,
+                        designer_panel_pan_x=0.4, designer_panel_pan_y=0.6)
             updated_view = client.call("audio.workspace_get")
             assert updated_view["designer_page"] == "effects" and updated_view["designer_layer"] == 3
             assert not updated_view["designer_tools_open"] and updated_view["designer_properties_open"]
@@ -192,6 +278,19 @@ def main():
             assert updated_view["designer_canvas_zoom"] == 2
             assert updated_view["designer_canvas_pan_x"] == 0.25
             assert updated_view["designer_canvas_pan_y"] == 0.75
+            assert updated_view["designer_eq_band"] == 2
+            assert updated_view["designer_eq_range_db"] == 96
+            assert not updated_view["designer_eq_auto_range"]
+            assert updated_view["designer_panel_zoom"] == 0.75
+            assert updated_view["designer_eq_height"] == 220
+            assert updated_view["designer_panel_pan_x"] == 0.4
+            assert updated_view["designer_panel_pan_y"] == 0.6
+            for band_index, extent in ((0, 6), (7, 288)):
+                bounded = client.call("audio.workspace_update", designer_eq_band=band_index,
+                                      designer_eq_range_db=extent, designer_eq_auto_range=True)
+                assert bounded["designer_eq_band"] == band_index
+                assert bounded["designer_eq_range_db"] == extent
+                assert bounded["designer_eq_auto_range"]
             for asset in reversed(assets):
                 client.call("audio.asset_remove", id=asset)
             assets.clear()

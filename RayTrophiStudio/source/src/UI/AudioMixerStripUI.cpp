@@ -92,6 +92,16 @@ void meter(const json& reading, float height) {
 
 void drawMixerContent(UIContext& ctx) {
     drawAudioEditorNavigation(ctx);
+    const auto workspace = ctx.scene.audio->invoke("workspace_get", json::object());
+    const auto focusedBus = workspace.value("mixer_bus", std::string("Master"));
+    static std::weak_ptr<audio::AudioService> focusedOwner;
+    static std::string lastFocusedBus;
+    static int lastDrawFrame = -2;
+    const bool revealFocus = focusedOwner.lock() != ctx.scene.audio || lastFocusedBus != focusedBus ||
+        lastDrawFrame != ImGui::GetFrameCount() - 1;
+    lastDrawFrame = ImGui::GetFrameCount();
+    focusedOwner = ctx.scene.audio;
+    lastFocusedBus = focusedBus;
     const auto view = ctx.scene.audio->invoke("mixer_get", json::object());
     ImGui::TextDisabled("Gain in dB | stereo balance | meters before preview mute");
     if (ImGui::Button("Reset peak holds")) {
@@ -116,12 +126,12 @@ void drawMixerContent(UIContext& ctx) {
                           ImGuiWindowFlags_NoScrollbar);
         auto* draw = ImGui::GetWindowDrawList();
         const auto origin = ImGui::GetCursorScreenPos();
-        const auto accent = ImGui::GetColorU32(name == "Master" ?
-            ImGuiCol_PlotLinesHovered : ImGuiCol_SliderGrabActive);
+        const auto accent = ImGui::GetColorU32(name == focusedBus ? ImGuiCol_CheckMark :
+            name == "Master" ? ImGuiCol_PlotLinesHovered : ImGuiCol_SliderGrabActive);
         draw->AddRectFilled(origin, ImVec2(origin.x + stripWidth - 28, origin.y + 3),
                             accent, 2);
         ImGui::Dummy(ImVec2(0, 6));
-        ImGui::TextUnformatted(name.c_str());
+        ImGui::Text("%s%s", name.c_str(), name == focusedBus ? " / Selected" : "");
         ImGui::TextDisabled(name == "Master" ? "Stereo output" : "Bus > Master");
         bool muted = bus.at("muted"), solo = bus.at("solo");
         if (ImGui::Selectable("Mute", muted, 0, ImVec2(48, 0))) {
@@ -177,6 +187,9 @@ void drawMixerContent(UIContext& ctx) {
             ImGui::TextDisabled("Peak %.1f", bus.at("meter").at("peak_dbfs").get<float>());
         }
         ImGui::EndChild();
+        if (revealFocus && name == focusedBus) {
+            ImGui::SetScrollHereX(0.5f);
+        }
         ImGui::PopStyleColor();
         ImGui::PopStyleVar();
         ImGui::PopID();
