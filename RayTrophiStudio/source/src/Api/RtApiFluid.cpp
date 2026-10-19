@@ -2372,19 +2372,12 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         if (grid_dom) {
             choose(grid_dom->fluid_params, grid_dom->voxel_size);
             // The descriptor's combustion switches follow the chemistry, as the
-            // removed Chemistry Preset combo did: water must enter the
-            // extinguishing path, a fuel must expose a flammable surface.
+            // removed Chemistry Preset combo did: a fuel must expose a
+            // flammable surface.
             const auto& chemistry = grid_dom->fluid_params.fuel_profile;
             grid_dom->fluid_flammable = chemistry.flammable;
-            grid_dom->fluid_extinguishing = chemistry.extinguishing;
             grid_dom->fluid_ignition_temperature = chemistry.flash_temperature;
             grid_dom->fluid_evaporation_rate = chemistry.vaporization_rate;
-            grid_dom->fluid_cooling_power = chemistry.cooling_power;
-            grid_dom->fluid_oxygen_dilution = chemistry.oxygen_dilution;
-            if (chemistry.extinguishing) {
-                grid_dom->fluid_surface_cooling =
-                    std::max(grid_dom->fluid_surface_cooling, chemistry.cooling_power);
-            }
         }
         invalidateScriptSimulation();
     }
@@ -3029,14 +3022,10 @@ Result updateCombustibleFluidSettings(
                 it->voxel_size, simulation.worldThermal().scale(), error))
             return Result::fail(error);
     }
-    // The substance's chemistry owns the physical interaction mode. In
-    // particular, water must enter the extinguishing path even when the
-    // `enabled` flag is used by an older script.
+    // The substance's chemistry owns the physical interaction mode: a
+    // script can switch burning off, never make a non-fuel flammable.
     const auto& profile = it->fluid_params.fuel_profile;
-    it->fluid_extinguishing = profile.extinguishing;
-    it->fluid_flammable = s.enabled && !profile.extinguishing;
-    it->fluid_cooling_power = profile.cooling_power;
-    it->fluid_oxygen_dilution = profile.oxygen_dilution;
+    it->fluid_flammable = s.enabled && profile.flammable;
     it->fluid_auto_ignite=s.auto_ignite;
     it->fluid_ignition_temperature=std::max(0.0f,s.ignition_temperature);
     it->fluid_evaporation_rate=std::max(0.0f,s.evaporation_rate);

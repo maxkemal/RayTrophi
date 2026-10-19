@@ -298,8 +298,8 @@ inline bool draw(const char* id, std::string& assigned) {
         {"Grains (DEM)", "Grain material (DEM)", dem, nullptr},
         {"Moisture", "Moisture", category == "solid" || category == "granular", nullptr},
         {"Combustion", "Burning (solid)", field_flag("combustible"), "combustible"},
-        {"Liquid fuel", "Liquid fuel", category == "fuel" || field_flag("fluid_flammable") ||
-            field_flag("fluid_extinguishing"), nullptr},
+        {"Liquid fuel", "Liquid fuel", category == "fuel" || field_flag("fluid_flammable"),
+            nullptr},
         {"Acoustics", "Acoustics", true, nullptr},
         {"Acoustic medium (fluid)", "Acoustic medium (equivalent fluid)", true, nullptr},
         {"Optical", "Look", true, nullptr},

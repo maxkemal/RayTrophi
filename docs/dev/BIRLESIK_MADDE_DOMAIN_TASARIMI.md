@@ -1,6 +1,6 @@
 # Birleşik madde domain'i — gaz/sıvı ayrımı olmayan simülasyon ve render
 
-> **Durum:** AKTİF — 2026-10-19 2. build: P0–P4 CANLI, `rt_matter_smoke` 10/10 PASS. 2026-10-19: Ek 11 kökü düzeltildi (yüzey↔hava filmi, `thermal_response` emekli) ve taneler termal zincire katıldı (tane+sıvı+hava+ateş tek domain); kaynakta, DERLENMEDİ — devir tablosu aşağıda. 2026-10-18: FG1 kaynakta (yanma hava sıcaklığı + buhar oksijen seyreltmesi, eski söndürme söküldü; derlenmedi). Hızlı tur: regresyonlar PASS, Ek 11 3/6, MSF alan sızıntısı düzeltildi (derlenmedi). 2026-10-11: T2 gizli ısı + yüzey yoğuşması (§4.7, MADDE_TIPLERI §6f), sis suyu/doygunluk (§4.8) ve yağmur: otokonversiyon, sis tavanı, düşüş, iniş (§4.8b) CANLI PASS; commit `01284ef`. Açık: sis/yağmur render'a bağlı değil (bulut işiyle), yağmur parsel doğumlarının yeri ölçülmedi. 2026-10-08: Madde T1/T3 kullanıcı build'i ve hızlı
+> **Durum:** AKTİF — 2026-10-19: P5 (`fluid_extinguishing` + `cooling_power` + `oxygen_dilution` söküldü) ve P6 (bayat testler) CANLI; açık tek iş: sleep_transfer yatağı çöküyor (COM y 0.028). 2. build: P0–P4 CANLI, `rt_matter_smoke` 10/10 PASS. 2026-10-19: Ek 11 kökü düzeltildi (yüzey↔hava filmi, `thermal_response` emekli) ve taneler termal zincire katıldı (tane+sıvı+hava+ateş tek domain); kaynakta, DERLENMEDİ — devir tablosu aşağıda. 2026-10-18: FG1 kaynakta (yanma hava sıcaklığı + buhar oksijen seyreltmesi, eski söndürme söküldü; derlenmedi). Hızlı tur: regresyonlar PASS, Ek 11 3/6, MSF alan sızıntısı düzeltildi (derlenmedi). 2026-10-11: T2 gizli ısı + yüzey yoğuşması (§4.7, MADDE_TIPLERI §6f), sis suyu/doygunluk (§4.8) ve yağmur: otokonversiyon, sis tavanı, düşüş, iniş (§4.8b) CANLI PASS; commit `01284ef`. Açık: sis/yağmur render'a bağlı değil (bulut işiyle), yağmur parsel doğumlarının yeri ölçülmedi. 2026-10-08: Madde T1/T3 kullanıcı build'i ve hızlı
 > dış IPC kabulü PASS; legacy/save-open/görsel kabul ve T2 hal/model birleşmesi açık.
 > C5/C6/C7 fiziksel yakınsama ve H1 maliyet kapıları bu testlerle kapanmaz.
 > Uzman Gas/Liquid domain'leri T0 eşitlik ölçümü olmadan kaldırılmaz.
@@ -27,7 +27,7 @@ soğutması. Kısa tur: [NEXT_BUILD_CHECKS.md](NEXT_BUILD_CHECKS.md) en üst.
 | Taneler termal zincirde | `thermal_liquid` tane engeli kalktı. Tane↔sıvı, tane↔hava (gaz şeridi), tane↔tane ısısı `MatterGrainThermal`'da; hücreler arası iletim, MSF kabuğu ve Ice erimesi mevcut yollarda. |
 | Gaz↔tane testi | Kod değil sahne: rüzgâr düşüş yolunun üstüne alındı, x kapısı düşüş penceresinde. |
 | Test sırası | [NEXT_BUILD_CHECKS.md](NEXT_BUILD_CHECKS.md) 0–8. H1 paketi en sonda. |
-| Açık | Tane erimesinin (Ice) canlı kanıtı yok. Tane domain'inde sıvı donmuyor, aşırı soğuyor (raporlanıyor). Ortam alan gevşemesi (`cooling_rate`) hâlâ kapasitesiz. `fluid_extinguishing` kararı açık. |
+| Açık | Tane erimesinin (Ice) canlı kanıtı yok. Tane domain'inde sıvı donmuyor, aşırı soğuyor (raporlanıyor). Ortam alan gevşemesi (`cooling_rate`) hâlâ kapasitesiz. `fluid_extinguishing` söküldü (P5, canlı). |
 
 ## 2026-10-08 ortak saat kaynak devamı
 

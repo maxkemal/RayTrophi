@@ -326,10 +326,11 @@ def main():
     # follow what the substance can use and none is unreachable.
     editor = read('src/UI/scene_ui_substance_editor.hpp')
     assert 'pending_key == edit_key' in editor and 'IsItemDeactivatedAfterEdit()) apply' in editor
-    assert 'Grains (DEM) use the grain material below' in editor and 'Show unused sections' in editor
+    assert 'Show unused sections' in editor
     assert '{"Grains (DEM)", "Grain material (DEM)", dem, nullptr}' in editor
     assert '"Script key: %s"' in editor and '##substance_filter' in editor
-    assert 'grain_locked' in read('src/UI/scene_ui_fluid_thermal.cpp')
+    # Thermal liquid runs with grains since 2026-10-19: the panel lock is gone.
+    assert 'grain_locked' not in read('src/UI/scene_ui_fluid_thermal.cpp')
     assert 'desc.fluid_params.grain.enabled' in read('src/UI/ParticleBillboardBuilder.cpp')
     cross = read('shaders/sim_grain_mpm.glsl')
     driver = read('src/Physics/Fluid/MatterGrainMpmContact.cpp')

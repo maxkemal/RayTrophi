@@ -25,15 +25,9 @@ void applyMoltenChemistry(SimulationGridDomainDesc& desc,
     desc.fluid_params.applySubstanceProfile(substance, scale);
     const auto& chemistry = desc.fluid_params.fuel_profile;
     desc.fluid_flammable = chemistry.flammable;
-    desc.fluid_extinguishing = chemistry.extinguishing;
     desc.fluid_auto_ignite = chemistry.flammable;
     desc.fluid_ignition_temperature = chemistry.flash_temperature;
     desc.fluid_evaporation_rate = chemistry.vaporization_rate;
-    desc.fluid_cooling_power = chemistry.cooling_power;
-    desc.fluid_oxygen_dilution = chemistry.oxygen_dilution;
-    if (chemistry.extinguishing)
-        desc.fluid_surface_cooling = std::max(
-            desc.fluid_surface_cooling, chemistry.cooling_power);
 }
 }
 

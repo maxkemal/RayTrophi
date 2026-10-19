@@ -77,13 +77,10 @@ const std::vector<FieldAccess>& fieldTable() {
         RT_FLOAT(heat_release, 0.0f, 100.0f, "", "Combustion"),
         RT_FLOAT(flame_level, 0.0f, 1.0f, "", "Combustion"),
         RT_BOOL(fluid_flammable, "Liquid fuel"),
-        RT_BOOL(fluid_extinguishing, "Liquid fuel"),
         RT_FLOAT(flash_kelvin, 0.0f, 10000.0f, "K", "Liquid fuel"),
         RT_FLOAT(autoignition_kelvin, 0.0f, 10000.0f, "K", "Liquid fuel"),
         RT_FLOAT(latent_heat_vaporization, 0.0f, 1.0e8f, "J/kg", "Liquid fuel"),
         RT_FLOAT(vaporization_rate, 0.0f, 100.0f, "1/s", "Liquid fuel"),
-        RT_FLOAT(cooling_power, 0.0f, 100.0f, "", "Liquid fuel"),
-        RT_FLOAT(oxygen_dilution, 0.0f, 1.0f, "", "Liquid fuel"),
         RT_FLOAT(flame_persistence, 0.0f, 100.0f, "", "Liquid fuel"),
         RT_BOOL(meltable, "Phase change"),
         RT_FLOAT(melt_kelvin, 0.0f, 10000.0f, "K", "Phase change"),
@@ -160,6 +157,8 @@ const std::vector<FieldAccess>& fieldTable() {
 //   a "follow the gas at N 1/s" rate has no successor.
 //   cooling_rate, solver_air/contact_cooling_rate (2026-10-19): capacity-free
 //   relaxation toward an ambient thermostat; replaced by films.
+//   fluid_extinguishing, cooling_power, oxygen_dilution (2026-10-19): drove
+//   the old quench, removed in FG1; nothing read them since.
 const char* retiredFieldReason(const std::string& key) {
     if (key == "dry_rate")
         return "drying is now physical evaporation; set water_capacity_kg_m2 instead";
@@ -172,6 +171,9 @@ const char* retiredFieldReason(const std::string& key) {
     if (key == "solver_air_cooling_rate" || key == "solver_contact_cooling_rate")
         return "liquid walls and air are films against each parcel's capacity "
                "(500 / 20 W/(m^2 K)); a Thermal field's strength is its rate_per_s";
+    if (key == "fluid_extinguishing" || key == "cooling_power" || key == "oxygen_dilution")
+        return "water quenches fire through the thermal chain (latent heat, steam "
+               "diluting oxygen); set latent_heat_vaporization or boiling_kelvin";
     return nullptr;
 }
 bool retiredField(const std::string& key) { return retiredFieldReason(key) != nullptr; }

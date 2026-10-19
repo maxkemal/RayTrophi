@@ -47,7 +47,6 @@ void APICSolverParams::applySubstanceProfile(
     const MaterialTemperatureScale& scale) {
     fuel_profile = {};
     fuel_profile.flammable = profile.fluid_flammable;
-    fuel_profile.extinguishing = profile.fluid_extinguishing;
     fuel_profile.flash_temperature = profile.flash_kelvin > 0.0f
         ? scale.toNormalized(profile.flash_kelvin) : 0.0f;
     fuel_profile.autoignition_temperature = profile.autoignition_kelvin > 0.0f
@@ -55,8 +54,6 @@ void APICSolverParams::applySubstanceProfile(
     fuel_profile.vaporization_rate = profile.vaporization_rate;
     fuel_profile.heat_capacity = profile.specific_heat * 1.0e-3f;
     fuel_profile.latent_heat = profile.latent_heat_vaporization * 1.0e-6f;
-    fuel_profile.cooling_power = profile.cooling_power;
-    fuel_profile.oxygen_dilution = profile.oxygen_dilution;
     fuel_profile.flame_persistence = profile.flame_persistence;
 }
 

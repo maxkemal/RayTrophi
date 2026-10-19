@@ -77,7 +77,7 @@ FluidCombustionExchangeStats transferFluidCombustionToGas(
     MatterExchangeLedger& ledger) {
     FluidCombustionExchangeStats stats;
     if (!fluid_domain.enabled || !gas_domain.enabled ||
-        !fluid_domain.fluid_flammable || fluid_domain.fluid_extinguishing ||
+        !fluid_domain.fluid_flammable ||
         !simulationDomainHasLiquid(fluid_domain.type) ||
         !simulationDomainHasGas(gas_domain.type) || !gas_domain.fire_enabled ||
         !fluid_state.valid || !gas_state.valid || fluid_state.particles.empty() ||

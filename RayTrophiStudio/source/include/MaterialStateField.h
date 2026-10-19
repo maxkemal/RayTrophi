@@ -277,13 +277,12 @@ struct SubstanceProfile {
     // converts Kelvin through MaterialTemperatureScale and SI heat values to
     // its compact solver representation.
     bool  fluid_flammable        = false;
-    bool  fluid_extinguishing    = false;
     float flash_kelvin           = 0.0f;
     float autoignition_kelvin    = 0.0f;
     float latent_heat_vaporization = 0.0f;  // J/kg
     float vaporization_rate      = 0.0f;    // 1/s
-    float cooling_power          = 0.0f;
-    float oxygen_dilution        = 0.0f;
+    // fluid_extinguishing, cooling_power, oxygen_dilution retired 2026-10-19:
+    // fire is quenched by the thermal chain (latent heat, steam diluting O2).
     float flame_persistence      = 0.0f;
 
     // ── Phase change ─────────────────────────────────────────────────────────

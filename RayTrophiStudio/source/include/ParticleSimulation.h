@@ -384,7 +384,6 @@ struct SimulationGridDomainDesc {
     // incompressible particle/SDF solve; only its GPU free-surface band becomes
     // a thermally responsive fuel source for overlapping Gas domains.
     bool  fluid_flammable = false;
-    bool  fluid_extinguishing = false;
     bool  fluid_auto_ignite = false;
     float fluid_ignition_temperature = 0.8f;
     float fluid_evaporation_rate = 0.35f;
@@ -392,8 +391,6 @@ struct SimulationGridDomainDesc {
     float fluid_combustion_heat_release = 2.0f;
     float fluid_combustion_smoke_yield = 0.45f;
     float fluid_surface_cooling = 0.35f;
-    float fluid_cooling_power = 0.0f;
-    float fluid_oxygen_dilution = 0.0f;
     // Seed strategy. SeedBox (default) keeps old projects' behaviour. FillLevel
     // ignores fluid_seed_min/max and instead fills the domain footprint from the
     // floor up to fluid_fill_level of the domain height, optionally inset from

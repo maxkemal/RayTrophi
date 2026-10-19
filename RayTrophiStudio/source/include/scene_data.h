@@ -4155,7 +4155,6 @@ struct SceneData {
 
         // Liquid -> gas combustion coupling: all authored, all change the solve.
         h = mix(h, d.fluid_flammable ? 1ull : 0ull);
-        h = mix(h, d.fluid_extinguishing ? 1ull : 0ull);
         h = mix(h, d.fluid_auto_ignite ? 1ull : 0ull);
         h = mix(h, fb(d.fluid_ignition_temperature));
         h = mix(h, fb(d.fluid_evaporation_rate));
@@ -4163,8 +4162,6 @@ struct SceneData {
         h = mix(h, fb(d.fluid_combustion_heat_release));
         h = mix(h, fb(d.fluid_combustion_smoke_yield));
         h = mix(h, fb(d.fluid_surface_cooling));
-        h = mix(h, fb(d.fluid_cooling_power));
-        h = mix(h, fb(d.fluid_oxygen_dilution));
 
         // Solid-phase coupling: both are physics, both change the solve.
         h = mix(h, d.fluid_solid_phase_enabled ? 1ull : 0ull);

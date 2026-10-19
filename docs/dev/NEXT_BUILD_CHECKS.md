@@ -1,3 +1,28 @@
+# 2026-10-19 (3. build): P5 söküm + P6 bayat testler
+
+> **SONUÇ (canlı):** madde 1/1, FG1 8/8, `g2_dry_wet` (Soil) dört kol PASS. `sleep_transfer` FAIL, beklendiği gibi: "bed collapsed" (COM y 0.028 m, 3 kat ~0.075). Not: `g2_dry_wet` domain'ini ve iki kaynağını sahnede bırakır; ardından koşan "boş sahne" testleri onlar silinmeden başlamaz.
+
+**Derleme:** yalnız C++ (shader değişmedi). Emekli madde alanları:
+`fluid_extinguishing`, `cooling_power`, `oxygen_dilution`; domain aynaları
+`fluid_extinguishing`, `fluid_cooling_power`, `fluid_oxygen_dilution`.
+
+Sıra (hepsi kısa):
+
+1. `python scripts/test/rt_matter_smoke.py --only substance fire_steam` —
+   madde 1/1 (Water'da üç alan yok, `fluid_extinguishing` set reddedilir),
+   FG1 8/8. **Bozuksa:** FG1 düşerse söndürme hâlâ bu alanlardan birini
+   okuyordu (grep temizdi; olmaması gerekir).
+2. `python scripts/test/rt_g2_dry_wet_compare_ipc.py` — Soil (MPM) ile dört kol,
+   kütle sürüklenmesi kapıları. **Bozuksa:** gözenek değişimi MPM'de de engel.
+3. `python scripts/test/rt_test_grain_sleep_transfer_ipc.py` — ★ beklenen sonuç
+   büyük olasılıkla **'bed collapsed; projectile birth site is occupied'**. Bu
+   artık doğru teşhis; 3×3×3 basit kübik yığın sürtünmeyle bile kararsız olabilir.
+   Ya yatak kararlı dizilime (piramit / duvarlı kutu) geçer, ya da çöküş bir
+   regresyondur (revizyon 24'te geçiyordu). Karar bir canlı ölçüm ister.
+
+Sessizce makul görünen: eski bir proje dosyası açılır, su domain'i hatasız
+yüklenir. Bu doğru: alanlar okunmuyor, davranış aynı (su zaten yanmıyordu).
+
 # 2026-10-19 (2. build): P0–P4 — TEK DERLEME, TEK DUMAN KOŞUSU
 
 > **SONUÇ (2026-10-19, canlı):** `rt_matter_smoke.py` **10/10 PASS** — madde 1/1, filmler 5/5 (düşüş 0.069 K/s, ortama 67.7 kJ), phase3 donma PASS, gaz↔tane 6/6, Ek 11 7/7 (iki koşu), yüzey suyu 6/6, FG1 8/8, tane ısısı 8/8 (artık ~1e-10 J, 400 tanede 0.5 ms), readiness 1/1. Not: tane sahnesinde `liquid_max_k` tane sıcaklığını gösteriyor (sıvı istatistiği taneleri de sayıyor olabilir; raporlama, fizik değil).
