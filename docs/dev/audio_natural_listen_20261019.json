@@ -1,0 +1,309 @@
+{
+  "passed": true,
+  "utc": "2026-10-19T20:14:51.206110+00:00",
+  "scope": "injected controls and native PCM, no measured solver events",
+  "listening_acceptance": "awaiting_user_feedback",
+  "cases": [
+    {
+      "model": "liquid_flow",
+      "passed": true,
+      "samples": [
+        {
+          "block_peak": 0.035910464823246,
+          "master_peak_dbfs": -36.14904534701792,
+          "master_rms_dbfs": -45.556760876328156,
+          "end_frame": 51200,
+          "clip_samples_window": 0,
+          "activity": 0.25
+        },
+        {
+          "block_peak": 0.10559581965208054,
+          "master_peak_dbfs": -28.43440553168032,
+          "master_rms_dbfs": -37.45045950707099,
+          "end_frame": 149504,
+          "clip_samples_window": 0,
+          "activity": 0.6
+        },
+        {
+          "block_peak": 0.1897759884595871,
+          "master_peak_dbfs": -23.41471135905412,
+          "master_rms_dbfs": -32.10287534196964,
+          "end_frame": 247808,
+          "clip_samples_window": 0,
+          "activity": 1
+        }
+      ]
+    },
+    {
+      "model": "gas_flow",
+      "passed": true,
+      "samples": [
+        {
+          "block_peak": 0.06005353108048439,
+          "master_peak_dbfs": -33.54786806562819,
+          "master_rms_dbfs": -42.90915002496489,
+          "end_frame": 421888,
+          "clip_samples_window": 0,
+          "activity": 0.25
+        },
+        {
+          "block_peak": 0.10838093608617783,
+          "master_peak_dbfs": -25.408198505893065,
+          "master_rms_dbfs": -34.50149735621712,
+          "end_frame": 567296,
+          "clip_samples_window": 0,
+          "activity": 0.6
+        },
+        {
+          "block_peak": 0.23469612002372742,
+          "master_peak_dbfs": -21.12838327588275,
+          "master_rms_dbfs": -30.521917712909442,
+          "end_frame": 735232,
+          "clip_samples_window": 0,
+          "activity": 1
+        }
+      ]
+    },
+    {
+      "model": "friction",
+      "passed": true,
+      "samples": [
+        {
+          "block_peak": 0.03383108973503113,
+          "master_peak_dbfs": -38.0107378416313,
+          "master_rms_dbfs": -44.77564374849599,
+          "end_frame": 1073152,
+          "clip_samples_window": 0,
+          "activity": 0.25
+        },
+        {
+          "block_peak": 0.0915665552020073,
+          "master_peak_dbfs": -30.14833008015211,
+          "master_rms_dbfs": -36.619931870285356,
+          "end_frame": 1171456,
+          "clip_samples_window": 0,
+          "activity": 0.6
+        },
+        {
+          "block_peak": 0.13392046093940735,
+          "master_peak_dbfs": -26.49400205446355,
+          "master_rms_dbfs": -32.99883667683939,
+          "end_frame": 1269760,
+          "clip_samples_window": 0,
+          "activity": 1
+        }
+      ]
+    },
+    {
+      "model": "rolling",
+      "passed": true,
+      "samples": [
+        {
+          "block_peak": 0.01865406706929207,
+          "master_peak_dbfs": -40.71318984848944,
+          "master_rms_dbfs": -52.09201979130207,
+          "end_frame": 1404928,
+          "clip_samples_window": 0,
+          "activity": 0.25
+        },
+        {
+          "block_peak": 0.044068843126297,
+          "master_peak_dbfs": -33.32854597065734,
+          "master_rms_dbfs": -43.289420398823815,
+          "end_frame": 1505280,
+          "clip_samples_window": 0,
+          "activity": 0.6
+        },
+        {
+          "block_peak": 0.08338087797164917,
+          "master_peak_dbfs": -27.682907979113196,
+          "master_rms_dbfs": -37.93434001068347,
+          "end_frame": 1603584,
+          "clip_samples_window": 0,
+          "activity": 1
+        }
+      ]
+    },
+    {
+      "model": "impact",
+      "passed": true,
+      "samples": [
+        {
+          "block_peak": 0.007476924918591976,
+          "master_peak_dbfs": -50.53494193540149,
+          "master_rms_dbfs": -57.02476776717181,
+          "end_frame": 1699840,
+          "clip_samples_window": 0,
+          "material": "wood"
+        },
+        {
+          "block_peak": 0.008493497036397457,
+          "master_peak_dbfs": -44.74428602188684,
+          "master_rms_dbfs": -52.79564916775445,
+          "end_frame": 1730560,
+          "clip_samples_window": 0,
+          "material": "wood"
+        },
+        {
+          "block_peak": 0.010008586570620537,
+          "master_peak_dbfs": -45.99401065660654,
+          "master_rms_dbfs": -54.05852445657211,
+          "end_frame": 1763328,
+          "clip_samples_window": 0,
+          "material": "metal"
+        },
+        {
+          "block_peak": 0.00783982127904892,
+          "master_peak_dbfs": -45.99663286677584,
+          "master_rms_dbfs": -54.06206363753503,
+          "end_frame": 1794048,
+          "clip_samples_window": 0,
+          "material": "metal"
+        },
+        {
+          "block_peak": 0.0070949518121778965,
+          "master_peak_dbfs": -47.94881109639802,
+          "master_rms_dbfs": -55.50212768558998,
+          "end_frame": 1826816,
+          "clip_samples_window": 0,
+          "material": "stone"
+        },
+        {
+          "block_peak": 0.010000023059546947,
+          "master_peak_dbfs": -43.67898603556904,
+          "master_rms_dbfs": -52.225442885236085,
+          "end_frame": 1857536,
+          "clip_samples_window": 0,
+          "material": "stone"
+        },
+        {
+          "block_peak": 0.007750448305159807,
+          "master_peak_dbfs": -45.531426757532444,
+          "master_rms_dbfs": -53.584154094035554,
+          "end_frame": 1890304,
+          "clip_samples_window": 0,
+          "material": "glass"
+        },
+        {
+          "block_peak": 0.007747499272227287,
+          "master_peak_dbfs": -50.802088475526055,
+          "master_rms_dbfs": -57.049970264197604,
+          "end_frame": 1923072,
+          "clip_samples_window": 0,
+          "material": "glass"
+        }
+      ]
+    },
+    {
+      "model": "contact_activity",
+      "passed": true,
+      "samples": [
+        {
+          "block_peak": 0.02147851325571537,
+          "master_peak_dbfs": -42.47855511238505,
+          "master_rms_dbfs": -51.86418953232055,
+          "end_frame": 2017280,
+          "clip_samples_window": 0,
+          "activity": 0.25
+        },
+        {
+          "block_peak": 0.060781169682741165,
+          "master_peak_dbfs": -33.70778922089344,
+          "master_rms_dbfs": -42.30188122858537,
+          "end_frame": 2115584,
+          "clip_samples_window": 0,
+          "activity": 0.6
+        },
+        {
+          "block_peak": 0.0800418108701706,
+          "master_peak_dbfs": -27.812424345933202,
+          "master_rms_dbfs": -36.86305958652018,
+          "end_frame": 2213888,
+          "clip_samples_window": 0,
+          "activity": 1
+        }
+      ]
+    },
+    {
+      "model": "deformation",
+      "passed": true,
+      "samples": [
+        {
+          "block_peak": 0.04670264571905136,
+          "master_peak_dbfs": -36.064118846448466,
+          "master_rms_dbfs": -41.85980599452825,
+          "end_frame": 2375680,
+          "clip_samples_window": 0,
+          "activity": 0.25
+        },
+        {
+          "block_peak": 0.10724978893995285,
+          "master_peak_dbfs": -25.329791911694365,
+          "master_rms_dbfs": -32.45975193485693,
+          "end_frame": 2543616,
+          "clip_samples_window": 0,
+          "activity": 0.6
+        },
+        {
+          "block_peak": 0.1654195934534073,
+          "master_peak_dbfs": -23.19942577476993,
+          "master_rms_dbfs": -29.863176634740466,
+          "end_frame": 2674688,
+          "clip_samples_window": 0,
+          "activity": 1
+        }
+      ]
+    },
+    {
+      "model": "fracture_activity",
+      "passed": true,
+      "samples": [
+        {
+          "block_peak": 0.015494060702621937,
+          "master_peak_dbfs": -55.54561654839531,
+          "master_rms_dbfs": -63.4822055618124,
+          "end_frame": 2809856,
+          "clip_samples_window": 0,
+          "activity": 0.25
+        },
+        {
+          "block_peak": 0.02042929269373417,
+          "master_peak_dbfs": -33.9399556342534,
+          "master_rms_dbfs": -44.790412476152696,
+          "end_frame": 2910208,
+          "clip_samples_window": 0,
+          "activity": 0.6
+        },
+        {
+          "block_peak": 0.04451102763414383,
+          "master_peak_dbfs": -31.641392938755388,
+          "master_rms_dbfs": -42.654133893634196,
+          "end_frame": 3008512,
+          "clip_samples_window": 0,
+          "activity": 1
+        }
+      ]
+    }
+  ],
+  "cleanup": [
+    {
+      "field": "emitters",
+      "preserved_ids": true
+    },
+    {
+      "field": "assets",
+      "preserved_ids": true
+    },
+    {
+      "field": "clips",
+      "preserved_ids": true
+    },
+    {
+      "field": "tracks",
+      "preserved_ids": true
+    },
+    {
+      "playback_mode_restored": true
+    }
+  ]
+}

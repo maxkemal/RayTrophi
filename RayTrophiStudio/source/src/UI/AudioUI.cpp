@@ -5,6 +5,7 @@
 #include "Audio/AcousticScene.h"
 #include "Audio/AudioWeatherBridge.h"
 #include "UI/AudioReactionUI.h"
+#include "UI/AudioPhysicalGeneratorUI.h"
 #include "UI/AudioThunderUI.h"
 #include "UI/AudioMixerUI.h"
 #include "UI/AudioWorkspaceUI.h"
@@ -300,6 +301,7 @@ void drawSourceInspector(UIContext& ctx) {
                     }
                     ImGui::EndCombo();
                 }
+                drawPhysicalGenerator(ctx, e);
                 for (const char* key : {"gain", "pitch"}) {
                     float value = e.at(key);
                     const bool gain = std::strcmp(key, "gain") == 0;

@@ -1,4 +1,5 @@
 #include "UI/AudioMixerUI.h"
+#include "UI/AudioLiveAnalysisUI.h"
 #include "UI/AudioWorkspaceUI.h"
 #include "UI/AudioPropertyLayout.h"
 #include "Api/RtApi.h"
@@ -36,6 +37,12 @@ void drawInspectorMixerLink(UIContext& ctx, const nlohmann::json& source) {
         const float peak = bus.at("meter").at("peak_dbfs");
         ImGui::TextDisabled("Channel peak %.1f dBFS / before output mute", peak);
         ImGui::ProgressBar(std::clamp((peak + 60) / 60, 0.0f, 1.0f), ImVec2(-1, 6), "");
+        if (ImGui::IsItemClicked()) {
+            openLiveAnalysis(ctx, name);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Click for this channel's live spectrum and levels.");
+        }
     }
     if (ImGui::Button("Show channel in Mixer")) {
         const auto updated = workspaceCall(ctx, "workspace_update",

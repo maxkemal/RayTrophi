@@ -73,6 +73,8 @@
       <UniqueIdentifier>{8c5b1f2a-94d3-4e7b-a1c6-3f0e9d27b541}</UniqueIdentifier>
     </Filter>
     <ClInclude Include="source\include\SubstanceLibrary.h" />
+    <ClInclude Include="source\include\SubstanceCatalogue.h" />
+    <ClCompile Include="source\src\Physics\SubstanceCatalogue.cpp" />
     <ClInclude Include="source\include\Fluid\FluidDomainSubstance.h" />
     <ClInclude Include="source\include\Fluid\MatterSubstanceState.h" />
     <ClInclude Include="source\include\Fluid\MatterGrainMpmContact.h" />
@@ -2822,6 +2824,7 @@
     <ClInclude Include="source\include\Audio\AudioEmitterSchema.h" />
     <ClInclude Include="source\include\Audio\AudioAcousticSettings.h" />
     <ClInclude Include="source\include\Audio\AudioParametricEq.h" />
+    <ClInclude Include="source\include\Audio\AudioDesignLimits.h" />
     <ClCompile Include="source\src\Scene\AudioParametricEq.cpp" />
     <ClInclude Include="source\include\UI\AudioEqEditorUI.h" />
     <ClInclude Include="source\include\UI\AudioEditorChrome.h" />
@@ -2848,6 +2851,22 @@
     <ClInclude Include="source\include\UI\AudioViewportLabels.h" />
     <ClInclude Include="source\include\UI\AudioVisualLanguage.h" />
     <ClInclude Include="source\include\Audio\AudioMixerRuntime.h" />
+    <ClInclude Include="source\include\Audio\AudioLiveAnalysis.h" />
+    <ClInclude Include="source\include\UI\AudioLiveAnalysisUI.h" />
+    <ClInclude Include="source\include\Audio\PhysicalAudioNaturalDsp.h" />
+    <ClInclude Include="source\include\Audio\PhysicalAudioCharacterDsp.h" />
+    <ClCompile Include="source\src\Scene\PhysicalAudioNaturalDsp.cpp" />
+    <ClCompile Include="source\src\Scene\PhysicalAudioCharacterDsp.cpp" />
+    <ClInclude Include="source\include\Audio\PhysicalAudioAuthoring.h" />
+    <ClCompile Include="source\src\Scene\PhysicalAudioAuthoring.cpp" />
+    <ClInclude Include="source\include\UI\AudioPhysicalGeneratorUI.h" />
+    <ClCompile Include="source\src\UI\AudioPhysicalGeneratorUI.cpp" />
+    <ClInclude Include="source\include\UI\AudioHistoryUI.h" />
+    <ClCompile Include="source\src\UI\AudioHistoryUI.cpp" />
+    <ClInclude Include="source\include\UI\AudioAnalysisGraph.h" />
+    <ClCompile Include="source\src\Scene\AudioLiveAnalysis.cpp" />
+    <ClCompile Include="source\src\UI\AudioLiveAnalysisUI.cpp" />
+    <ClCompile Include="source\src\UI\AudioAnalysisGraph.cpp" />
     <ClInclude Include="source\include\UI\AudioMixerUI.h" />
     <ClCompile Include="source\src\Scene\AudioMixer.cpp" />
     <ClCompile Include="source\src\Scene\AcousticPlayback.cpp" />

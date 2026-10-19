@@ -1,0 +1,57 @@
+{
+  "passed": true,
+  "test": "substance catalogue/inheritance quick acceptance",
+  "existing_authored_audio_unchanged": true,
+  "substance_names_unchanged": true,
+  "audio_counts": {
+    "assets": 9,
+    "emitters": 14,
+    "clips": 0,
+    "tracks": 0
+  },
+  "enabled_acoustic_sources": [
+    "audio_source_10",
+    "audio_source_15",
+    "audio_source_25"
+  ],
+  "acoustic_status": [
+    {
+      "id": "audio_source_10",
+      "status": "clear",
+      "backend": "active_vulkan_as",
+      "solver_state": "ready",
+      "snapshot_complete": true,
+      "specular_paths": 6,
+      "diffuse_paths": 3,
+      "diffuse_complete": true,
+      "diffuse_contributions": 64,
+      "finite_nonnegative_path_data": true
+    },
+    {
+      "id": "audio_source_15",
+      "status": "clear",
+      "backend": "active_vulkan_as",
+      "solver_state": "ready",
+      "snapshot_complete": true,
+      "specular_paths": 6,
+      "diffuse_paths": 2,
+      "diffuse_complete": true,
+      "diffuse_contributions": 63,
+      "finite_nonnegative_path_data": true
+    },
+    {
+      "id": "audio_source_25",
+      "status": "clear",
+      "backend": "active_vulkan_as",
+      "solver_state": "ready",
+      "snapshot_complete": true,
+      "specular_paths": 6,
+      "diffuse_paths": 2,
+      "diffuse_complete": true,
+      "diffuse_contributions": 64,
+      "finite_nonnegative_path_data": true
+    }
+  ],
+  "scope": "No playback, scene save or geometry changes. Acoustic status is readback, not listening or full propagation acceptance.",
+  "acoustic_report_sanity_passed": true
+}

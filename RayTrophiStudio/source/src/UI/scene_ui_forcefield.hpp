@@ -3062,42 +3062,36 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 {
                     // Every burning/thermal number is derived from this choice;
                     // there are no free-float overrides any more.
-                    const auto library = RayTrophiSim::substanceProfiles();
-                    matter::drawObjectSubstance(ui_ctx, c.source_name);
-                    ImGui::BeginDisabled(scene.object_substances.contains(c.source_name));
-                    if (ImGui::BeginCombo("Substance##CollTabMsf", c.msf_substance.c_str())) {
-                        for (const auto* entry : library) {
-                            const auto& profile = *entry;
-                            const bool selected = (c.msf_substance == profile.name);
-                            if (ImGui::Selectable(profile.name.c_str(), selected)) {
-                                if (c.msf_substance != profile.name) {
-                                    if (!c.source_name.empty()) {
-                                        runtime.clearMaterialStateField(c.source_name);
-                                        scene.clearMaterialDamageHistory(c.source_name);
-                                    }
-                                    c.msf_substance = profile.name;
-                                    ui_ctx.renderer.resetCPUAccumulation();
-                                    if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
-                                    ui_ctx.start_render = true;
-                                }
-                            }
-                            if (selected) ImGui::SetItemDefaultFocus();
-                        }
-                        ImGui::EndCombo();
-                    }
-                    {
-                        const std::string before = c.msf_substance;
-                        if (SubstanceEditorUI::draw("##CollTabMsfEditor", c.msf_substance)) {
-                            if (c.msf_substance != before && !c.source_name.empty()) {
+                    const bool objectMaterialShown =
+                        matter::drawObjectSubstance(ui_ctx, c.source_name);
+                    if (!objectMaterialShown) {
+                        if (SubstanceEditorUI::drawPicker("Substance##CollTabMsf", c.msf_substance)) {
+                            if (!c.source_name.empty()) {
                                 runtime.clearMaterialStateField(c.source_name);
                                 scene.clearMaterialDamageHistory(c.source_name);
                             }
                             ui_ctx.renderer.resetCPUAccumulation();
-                            if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
+                            if (ui_ctx.backend_ptr) {
+                                ui_ctx.backend_ptr->resetAccumulation();
+                            }
                             ui_ctx.start_render = true;
                         }
+                        {
+                            const std::string before = c.msf_substance;
+                            if (SubstanceEditorUI::draw("##CollTabMsfEditor", c.msf_substance,
+                                    "Mechanical")) {
+                                if (c.msf_substance != before && !c.source_name.empty()) {
+                                    runtime.clearMaterialStateField(c.source_name);
+                                    scene.clearMaterialDamageHistory(c.source_name);
+                                }
+                                ui_ctx.renderer.resetCPUAccumulation();
+                                if (ui_ctx.backend_ptr) {
+                                    ui_ctx.backend_ptr->resetAccumulation();
+                                }
+                                ui_ctx.start_render = true;
+                            }
+                        }
                     }
-                    ImGui::EndDisabled();
                     // By value: the authoring numbers live on WorldThermalState
                     // (below) and this is the derived mapping, so there is only
                     // ever one thing to edit.

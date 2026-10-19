@@ -4,6 +4,7 @@
 #include "Audio/AudioSoundDesign.h"
 #include "Audio/AudioDesignDsp.h"
 #include "Audio/AudioDesignJobs.h"
+#include "Audio/AudioDesignLimits.h"
 #include "Audio/AudioService.h"
 #include "../../../external/miniaudio/miniaudio.h"
 #include "../../../external/DaisySP/Source/Synthesis/oscillator.h"
@@ -109,7 +110,10 @@ json validate(const json& input) {
     require(preset == "tone" || preset == "wind" || preset == "metal" || preset == "wood",
             "Unknown sound design preset");
     recipe["preset"] = preset;
-    recipe["duration_seconds"] = control(input, "duration_seconds", 2, 0.05, 10);
+    recipe["duration_seconds"] = control(input, "duration_seconds", 2, 0.05, designMaxSeconds);
+    validateDesignCapacity(recipe.at("duration_seconds").get<double>(),
+        recipe.at("stretch_ratio").get<double>(), recipe.at("tail_seconds").get<double>(),
+        recipe.at("layers").empty() ? 1 : 2);
     require(!input.contains("seed") || input.at("seed").is_number_integer(),
             "seed must be an integer");
     recipe["seed"] = static_cast<std::uint32_t>(control(input, "seed", 1, 0, 4294967295.0));
@@ -221,9 +225,11 @@ AudioPcm loadRange(json& recipe, const json& assets) {
     const double start = recipe.at("source_in_seconds");
     const double finish = recipe.value("source_out_seconds", std::min(
         found->at("duration").get<double>(), start + 10));
-    require(finish > start && finish - start <= 30 && finish <=
+    require(finish > start && finish - start <= designMaxSeconds && finish <=
             found->at("duration").get<double>() + 1e-6,
-            "Select an existing source range of at most 30 seconds");
+            "Select an existing source range of at most 600 seconds");
+    validateDesignCapacity(finish - start, recipe.at("stretch_ratio").get<double>(),
+        recipe.at("tail_seconds").get<double>(), found->value("channels", 2u));
     const auto decoded = decodeAudioPcm(pathOf(found->at("path")));
     const auto first = static_cast<std::uint64_t>(std::llround(start * rate));
     const auto last = std::min(decoded.frames(),
@@ -252,7 +258,8 @@ AudioPcm transform(const AudioPcm& original, const json& recipe, json& processin
     if (ratio != 1 || pitch != 0 || recipe.at("formant_semitones").get<double>() != 0 ||
         recipe.at("formant_compensate").get<bool>()) {
         const auto frames = static_cast<std::size_t>(std::llround(original.frames() * ratio));
-        require(frames <= 30 * rate, "Stretched output must not exceed 30 seconds");
+        require(frames <= designMaxSeconds * rate,
+            "Stretched output must not exceed 600 seconds");
         std::vector<std::vector<float>> input(original.channels), output(original.channels);
         for (unsigned channel = 0; channel < original.channels; ++channel) {
             input[channel].resize(original.frames());
@@ -287,7 +294,8 @@ AudioPcm transform(const AudioPcm& original, const json& recipe, json& processin
     }
     const auto tail = static_cast<std::size_t>(std::llround(
         recipe.at("tail_seconds").get<double>() * rate));
-    require(result.frames() + tail <= 30 * rate, "Sound including effect tail exceeds 30 seconds");
+    require(result.frames() + tail <= designMaxSeconds * rate,
+        "Sound including effect tail exceeds 600 seconds");
     result.samples.resize(result.samples.size() + tail * result.channels, 0);
     applyDesignEffects(result, recipe.at("effects"), check);
     daisysp::OnePole low[2], high[2];
@@ -529,6 +537,9 @@ AudioDesignResult prepareSoundDesign(const json& input, const json& assets,
                                       renderDesignLayers(recipe, assets, envelope, check)) :
         loadRange(recipe, assets);
     checkpoint();
+    validateDesignCapacity(original.frames() / static_cast<double>(rate),
+        recipe.at("stretch_ratio").get<double>(), recipe.at("tail_seconds").get<double>(),
+        original.channels);
     json processing;
     auto processed = transform(original, recipe, processing, check);
     checkpoint();

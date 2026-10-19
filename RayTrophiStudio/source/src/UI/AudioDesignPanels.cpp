@@ -1,6 +1,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "Audio/AudioDesignLimits.h"
 #include "UI/AudioDesignPanels.h"
 #include "UI/AudioEqEditorUI.h"
 #include "UI/AudioDesignView.h"
@@ -408,8 +409,8 @@ bool drawDesignSourceEditor(UIContext& ctx, json& recipe) {
     const double selectedStart = recipe.value("source_in_seconds", 0.0);
     const double selectedEnd = recipe.value("source_out_seconds", std::min(duration, 10.0));
     if (selectedStart < 0 || selectedEnd > duration + 1e-6 ||
-        selectedEnd < selectedStart + 0.05 || selectedEnd - selectedStart > 30) {
-        ImGui::TextWrapped("Adjust source start/end to a valid 0.05..30 second range in Controls.");
+        selectedEnd < selectedStart + 0.05 || selectedEnd - selectedStart > audio::designMaxSeconds) {
+        ImGui::TextWrapped("Adjust source start/end to a valid 0.05..600 second range in Controls.");
         return false;
     }
     ImGui::Text("Source %.3f - %.3f s | selection %.3f - %.3f s", begin, finish,
@@ -485,9 +486,9 @@ bool drawDesignSourceEditor(UIContext& ctx, json& recipe) {
         double start = source.initialStart, end = source.initialEnd;
         const double position = std::round(time * 48000) / 48000;
         if (source.handle == 0) {
-            start = std::clamp(position, std::max(0.0, end - 30), end - 0.05);
+            start = std::clamp(position, std::max(0.0, end - audio::designMaxSeconds), end - 0.05);
         } else if (source.handle == 1) {
-            end = std::clamp(position, start + 0.05, std::min(duration, start + 30));
+            end = std::clamp(position, start + 0.05, std::min(duration, start + audio::designMaxSeconds));
         } else {
             const double length = end - start;
             start = std::clamp(start + position - source.mouseStart, 0.0, duration - length);

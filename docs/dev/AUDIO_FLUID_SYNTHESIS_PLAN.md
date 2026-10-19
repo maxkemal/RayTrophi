@@ -1,5 +1,14 @@
 # Physics-driven fluid synthesis continuation
 
+Current implementation ordering: [Audio master plan](AUDIO_MASTER_PLAN.md), then
+[all-family synthesis plan](PHYSICAL_AUDIO_SYNTHESIS_PLAN.md). The F0/F1/F2 history
+below retains its original scope; the new plan reuses existing history/replay/bake.
+
+2026-10-19 user priority extends beyond fluids to all structures/event families.
+See [the shared quality closure](PHYSICAL_AUDIO_QUALITY_CLOSURE.md). It does not
+claim the current flow texture is realistic splash/bubble synthesis or that existing
+replay/bake completes physical event provenance and acoustic export parity.
+
 Planning checkpoint: 2026-10-18. This document defines the next implementation
 slice; it does not claim new runtime code, builds or live acceptance.
 

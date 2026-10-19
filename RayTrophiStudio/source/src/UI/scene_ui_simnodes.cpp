@@ -33,6 +33,7 @@
  * resolve fails at apply time, far away from where it was typed.
  */
 
+#include "scene_ui_substance_editor.hpp"
 #include "scene_ui.h"
 // ★ scene_ui.h only forward-declares SceneSelection; reading the active
 // selection below needs the complete type.
@@ -816,12 +817,10 @@ void SceneUI::drawSimulationNodeProperties(NodeSystem::Sim::SimulationNodeGraph&
     }
     else if (auto* sub = dynamic_cast<SubstanceNode*>(selected)) {
         ImGui::TextUnformatted("Substance");
-        std::vector<std::string> substances;
-        for (const auto* profile : RayTrophiSim::substanceProfiles())
-            substances.push_back(profile->name);
-        std::string choice;
-        if (namePicker("##substance", sub->substanceName, substances, false, choice))
+        auto choice = sub->substanceName;
+        if (SubstanceEditorUI::drawPicker("##substance", choice)) {
             setText("substance", choice);
+        }
         ImGui::Spacing();
         bool override_ignition = sub->overrideIgnition;
         if (ImGui::Checkbox("Override ignition point", &override_ignition))

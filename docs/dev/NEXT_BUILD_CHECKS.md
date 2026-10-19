@@ -1,3 +1,117 @@
+# 2026-10-19: dinleme geri bildirimi — karakter revizyonu 2
+
+> **Durum:** Kaynakta; bu revizyon derlenmedi veya dinlenmedi. Önceki teknik PASS
+> sonuçları revizyon 1'e aittir. Birleşik domain dosyaları değiştirilmedi.
+
+1. Kullanıcı Studio C++ build'i. AudioCharacter DSP yeni .cpp/.h proje kayıtlı;
+   bu audio işi shader değişikliği istemez.
+2. Source / Sound / Synthetic generator / v2 / Sound character -> Tuned.
+   Su–gaz–sürtünme artık ayrı karakter hedefliyor. Friction surface dört aile sunar.
+3. Dış terminal: `python scripts/test/rt_test_audio_natural_ipc.py`;
+   yalnız boş/geçici audio sahnesinde aynı test `--exercise` ile.
+4. Metal ve cam darbe revizyon 1/2 PCM hash'leri aynı kalmalı; ahşap/taşın kuyruğu
+   belirgin kısalmalı. Dört sürtünme yüzeyi ayrı çıktı vermeli. History/seed aynıysa
+   her revizyonda bake deterministik olmalı.
+5. Yeniden dinleme: `rt_listen_audio_natural_ipc.py` artık revizyon 2 seçer;
+   karşılaştırmada `--character-revision 1`, sürtünmede `--surface mineral` vb.
+   Model adını her aşamada ayrıca bildir. Kırılmanın tek tip tık yerine kısa kümeler
+   vermesini dinle. Statik kontroller doğallık kanıtı değildir.
+6. İsteğe bağlı C++ harness üç DSP .cpp'siyle kullanıcı tarafından derlenir:
+   block partition, sessizlik, metal/cam koruma, ahşap/taş sönümü ve yüzey farkı.
+
+# 2026-10-19: kod partisi — odaklı Undo/Redo ve fiziksel üretici v2
+
+> **Durum:** Kaynakta teslim. Codex derlemedi, Studio açmadı, canlı probe/dinleme yapmadı.
+> Birleşik domain solver/shader/test dosyaları değiştirilmedi. Önceki liste aşağıda.
+
+1. Kullanıcı Studio C++ build'i. Bu audio partisi shader değişikliği gerektirmez;
+   diğer ajanın shader gereksinimleri kendi kapsamındadır.
+2. Edit -> Designer'da Undo Sound Designer / Redo Sound Designer; Ctrl+Z/Y/Shift+Z.
+   Viewport'a tıkla: scene geçmişi. Arrange de scene geçmişi. Menü açılması hedefi
+   değiştirmemeli; text input kendi Ctrl+Z'sini almalı; boş Designer history sahneyi etkilememeli.
+3. Kaynak Sound -> Synthetic generator: model seç, v1/v2 değiştir, sayıları Enter ile
+   uygula. Sürekli kaynakta Activity connection ile uygun domain/signal bağla;
+   impact'ta Excite impact dene. Eski sahnede v1 kendiliğinden değişmemeli.
+4. Dış terminal: `python scripts/test/rt_test_audio_natural_ipc.py`.
+   Katalog ve geçici history_scope doğrulaması; çalışma görünümü sonunda geri yüklenir.
+5. Yalnız BOŞ/GEÇİCİ audio sahnesinde aynı komutu `--exercise` ile çalıştır:
+   sekiz model/v1-v2, dry bake hash/seviye, parametre farkı ve atomik hata/history testleri.
+   Sahne undo geçmişi oluşturur; çalışma sahnesinde koşturma.
+6. Her v2 aileyi düşük/orta/yüksek girişte dinle; başlangıç/duruş, farklı seed,
+   body/texture ve malzemede klik/ton/tekrar kontrolü. Önceki fizik/echo probe'ları
+   ayrı regresyon kapısı. Doğal ses kalitesi FFT veya kaynak incelemesiyle kabul edilmez.
+7. İsteğe bağlı bağımsız C++ harness: `scripts/test/physical_audio_dsp_test.cpp`;
+   PhysicalAudioDsp.cpp ve PhysicalAudioNaturalDsp.cpp ile kullanıcı derler.
+   Block-size, sıfır activity, seed ve darbe enerji sırası testleri içerir.
+
+# 2026-10-19: Analyze durum satiri yerlesim duzeltmesi
+
+> **Durum:** Kullanici graph Ctrl+wheel calismasini dogruladi. Bu duzeltme kaynakta;
+> yeni build/gorsel kontrol bekliyor. Onceki kontroller asagida korunmustur.
+
+1. Live Analyze acikken sesi baslat/durdur veya kanal mute yap: Signal active /
+   Channel silent degisirken Peak/RMS, graph ve alt kanal tablosu yer degistirmemeli.
+2. Output mute ve full-scale uyarisinda da ayni tek satir korunmali.
+   Dar panelde metin satir sarmamali; ayrintilar hover tooltip'te okunmali.
+3. Gecis sirasinda Ctrl+wheel ile zoom ve orta tus pan yap: graph konumu ve font
+   boyutlari sabit kalmali. Codex bu turda build veya uygulama testi yapmadi.
+
+# 2026-10-19: Analyze alternatif gorunumler ve mouse gezinme
+
+> **Durum:** Temel canli analiz kullanicida calisti. Bu genisletme kaynakta hazir;
+> yeni build/gorsel kabul bekliyor. Codex derleme veya uygulama baslatma yapmadi.
+
+1. Dis terminal: `python scripts/test/rt_test_audio_live_analysis_ipc.py`.
+   Beklenen: dort gorunum ve viewport sinirlari, atomik hata reddi,
+   details/history sozlesmesi; workspace sonunda geri yuklenir.
+2. Live Analyze / View: cizgi, dolu alan, alti sutun, spektrogram arasinda gec.
+   Spektrogram zaman/Hz gostermeli; renkler -96..0 dBFS, bosluklar orneklenmeyen zaman.
+3. Yalniz grafik uzerinde Ctrl+tekerlek imlec merkezli zoom; orta surukleme pan.
+   Dugme yok, orta cift tik reset yok. 1x'e uzaklastirinca tam gorunum gelir.
+   Kanal gostergeleri ve fontlar buyumemeli; duz tekerlek paneli kaydirmali.
+4. Kanal degistir, sesi durdur/baslat: veri akmali, history karismamali,
+   yeni pencere yoksa son snapshot uyarisi kalmali. Designer son-render analizi korunmali.
+5. Istege bagli bos/gecici audio sahnesinde ayni dis test `--signal` ile gercek
+   stereo FFT/bant/gain/mute ve history sozlesmesini kontrol eder.
+
+# 2026-10-19: Designer kompakt üst bant
+
+> **Durum:** Kaynakta hazır; build ve görsel kabul kullanıcıda. Canlı uygulamaya dokunulmadı.
+
+1. Designer: geniş panelde ince sekme satırı ve tek kontrol satırı; ad/kaynak,
+   Play/Stop, workflow, Save/Options görünür. Ana tema renkleri korunmalı.
+2. Daralt: kontroller alta taşmamalı; yatay kaydırma ile erişilebilmeli.
+3. Options: Loop, Original/Processed, Refresh, Undo/Redo, ölçek/Fit ve dock
+   aç/kapat çalışmalı. Save penceresinde asset/klip hedefleri korunmalı.
+4. Generate/Edit/Effects ve canlı Analyze arasında geçişte ana alan taşmamalı;
+   araç çubuğunun küçük boyutları alt editör kontrollerine sızmamalı.
+
+# 2026-10-19: canlı Audio Analyze
+
+> **Durum:** CANLI — kaynak teslimi; yeni C++ build'i ve canlı kabul bekliyor.
+> Önceki Substance ve birleşik domain kontrolleri aşağıda korunmuştur.
+
+1. **Hızlı mevcut sahne:** dış terminalden
+   `python scripts/test/rt_test_audio_live_analysis_ipc.py`.
+   Beklenen: beş kanal, sonlu spektrum/bantlar (cihaz açıksa), geçersiz bus/mode
+   reddi ve workspace'in geri yüklenmesi. Unknown operation ise exe eskidir.
+2. **Görsel hızlı:** Master signal'e tıkla: Live açılmalı; Inspector Channel Peak'e
+   tıkla: o kanal seçilmeli. Canlıda Designer Play/Save/Before/After görünmemeli.
+   Kanal sesi/gain/mute değişirken spektrum güncellenmeli; render istememeli.
+   Output mute öncesi ölçüm uyarısı doğru, sessizlik ve bekleme ayrı olmalı.
+3. **Bağımsız PCM kanıtı:** boş disposable audio sahnesinde aynı scripti `--signal`
+   ile çalıştır. 1 kHz ters polariteli stereo iptal olmamalı; yarım kanal gain'i
+   -6.02 dB, Master gain değişimi yalnız Master grafiğini etkilemeli. Geçici
+   kaynak/asset/dosya temizlenmeli; mixer ve output mute geri yüklenmeli.
+4. **Son render ayrımı:** Designer: last render, kayıtlı render FFT/spektrogramını
+   göstermeli. Sahne sesleri bunu değiştirmemeli. Live'a dönüş güncel miks olmalı.
+   En sinsi hata: eski Designer spektrumunu canlı gibi göstermek; `--signal`
+   sırasında Designer revision değişmeden gerçek kanal kazancını ölçerek yakalanır.
+
+Ayrıntı: [AUDIO_LIVE_ANALYSIS.md](AUDIO_LIVE_ANALYSIS.md).
+
+---
+
 # 2026-10-19 (5. build): oturtma yer değiştirme ölçütü + kare başı hareket okuması + yoğunluk gevşemesi
 
 > **SONUÇ (canlı, 2026-10-19):** madde 1/1, contact_heat 7/7, surface_water 6/6,
@@ -185,6 +299,37 @@ sırasında ayıklama yapılmaz, bulgu nota girer.
 Ölçülmeyenler (bilinçli, sonraki tura): P2'nin buharlı hücredeki etkisini
 gösteren ayrı bir kapı yok. P3 (tane domain'inde donma) ve P4'ün 1e5 tane
 maliyeti için test yazılmadı. İlk ihtiyaçta tek kısa kol eklenir.
+
+---
+
+# 2026-10-19: Substance katalog/panel ek kontrolü
+
+**Son hızlı canlı kontrol:** Kullanıcı build'iyle Substance katalog/miras IPC testi
+PASS; geçici profiller temizlendi. Mevcut 9 audio asset / 14 source ve akustik
+ayarları korundu. Üç Vulkan akustik raporu ready/clear, her birinde 6 specular ve
+2–3 diffuse yol. Bu, aşağıdaki görsel UI/proje ve birleşik domain fizik kabulünün
+yerine geçmez. Rapor: `substance_catalogue_acceptance_20261019.json`.
+
+> **Durum:** CANLI — kaynak teslimi; build/canlı kabul bekliyor. Aşağıdaki birleşik
+> domain/termal kontrol listesi korunmuştur. Bu Substance eklemesi için C++ build'i gerekir.
+
+1. **Hızlı bağımsız servis kontrolü:** Studio açıkken dış terminalden
+   `python scripts/test/rt_test_substance_catalogue_ipc.py`. PASS: altı temel profil,
+   temsilciyle birebir alanlar, inherited family, shared scope, atomik hata/revert.
+   Katalog alanları yoksa exe eskidir; Generic metal / Steel eşliği bozuksa temel
+   profil üretimi veya başlangıç sırası hatalıdır.
+2. **Ortak UI:** obje, collider, domain ve flow source aynı aile seçicisini kullanmalı.
+   Profile details altında General / Mechanical / Thermal / Acoustics / Advanced;
+   read-only built-in'de sekmeler çalışmalı. Dar panelde alanlar kendi içinde kaymalı.
+   Collider'da iki Substance formu görünürse ortak obje paneli devralması bozulmuştur.
+3. **Paylaşım ve miras:** aynı proje profilini iki objeye ata; referans özeti iki
+   bağlantıyı içermeli. Derive edip yalnız birini değiştir; diğerinin değeri korunmalı.
+   Eski isimli projeyi kaydet/aç, atamalar ve fizik alanları aynı kalmalı.
+4. **Sessizce makul görünen hata:** aile etiketi doğruyken gerçek fizik değerlerinin
+   değişmesi veya ikinci collider malzemesinin otorite kalması. UI'ya bakmakla yetinme;
+   substance.get / substance.get_object readback'lerini karşılaştır.
+
+Ayrıntı: [SUBSTANCE_CATALOGUE_PANEL.md](SUBSTANCE_CATALOGUE_PANEL.md).
 
 ---
 

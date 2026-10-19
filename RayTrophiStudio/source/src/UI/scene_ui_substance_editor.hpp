@@ -48,60 +48,85 @@ inline std::string fieldLabel(const char* key) {
 }
 
 // One substance picker for every surface (domain default, flow source,
-// collider): grouped by category, project substances labelled with their base.
+// collider): grouped by canonical family, with detailed examples opt-in.
 // `empty_label` non-null offers an empty choice with that label. Returns true
 // when `name` changed.
 inline bool drawPicker(const char* id, std::string& name, const char* empty_label = nullptr) {
     std::vector<rtapi::SubstanceSummary> substances;
-    if (!rtapi::listSubstances(substances).ok) return false;
+    if (!rtapi::listSubstances(substances).ok) {
+        return false;
+    }
     bool changed = false;
     const char* preview = name.empty() ? (empty_label ? empty_label : "") : name.c_str();
     ImGui::SetNextItemWidth(-FLT_MIN);
     if (ImGui::BeginCombo(id, preview)) {
         static char filter[48] = {0};
+        static bool show_details = false;
         if (ImGui::IsWindowAppearing()) {
             filter[0] = '\0';
             ImGui::SetKeyboardFocusHere();
         }
         ImGui::SetNextItemWidth(-FLT_MIN);
-        ImGui::InputTextWithHint("##substance_filter", "Search", filter, sizeof(filter));
+        ImGui::InputTextWithHint("##substance_filter", "Search all profiles", filter, sizeof(filter));
+        ImGui::Checkbox("Detailed examples / tests", &show_details);
         std::string needle = filter;
         std::transform(needle.begin(), needle.end(), needle.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        const auto matches = [&](const std::string& text) {
-            if (needle.empty()) return true;
-            std::string lower = text;
-            std::transform(lower.begin(), lower.end(), lower.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            return lower.find(needle) != std::string::npos;
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const auto matches = [&](std::string text) {
+            std::transform(text.begin(), text.end(), text.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return needle.empty() || text.find(needle) != std::string::npos;
         };
         if (empty_label && ImGui::Selectable(empty_label, name.empty())) {
             changed = !name.empty();
             name.clear();
         }
-        static const std::pair<const char*, const char*> kGroups[] = {
-            {"liquid", "Liquids"}, {"fuel", "Fuels"},
-            {"granular", "Granular"}, {"solid", "Solids"}};
-        for (const auto& [key, title] : kGroups) {
-            bool any = false;
-            for (const auto& row : substances) {
-                any |= row.category == key && (matches(row.name) || matches(row.based_on));
+        std::vector<nlohmann::json> metadata;
+        std::vector<std::pair<std::string, std::string>> groups;
+        for (const auto& row : substances) {
+            const auto info = nlohmann::json::parse(row.catalogue_json);
+            metadata.push_back(info);
+            const auto tier = info.at("tier").get<std::string>();
+            const bool visible = tier == "foundation" || tier == "project" ||
+                show_details || !needle.empty() || row.name == name;
+            const auto key = info.at("family").get<std::string>();
+            if (visible && matches(row.name + " " + row.based_on + " " +
+                    info.at("family_label").get<std::string>()) &&
+                std::none_of(groups.begin(), groups.end(),
+                    [&](const auto& group) { return group.first == key; })) {
+                groups.emplace_back(key, info.at("family_label").get<std::string>());
             }
-            if (!any) continue;
-            ImGui::SeparatorText(title);
-            for (const auto& row : substances) {
-                if (row.category != key || !(matches(row.name) || matches(row.based_on))) {
+        }
+        for (const auto& [key, title] : groups) {
+            ImGui::SeparatorText(title.c_str());
+            for (std::size_t index = 0; index < substances.size(); ++index) {
+                const auto& row = substances[index];
+                const auto& info = metadata[index];
+                const auto tier = info.at("tier").get<std::string>();
+                const bool selected = name == row.name;
+                if (info.at("family") != key ||
+                    (!show_details && needle.empty() && !selected &&
+                        tier != "foundation" && tier != "project") ||
+                    !matches(row.name + " " + row.based_on + " " + title)) {
                     continue;
                 }
-                const bool selected = name == row.name;
-                const std::string label = row.builtin
-                    ? row.name
-                    : row.name + "  (from " + row.based_on + ")";
+                const auto label = row.name + (tier == "project" ? " (project)" :
+                    tier == "foundation" ? " (starting profile)" :
+                    tier == "test" ? " (test)" : " (example)");
                 if (ImGui::Selectable(label.c_str(), selected) && !selected) {
                     name = row.name;
                     changed = true;
                 }
-                if (selected) ImGui::SetItemDefaultFocus();
+                if (ImGui::IsItemHovered()) {
+                    const auto representative = info.at("representative").get<std::string>();
+                    ImGui::SetTooltip("%s\n%s%s", row.category.c_str(),
+                        representative.empty() ? "Base: " : "Starting values from: ",
+                        representative.empty() ? info.at("root_profile").get_ref<const std::string&>().c_str() :
+                            representative.c_str());
+                }
+                if (selected) {
+                    ImGui::SetItemDefaultFocus();
+                }
             }
         }
         ImGui::EndCombo();
@@ -110,7 +135,8 @@ inline bool drawPicker(const char* id, std::string& name, const char* empty_labe
 }
 
 // Returns true when the library or `assigned` changed (the caller re-renders).
-inline bool draw(const char* id, std::string& assigned) {
+inline bool draw(const char* id, std::string& assigned,
+                 const char* initial_tab = "General") {
     if (assigned.empty()) return false;
     std::string text;
     if (!rtapi::getSubstance(assigned, text).ok) {
@@ -132,10 +158,16 @@ inline bool draw(const char* id, std::string& assigned) {
     static std::string pending_key;
     static float pending_value[3] = {0.0f, 0.0f, 0.0f};
     ImGui::PushID(id);
-    const std::string header = builtin
-        ? "Substance: " + assigned + " (built-in, read-only)"
-        : "Substance: " + assigned + " (from " + info.value("based_on", std::string()) + ")";
-    if (!ImGui::TreeNode(header.c_str())) {
+    const auto& catalogue = info.at("catalogue");
+    ImGui::TextWrapped("%s | %s", catalogue.at("family_label").get_ref<const std::string&>().c_str(),
+        builtin ? "Built-in / read only" : "Shared project profile");
+    if (!builtin) {
+        ImGui::TextWrapped("Inherits: %s | %zu overridden fields",
+            info.at("based_on").get_ref<const std::string&>().c_str(), overridden.size());
+    }
+    ImGui::TextWrapped("Shared scope: %zu recorded references. Derive to isolate this assignment.",
+        info.at("affected_references").size());
+    if (!ImGui::TreeNode("Profile details")) {
         ImGui::PopID();
         return false;
     }
@@ -184,9 +216,9 @@ inline bool draw(const char* id, std::string& assigned) {
         }
     };
 
-    ImGui::BeginDisabled(builtin);
     const auto draw_field = [&](const RayTrophiSim::SubstanceFieldSpec& spec) {
         ImGui::PushID(spec.key);
+        ImGui::BeginDisabled(builtin);
         const std::string edit_key = assigned + "/" + spec.key;
         const bool marked = is_overridden(spec.key);
         std::string label = std::string(marked ? "* " : "") + fieldLabel(spec.key);
@@ -270,6 +302,7 @@ inline bool draw(const char* id, std::string& assigned) {
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Drop this override: follow the base substance again");
         }
+        ImGui::EndDisabled();
         ImGui::PopID();
     };
     const auto field_text = [&](const char* key) {
@@ -305,50 +338,103 @@ inline bool draw(const char* id, std::string& assigned) {
         {"Optical", "Look", true, nullptr},
     };
     static bool show_unused = false;
-    std::string hidden;
-    for (const auto& section : sections) {
-        const bool open = section.used || show_unused;
-        if (!open) {
-            hidden += (hidden.empty() ? "" : ", ") + std::string(section.title);
+    const auto tab_for = [](const std::string& group) {
+        if (group == "Identity") {
+            return std::string("General");
         }
-        if (!open && !section.gate) continue;
-        ImGui::SeparatorText(section.title);
-        const bool granular_section = std::string(section.group) == "Granular";
-        if (granular_section && dem) {
-            // These continuum fields feed MPM only; editing them on a DEM
-            // substance changed nothing, which is the panel lying.
-            ImGui::TextWrapped("Grains (DEM) use the grain material below; the continuum fields "
-                "are used only when the solver is mpm (Show unused sections lists them).");
+        if (group == "Liquid" || group == "Granular" || group == "Grains (DEM)") {
+            return std::string("Mechanical");
         }
-        for (const auto& spec : RayTrophiSim::substanceFieldSpecs()) {
-            if (std::string(spec.group) != section.group) continue;
-            const bool is_gate = section.gate && std::string(spec.key) == section.gate;
-            const bool is_transport = std::string(spec.key) == "granular_transport";
-            if (!open && !is_gate) continue;
-            if (granular_section && dem && !is_transport && !show_unused) continue;
-            draw_field(spec);
+        if (group == "Acoustics" || group == "Acoustic medium (fluid)") {
+            return std::string("Acoustics");
         }
+        if (group == "Optical" || group == "Solver hints") {
+            return std::string("Advanced");
+        }
+        return std::string("Thermal");
+    };
+    const ImGuiID initialized_key = ImGui::GetID("##SubstanceTabsInitialized");
+    const bool initialize = ImGui::GetStateStorage()->GetInt(initialized_key, 0) == 0;
+    if (ImGui::BeginTabBar("SubstanceSections", ImGuiTabBarFlags_FittingPolicyScroll)) {
+        for (const char* tab : {"General", "Mechanical", "Thermal", "Acoustics", "Advanced"}) {
+            const auto flags = initialize && std::string(tab) == initial_tab ?
+                ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
+            if (!ImGui::BeginTabItem(tab, nullptr, flags)) {
+                continue;
+            }
+            ImGui::BeginChild("ProfileFields", ImVec2(0,
+                ImGui::GetTextLineHeightWithSpacing() * 14), false);
+            if (std::string(tab) == "General") {
+                const auto representative = catalogue.at("representative").get<std::string>();
+                if (!representative.empty()) {
+                    ImGui::TextWrapped("Representative starting values: %s. "
+                        "This is not a universal measurement for the entire family.",
+                        representative.c_str());
+                }
+                ImGui::TextWrapped("Surface acoustics: %s | Medium: %s",
+                    field_flag("acoustic_defined") ? "Defined" : "Unconfigured",
+                    field_flag("acoustic_medium_defined") ? "Defined" : "Unconfigured");
+                const auto& references = info.at("affected_references");
+                ImGui::TextWrapped("Editing this shared profile affects its references "
+                    "and inheriting profiles (%zu recorded references).", references.size());
+                if (ImGui::TreeNode("Affected references")) {
+                    for (const auto& reference : references) {
+                        ImGui::BulletText("%s", reference.get_ref<const std::string&>().c_str());
+                    }
+                    ImGui::TreePop();
+                }
+            }
+            if (std::string(tab) == "Advanced") {
+                ImGui::Checkbox("Show unused sections", &show_unused);
+                ImGui::SeparatorText("Solver numerics");
+                for (const auto& spec : RayTrophiSim::substanceFieldSpecs()) {
+                    if (std::string(spec.group) == "Solver hints") {
+                        draw_field(spec);
+                    }
+                }
+            }
+            for (const auto& section : sections) {
+                if (tab_for(section.group) != tab) {
+                    continue;
+                }
+                const bool open = section.used || show_unused;
+                if (!open && !section.gate) {
+                    continue;
+                }
+                if (std::string(tab) == "Acoustics") {
+                    const bool configured = field_flag(std::string(section.group) == "Acoustics" ?
+                        "acoustic_defined" : "acoustic_medium_defined");
+                    ImGui::TextWrapped("%s: %s", section.title,
+                        configured ? "Defined" : "Unconfigured (stored values are inactive)");
+                    if (!ImGui::CollapsingHeader(section.title)) {
+                        continue;
+                    }
+                } else {
+                    ImGui::SeparatorText(section.title);
+                }
+                const bool granular_section = std::string(section.group) == "Granular";
+                if (granular_section && dem) {
+                    ImGui::TextWrapped("DEM uses grain fields. MPM continuum fields are "
+                        "available through Show unused sections in Advanced.");
+                }
+                for (const auto& spec : RayTrophiSim::substanceFieldSpecs()) {
+                    if (std::string(spec.group) != section.group) {
+                        continue;
+                    }
+                    const bool gate = section.gate && std::string(spec.key) == section.gate;
+                    if ((!open && !gate) || (granular_section && dem &&
+                            std::string(spec.key) != "granular_transport" && !show_unused)) {
+                        continue;
+                    }
+                    draw_field(spec);
+                }
+            }
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+        ImGui::GetStateStorage()->SetInt(initialized_key, 1);
     }
-    // Viewing controls stay usable on a read-only built-in; only fields lock.
-    ImGui::EndDisabled();
-    // Solver numerics are tuned per substance but are not material physics.
-    const bool advanced_open = ImGui::TreeNode("Advanced: solver numerics");
-    if (advanced_open) {
-        ImGui::BeginDisabled(builtin);
-        for (const auto& spec : RayTrophiSim::substanceFieldSpecs()) {
-            if (std::string(spec.group) == "Solver hints") draw_field(spec);
-        }
-        ImGui::EndDisabled();
-        ImGui::TreePop();
-    }
-    ImGui::Checkbox("Show unused sections", &show_unused);
-    if (ImGui::IsItemHovered()) {
-        const std::string tip = hidden.empty() ? std::string("Every section is in use.")
-            : "Not used by this substance: " + hidden;
-        ImGui::SetTooltip("%s", tip.c_str());
-    }
-    ImGui::BeginDisabled(builtin);
-    ImGui::EndDisabled();
 
     if (!builtin) {
         ImGui::Spacing();

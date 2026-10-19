@@ -213,6 +213,7 @@ bool loadLocked(std::string& error) {
 uint32_t requiredCapabilities(const std::string& method) {
     if (method == "camera.sample_lens_weather") return Read;
     if (method.rfind("audio.", 0) == 0) {
+        if (method == "audio.analysis_get" || method == "audio.physical_catalogue") return Read;
         if (method == "audio.physical_bake_status") return Read;
         if (method == "audio.physical_history_status") return Read;
         if (method == "audio.physical_replay_status") return Read;

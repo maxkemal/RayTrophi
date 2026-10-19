@@ -1,0 +1,59 @@
+{
+  "passed": true,
+  "utc": "2026-10-19T20:21:44.989458+00:00",
+  "scope": "injected controls and native PCM, no measured solver events",
+  "listening_acceptance": "awaiting_user_feedback",
+  "cases": [
+    {
+      "model": "liquid_flow",
+      "passed": true,
+      "samples": [
+        {
+          "block_peak": 0.03986595943570137,
+          "master_peak_dbfs": -35.8386286360351,
+          "master_rms_dbfs": -45.53927581293263,
+          "end_frame": 19908608,
+          "clip_samples_window": 0,
+          "activity": 0.25
+        },
+        {
+          "block_peak": 0.1011679619550705,
+          "master_peak_dbfs": -27.65065274045795,
+          "master_rms_dbfs": -37.38319507163145,
+          "end_frame": 20006912,
+          "clip_samples_window": 0,
+          "activity": 0.6
+        },
+        {
+          "block_peak": 0.1759304404258728,
+          "master_peak_dbfs": -23.41471135905412,
+          "master_rms_dbfs": -32.29577533207029,
+          "end_frame": 20105216,
+          "clip_samples_window": 0,
+          "activity": 1
+        }
+      ]
+    }
+  ],
+  "cleanup": [
+    {
+      "field": "emitters",
+      "preserved_ids": true
+    },
+    {
+      "field": "assets",
+      "preserved_ids": true
+    },
+    {
+      "field": "clips",
+      "preserved_ids": true
+    },
+    {
+      "field": "tracks",
+      "preserved_ids": true
+    },
+    {
+      "playback_mode_restored": true
+    }
+  ]
+}

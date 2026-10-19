@@ -30,5 +30,6 @@ void copyObjectSubstance(SceneData& scene, const std::string& source, const std:
 std::shared_ptr<void> retainObjectSubstanceHistory(const nlohmann::json& state);
 bool objectSubstanceHistoryUses(const std::string& substance);
 std::uint64_t objectSubstanceFingerprint(const SceneData& scene);
-void drawObjectSubstance(UIContext& ctx, const std::string& object);
+// True when the common object-material panel owns this assignment surface.
+bool drawObjectSubstance(UIContext& ctx, const std::string& object);
 } // namespace matter

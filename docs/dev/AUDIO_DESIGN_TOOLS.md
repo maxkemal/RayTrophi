@@ -57,9 +57,9 @@ the current design is replaced. Disabled modules still need valid parameters.
 | Sample | existing asset_id; source offsets 0..600 s; selected range .05..10 s |
 
 Layers require synth mode and produce stereo with equal-power pan, short edge fades
-and deterministic noise. Global duration is .05..10 s. An overloaded composite is
+and deterministic noise. Global Designer duration is .05..600 s, subject to the PCM budget. An overloaded composite is
 normalized before ADSR/output processing. Empty layers retain the legacy engine.
-The top-level imported-asset mode still permits a .05..30 s selection. File decoding
+The top-level imported-asset mode still permits a .05..600 s selection, subject to the PCM budget. File decoding
 retains the existing 600 s / 128 MiB bound; zoom caches one decoded source by path,
 size and modification time. Rendering reads selected sample assets again.
 
@@ -85,7 +85,7 @@ revisions/licenses remain; no DaisySP-LGPL modules are included.
 
 Processing order: source/layers and envelope, reverse, pitch/time/formants, appended
 tail, ordered rack, legacy output filters/drive, master gain/fades, sample clamp,
-loop seam. Tail is 0..5 s; total result cannot exceed 30 s. A gain boost after the
+loop seam. Tail is 0..5 s; total result cannot exceed 600 s or the PCM budget. A gain boost after the
 limiter can therefore exceed its ceiling. `gain_db` (-60..6) is an input alias;
 canonical recipes store linear `gain`. Conflicting supplied gain values fail.
 Formant shift is ±12 semitones; base is 20..2000 Hz; compensation defaults false.
@@ -337,3 +337,11 @@ The existing workspace scripting/IPC fields `designer_tools_open` and
 Manual verification after the user build: collapse/restore both sides independently,
 resize expanded columns, switch workflow and source/arrange, and check narrow layouts.
 No application build or live verification was performed for this UI adjustment.
+
+
+2026-10-19: Designer capacity uses the shared 512 MiB estimated PCM working-set
+budget (input and output, four float32 banks each), in addition to duration and
+existing decode/import limits. design_catalogue exposes max_duration_seconds,
+working_pcm_budget_bytes and processing_mode=bounded_memory through Python/IPC.
+This is in-memory processing; see AUDIO_DESIGN_CONTEXT_WORKFLOW_PLAN.md for source
+identity, save/clip targets, pending streaming work and post-build acceptance.

@@ -482,6 +482,11 @@
     <ClInclude Include="source\include\MaterialProgram.h" />
     <ClInclude Include="source\include\MaterialStateField.h" />
     <ClInclude Include="source\include\SubstanceLibrary.h" />
+    <ClInclude Include="source\include\SubstanceCatalogue.h" />
+    <ClCompile Include="source\src\Physics\SubstanceCatalogue.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
     <ClInclude Include="source\include\Fluid\FluidDomainSubstance.h" />
     <ClInclude Include="source\include\Fluid\MatterSubstanceState.h" />
     <ClInclude Include="source\include\Fluid\MatterGrainMpmContact.h" />
@@ -2545,6 +2550,7 @@
     <ClInclude Include="source\include\Audio\AudioEmitterSchema.h" />
     <ClInclude Include="source\include\Audio\AudioAcousticSettings.h" />
     <ClInclude Include="source\include\Audio\AudioParametricEq.h" />
+    <ClInclude Include="source\include\Audio\AudioDesignLimits.h" />
     <ClCompile Include="source\src\Scene\AudioParametricEq.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
@@ -2784,6 +2790,46 @@
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <ClInclude Include="source\include\Audio\AudioMixerRuntime.h" />
+    <ClInclude Include="source\include\Audio\AudioLiveAnalysis.h" />
+    <ClInclude Include="source\include\UI\AudioLiveAnalysisUI.h" />
+    <ClInclude Include="source\include\Audio\PhysicalAudioNaturalDsp.h" />
+    <ClInclude Include="source\include\Audio\PhysicalAudioCharacterDsp.h" />
+    <ClCompile Include="source\src\Scene\PhysicalAudioNaturalDsp.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioCharacterDsp.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\Audio\PhysicalAudioAuthoring.h" />
+    <ClCompile Include="source\src\Scene\PhysicalAudioAuthoring.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\UI\AudioPhysicalGeneratorUI.h" />
+    <ClCompile Include="source\src\UI\AudioPhysicalGeneratorUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\UI\AudioHistoryUI.h" />
+    <ClCompile Include="source\src\UI\AudioHistoryUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\UI\AudioAnalysisGraph.h" />
+    <ClCompile Include="source\src\Scene\AudioLiveAnalysis.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioLiveAnalysisUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioAnalysisGraph.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
     <ClInclude Include="source\include\UI\AudioMixerUI.h" />
     <ClCompile Include="source\src\Scene\AudioMixer.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>

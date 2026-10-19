@@ -34,11 +34,12 @@ void validateAudioRequest(const std::string& operation, const json& params) {
         if (listed(key, {"id", "path", "name", "asset_id", "parent", "bus", "scope",
             "action", "mode", "key", "source", "author", "license", "folder",
             "environment_role", "source_material", "target_material", "assets_root", "track_id", "mixer_bus",
-            "from_substance", "to_substance", "preset", "kind", "channel", "clip_policy"})) {
+            "from_substance", "to_substance", "preset", "kind", "channel", "clip_policy",
+            "analysis_mode", "analysis_view", "history_scope"})) {
             require(value.is_string(), "Audio parameter must be a string: " + key);
         } else if (listed(key, {"loop", "spatial", "muted", "solo", "enabled", "store",
             "background", "original", "continuous", "details", "overwrite", "auto_loop",
-            "spectral", "reflections", "diffuse"})) {
+            "spectral", "reflections", "diffuse", "clear_history"})) {
             require(value.is_boolean(), "Audio parameter must be boolean: " + key);
         } else if (listed(key, {"ids", "tags", "controls", "events", "gain_curve",
             "pitch_curve", "pan_curve"})) {
@@ -80,7 +81,7 @@ void validateAudioRequest(const std::string& operation, const json& params) {
             require(!value.get<std::string>().empty(), "Audio id must be nonempty");
         }
     }
-    if (listed(operation, {"get", "source_runtime", "select", "update", "duplicate", "remove",
+    if (listed(operation, {"physical_configure", "get", "source_runtime", "select", "update", "duplicate", "remove",
         "play", "pause", "stop", "preview", "asset_remove", "asset_relink", "waveform",
         "acoustics_preview", "physical_impact", "physical_history_start",
         "physical_replay_start", "design_reuse", "track_update", "track_remove", "clip_update",

@@ -744,7 +744,8 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  scene_loading.load() ||
                  rendering_in_progress.load() ||
                  ctx.render_settings.backend_changed;
-             if (ImGui::MenuItem("Undo", "Ctrl+Z", false, history.canUndo() && !block_history_actions)) {
+            const bool audio_history = AudioUI::drawAudioHistoryMenu(ctx, block_history_actions);
+             if (!audio_history && ImGui::MenuItem("Undo", "Ctrl+Z", false, history.canUndo() && !block_history_actions)) {
                  history.undo(ctx);
                  rebuildMeshCache(ctx.scene.world.objects);
                  mesh_cache_valid = false;
@@ -752,7 +753,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  ctx.selection.selected.has_cached_aabb = false;
                  g_ProjectManager.markModified();
             }
-            if (ImGui::MenuItem("Redo", "Ctrl+Y", false, history.canRedo() && !block_history_actions)) {
+            if (!audio_history && ImGui::MenuItem("Redo", "Ctrl+Y", false, history.canRedo() && !block_history_actions)) {
                  history.redo(ctx);
                  rebuildMeshCache(ctx.scene.world.objects);
                  mesh_cache_valid = false;

@@ -1,0 +1,51 @@
+{
+  "passed": true,
+  "utc": "2026-10-19T20:23:26.073959+00:00",
+  "scope": "injected controls and native PCM, no measured solver events",
+  "listening_acceptance": "awaiting_user_feedback",
+  "cases": [
+    {
+      "model": "impact",
+      "passed": true,
+      "samples": [
+        {
+          "block_peak": 0.00014630859368480742,
+          "master_peak_dbfs": -120.0,
+          "master_rms_dbfs": -120.0,
+          "end_frame": 24875008,
+          "clip_samples_window": 0,
+          "material": "metal"
+        },
+        {
+          "block_peak": 0.0001290773943765089,
+          "master_peak_dbfs": -120.0,
+          "master_rms_dbfs": -120.0,
+          "end_frame": 24946688,
+          "clip_samples_window": 0,
+          "material": "metal"
+        }
+      ]
+    }
+  ],
+  "cleanup": [
+    {
+      "field": "emitters",
+      "preserved_ids": true
+    },
+    {
+      "field": "assets",
+      "preserved_ids": true
+    },
+    {
+      "field": "clips",
+      "preserved_ids": true
+    },
+    {
+      "field": "tracks",
+      "preserved_ids": true
+    },
+    {
+      "playback_mode_restored": true
+    }
+  ]
+}

@@ -5,6 +5,7 @@
 #include "UI/AudioVisualLanguage.h"
 #include "UI/AudioAcousticSettingsUI.h"
 #include "UI/AudioSoundDesignerUI.h"
+#include "UI/AudioLiveAnalysisUI.h"
 #include "UI/AudioPropertyLayout.h"
 #include "UI/AudioUI.h"
 #include "UI/AudioThunderUI.h"
@@ -284,7 +285,10 @@ void drawSynthesisControls(UIContext& ctx) {
 }
 
 void drawAudioEditorNavigation(UIContext& ctx) {
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(5, 3));
     const auto state = rtapi::editorState();
+    const float tabWidth = std::clamp(ImGui::GetContentRegionAvail().x / 4 -
+        ImGui::GetStyle().ItemSpacing.x, 45.0f, 85.0f);
     for (const auto& entry : {std::pair{"Timeline", "audio"},
                               std::pair{"Mixer", "audio_mixer"}}) {
         if (state.bottom_editor != "audio" && !ImGui::GetIO().MouseDown[0]) {
@@ -292,7 +296,7 @@ void drawAudioEditorNavigation(UIContext& ctx) {
         }
         const bool active = state.bottom_editor == entry.second &&
             !ctx.scene.audio->invoke("workspace_get", json::object()).value("designer_open", false);
-        if (ImGui::Selectable(entry.first, active, 0, ImVec2(85, 0))) {
+        if (ImGui::Selectable(entry.first, active, 0, ImVec2(tabWidth, 0))) {
             finishAudioTimelineGesture(ctx);
             workspaceCall(ctx, "workspace_update", {{"designer_open", false}});
             workspaceCall(ctx, "design_stop");
@@ -301,9 +305,17 @@ void drawAudioEditorNavigation(UIContext& ctx) {
         ImGui::SameLine();
     }
     const auto view = ctx.scene.audio->invoke("workspace_get", json::object());
-    if (ImGui::Selectable("Designer", view.value("designer_open", false), 0, ImVec2(85, 0))) {
+    const bool analyzing = view.value("designer_open", false) &&
+        view.value("designer_page", "generate") == "analyze";
+    if (ImGui::Selectable("Designer", view.value("designer_open", false) && !analyzing,
+            0, ImVec2(tabWidth, 0))) {
         openSoundDesigner(ctx);
     }
+    ImGui::SameLine();
+    if (ImGui::Selectable("Analyze", analyzing, 0, ImVec2(tabWidth, 0))) {
+        openLiveAnalysis(ctx, view.value("mixer_bus", std::string("Master")));
+    }
+    ImGui::PopStyleVar();
     if (view.value("designer_open", false)) {
         ImGui::SameLine();
     } else {
@@ -454,8 +466,12 @@ void drawWorkspace(UIContext& ctx) {
         std::snprintf(level, sizeof(level), "Master signal  %.1f dBFS", db);
         ImGui::ProgressBar(std::clamp((db + 60.0f) / 60.0f, 0.0f, 1.0f),
             ImVec2(-1, 0), level);
+        if (ImGui::IsItemClicked()) {
+            openLiveAnalysis(ctx, "Master");
+        }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Signal before output mute. This is the combined scene mix.");
+            ImGui::SetTooltip("Signal before output mute, including previews. "
+                "Click for live spectrum and channel levels.");
         }
     }
     bool previewMuted = status.at("preview_muted");
@@ -601,7 +617,10 @@ void drawWorkspace(UIContext& ctx) {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Output")) {
-            if (ctx.scene.audio->invoke("workspace_get", json::object()).value("designer_open", false)) {
+            const auto workspace = ctx.scene.audio->invoke("workspace_get", json::object());
+            const bool liveAnalysis = workspace.value("designer_page", "generate") == "analyze" &&
+                workspace.value("analysis_mode", "live") == "live";
+            if (workspace.value("designer_open", false) && !liveAnalysis) {
                 if (ImGui::CollapsingHeader("Designed sound / Save", ImGuiTreeNodeFlags_DefaultOpen)) {
                     drawSoundDesignInspector(ctx);
                 }

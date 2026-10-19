@@ -1,5 +1,74 @@
 # Continuous physical activity sound generation
 
+## 2026-10-19: v2 source delivery and source inspector
+
+Status: implemented in source, not compiled or listened to in this turn. No unified
+solver/shader/test files or active domain scene were changed.
+
+`generator.version=1` remains the default for omitted versions and keeps the original
+PhysicalAudioDsp rendering code unchanged. Explicit `version=2` selects the fixed-state
+PhysicalAudioNaturalDsp in the same live / scheduled replay / dry bake facade. All eight
+existing models are supported. V2 adds finite `texture`, `variation`, `body` controls
+in 0..1 (default 0.5); brightness/seed and existing resonant controls remain shared.
+Those three new controls reject on v1. No old scene is silently upgraded.
+
+V2 combines colored frequency layers, slow seeded modulation and, where appropriate,
+statistical microtexture or a 12-mode resonator/contact onset. It removes slow DC and
+retains dry dynamics rather than normalizing each bake. Seeded liquid/fracture details
+are artistic microtexture, not measured splash/bubble/fracture events, calibrated
+radiated power or solved material eigenmodes. No new thermal/rain/thunder generator or
+solver-event publication is claimed by this source slice. Listening realism is pending.
+
+Shared Python `rt.audio` / IPC operations:
+
+- `physical_catalogue()` is Read-only: versions, eight models/default recipes, friendly
+  labels, controls, resonators, sample format and artistic/measured scope.
+- `physical_configure(id, generator, reaction=None, clear_history=False)` atomically
+  converts/updates the existing source through canonical update/validation. Source ID,
+  transform/routing/gain stay intact; asset binding is explicitly removed, loop enabled.
+  Impact defaults to manual reaction; asset/manual/weather continuous inputs default
+  to a new explicit signal binding. Existing signal/domain bindings are preserved and
+  mismatched model/channel bindings reject. Explicit reaction uses the shared validator.
+- Stored takes are retained if valid. An incompatible take rejects the whole operation;
+  `clear_history=True` explicitly clears it. No hidden telemetry enable or simulation start.
+- source_runtime.generator_runtime now includes nullable `last_accepted_sequence`,
+  including after automatic retirement, so UI impact auditions use canonical dedup state.
+
+```python
+source = rt.audio.create(name="Liquid texture", gain=0.15)
+configured = rt.audio.physical_configure(id=source["id"], generator={
+    "version": 2, "model": "liquid_flow", "seed": 17,
+    "brightness": 0.6, "texture": 0.65, "variation": 0.7, "body": 0.4})
+# Bind configured['reaction'] to an explicit signal or matching domain via existing APIs.
+# Zero activity remains silent; configuring a source does not fabricate activity.
+```
+
+Inspector: source Sound tab -> Synthetic generator. Model/engine version, seed,
+brightness and v2 controls, resonant parameters, explicit clear-take and impact-test
+controls call the same authoring operations. Numeric entries commit with Enter to
+avoid rebuilding the voice on every drag frame. Existing Activity connection binds
+signals/domains. Designer offline preset generation is a separate existing workflow.
+
+Also delivered: main Edit menu and Ctrl+Z/Ctrl+Y/Ctrl+Shift+Z route to Designer render
+history while its source editor/inspector owns focus; viewport/Arrange use scene history,
+text input takes precedence. Empty Designer history never falls through to scene undo.
+Local duplicate Undo/Redo controls were removed. Transient workspace `history_scope`
+(scene|design) exposes the UI-maintained focus target through workspace_get/update;
+explicit script/IPC design_undo/design_redo keep their existing service contract.
+Unrendered UI draft buffers are not newly promoted to a per-keystroke history by this patch.
+
+Post-build acceptance: `python scripts/test/rt_test_audio_natural_ipc.py` checks catalogue
+and reversible focus-scope validation; `--exercise` additionally requires an empty
+DISPOSABLE audio scene, creates/removes sources and temporary bake assets, checks all
+models, v1/v2, finite/deterministic PCM, changed controls, atomic errors and history clearing.
+It does not launch Studio, play sound or enable telemetry. Authoring history remains,
+so do not use the exercise in a working scene. `physical_audio_dsp_test.cpp` is an optional
+standalone post-build harness for block partitions 1/7/64/257/1024, empty callbacks,
+zero activity, seed/parameter changes and impact energy ordering. Codex did not compile it.
+
+Earlier checkpoints below retain their original scope.
+
+
 2026-10-18 source checkpoint. No C++ build, Studio launch or live test performed.
 UI reorganization is deferred until the physical audio core is delivered, per
 the user's correction. This is the first runtime procedural source slice, not
@@ -238,3 +307,53 @@ fluid/gas/DEM activity, save/load/undo/duplicate, recipe/asset switching, mixed
 asset/procedural voice budgets, capture rejection, pause/seek and device teardown.
 Listen and measure callback/voice cost separately; syntax/static checks do not
 establish water/friction realism or performance acceptance.
+
+## 2026-10-19 user-built acceptance
+
+After the user's build, the external natural IPC contract and --exercise checks
+passed for all eight models: versions, atomic invalid requests, deterministic dry
+bake hashes, changed texture/body output, legacy selection and history clearing.
+The audible native demo then played all eight V2 models with injected activity;
+impact audition covered wood/metal/stone/glass. Native source block peaks were
+finite/nonzero, Master frames advanced, and the sampled windows did not clip.
+Temporary source/asset/clip/track ID sets were restored and audio playback mode
+was restored; user volume/mute and solver telemetry were not changed.
+
+Evidence: audio_natural_acceptance_20261019.json and audio_natural_listen_20261019.json.
+Listening naturalness still awaits user feedback. These are injected controls,
+not solver events, calibrated radiation, acoustic export parity or the C++ block-
+partition harness. Scene authoring tests advance IDs and leave undo history;
+cleanup of temporary entities is not a whole-scene history rollback.
+
+## 2026-10-19 listening revision 2 (source, not built)
+
+User feedback: liquid/gas/friction sounded nearly identical; metal/glass impact
+was correct; wood/stone rang too metallic; fracture crackle was unnatural. Friction
+needs material-dependent character. This is partial listening acceptance, not a pass
+for all models. The aggregate acceptance JSON records that original-character verdict.
+
+V2 now has character_revision=1|2, default 1 for omitted values, preserving previously
+saved recipes. Catalogue defaults for newly selected models recommend revision 2.
+PhysicalAudioCharacterDsp supplies only the revised liquid, gas, friction, fracture
+and wood/stone impact paths. Metal/glass impact, rolling, contact and deformation
+retain the original V2 DSP path. V1 is unchanged. Same live/replay/bake facade applies.
+
+Revised liquid emphasizes independent short wet grains over the noise bed. Gas is
+smooth, slowly varying low/mid airflow. Friction is irregular scraping with explicit
+surface=organic|mineral|metal|glass (only V2 character 2 friction, default organic).
+These are authored surface timbres, not automatically measured Substance pairs.
+Wood/stone modes and contact bursts damp much faster. Fracture uses small irregular
+clusters of short band-limited cracks and quieter debris, not uniform ringing ticks.
+All of these remain statistical activity textures, not newly measured solver events.
+
+UI: Sound -> Synthetic generator -> v2 -> Sound character: Tuned / material character;
+friction exposes Friction surface. Character and surface share canonical validation,
+physical_catalogue and physical_configure/create/update in Python/IPC. Switching
+back to Original removes the tuned-only surface field. No old recipe silently changes.
+
+Acceptance scripts now cover revision typing, incompatible surface fields, revision
+hash differences, bit-identical metal/glass revision outputs, four distinct friction
+surfaces and much shorter wood/stone tails. The C++ standalone harness also links
+PhysicalAudioCharacterDsp.cpp. They are updated, not run against this new source.
+The listening script now defaults to --character-revision 2 and supports --surface;
+a new Studio build is required before running it. Use --character-revision 1 for A/B.

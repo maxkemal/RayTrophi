@@ -1,0 +1,59 @@
+{
+  "passed": true,
+  "utc": "2026-10-19T20:24:09.969874+00:00",
+  "scope": "injected controls and native PCM, no measured solver events",
+  "listening_acceptance": "awaiting_user_feedback",
+  "cases": [
+    {
+      "model": "contact_activity",
+      "passed": true,
+      "samples": [
+        {
+          "block_peak": 0.017873533070087433,
+          "master_peak_dbfs": -41.51012539495547,
+          "master_rms_dbfs": -49.692428499130244,
+          "end_frame": 27054080,
+          "clip_samples_window": 0,
+          "activity": 0.25
+        },
+        {
+          "block_peak": 0.07138416171073914,
+          "master_peak_dbfs": -34.5406412342804,
+          "master_rms_dbfs": -44.133698642753004,
+          "end_frame": 27224064,
+          "clip_samples_window": 0,
+          "activity": 0.6
+        },
+        {
+          "block_peak": 0.0743732750415802,
+          "master_peak_dbfs": -29.615002258531856,
+          "master_rms_dbfs": -38.84933159841601,
+          "end_frame": 27369472,
+          "clip_samples_window": 0,
+          "activity": 1
+        }
+      ]
+    }
+  ],
+  "cleanup": [
+    {
+      "field": "emitters",
+      "preserved_ids": true
+    },
+    {
+      "field": "assets",
+      "preserved_ids": true
+    },
+    {
+      "field": "clips",
+      "preserved_ids": true
+    },
+    {
+      "field": "tracks",
+      "preserved_ids": true
+    },
+    {
+      "playback_mode_restored": true
+    }
+  ]
+}

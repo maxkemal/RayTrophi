@@ -11,6 +11,10 @@ PhysicalAudioDsp::PhysicalAudioDsp(const nlohmann::json& recipe) {
     model_ = name == "gas_flow" ? 1 : name == "friction" ? 2 :
         name == "rolling" ? 3 : name == "impact" ? 4 : name == "contact_activity" ? 5 :
         name == "deformation" ? 6 : name == "fracture_activity" ? 7 : 0;
+    if (recipe.value("version", 1) == 2) {
+        natural_.emplace(recipe);
+        return;
+    }
     const float hz = model_ == 3 ? 90 + 260 * brightness :
         model_ == 1 ? 180 + 2400 * brightness : 700 + 6800 * brightness;
     cutoff_ = 1.0f - std::exp(-6.28318530718f * hz / 48000.0f);
@@ -72,6 +76,9 @@ float PhysicalAudioDsp::resonance(float excitation) {
 }
 
 float PhysicalAudioDsp::render(float* output, std::size_t count, float activity, float impulse) {
+    if (natural_) {
+        return natural_->render(output, count, activity, impulse);
+    }
     const float target = std::isfinite(activity) ? std::clamp(activity, 0.0f, 1.0f) : 0;
     const float excitation = std::isfinite(impulse) ? std::clamp(impulse, 0.0f, 1.0f) : 0;
     float peak = 0;

@@ -131,6 +131,9 @@ nlohmann::json author(UIContext& ctx, SceneHistory* history, const std::string& 
     if (AudioService::isAuthoring(operation) && rtapi::renderOutputPending()) {
         throw std::runtime_error("Scene audio authoring is locked by the render job");
     }
+    if (operation == "analysis_get" || operation == "physical_catalogue") {
+        return ctx.scene.audio->invoke(operation, params);
+    }
     if (operation == "acoustics_boundary") {
         return ctx.scene.audio->invoke(operation, params);
     }

@@ -1,6 +1,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "Audio/AudioDesignLimits.h"
 #include "Audio/AudioDesignDsp.h"
 #include "Audio/AudioParametricEq.h"
 #include "../../../external/DaisySP/Source/Effects/chorus.h"
@@ -183,7 +184,9 @@ json designDspCatalogue() {
         {"mode", choice("Band type", "peak", {"peak", "lowshelf", "highshelf", "lowpass", "highpass"})},
         {"frequency_hz", field("Frequency", 1000, 20, 20000, "Hz", true)},
         {"gain_db", field("Gain", 0, -24, 24, "dB")}, {"q", field("Q", 0.707, 0.1, 10)}};
-    return {{"version", 3}, {"max_layers", 8}, {"max_effects", 8}, {"max_eq_bands", 8},
+    return {{"version", 3}, {"max_duration_seconds", designMaxSeconds},
+        {"working_pcm_budget_bytes", designWorkingPcmBudget},
+        {"processing_mode", "bounded_memory"}, {"max_layers", 8}, {"max_effects", 8}, {"max_eq_bands", 8},
         {"layers", layers}, {"effects", effects}, {"eq_band_fields", bandFields},
         {"eq_presets", json::array({{{"name", "Bass / Body / Brightness (flat)"},
             {"bands", json::array({
