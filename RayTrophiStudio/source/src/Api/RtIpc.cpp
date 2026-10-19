@@ -2961,17 +2961,22 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"thermal_heat_to_ambient_j", info.thermal_heat_to_ambient_j},
                         {"settle_on_seed", info.settle_on_seed},
                         {"settle_max_steps", info.settle_max_steps},
-                        {"settle_speed_m_s", info.settle_speed_m_s},
+                        {"settle_displacement_m", info.settle_displacement_m},
                         {"settle_pending", info.settle_pending},
                         {"settle_ran", info.settle_ran},
                         {"settle_converged", info.settle_converged},
+                        {"settle_plateau", info.settle_plateau},
                         {"settle_steps", info.settle_steps},
                         {"settle_particles", info.settle_particles},
-                        {"settle_first_speed_m_s", info.settle_first_speed_m_s},
-                        {"settle_residual_speed_m_s", info.settle_residual_speed_m_s},
+                        {"settle_first_p95_m", info.settle_first_p95_m},
+                        {"settle_residual_p95_m", info.settle_residual_p95_m},
                         {"settle_ms", info.settle_ms},
                         {"live_max_speed_m_s", info.live_max_speed_m_s},
                         {"live_mean_speed_m_s", info.live_mean_speed_m_s},
+                        {"live_motion_samples", info.live_motion_samples},
+                        {"live_motion_mean_m", info.live_motion_mean_m},
+                        {"live_motion_p95_m", info.live_motion_p95_m},
+                        {"live_motion_max_m", info.live_motion_max_m},
                         {"thermal_contact_shell_kelvin", info.thermal_contact_shell_kelvin},
                         {"thermal_contact_parcel_kelvin", info.thermal_contact_parcel_kelvin},
                         {"thermal_contact_shell_cells", info.thermal_contact_shell_cells},
@@ -3205,17 +3210,22 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"thermal_heat_to_ambient_j", info.thermal_heat_to_ambient_j},
                         {"settle_on_seed", info.settle_on_seed},
                         {"settle_max_steps", info.settle_max_steps},
-                        {"settle_speed_m_s", info.settle_speed_m_s},
+                        {"settle_displacement_m", info.settle_displacement_m},
                         {"settle_pending", info.settle_pending},
                         {"settle_ran", info.settle_ran},
                         {"settle_converged", info.settle_converged},
+                        {"settle_plateau", info.settle_plateau},
                         {"settle_steps", info.settle_steps},
                         {"settle_particles", info.settle_particles},
-                        {"settle_first_speed_m_s", info.settle_first_speed_m_s},
-                        {"settle_residual_speed_m_s", info.settle_residual_speed_m_s},
+                        {"settle_first_p95_m", info.settle_first_p95_m},
+                        {"settle_residual_p95_m", info.settle_residual_p95_m},
                         {"settle_ms", info.settle_ms},
                         {"live_max_speed_m_s", info.live_max_speed_m_s},
                         {"live_mean_speed_m_s", info.live_mean_speed_m_s},
+                        {"live_motion_samples", info.live_motion_samples},
+                        {"live_motion_mean_m", info.live_motion_mean_m},
+                        {"live_motion_p95_m", info.live_motion_p95_m},
+                        {"live_motion_max_m", info.live_motion_max_m},
                         {"thermal_contact_shell_kelvin", info.thermal_contact_shell_kelvin},
                         {"thermal_contact_parcel_kelvin", info.thermal_contact_parcel_kelvin},
                         {"thermal_contact_shell_cells", info.thermal_contact_shell_cells},
@@ -3369,8 +3379,8 @@ json dispatchMethod(const std::string& method, const json& params) {
         const bool on_seed = optionalBool(params, "on_seed", true);
         const bool has_steps = params.contains("max_steps");
         const int max_steps = optionalInt(params, "max_steps", 240);
-        const bool has_speed = params.contains("speed_m_s");
-        const float speed = optionalFloat(params, "speed_m_s", 0.01f);
+        const bool has_speed = params.contains("displacement_m");
+        const float speed = optionalFloat(params, "displacement_m", 0.0002f);
         const bool request = optionalBool(params, "request", true);
         return enqueueResult([=](UIContext&) {
             return rtapi::settleFluidDomain(domain, has_on_seed ? &on_seed : nullptr,

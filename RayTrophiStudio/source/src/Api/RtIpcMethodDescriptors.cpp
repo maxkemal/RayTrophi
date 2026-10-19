@@ -2144,15 +2144,15 @@ static const MethodRegistration reg_fluid_set_whitewater(desc_fluid_set_whitewat
 
 static const MethodParam params_fluid_settle[] = {
     {"domain", "string", true, "", nullptr, nullptr},
+    {"displacement_m", "float", false, "", "0.0002", nullptr},
     {"max_steps", "int", false, "", "240", nullptr},
     {"on_seed", "bool", false, "", "true", nullptr},
     {"request", "bool", false, "", "true", nullptr},
-    {"speed_m_s", "float", false, "", "0.01", nullptr},
 };
 static const MethodDescriptor desc_fluid_settle = {
     "fluid.settle", "fluid",
     "Relax a fluid/matter domain's particles to rest before t = 0",
-    "A seed is not an equilibrium (grains placed without their radius, no contact carrying the bed's weight, sub-cell density noise in liquid). With on_seed (default true) every seed is relaxed at the start of the next step: the domain's own solver steps run with time, sources, heat, gas, foam and MSF stopped, and all velocities and spins are zeroed after each step, until the fastest carrier is below speed_m_s (default 0.01) or max_steps (default 240). request=true (default) relaxes the current particles too, e.g. a bed poured by sources. Omitted settings are kept. fluid.list_domains reports settle_on_seed/max_steps/speed_m_s and settle_pending, settle_ran, settle_converged, settle_steps, settle_particles, settle_first_speed_m_s, settle_residual_speed_m_s, settle_ms. Animated colliders are not sampled while settling.",
+    "A seed is not an equilibrium (grains placed without their radius, no contact carrying the bed's weight, sub-cell density noise in liquid). With on_seed (default true) every seed is relaxed at the start of the next step: the domain's own solver steps run with time, sources, heat, gas, foam and MSF stopped, and all velocities and spins are zeroed after each step. It stops when the 95th percentile of per-step displacement is below displacement_m (m per step, default 0.0002), when it stops falling (settle_plateau: the solver's own floor) or at max_steps (default 240). request=true (default) relaxes the current particles too, e.g. a bed poured by sources. Omitted settings are kept. fluid.list_domains reports settle_on_seed/max_steps/displacement_m, settle_pending, settle_ran, settle_converged, settle_plateau, settle_steps, settle_particles, settle_first_p95_m, settle_residual_p95_m, settle_ms, and live_motion_samples/mean_m/p95_m/max_m (last frame's displacement of a carrier sample, by position). Animated colliders are not sampled while settling.",
     "write", "SceneWrite", false, "any",
     "fluid|settle|simulation|reset",
     nullptr,

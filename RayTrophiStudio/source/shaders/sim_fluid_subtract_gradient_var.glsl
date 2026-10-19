@@ -20,7 +20,7 @@ layout(push_constant) uniform PC {
     float sor_omega;
     int   iterations;
     int   parity;
-    float density_correction;
+    float density_relaxation_s;
     int   particles_per_cell;
     int   variational;
     int   gfm_active;

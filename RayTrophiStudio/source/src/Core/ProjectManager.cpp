@@ -5875,7 +5875,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"fill_wall_margin", domain.fluid_fill_wall_margin},
             {"seed_settle", domain.fluid_seed_settle},
             {"settle_max_steps", domain.fluid_settle_max_steps},
-            {"settle_speed_m_s", domain.fluid_settle_speed_m_s},
+            {"settle_displacement_m", domain.fluid_settle_displacement_m},
             {"gravity", vec3ToJson(domain.fluid_params.gravity)},
             {"particles_per_cell", domain.fluid_params.particles_per_cell},
             {"cfl", domain.fluid_params.cfl},
@@ -5910,7 +5910,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"internal_friction", domain.fluid_params.internal_friction},
             {"air_drag", domain.fluid_params.air_drag},
             {"inherit_atmosphere", domain.fluid_params.inherit_atmosphere},
-            {"density_correction", domain.fluid_params.density_correction},
+            {"density_relaxation_s", domain.fluid_params.density_relaxation_s},
             // ★ The domain's material is its Default Substance. Viscosity, the
             // granular skeleton, the freeze point, conduction and the fuel
             // profile are resolved from it every step and are NOT stored here:
@@ -6449,7 +6449,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_fill_wall_margin = f.value("fill_wall_margin", domain.fluid_fill_wall_margin);
             domain.fluid_seed_settle = f.value("seed_settle", domain.fluid_seed_settle);
             domain.fluid_settle_max_steps = f.value("settle_max_steps", domain.fluid_settle_max_steps);
-            domain.fluid_settle_speed_m_s = f.value("settle_speed_m_s", domain.fluid_settle_speed_m_s);
+            domain.fluid_settle_displacement_m = f.value("settle_displacement_m", domain.fluid_settle_displacement_m);
             if (f.contains("gravity")) domain.fluid_params.gravity = jsonToVec3(f["gravity"]);
             domain.fluid_params.particles_per_cell = f.value("particles_per_cell", domain.fluid_params.particles_per_cell);
             domain.fluid_params.cfl = f.value("cfl", domain.fluid_params.cfl);
@@ -6485,7 +6485,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.internal_friction = f.value("internal_friction", domain.fluid_params.internal_friction);
             domain.fluid_params.air_drag = f.value("air_drag", domain.fluid_params.air_drag);
             domain.fluid_params.inherit_atmosphere = f.value("inherit_atmosphere", true);
-            domain.fluid_params.density_correction = f.value("density_correction", domain.fluid_params.density_correction);
+            domain.fluid_params.density_relaxation_s = f.value("density_relaxation_s", domain.fluid_params.density_relaxation_s);
             // Numerical settings (the substance's solver hints, editable on the
             // domain).
             domain.fluid_params.granular_max_solver_substeps = f.value("granular_max_solver_substeps", domain.fluid_params.granular_max_solver_substeps);

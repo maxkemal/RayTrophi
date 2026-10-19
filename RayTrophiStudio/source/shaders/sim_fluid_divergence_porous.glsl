@@ -28,7 +28,7 @@ layout(push_constant) uniform PC {
     float sor_omega;
     int   iterations;
     int   parity;
-    float density_correction;
+    float density_relaxation_s;
     int   particles_per_cell;
     int   variational;
     int   gfm_active;
@@ -159,8 +159,9 @@ void main() {
     // Without this the correction refills the pores and undoes the exclusion
     // the projection just enforced. eps is the mean open weight of the cell's
     // interior faces that border no collider (porosity is the only thing that
-    // closes those); the extra term enters as rhs = -div h^2/dt.
-    if (pc.density_correction > 0.0 && pc.particles_per_cell > 0) {
+    // closes those); the extra term enters as rhs = -div h^2/dt, removed over
+    // density_relaxation_s like the main term (1/s, not a velocity).
+    if (pc.density_relaxation_s > 0.0 && pc.particles_per_cell > 0) {
         float open = 0.0, faces = 0.0;
         if (i > 0 && !is_solid(i - 1, j, k))          { open += wxl; faces += 1.0; }
         if (i + 1 < pc.nx && !is_solid(i + 1, j, k))  { open += wxh; faces += 1.0; }
@@ -173,7 +174,7 @@ void main() {
             float ppc = float(pc.particles_per_cell);
             float count = fluid_mask[id];
             float extra = max(count - eps * ppc, 0.0) - max(count - ppc, 0.0);
-            div -= pc.density_correction * extra / (ppc * (pc.voxel_size > 1e-6 ? pc.voxel_size : 1.0));
+            div -= (extra / ppc) / max(pc.density_relaxation_s, pc.dt);
         }
     }
     divergence[id] = div;

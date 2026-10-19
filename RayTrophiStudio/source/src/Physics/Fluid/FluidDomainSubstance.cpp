@@ -88,7 +88,7 @@ void applySubstanceSolverHints(APICSolverParams& params, const SubstanceProfile&
     params.flip_blend = s.solver_flip_blend;
     params.apic_blend = s.solver_apic_blend;
     params.velocity_damping = s.solver_velocity_damping;
-    params.density_correction = s.solver_density_correction;
+    params.density_relaxation_s = s.solver_density_relaxation_s;
     params.air_drag = s.solver_air_drag;
     params.wall_damping = s.solver_wall_damping;
     params.affine_damping = s.solver_affine_damping;

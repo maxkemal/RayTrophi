@@ -1,3 +1,83 @@
+# 2026-10-19 (5. build): oturtma yer değiştirme ölçütü + kare başı hareket okuması + yoğunluk gevşemesi
+
+> **SONUÇ (canlı, 2026-10-19):** madde 1/1, contact_heat 7/7, surface_water 6/6,
+> FG1 8/8. Yeni yoğunluk terimi sıvı testlerini bozmadı; FG1 süresi 368 sn'den
+> 70 sn'ye indi.
+> **seed_settle 2/5:**
+> - **Kum:** oturtma 5 adımda yakınsadı (p95 2.33 → 0.14 mm/adım, 76 ms). Ama
+>   serbest koşuda oturtulmuş kol, oturtulmamıştan daha çok hareket ediyor:
+>   p95 1.49 mm/kare (oturtulmamış 1.21), COM 2.5 mm kayıyor. Hızlar sıfırlıyken
+>   yatak sürünüyor, serbest bırakılınca yeniden titriyor. ★ DEM yatağının
+>   dinlenme tabanı da gerçek; kökü açık.
+> - **Su:** ★ KUSUR. `settle_steps` 1, p95 0 ve "converged" geldi. Seed'den
+>   hemen sonra parçacık id'leri henüz yok, eşleşen örnek sayısı 0 çıkıyor ve
+>   p95 = 0 yakınsama sayılıyor. Düzeltme sonraki partide: örnek yoksa
+>   yakınsamış sayma, id yoksa indeksle eşle.
+> - **Su serbest koşu (konumla):** iki kolda da p95 4.35 mm/kare (~0.26 m/s).
+>   Yani çalkantı yalnız hız sütununda değil, konumda da gerçek. Yoğunluk
+>   payı düştü, kalan FLIP payı. FLIP ölçümü (0.9 / 0.3 × 5 / 2.5 cm) sırada.
+> **sleep_transfer 4 kol PASS, A/B kapısı sınırda FAIL:** strong kolunda
+> uyku açık ile kapalı arasındaki enerji farkı 4.4e-5 J, tolerans 4.1e-5 J.
+> Önceki koşu geçmişti. Bu build DEM'e dokunmadı (yalnız okuma probu); kapı
+> küçük enerjide dalgalı.
+
+**Derleme:** C++ **ve shader paketi**. Yoğunluk terimi şu dosyalarda değişti:
+`sim_fluid_cg_residual_init`, `sim_sparse_pressure.glsl` (tüm
+`sim_sparse_pressure_*`), `sim_fluid_divergence_porous.glsl` ve bütün CG
+push-constant yapıları (alan adı değişti, düzen aynı). CUDA çekirdeği de
+güncellendi (OptiX donmuş, ama derlenmesi gerekiyor).
+
+**Yoğunluk düzeltmesi yeniden yazıldı (kural 5, ad değişti):**
+`density_correction` (kazanç) → `density_relaxation_s` (saniye, varsayılan 0.5,
+0 kapalı). Madde alanı `solver_density_correction` →
+`solver_density_relaxation_s`; eski anahtar gerekçeyle reddedilir. Yeni formül:
+hücrenin sayımı akışkan 6 komşusuyla ortalanıyor; ortalamanın bir standart
+hatasının (Poisson) üstündeki fazla, `max(τ, dt)` içinde 1/s diverjans olarak
+gideriliyor. CPU, Vulkan, seyrek, gözenekli ve CUDA yollarında formül aynı.
+Eski projelerde anahtar yok sayılır, 0.5 s varsayılanı kullanılır.
+
+Oturtma için de yalnız C++ değişti. Emekli/yeniden adlandırılan alanlar (kural 5, anlamı
+değişti): `fluid_settle_speed_m_s` → `fluid_settle_displacement_m`
+(m/adım, varsayılan 0.0002); okumada `settle_speed_m_s/first/residual_speed`
+→ `settle_displacement_m`, `settle_first_p95_m`, `settle_residual_p95_m`, yeni
+`settle_plateau`. `fluid.settle` parametresi `speed_m_s` → `displacement_m`.
+Yeni okuma: `live_motion_samples/mean_m/p95_m/max_m`. Bunlar son karede 4096
+taşıyıcılık örneğin id ile eşlenmiş KONUM değişimidir.
+
+**Tank tabanının kökü (canlı prob, derleme gerekmedi):** dinlenik su tankında
+ortalama parsel hızı ~0.16–0.21 m/s.
+- Yoğunluk düzeltmesi 0: 0.21 → 0.16. Tam sayı hücre sayımı, hızlı bir sabit
+  sıçramaya dönüşüyor (1 fazla parçacık / ppc 4 × 1.2 ≈ 0.3 m/s). Bu terim
+  ızgaradan ve dt'den bağımsız, yani boyutsal olarak da yanlış.
+- dt 1/120: 0.14; CPU: 0.18. Bu bir g·dt artefaktı değil, iki arka uçta da var.
+- **FLIP 0: 0.004 m/s.** Kök FLIP gürültüsü: G2P, parçacıkla ızgara arasındaki
+  alt-hücre farkının %90'ını her adımda geri yüklüyor ve fark sönmeden
+  birikiyor. Su `solver_flip_blend = 0.90`.
+- Karar bekliyor (öneri sırasıyla): (a) suyun ve sıvı ön ayarlarının FLIP
+  oranını düşürmek (APIC zaten açısal momentumu koruyor; 0–0.3); (b) FLIP
+  oranını çözünürlüğe ve dt'ye bağlı yapmak; (c) yoğunluk düzeltmesini
+  boyutlu bir gevşeme süresine çevirmek (ΔU = h·(fazla/hedef)/τ) ve tam sayı
+  sayım yerine yumuşak (trilinear) yoğunluk kullanmak.
+
+Sıra:
+
+1. `python scripts/test/rt_matter_smoke.py --only seed_settle`: 5 kapı.
+   Beklenen: `settle_ran`, `grains_*` PASS; `liquid_at_rest` ★ büyük olasılıkla
+   FAIL (FLIP tabanı, yukarıda). `summary.water_settle.settle_plateau` true
+   olmalı. Oturtma tabana ulaşınca erken durur ve 240 adımın tamamını ödemez.
+   **Bozuksa:** `settle_ran` FAIL ve `settle_steps == max_steps` ise düzlük
+   algılanmıyor; `grains_control_moves` FAIL ise kum seed'i zaten dinlenik ya
+   da ölçüm duyarsız.
+2. `python scripts/test/rt_matter_smoke.py --only sleep_transfer`: 5/5 kalmalı.
+3. `python scripts/test/rt_matter_smoke.py --only substance surface_water fire_steam contact_heat`:
+   yoğunluk terimini kullanan sıvı testleri. Hepsi geçmeli; madde testi eski
+   anahtarın reddini de kontrol eder. **Bozuksa:** sıvı hacim kaybediyor ya da
+   üst üste biniyor demektir. τ çok uzun olabilir; 0.5 s'yi 0.2 ile dene.
+4. Ölçüm (FLIP kararı için, kod yok): `seed_settle_live.json` su kollarındaki
+   `motion_p95_m`. Önceki ölçüm 0.16–0.21 m/s hızdı; yoğunluk payı (~0.05 m/s)
+   artık düşmüş olmalı, kalan FLIP payı. Ardından FLIP 0.9 / 0.3 ve 5 / 2.5 cm
+   ölçümü yapılacak.
+
 # 2026-10-19 (4. build): seed oturtma (DEM + sıvı) + sleep_transfer yatağı
 
 > **SONUÇ (canlı, 2026-10-19):** sleep_transfer **5/5 PASS**: tek katlı yatak

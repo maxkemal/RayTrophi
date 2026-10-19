@@ -1584,17 +1584,22 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["thermal_heat_to_ambient_j"] = info.thermal_heat_to_ambient_j;
         d["settle_on_seed"] = info.settle_on_seed;
         d["settle_max_steps"] = info.settle_max_steps;
-        d["settle_speed_m_s"] = info.settle_speed_m_s;
+        d["settle_displacement_m"] = info.settle_displacement_m;
         d["settle_pending"] = info.settle_pending;
         d["settle_ran"] = info.settle_ran;
         d["settle_converged"] = info.settle_converged;
+        d["settle_plateau"] = info.settle_plateau;
         d["settle_steps"] = info.settle_steps;
         d["settle_particles"] = info.settle_particles;
-        d["settle_first_speed_m_s"] = info.settle_first_speed_m_s;
-        d["settle_residual_speed_m_s"] = info.settle_residual_speed_m_s;
+        d["settle_first_p95_m"] = info.settle_first_p95_m;
+        d["settle_residual_p95_m"] = info.settle_residual_p95_m;
         d["settle_ms"] = info.settle_ms;
         d["live_max_speed_m_s"] = info.live_max_speed_m_s;
         d["live_mean_speed_m_s"] = info.live_mean_speed_m_s;
+        d["live_motion_samples"] = info.live_motion_samples;
+        d["live_motion_mean_m"] = info.live_motion_mean_m;
+        d["live_motion_p95_m"] = info.live_motion_p95_m;
+        d["live_motion_max_m"] = info.live_motion_max_m;
         d["thermal_contact_shell_kelvin"] = info.thermal_contact_shell_kelvin;
         d["thermal_contact_parcel_kelvin"] = info.thermal_contact_parcel_kelvin;
         d["thermal_contact_shell_cells"] = info.thermal_contact_shell_cells;
@@ -1895,17 +1900,22 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["thermal_heat_to_ambient_j"] = info.thermal_heat_to_ambient_j;
         d["settle_on_seed"] = info.settle_on_seed;
         d["settle_max_steps"] = info.settle_max_steps;
-        d["settle_speed_m_s"] = info.settle_speed_m_s;
+        d["settle_displacement_m"] = info.settle_displacement_m;
         d["settle_pending"] = info.settle_pending;
         d["settle_ran"] = info.settle_ran;
         d["settle_converged"] = info.settle_converged;
+        d["settle_plateau"] = info.settle_plateau;
         d["settle_steps"] = info.settle_steps;
         d["settle_particles"] = info.settle_particles;
-        d["settle_first_speed_m_s"] = info.settle_first_speed_m_s;
-        d["settle_residual_speed_m_s"] = info.settle_residual_speed_m_s;
+        d["settle_first_p95_m"] = info.settle_first_p95_m;
+        d["settle_residual_p95_m"] = info.settle_residual_p95_m;
         d["settle_ms"] = info.settle_ms;
         d["live_max_speed_m_s"] = info.live_max_speed_m_s;
         d["live_mean_speed_m_s"] = info.live_mean_speed_m_s;
+        d["live_motion_samples"] = info.live_motion_samples;
+        d["live_motion_mean_m"] = info.live_motion_mean_m;
+        d["live_motion_p95_m"] = info.live_motion_p95_m;
+        d["live_motion_max_m"] = info.live_motion_max_m;
         d["thermal_contact_shell_kelvin"] = info.thermal_contact_shell_kelvin;
         d["thermal_contact_parcel_kelvin"] = info.thermal_contact_parcel_kelvin;
         d["thermal_contact_shell_cells"] = info.thermal_contact_shell_cells;
@@ -2188,17 +2198,22 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["thermal_heat_to_ambient_j"] = info.thermal_heat_to_ambient_j;
         d["settle_on_seed"] = info.settle_on_seed;
         d["settle_max_steps"] = info.settle_max_steps;
-        d["settle_speed_m_s"] = info.settle_speed_m_s;
+        d["settle_displacement_m"] = info.settle_displacement_m;
         d["settle_pending"] = info.settle_pending;
         d["settle_ran"] = info.settle_ran;
         d["settle_converged"] = info.settle_converged;
+        d["settle_plateau"] = info.settle_plateau;
         d["settle_steps"] = info.settle_steps;
         d["settle_particles"] = info.settle_particles;
-        d["settle_first_speed_m_s"] = info.settle_first_speed_m_s;
-        d["settle_residual_speed_m_s"] = info.settle_residual_speed_m_s;
+        d["settle_first_p95_m"] = info.settle_first_p95_m;
+        d["settle_residual_p95_m"] = info.settle_residual_p95_m;
         d["settle_ms"] = info.settle_ms;
         d["live_max_speed_m_s"] = info.live_max_speed_m_s;
         d["live_mean_speed_m_s"] = info.live_mean_speed_m_s;
+        d["live_motion_samples"] = info.live_motion_samples;
+        d["live_motion_mean_m"] = info.live_motion_mean_m;
+        d["live_motion_p95_m"] = info.live_motion_p95_m;
+        d["live_motion_max_m"] = info.live_motion_max_m;
         d["thermal_contact_shell_kelvin"] = info.thermal_contact_shell_kelvin;
         d["thermal_contact_parcel_kelvin"] = info.thermal_contact_parcel_kelvin;
         d["thermal_contact_shell_cells"] = info.thermal_contact_shell_cells;
@@ -2401,16 +2416,16 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     // Seed settle (MatterSeedSettle): None keeps a setting; request relaxes
     // the current particles to rest at the start of the next step.
     fluid.def("settle", [](const std::string& domain, py::object on_seed,
-                           py::object max_steps, py::object speed_m_s, bool request) {
+                           py::object max_steps, py::object displacement_m, bool request) {
         bool seed_value = false; int steps_value = 0; float speed_value = 0.0f;
         const bool* seed_ptr = nullptr; const int* steps_ptr = nullptr;
         const float* speed_ptr = nullptr;
         if (!on_seed.is_none()) { seed_value = py::cast<bool>(on_seed); seed_ptr = &seed_value; }
         if (!max_steps.is_none()) { steps_value = py::cast<int>(max_steps); steps_ptr = &steps_value; }
-        if (!speed_m_s.is_none()) { speed_value = py::cast<float>(speed_m_s); speed_ptr = &speed_value; }
+        if (!displacement_m.is_none()) { speed_value = py::cast<float>(displacement_m); speed_ptr = &speed_value; }
         requireResult(rtapi::settleFluidDomain(domain, seed_ptr, steps_ptr, speed_ptr, request));
     }, py::arg("domain"), py::arg("on_seed") = py::none(), py::arg("max_steps") = py::none(),
-       py::arg("speed_m_s") = py::none(), py::arg("request") = true,
+       py::arg("displacement_m") = py::none(), py::arg("request") = true,
        "Relax a fluid/matter domain to rest before t = 0 without advancing time.");
 
     // Bind a material to a SUBSTANCE inside one domain. "" clears the binding;

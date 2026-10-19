@@ -4,7 +4,7 @@ layout(push_constant) uniform PC {
     int nx; int ny; int nz; int boundary;
     float voxel_size; float dt; float sor_omega;
     int iterations; int parity;
-    float density_correction; int particles_per_cell;
+    float density_relaxation_s; int particles_per_cell;
     int variational; int gfm_active;
     uint tiles_x; uint tiles_y; uint tiles_z;
     uint tile_count; uint compact_count; uint partial_count; uint reserved;
@@ -173,11 +173,21 @@ void main() {
     float h = pc.voxel_size > 1e-6 ? pc.voxel_size : 1.0;
     float inv_dt = pc.dt > 1e-8 ? 1.0 / pc.dt : 0.0;
     float rhs = -divergence[id] * h * h * inv_dt;
-    if (pc.density_correction > 0.0 && pc.particles_per_cell > 0) {
-        float over = mask[id] - float(pc.particles_per_cell);
-        if (over > 0.0) {
-            rhs += pc.density_correction * h * inv_dt * over / float(pc.particles_per_cell);
+    // Density relaxation: same formula as sim_fluid_cg_residual_init.
+    if (pc.density_relaxation_s > 0.0 && pc.particles_per_cell > 0) {
+        float sum = mask[id], n = 1.0;
+        for (int axis = 0; axis < 3; ++axis) {
+            for (int direction = -1; direction <= 1; direction += 2) {
+                ivec3 near_cell = cell;
+                near_cell[axis] += direction;
+                if (!inside(near_cell)) continue;
+                float m = mask[denseIndex(near_cell)];
+                if (m >= 0.5) { sum += m; n += 1.0; }
+            }
         }
+        float target = float(pc.particles_per_cell);
+        float excess = max(sum / n - target - sqrt(target / n), 0.0) / target;
+        rhs += excess / max(pc.density_relaxation_s, pc.dt) * h * h * inv_dt;
     }
     residual[lane] = rhs;
 #endif

@@ -16,7 +16,7 @@ struct Constants {
     int nx, ny, nz, boundary;
     float voxel_size, dt, sor_omega;
     int iterations, parity;
-    float density_correction;
+    float density_relaxation_s;
     int particles_per_cell, variational, gfm_active;
     uint32_t tiles_x, tiles_y, tiles_z, tile_count;
     uint32_t compact_count, partial_count, reserved;
@@ -135,7 +135,7 @@ bool solveSparsePressure(SimulationComputeContext& compute,
         : (params.boundary == APICSolverParams::BoundaryMode::Periodic ? 2 : 1);
     constants.voxel_size = voxel;
     constants.dt = dt;
-    constants.density_correction = params.density_correction;
+    constants.density_relaxation_s = params.density_relaxation_s;
     constants.particles_per_cell = params.particles_per_cell;
     constants.variational = variational ? 1 : 0;
     constants.tiles_x = (uint32_t(nx) + 7u) / 8u;

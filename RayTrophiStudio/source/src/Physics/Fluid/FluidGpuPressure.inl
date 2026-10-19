@@ -205,7 +205,7 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     c.iterations = 0;
     c.parity     = 0;
     // Bridson density-targeted projection (mask carries per-cell particle count).
-    c.density_correction = fluid_params.density_correction;
+    c.density_relaxation_s = fluid_params.density_relaxation_s;
     c.particles_per_cell = fluid_params.particles_per_cell;
     c.variational        = is_variational ? 1 : 0;
     c.gfm_active         = is_gfm ? 1 : 0;

@@ -1371,7 +1371,7 @@ struct GridProjectionGpuConstants {
     int iterations = 40;
     int parity = 0;
     // MGPCG extras (must mirror the device GridProjectionConstants tail).
-    float density_correction = 0.0f; // 0 = off (SOR path leaves it default)
+    float density_relaxation_s = 0.0f; // 0 = off (SOR path leaves it default)
     int   particles_per_cell = 0;
     // Variational solid coupling flag (must mirror device GridProjectionConstants).
     // 0 = binary solid faces (current GPU behaviour); 1 = fractional weights +
@@ -1394,7 +1394,7 @@ struct GasGridProjectionGpuConstants {
     float sor_omega = 1.7f;
     int iterations = 40;
     int parity = 0;
-    float density_correction = 0.0f;
+    float density_relaxation_s = 0.0f;
     int particles_per_cell = 0;
     int variational = 0;
     int gfm_active = 0;
@@ -7537,7 +7537,11 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
 #define RT_FLUID_DOMAIN_STEP_CONTEXT
 #include "Fluid/FluidDomainStep.inl"
 #undef RT_FLUID_DOMAIN_STEP_CONTEXT
-                if (!settling_) audio_frame.publishLiquid();
+                if (!settling_) {
+                    audio_frame.publishLiquid();
+                    // What the carriers did this frame, by position (MatterSeedSettle).
+                    measureFrameMotion(state);
+                }
             }
             if (settling_) {
                 // The gas lane and mist drag do not move during a settle.
@@ -10309,7 +10313,7 @@ bool ParticleSimulationSystem::validateGpuFluidMGPCG(SimulationComputeContext* c
     Fluid::APICSolverParams params;
     params.free_surface = true;
     params.pressure_iterations = 400; // generous cap; CG converges well before this
-    params.density_correction = 0.0f; // isolate the linear solve (no Bridson term)
+    params.density_relaxation_s = 0.0f; // isolate the linear solve (no Bridson term)
     bool ok = runGpuFluidMGPCGPressure(st, params, dt, compute, buffers, mask);
     std::vector<float> p_gpu(cells, 0.0f);
     std::vector<float> div_gpu(cells, 0.0f), diag_gpu(cells, 0.0f), r_gpu(cells, 0.0f);

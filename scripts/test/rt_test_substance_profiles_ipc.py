@@ -129,6 +129,7 @@ def main():
         # Retired 2026-10-19: surface heating is a film against the body capacity.
         assert rejected("substance.set", name=HONEY, fields={"thermal_response": 3.0})
         assert rejected("substance.set", name=HONEY, fields={"fluid_extinguishing": True})
+        assert rejected("substance.set", name=HONEY, fields={"solver_density_correction": 1.0})
         assert rejected("substance.set", name=HONEY, fields={"no_such_field": 1.0})
         assert rejected("substance.set", name=HONEY,
                         fields={"meltable": True, "melt_kelvin": 400.0, "boiling_kelvin": 300.0})

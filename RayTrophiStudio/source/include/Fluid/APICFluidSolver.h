@@ -144,7 +144,8 @@ struct APICSolverParams {
     // making the PCG raise pressure there and push particles outward.
     // Without it, FLIP piles collapse on top of each other ("2D pile").
     // 0 = off (raw NS divergence only), 1.0 = sensible default for water.
-    float density_correction = 1.0f;
+    // Seconds to remove a cell's excess density (above count noise); 0 = off.
+    float density_relaxation_s = 0.5f;
 
     // Per-particle viscous decay rate (1/s). Exponential energy loss:
     // v *= exp(-internal_friction * dt), applied to EVERY particle in

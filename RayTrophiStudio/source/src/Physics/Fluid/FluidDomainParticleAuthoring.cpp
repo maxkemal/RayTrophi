@@ -47,7 +47,7 @@ bool ParticleSimulationSystem::configureFluidDomainSettle(
     const std::string& domain_name,
     const bool* on_seed,
     const int* max_steps,
-    const float* speed_m_s,
+    const float* displacement_m,
     bool request) {
     for (auto& domain : grid_domains_) {
         if (domain.name != domain_name ||
@@ -56,7 +56,7 @@ bool ParticleSimulationSystem::configureFluidDomainSettle(
         }
         if (on_seed) domain.fluid_seed_settle = *on_seed;
         if (max_steps) domain.fluid_settle_max_steps = std::max(1, *max_steps);
-        if (speed_m_s) domain.fluid_settle_speed_m_s = std::max(0.0f, *speed_m_s);
+        if (displacement_m) domain.fluid_settle_displacement_m = std::max(0.0f, *displacement_m);
         if (request) domain.fluid_pending_settle = true;
         // Arms the state now; the relaxation itself runs at the start of the
         // next step, where the solvers and their buffers are.
