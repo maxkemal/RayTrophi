@@ -363,7 +363,7 @@ struct SubstanceProfile {
     float solver_flip_blend = 0.97f;
     float solver_apic_blend = 0.95f;
     float solver_velocity_damping = 0.999f;
-    float solver_density_correction = 1.0f;
+    float solver_density_relaxation_s = 0.5f;  // s; 0 = off (was a gain)
     float solver_air_drag = 0.15f;               // 1/m, detached droplets
     float solver_wall_damping = 0.15f;
     float solver_affine_damping = 0.98f;

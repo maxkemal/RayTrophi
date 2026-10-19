@@ -1502,7 +1502,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         ImGui::SliderInt("Pressure Iterations", &fluid->params.pressure_iterations, 1, 120);
         ImGui::DragFloat("Pressure Residual Target", &fluid->params.pressure_relative_residual, 1.0e-6f, 1.0e-8f, 1.0e-2f, "%.1e");
         ImGui::Checkbox("Pressure Layer B V-cycle", &fluid->params.pressure_multigrid_preconditioner);
-        solver_edited |= ImGui::DragFloat("Density Correction", &fluid->params.density_correction, 0.05f, 0.0f, 10.0f, "%.2f");
+        solver_edited |= ImGui::DragFloat("Density Relaxation (s)", &fluid->params.density_relaxation_s, 0.01f, 0.0f, 100.0f, "%.2f");
         // SOR Omega is dead with PCG+MIC(0); kept in the struct for project
         // file backward compat, hidden here.
         solver_edited |= ImGui::DragFloat("APIC Affine", &fluid->params.apic_blend, 0.01f, 0.0f, 1.0f, "%.2f");

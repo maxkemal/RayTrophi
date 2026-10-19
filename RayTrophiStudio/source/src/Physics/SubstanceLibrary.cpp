@@ -128,7 +128,7 @@ const std::vector<FieldAccess>& fieldTable() {
         RT_FLOAT(solver_flip_blend, 0.0f, 1.0f, "", "Solver hints"),
         RT_FLOAT(solver_apic_blend, 0.0f, 1.0f, "", "Solver hints"),
         RT_FLOAT(solver_velocity_damping, 0.0f, 1.0f, "", "Solver hints"),
-        RT_FLOAT(solver_density_correction, 0.0f, 10.0f, "", "Solver hints"),
+        RT_FLOAT(solver_density_relaxation_s, 0.0f, 100.0f, "s", "Solver hints"),
         RT_FLOAT(solver_air_drag, 0.0f, 100.0f, "1/m", "Solver hints"),
         RT_FLOAT(solver_wall_damping, 0.0f, 1.0f, "", "Solver hints"),
         RT_FLOAT(solver_affine_damping, 0.0f, 1.0f, "", "Solver hints"),
@@ -171,6 +171,9 @@ const char* retiredFieldReason(const std::string& key) {
     if (key == "solver_air_cooling_rate" || key == "solver_contact_cooling_rate")
         return "liquid walls and air are films against each parcel's capacity "
                "(500 / 20 W/(m^2 K)); a Thermal field's strength is its rate_per_s";
+    if (key == "solver_density_correction")
+        return "the density term is now a relaxation time in seconds over a "
+               "noise-filtered density; set solver_density_relaxation_s";
     if (key == "fluid_extinguishing" || key == "cooling_power" || key == "oxygen_dilution")
         return "water quenches fire through the thermal chain (latent heat, steam "
                "diluting oxygen); set latent_heat_vaporization or boiling_kelvin";

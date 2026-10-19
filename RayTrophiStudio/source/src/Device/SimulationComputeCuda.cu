@@ -62,7 +62,7 @@ struct GridProjectionConstants {
     // MGPCG extras (appended — by-value struct, older kernels ignore them).
     // fluid_mask semantics for the CG path: >0.5 = fluid cell (value = particle
     // count for density correction); 0 = air; <-0.5 = solid (Neumann wall).
-    float density_correction; // Bridson density-targeted projection gain (0=off)
+    float density_relaxation_s; // Bridson density-targeted projection gain (0=off)
     int   particles_per_cell; // target count per cell for the over-pack term
     // Variational solid coupling (mirrors the CPU path). 0 = binary solid faces
     // (old behaviour); 1 = use the fractional MAC-face open weights + solid
@@ -1361,16 +1361,24 @@ __global__ void fluid_cg_residual_init_kernel(const float* divergence,
     const float h      = c.voxel_size > 1e-6f ? c.voxel_size : 1.0f;
     const float inv_dt = c.dt > 1e-8f ? 1.0f / c.dt : 0.0f;
     float rhs = -divergence[id] * h * h * inv_dt;
-    // Bridson density-targeted projection: over-packed fluid cells (the mask
-    // value carries the per-cell particle COUNT) get a synthetic positive RHS
-    // so the solver raises pressure there and expels particles — without this
-    // FLIP piles collapse on top of each other. Matches the CPU PCG term
-    // (+density_correction*(h/dt)*over/target). target = particles_per_cell.
-    if (c.density_correction > 0.0f && c.particles_per_cell > 0) {
-        const float over = fluid_mask[id] - static_cast<float>(c.particles_per_cell);
-        if (over > 0.0f)
-            rhs += c.density_correction * (h * inv_dt) * over /
-                   static_cast<float>(c.particles_per_cell);
+    // Density relaxation: same formula as the CPU PCG and
+    // sim_fluid_cg_residual_init (neighbour-averaged count above one standard
+    // error, removed over density_relaxation_s seconds).
+    if (c.density_relaxation_s > 0.0f && c.particles_per_cell > 0) {
+        const int sx = 1, sy = c.nx, sz = c.nx * c.ny;
+        const int i = id % c.nx, j = (id / c.nx) % c.ny, k = id / sz;
+        float sum = fluid_mask[id], n = 1.0f;
+        const auto add = [&](bool ok, int q) {
+            if (!ok) return;
+            const float m = fluid_mask[q];
+            if (m >= 0.5f) { sum += m; n += 1.0f; }
+        };
+        add(i > 0, id - sx); add(i + 1 < c.nx, id + sx);
+        add(j > 0, id - sy); add(j + 1 < c.ny, id + sy);
+        add(k > 0, id - sz); add(k + 1 < c.nz, id + sz);
+        const float target = static_cast<float>(c.particles_per_cell);
+        const float excess = fmaxf(sum / n - target - sqrtf(target / n), 0.0f) / target;
+        rhs += excess / fmaxf(c.density_relaxation_s, c.dt) * h * h * inv_dt;
     }
     r[id] = rhs;
 }

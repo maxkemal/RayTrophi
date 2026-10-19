@@ -164,16 +164,17 @@ void fillFluidSettle(const RayTrophiSim::SimulationGridDomainDesc& d,
                      FluidDomainInfo& info) {
     info.settle_on_seed = d.fluid_seed_settle;
     info.settle_max_steps = d.fluid_settle_max_steps;
-    info.settle_speed_m_s = d.fluid_settle_speed_m_s;
+    info.settle_displacement_m = d.fluid_settle_displacement_m;
     if (!state) return;
     const auto& st = state->settle_stats;
     info.settle_pending = st.pending || d.fluid_pending_settle;
     info.settle_ran = st.ran;
     info.settle_converged = st.converged;
+    info.settle_plateau = st.plateau;
     info.settle_steps = st.steps;
     info.settle_particles = static_cast<uint64_t>(st.particles);
-    info.settle_first_speed_m_s = st.first_speed_m_s;
-    info.settle_residual_speed_m_s = st.residual_speed_m_s;
+    info.settle_first_p95_m = st.first_p95_m;
+    info.settle_residual_p95_m = st.residual_p95_m;
     info.settle_ms = st.ms;
     double speed_sum = 0.0;
     float speed_max = 0.0f;
@@ -185,6 +186,11 @@ void fillFluidSettle(const RayTrophiSim::SimulationGridDomainDesc& d,
     const auto n = state->particles.velocity.size();
     info.live_max_speed_m_s = speed_max;
     info.live_mean_speed_m_s = n ? static_cast<float>(speed_sum / double(n)) : 0.0f;
+    const auto& probe = state->motion_probe;
+    info.live_motion_samples = static_cast<uint64_t>(probe.samples);
+    info.live_motion_mean_m = probe.mean_m;
+    info.live_motion_p95_m = probe.p95_m;
+    info.live_motion_max_m = probe.max_m;
 }
 
 void fillFluidViews(const RayTrophiSim::SimulationGridDomainDesc& d,
@@ -2220,11 +2226,11 @@ Result clearFluidParticles(const std::string& domain_id_or_name,
 }
 
 Result settleFluidDomain(const std::string& domain_id_or_name, const bool* on_seed,
-                         const int* max_steps, const float* speed_m_s, bool request) {
+                         const int* max_steps, const float* displacement_m, bool request) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     if (max_steps && *max_steps < 1) return Result::fail("max_steps must be >= 1");
-    if (speed_m_s && !(*speed_m_s >= 0.0f)) return Result::fail("speed_m_s must be >= 0");
+    if (displacement_m && !(*displacement_m >= 0.0f)) return Result::fail("displacement_m must be >= 0");
 
     rtapi::FluidDomainInfo info;
     if (!getFluidDomain(domain_id_or_name, info).ok) {
@@ -2235,12 +2241,12 @@ Result settleFluidDomain(const std::string& domain_id_or_name, const bool* on_se
     const auto active_runtime = g_ctx->scene.getParticleSimulationSystem();
     bool done = active_runtime &&
         active_runtime->configureFluidDomainSettle(info.name, on_seed, max_steps,
-                                                   speed_m_s, request);
+                                                   displacement_m, request);
     for (auto& system : g_ctx->scene.particle_systems) {
         if (done) break;
         if (system.runtime && system.runtime != active_runtime &&
             system.runtime->configureFluidDomainSettle(info.name, on_seed, max_steps,
-                                                       speed_m_s, request)) {
+                                                       displacement_m, request)) {
             done = true;
         }
     }

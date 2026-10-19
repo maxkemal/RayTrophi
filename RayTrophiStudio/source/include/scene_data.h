@@ -4035,7 +4035,7 @@ struct SceneData {
         h = mix(h, fb(fp.max_velocity));
         h = mix(h, fb(fp.velocity_damping));
         h = mix(h, fb(fp.wall_damping));
-        h = mix(h, fb(fp.density_correction));
+        h = mix(h, fb(fp.density_relaxation_s));
         h = mix(h, fb(fp.internal_friction));
         h = mix(h, fb(fp.air_drag));
         // Climate wind is an input to the step once inherited (Faz 2).
@@ -4155,7 +4155,7 @@ struct SceneData {
         // A settled seed is a different initial state (MatterSeedSettle).
         h = mix(h, d.fluid_seed_settle ? 1ull : 0ull);
         h = mix(h, static_cast<uint64_t>(d.fluid_settle_max_steps));
-        h = mix(h, fb(d.fluid_settle_speed_m_s));
+        h = mix(h, fb(d.fluid_settle_displacement_m));
 
         // Liquid -> gas combustion coupling: all authored, all change the solve.
         h = mix(h, d.fluid_flammable ? 1ull : 0ull);

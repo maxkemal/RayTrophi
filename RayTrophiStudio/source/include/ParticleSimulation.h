@@ -404,14 +404,15 @@ struct SimulationGridDomainDesc {
     // splash. When fluid_seed_settle is on, the domain is relaxed to rest
     // before t = 0 (ParticleSimulationSystem::settleGridDomains): its own
     // steps run without advancing time, sources, heat or gas, and every
-    // velocity and spin is zeroed after each step, until the fastest
-    // carrier is below fluid_settle_speed_m_s or the step limit is reached.
+    // velocity and spin is zeroed after each step, until the 95th percentile
+    // of per-step displacement is below fluid_settle_displacement_m (m per
+    // step), stops falling (the solver's own floor) or the step limit ends it.
     // fluid_pending_settle asks for the same pass on the current particles
     // (fluid.settle), e.g. a bed poured by sources.
     bool  fluid_seed_settle = true;
     bool  fluid_pending_settle = false;
     int   fluid_settle_max_steps = 240;
-    float fluid_settle_speed_m_s = 0.01f;
+    float fluid_settle_displacement_m = 0.0002f;
     // Translation anchors: previous frame's domain min/max corners. We use
     // BOTH so we can distinguish translation (both corners shift by the
     // same delta → seed follows) from resize (only one corner moves → seed
@@ -1090,17 +1091,30 @@ struct SimulationGasStats {
 };
 
 // What the last seed settle did (settleGridDomains). steps counts relaxation
-// steps; first/residual are the fastest carrier's speed after the first and
-// the last of them, before zeroing (m/s).
+// steps; first/residual are the 95th percentile of per-carrier displacement
+// in the first and the last of them (m per step). plateau: stopped because
+// the displacement stopped falling (the solver's floor), not at rest.
 struct SimulationSeedSettleStats {
     bool  pending = false;
     bool  ran = false;
     bool  converged = false;
+    bool  plateau = false;
     int   steps = 0;
     std::size_t particles = 0;
-    float first_speed_m_s = 0.0f;
-    float residual_speed_m_s = 0.0f;
+    float first_p95_m = 0.0f;
+    float residual_p95_m = 0.0f;
     float ms = 0.0f;
+};
+
+// Per-frame displacement of a carrier sample, matched by particle id
+// (measureFrameMotion): what the carriers did, not what their velocity says.
+struct SimulationMotionProbe {
+    std::vector<uint64_t> ids;
+    std::vector<Vec3> positions;
+    std::size_t samples = 0;
+    float mean_m = 0.0f;
+    float p95_m = 0.0f;
+    float max_m = 0.0f;
 };
 
 struct SimulationGridDomainState {
@@ -1216,6 +1230,7 @@ struct SimulationGridDomainState {
     // and the thermal chain runs once per FRAME, before the solver.
     Fluid::ThermalLiquidStats thermal_stats;
     SimulationSeedSettleStats settle_stats;
+    SimulationMotionProbe motion_probe;
     SimulationComputeContext::TransferStats fluid_transfer_stats;
     // Whitewater secondary particles (spray/foam/bubbles). Render-only — never
     // fed back into the pressure solve, so it cannot affect liquid mass.
@@ -2492,7 +2507,7 @@ public:
     /// liquid/matter domain.
     bool configureFluidDomainSettle(const std::string& domain_name,
                                     const bool* on_seed, const int* max_steps,
-                                    const float* speed_m_s, bool request);
+                                    const float* displacement_m, bool request);
     void setGridDomainBoundsResolver(std::function<bool(const SimulationGridDomainDesc&, Vec3&, Vec3&)> resolver);
     /// Run a sync pass immediately (resize state, apply any pending fluid
     /// seeds, etc.) without waiting for the next sim tick. Needed when the

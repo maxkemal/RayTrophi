@@ -4653,23 +4653,31 @@ struct FluidDomainInfo {
     double   thermal_grain_energy_residual_j = 0.0;
     float    thermal_grain_ms = 0.0f;
     // Seed settle (2026-10-19, MatterSeedSettle): the settings, and what the
-    // last relaxation did. Speeds are the fastest carrier after the first and
-    // last relaxation step, before zeroing (m/s).
+    // last relaxation did. first/residual: 95th percentile of per-carrier
+    // displacement in the first and last relaxation step (m per step);
+    // plateau = stopped at the solver's floor, not at rest.
     bool     settle_on_seed = true;
     int      settle_max_steps = 240;
-    float    settle_speed_m_s = 0.01f;
+    float    settle_displacement_m = 0.0002f;
     bool     settle_pending = false;
     bool     settle_ran = false;
     bool     settle_converged = false;
+    bool     settle_plateau = false;
     int      settle_steps = 0;
     uint64_t settle_particles = 0;
-    float    settle_first_speed_m_s = 0.0f;
-    float    settle_residual_speed_m_s = 0.0f;
+    float    settle_first_p95_m = 0.0f;
+    float    settle_residual_p95_m = 0.0f;
     float    settle_ms = 0.0f;
     // Live carrier speeds now (every particle of the domain, m/s): "is it at
     // rest" for liquid too, which acceptance_metrics covers only for grains.
     float    live_max_speed_m_s = 0.0f;
     float    live_mean_speed_m_s = 0.0f;
+    // Last frame's displacement of a carrier sample (up to 4096, matched by
+    // id; m per frame). Positions, so a velocity column cannot fool it.
+    uint64_t live_motion_samples = 0;
+    float    live_motion_mean_m = 0.0f;
+    float    live_motion_p95_m = 0.0f;
+    float    live_motion_max_m = 0.0f;
     uint64_t thermal_contact_cooled_particles = 0;
     float    thermal_min_kelvin = 0.0f;
     float    thermal_mean_kelvin = 0.0f;
@@ -5271,7 +5279,7 @@ Result clearFluidParticles(const std::string& domain_id_or_name,
 // setting; request = settle the current particles at the start of the next
 // step. fluid.list_domains reports settle_*.
 Result settleFluidDomain(const std::string& domain_id_or_name, const bool* on_seed,
-                         const int* max_steps, const float* speed_m_s, bool request);
+                         const int* max_steps, const float* displacement_m, bool request);
 // Assign by material NAME so scripts never depend on unstable registry ids.
 // Empty clears the override (scene default / source-object face materials).
 Result setFluidSplatMaterial(const std::string& domain_id_or_name,

@@ -380,7 +380,7 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     // then editable on the domain).
     j["fluid_params"]["velocity_damping"] = d.fluid_params.velocity_damping;
     j["fluid_params"]["wall_damping"] = d.fluid_params.wall_damping;
-    j["fluid_params"]["density_correction"] = d.fluid_params.density_correction;
+    j["fluid_params"]["density_relaxation_s"] = d.fluid_params.density_relaxation_s;
     j["fluid_params"]["affine_damping"] = d.fluid_params.affine_damping;
     j["fluid_params"]["max_velocity"] = d.fluid_params.max_velocity;
     j["fluid_params"]["viscosity_sweeps"] = d.fluid_params.viscosity_sweeps;
@@ -417,7 +417,7 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_fill_wall_margin"] = d.fluid_fill_wall_margin;
     j["fluid_seed_settle"] = d.fluid_seed_settle;
     j["fluid_settle_max_steps"] = d.fluid_settle_max_steps;
-    j["fluid_settle_speed_m_s"] = d.fluid_settle_speed_m_s;
+    j["fluid_settle_displacement_m"] = d.fluid_settle_displacement_m;
     j["fluid_render_mode"] = (int)d.fluid_render_mode;
     j["fluid_fog_spread_voxels"] = d.fluid_fog_spread_voxels;
     j["fluid_fog_erosion_strength"] = d.fluid_fog_erosion_strength;
@@ -580,7 +580,7 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fp.contains("reseed_enabled")) d.fluid_params.reseed_enabled = fp["reseed_enabled"];
         if (fp.contains("velocity_damping")) d.fluid_params.velocity_damping = fp["velocity_damping"];
         if (fp.contains("wall_damping")) d.fluid_params.wall_damping = fp["wall_damping"];
-        if (fp.contains("density_correction")) d.fluid_params.density_correction = fp["density_correction"];
+        if (fp.contains("density_relaxation_s")) d.fluid_params.density_relaxation_s = fp["density_relaxation_s"];
         if (fp.contains("affine_damping")) d.fluid_params.affine_damping = fp["affine_damping"];
         if (fp.contains("max_velocity")) d.fluid_params.max_velocity = fp["max_velocity"];
         if (fp.contains("viscosity_sweeps")) d.fluid_params.viscosity_sweeps = fp["viscosity_sweeps"];
@@ -637,7 +637,7 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_fill_wall_margin")) d.fluid_fill_wall_margin = j["fluid_fill_wall_margin"];
     if (j.contains("fluid_seed_settle")) d.fluid_seed_settle = j["fluid_seed_settle"];
     if (j.contains("fluid_settle_max_steps")) d.fluid_settle_max_steps = j["fluid_settle_max_steps"];
-    if (j.contains("fluid_settle_speed_m_s")) d.fluid_settle_speed_m_s = j["fluid_settle_speed_m_s"];
+    if (j.contains("fluid_settle_displacement_m")) d.fluid_settle_displacement_m = j["fluid_settle_displacement_m"];
     if (j.contains("fluid_render_mode")) d.fluid_render_mode = RayTrophiSim::Fluid::fluidRenderModeFromStored(j["fluid_render_mode"].get<int>());
     if (j.contains("fluid_fog_spread_voxels")) d.fluid_fog_spread_voxels = j["fluid_fog_spread_voxels"];
     d.fluid_fog_erosion_strength = j.value("fluid_fog_erosion_strength", d.fluid_fog_erosion_strength);

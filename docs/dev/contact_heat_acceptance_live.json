@@ -2,68 +2,68 @@
   "samples": [
     {
       "step": 200,
-      "contact": 2332,
-      "heat_to_solid_j": -6582.763262052026,
-      "max_kelvin": 294.21051025390625,
+      "contact": 4021,
+      "heat_to_solid_j": -6561.159566320431,
+      "max_kelvin": 294.2106018066406,
       "field_heated": 0,
-      "shell_seen_kelvin": 689.9244090095433,
-      "parcel_seen_kelvin": 293.4488337318174,
+      "shell_seen_kelvin": 689.954395705662,
+      "parcel_seen_kelvin": 293.29229407392893,
       "shell_cells": 413
     },
     {
       "step": 250,
-      "contact": 2373,
-      "heat_to_solid_j": -6515.613713168805,
-      "max_kelvin": 297.3674011230469,
+      "contact": 3482,
+      "heat_to_solid_j": -5914.534296588335,
+      "max_kelvin": 297.2062072753906,
       "field_heated": 0,
-      "shell_seen_kelvin": 685.4665660453836,
-      "parcel_seen_kelvin": 294.5090697509106,
-      "shell_cells": 414
+      "shell_seen_kelvin": 684.6916988399948,
+      "parcel_seen_kelvin": 294.1686247150247,
+      "shell_cells": 412
     },
     {
       "step": 300,
-      "contact": 2376,
-      "heat_to_solid_j": -6488.325739065618,
-      "max_kelvin": 300.34661865234375,
+      "contact": 3195,
+      "heat_to_solid_j": -5356.086805181347,
+      "max_kelvin": 300.3081359863281,
       "field_heated": 0,
-      "shell_seen_kelvin": 681.4438943492975,
-      "parcel_seen_kelvin": 295.50271340179614,
-      "shell_cells": 414
+      "shell_seen_kelvin": 679.8751398556444,
+      "parcel_seen_kelvin": 294.9899453388135,
+      "shell_cells": 411
     },
     {
       "step": 350,
-      "contact": 2361,
-      "heat_to_solid_j": -6413.720932968895,
-      "max_kelvin": 302.7321472167969,
+      "contact": 3145,
+      "heat_to_solid_j": -5263.034900614026,
+      "max_kelvin": 303.296630859375,
       "field_heated": 0,
-      "shell_seen_kelvin": 678.3312066628522,
-      "parcel_seen_kelvin": 296.3543314769444,
-      "shell_cells": 414
+      "shell_seen_kelvin": 676.3025825026536,
+      "parcel_seen_kelvin": 295.82663188163286,
+      "shell_cells": 412
     },
     {
       "step": 400,
-      "contact": 2323,
-      "heat_to_solid_j": -6337.929366017965,
-      "max_kelvin": 304.9930725097656,
+      "contact": 3085,
+      "heat_to_solid_j": -5171.474747015939,
+      "max_kelvin": 305.1670837402344,
       "field_heated": 0,
-      "shell_seen_kelvin": 675.4957288049359,
-      "parcel_seen_kelvin": 297.09407733401207,
-      "shell_cells": 414
+      "shell_seen_kelvin": 673.2024472532538,
+      "parcel_seen_kelvin": 296.50922086766974,
+      "shell_cells": 410
     },
     {
       "step": 450,
-      "contact": 2328,
-      "heat_to_solid_j": -6293.444390578177,
-      "max_kelvin": 307.2808837890625,
+      "contact": 2888,
+      "heat_to_solid_j": -5133.828302215984,
+      "max_kelvin": 308.12103271484375,
       "field_heated": 0,
-      "shell_seen_kelvin": 673.260398692403,
-      "parcel_seen_kelvin": 297.5152457194087,
-      "shell_cells": 414
+      "shell_seen_kelvin": 670.6170986359291,
+      "parcel_seen_kelvin": 297.23167600259285,
+      "shell_cells": 412
     }
   ],
   "shell_before_fill": {
     "centers_dirty": false,
-    "content_generation": 18,
+    "content_generation": 1,
     "domain": "surface_uv",
     "element_count": 99072,
     "initial_mass": 17.007843017578125,
@@ -98,7 +98,7 @@
     "temperature_fresh": true,
     "temperature_valid": true,
     "thermal_depth_m": 0.10000000894069672,
-    "topology_generation": 3,
+    "topology_generation": 2,
     "transferred_mass": 0.0
   },
   "verdicts": {

@@ -1187,20 +1187,34 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         float div_val = -scale_div *
             ((Uxh - Uxl) + (Uyh - Uyl) + (Uzh - Uzl));
 
-        // Bridson density-targeted projection. Over-populated cells get a
-        // positive contribution to the RHS, which the PCG converts to a
-        // pressure rise → outward velocity gradient → particles expelled.
-        // Sign matches the existing convention (div = -scale_div * div_v;
-        // positive RHS pushes pressure up). Scaled by 1/target so the knob
-        // is dimensionless and independent of seed density.
-        if (params.density_correction > 0.0f) {
-            const int target = std::max(1, params.particles_per_cell);
-            const int count = proj_cell_count[grid.cellIndex(i, j, k)];
-            const int over = count - target;
-            if (over > 0) {
-                div_val += params.density_correction * scale_div *
-                           static_cast<float>(over) / static_cast<float>(target);
-            }
+        // Density relaxation (2026-10-19). An over-packed cell gets a
+        // divergence source (1/s; positive raises pressure and expels) that
+        // removes its excess over density_relaxation_s seconds. The density
+        // is the cell's parcel count averaged with its fluid 6-neighbours,
+        // and only the part above one standard error of that mean counts.
+        // ★ The old term read excess/target directly as a velocity jump in
+        // m/s, independent of h and dt, from the raw integer count: a RESTING
+        // tank's count noise (~sqrt(ppc)) pumped ~0.05 m/s into still water
+        // (2026-10-19 probe). Same formula in sim_fluid_cg_residual_init,
+        // sim_sparse_pressure and the CUDA residual kernel.
+        if (params.density_relaxation_s > 0.0f) {
+            const float target = static_cast<float>(std::max(1, params.particles_per_cell));
+            float sum = static_cast<float>(proj_cell_count[grid.cellIndex(i, j, k)]);
+            float n = 1.0f;
+            const auto neighbour = [&](int a, int b, int c) {
+                if (a < 0 || b < 0 || c < 0 || a >= nx || b >= ny || c >= nz) return;
+                const size_t q = grid.cellIndex(a, b, c);
+                if (cell[q] != CELL_FLUID) return;
+                sum += static_cast<float>(proj_cell_count[q]);
+                n += 1.0f;
+            };
+            neighbour(i - 1, j, k); neighbour(i + 1, j, k);
+            neighbour(i, j - 1, k); neighbour(i, j + 1, k);
+            neighbour(i, j, k - 1); neighbour(i, j, k + 1);
+            const float mean = sum / n;
+            const float noise = std::sqrt(target / n);
+            const float excess = std::max(mean - target - noise, 0.0f) / target;
+            div_val += excess / std::max(params.density_relaxation_s, dt);
         }
 
         div[grid.cellIndex(i, j, k)] = div_val;

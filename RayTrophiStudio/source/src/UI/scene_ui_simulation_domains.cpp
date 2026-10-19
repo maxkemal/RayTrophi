@@ -1002,12 +1002,13 @@ void drawSimulationDomainControls(
                         ImGui::DragInt("Settle Max Steps", &domain.fluid_settle_max_steps, 1.0f, 1, 4000);
                         seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                         ImGui::SetNextItemWidth(DomainUi::itemWidth());
-                        ImGui::DragFloat("Settle Speed (m/s)", &domain.fluid_settle_speed_m_s,
-                                         0.001f, 0.0f, 10.0f, "%.4f");
+                        ImGui::DragFloat("Settle Tolerance (m/step)", &domain.fluid_settle_displacement_m,
+                                         0.00001f, 0.0f, 1.0f, "%.5f");
                         seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                         if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Settled when the fastest grain or parcel moved slower than this in\n"
-                                              "one relaxation step.");
+                            ImGui::SetTooltip("Settled when 95%% of grains/parcels moved less than this in one\n"
+                                              "relaxation step. It also stops when the motion stops falling:\n"
+                                              "that is the solver's own floor; more steps cannot remove it.");
                         }
                     }
                     if (ImGui::Button("Settle Live Now##SettleNow", ImVec2(-1, 0))) {
@@ -1026,9 +1027,10 @@ void drawSimulationDomainControls(
                             if (descs[d].name != domain.name) continue;
                             const auto& st = states[d].settle_stats;
                             if (st.ran) {
-                                ImGui::TextDisabled("Last settle: %d steps, %.4f m/s (%s), %.0f ms",
-                                    st.steps, st.residual_speed_m_s,
-                                    st.converged ? "at rest" : "step limit", st.ms);
+                                ImGui::TextDisabled("Last settle: %d steps, p95 %.5f m/step (%s), %.0f ms",
+                                    st.steps, st.residual_p95_m,
+                                    st.converged ? "at rest" : (st.plateau ? "solver floor" : "step limit"),
+                                    st.ms);
                             }
                             break;
                         }
@@ -2802,9 +2804,11 @@ void drawSimulationDomainControls(
                         ImGui::SetTooltip("Couples domain coordinate translation to fluid velocity. Allows creating sloshing liquids inside a moving cup.");
                     }
 
-                    fp_edited |= ImGui::DragFloat("Density Correction Strength", &fp.density_correction, 0.05f, 0.0f, 10.0f, "%.2f");
+                    fp_edited |= ImGui::DragFloat("Density Relaxation (s)", &fp.density_relaxation_s, 0.01f, 0.0f, 100.0f, "%.2f");
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Repulsive force preventing particles from clustering too close. Helps maintain fluid incompressibility. ~1.0 is recommended.");
+                        ImGui::SetTooltip("Seconds over which an over-packed cell pushes its extra liquid out.\n"
+                                          "Only density above the counting noise is corrected, so still water\n"
+                                          "stays still. Shorter = stiffer against clumping; 0 = off. ~0.5 s.");
                     }
 
                     ImGui::Checkbox("Free Surface Pressure Boundary", &fp.free_surface);

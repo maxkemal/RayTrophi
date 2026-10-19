@@ -508,7 +508,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.solver_viscosity_sweeps = 12.0f; p.solver_viscosity_wall_slip = 0.2f;
             p.solver_internal_friction = 0.35f;
             p.solver_flip_blend = 0.90f; p.solver_apic_blend = 0.90f;
-            p.solver_density_correction = 1.2f;
+            p.solver_density_relaxation_s = 0.5f;
             p.solver_air_drag = 0.8f; p.solver_wall_damping = 0.30f;
             p.solver_affine_damping = 0.95f;
             add(p);
