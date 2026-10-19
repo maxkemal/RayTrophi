@@ -4,6 +4,7 @@ Does not compile or execute shaders. Live weak/strong impact, slow loads and
 repose/large-N parity must still pass after the user's build.
 """
 import math
+import re
 import struct
 from pathlib import Path
 
@@ -107,7 +108,9 @@ def check_source():
     shader = (SOURCE / 'shaders/sim_matter_grain.glsl').read_text(encoding='utf-8-sig')
     transfer = (SOURCE / 'shaders/sim_matter_grain_sleep_transfer.glsl').read_text()
     host = (SOURCE / 'src/Physics/Fluid/MatterGrainGpu.cpp').read_text(encoding='utf-8-sig')
-    assert 'const uint REVISION = 24u;' in shader
+    header = (SOURCE / 'include/Fluid/MatterGrain.h').read_text(encoding='utf-8-sig')
+    revision = int(re.search(r'kMatterGrainShaderRevision = (\d+);', header).group(1))
+    assert revision >= 24 and f'const uint REVISION = {revision}u;' in shader
     guard = shader.index('uint(history_blocks.length()) < 5u*pc.substep.y')
     assert guard < shader.index('uint entry = history_blocks[i];')
     assert 'if (overflow & 16u)' in host

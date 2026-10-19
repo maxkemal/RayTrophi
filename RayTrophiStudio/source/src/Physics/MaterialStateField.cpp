@@ -453,8 +453,6 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.melt_kelvin = 273.15f; p.boiling_kelvin = 373.15f;
             p.latent_heat_fusion = 3.34e5f;
             p.latent_heat_vaporization = 2.26e6f;
-            p.fluid_extinguishing = true;
-            p.cooling_power = 1.0f; p.oxygen_dilution = 0.35f;
             p.molten_emission = 0.0f;
             // Solver hints are the field defaults (the Water fluid preset), and
             // nu 1e-6 is below any renderable voxel: the domain resolver skips
@@ -604,8 +602,6 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.liquid_density = 997.0f;
             p.liquid_kinematic_viscosity = 0.0f;
             p.latent_heat_vaporization = 2.26e6f;
-            p.fluid_extinguishing = true;
-            p.cooling_power = 1.0f; p.oxygen_dilution = 0.35f;
             // ★ PROVISIONAL until the three snow scenes are measured (compression,
             // snowball, slope release). Stomakhin et al. 2013: E0 = 1.4e5 Pa,
             // nu = 0.2, xi = 10, theta_c = 2.5e-2, theta_s = 7.5e-3. theta_s maps
@@ -695,8 +691,6 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.liquid_density = 997.0f;
             p.liquid_kinematic_viscosity = 0.0f;
             p.latent_heat_vaporization = 2.26e6f;
-            p.fluid_extinguishing = true;
-            p.cooling_power = 1.0f; p.oxygen_dilution = 0.35f;
             p.molten_emission = 0.0f;
             // Solid ice poured as loose pieces is a GRAIN carrier (discrete DEM
             // spheres, decision in docs/dev/BUZ_MODEL_KARARI.md). Granular is the

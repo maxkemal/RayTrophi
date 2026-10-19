@@ -1,5 +1,6 @@
 """Non-build audit of the C4a identity/transfer integration."""
 import ast
+import re
 import json
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -30,9 +31,13 @@ def main():
     assert "sorted.front() == 0" in cache
     assert "std::adjacent_find(sorted.begin(), sorted.end())" in cache
     assert "readParticleIdentities(is, d.particles.particle_id," in cache
-    assert "kVersion = 12u" in read("include/SimCache.h")
+    # The cache format only moves forward; the identity columns arrived in v12.
+    version = int(re.search(r"kVersion = (\d+)u", read("include/SimCache.h")).group(1))
+    assert version >= 12, version
     frame_cache = read("include/scene_data.h")
-    assert "c.meta = st;" in frame_cache
+    # The frame cache keeps the whole snapshot (moved in since the frame-cache
+    # rewrite), so particle identities survive with it.
+    assert "c.meta = std::move(input);" in frame_cache or "c.meta = st;" in frame_cache
     assert "particles.particle_id.clear" not in frame_cache
     assert "collapseIfUniform(pt.particle_id" not in frame_cache
 

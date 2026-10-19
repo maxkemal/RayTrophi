@@ -50,14 +50,11 @@ namespace Fluid {
 // allocate gas channels.
 struct FluidFuelProfile {
     bool flammable = false;
-    bool extinguishing = false;
     float flash_temperature = 0.0f;
     float autoignition_temperature = 0.0f;
     float vaporization_rate = 0.0f;
     float heat_capacity = 1.0f;
     float latent_heat = 0.0f;
-    float cooling_power = 0.0f;
-    float oxygen_dilution = 0.0f;
     float flame_persistence = 0.0f;
 };
 

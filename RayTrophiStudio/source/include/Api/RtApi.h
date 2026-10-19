@@ -4787,7 +4787,7 @@ struct GasDomainSettings {
     int turbulence_octaves_effective = 3;
 };
 
-// The chemistry itself (flammable, flash point, extinguishing) is the domain's
+// The chemistry itself (flammable, flash point, vaporization) is the domain's
 // default substance; these are the combustion controls layered on top.
 struct CombustibleFluidSettings {
     bool enabled = false;

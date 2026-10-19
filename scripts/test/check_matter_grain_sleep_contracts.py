@@ -20,11 +20,18 @@ def read(path):
     return (SOURCE / path).read_text(encoding='utf-8-sig')
 
 
+def read_header():
+    return read('include/Fluid/MatterGrain.h')
+
+
 def check_source():
     shader = read('shaders/sim_matter_grain.glsl')
     policy = read('shaders/sim_matter_grain_sleep.glsl')
     host = read('src/Physics/Fluid/MatterGrainGpu.cpp')
-    assert 'const uint REVISION = 24u;' in shader
+    # The sleep path landed in revision 24; later revisions keep it (P6).
+    revision = int(re.search(r'kMatterGrainShaderRevision = (\d+);',
+                             read_header()).group(1))
+    assert revision >= 24 and f'const uint REVISION = {revision}u;' in shader
     assert '#include "sim_matter_grain_sleep.glsl"' in shader
     assert 'pc.substep.x == pc.substep.w || (pc.substep.x + 1u) % period == 0u' in policy
     assert 'float interval = min(0.02, pc.sleep.w);' in policy

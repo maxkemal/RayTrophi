@@ -79,11 +79,8 @@ bool resolveGridDomainSubstancePhysics(SimulationGridDomainDesc& domain, float v
     }
     const auto& chemistry = domain.fluid_params.fuel_profile;
     domain.fluid_flammable = chemistry.flammable;
-    domain.fluid_extinguishing = chemistry.extinguishing;
     domain.fluid_ignition_temperature = chemistry.flash_temperature;
     domain.fluid_evaporation_rate = chemistry.vaporization_rate;
-    domain.fluid_cooling_power = chemistry.cooling_power;
-    domain.fluid_oxygen_dilution = chemistry.oxygen_dilution;
     return true;
 }
 
@@ -317,13 +314,10 @@ bool migrateLegacyDomainMaterial(const json& f, const std::string& domain_name,
         if (chem && base_profile && chem->name != base_profile->name &&
             chem->name != base_profile->based_on) {
             overrides["fluid_flammable"] = chem->fluid_flammable;
-            overrides["fluid_extinguishing"] = chem->fluid_extinguishing;
             overrides["flash_kelvin"] = chem->flash_kelvin;
             overrides["autoignition_kelvin"] = chem->autoignition_kelvin;
             overrides["vaporization_rate"] = chem->vaporization_rate;
             overrides["latent_heat_vaporization"] = chem->latent_heat_vaporization;
-            overrides["cooling_power"] = chem->cooling_power;
-            overrides["oxygen_dilution"] = chem->oxygen_dilution;
             overrides["flame_persistence"] = chem->flame_persistence;
         }
     }

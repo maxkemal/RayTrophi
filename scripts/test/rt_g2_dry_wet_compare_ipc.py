@@ -49,14 +49,15 @@ def main():
         if DOMAIN not in [d['name'] for d in original['domains']]:
             call('fluid.create_domain', name=DOMAIN, type='matter',
                  domain_min=[-1.6, 0, -1.6], domain_max=[1.6, 2.4, 1.6], voxel_size=.1)
-        material = domain_material(call, 'T: g2_dry_wet_compare', 'Sand',
+        # Soil: the MPM continuum this A/B measures (Sand is DEM since U-batch).
+        material = domain_material(call, 'T: g2_dry_wet_compare', 'Soil',
             granular_young_modulus=2000000., granular_friction_angle=49., granular_cohesion=0., granular_tensile_cutoff=0., granular_rebonding=False, granular_damage_rate=0.)
         call('fluid.set_param', domain=DOMAIN, enabled=True, visible=False,
              backend='vulkan', boundary='closed', default_substance=material,
              solid_phase=False, thermal_liquid_enabled=False)
         names = {s['name'] for s in call('flow_source.list')}
         for name, substance, model, position, rate, limit, start, end in [
-            ('G2_Sand_Finite', 'Sand', 'granular', [0, .6, 0], 1200, 360, 0., .3),
+            ('G2_Sand_Finite', material, 'granular', [0, .6, 0], 1200, 360, 0., .3),
             ('G2_Water_Finite', 'Water', 'fluid', [0, .85, 0], 1200, 360, .5, .8)]:
             call('flow_source.update' if name in names else 'flow_source.create',
                  name=name, domain=DOMAIN, enabled=False, phase='liquid', source_mode='point',

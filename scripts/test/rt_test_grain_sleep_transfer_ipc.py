@@ -109,6 +109,12 @@ def main():
                 results[key] = {'before': before, 'samples': samples}
                 save()
                 assert before['particles'] == BED, before
+                # P6 2026-10-19: the last live run read 'projectile not born'; the
+                # real cause was a collapsed bed (COM y 0.030 m, a 3-layer stack is
+                # ~0.075 m) covering the projectile's birth site, which the grain
+                # birth filter rejects as overlap. Name that cause here.
+                assert before['com'][1] > 2*RADIUS, ('bed collapsed; projectile birth '
+                                                     'site is occupied', before)
                 if sleep:
                     assert before['sleeping'] >= BED-4, ('bed did not settle', before)
                 for _ in range(30):

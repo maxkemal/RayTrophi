@@ -1,5 +1,6 @@
 """Non-build C5 lifecycle, publication and shared authoring source audit."""
 import ast
+import re
 from pathlib import Path
 
 
@@ -22,8 +23,9 @@ def main():
         assert f"{field}[i] = {field}[last]" in particles, field
         assert f"allocationBytes(particles.{field})" in memory, field
         assert cache.count(field) >= 3, field
-    assert "kVersion = 14u" in read("include/SimCache.h")
-    assert "version == 11u || version == 12u || version == 13u || version == kVersion" in read("include/SimCache.h")
+    # The cache format only moves forward; the identity columns arrived in v14.
+    version = int(re.search(r"kVersion = (\d+)u", read("include/SimCache.h")).group(1))
+    assert version >= 14, version
     core = read("src/Physics/Fluid/MatterPoreExchange.cpp")
     assert core.index("working > budget_bytes") < core.index("auto candidate = particles")
     assert core.index("C5 conservation gate rejected") < core.index("particles = std::move(candidate)")

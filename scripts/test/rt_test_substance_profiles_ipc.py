@@ -22,7 +22,7 @@ NUMERIC_FIELDS = {
     "liquid_kinematic_viscosity", "ignition_kelvin", "flash_kelvin",
     "autoignition_kelvin", "melt_kelvin", "boiling_kelvin",
     "latent_heat_fusion", "latent_heat_vaporization", "vaporization_rate",
-    "cooling_power", "oxygen_dilution", "flame_persistence",
+    "flame_persistence",
     "granular_friction_degrees", "granular_cohesion",
 }
 HONEY, DARK, COLLIDER = "T1_Honey", "T1_HoneyDark", "T1_SubstanceRefCollider"
@@ -85,7 +85,9 @@ def main():
         assert rows["Sand"]["grain_water_capacity_fraction"] == 0.0
         assert math.isclose(rows["Water"]["liquid_surface_tension_n_m"], 0.072, abs_tol=1e-6)
         assert {"Honey", "Chocolate", "Mud"}.issubset(rows)
-        assert rows["Water"]["fluid_extinguishing"] is True
+        # P5 2026-10-19: the quench chemistry is retired; water is just not a fuel.
+        assert rows["Water"]["fluid_flammable"] is False
+        assert not {"fluid_extinguishing", "cooling_power", "oxygen_dilution"} & set(rows["Water"])
         for name in ("Gasoline", "Alcohol", "Oil", "Plastic (PE)", "Wax"):
             assert rows[name]["fluid_flammable"] is True
             assert rows[name]["flash_kelvin"] > 0.0
@@ -126,6 +128,7 @@ def main():
         assert rejected("substance.set", name=HONEY, fields={"density": 1400.0, "emissivity": 5.0})
         # Retired 2026-10-19: surface heating is a film against the body capacity.
         assert rejected("substance.set", name=HONEY, fields={"thermal_response": 3.0})
+        assert rejected("substance.set", name=HONEY, fields={"fluid_extinguishing": True})
         assert rejected("substance.set", name=HONEY, fields={"no_such_field": 1.0})
         assert rejected("substance.set", name=HONEY,
                         fields={"meltable": True, "melt_kelvin": 400.0, "boiling_kelvin": 300.0})

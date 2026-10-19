@@ -407,7 +407,6 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_seed_mode"] = (int)d.fluid_seed_mode;
     j["fluid_fill_level"] = d.fluid_fill_level;
     j["fluid_flammable"] = d.fluid_flammable;
-    j["fluid_extinguishing"] = d.fluid_extinguishing;
     j["fluid_auto_ignite"] = d.fluid_auto_ignite;
     j["fluid_ignition_temperature"] = d.fluid_ignition_temperature;
     j["fluid_evaporation_rate"] = d.fluid_evaporation_rate;
@@ -415,8 +414,6 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_combustion_heat_release"] = d.fluid_combustion_heat_release;
     j["fluid_combustion_smoke_yield"] = d.fluid_combustion_smoke_yield;
     j["fluid_surface_cooling"] = d.fluid_surface_cooling;
-    j["fluid_cooling_power"] = d.fluid_cooling_power;
-    j["fluid_oxygen_dilution"] = d.fluid_oxygen_dilution;
     j["fluid_fill_wall_margin"] = d.fluid_fill_wall_margin;
     j["fluid_render_mode"] = (int)d.fluid_render_mode;
     j["fluid_fog_spread_voxels"] = d.fluid_fog_spread_voxels;
@@ -627,7 +624,6 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_seed_mode")) d.fluid_seed_mode = (RayTrophiSim::FluidSeedMode)(int)j["fluid_seed_mode"];
     if (j.contains("fluid_fill_level")) d.fluid_fill_level = j["fluid_fill_level"];
     if (j.contains("fluid_flammable")) d.fluid_flammable = j["fluid_flammable"];
-    if (j.contains("fluid_extinguishing")) d.fluid_extinguishing = j["fluid_extinguishing"];
     if (j.contains("fluid_auto_ignite")) d.fluid_auto_ignite = j["fluid_auto_ignite"];
     if (j.contains("fluid_ignition_temperature")) d.fluid_ignition_temperature = j["fluid_ignition_temperature"];
     if (j.contains("fluid_evaporation_rate")) d.fluid_evaporation_rate = j["fluid_evaporation_rate"];
@@ -635,8 +631,6 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_combustion_heat_release")) d.fluid_combustion_heat_release = j["fluid_combustion_heat_release"];
     if (j.contains("fluid_combustion_smoke_yield")) d.fluid_combustion_smoke_yield = j["fluid_combustion_smoke_yield"];
     if (j.contains("fluid_surface_cooling")) d.fluid_surface_cooling = j["fluid_surface_cooling"];
-    if (j.contains("fluid_cooling_power")) d.fluid_cooling_power = j["fluid_cooling_power"];
-    if (j.contains("fluid_oxygen_dilution")) d.fluid_oxygen_dilution = j["fluid_oxygen_dilution"];
     if (j.contains("fluid_fill_wall_margin")) d.fluid_fill_wall_margin = j["fluid_fill_wall_margin"];
     if (j.contains("fluid_render_mode")) d.fluid_render_mode = RayTrophiSim::Fluid::fluidRenderModeFromStored(j["fluid_render_mode"].get<int>());
     if (j.contains("fluid_fog_spread_voxels")) d.fluid_fog_spread_voxels = j["fluid_fog_spread_voxels"];

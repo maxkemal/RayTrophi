@@ -5922,7 +5922,6 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"fog_autoconversion_rate", domain.fluid_params.fog_autoconversion_rate},
             {"fog_ceiling_kg_m3", domain.fluid_params.fog_ceiling_kg_m3},
             {"flammable", domain.fluid_flammable},
-            {"extinguishing", domain.fluid_extinguishing},
             {"auto_ignite", domain.fluid_auto_ignite},
             {"ignition_temperature", domain.fluid_ignition_temperature},
             {"evaporation_rate", domain.fluid_evaporation_rate},
@@ -6522,7 +6521,6 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
                            " sweeps=" + std::to_string(domain.fluid_params.viscosity_sweeps) +
                            " granular_on=" + (domain.fluid_params.granular_enabled ? "1" : "0"));
             domain.fluid_flammable = f.value("flammable", domain.fluid_flammable);
-            domain.fluid_extinguishing = f.value("extinguishing", domain.fluid_extinguishing);
             domain.fluid_auto_ignite = f.value("auto_ignite", domain.fluid_auto_ignite);
             domain.fluid_ignition_temperature = f.value("ignition_temperature", domain.fluid_ignition_temperature);
             domain.fluid_evaporation_rate = f.value("evaporation_rate", domain.fluid_evaporation_rate);
