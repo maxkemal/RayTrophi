@@ -369,11 +369,9 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_params"]["flip_blend"] = d.fluid_params.flip_blend;
     j["fluid_params"]["internal_friction"] = d.fluid_params.internal_friction;
     j["fluid_params"]["thermal_liquid_enabled"] = d.fluid_params.thermal_liquid_enabled;
-    j["fluid_params"]["thermal_air_cooling_rate"] = d.fluid_params.thermal_air_cooling_rate;
     j["fluid_params"]["fog_autoconversion_kg_m3"] = d.fluid_params.fog_autoconversion_kg_m3;
     j["fluid_params"]["fog_autoconversion_rate"] = d.fluid_params.fog_autoconversion_rate;
     j["fluid_params"]["fog_ceiling_kg_m3"] = d.fluid_params.fog_ceiling_kg_m3;
-    j["fluid_params"]["thermal_contact_cooling_rate"] = d.fluid_params.thermal_contact_cooling_rate;
     j["fluid_params"]["granular_max_solver_substeps"] = d.fluid_params.granular_max_solver_substeps;
     j["fluid_params"]["air_drag"] = d.fluid_params.air_drag;
     j["fluid_params"]["inherit_atmosphere"] = d.fluid_params.inherit_atmosphere;
@@ -572,11 +570,9 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fp.contains("flip_blend")) d.fluid_params.flip_blend = fp["flip_blend"];
         if (fp.contains("internal_friction")) d.fluid_params.internal_friction = fp["internal_friction"];
         if (fp.contains("thermal_liquid_enabled")) d.fluid_params.thermal_liquid_enabled = fp["thermal_liquid_enabled"];
-        if (fp.contains("thermal_air_cooling_rate")) d.fluid_params.thermal_air_cooling_rate = fp["thermal_air_cooling_rate"];
         if (fp.contains("fog_autoconversion_kg_m3")) d.fluid_params.fog_autoconversion_kg_m3 = fp["fog_autoconversion_kg_m3"];
         if (fp.contains("fog_autoconversion_rate")) d.fluid_params.fog_autoconversion_rate = fp["fog_autoconversion_rate"];
         if (fp.contains("fog_ceiling_kg_m3")) d.fluid_params.fog_ceiling_kg_m3 = fp["fog_ceiling_kg_m3"];
-        if (fp.contains("thermal_contact_cooling_rate")) d.fluid_params.thermal_contact_cooling_rate = fp["thermal_contact_cooling_rate"];
         d.fluid_params.sanitizeThermalLiquid();
         if (fp.contains("granular_max_solver_substeps")) d.fluid_params.granular_max_solver_substeps = fp["granular_max_solver_substeps"];
         if (fp.contains("air_drag")) d.fluid_params.air_drag = fp["air_drag"];

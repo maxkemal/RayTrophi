@@ -35,22 +35,6 @@ void drawTimeConstant(float rate) {
     }
 }
 
-float thresholdCrossingSeconds(float birth_kelvin,
-                               float ambient_kelvin,
-                               float freeze_kelvin,
-                               float rate) {
-    if (!(rate > 0.0f) || !(birth_kelvin > freeze_kelvin) ||
-        !(freeze_kelvin > ambient_kelvin)) {
-        return -1.0f;
-    }
-    const float hot_delta = birth_kelvin - ambient_kelvin;
-    const float freeze_delta = freeze_kelvin - ambient_kelvin;
-    if (!(hot_delta > freeze_delta) || !(freeze_delta > 0.0f)) {
-        return -1.0f;
-    }
-    return std::log(hot_delta / freeze_delta) / rate;
-}
-
 void drawBirthTemperatureWarning(float birth_kelvin,
                                  float ambient_kelvin,
                                  const RayTrophiSim::Fluid::APICSolverParams& params,
@@ -95,30 +79,11 @@ void drawBirthTemperatureWarning(float birth_kelvin,
         return;
     }
 
-    const float contact_seconds = thresholdCrossingSeconds(
-        birth_kelvin,
-        ambient_kelvin,
-        freeze_kelvin,
-        params.thermal_contact_cooling_rate);
-    const float air_seconds = thresholdCrossingSeconds(
-        birth_kelvin,
-        ambient_kelvin,
-        freeze_kelvin,
-        params.thermal_air_cooling_rate);
-    if (contact_seconds >= 0.0f && air_seconds >= 0.0f) {
-        ImGui::TextDisabled(
-            "Estimated threshold crossing: contact %.2f s | air %.2f s",
-            contact_seconds,
-            air_seconds);
-    } else if (contact_seconds >= 0.0f) {
-        ImGui::TextDisabled(
-            "Estimated threshold crossing at contact: %.2f s",
-            contact_seconds);
-    } else if (air_seconds >= 0.0f) {
-        ImGui::TextDisabled(
-            "Estimated threshold crossing in air: %.2f s",
-            air_seconds);
-    }
+    // Walls and air are films against each parcel's capacity (2026-10-19), so
+    // the time depends on the voxel: tau = rho c h / film for one face.
+    ImGui::TextDisabled(
+        "Cooling: 500 W/(m^2 K) to walls, 20 W/(m^2 K) to open air, against each\n"
+        "parcel's heat capacity - a coarse voxel cools slowly, as a big blob does.");
 }
 
 } // namespace
@@ -192,14 +157,12 @@ bool drawDomainControls(
     ImGui::SeparatorText("Thermal Liquid (cools, thickens, sets)");
 
     bool edited = false;
-    const bool grain_locked = params.grain.enabled && !params.thermal_liquid_enabled;
-    ImGui::BeginDisabled(grain_locked);
     edited |= ImGui::Checkbox(
         "Enable Cooling & Freezing",
         &params.thermal_liquid_enabled);
-    ImGui::EndDisabled();
-    if (grain_locked) {
-        ImGui::TextDisabled("Thermal liquid cannot run with grains yet.");
+    if (params.grain.enabled && params.thermal_liquid_enabled) {
+        ImGui::TextDisabled("Grains share the heat (liquid, air, walls, contact). Ice here "
+                            "is pinned; grains do not collide with it yet.");
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
@@ -228,35 +191,8 @@ bool drawDomainControls(
                             default_profile->name.c_str());
     }
 
-    edited |= ImGui::DragFloat(
-        "Air Cooling (1/s)",
-        &params.thermal_air_cooling_rate,
-        0.01f,
-        0.0f,
-        100.0f,
-        "%.3f");
-    const bool air_hovered = ImGui::IsItemHovered();
-    drawTimeConstant(params.thermal_air_cooling_rate);
-    if (air_hovered) {
-        ImGui::SetTooltip(
-            "Newton cooling rate for free-surface parcels. tau = 1/rate is the\n"
-            "time to close about 63%% of the temperature difference.");
-    }
-
-    edited |= ImGui::DragFloat(
-        "Contact Cooling (1/s)",
-        &params.thermal_contact_cooling_rate,
-        0.05f,
-        0.0f,
-        100.0f,
-        "%.3f");
-    const bool contact_hovered = ImGui::IsItemHovered();
-    drawTimeConstant(params.thermal_contact_cooling_rate);
-    if (contact_hovered) {
-        ImGui::SetTooltip(
-            "Cooling rate for parcels touching a collider or closed wall.\n"
-            "This normally controls how quickly the first supported layer sets.");
-    }
+    ImGui::TextDisabled(
+        "Walls/air: films (500 / 20 W/(m^2 K)) against each parcel's capacity.");
 
     // Fog water held by this domain's air (GasSaturation.h). kg/m^3 is the
     // atmosphere layer's unit, so a cloud and this fog read the same number.
@@ -377,6 +313,23 @@ bool drawDomainControls(
         ImGui::TextDisabled(
             "Heated by thermal fields: %zu parcels",
             stats->field_heated_particles);
+    }
+    if (stats->contact_cooled_particles > 0 || stats->air_cooled_particles > 0) {
+        ImGui::TextDisabled(
+            "Walls/outside air: %zu + %zu parcels | heat %.3g J",
+            stats->contact_cooled_particles, stats->air_cooled_particles,
+            stats->heat_to_ambient_j);
+    }
+    if (stats->grain_measured) {
+        ImGui::TextDisabled(
+            "Grains: %zu (%zu in liquid) | min %.1f / mean %.1f / max %.1f K",
+            stats->grain_count, stats->grain_wetted, stats->grain_min_kelvin,
+            stats->grain_mean_kelvin, stats->grain_max_kelvin);
+        ImGui::TextDisabled(
+            "Grain heat: to liquid %.3g J, to air %.3g J, to walls %.3g J | residual %.2g J | %.2f ms",
+            stats->grain_heat_to_liquid_j, stats->grain_heat_to_gas_j,
+            stats->grain_heat_to_walls_j,
+            stats->grain_energy_residual_j, stats->grain_thermal_ms);
     }
     if (stats->cold_unsupported > 0 && stats->frozen_particles == 0) {
         warningText(

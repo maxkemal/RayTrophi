@@ -1,9 +1,33 @@
 # Birleşik madde domain'i — gaz/sıvı ayrımı olmayan simülasyon ve render
 
-> **Durum:** AKTİF — 2026-10-18: FG1 kaynakta (yanma hava sıcaklığı + buhar oksijen seyreltmesi, eski söndürme söküldü; derlenmedi). Hızlı tur: regresyonlar PASS, Ek 11 3/6, MSF alan sızıntısı düzeltildi (derlenmedi). 2026-10-11: T2 gizli ısı + yüzey yoğuşması (§4.7, MADDE_TIPLERI §6f), sis suyu/doygunluk (§4.8) ve yağmur: otokonversiyon, sis tavanı, düşüş, iniş (§4.8b) CANLI PASS; commit `01284ef`. Açık: sis/yağmur render'a bağlı değil (bulut işiyle), yağmur parsel doğumlarının yeri ölçülmedi. 2026-10-08: Madde T1/T3 kullanıcı build'i ve hızlı
+> **Durum:** AKTİF — 2026-10-19 2. build: P0–P4 CANLI, `rt_matter_smoke` 10/10 PASS. 2026-10-19: Ek 11 kökü düzeltildi (yüzey↔hava filmi, `thermal_response` emekli) ve taneler termal zincire katıldı (tane+sıvı+hava+ateş tek domain); kaynakta, DERLENMEDİ — devir tablosu aşağıda. 2026-10-18: FG1 kaynakta (yanma hava sıcaklığı + buhar oksijen seyreltmesi, eski söndürme söküldü; derlenmedi). Hızlı tur: regresyonlar PASS, Ek 11 3/6, MSF alan sızıntısı düzeltildi (derlenmedi). 2026-10-11: T2 gizli ısı + yüzey yoğuşması (§4.7, MADDE_TIPLERI §6f), sis suyu/doygunluk (§4.8) ve yağmur: otokonversiyon, sis tavanı, düşüş, iniş (§4.8b) CANLI PASS; commit `01284ef`. Açık: sis/yağmur render'a bağlı değil (bulut işiyle), yağmur parsel doğumlarının yeri ölçülmedi. 2026-10-08: Madde T1/T3 kullanıcı build'i ve hızlı
 > dış IPC kabulü PASS; legacy/save-open/görsel kabul ve T2 hal/model birleşmesi açık.
 > C5/C6/C7 fiziksel yakınsama ve H1 maliyet kapıları bu testlerle kapanmaz.
 > Uzman Gas/Liquid domain'leri T0 eşitlik ölçümü olmadan kaldırılmaz.
+
+## Devir — 2026-10-19 sonu (P0–P4 YAZILDI, tek derleme + `rt_matter_smoke.py` bekliyor)
+
+Kapsam ve kalanlar: [MATTER_ROADMAP_2026_10.md](MATTER_ROADMAP_2026_10.md),
+test sırası: [NEXT_BUILD_CHECKS.md](NEXT_BUILD_CHECKS.md) en üst. Ayrıntı
+aşağıda "Parti 2026-10-19 P1–P4".
+
+## Devir — 2026-10-19 (1. build CANLI; 2. build'e üç düzeltme)
+
+**Canlı (1. build, 2026-10-19 10:56):** madde 1/1, gaz↔tane 6/6, Ek 11 6/7
+(fizik tamamı PASS), yüzey suyu 6/6, FG1 8/8, tane ısısı 7/7 (ama oran yanlış,
+aşağıda). Üç düzeltme yazıldı, derlenmedi: `msf.fields` → `temperature_fresh`,
+`scene.add_primitive` silinmiş ad hatası, taneler için kapasitesiz duvar
+soğutması. Kısa tur: [NEXT_BUILD_CHECKS.md](NEXT_BUILD_CHECKS.md) en üst.
+
+(1. build öncesi tablo:)
+
+| Konu | Durum |
+|---|---|
+| Ek 11 kökü | `sim_msf_gather` kabuğu gövdeden bağımsız olarak hava sıcaklığına çiviliyordu (`thermal_response` 1–8 1/s, havaya enerji yazılmıyordu). Domain içindeki yüzler 294 K'de kalıyor, yalnız zeminin altındaki yarı ısınıyordu: "ısınan yüzler suya değmiyor" ölçümünün kökü buydu. Yerine iki cisim film geldi (aşağıda "Parti 2026-10-19"). |
+| Taneler termal zincirde | `thermal_liquid` tane engeli kalktı. Tane↔sıvı, tane↔hava (gaz şeridi), tane↔tane ısısı `MatterGrainThermal`'da; hücreler arası iletim, MSF kabuğu ve Ice erimesi mevcut yollarda. |
+| Gaz↔tane testi | Kod değil sahne: rüzgâr düşüş yolunun üstüne alındı, x kapısı düşüş penceresinde. |
+| Test sırası | [NEXT_BUILD_CHECKS.md](NEXT_BUILD_CHECKS.md) 0–8. H1 paketi en sonda. |
+| Açık | Tane erimesinin (Ice) canlı kanıtı yok. Tane domain'inde sıvı donmuyor, aşırı soğuyor (raporlanıyor). Ortam alan gevşemesi (`cooling_rate`) hâlâ kapasitesiz. `fluid_extinguishing` kararı açık. |
 
 ## 2026-10-08 ortak saat kaynak devamı
 
@@ -1946,6 +1970,180 @@ gizli ısı ödemeden siliyor, gather ıslak yüzeyi kaynamada kelepçeleyip gel
   Water emiliyor (yağ emmiyor); damlama/akma yok (doygunluk üstü su kalmaz çünkü
   alım eksikle sınırlı); kar/buz `absorbency` 0.
 - Kabul: `scripts/test/rt_test_surface_water_ipc.py`.
+
+### Parti 2026-10-19 — yüzey↔hava filmi + taneler termal zincirde (DERLENMEDİ)
+
+**Ek 11 kökü (aleti 2026-10-18'de gösterdi).** Ölçülen: ıslak hücrelerin kabuğu
+294,2 K, kabuk ortalaması 348 K, en düşük 299 K, en yüksek 396 K. Sahnede küp
+orijinde, yarısı domain zemininin altında. `sim_msf_gather` her elemanı
+`mix(T, T_gaz, 1−e^{−thermal_response·dt})` ile gaza çekiyordu (demir 3/s):
+- Gövdeden bağımsızdı. 0,1 m demir blok ile 1 mm sac aynı hızla havayı izliyordu.
+- Havaya enerji yazılmıyordu. Sıcak plaka havayı ısıtmıyor, soğuk hava plakayı
+  bedavaya soğutuyordu.
+Domain içindeki (ıslanan) yüzler oda havasına çivilendi. Alan ise yalnız domain
+dışındaki yarıyı ısıttı.
+
+**Yeni model (`sim_msf_gather`).** Eleman ile hücre havası arasında iki cisim:
+- C_e = ρ·c·`thermal_depth_m`·alan. Sıvı temasıyla aynı gövde.
+- C_g = ρ_hava(T)·c_hava·h³.
+- G = (20 W/(m²K) + alev·ε·σ(T_g²+T_s²)(T_g+T_s))·alan.
+- Eleman kesin iki cisim gevşemesiyle hareket eder. Hücre tam −C_e·ΔT_s alır:
+  yeni işaretli `msf_accum_convect` (int, 2²⁸ sabit nokta). `sim_msf_resolve`
+  onu katlar. Taban artık 1 K (eskiden normalize 0'dı: soğuk yüzeyin soğuttuğu
+  hava geri ısıtılıyordu).
+- Eleman yalnız hücre havasının PAYINI görür (alanı / 3h²). Aynı hücredeki
+  çok sayıda eleman havayı aşırı itemez.
+- Alev ışınımı: alev seviyesi 0..1 yayıcılık çarpanı. Kağıt alevde hâlâ tutuşur
+  (ince gövde + ışınım), demir esintiyi neredeyse fark etmez.
+- Emekli: `thermal_response` madde alanı (kural 5). Yüklemede override log'lanıp
+  düşülür, düzenlemede gerekçeli hata verilir. Hiçbir script/test kullanmıyordu.
+
+**Bilinen sınırlar.**
+- Hava sıcaklığı alanın Tv'si olarak okunuyor. Buhar hücresinde film biraz
+  sıcak çalışır (FG1'deki gibi buhar bağlanmadı).
+- Ortam/alan gevşemesi (`sim_msf_ambient`, `cooling_rate`) hâlâ kapasitesiz bir
+  hız. Domain içinde bu, ikinci bir hava soğutması demek: demir için ~×1000
+  güçlü, ince ahşap için fiziğe yakın. Sonraki adım.
+- Yüzey suyu testinde (meşe üstü) sayılar düşecek: eskiden gaz çivilemesiyle
+  636 K'e çıkıyordu. Bu fiziksel düzeltmedir.
+
+**Taneler termal zincirde (`Fluid/MatterGrainThermal.cpp`, HANDOFF_DEM_THERMAL 1–3, 5).**
+- DEM sıcaklığa ihtiyaç duymaz. Taneler sıcaklıklarını host'ta, kanonik
+  `particles.temperature`'da taşır. Seçme/birleştirme bütün dizileri kopyalıyor.
+  Termal blok tane adımından önce, tanelerin de bulunduğu `state.particles`
+  üzerinde koşuyor.
+- Önceden de taneleri taşıyanlar:
+  - hücreler arası iletim (`conductThermalLiquid`, taşıyıcının kendi c ve k'sı;
+    Sand k 0,27 yatak değeri);
+  - MSF kabuk teması (tane için film 200 W/(m²K), sıvı 500);
+  - Ice (iskelet) erimesi gizli ısıyla, model geçişiyle sıvı şeridine.
+- Hücre içinde yeni olanlar:
+  - tane↔sıvı: 500 W/(m²K) film, ıslak payda, hücrenin sıvısına tek havuz
+    olarak;
+  - tane↔hava: 20 W/(m²K) + alev ışınımı, kuru payda, gaz şeridinin hücresine
+    (ΔTv host'a yazılır; gaz adımı başta cihaz kopyalarını geçersiz sayıp
+    yükler);
+  - tane↔tane: G = k·4πr, hücre tane ortalamasına doğru, kapasiteyle tam
+    korunumlu.
+- Filmler tanenin kendi iç direnciyle seri: h_eff = 1/(1/h + r/(5k)). 1 cm
+  çakıl suda τ ≈ 36 sn, 2 cm'de ≈ 125 sn. İç direnç olmasa ~4× hızlı olurdu.
+- Tane alanı 3m/(ρr): süper tane kütlesinin yüzeyi.
+- Hava kapısı sürüklemeyle aynı: yalnız gaz şeridi adım attıysa ("hava,
+  domain'in onu simüle ettiği yerde vardır").
+- Tane domain'inde sıvı DONMAZ, aşırı soğur. Tane sahipliği donmuş taşıyıcı
+  kabul etmiyor, adım dururdu. `freeze_held_by_grains` raporlanıyor.
+- IPC/Python/panel: `fluid.list_domains` → `thermal_grain_measured/count/wetted/
+  min/mean/max_kelvin/heat_to_liquid_j/heat_to_gas_j/energy_residual_j/ms`,
+  `thermal_freeze_held_by_grains`. Panelde Thermal Liquid bölümünde iki satır.
+- Sınırlar:
+  - Tane döngüsü seri (OpenMP yok); 1e5 tanede maliyeti ölç.
+  - Gözenek suyu tane ısı kapasitesine katılmıyor (bütün geçişlerle tutarlı
+    kalsın diye).
+  - Sand/Gravel'ın tek iletkenliği (yatak değeri) iç direnç için de kullanılıyor:
+    mineral değerinden yavaş, yani muhafazakâr.
+  - Tane↔kabuk alanı hücre yüzü payı (sıvıyla aynı).
+  - Hava hücresi hacmi yalnız tane hacmiyle azaltılıyor (sıvı hacmi değil).
+- Kabul: `scripts/test/rt_test_grain_heat_ipc.py` (7 kapı).
+
+**Canlı sonuç (1. build, 2026-10-19):**
+- Gaz↔tane **6/6**: düşüş penceresinde x dürtüsü +0,043 N·s (y 0,195); toplam
+  da artık +0,035. Çift tam zıt.
+- Ek 11 **6/7, fizik tamamı PASS**: ıslak kabuk 392,6 K görülüyor (eskiden
+  294,2), ilk örnekte su→katı −1486 J/adım (eskiden −17,8), suyun en sıcağı
+  295,4 K. Dolumdan önce kabuk düzgün: en düşük 396,67, en yüksek 396,67 K
+  (eskiden 299…396).
+  - Tek FAIL bir ölçüydü. `msf.fields` host kopyasını okuyor; boş domain
+    readback istemiyor, yani kopya alanın yaratıldığı ana ait olabiliyor ve
+    `temperature_valid` yine true. Okunan 293,7 K idi, kabuk 390 K'deydi.
+    Ek adımla okununca 396,7 K. Düzeltme `temperature_fresh` (derlenmedi).
+- ★ **Yan bulgu, hatasız yanlış:** `scene.add_primitive` silinmiş bir adla
+  (sıkıştırma bekleyen silme) başarı döndürüyor ama nesneyi görünmez/silinmiş
+  yaratıyordu. Her ekle-sil testinin ikinci koşusu bundan bozuldu: MSF alanı
+  yok, 6 kapı FAIL. Ad seçimi artık bekleyen silmeleri dolu sayıyor
+  (`RtApi.cpp addPrimitive`, derlenmedi). UI'nin kendi ekleme yolu
+  denetlenmedi.
+- Yüzey suyu **6/6**: meşe üstü 373,6 K'de kaynamada tutunuyor (eskiden gaz
+  çivilemesiyle 636 K), buharlaşan 0,0032 kg (eskiden 0,023). Beklenen
+  fiziksel düşüş.
+- FG1 **8/8**. Madde testi PASS (`thermal_response` reddediliyor).
+- Tane ısısı **7/7, ama oran YANLIŞ** (kontrol listesindeki sinsi durum):
+  360 → 299 K 1,5 sn'de, sonu 293,0 K, yani suyun altında. Suya 4,66 kJ,
+  havaya 68 J gitti; ~157 kJ'lük fazlanın %97'sini `coolThermalLiquid`'in
+  kapalı duvar "temas" soğutması yuttu (sonsuz ortam, kapasitesiz hız; tabana
+  oturan her tane bir duvara değiyor). Taneler o yoldan çıkarıldı; duvar artık
+  tane geçişinde 200 W/(m²K) film, yüzün altıda biri,
+  `thermal_grain_heat_to_walls_j` (derlenmedi). Teste `cools_at_physical_rate`
+  ve `water_takes_most` kapıları eklendi.
+  ★ Aynı kapasitesiz duvar yolu SIVI için hâlâ duruyor (kapalı duvar = ortam
+  termostatı). Bu daha önceki bir model kararı; tane bulgusu onun ölçeğini
+  gösterdi. Sıvıda da film modeline geçmek sonraki iş.
+- Tane geçişinin maliyeti 400 tanede 0,26–0,46 ms. Enerji artığı ≤ 5e-10 J.
+- H1 paketi **15/21**.
+  - PASS: coexist, porous, wet, motion, dense, repose, base, history,
+    convergence, extended, settle, panel.
+  - `readiness` FAIL gerçek bir hataydı (bu partiden önce): taneleri yalnız
+    İSTEYEN (henüz adım atmamış) bir domain CPU'ya ya da açık sınıra
+    alınabiliyordu. Koruma artık doğrudan `matterGrainBlockers` (derlenmedi).
+  - İlgisiz/bayat: üç statik sözleşme (REVISION 24→27, editör metni),
+    `g2_dry_wet` (Sand artık DEM), `sleep_transfer` (mermi doğmuyor; ayrı bakılmalı).
+
+**Gaz↔tane sahnesi.** Kod değişmedi. Rüzgâr kaynağı düşüş yolunun üstünde
+(0, 1,1, 0; r 0,35) ve x kapısı düşüş penceresinde (ilk 45 adım) ölçülüyor.
+Kapalı kutuda dönüş akışı içindeki yığın artık kapıyı sulandırmıyor; toplamlar
+yine raporlanıyor.
+
+### Parti 2026-10-19 P1–P4 (CANLI — duman 10/10 PASS)
+
+**P1, kapasitesiz ısı yutakları söküldü.**
+- Sıvı (`coolThermalLiquid`): kapalı duvar ve çıplak collider yüzü
+  500 W/(m²K), gaz ızgarası olmayan domainde açık hava yüzü 20 W/(m²K) +
+  doğrusallaştırılmış ışınım. Hepsi parselin kendi ısı kapasitesine karşı ve
+  hücre yüzünün payı üzerinden. Duvarın aldığı `heat_to_ambient_j` olarak
+  raporlanıyor (dört katman, panel).
+- MSF (`sim_msf_ambient`): gaz domain'i dışında oda, aynı hava filmi
+  (dünya `convection_coefficient` çarpanı kaldı) + ışınım, gövde
+  ρ·c·`thermal_depth_m`. Gaz domain'i içinde hava yalnız gather'ın; her gaz
+  domain'i artık `gas_air` bayraklı bir bölge.
+- Termal alan açık bir DIŞ KAYNAK olarak kaldı. Kaynama, FG1, sis, kar ve
+  füzyon testleri onunla ısıtıyor; hızını filme bağlamak hepsini fiziksel
+  ama dakikalar süren sahnelere çevirirdi. Hızı artık alanın
+  `thermal_rate_per_s`'i (varsayılan 2/s = parsellerin eski temas hızı;
+  IPC/Python/panel/serileştirici/hash). MSF yüzeyleri de aynı hızla ısınır;
+  eskiden maddenin `cooling_rate`'iyle ısınıyorlardı (demir 0,05/s).
+- Emekli (kural 5): `cooling_rate`, `solver_air/contact_cooling_rate`
+  (madde: yüklemede log'lanıp düşülür, düzenlemede gerekçeli hata) ve
+  `thermal_air/contact_cooling_rate` (domain: IPC ve Python gerekçeyle
+  reddeder; serileştirici ve proje artık yazmıyor, okurken yok sayıyor).
+- ★ Ölçek uyarısı: 5 cm'lik vokselde duvarda τ ≈ ρch/500 ≈ 420 sn (su).
+  Mum/wax sahneleri artık dakikalarca donar; eskiden 0,5 sn'de donuyordu.
+  Bilinçli. Bu, vokselin fiziği.
+
+**P2, filmler Tv değil T okur.**
+- `sim_msf_gather` buhar envanterini 7. bağlama olarak alıyor (yoksa kuru).
+  T = airFromVirtual(Tv, m); hava kapasitesi ρ = P·Ma/(R·Tv) (kesin); gaz
+  alanına ΔT·Tv/T yazılıyor.
+- Tane↔hava aynı çevrimi host'taki buharla yapıyor (`gasCombustionAir`).
+  Envanter cihazdaysa host işaretçisi boş ve kuru varsayılır (sınır).
+
+**P3, tane domain'inde donma.**
+- Donmuş sıvı artık adımı reddettirmiyor. `partitionMatterGrainOwners` onu
+  "tutulan" kümeye koyuyor; hiçbir şerit taşımıyor, birleştirmede geri
+  geliyor.
+- Sıvı buzu katı faz kaplaması olarak görüyor (o yol tane engelinden
+  bağımsız). `freeze_held_by_grains` sökuldü.
+- Sınır: DEM taneleri yalnız üçgenlerle çarpışıyor, buzun içinden geçer.
+
+**P4, ölçek.**
+- Tane ısı geçişi iki fazda paralel: sıvı hücresi grupları (sıvı havuzu,
+  duvar, tane-tane) ve hava hücresi grupları. Her grup kararlı sırada,
+  sonuç iş parçacığı sayısından bağımsız.
+- Gözenek suyu taşıyıcının ısı kapasitesinde (`parcelHeatCapacity`,
+  4186 J/(kg K)): bütün geçişlerde tek tanım.
+- Sınır: emilen su taşıyıcıya karışma ısısı ödemeden katılıyor.
+
+**Test:** `scripts/test/rt_test_thermal_films_ipc.py` (5 kapı) yeni.
+`rt_test_grain_heat_ipc.py` 8 kapı. `rt_test_fluid_phase3_boundary_freeze_ipc.py`
+emekli hızları göndermiyor. Hepsi `rt_matter_smoke.py`'de.
 
 ## Öncelikli sonraki düzeltmeler
 1. ✔ (kodda yapılmış, 2026-10-18'de doğrulandı) FluidPhysicalMass.cpp densityForParticle yalnız liquid_density kullanıyor.

@@ -220,6 +220,7 @@ ForceFieldInfo infoFromField(const ForceField& field) {
     info.linear_drag = field.linear_drag;
     info.quadratic_drag = field.quadratic_drag;
     info.thermal_delta_kelvin = field.thermal_delta_kelvin;
+    info.thermal_rate_per_s = field.thermal_rate_per_s;
     info.fluid_surface_drag = field.fluid_surface_drag;
     info.fluid_drag_coupling = field.fluid_drag_coupling;
     info.fluid_surface_depth = field.fluid_surface_depth;
@@ -283,6 +284,8 @@ Result applyInfoToField(const ForceFieldInfo& info, ForceField& field) {
     field.linear_drag = info.linear_drag;
     field.quadratic_drag = info.quadratic_drag;
     field.thermal_delta_kelvin = info.thermal_delta_kelvin;
+    field.thermal_rate_per_s = std::isfinite(info.thermal_rate_per_s)
+        ? std::clamp(info.thermal_rate_per_s, 0.0f, 1000.0f) : field.thermal_rate_per_s;
     field.fluid_surface_drag = info.fluid_surface_drag;
     field.fluid_drag_coupling = info.fluid_drag_coupling;
     field.fluid_surface_depth = info.fluid_surface_depth;

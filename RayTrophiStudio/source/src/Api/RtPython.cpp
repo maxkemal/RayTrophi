@@ -1359,6 +1359,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["linear_drag"] = info.linear_drag;
         d["quadratic_drag"] = info.quadratic_drag;
         d["thermal_delta_kelvin"] = info.thermal_delta_kelvin;
+        d["thermal_rate_per_s"] = info.thermal_rate_per_s;
         d["fluid_surface_drag"] = info.fluid_surface_drag;
         d["fluid_drag_coupling"] = info.fluid_drag_coupling;
         d["fluid_surface_depth"] = info.fluid_surface_depth;
@@ -1435,6 +1436,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         flt("inward_force", info.inward_force); flt("upward_force", info.upward_force);
         flt("linear_drag", info.linear_drag); flt("quadratic_drag", info.quadratic_drag);
         flt("thermal_delta_kelvin", info.thermal_delta_kelvin);
+        flt("thermal_rate_per_s", info.thermal_rate_per_s);
         boolean("fluid_surface_drag", info.fluid_surface_drag);
         flt("fluid_drag_coupling", info.fluid_drag_coupling);
         flt("fluid_surface_depth", info.fluid_surface_depth);
@@ -1556,11 +1558,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["surface_work_cells"] = info.surface_work_cells;
         d["surface_bin_cells"] = info.surface_bin_cells;
         d["thermal_liquid_enabled"] = info.thermal_liquid_enabled;
-        d["thermal_air_cooling_rate"] = info.thermal_air_cooling_rate;
         d["fog_autoconversion_kg_m3"] = info.fog_autoconversion_kg_m3;
         d["fog_autoconversion_rate"] = info.fog_autoconversion_rate;
         d["fog_ceiling_kg_m3"] = info.fog_ceiling_kg_m3;
-        d["thermal_contact_cooling_rate"] = info.thermal_contact_cooling_rate;
         d["thermal_ambient_kelvin"] = info.thermal_ambient_kelvin;
         d["thermal_measured"] = info.thermal_measured;
         d["thermal_frozen_particles"] = info.thermal_frozen_particles;
@@ -1581,9 +1581,21 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["thermal_condensation_splits"] = info.thermal_condensation_splits;
         d["thermal_solid_contact_particles"] = info.thermal_solid_contact_particles;
         d["thermal_heat_to_solid_j"] = info.thermal_heat_to_solid_j;
+        d["thermal_heat_to_ambient_j"] = info.thermal_heat_to_ambient_j;
         d["thermal_contact_shell_kelvin"] = info.thermal_contact_shell_kelvin;
         d["thermal_contact_parcel_kelvin"] = info.thermal_contact_parcel_kelvin;
         d["thermal_contact_shell_cells"] = info.thermal_contact_shell_cells;
+        d["thermal_grain_measured"] = info.thermal_grain_measured;
+        d["thermal_grain_count"] = info.thermal_grain_count;
+        d["thermal_grain_wetted"] = info.thermal_grain_wetted;
+        d["thermal_grain_min_kelvin"] = info.thermal_grain_min_kelvin;
+        d["thermal_grain_mean_kelvin"] = info.thermal_grain_mean_kelvin;
+        d["thermal_grain_max_kelvin"] = info.thermal_grain_max_kelvin;
+        d["thermal_grain_heat_to_liquid_j"] = info.thermal_grain_heat_to_liquid_j;
+        d["thermal_grain_heat_to_gas_j"] = info.thermal_grain_heat_to_gas_j;
+        d["thermal_grain_heat_to_walls_j"] = info.thermal_grain_heat_to_walls_j;
+        d["thermal_grain_energy_residual_j"] = info.thermal_grain_energy_residual_j;
+        d["thermal_grain_ms"] = info.thermal_grain_ms;
         d["thermal_contact_cooled_particles"] = info.thermal_contact_cooled_particles;
         d["thermal_min_kelvin"] = info.thermal_min_kelvin;
         d["thermal_mean_kelvin"] = info.thermal_mean_kelvin;
@@ -1844,11 +1856,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["surface_work_cells"] = info.surface_work_cells;
         d["surface_bin_cells"] = info.surface_bin_cells;
         d["thermal_liquid_enabled"] = info.thermal_liquid_enabled;
-        d["thermal_air_cooling_rate"] = info.thermal_air_cooling_rate;
         d["fog_autoconversion_kg_m3"] = info.fog_autoconversion_kg_m3;
         d["fog_autoconversion_rate"] = info.fog_autoconversion_rate;
         d["fog_ceiling_kg_m3"] = info.fog_ceiling_kg_m3;
-        d["thermal_contact_cooling_rate"] = info.thermal_contact_cooling_rate;
         d["thermal_ambient_kelvin"] = info.thermal_ambient_kelvin;
         d["thermal_measured"] = info.thermal_measured;
         d["thermal_frozen_particles"] = info.thermal_frozen_particles;
@@ -1869,9 +1879,21 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["thermal_condensation_splits"] = info.thermal_condensation_splits;
         d["thermal_solid_contact_particles"] = info.thermal_solid_contact_particles;
         d["thermal_heat_to_solid_j"] = info.thermal_heat_to_solid_j;
+        d["thermal_heat_to_ambient_j"] = info.thermal_heat_to_ambient_j;
         d["thermal_contact_shell_kelvin"] = info.thermal_contact_shell_kelvin;
         d["thermal_contact_parcel_kelvin"] = info.thermal_contact_parcel_kelvin;
         d["thermal_contact_shell_cells"] = info.thermal_contact_shell_cells;
+        d["thermal_grain_measured"] = info.thermal_grain_measured;
+        d["thermal_grain_count"] = info.thermal_grain_count;
+        d["thermal_grain_wetted"] = info.thermal_grain_wetted;
+        d["thermal_grain_min_kelvin"] = info.thermal_grain_min_kelvin;
+        d["thermal_grain_mean_kelvin"] = info.thermal_grain_mean_kelvin;
+        d["thermal_grain_max_kelvin"] = info.thermal_grain_max_kelvin;
+        d["thermal_grain_heat_to_liquid_j"] = info.thermal_grain_heat_to_liquid_j;
+        d["thermal_grain_heat_to_gas_j"] = info.thermal_grain_heat_to_gas_j;
+        d["thermal_grain_heat_to_walls_j"] = info.thermal_grain_heat_to_walls_j;
+        d["thermal_grain_energy_residual_j"] = info.thermal_grain_energy_residual_j;
+        d["thermal_grain_ms"] = info.thermal_grain_ms;
         d["thermal_contact_cooled_particles"] = info.thermal_contact_cooled_particles;
         d["thermal_min_kelvin"] = info.thermal_min_kelvin;
         d["thermal_mean_kelvin"] = info.thermal_mean_kelvin;
@@ -2114,11 +2136,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["surface_work_cells"] = info.surface_work_cells;
         d["surface_bin_cells"] = info.surface_bin_cells;
         d["thermal_liquid_enabled"] = info.thermal_liquid_enabled;
-        d["thermal_air_cooling_rate"] = info.thermal_air_cooling_rate;
         d["fog_autoconversion_kg_m3"] = info.fog_autoconversion_kg_m3;
         d["fog_autoconversion_rate"] = info.fog_autoconversion_rate;
         d["fog_ceiling_kg_m3"] = info.fog_ceiling_kg_m3;
-        d["thermal_contact_cooling_rate"] = info.thermal_contact_cooling_rate;
         d["thermal_ambient_kelvin"] = info.thermal_ambient_kelvin;
         d["thermal_measured"] = info.thermal_measured;
         d["thermal_frozen_particles"] = info.thermal_frozen_particles;
@@ -2139,9 +2159,21 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["thermal_condensation_splits"] = info.thermal_condensation_splits;
         d["thermal_solid_contact_particles"] = info.thermal_solid_contact_particles;
         d["thermal_heat_to_solid_j"] = info.thermal_heat_to_solid_j;
+        d["thermal_heat_to_ambient_j"] = info.thermal_heat_to_ambient_j;
         d["thermal_contact_shell_kelvin"] = info.thermal_contact_shell_kelvin;
         d["thermal_contact_parcel_kelvin"] = info.thermal_contact_parcel_kelvin;
         d["thermal_contact_shell_cells"] = info.thermal_contact_shell_cells;
+        d["thermal_grain_measured"] = info.thermal_grain_measured;
+        d["thermal_grain_count"] = info.thermal_grain_count;
+        d["thermal_grain_wetted"] = info.thermal_grain_wetted;
+        d["thermal_grain_min_kelvin"] = info.thermal_grain_min_kelvin;
+        d["thermal_grain_mean_kelvin"] = info.thermal_grain_mean_kelvin;
+        d["thermal_grain_max_kelvin"] = info.thermal_grain_max_kelvin;
+        d["thermal_grain_heat_to_liquid_j"] = info.thermal_grain_heat_to_liquid_j;
+        d["thermal_grain_heat_to_gas_j"] = info.thermal_grain_heat_to_gas_j;
+        d["thermal_grain_heat_to_walls_j"] = info.thermal_grain_heat_to_walls_j;
+        d["thermal_grain_energy_residual_j"] = info.thermal_grain_energy_residual_j;
+        d["thermal_grain_ms"] = info.thermal_grain_ms;
         d["thermal_contact_cooled_particles"] = info.thermal_contact_cooled_particles;
         d["thermal_min_kelvin"] = info.thermal_min_kelvin;
         d["thermal_mean_kelvin"] = info.thermal_mean_kelvin;
@@ -2614,11 +2646,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         rtapi::FluidThermalPatch thermal_patch;
         bool has_thermal_patch = false;
         if(kwargs.contains("thermal_liquid_enabled")){thermal_patch.enabled=py::cast<bool>(kwargs["thermal_liquid_enabled"]);has_thermal_patch=true;}
-        if(kwargs.contains("thermal_air_cooling_rate")){thermal_patch.air_cooling_rate=py::cast<float>(kwargs["thermal_air_cooling_rate"]);has_thermal_patch=true;}
+        if(kwargs.contains("thermal_air_cooling_rate")||kwargs.contains("thermal_contact_cooling_rate")){
+            throw std::runtime_error("thermal_air_cooling_rate / thermal_contact_cooling_rate were removed: walls and air are films against each parcel's heat capacity (500 / 20 W/(m^2 K)); a Thermal field's strength is forcefield thermal_rate_per_s. The old 1/s rates have no successor.");
+        }
         if(kwargs.contains("fog_autoconversion_kg_m3")){thermal_patch.fog_autoconversion_kg_m3=py::cast<float>(kwargs["fog_autoconversion_kg_m3"]);has_thermal_patch=true;}
         if(kwargs.contains("fog_autoconversion_rate")){thermal_patch.fog_autoconversion_rate=py::cast<float>(kwargs["fog_autoconversion_rate"]);has_thermal_patch=true;}
         if(kwargs.contains("fog_ceiling_kg_m3")){thermal_patch.fog_ceiling_kg_m3=py::cast<float>(kwargs["fog_ceiling_kg_m3"]);has_thermal_patch=true;}
-        if(kwargs.contains("thermal_contact_cooling_rate")){thermal_patch.contact_cooling_rate=py::cast<float>(kwargs["thermal_contact_cooling_rate"]);has_thermal_patch=true;}
 
         requireResult(rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_vs, p_rm, p_dev, p_bound, p_substance, p_sweeps, p_slip, p_surf_mat,
                                                p_surface_offset,
@@ -3554,6 +3587,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["mass_negative"] = f.mass_negative;
             d["mass_invalid_elements"] = f.mass_invalid_elements;
             d["temperature_valid"] = f.temperature_valid;
+            d["temperature_fresh"] = f.temperature_fresh;
             d["mean_kelvin"] = f.mean_kelvin;
             d["min_kelvin"] = f.min_kelvin;
             d["max_kelvin"] = f.max_kelvin;

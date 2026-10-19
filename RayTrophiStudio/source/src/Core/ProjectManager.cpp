@@ -5918,11 +5918,9 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"default_substance", domain.fluid_params.default_substance},
             {"granular_max_solver_substeps", domain.fluid_params.granular_max_solver_substeps},
             {"thermal_liquid_enabled", domain.fluid_params.thermal_liquid_enabled},
-            {"thermal_air_cooling_rate", domain.fluid_params.thermal_air_cooling_rate},
             {"fog_autoconversion_kg_m3", domain.fluid_params.fog_autoconversion_kg_m3},
             {"fog_autoconversion_rate", domain.fluid_params.fog_autoconversion_rate},
             {"fog_ceiling_kg_m3", domain.fluid_params.fog_ceiling_kg_m3},
-            {"thermal_contact_cooling_rate", domain.fluid_params.thermal_contact_cooling_rate},
             {"flammable", domain.fluid_flammable},
             {"extinguishing", domain.fluid_extinguishing},
             {"auto_ignite", domain.fluid_auto_ignite},
@@ -6487,11 +6485,9 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             // domain).
             domain.fluid_params.granular_max_solver_substeps = f.value("granular_max_solver_substeps", domain.fluid_params.granular_max_solver_substeps);
             domain.fluid_params.thermal_liquid_enabled = f.value("thermal_liquid_enabled", domain.fluid_params.thermal_liquid_enabled);
-            domain.fluid_params.thermal_air_cooling_rate = f.value("thermal_air_cooling_rate", domain.fluid_params.thermal_air_cooling_rate);
             domain.fluid_params.fog_autoconversion_kg_m3 = f.value("fog_autoconversion_kg_m3", domain.fluid_params.fog_autoconversion_kg_m3);
             domain.fluid_params.fog_autoconversion_rate = f.value("fog_autoconversion_rate", domain.fluid_params.fog_autoconversion_rate);
             domain.fluid_params.fog_ceiling_kg_m3 = f.value("fog_ceiling_kg_m3", domain.fluid_params.fog_ceiling_kg_m3);
-            domain.fluid_params.thermal_contact_cooling_rate = f.value("thermal_contact_cooling_rate", domain.fluid_params.thermal_contact_cooling_rate);
             domain.fluid_params.sanitizeThermalLiquid();
             // ★ The material. A file written before 2026-10-07 has no
             // default_substance; it stored a FluidPreset/FluidChemistryPreset

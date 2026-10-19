@@ -3627,6 +3627,9 @@ struct ForceFieldInfo {
     // by the falloff. A Thermal field exerts no force at all — it drives Material
     // State Field surface heating (ignition, char, incandescence) only.
     float thermal_delta_kelvin = 600.0f;
+    // thermal: relaxation rate toward ambient + delta inside the field (1/s),
+    // for matter parcels and MSF surfaces alike.
+    float thermal_rate_per_s = 2.0f;
 
     // Wind -> APIC liquid coupling. With the drag model on, `strength` is read
     // as the TARGET surface speed (m/s) rather than an acceleration, and only
@@ -4598,8 +4601,6 @@ struct FluidDomainInfo {
     // See APICSolverParams::thermal_* and FluidThermalLiquid.h. Written through
     // setFluidThermal.
     bool  thermal_liquid_enabled = false;
-    float thermal_air_cooling_rate = 0.15f;
-    float thermal_contact_cooling_rate = 2.0f;
     // Fog water microphysics of the domain's air (APICSolverParams::fog_*):
     // kg/m^3 autoconversion onset, 1/s rate, kg/m^3 hard ceiling.
     float fog_autoconversion_kg_m3 = 1.0e-3f;
@@ -4633,10 +4634,24 @@ struct FluidDomainInfo {
     uint64_t thermal_condensation_splits = 0;    // parcels grown past 2x mass and split
     uint64_t thermal_solid_contact_particles = 0; // parcels trading heat with MSF surfaces
     double   thermal_heat_to_solid_j = 0.0;        // net liquid -> surfaces this step
+    double   thermal_heat_to_ambient_j = 0.0;      // walls + outside air (films) this step
     // Contact-weighted temperatures the touching parcels saw (K, 0 = none).
     double   thermal_contact_shell_kelvin = 0.0;
     double   thermal_contact_parcel_kelvin = 0.0;
     uint64_t thermal_contact_shell_cells = 0;
+    // Grain carriers in the thermal chain (2026-10-19, MatterGrainThermal).
+    // thermal_grain_measured false: no grains or the pass did not run.
+    bool     thermal_grain_measured = false;
+    uint64_t thermal_grain_count = 0;
+    uint64_t thermal_grain_wetted = 0;
+    float    thermal_grain_min_kelvin = 0.0f;
+    float    thermal_grain_mean_kelvin = 0.0f;
+    float    thermal_grain_max_kelvin = 0.0f;
+    double   thermal_grain_heat_to_liquid_j = 0.0;
+    double   thermal_grain_heat_to_gas_j = 0.0;
+    double   thermal_grain_heat_to_walls_j = 0.0;
+    double   thermal_grain_energy_residual_j = 0.0;
+    float    thermal_grain_ms = 0.0f;
     uint64_t thermal_contact_cooled_particles = 0;
     float    thermal_min_kelvin = 0.0f;
     float    thermal_mean_kelvin = 0.0f;
@@ -4690,8 +4705,6 @@ struct FluidSurfaceDetailPatch {
 
 struct FluidThermalPatch {
     std::optional<bool>  enabled;
-    std::optional<float> air_cooling_rate;       // 1/s
-    std::optional<float> contact_cooling_rate;   // 1/s
     std::optional<float> fog_autoconversion_kg_m3;   // 0..1000 kg/m^3
     std::optional<float> fog_autoconversion_rate;    // 0..100 1/s
     std::optional<float> fog_ceiling_kg_m3;          // 0..1000 kg/m^3
@@ -5151,6 +5164,12 @@ struct MaterialFieldInfo {
     // Element temperature (Kelvin) from the last host readback; valid=false
     // until one has landed, so a missing copy never reads as "293 K".
     bool temperature_valid = false;
+    // ★ valid says a copy EXISTS, not that it is current: an empty domain
+    // requests no readback, so the copy can date from the field's creation
+    // (Ek 11, 2026-10-19: 293.7 K reported while the shell was at 390 K).
+    // fresh = taken after the last device dispatch. Every msf.fields call
+    // requests the next one, so a stale read heals after one step.
+    bool temperature_fresh = false;
     float mean_kelvin = 0.0f;
     float min_kelvin = 0.0f;
     float max_kelvin = 0.0f;

@@ -148,12 +148,15 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
 
 // DEM owners are selected from each substance's granular_transport, then
 // sorted by identity. `liquid` is the continuum lane (fluid and, without DEM
-// carriers, MPM). MPM + DEM is held until their contact stage exists. Missing
-// sidecars, frozen/elastic carriers and invalid wet ownership reject the step.
+// carriers, MPM). MPM + DEM is held until their contact stage exists.
+// `held` (2026-10-19): frozen liquid parcels. No lane moves them - they are
+// pinned ice the liquid already sees as the solid-phase overlay - and they
+// return unchanged at the merge; the thermal chain melts them in place.
+// Missing sidecars, elastic carriers and invalid wet ownership reject the step.
 bool partitionMatterGrainOwners(const FluidParticles& particles, const APICSolverParams& params,
     bool legacy_granular,
     bool wet_grains, std::vector<std::size_t>& liquid, std::vector<std::size_t>& grains,
-    std::string& error);
+    std::vector<std::size_t>& held, std::string& error);
 
 // B8: orders grain indices by the Morton code of their contact cell (size
 // `cell`, from `origin`), ties by identity. Neighbours then sit close in the
@@ -169,10 +172,10 @@ float orderMatterGrainsByCell(const FluidParticles& particles, const Vec3& origi
 FluidParticles selectMatterParticles(const FluidParticles& particles,
     const std::vector<std::size_t>& order);
 
-// particles := [liquid..., grains...]. Both subsets must be the full
-// population (no births or removals); the merged order is stable frame to
-// frame, so the next partition is the identity permutation.
+// particles := [liquid..., grains..., held...]. Together the subsets must be
+// the full population (no births or removals); the merged order is stable
+// frame to frame, so the next partition is the identity permutation.
 bool mergeMatterGrainOwners(FluidParticles& particles, const FluidParticles& liquid,
-    const FluidParticles& grains, std::string& error);
+    const FluidParticles& grains, const FluidParticles& held, std::string& error);
 
 } // namespace RayTrophiSim::Fluid

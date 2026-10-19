@@ -1258,9 +1258,9 @@ private:
             // into the gas fields and clears them (8 SSBO, 32B).
             // 80B since Phase 5: material2 carries water's boiling point in
             // normalized units, which is what pins a wet surface's temperature.
-            { "sim_msf_gather",                     "sim_msf_gather.spv",                   4, 80 },
+            { "sim_msf_gather",                     "sim_msf_gather.spv",                   7, 112 },
             { "sim_msf_scatter",                    "sim_msf_scatter.spv",                  7, 48 },
-            { "sim_msf_resolve",                    "sim_msf_resolve.spv",                  8, 32 },
+            { "sim_msf_resolve",                    "sim_msf_resolve.spv",                  9, 32 },
             // Ambient / boundary-condition pass (Phase 4). Runs once per frame
             // outside the domain loop, so it needs no gas bindings at all:
             // centers + state + thermal sources + domain ambient zones (4 SSBO,

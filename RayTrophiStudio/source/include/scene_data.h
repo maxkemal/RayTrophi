@@ -4111,11 +4111,9 @@ struct SceneData {
         // Thermal liquid: every dial changes what freezes where, so a bake made
         // under other values no longer describes this liquid.
         h = mix(h, fp.thermal_liquid_enabled ? 1ull : 0ull);
-        h = mix(h, fb(fp.thermal_air_cooling_rate));
         h = mix(h, fb(fp.fog_autoconversion_kg_m3));
         h = mix(h, fb(fp.fog_autoconversion_rate));
         h = mix(h, fb(fp.fog_ceiling_kg_m3));
-        h = mix(h, fb(fp.thermal_contact_cooling_rate));
         // The freeze curve is the Default Substance's (no domain copy). The
         // substance API invalidates on edit; hashing it here keeps a panel
         // edit honest too.
@@ -4376,6 +4374,7 @@ struct SceneData {
                 h = mix(h, static_cast<uint64_t>(ff->shape));
                 h = mix(h, static_cast<uint64_t>(ff->falloff_type));
                 h = mix(h, qf(ff->thermal_delta_kelvin));
+                h = mix(h, qf(ff->thermal_rate_per_s));
                 h = mix(h, qf(ff->position.x)); h = mix(h, qf(ff->position.y)); h = mix(h, qf(ff->position.z));
                 h = mix(h, qf(ff->falloff_radius)); h = mix(h, qf(ff->inner_radius));
                 h = mix(h, qf(ff->start_frame)); h = mix(h, qf(ff->end_frame));

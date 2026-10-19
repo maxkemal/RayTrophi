@@ -766,9 +766,10 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
 bool partitionMatterGrainOwners(const FluidParticles& p, const APICSolverParams& params,
     bool legacy_granular,
     bool wet_grains, std::vector<std::size_t>& liquid, std::vector<std::size_t>& grains,
-    std::string& error) {
+    std::vector<std::size_t>& held, std::string& error) {
     liquid.clear();
     grains.clear();
+    held.clear();
     const std::size_t count = p.size();
     if (p.particle_id.size() != count || p.constitutive_model.size() != count ||
         p.pore_water_mass_kg.size() != count) {
@@ -782,8 +783,15 @@ bool partitionMatterGrainOwners(const FluidParticles& p, const APICSolverParams&
     }
     for (std::size_t i = 0; i < count; ++i) {
         const auto model = static_cast<MatterConstitutiveModel>(p.constitutive_model[i]);
-        if (isFrozenParticle(p, i) || model == MatterConstitutiveModel::Elastic) {
-            error = "grain domain carries a frozen/elastic carrier; no transport owner accepts it";
+        // ★ Frozen liquid is ice that no lane moves (2026-10-19). It used to
+        // refuse the whole step, so a grain domain could not freeze at all and
+        // its water was made to supercool instead.
+        if (isFrozenParticle(p, i)) {
+            held.push_back(i);
+            continue;
+        }
+        if (model == MatterConstitutiveModel::Elastic) {
+            error = "grain domain carries an elastic carrier; no transport owner accepts it";
             return false;
         }
         if (isGranular(p, i, legacy_granular)) {
@@ -876,9 +884,10 @@ FluidParticles selectMatterParticles(const FluidParticles& particles,
 }
 
 bool mergeMatterGrainOwners(FluidParticles& particles, const FluidParticles& liquid,
-                            const FluidParticles& grains, std::string& error) {
-    const std::size_t nl = liquid.size(), ng = grains.size();
-    if (nl + ng != particles.size()) {
+                            const FluidParticles& grains, const FluidParticles& held,
+                            std::string& error) {
+    const std::size_t nl = liquid.size(), ng = grains.size(), nh = held.size();
+    if (nl + ng + nh != particles.size()) {
         error = "grain/liquid merge: an owner changed the carrier count";
         return false;
     }
@@ -887,7 +896,7 @@ bool mergeMatterGrainOwners(FluidParticles& particles, const FluidParticles& liq
     MatterParticleIdIndex index;
     std::vector<uint8_t> returned(particles.size(), 0);
     bool same = index.build(particles.particle_id);
-    for (const auto* subset : {&liquid, &grains}) {
+    for (const auto* subset : {&liquid, &grains, &held}) {
         for (std::size_t k = 0; same && k < subset->size(); ++k) {
             const uint32_t at = k < subset->particle_id.size()
                 ? index.find(subset->particle_id[k]) : MatterParticleIdIndex::kMissing;
@@ -903,6 +912,7 @@ bool mergeMatterGrainOwners(FluidParticles& particles, const FluidParticles& liq
     }
     particles.copyRangeFrom(0, liquid);
     particles.copyRangeFrom(nl, grains);
+    if (nh > 0) particles.copyRangeFrom(nl + ng, held);
     error.clear();
     return true;
 }

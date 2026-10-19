@@ -7,6 +7,7 @@
 #include "Fluid/MatterGrainBirth.h"
 #include "Fluid/MatterGrainCoupling.h"
 #include "Fluid/MatterGrainGasCoupling.h"
+#include "Fluid/MatterGrainThermal.h"
 #include "Fluid/MatterGrainMpmContact.h"
 #include "Fluid/MatterCommonClock.h"
 #include "Fluid/MatterGrainFluidGpuCoupling.h"
@@ -103,6 +104,7 @@ void collectThermalSources(
         src.inner_radius = std::max(0.0f, field->inner_radius);
         src.falloff_radius = std::max(src.inner_radius + 1e-4f, field->falloff_radius);
         src.delta_kelvin = field->thermal_delta_kelvin;
+        src.rate_per_s = std::max(0.0f, field->thermal_rate_per_s);
         src.falloff_type = static_cast<float>(static_cast<int>(field->falloff_type));
         src.infinite = field->shape == Physics::ForceFieldShape::Infinite ? 1.0f : 0.0f;
         const Matrix4x4 to_local = field->worldToLocalMatrix();
@@ -7439,13 +7441,19 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     ambient_ceiling =
                         std::max(ambient_ceiling, domain.fire_max_temperature);
                 }
-                if (!domain.thermal_override_enabled) continue;
+                // A gas lane is the box's own air: sim_msf_gather trades the
+                // surface film with it, so the ambient pass must not add a second
+                // one against the room (2026-10-19).
+                const bool gas_air = domain.enabled && simulationDomainHasGas(domain.type);
+                if (!domain.thermal_override_enabled && !gas_air) continue;
                 MaterialStateFieldSystem::AmbientZone zone;
                 const Vec3 mn = grid_domain_states_[d].bounds_min;
                 const Vec3 mx = grid_domain_states_[d].bounds_max;
                 zone.bounds_min[0] = mn.x; zone.bounds_min[1] = mn.y; zone.bounds_min[2] = mn.z;
                 zone.bounds_max[0] = mx.x; zone.bounds_max[1] = mx.y; zone.bounds_max[2] = mx.z;
-                zone.ambient_kelvin = domain.thermal_ambient_kelvin;
+                zone.ambient_kelvin = domain.thermal_override_enabled
+                    ? domain.thermal_ambient_kelvin : 0.0f;
+                zone.gas_air = gas_air ? 1.0f : 0.0f;
                 ambient_zones.push_back(zone);
             }
 
@@ -8094,6 +8102,15 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 gas.accum_density = gpu_buffers->msf_accum_density;
                 gas.accum_heat = gpu_buffers->msf_accum_heat;
                 gas.accum_flame = gpu_buffers->msf_accum_flame;
+                gas.accum_convect = gpu_buffers->msf_accum_convect;
+                // P2: the film reads the air's T from Tv with the domain's own
+                // vapour (device inventory; a host-owned pool reads as dry).
+                if (i < grid_domains_.size()) {
+                    const auto air = Fluid::gasCombustionAir(grid_domains_[i], state, world_thermal_);
+                    gas.vapour = Fluid::gasCombustionVapourBuffer(state);
+                    gas.vapour_molar = air.vapour_molar;
+                    gas.cell_volume = air.cell_volume;
+                }
                 // Oxygen is a boundary condition, so the domain overrides the
                 // world inside its own box. It can only throttle pyrolysis, never
                 // start it.
@@ -9837,6 +9854,7 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.msf_accum_density);
     destroy(buffers.msf_accum_heat);
     destroy(buffers.msf_accum_flame);
+    destroy(buffers.msf_accum_convect);
     destroy(buffers.cg_residual);
     destroy(buffers.cg_z);
     destroy(buffers.cg_search);
@@ -10050,6 +10068,15 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
         ensureComputeBuffer(compute, buffers.msf_accum_density, "GridDomainMsfAccumDensity", accum_bytes, usage);
         ensureComputeBuffer(compute, buffers.msf_accum_heat, "GridDomainMsfAccumHeat", accum_bytes, usage);
         ensureComputeBuffer(compute, buffers.msf_accum_flame, "GridDomainMsfAccumFlame", accum_bytes, usage);
+        const bool initialize_convect =
+            initialize_accum || !buffers.msf_accum_convect.valid() ||
+            compute.getBufferSize(buffers.msf_accum_convect) < accum_bytes;
+        ensureComputeBuffer(compute, buffers.msf_accum_convect, "GridDomainMsfAccumConvect", accum_bytes, usage);
+        if (initialize_convect && buffers.msf_accum_convect.valid()) {
+            const std::vector<uint32_t> zeros(cell_count, 0u);
+            compute.uploadBuffer(buffers.msf_accum_convect, zeros.data(),
+                                 zeros.size() * sizeof(uint32_t));
+        }
         if (initialize_accum && buffers.msf_accum_fuel.valid()) {
             // Sized by the live cell count, not the (grow-only) allocation.
             const std::vector<uint32_t> zeros(cell_count, 0u);

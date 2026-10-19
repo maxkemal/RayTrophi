@@ -9,7 +9,7 @@ layout(local_size_x = 256) in;
 
 layout(push_constant) uniform PC {
     ivec4 dim;       // nx, ny, nz, cell_count
-    vec4  params;    // fixed_point_scale, max_temperature, unused, unused
+    vec4  params;    // fixed_point_scale, max_temperature, convect fixed point, min_temperature
 } pc;
 
 layout(set=0, binding=0) buffer Density     { float density[]; };
@@ -20,6 +20,9 @@ layout(set=0, binding=4) buffer AccumFuel    { uint accum_fuel[]; };
 layout(set=0, binding=5) buffer AccumDensity { uint accum_density[]; };
 layout(set=0, binding=6) buffer AccumHeat    { uint accum_heat[]; };
 layout(set=0, binding=7) buffer AccumFlame   { uint accum_flame[]; };
+// Signed surface<->air film heat from sim_msf_gather (normalized temperature
+// change of the cell, 1/params.z units).
+layout(set=0, binding=8) buffer AccumConvect { int accum_convect[]; };
 
 void main() {
     uint id = gl_GlobalInvocationID.x;
@@ -29,13 +32,19 @@ void main() {
     uint d = accum_density[id];
     uint h = accum_heat[id];
     uint fl = accum_flame[id];
-    if ((f | d | h | fl) == 0u) return;
+    int cv = accum_convect[id];
+    if ((f | d | h | fl) == 0u && cv == 0) return;
 
     float inv = 1.0 / max(pc.params.x, 1.0);
     fuel[id]        = max(0.0, fuel[id] + float(f) * inv);
     density[id]     = max(0.0, density[id] + float(d) * inv);
-    temperature[id] = clamp(temperature[id] + float(h) * inv, 0.0, pc.params.y);
+    // ★ The floor is 1 K (params.w), not normalized 0: a surface colder than
+    // the calibration zero cools its air below it, and the old clamp at 0
+    // handed that air back the heat it had just given the surface.
+    float conv = float(cv) / max(pc.params.z, 1.0);
+    temperature[id] = clamp(temperature[id] + float(h) * inv + conv, pc.params.w, pc.params.y);
     flame[id]       = max(flame[id], float(fl) * inv);
+    accum_convect[id] = 0;
 
     accum_fuel[id] = 0u;
     accum_density[id] = 0u;

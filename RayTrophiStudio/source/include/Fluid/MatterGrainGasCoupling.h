@@ -22,6 +22,12 @@ struct MatterGrainGasAir {
     float ambient_kelvin = 293.15f;  // K at gas_ambient
     float gas_ambient = 0.0f;        // normalized field value of the ambient
     float kelvin_per_unit = 0.0f;
+    // Heat films need the air's T, not Tv (P2, 2026-10-19). Host vapour per
+    // cell; null (device-owned inventory, or no condensable vapour) = dry air.
+    const float* vapour_kg = nullptr;
+    std::size_t vapour_cells = 0;
+    float vapour_molar = 0.0f;
+    float cell_volume = 0.0f;
 };
 
 // One frame of grain <-> gas drag, staggered like the liquid coupling: the gas

@@ -63,8 +63,6 @@ const std::vector<FieldAccess>& fieldTable() {
         RT_FLOAT(specific_heat, 1.0f, 1.0e5f, "J/(kg K)", "Thermal"),
         RT_FLOAT(conductivity, 0.0f, 1000.0f, "W/(m K)", "Thermal"),
         RT_FLOAT(emissivity, 0.0f, 1.0f, "", "Thermal"),
-        RT_FLOAT(thermal_response, 0.0f, 100.0f, "1/s", "Thermal"),
-        RT_FLOAT(cooling_rate, 0.0f, 10.0f, "1/s", "Thermal"),
         RT_FLOAT(liquid_density, 1.0f, 30000.0f, "kg/m^3", "Liquid"),
         RT_FLOAT(liquid_kinematic_viscosity, 0.0f, 1000.0f, "m^2/s", "Liquid"),
         RT_FLOAT(absorbency, 0.0f, 1.0f, "", "Moisture"),
@@ -143,8 +141,6 @@ const std::vector<FieldAccess>& fieldTable() {
         RT_FLOAT(solver_internal_friction, 0.0f, 100.0f, "1/s", "Solver hints"),
         RT_FLOAT(solver_granular_max_substeps, 1.0f, 64.0f, "", "Solver hints"),
         RT_BOOL(solver_thermal_chain, "Solver hints"),
-        RT_FLOAT(solver_air_cooling_rate, 0.0f, 100.0f, "1/s", "Solver hints"),
-        RT_FLOAT(solver_contact_cooling_rate, 0.0f, 100.0f, "1/s", "Solver hints"),
         FieldAccess{{"char_color", Kind::Color, 0.0f, 1.0f, "", "Optical"}},
         RT_FLOAT(molten_emission, 0.0f, 100.0f, "", "Optical"),
     };
@@ -159,9 +155,26 @@ const std::vector<FieldAccess>& fieldTable() {
 // "unknown field": the old value has no meaning to translate into.
 //   dry_rate (2026-10-18): drying is the open-pan evaporation flux paying its
 //   latent heat; a per-material rate on a 0..1 moisture has no successor.
-bool retiredField(const std::string& key) {
-    return key == "dry_rate";
+//   thermal_response (2026-10-19): the surface trades heat with the gas through
+//   a film against its body capacity (density, specific_heat, conductivity);
+//   a "follow the gas at N 1/s" rate has no successor.
+//   cooling_rate, solver_air/contact_cooling_rate (2026-10-19): capacity-free
+//   relaxation toward an ambient thermostat; replaced by films.
+const char* retiredFieldReason(const std::string& key) {
+    if (key == "dry_rate")
+        return "drying is now physical evaporation; set water_capacity_kg_m2 instead";
+    if (key == "thermal_response")
+        return "surface heating is now a film against the body's heat capacity; "
+               "set density, specific_heat or conductivity instead";
+    if (key == "cooling_rate")
+        return "surfaces cool through an air film against their body's capacity; "
+               "set density, specific_heat, emissivity or the world convection";
+    if (key == "solver_air_cooling_rate" || key == "solver_contact_cooling_rate")
+        return "liquid walls and air are films against each parcel's capacity "
+               "(500 / 20 W/(m^2 K)); a Thermal field's strength is its rate_per_s";
+    return nullptr;
 }
+bool retiredField(const std::string& key) { return retiredFieldReason(key) != nullptr; }
 
 const FieldAccess* findField(const std::string& key) {
     for (const auto& field : fieldTable()) {
@@ -384,7 +397,7 @@ bool publish(Library& lib, std::vector<ProjectSubstance> project, std::string& e
         for (auto it = item.overrides.begin(); it != item.overrides.end();) {
             if (retiredField(it.key())) {
                 SCENE_LOG_WARN("[Substance] '" + item.name + "': retired field '" + it.key() +
-                               "' dropped (drying is now physical evaporation)");
+                               "' dropped (" + std::string(retiredFieldReason(it.key())) + ")");
                 it = item.overrides.erase(it);
             } else {
                 ++it;
@@ -539,9 +552,9 @@ bool patchSubstance(const std::string& name, const json& fields, std::string& er
     }
     for (const auto& [key, value] : fields.items()) {
         if (!findField(key)) {
-            error = retiredField(key)
-                ? "substance field '" + key + "' was retired (drying is now physical "
-                  "evaporation; set water_capacity_kg_m2 instead)"
+            const char* reason = retiredFieldReason(key);
+            error = reason
+                ? "substance field '" + key + "' was retired (" + std::string(reason) + ")"
                 : "unknown substance field '" + key + "'";
             return false;
         }

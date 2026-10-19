@@ -42,9 +42,7 @@ def main():
             thermal_freeze_kelvin=400.0)
         client.call(
             "fluid.set_param", domain=fluid, default_substance=material,
-            thermal_liquid_enabled=True,
-            thermal_air_cooling_rate=0.0,
-            thermal_contact_cooling_rate=0.0)
+            thermal_liquid_enabled=True)
         client.call(
             "fluid.seed", domain=fluid,
             seed_min=[30.2, 0.01, 0.2], seed_max=[30.8, 0.18, 0.8],
