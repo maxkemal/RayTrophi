@@ -4152,6 +4152,10 @@ struct SceneData {
         h = mix(h, d.fluid_reseed_on_reset ? 1ull : 0ull);
         h = mix(h, fb(d.fluid_fill_level));
         h = mix(h, fb(d.fluid_fill_wall_margin));
+        // A settled seed is a different initial state (MatterSeedSettle).
+        h = mix(h, d.fluid_seed_settle ? 1ull : 0ull);
+        h = mix(h, static_cast<uint64_t>(d.fluid_settle_max_steps));
+        h = mix(h, fb(d.fluid_settle_speed_m_s));
 
         // Liquid -> gas combustion coupling: all authored, all change the solve.
         h = mix(h, d.fluid_flammable ? 1ull : 0ull);

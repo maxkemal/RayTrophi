@@ -335,6 +335,15 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
             Fluid::initializeMatterBirthModels(
                 state.particles, seed_begin, domain.fluid_params);
             domain.fluid_pending_seed = false;
+            // The seed lattice is not an equilibrium; relax it before t = 0.
+            if (domain.fluid_seed_settle && state.particles.size() > seed_begin) {
+                state.settle_stats.pending = true;
+            }
+        }
+        if (simulationDomainHasLiquid(domain.type) &&
+            domain.fluid_pending_settle && state.valid) {
+            state.settle_stats.pending = !state.particles.empty();
+            domain.fluid_pending_settle = false;
         }
     }
 }

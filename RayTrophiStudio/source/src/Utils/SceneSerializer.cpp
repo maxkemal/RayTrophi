@@ -415,6 +415,9 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_combustion_smoke_yield"] = d.fluid_combustion_smoke_yield;
     j["fluid_surface_cooling"] = d.fluid_surface_cooling;
     j["fluid_fill_wall_margin"] = d.fluid_fill_wall_margin;
+    j["fluid_seed_settle"] = d.fluid_seed_settle;
+    j["fluid_settle_max_steps"] = d.fluid_settle_max_steps;
+    j["fluid_settle_speed_m_s"] = d.fluid_settle_speed_m_s;
     j["fluid_render_mode"] = (int)d.fluid_render_mode;
     j["fluid_fog_spread_voxels"] = d.fluid_fog_spread_voxels;
     j["fluid_fog_erosion_strength"] = d.fluid_fog_erosion_strength;
@@ -632,6 +635,9 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_combustion_smoke_yield")) d.fluid_combustion_smoke_yield = j["fluid_combustion_smoke_yield"];
     if (j.contains("fluid_surface_cooling")) d.fluid_surface_cooling = j["fluid_surface_cooling"];
     if (j.contains("fluid_fill_wall_margin")) d.fluid_fill_wall_margin = j["fluid_fill_wall_margin"];
+    if (j.contains("fluid_seed_settle")) d.fluid_seed_settle = j["fluid_seed_settle"];
+    if (j.contains("fluid_settle_max_steps")) d.fluid_settle_max_steps = j["fluid_settle_max_steps"];
+    if (j.contains("fluid_settle_speed_m_s")) d.fluid_settle_speed_m_s = j["fluid_settle_speed_m_s"];
     if (j.contains("fluid_render_mode")) d.fluid_render_mode = RayTrophiSim::Fluid::fluidRenderModeFromStored(j["fluid_render_mode"].get<int>());
     if (j.contains("fluid_fog_spread_voxels")) d.fluid_fog_spread_voxels = j["fluid_fog_spread_voxels"];
     d.fluid_fog_erosion_strength = j.value("fluid_fog_erosion_strength", d.fluid_fog_erosion_strength);

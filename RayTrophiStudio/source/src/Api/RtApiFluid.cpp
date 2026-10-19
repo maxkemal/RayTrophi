@@ -159,11 +159,41 @@ const RayTrophiSim::Fluid::LevelSetStats* findFluidSurfaceStats(
 // What the view resolver decided for this domain, per view, with the volume
 // each view is published on. The same plan the volume route, the splat bridge
 // and the panel read, so a script can compare it with the picture.
+void fillFluidSettle(const RayTrophiSim::SimulationGridDomainDesc& d,
+                     const RayTrophiSim::SimulationGridDomainState* state,
+                     FluidDomainInfo& info) {
+    info.settle_on_seed = d.fluid_seed_settle;
+    info.settle_max_steps = d.fluid_settle_max_steps;
+    info.settle_speed_m_s = d.fluid_settle_speed_m_s;
+    if (!state) return;
+    const auto& st = state->settle_stats;
+    info.settle_pending = st.pending || d.fluid_pending_settle;
+    info.settle_ran = st.ran;
+    info.settle_converged = st.converged;
+    info.settle_steps = st.steps;
+    info.settle_particles = static_cast<uint64_t>(st.particles);
+    info.settle_first_speed_m_s = st.first_speed_m_s;
+    info.settle_residual_speed_m_s = st.residual_speed_m_s;
+    info.settle_ms = st.ms;
+    double speed_sum = 0.0;
+    float speed_max = 0.0f;
+    for (const auto& v : state->particles.velocity) {
+        const float speed = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+        speed_sum += speed;
+        speed_max = std::max(speed_max, speed);
+    }
+    const auto n = state->particles.velocity.size();
+    info.live_max_speed_m_s = speed_max;
+    info.live_mean_speed_m_s = n ? static_cast<float>(speed_sum / double(n)) : 0.0f;
+}
+
 void fillFluidViews(const RayTrophiSim::SimulationGridDomainDesc& d,
                     const RayTrophiSim::ParticleSimulationSystem* sys, std::size_t index,
                     const RayTrophiSim::SimulationGridDomainState* state,
                     FluidDomainInfo& info) {
     using RayTrophiSim::Fluid::FluidView;
+    // Every domain read goes through here with its desc and state.
+    fillFluidSettle(d, state, info);
     info.views.clear();
     info.views_measured = false;
     info.particle_labels = RayTrophiSim::Fluid::inspectParticleLabels(state);
@@ -2186,6 +2216,35 @@ Result clearFluidParticles(const std::string& domain_id_or_name,
         return Result::fail("fluid domain not found: " + info.name);
     invalidateScriptSimulation();
     g_ctx->scene.preserveScriptSimulationPreview();
+    return Result::success();
+}
+
+Result settleFluidDomain(const std::string& domain_id_or_name, const bool* on_seed,
+                         const int* max_steps, const float* speed_m_s, bool request) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (max_steps && *max_steps < 1) return Result::fail("max_steps must be >= 1");
+    if (speed_m_s && !(*speed_m_s >= 0.0f)) return Result::fail("speed_m_s must be >= 0");
+
+    rtapi::FluidDomainInfo info;
+    if (!getFluidDomain(domain_id_or_name, info).ok) {
+        return Result::fail("fluid domain not found: " + domain_id_or_name);
+    }
+    // No invalidation: the request acts on the live particles (a bed poured
+    // by sources); the settings are hashed with the domain like any other.
+    const auto active_runtime = g_ctx->scene.getParticleSimulationSystem();
+    bool done = active_runtime &&
+        active_runtime->configureFluidDomainSettle(info.name, on_seed, max_steps,
+                                                   speed_m_s, request);
+    for (auto& system : g_ctx->scene.particle_systems) {
+        if (done) break;
+        if (system.runtime && system.runtime != active_runtime &&
+            system.runtime->configureFluidDomainSettle(info.name, on_seed, max_steps,
+                                                       speed_m_s, request)) {
+            done = true;
+        }
+    }
+    if (!done) return Result::fail("authoritative fluid grid domain not found: " + info.name);
     return Result::success();
 }
 

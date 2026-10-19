@@ -6935,6 +6935,8 @@ void ParticleSimulationSystem::synchronizeGridDomainsNow() {
 
 #include "Fluid/MatterDomainSources.inl"
 
+#include "Fluid/MatterSeedSettle.inl"
+
 void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context) {
     matter_exchange_ledger_.beginStep(++matter_exchange_step_);
     if (grid_domains_.empty()) {
@@ -6963,7 +6965,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
     // Same lifetime as coupling_trace_: describes THIS step only.
     kinematic_stamp_log_.clear();
     ++kinematic_stamp_steps_;
-    if (kinematic_collider_provider_) {
+    if (kinematic_collider_provider_ && !settling_) {
         std::string kinematic_error;
         if (kinematic_collider_provider_(
                 context.frame,
@@ -6980,7 +6982,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         std::any_of(colliders_.begin(), colliders_.end(), [](const auto& c) {
             return c.enabled && c.msf_auto_transfer;
         });
-    if (automatic_molten_transfer) {
+    if (automatic_molten_transfer && !settling_) {
         automatic_molten_readback_seconds_ += std::max(dt, 0.0f);
     } else {
         automatic_molten_readback_seconds_ = 0.0f;
@@ -7040,8 +7042,13 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         }
     }
 
+    // A fresh seed relaxes to rest before anything else moves (MatterSeedSettle).
+    if (!settling_) {
+        settleGridDomains(context);
+    }
+
     // Sources and particles deposit into the grid before it is advanced.
-    injectFlowSourcesIntoGridDomains(
+    if (!settling_) injectFlowSourcesIntoGridDomains(
         // ★ timeline_frame, not frame: these resolve KEYFRAMES, and in Live
         // Update `frame` is a free-running step counter (see SimulationContext).
         dt, context.time_seconds, context.timeline_frame, context.compute);
@@ -7071,7 +7078,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         (deposit_density_rate + deposit_temperature_rate + deposit_fuel_rate) > 0.0f ||
         any_emitter_override;
 
-    if (alive_count_ > 0 && deposit_any && std::isfinite(dt) && dt > 0.0f) {
+    if (!settling_ && alive_count_ > 0 && deposit_any && std::isfinite(dt) && dt > 0.0f) {
         const float radius = std::max(physics_settings_.particle_radius, 0.001f);
         const float size_scale = std::max(1.0f, radius * 16.0f);
         const bool  fade_with_age = physics_settings_.grid_deposit_fade_with_age;
@@ -7382,7 +7389,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
     // world layer: an object inside no domain still has a defined temperature.
     // ═══════════════════════════════════════════════════════════════════════
     bool msf_fields_live = false;
-    if (collider_mesh_resolver_ && context.compute &&
+    if (!settling_ && collider_mesh_resolver_ && context.compute &&
         context.compute->supportsDispatch()) {
         material_state_fields_.beginSyncPass();
         std::vector<SurfaceMeshTriangle> triangles;
@@ -7496,6 +7503,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         if (!state.valid) {
             continue;
         }
+        // While settling, only the settling domains step.
+        if (settling_ && !state.settle_stats.pending) {
+            continue;
+        }
         Fluid::MatterAudioFrame audio_frame(state, grid_domains_[i], dt);
 
         const bool matter_domain =
@@ -7526,7 +7537,12 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
 #define RT_FLUID_DOMAIN_STEP_CONTEXT
 #include "Fluid/FluidDomainStep.inl"
 #undef RT_FLUID_DOMAIN_STEP_CONTEXT
-                audio_frame.publishLiquid();
+                if (!settling_) audio_frame.publishLiquid();
+            }
+            if (settling_) {
+                // The gas lane and mist drag do not move during a settle.
+                if (matter_domain) liquid_scope.restore();
+                continue;
             }
             if (matter_domain) {
                 liquid_scope.restore();
@@ -8887,7 +8903,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
     if (context.compute && material_state_fields_.readbackPending()) {
         material_state_fields_.flushReadback(*context.compute);
     }
-    if (context.compute) {
+    if (context.compute && !settling_) {
         queueAutomaticMoltenMassTransfers(dt);
         processMoltenMassTransfers(*context.compute);
     }

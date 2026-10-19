@@ -325,6 +325,7 @@ uint32_t requiredCapabilities(const std::string& method) {
     if (method == "fluid.grain_settings") return Read;
     if (method == "fluid.set_pore_exchange") return SceneWrite;
     if (method == "fluid.set_grain_settings") return SceneWrite;
+    if (method == "fluid.settle") return SceneWrite;
     if (method == "physics.collider.proxy_set.list" ||
         method == "physics.collider.proxy_set.get" ||
         method == "physics.collider.proxy_set.sample" ||

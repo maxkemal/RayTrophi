@@ -1,3 +1,55 @@
+# 2026-10-19 (4. build): seed oturtma (DEM + sıvı) + sleep_transfer yatağı
+
+> **SONUÇ (canlı, 2026-10-19):** sleep_transfer **5/5 PASS**: tek katlı yatak
+> oturtuldu ve projectile doğdu. Bu koşuda iki test aracı düzeltildi:
+> `rt_grain_material` silinen kaynağı unutuyor, `save()` Windows'un geçici
+> kilidinde yeniden deniyor. contact_heat 7/7, surface_water 6/6 ve FG1 8/8
+> geçti, ama süreler arttı: 253→435 s ve 224→368 s.
+> **seed_settle FAIL 2/5.** Oturtma 240 adımda yakınsamadı. Her adım dinlenmeden
+> başlıyor ve sonunda aynı hızı veriyor: su ilk adımda da son adımda da 0.112
+> m/s, kum 0.085→0.143 m/s. Bu seed enerjisi değil, çözücünün tek adımda
+> yerçekimine verdiği tepkinin tabanı. Durma ölçütü yanlış seçildi. Açık/kapalı
+> kollar 30 karede ayırt edilemiyor: kum tepe hızı 0.154 / 0.148, su ortalaması
+> 0.215 / 0.222 m/s. ★ Duran bir tankta ortalama 0.2 m/s parsel hızı kendi
+> başına şüpheli. Ya saklanan hız projeksiyon öncesi bir değer (ölçüm sorunu),
+> ya da gerçek bir çalkantı tabanı var. Ayırt etmek için konum değişimi
+> ölçülmeli. Bir sonraki parti şunları içeriyor:
+> (1) Durma ölçütü hızdan adım başına en büyük yer değiştirmeye geçecek.
+> (2) Canlı okumaya kare başına yer değiştirme eklenecek.
+> (3) Tank tabanının kökü bulunacak.
+> Şimdilik oturtma her seed'de 240 adımın tamamını ödüyor (~0.7–1 s/seed).
+
+**Derleme:** yalnız C++ (shader yok). Yeni dosya `Fluid/MatterSeedSettle.inl`
+(vcxproj'a eklendi). Yeni IPC `fluid.settle`; `fluid.list_domains` artık
+`settle_*` ve `live_max/mean_speed_m_s` raporlar. Panel: Seed bölümünde
+"Settle Seed at Rest", iki ayar, "Settle Live Now" ve son oturtma satırı.
+
+★ Varsayılan AÇIK: her seed (Fill Domain ve Seed Box) ilk adımdan önce
+dinlenmeye oturtulur. İlk karede bir duraklama beklenir (en fazla 240
+gevşeme adımı; büyük tane sahnelerinde saniyeler sürebilir).
+
+Sıra:
+
+1. `python scripts/test/rt_matter_smoke.py --only seed_settle`: 5 kapı.
+   `docs/dev/seed_settle_live.json` özetinde üç sayı var: oturtulmuş kumun
+   tepe hızı, kontrol kolunun tepe hızı ve suyun ortalama hızı. **Bozuksa:**
+   `grains_control_moves` FAIL ise kapalı kol da duruyor, yani test duyarsız
+   (eşik mi yanlış, seed zaten mi iyi, ölç). `settle_ran` FAIL ise istek
+   state'e ulaşmadı.
+   ★ Sessizce makul görünen: `settle_converged` false olur ama kapılar geçer.
+   Bu, adım sınırına takıldı demektir; `settle_residual_speed_m_s`'e bak.
+2. `python scripts/test/rt_matter_smoke.py --only sleep_transfer`: yeni tek
+   katlı 9×3 yatak, doğumdan sonra `fluid.settle` çağrılıyor. Beklenen: dört
+   kolun PASS satırları ve "PASS revision-24 transfer". **Bozuksa:** "bed covers
+   the projectile birth site" yatağın hâlâ yayıldığını, "bed did not settle"
+   oturtmanın uyku zamanlayıcısını başlatmadığını gösterir.
+3. `python scripts/test/rt_matter_smoke.py --only contact_heat fire_steam surface_water`:
+   seed kullanan eski testler; oturtma onların başlangıcını değiştirdi. Hepsi
+   geçmeli. Süre artışı oturtmanın maliyetidir.
+
+Bilinen sınırlar: oturtma sırasında hareketli (animasyonlu) collider'lar
+örneklenmez, gaz şeridi adım atmaz ve gözenek suyu alışverişi kapatılmadı.
+
 # 2026-10-19 (3. build): P5 söküm + P6 bayat testler
 
 > **SONUÇ (canlı):** madde 1/1, FG1 8/8, `g2_dry_wet` (Soil) dört kol PASS. `sleep_transfer` FAIL, beklendiği gibi: "bed collapsed" (COM y 0.028 m, 3 kat ~0.075). Not: `g2_dry_wet` domain'ini ve iki kaynağını sahnede bırakır; ardından koşan "boş sahne" testleri onlar silinmeden başlamaz.

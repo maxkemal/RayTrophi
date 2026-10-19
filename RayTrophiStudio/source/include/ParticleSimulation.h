@@ -398,6 +398,20 @@ struct SimulationGridDomainDesc {
     FluidSeedMode fluid_seed_mode = FluidSeedMode::SeedBox;
     float fluid_fill_level = 0.5f;        // 0..1 fraction of domain height
     float fluid_fill_wall_margin = 0.0f;  // world-unit inset from the side walls
+    // Seed settle (2026-10-19): a seed is placed on a voxel sub-lattice that
+    // knows nothing of grain radius or contact load, so it starts with
+    // overlaps, gaps and an unloaded bed, and the first frames slump and
+    // splash. When fluid_seed_settle is on, the domain is relaxed to rest
+    // before t = 0 (ParticleSimulationSystem::settleGridDomains): its own
+    // steps run without advancing time, sources, heat or gas, and every
+    // velocity and spin is zeroed after each step, until the fastest
+    // carrier is below fluid_settle_speed_m_s or the step limit is reached.
+    // fluid_pending_settle asks for the same pass on the current particles
+    // (fluid.settle), e.g. a bed poured by sources.
+    bool  fluid_seed_settle = true;
+    bool  fluid_pending_settle = false;
+    int   fluid_settle_max_steps = 240;
+    float fluid_settle_speed_m_s = 0.01f;
     // Translation anchors: previous frame's domain min/max corners. We use
     // BOTH so we can distinguish translation (both corners shift by the
     // same delta → seed follows) from resize (only one corner moves → seed
@@ -1075,6 +1089,20 @@ struct SimulationGasStats {
     float  saturation_ms = 0.0f;
 };
 
+// What the last seed settle did (settleGridDomains). steps counts relaxation
+// steps; first/residual are the fastest carrier's speed after the first and
+// the last of them, before zeroing (m/s).
+struct SimulationSeedSettleStats {
+    bool  pending = false;
+    bool  ran = false;
+    bool  converged = false;
+    int   steps = 0;
+    std::size_t particles = 0;
+    float first_speed_m_s = 0.0f;
+    float residual_speed_m_s = 0.0f;
+    float ms = 0.0f;
+};
+
 struct SimulationGridDomainState {
     // Mirror of the desc's type so consumers (renderer, timeline cache, UI)
     // can branch on type without holding a desc reference.
@@ -1187,6 +1215,7 @@ struct SimulationGridDomainState {
     // fluid_stats rather than inside it: Fluid::step resets its stats on entry,
     // and the thermal chain runs once per FRAME, before the solver.
     Fluid::ThermalLiquidStats thermal_stats;
+    SimulationSeedSettleStats settle_stats;
     SimulationComputeContext::TransferStats fluid_transfer_stats;
     // Whitewater secondary particles (spray/foam/bubbles). Render-only — never
     // fed back into the pressure solve, so it cannot affect liquid mass.
@@ -2458,6 +2487,12 @@ public:
     /// stay emitter-only after a rewind.
     bool clearFluidDomainParticles(const std::string& domain_name,
                                    bool clear_seed_recipe);
+    /// Seed settle settings, and with `request` a settle of the current
+    /// particles on the next step. Null keeps a setting. False: no such
+    /// liquid/matter domain.
+    bool configureFluidDomainSettle(const std::string& domain_name,
+                                    const bool* on_seed, const int* max_steps,
+                                    const float* speed_m_s, bool request);
     void setGridDomainBoundsResolver(std::function<bool(const SimulationGridDomainDesc&, Vec3&, Vec3&)> resolver);
     /// Run a sync pass immediately (resize state, apply any pending fluid
     /// seeds, etc.) without waiting for the next sim tick. Needed when the
@@ -2591,6 +2626,7 @@ private:
     void applyColliders(Vec3& position, Vec3& velocity, const Vec3* previous_position = nullptr) const;
     void synchronizeGridDomains();
     void stepGridDomains(const SimulationContext& context);
+    void settleGridDomains(const SimulationContext& context);
     void injectFlowSourcesIntoGridDomains(float dt,
                                           float time_seconds,
                                           int frame,
@@ -2726,6 +2762,10 @@ private:
     std::vector<CouplingTraceEntry> coupling_trace_;
     MatterExchangeLedger matter_exchange_ledger_;
     uint64_t matter_exchange_step_ = 0;
+    // True while settleGridDomains re-runs stepGridDomains: time, sources,
+    // heat, gas, foam, audio and MSF stand still; only the settling
+    // domains' solvers move.
+    bool settling_ = false;
     void noteCoupling(const char* name, const char* producer, const char* consumer,
                       std::string source_domain, std::string target_domain) {
         coupling_trace_.push_back(CouplingTraceEntry{

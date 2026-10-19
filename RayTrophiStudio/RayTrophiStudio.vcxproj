@@ -301,6 +301,7 @@
     <ClInclude Include="source\src\Physics\Fluid\MatterDomainSynchronization.inl" />
     <ClInclude Include="source\src\Physics\Fluid\MatterDomainRestore.inl" />
     <ClInclude Include="source\src\Physics\Fluid\MatterDomainSources.inl" />
+    <ClInclude Include="source\src\Physics\Fluid\MatterSeedSettle.inl" />
     <ClInclude Include="source\include\PostProcess\ColorMath.h" />
     <ClInclude Include="source\include\PostProcess\Exposure.h" />
     <ClInclude Include="source\include\PostProcess\PostService.h" />

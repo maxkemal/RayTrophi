@@ -154,6 +154,9 @@
     <ClInclude Include="source\src\Physics\Fluid\MatterDomainSources.inl">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\src\Physics\Fluid\MatterSeedSettle.inl">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\PostProcess\ColorMath.h" />
     <ClInclude Include="source\include\PostProcess\Exposure.h" />
     <ClInclude Include="source\include\PostProcess\PostService.h" />

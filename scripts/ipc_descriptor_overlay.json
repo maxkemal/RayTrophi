@@ -1537,6 +1537,11 @@
     "summary": "Remove the particles from a fluid domain",
     "tags": "simulation|reset"
   },
+  "fluid.settle": {
+    "summary": "Relax a fluid/matter domain's particles to rest before t = 0",
+    "notes": "A seed is not an equilibrium (grains placed without their radius, no contact carrying the bed's weight, sub-cell density noise in liquid). With on_seed (default true) every seed is relaxed at the start of the next step: the domain's own solver steps run with time, sources, heat, gas, foam and MSF stopped, and all velocities and spins are zeroed after each step, until the fastest carrier is below speed_m_s (default 0.01) or max_steps (default 240). request=true (default) relaxes the current particles too, e.g. a bed poured by sources. Omitted settings are kept. fluid.list_domains reports settle_on_seed/max_steps/speed_m_s and settle_pending, settle_ran, settle_converged, settle_steps, settle_particles, settle_first_speed_m_s, settle_residual_speed_m_s, settle_ms. Animated colliders are not sampled while settling.",
+    "tags": "simulation|reset"
+  },
   "fluid.reset": {
     "summary": "Reset every fluid and gas simulation to frame zero",
     "tags": "simulation|reset|rewind"
