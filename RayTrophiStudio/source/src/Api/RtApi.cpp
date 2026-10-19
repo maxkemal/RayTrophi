@@ -1413,7 +1413,14 @@ Result addPrimitive(const std::string& type, const std::string& requested_name, 
 
     std::string candidate_name = base_name;
     int index = 1;
-    while (objectExists(candidate_name)) {
+    // ★ A deleted object stays in world.objects under its name until the
+    // pending deletes are compacted, and the name stays marked deleted.
+    // objectExists() says "free" for it, so re-adding a just-deleted name used
+    // to build a mesh that every reader treated as deleted (and compaction
+    // would erase): success returned, no object in the scene (2026-10-19, the
+    // second run of every test that adds and deletes the same primitive).
+    while (objectExists(candidate_name) ||
+           g_ctx->scene.isEditorPendingDeleteObjectName(candidate_name)) {
         char buf[32];
         std::snprintf(buf, sizeof(buf), ".%03d", index++);
         candidate_name = base_name + buf;

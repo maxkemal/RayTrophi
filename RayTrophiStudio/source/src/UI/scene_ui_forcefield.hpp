@@ -3975,6 +3975,17 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 "glow (Draper point) starts at 798 K, iron melts at 1811 K.");
         }
         ImGui::TextDisabled("ambient %+0.0f K at the core", field->thermal_delta_kelvin);
+        if (ImGui::DragFloat("Heating Rate (1/s)##FFThermalRate",
+                             &field->thermal_rate_per_s, 0.05f, 0.0f, 1000.0f, "%.2f")) {
+            ff_changed = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "How fast what is inside the field relaxes toward ambient + offset\n"
+                "(liquid, snow, grains and mesh surfaces alike). tau = 1/rate.\n"
+                "A field is an authored heater: its strength is set here, not by\n"
+                "the materials it heats.");
+        }
     } else {
         if (ImGui::DragFloat("Force Strength##FFStrength", &field->strength, 0.1f, -1000.0f, 1000.0f, "%.2f")) ff_changed = true;
         if (ImGui::IsItemHovered()) {

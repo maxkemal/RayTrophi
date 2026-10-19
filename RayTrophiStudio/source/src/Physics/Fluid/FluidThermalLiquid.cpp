@@ -87,65 +87,71 @@ void coolThermalLiquid(FluidParticles& particles,
     if (particles.temperature.size() < n)
         particles.temperature.resize(n, ambient_kelvin);
 
-    // Cell occupancy: which cells hold liquid. An EMPTY, non-solid neighbour
-    // cell is air, and a parcel in a cell with an air face is at the surface.
-    static std::vector<uint8_t> s_occupied;
-    s_occupied.assign(cells, 0u);
+    // Parcels per cell: which cells hold liquid (an EMPTY, non-solid neighbour
+    // cell is air) and how many share each cell's faces.
+    static std::vector<uint16_t> s_count;
+    s_count.assign(cells, 0u);
     const float inv_h = 1.0f / grid.voxel_size;
     for (std::size_t p = 0; p < n; ++p) {
         if (!liveParcel(particles, p)) continue;
         int i, j, k;
         if (!particleCell(grid, particles.position[p], inv_h, i, j, k)) continue;
-        s_occupied[grid.cellIndex(i, j, k)] = 1u;
+        uint16_t& c = s_count[grid.cellIndex(i, j, k)];
+        if (c < 0xffffu) ++c;
     }
-    // Local ambient = domain ambient + every field's delta at the parcel;
-    // `heated` is set when any field reaches it.
-    const auto localAmbient = [&](std::size_t p, bool& heated) {
-        heated = false;
-        float local = ambient_kelvin;
-        if (!fields) return local;
+    // A Thermal field is an authored heat SOURCE: every parcel inside relaxes
+    // toward ambient + the stacked deltas at the fields' own rate (weighted),
+    // surface or not. `rate` 0 = outside every field.
+    const auto fieldTarget = [&](std::size_t p, float& rate) {
+        rate = 0.0f;
+        float delta = 0.0f, weights = 0.0f, rated = 0.0f;
+        if (!fields) return ambient_kelvin;
         const auto& x = particles.position[p];
         for (const auto& s : *heat_sources) {
             const float w = thermalSourceWeight(s, x.x, x.y, x.z);
             if (w <= 0.0f) continue;
-            local += s.delta_kelvin * w;
-            heated = true;
+            delta += s.delta_kelvin * w;
+            rated += std::max(0.0f, s.rate_per_s) * w;
+            weights += w;
         }
-        return std::max(1.0f, local);
+        if (weights > 0.0f) rate = rated / weights;
+        return std::max(1.0f, ambient_kelvin + delta);
     };
 
     const bool closed_walls =
         params.boundary == APICSolverParams::BoundaryMode::Closed;
     const bool has_solid = grid.solid.size() == cells;
-    const float a_air = 1.0f - std::exp(-std::max(0.0f, params.thermal_air_cooling_rate) * dt);
-    const float a_contact =
-        1.0f - std::exp(-std::max(0.0f, params.thermal_contact_cooling_rate) * dt);
+    const double share_area = static_cast<double>(grid.voxel_size) * grid.voxel_size;
+    constexpr double kWallFilm = MaterialStateFieldSystem::kMsfContactFilmWm2K;
+    constexpr double kAirFilm = MaterialStateFieldSystem::kMsfGasFilmWm2K;
+    constexpr double kSigma = 5.670374e-8;
 
     int64_t air_count = 0;
     int64_t contact_count = 0;
     int64_t heated_count = 0;
+    double to_ambient = 0.0;
     const int64_t count = static_cast<int64_t>(n);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) reduction(+:air_count, contact_count, heated_count) if(count > 32768)
+#pragma omp parallel for schedule(static) reduction(+:air_count, contact_count, heated_count, to_ambient) if(count > 32768)
 #endif
     for (int64_t raw = 0; raw < count; ++raw) {
         const std::size_t p = static_cast<std::size_t>(raw);
         if (!liveParcel(particles, p)) continue;
         int i, j, k;
         if (!particleCell(grid, particles.position[p], inv_h, i, j, k)) continue;
-        bool air = false;
-        bool contact = false;
+        int air_faces = 0;
+        int wall_faces = 0;
         for (const auto& o : kFaceOffsets) {
             const int ni = i + o[0], nj = j + o[1], nk = k + o[2];
             if (ni < 0 || ni >= grid.nx || nj < 0 || nj >= grid.ny ||
                 nk < 0 || nk >= grid.nz) {
                 // A closed wall is a container surface at ambient; an open or
                 // periodic one is more air (or more liquid) beyond the box.
-                if (closed_walls) contact = true; else air = true;
+                if (closed_walls) ++wall_faces; else ++air_faces;
                 continue;
             }
             const std::size_t nc = grid.cellIndex(ni, nj, nk);
-            // ★ Only the COLLIDER bit counts as a cold surface. The solid-phase
+            // ★ Only the COLLIDER bit counts as a surface. The solid-phase
             // overlay (value 2) is the liquid's own frozen parcels, and cooling
             // a parcel "by contact" with its own kind would make every layer
             // quench the next one instantly.
@@ -154,30 +160,68 @@ void coolThermalLiquid(FluidParticles& particles,
                 // exchangeLiquidSolidContact instead of being an ambient sink.
                 if (!(solid_capacity && solid_capacity->size() == cells &&
                       (*solid_capacity)[nc] > 0.0f)) {
-                    contact = true;
+                    ++wall_faces;
                 }
-            } else if (!(has_solid && grid.solid[nc] != 0u) && s_occupied[nc] == 0u) {
-                air = true;
+            } else if (!(has_solid && grid.solid[nc] != 0u) && s_count[nc] == 0u) {
+                ++air_faces;
             }
         }
-        bool heated = false;
-        const float local = localAmbient(p, heated);
-        if (!chain) { air = false; contact = false; }
+        if (!chain) { air_faces = 0; wall_faces = 0; }
         // A Matter domain's air is its own gas grid: the surface exchange
         // happens there (exchangeLiquidGasSurface), with energy conserved,
         // instead of against an infinite ambient reservoir here.
-        if (air_through_gas) air = false;
-        if (!air && !contact && !heated) continue;
-        float t = particles.temperature[p];
+        if (air_through_gas) air_faces = 0;
+        // ★ Grain carriers trade with walls and air through films in
+        // exchangeMatterGrainHeat (2026-10-19: this sink drained a hot gravel
+        // bed into the floor in 1.5 s). Thermal fields still reach them below.
+        if (params.grain.enabled && p < particles.constitutive_model.size() &&
+            particles.constitutive_model[p] ==
+                static_cast<uint8_t>(MatterConstitutiveModel::Granular)) {
+            air_faces = 0;
+            wall_faces = 0;
+        }
+        float rate = 0.0f;
+        const float target = fieldTarget(p, rate);
+        if (air_faces == 0 && wall_faces == 0 && !(rate > 0.0f)) continue;
+        double t = particles.temperature[p];
         if (!std::isfinite(t)) t = ambient_kelvin;
-        if (heated && !contact) { t += (local - t) * a_contact; ++heated_count; }
-        if (contact) { t += (local - t) * a_contact; ++contact_count; }
-        if (air)     { t += (local - t) * a_air;     ++air_count; }
-        particles.temperature[p] = t;
+        // ★ Walls and air are FILMS against the parcel's heat capacity, not
+        // rates (2026-10-19). The old 2/s "contact" and 0.15/s "air" rates
+        // were capacity-free: an ambient thermostat that cooled a 5 cm parcel
+        // as fast as a droplet and booked nothing. A wall is still an infinite
+        // container at ambient - what it takes is now reported
+        // (heat_to_ambient_j). Coarse voxels cool slowly; that is the voxel.
+        if (air_faces > 0 || wall_faces > 0) {
+            const uint32_t tag = p < particles.substance_tag.size()
+                ? particles.substance_tag[p] : kSubstanceUntagged;
+            const SubstanceProfile* profile = particleSubstance(tag, params);
+            const double cap = profile
+                ? parcelHeatCapacity(particles, p, *profile, grid.voxel_size,
+                                     params.particles_per_cell)
+                : 0.0;
+            if (cap > 0.0) {
+                const double share = share_area / std::max<int>(1, s_count[grid.cellIndex(i, j, k)]);
+                const double ta = ambient_kelvin;
+                const double emissivity = std::clamp(double(profile->emissivity), 0.0, 1.0);
+                const double radiation = emissivity * kSigma * (t * t + ta * ta) * (t + ta);
+                const double g = ((kAirFilm + radiation) * air_faces + kWallFilm * wall_faces) * share;
+                const double before = t;
+                t = ta + (t - ta) * std::exp(-g * dt / cap);
+                to_ambient += cap * (before - t);
+                if (air_faces > 0) ++air_count;
+                if (wall_faces > 0) ++contact_count;
+            }
+        }
+        if (rate > 0.0f) {
+            t = target + (t - target) * std::exp(-double(rate) * dt);
+            ++heated_count;
+        }
+        particles.temperature[p] = static_cast<float>(t);
     }
     stats.air_cooled_particles = static_cast<std::size_t>(air_count);
     stats.contact_cooled_particles = static_cast<std::size_t>(contact_count);
     stats.field_heated_particles = static_cast<std::size_t>(heated_count);
+    stats.heat_to_ambient_j = to_ambient;
     stats.measured = true;
     measureTemperatures(particles, stats);
 }
@@ -198,6 +242,7 @@ void exchangeLiquidSolidContact(FluidParticles& particles,
         return;
     }
     constexpr double kContactFilm = MaterialStateFieldSystem::kMsfContactFilmWm2K;
+    constexpr double kGrainContactFilm = 200.0;
     const float h = grid.voxel_size;
     const float inv_h = 1.0f / h;
     // Parcels per cell share the cell's contact face.
@@ -248,7 +293,12 @@ void exchangeLiquidSolidContact(FluidParticles& particles,
         if (!(cp > 0.0) || !(cs > 0.0)) continue;
         const double ts = solid_kelvin[shell];
         const double area = static_cast<double>(h) * h / std::max<int>(1, s_count[own]);
-        const double g = kContactFilm * area;
+        // A grain bed touches a wall at points with air between, not with a
+        // wetting film: ~200 W/(m^2 K) for sand/gravel on a plate.
+        const bool grain_carrier = p < particles.constitutive_model.size() &&
+            particles.constitutive_model[p] ==
+                static_cast<uint8_t>(MatterConstitutiveModel::Granular);
+        const double g = (grain_carrier ? kGrainContactFilm : kContactFilm) * area;
         seen_weight += g;
         seen_shell += g * ts;
         seen_parcel += g * tp;
@@ -288,7 +338,13 @@ double parcelHeatCapacity(const FluidParticles& particles, std::size_t p,
                std::max(1, particles_per_cell) * fraction;
     }
     const double c = profile.specific_heat > 0.0f ? profile.specific_heat : 1000.0;
-    return mass * c;
+    // Pore water rides the carrier at its temperature (2026-10-19, P4): a wet
+    // sand grain holds the heat of its water too. One definition for every
+    // pass, so exchanges between passes still conserve.
+    constexpr double kPoreWaterSpecificHeat = 4186.0;
+    const double pore = p < particles.pore_water_mass_kg.size()
+        ? std::max(0.0f, particles.pore_water_mass_kg[p]) : 0.0f;
+    return mass * c + pore * kPoreWaterSpecificHeat;
 }
 
 void conductThermalLiquid(FluidParticles& particles,
@@ -553,6 +609,7 @@ void updateThermalFreeze(FluidParticles& particles,
             fraction = 0.0f;
             continue;
         }
+
         if (!liveParcel(particles, p)) {
             f &= ~kParticleFlagFrozen;
             continue;

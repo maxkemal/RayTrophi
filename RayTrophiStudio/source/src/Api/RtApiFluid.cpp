@@ -102,8 +102,6 @@ void fillFluidRheology(const RayTrophiSim::Fluid::APICSolverParams& params,
     info.granular_tack_peak = params.granular_tack_peak;
     info.granular_thermal_conductivity = params.granular_thermal_conductivity;
     info.thermal_liquid_enabled = params.thermal_liquid_enabled;
-    info.thermal_air_cooling_rate = params.thermal_air_cooling_rate;
-    info.thermal_contact_cooling_rate = params.thermal_contact_cooling_rate;
     info.fog_autoconversion_kg_m3 = params.fog_autoconversion_kg_m3;
     info.fog_autoconversion_rate = params.fog_autoconversion_rate;
     info.fog_ceiling_kg_m3 = params.fog_ceiling_kg_m3;
@@ -443,9 +441,21 @@ void fillFluidSolidPhase(const RayTrophiSim::SimulationGridDomainState& state,
     info.thermal_condensation_splits = static_cast<uint64_t>(ts.condensation_splits);
     info.thermal_solid_contact_particles = static_cast<uint64_t>(ts.solid_contact_particles);
     info.thermal_heat_to_solid_j = ts.heat_to_solid_j;
+    info.thermal_heat_to_ambient_j = ts.heat_to_ambient_j;
     info.thermal_contact_shell_kelvin = ts.solid_contact_shell_kelvin;
     info.thermal_contact_parcel_kelvin = ts.solid_contact_parcel_kelvin;
     info.thermal_contact_shell_cells = static_cast<uint64_t>(ts.solid_contact_shell_cells);
+    info.thermal_grain_measured = ts.grain_measured;
+    info.thermal_grain_count = static_cast<uint64_t>(ts.grain_count);
+    info.thermal_grain_wetted = static_cast<uint64_t>(ts.grain_wetted);
+    info.thermal_grain_min_kelvin = ts.grain_min_kelvin;
+    info.thermal_grain_mean_kelvin = ts.grain_mean_kelvin;
+    info.thermal_grain_max_kelvin = ts.grain_max_kelvin;
+    info.thermal_grain_heat_to_liquid_j = ts.grain_heat_to_liquid_j;
+    info.thermal_grain_heat_to_gas_j = ts.grain_heat_to_gas_j;
+    info.thermal_grain_heat_to_walls_j = ts.grain_heat_to_walls_j;
+    info.thermal_grain_energy_residual_j = ts.grain_energy_residual_j;
+    info.thermal_grain_ms = ts.grain_thermal_ms;
     info.thermal_contact_cooled_particles = static_cast<uint64_t>(ts.contact_cooled_particles);
     info.thermal_min_kelvin = ts.min_kelvin;
     info.thermal_mean_kelvin = ts.mean_kelvin;
@@ -867,10 +877,6 @@ Result setFluidThermal(const std::string& domain_id_or_name,
         return !v || (std::isfinite(*v) && *v >= lo && *v <= hi);
     };
     // Rejected, not clamped — same reasoning as setFluidSurfaceDetail.
-    if (!finiteIn(patch.air_cooling_rate, 0.0f, 100.0f))
-        return Result::fail("air_cooling_rate must be in [0, 100] 1/s");
-    if (!finiteIn(patch.contact_cooling_rate, 0.0f, 100.0f))
-        return Result::fail("contact_cooling_rate must be in [0, 100] 1/s");
     if (!finiteIn(patch.fog_autoconversion_kg_m3, 0.0f, 1000.0f))
         return Result::fail("fog_autoconversion_kg_m3 must be in [0, 1000] kg/m^3");
     if (!finiteIn(patch.fog_autoconversion_rate, 0.0f, 100.0f))
@@ -882,13 +888,7 @@ Result setFluidThermal(const std::string& domain_id_or_name,
     auto* dom = findLiquidDomainDesc(domain_id_or_name, found);
     if (!dom) return found;
     auto& p = dom->fluid_params;
-    if (patch.enabled && *patch.enabled &&
-        RayTrophiSim::Fluid::matterGrainsInUse(scriptSimulationRuntime(), *dom)) {
-        return Result::fail("grains are enabled: Thermal liquid cannot run with grains yet.");
-    }
     if (patch.enabled) p.thermal_liquid_enabled = *patch.enabled;
-    if (patch.air_cooling_rate) p.thermal_air_cooling_rate = *patch.air_cooling_rate;
-    if (patch.contact_cooling_rate) p.thermal_contact_cooling_rate = *patch.contact_cooling_rate;
     if (patch.fog_autoconversion_kg_m3) p.fog_autoconversion_kg_m3 = *patch.fog_autoconversion_kg_m3;
     if (patch.fog_autoconversion_rate) p.fog_autoconversion_rate = *patch.fog_autoconversion_rate;
     if (patch.fog_ceiling_kg_m3) p.fog_ceiling_kg_m3 = *patch.fog_ceiling_kg_m3;
@@ -900,8 +900,6 @@ Result setFluidThermal(const std::string& domain_id_or_name,
     for (auto& fo : g_ctx->scene.fluid_objects) {
         if (fo.name != dom->name) continue;
         fo.params.thermal_liquid_enabled = p.thermal_liquid_enabled;
-        fo.params.thermal_air_cooling_rate = p.thermal_air_cooling_rate;
-        fo.params.thermal_contact_cooling_rate = p.thermal_contact_cooling_rate;
         fo.params.fog_autoconversion_kg_m3 = p.fog_autoconversion_kg_m3;
         fo.params.fog_autoconversion_rate = p.fog_autoconversion_rate;
         fo.params.fog_ceiling_kg_m3 = p.fog_ceiling_kg_m3;
@@ -1010,6 +1008,7 @@ Result listMaterialFields(std::vector<MaterialFieldInfo>& out_fields) {
                     hi = std::max(hi, k);
                 }
                 info.temperature_valid = true;
+                info.temperature_fresh = field.host_state_fresh;
                 info.mean_kelvin = static_cast<float>(sum / static_cast<double>(n));
                 info.min_kelvin = lo;
                 info.max_kelvin = hi;
@@ -2272,8 +2271,16 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         if (backend) candidate.backend = parseDomainBackend(*backend);
         if (boundary) candidate.boundary_mode = parseGridBoundary(*boundary);
         if (solid_phase) candidate.fluid_solid_phase_enabled = *solid_phase;
+        // ★ The blockers directly, not validateMatterGrainDomain: that one
+        // passes whenever grain.enabled is false, and enabled is DERIVED at the
+        // first step. A domain whose substances only WANT grains (after reset,
+        // before stepping) could be moved to CPU / an open boundary unchecked
+        // (H1 readiness arm, 2026-10-19).
         std::string error;
-        if (!RayTrophiSim::Fluid::validateMatterGrainDomain(candidate, candidate.fluid_params.grain, error)) {
+        for (const auto& blocker : RayTrophiSim::Fluid::matterGrainBlockers(candidate)) {
+            error += (error.empty() ? "" : " ") + blocker.message;
+        }
+        if (!error.empty()) {
             return Result::fail("grains are enabled: " + error);
         }
     }

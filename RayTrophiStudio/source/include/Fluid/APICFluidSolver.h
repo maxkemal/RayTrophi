@@ -248,8 +248,8 @@ struct APICSolverParams {
     // viscosity field is only built, and the frozen flag only ever set, when
     // this is on.
     bool  thermal_liquid_enabled = false;
-    float thermal_air_cooling_rate = 0.15f;     // 1/s, parcels in a surface cell
-    float thermal_contact_cooling_rate = 2.0f;  // 1/s, parcels touching a collider/closed wall
+    // No thermal_air/contact_cooling_rate (retired 2026-10-19): walls and air
+    // are films against each parcel's capacity (coolThermalLiquid).
 
     // Fog water microphysics of this domain's air (Fluid/GasSaturation.h), in
     // the atmosphere layer's unit kg/m^3. Kessler autoconversion: fog water
@@ -262,8 +262,6 @@ struct APICSolverParams {
     float fog_ceiling_kg_m3 = 5.0e-3f;
 
     void sanitizeThermalLiquid() {
-        thermal_air_cooling_rate = std::clamp(thermal_air_cooling_rate, 0.0f, 100.0f);
-        thermal_contact_cooling_rate = std::clamp(thermal_contact_cooling_rate, 0.0f, 100.0f);
         // 1000 kg/m^3 is liquid water itself: a physical bound, not a scale cap.
         fog_autoconversion_kg_m3 = std::clamp(fog_autoconversion_kg_m3, 0.0f, 1000.0f);
         fog_autoconversion_rate = std::clamp(fog_autoconversion_rate, 0.0f, 100.0f);

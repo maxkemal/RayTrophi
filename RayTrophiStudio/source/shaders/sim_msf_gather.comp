@@ -2,10 +2,12 @@
 // Material State Field — thermal / pyrolysis integration (gather half).
 //
 // One invocation per surface element (triangle centroid). Reads the gas
-// temperature of the nearest OPEN cell, integrates the element's persistent
-// state, and records how much combustible mass it released this step. It never
-// touches the gas itself — sim_msf_scatter does that, because several elements
-// can land in the same cell and the sum needs atomics.
+// temperature of the nearest OPEN cell, trades heat with it through a film,
+// integrates the element's persistent state, and records how much combustible
+// mass it released this step. The pyrolysis deposit goes through
+// sim_msf_scatter; the film heat is added here to a signed per-cell
+// accumulator (several elements share a cell, so it needs atomics) and folded
+// into the gas by sim_msf_resolve.
 //
 // MSF is now the sole owner of pyrolysis; the voxel surface_state path is gone.
 // See docs/NODE_SIMULATION_ARCHITECTURE_PLAN.md (Faz 2b).
@@ -14,11 +16,13 @@ layout(local_size_x = 256) in;
 layout(push_constant) uniform PC {
     ivec4 dim;           // nx, ny, nz, element_count
     vec4  origin_voxel;  // xyz = grid origin (world), w = voxel size
-    vec4  material0;     // ignition_T, fuel_capacity, burn_rate, thermal_response
-    vec4  material1;     // (reserved, was cooling_rate), char_rate, dt, max_temperature
+    vec4  material0;     // ignition_T, fuel_capacity, burn_rate, gas film W/(m^2 K)
+    vec4  material1;     // body capacity J/(K m^2), char_rate, dt, max_temperature
     // melt_enthalpy_span = latent heat of fusion expressed as the normalized
     // temperature span whose energy equals it (L/c / kelvin_per_unit).
     vec4  material2;     // water_capacity_kg_m2, melt_normalized, melt_enthalpy_span, mass_capacity
+    vec4  material3;     // reference_K, kelvin_per_unit, emissivity, convect fixed point
+    vec4  material4;     // vapour molar kg/mol (0 = dry air), cell volume m^3, unused, unused
 } pc;
 
 layout(set=0, binding=0) readonly buffer Centers { vec4 centers[]; };  // xyz world, w area
@@ -30,6 +34,30 @@ layout(set=0, binding=0) readonly buffer Centers { vec4 centers[]; };  // xyz wo
 layout(set=0, binding=1)          buffer State   { vec4 state[]; };
 layout(set=0, binding=2) readonly buffer GasTemperature { float gas_t[]; };
 layout(set=0, binding=3) readonly buffer Solid          { float solid[]; };
+// Flame level of the cell (0..1): how much of the gas radiates like a flame.
+layout(set=0, binding=4) readonly buffer Flame          { float flame[]; };
+// Signed normalized temperature change of the cell, in 1/material3.w units.
+layout(set=0, binding=5)          buffer AccumConvect   { int accum_convect[]; };
+// Condensable vapour per cell (kg). Only read when material4.x > 0; otherwise
+// the temperature buffer is bound here as a never-read dummy.
+layout(set=0, binding=6) readonly buffer Vapour         { float vapour[]; };
+
+// The gas field holds the VIRTUAL temperature Tv. Same closed form as
+// airKelvinFromVirtual (GasSaturation.cpp) and sim_gas_combustion.
+float airFromVirtual(float tv_in, float m) {
+    const float R = 8.314462, P = 101325.0, Ma = 0.028965;
+    float tv = max(tv_in, 1.0);
+    float mv = pc.material4.x;
+    if (!(m > 0.0) || !(mv > 0.0) || !(pc.material4.y > 0.0)) return tv;
+    float k = m * R / (mv * P * pc.material4.y);
+    float denominator = Ma + tv * k * (Ma - mv);
+    float t = tv * mv / Ma;
+    if (denominator > 1.0e-12) {
+        float mixed = tv * Ma / denominator;
+        if (k * mixed < 1.0) t = mixed;
+    }
+    return max(t, 1.0);
+}
 
 uint idx(ivec3 p) { return uint(p.x + p.y * pc.dim.x + p.z * pc.dim.x * pc.dim.y); }
 bool inside(ivec3 p) {
@@ -135,10 +163,72 @@ void main() {
         return;
     }
 
-    // First-order thermal inertia: follows the gas but neither ignites from a
-    // single-frame spike nor stores energy forever.
-    float transfer = 1.0 - exp(-pc.material0.w * dt);
-    st.x = mix(st.x, gas, transfer);
+    // ── Surface <-> air film (2026-10-19) ────────────────────────────────────
+    // ★ This used to be `st.x = mix(st.x, gas, 1 - exp(-thermal_response*dt))`:
+    // the surface FOLLOWED the air at 1-8 1/s whatever stood behind it, and the
+    // air never felt it. A 0.1 m iron block inside a domain was pinned to the
+    // room air (only its faces outside the box warmed), and a hot plate heated
+    // nothing. Now two bodies trade energy:
+    //   element  C_e = body capacity (rho c depth, J/(K m^2)) * area
+    //   air      C_g = rho_air(T) c_air h^3 of the cell
+    //   film     G   = (h_conv + flame * eps sigma (Tg^2+Ts^2)(Tg+Ts)) * area
+    // The element moves by the exact two-body relaxation; the cell gets
+    // exactly -C_e dTs. Paper still lights in a flame (thin body, radiation),
+    // iron barely notices a draught.
+    // ★ The air's REAL temperature (2026-10-19, P2): the field holds Tv, and in
+    // a steam cell Tv is far above T (373 K steam reads ~600 K) - the film
+    // used to heat a surface over boiling water as if it were a flame. The
+    // exchange runs in T; the cell's Tv moves by dT * Tv/T.
+    // The target cell is the scatter pass's open-cell search, so heat lands
+    // where pyrolysis vents.
+    int target = -1;
+    {
+        if (inside(p) && solid[idx(p)] <= 0.5) {
+            target = int(idx(p));
+        } else {
+            const ivec3 dirs[6] = ivec3[6](ivec3(1,0,0), ivec3(-1,0,0),
+                                           ivec3(0,1,0), ivec3(0,-1,0),
+                                           ivec3(0,0,1), ivec3(0,0,-1));
+            for (int step = 1; step <= 3 && target < 0; ++step) {
+                for (int d = 0; d < 6; ++d) {
+                    ivec3 q = p + dirs[d] * step;
+                    if (!inside(q)) continue;
+                    uint s = idx(q);
+                    if (solid[s] <= 0.5) { target = int(s); break; }
+                }
+            }
+        }
+    }
+    float area_e = max(centers[id].w, 0.0);
+    float body = pc.material1.x * area_e;           // J/K
+    if (target >= 0 && body > 0.0 && pc.material3.y > 0.0) {
+        uint cell = uint(target);
+        float kpu = pc.material3.y;
+        float tv = max(1.0, pc.material3.x + gas * kpu);
+        float m = pc.material4.x > 0.0 ? max(vapour[cell], 0.0) : 0.0;
+        float tg = airFromVirtual(tv, m);
+        float air = (tg - pc.material3.x) / kpu;
+        float ts = max(1.0, pc.material3.x + st.x * kpu);
+        const float SIGMA = 5.670374e-8;
+        float fl = clamp(flame[cell], 0.0, 1.0);
+        float film = pc.material0.w +
+                     fl * pc.material3.z * SIGMA * (tg * tg + ts * ts) * (tg + ts);
+        float g = film * area_e;                    // W/K
+        // rho = P Ma / (R Tv) exactly, vapour or not; c_air 1005 J/(kg K).
+        float cg = (353.06 / tv) * 1005.0 * h * h * h;
+        // The element only sees its SHARE of the cell's air (its area over the
+        // most surface a cell can hold, ~3 faces), so the many elements of one
+        // cell can never drive the air past where they all agree.
+        float cgs = max(cg * area_e / (3.0 * h * h), 1e-12);
+        float decay = 1.0 - exp(-g * dt * (1.0 / body + 1.0 / cgs));
+        float eq = (body * st.x + cgs * air) / (body + cgs);
+        float ds = (eq - st.x) * decay;
+        st.x += ds;
+        // kelvin_per_unit cancels: both sides are in the same normalized unit.
+        float dg = clamp(-body * ds / cg * (tv / tg), -1.0, 1.0);
+        int fixed_dg = int(round(dg * pc.material3.w));
+        if (fixed_dg != 0) atomicAdd(accum_convect[cell], fixed_dg);
+    }
     st.x = min(st.x, pc.material1.w);
 
     // ── Surface water (2026-10-18) ───────────────────────────────────────────

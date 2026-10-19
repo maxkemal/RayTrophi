@@ -485,6 +485,9 @@
     <ClInclude Include="source\include\Fluid\MatterGrainGasCoupling.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterGrainThermal.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Fluid\FluidSurfaceWater.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
@@ -1380,6 +1383,7 @@
     <ClCompile Include="source\src\Physics\Fluid\GasSurfaceExchangeCpu.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\GasCombustionAir.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainGasCoupling.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainThermal.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidSurfaceWater.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\GasPhaseMomentum.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\WhitewaterRuntime.cpp" />

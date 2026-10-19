@@ -285,9 +285,9 @@ std::vector<MatterGrainBlocker> matterGrainBlockers(const SimulationGridDomainDe
     if (d.fluid_params.pore_exchange.wet_response_enabled) {
         add("wet_response", "Pore wet response cannot run with grains; use wet grains.");
     }
-    if (d.fluid_params.thermal_liquid_enabled) {
-        add("thermal_liquid", "Thermal liquid cannot run with grains yet.");
-    }
+    // Thermal liquid runs with grains since 2026-10-19 (MatterGrainThermal):
+    // grains carry their temperature on the host, frozen liquid is held as
+    // pinned ice outside both lanes, Ice grains melt into the liquid.
     // The switch is on by default and stamps only substances bound as Solid
     // (FluidDomainStep reads it the same way): with none authored it does
     // nothing, and blocking on it refused grains in every new Matter domain.

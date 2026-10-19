@@ -69,12 +69,30 @@ struct ThermalLiquidStats {
     std::size_t condensation_splits = 0;       // parcels grown past 2x canonical mass and split
     std::size_t solid_contact_particles = 0;   // parcels trading heat with a surface (MSF)
     double      heat_to_solid_j = 0.0;         // net heat liquid -> surfaces this step
+    // Heat the walls and the outside air (infinite reservoirs at ambient)
+    // took this step through their films; negative = they warmed the liquid.
+    double      heat_to_ambient_j = 0.0;
     // What the touching parcels SAW, contact-weighted (K; 0 = no contact).
     // Tells "the shell looks cold where the water is" apart from "heat does
     // not flow" when heat_to_solid_j is small (Ek 11, 2026-10-18).
     double      solid_contact_shell_kelvin = 0.0;
     double      solid_contact_parcel_kelvin = 0.0;
     std::size_t solid_contact_shell_cells = 0;  // distinct shell cells touched
+    // Grain carriers (exchangeMatterGrainHeat, 2026-10-19). grain_measured
+    // false: no grains, or the pass did not run - the rows are then unmeasured.
+    bool        grain_measured = false;
+    std::size_t grain_count = 0;
+    std::size_t grain_wetted = 0;              // grains sharing a cell with liquid
+    float       grain_min_kelvin = 0.0f;
+    float       grain_mean_kelvin = 0.0f;
+    float       grain_max_kelvin = 0.0f;
+    double      grain_heat_to_liquid_j = 0.0;  // net grains -> liquid this step
+    double      grain_heat_to_gas_j = 0.0;     // net grains -> the domain's air
+    double      grain_heat_to_walls_j = 0.0;   // grains -> closed walls / bare colliders
+    // sum of C dT over grains, liquid and air for this pass: zero to rounding.
+    // Anything else means one side was written without the other.
+    double      grain_energy_residual_j = 0.0;
+    float       grain_thermal_ms = 0.0f;
     float       min_kelvin = 0.0f;
     float       mean_kelvin = 0.0f;
     float       max_kelvin = 0.0f;
@@ -84,18 +102,18 @@ struct ThermalLiquidStats {
     float       max_viscosity = 0.0f;
 };
 
-// Newton cooling toward `ambient_kelvin`: parcels in a cell with an empty
-// (air) face neighbour at thermal_air_cooling_rate, parcels whose cell touches
-// a collider or a CLOSED domain wall at thermal_contact_cooling_rate. Both
-// apply when both hold. Exponential form: stable at any dt, never overshoots.
-// Runs for granular domains too (a molten plastic re-stiffens as it cools).
-// `heat_sources` (Thermal force fields, the same list and the same
-// thermalSourceWeight() MSF uses, so one field heats a mesh and the snow on it
-// alike) stack on top of the ambient: every parcel inside a field relaxes toward that local temperature at
-// thermal_contact_cooling_rate, surface or not. Fields act even with the
-// thermal-liquid chain off: a placed heat source is an explicit request, and
-// before 2026-10-09 a Thermal field next to Snow did nothing at all. With the
-// chain off only parcels inside a field change.
+// Walls and outside air as FILMS against each parcel's heat capacity
+// (2026-10-19; the old thermal_air/contact_cooling_rate were capacity-free and
+// are retired). A face on a closed domain wall or on a collider without an MSF
+// shell trades through 500 W/(m^2 K) with a container at `ambient_kelvin`; a
+// face onto empty air through 20 W/(m^2 K) plus the parcel's linearized
+// radiation - only where the domain has no gas grid (air_through_gas). Each
+// parcel takes its share of the cell face (h^2 / parcels in the cell). Grain
+// carriers are skipped (exchangeMatterGrainHeat owns them).
+// `heat_sources` (Thermal force fields, the same list and thermalSourceWeight()
+// MSF uses) are authored heat SOURCES: every parcel inside one relaxes toward
+// ambient + the stacked deltas at the fields' own rate_per_s, surface or not,
+// with the thermal-liquid chain on or off.
 // Reads grid.solid, so call it AFTER the collider voxelize and BEFORE the
 // solid-phase overlay is stamped (the overlay is not a cold surface).
 void coolThermalLiquid(FluidParticles& particles,

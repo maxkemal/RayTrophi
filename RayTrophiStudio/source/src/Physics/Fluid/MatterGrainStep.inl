@@ -94,10 +94,8 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     bool domain_moving, const Fluid::MatterGrainGasAir& gas_air, std::string& error) {
     const auto step_start = std::chrono::steady_clock::now();
     if (!compute || params.boundary != Fluid::APICSolverParams::BoundaryMode::Closed ||
-        params.pore_exchange.enabled || params.pore_exchange.wet_response_enabled ||
-        params.thermal_liquid_enabled) {
-        error = "grain domain requires Closed Vulkan; MPM pore/wet physics and thermal "
-            "liquid disabled";
+        params.pore_exchange.enabled || params.pore_exchange.wet_response_enabled) {
+        error = "grain domain requires Closed Vulkan and MPM pore/wet physics disabled";
         return false;
     }
     if (domain_moving) {
@@ -299,9 +297,9 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     const auto ms_since = [](std::chrono::steady_clock::time_point t) {
         return std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t).count();
     };
-    std::vector<std::size_t> liquid_order, grain_order;
+    std::vector<std::size_t> liquid_order, grain_order, held_order;
     if (!Fluid::partitionMatterGrainOwners(state.particles, params, legacy_granular,
-            params.grain.wet_grains, liquid_order, grain_order, error)) {
+            params.grain.wet_grains, liquid_order, grain_order, held_order, error)) {
         return false;
     }
     // Same grains as last published (merge keeps their order): keep that order
@@ -318,6 +316,10 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         Fluid::kMatterGrainResortDisorder, resorted);
     auto liquid = Fluid::selectMatterParticles(state.particles, liquid_order);
     auto grains = Fluid::selectMatterParticles(state.particles, grain_order);
+    // Frozen liquid: pinned ice, outside both lanes (the liquid sees it as the
+    // solid-phase overlay). Known limit: DEM grains collide with triangles only,
+    // so they pass through ice.
+    const auto held = Fluid::selectMatterParticles(state.particles, held_order);
     Fluid::APICSolverStats stats;
     Fluid::MatterGrainStepReport report;
     report.host_order_ms = ms_since(order_start);
@@ -624,7 +626,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     }
 
     const auto merge_start = std::chrono::steady_clock::now();
-    if (!Fluid::mergeMatterGrainOwners(state.particles, liquid, grains, error)) {
+    if (!Fluid::mergeMatterGrainOwners(state.particles, liquid, grains, held, error)) {
         return false;
     }
     report.host_merge_ms = ms_since(merge_start);

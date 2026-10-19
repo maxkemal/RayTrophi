@@ -377,6 +377,7 @@ nlohmann::json ForceField::toJson() const {
 
     // Thermal
     j["thermal_delta_kelvin"] = thermal_delta_kelvin;
+    j["thermal_rate_per_s"] = thermal_rate_per_s;
 
     // Fluid wind coupling
     j["fluid_surface_drag"] = fluid_surface_drag;
@@ -443,6 +444,7 @@ void ForceField::fromJson(const nlohmann::json& j) {
     if (j.contains("quadratic_drag")) quadratic_drag = j["quadratic_drag"];
 
     if (j.contains("thermal_delta_kelvin")) thermal_delta_kelvin = j["thermal_delta_kelvin"];
+    if (j.contains("thermal_rate_per_s")) thermal_rate_per_s = j["thermal_rate_per_s"];
 
     if (j.contains("fluid_surface_drag")) fluid_surface_drag = j["fluid_surface_drag"];
     if (j.contains("fluid_drag_coupling")) fluid_drag_coupling = j["fluid_drag_coupling"];

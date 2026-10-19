@@ -67,10 +67,16 @@ def main():
         call('fluid.reset')
         for step in range(1, 181):            # heat the dry cube
             call('fluid.step', dt=DT)
+        # ★ msf.fields reads the host copy, and an EMPTY domain requests no
+        # readback: the copy can date from the field's creation (2026-10-19:
+        # 293.7 K reported while the shell was ~390 K). The call requests one;
+        # one more heated step lands it. temperature_fresh says it did.
+        call('msf.fields')
+        call('fluid.step', dt=DT)
         shell = [f for f in call('msf.fields')['fields'] if f['substance'] == 'Iron']
         data['shell_before_fill'] = shell[0] if shell else None
         print(json.dumps({'shell_before_fill': {k: shell[0].get(k) for k in
-                          ('mean_kelvin', 'max_kelvin', 'temperature_valid',
+                          ('mean_kelvin', 'max_kelvin', 'temperature_valid', 'temperature_fresh',
                            'thermal_depth_m', 'surface_area_m2')} if shell else None}),
               flush=True)
         call('forcefield.remove', field=field)
@@ -93,11 +99,16 @@ def main():
                 print(json.dumps(s), flush=True)
         shell_before = data['shell_before_fill'] or {}
         verdicts = {
-            'shell_hot_before_fill': bool(shell_before.get('temperature_valid')) and
+            'shell_hot_before_fill': bool(shell_before.get('temperature_fresh')) and
                                      shell_before.get('max_kelvin', 0) > 350.0,
             'liquid_touches_shell': any(s['contact'] > 0 for s in data['samples']),
             'field_misses_water': all(s['field_heated'] == 0 for s in data['samples']),
             'heat_flows_solid_to_liquid': any(s['heat_to_solid_j'] < 0 for s in data['samples']),
+            # 2026-10-19 root: the wetted faces are the ones INSIDE the domain,
+            # and the gas pass used to pin them to the room air (294 K seen while
+            # the shell mean was 348 K). With the air film against the body's
+            # capacity they heat like the rest of the cube.
+            'wetted_shell_is_hot': (data['samples'][0]['shell_seen_kelvin'] or 0.0) > 330.0,
             # A solid iron body, not a 1 mm sheet: ~1 m^2 wetted at ~+45 K under a
             # 500 W/m^2K film is ~24 kW, ~400 J per 1/60 s step. The hollow-shell
             # model drained after a few steps and gave ~15 J.

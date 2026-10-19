@@ -9,8 +9,17 @@ Two arms in one closed Matter domain with the same falling Sand:
   still - no gas source. The drag is gated on a gas lane that stepped AND
           moves, so nothing couples: vacuum-calibrated grain scenes (free fall,
           repose, CPU reference) must not change.
-  wind  - a horizontal gas source (+x). Grains must take +x drag impulse, the
-          gas must take the opposite impulse, and the pair must cancel.
+  wind  - a horizontal gas source (+x) ON the fall path. Grains must take +x
+          drag impulse while they fall through it, the gas must take the
+          opposite impulse, and the pair must cancel.
+
+★ 2026-10-19 scene fix: the source used to sit 0.7 m beside the fall path.
+In the closed box the jet turned before reaching the sand, and the pile on the
+floor sat in the RETURN flow (-x): drag x -0.007 N s against +0.147 N s of
+plain air resistance on the fall. The coupling was right, the wind missed. The
+x gate is now measured over the fall window (the pile then rests in whatever
+the box's circulation is, which is not what this test is about); the totals
+are still reported.
 
 Reads fluid.matter_models -> grain_diagnostics.liquid (the same core the
 panel and Python read). Scene domains, sources, colliders and fields are
@@ -35,6 +44,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--steps', type=int, default=120)
     parser.add_argument('--wind', type=float, default=4.0, help='m/s along +x')
+    parser.add_argument('--fall-steps', type=int, default=45,
+                        help='steps the sand is airborne (falls 1.6 m in ~0.6 s)')
     args = parser.parse_args()
 
     client = RtIpc()
@@ -56,6 +67,7 @@ def main():
         call('timeline.set_frame', frame=0)
         call('fluid.reset')
         arm = {'samples': [], 'coupled_steps': 0, 'drag': [0.0, 0.0, 0.0],
+               'fall_drag': [0.0, 0.0, 0.0], 'fall_reaction': [0.0, 0.0, 0.0],
                'reaction': [0.0, 0.0, 0.0], 'max_residual': 0.0,
                'max_relative_speed': 0.0, 'limited_cells': 0, 'grains_max': 0}
         for step in range(1, args.steps + 1):
@@ -68,8 +80,13 @@ def main():
             if coupled:
                 arm['coupled_steps'] += 1
             for axis in range(3):
-                arm['drag'][axis] += (liquid.get('gas_drag_impulse_n_s') or [0, 0, 0])[axis]
-                arm['reaction'][axis] += (liquid.get('gas_reaction_n_s') or [0, 0, 0])[axis]
+                drag = (liquid.get('gas_drag_impulse_n_s') or [0, 0, 0])[axis]
+                reaction = (liquid.get('gas_reaction_n_s') or [0, 0, 0])[axis]
+                arm['drag'][axis] += drag
+                arm['reaction'][axis] += reaction
+                if step <= args.fall_steps:
+                    arm['fall_drag'][axis] += drag
+                    arm['fall_reaction'][axis] += reaction
             arm['max_residual'] = max(arm['max_residual'],
                                       liquid.get('gas_momentum_residual_n_s', 0.0))
             arm['max_relative_speed'] = max(arm['max_relative_speed'],
@@ -107,15 +124,16 @@ def main():
              velocity=[0, 0, 0], fluid_velocity_spread=0., use_time_limit=True,
              start_time=0., end_time=.4, fluid_particles_per_second=3000.)
         created_sources.append(SAND)
+        # Centred on the fall path (sand leaves y 1.6, falls through y 0.75..1.45).
         call('flow_source.create', name=WIND, domain=DOMAIN, phase='gas',
-             position=[-.7, 1.2, 0], radius=.3, density=.2, temperature=0., fuel=0.,
+             position=[0, 1.1, 0], radius=.35, density=.2, temperature=0., fuel=0.,
              velocity=[args.wind, 0, 0])
         created_sources.append(WIND)
 
         still = run_arm('still', windy=False)
         wind = run_arm('wind', windy=True)
 
-        drag_x = wind['drag'][0]
+        drag_x = wind['fall_drag'][0]
         drag_size = math.sqrt(sum(v * v for v in wind['drag']))
         verdicts = {
             'grains_born': still['grains_max'] > 0 and wind['grains_max'] > 0,
@@ -123,11 +141,13 @@ def main():
             'still_air_does_not_couple': still['coupled_steps'] == 0,
             'wind_couples': wind['coupled_steps'] > 0,
             'wind_pushes_grains_along_x': drag_x > 0.0,
-            'gas_takes_the_opposite': wind['reaction'][0] < 0.0,
+            'gas_takes_the_opposite': wind['fall_reaction'][0] < 0.0,
             'pair_cancels': wind['max_residual'] <= 1e-4 * max(drag_size, 1e-9) + 1e-9,
         }
         data['verdicts'] = verdicts
         data['reported'] = {'drag_n_s': wind['drag'], 'reaction_n_s': wind['reaction'],
+                            'fall_drag_n_s': wind['fall_drag'],
+                            'fall_reaction_n_s': wind['fall_reaction'],
                             'limited_cell_steps': wind['limited_cells'],
                             'max_relative_speed_m_s': wind['max_relative_speed']}
         print(json.dumps(data['reported']), flush=True)

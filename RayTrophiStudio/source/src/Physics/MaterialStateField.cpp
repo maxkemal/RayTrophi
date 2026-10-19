@@ -39,11 +39,13 @@ float elapsedMs(const Clock::time_point& a, const Clock::time_point& b) {
 struct MsfGatherConstants {
     int   dim[4] = {};          // nx, ny, nz, element_count
     float origin_voxel[4] = {}; // xyz origin, w voxel size
-    float material0[4] = {};    // ignition_T, fuel_capacity, burn_rate, thermal_response
-    float material1[4] = {};    // (reserved, was cooling_rate), char_rate, dt, max_temperature
+    float material0[4] = {};    // ignition_T, fuel_capacity, burn_rate, gas film W/(m^2 K)
+    float material1[4] = {};    // body capacity J/(K m^2), char_rate, dt, max_temperature
     float material2[4] = {};    // water_capacity_kg_m2, melt_normalized, melt_enthalpy_span, mass_capacity
+    float material3[4] = {};    // reference_K, kelvin_per_unit, emissivity, convect fixed point
+    float material4[4] = {};    // vapour molar kg/mol (0 = dry), cell volume m^3, unused, unused
 };
-static_assert(sizeof(MsfGatherConstants) == 80,
+static_assert(sizeof(MsfGatherConstants) == 112,
               "sim_msf_gather push-constant ABI changed");
 
 struct MsfScatterConstants {
@@ -56,7 +58,7 @@ static_assert(sizeof(MsfScatterConstants) == 48,
 
 struct MsfResolveConstants {
     int   dim[4] = {};
-    float params[4] = {};  // fp_scale, max_temperature, unused, unused
+    float params[4] = {};  // fp_scale, max_temperature, convect fp_scale, min_temperature
 };
 static_assert(sizeof(MsfResolveConstants) == 32,
               "sim_msf_resolve push-constant ABI changed");
@@ -64,8 +66,8 @@ static_assert(sizeof(MsfResolveConstants) == 32,
 // Phase 4 ambient pass. Must match sim_msf_ambient.comp's PC block exactly.
 struct MsfAmbientConstants {
     int   counts[4] = {};   // element_count, source_count, zone_count, unused
-    float params[4] = {};   // dt, relax_rate, reference_K (normalized 0), inv_kelvin_per_unit
-    float params2[4] = {};  // max_temperature, unused, unused, world_ambient_K
+    float params[4] = {};   // dt, air film W/(m^2 K), reference_K (normalized 0), inv_kelvin_per_unit
+    float params2[4] = {};  // max_temperature, body J/(K m^2), emissivity, world_ambient_K
 };
 static_assert(sizeof(MsfAmbientConstants) == 48,
               "sim_msf_ambient push-constant ABI changed");
@@ -103,6 +105,10 @@ constexpr double kSurfaceWaterEvaporationCoefficient = 4.0e-5;
 // object's per-step burn landed in ONE cell, which the nearest-open-cell search
 // cannot produce.
 constexpr float kFixedPointScale = 4194304.0f;  // 1<<22
+// Surface<->air convection, signed: 1<<28 resolves ~1e-6 K per element at the
+// default 350 K/unit (a texel under natural convection moves its cell ~1e-4 K
+// per step) and still holds +-8 normalized units per cell per step.
+constexpr float kConvectFixedPointScale = 268435456.0f;  // 1<<28
 
 // One MSF sample: a point on the surface with the world area it represents, and
 // which texel of the UV mask it drives (kNoTexel when sampling fell back to
@@ -243,7 +249,8 @@ void buildCentroidSamples(const std::vector<SurfaceMeshTriangle>& triangles,
 bool MaterialStateFieldSystem::GasBinding::valid() const {
     return density.valid() && temperature.valid() && fuel.valid() &&
            flame.valid() && solid_mask.valid() && accum_fuel.valid() &&
-           accum_density.valid() && accum_heat.valid() && accum_flame.valid();
+           accum_density.valid() && accum_heat.valid() && accum_flame.valid() &&
+           accum_convect.valid();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -280,7 +287,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.emissivity = 0.9f;
             // Low conductivity: the surface heats and ignites long before the
             // bulk does, which is why wood chars rather than melting through.
-            p.thermal_response = 2.0f; p.cooling_rate = 0.06f;
+
             p.combustible = true;
             p.ignition_kelvin = 573.0f;
             p.fuel_capacity = 6.0f; p.burn_rate = 0.6f;
@@ -299,7 +306,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.emissivity = 0.35f;
             // Metal follows the gas quickly (high conductivity) and sheds heat
             // quickly too — that is what makes glowing steel cool visibly.
-            p.thermal_response = 6.0f; p.cooling_rate = 0.10f;
+
             p.combustible = false;
             p.meltable = true;
             p.melt_kelvin = 1811.0f; p.boiling_kelvin = 3134.0f;
@@ -319,7 +326,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.absorbency = 0.0f;  p.water_capacity_kg_m2 = 0.05f;
             p.density = 7850.0f; p.specific_heat = 490.0f; p.conductivity = 45.0f;
             p.emissivity = 0.4f;
-            p.thermal_response = 5.5f; p.cooling_rate = 0.10f;
+
             p.meltable = true;
             p.melt_kelvin = 1698.0f; p.boiling_kelvin = 3134.0f;
             p.latent_heat_fusion = 2.6e5f; p.melt_viscosity = 0.4f;
@@ -338,7 +345,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.absorbency = 0.0f;  p.water_capacity_kg_m2 = 0.05f;
             p.density = 8960.0f; p.specific_heat = 385.0f; p.conductivity = 401.0f;
             p.emissivity = 0.15f;
-            p.thermal_response = 8.0f; p.cooling_rate = 0.14f;
+
             p.meltable = true;
             p.melt_kelvin = 1358.0f; p.boiling_kelvin = 2835.0f;
             p.latent_heat_fusion = 2.05e5f; p.melt_viscosity = 0.25f;
@@ -354,7 +361,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             // Phase 5 moisture: soaks instantly, dries fast (thin).
             p.absorbency = 0.95f; p.water_capacity_kg_m2 = 0.15f;
             p.density = 800.0f; p.specific_heat = 1340.0f; p.conductivity = 0.05f;
-            p.thermal_response = 4.0f; p.cooling_rate = 0.10f;
+
             p.combustible = true;
             p.ignition_kelvin = 506.0f;   // ~233 C
             p.fuel_capacity = 0.8f; p.burn_rate = 2.5f;
@@ -367,7 +374,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             // Phase 5 moisture: the sponge of the library.
             p.absorbency = 1.0f;  p.water_capacity_kg_m2 = 0.30f;
             p.density = 400.0f; p.specific_heat = 1300.0f; p.conductivity = 0.06f;
-            p.thermal_response = 3.5f; p.cooling_rate = 0.09f;
+
             p.combustible = true;
             p.ignition_kelvin = 573.0f;
             p.fuel_capacity = 1.5f; p.burn_rate = 1.4f;
@@ -380,7 +387,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             // Phase 5 moisture: non-porous.
             p.absorbency = 0.05f; p.water_capacity_kg_m2 = 0.03f;
             p.density = 950.0f; p.specific_heat = 1900.0f; p.conductivity = 0.4f;
-            p.thermal_response = 3.0f; p.cooling_rate = 0.07f;
+
             p.combustible = true;
             p.ignition_kelvin = 622.0f;
             p.fuel_capacity = 3.0f; p.burn_rate = 1.0f;
@@ -406,7 +413,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             // Phase 5 moisture: hydrophobic by definition.
             p.absorbency = 0.0f;  p.water_capacity_kg_m2 = 0.02f;
             p.density = 900.0f; p.specific_heat = 2100.0f; p.conductivity = 0.25f;
-            p.thermal_response = 3.5f; p.cooling_rate = 0.08f;
+
             p.combustible = true;
             p.ignition_kelvin = 523.0f;
             p.fuel_capacity = 2.5f; p.burn_rate = 0.8f;
@@ -681,7 +688,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.absorbency = 0.0f;  p.water_capacity_kg_m2 = 0.05f;
             p.density = 917.0f; p.specific_heat = 2100.0f; p.conductivity = 2.2f;
             p.emissivity = 0.97f;
-            p.thermal_response = 4.5f; p.cooling_rate = 0.05f;
+
             p.meltable = true;
             p.melt_kelvin = 273.15f; p.boiling_kelvin = 373.15f;
             p.latent_heat_fusion = 3.34e5f; p.melt_viscosity = 0.02f;
@@ -724,7 +731,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.absorbency = 0.25f; p.water_capacity_kg_m2 = 0.5f;
             p.density = 2600.0f; p.specific_heat = 840.0f; p.conductivity = 2.5f;
             p.emissivity = 0.85f;
-            p.thermal_response = 1.5f; p.cooling_rate = 0.04f;
+
             p.meltable = true;
             p.melt_kelvin = 1473.0f; p.boiling_kelvin = 3200.0f;
             p.latent_heat_fusion = 4.0e5f; p.melt_viscosity = 0.9f;
@@ -737,7 +744,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             // Phase 5 moisture: mostly water already.
             p.absorbency = 0.60f; p.water_capacity_kg_m2 = 0.5f;
             p.density = 1050.0f; p.specific_heat = 3500.0f; p.conductivity = 0.5f;
-            p.thermal_response = 2.5f; p.cooling_rate = 0.07f;
+
             p.combustible = true;
             p.ignition_kelvin = 673.0f;
             p.fuel_capacity = 4.0f; p.burn_rate = 0.5f;
@@ -754,8 +761,7 @@ MaterialSubstance MaterialSubstance::fromProfile(const SubstanceProfile& profile
                                                  const MaterialTemperatureScale& scale,
                                                  const SubstanceOverride& overrides) {
     MaterialSubstance out;
-    out.thermal_response = std::max(0.0f, profile.thermal_response);
-    out.cooling_rate = std::max(0.0f, profile.cooling_rate);
+    out.emissivity = std::clamp(profile.emissivity, 0.0f, 1.0f);
     out.absorbency = std::max(0.0f, profile.absorbency);
     out.water_capacity_kg_m2 = std::max(0.0f, profile.water_capacity_kg_m2);
 
@@ -1074,12 +1080,19 @@ bool MaterialStateFieldSystem::step(SimulationComputeContext& compute,
         pc.material0[0] = std::max(0.0f, substance.ignition_temperature);
         pc.material0[1] = std::max(0.0f, substance.fuel_capacity);
         pc.material0[2] = std::max(0.0f, substance.burn_rate);
-        pc.material0[3] = std::max(0.0f, substance.thermal_response);
+        // Surface <-> air film. The body behind each element is what makes iron
+        // slow and paper fast: J/(K m^2) = density * c * thermal_depth_m, the
+        // same body the liquid contact uses (gatherThermalContact).
+        pc.material0[3] = kMsfGasFilmWm2K;
         // ★ Slot 0 used to be the passive cooling rate. Cooling moved to the
         // ambient pass in Phase 4 — leaving it here made every additional gas
         // domain cool the object again, including domains it was nowhere near.
         // The slot stays (the 64-byte ABI is shared with the .spv) and reads 0.
-        pc.material1[0] = 0.0f;
+        {
+            const float rho = profile.density > 0.0f ? profile.density : 1000.0f;
+            const float c = profile.specific_heat > 0.0f ? profile.specific_heat : 1000.0f;
+            pc.material1[0] = std::max(0.0f, field.thermal_depth_m) * rho * c;
+        }
         pc.material1[1] = std::max(0.0f, substance.char_rate);
         // Surface water capacity (kg/m^2): the gather throttles pyrolysis by
         // water / capacity. The old boiling-point clamp in this slot is gone; the
@@ -1092,17 +1105,25 @@ bool MaterialStateFieldSystem::step(SimulationComputeContext& compute,
         pc.material2[3] = substance.mass_capacity;
         pc.material1[2] = dt;
         pc.material1[3] = std::max(1.0f, max_temperature);
+        pc.material3[0] = scale.reference_kelvin;
+        pc.material3[1] = scale.kelvin_per_unit;
+        pc.material3[2] = substance.emissivity;
+        pc.material3[3] = kConvectFixedPointScale;
+        const bool humid = gas.vapour.valid() && gas.vapour_molar > 0.0f;
+        pc.material4[0] = humid ? gas.vapour_molar : 0.0f;
+        pc.material4[1] = gas.cell_volume;
 
         const uint32_t element_groups =
             (static_cast<uint32_t>(element_count) + 255u) / 256u;
 
-        ComputeBufferHandle gather_bufs[4] = {
-            field.gpu_centers, field.gpu_state, gas.temperature, gas.solid_mask
+        ComputeBufferHandle gather_bufs[7] = {
+            field.gpu_centers, field.gpu_state, gas.temperature, gas.solid_mask,
+            gas.flame, gas.accum_convect, humid ? gas.vapour : gas.temperature
         };
         ComputeDispatch gather;
         gather.kernel = "sim_msf_gather";
         gather.buffers = gather_bufs;
-        gather.buffer_count = 4;
+        gather.buffer_count = 7;
         gather.constants = &pc;
         gather.constants_size = sizeof(pc);
         gather.groups.groups_x = element_groups;
@@ -1110,6 +1131,9 @@ bool MaterialStateFieldSystem::step(SimulationComputeContext& compute,
         // before this dispatch is one step behind.
         field.host_state_fresh = false;
         if (!compute.dispatch(gather)) { all_ok = false; continue; }
+        // Every gathered element may have traded heat with the air, so the
+        // resolve pass must fold the convection accumulator in even for iron.
+        any_scatter = true;
 
         // Scatter: deposit the released vapour into the accumulators. Only
         // combustible substances can have released anything, so skip the whole
@@ -1155,15 +1179,20 @@ bool MaterialStateFieldSystem::step(SimulationComputeContext& compute,
         rc.dim[3] = static_cast<int>(cell_count);
         rc.params[0] = kFixedPointScale;
         rc.params[1] = std::max(1.0f, max_temperature);
+        rc.params[2] = kConvectFixedPointScale;
+        // 1 K, not normalized 0: air cooled by an ice tray may sit below the
+        // calibration zero, and clamping there would create the heat it lost.
+        rc.params[3] = scale.toNormalized(1.0f);
 
-        ComputeBufferHandle resolve_bufs[8] = {
+        ComputeBufferHandle resolve_bufs[9] = {
             gas.density, gas.temperature, gas.fuel, gas.flame,
-            gas.accum_fuel, gas.accum_density, gas.accum_heat, gas.accum_flame
+            gas.accum_fuel, gas.accum_density, gas.accum_heat, gas.accum_flame,
+            gas.accum_convect
         };
         ComputeDispatch resolve;
         resolve.kernel = "sim_msf_resolve";
         resolve.buffers = resolve_bufs;
-        resolve.buffer_count = 8;
+        resolve.buffer_count = 9;
         resolve.constants = &rc;
         resolve.constants_size = sizeof(rc);
         // Sized by the live cell count, never by the buffer's byte size: the
@@ -1591,15 +1620,23 @@ bool MaterialStateFieldSystem::stepAmbient(SimulationComputeContext& compute,
         pc.counts[1] = static_cast<int>(sources.size());
         pc.counts[2] = static_cast<int>(zones.size());
         pc.params[0] = dt;
-        pc.params[1] = std::max(0.0f, profile.cooling_rate) * convection;
+        // Air film to the room (W/(m^2 K)); the world's convection dial still
+        // scales it (a draughty room, a thermos).
+        pc.params[1] = kMsfGasFilmWm2K * convection;
         pc.params[2] = world.reference_kelvin;
         pc.params[3] = 1.0f / kelvin_per_unit;
         pc.params2[0] = std::max(1.0f, max_temperature);
         // Drying left the device (2026-10-18): stepSurfaceWater runs it on the
         // host with mass and latent heat, and hands the result over as
         // water_input / heat_input below.
-        pc.params2[1] = 0.0f;
-        pc.params2[2] = 0.0f;
+        // Body behind each element (J/(K m^2)) and its emissivity: the same
+        // body the gas film and the liquid contact use.
+        {
+            const float rho = profile.density > 0.0f ? profile.density : 1000.0f;
+            const float c = profile.specific_heat > 0.0f ? profile.specific_heat : 1000.0f;
+            pc.params2[1] = std::max(0.0f, field.thermal_depth_m) * rho * c;
+        }
+        pc.params2[2] = std::clamp(profile.emissivity, 0.0f, 1.0f);
         pc.params2[3] = world_ambient_kelvin;
         (void)scale;
 

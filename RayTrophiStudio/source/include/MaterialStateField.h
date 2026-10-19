@@ -226,11 +226,16 @@ struct SubstanceProfile {
     float conductivity       = 1.0f;     // W/(m·K)
     float emissivity         = 0.9f;     // 0..1
 
-    // Thermal inertia: the surface follows nearby gas temperature with
-    // 1-exp(-response*dt), so a one-frame spike cannot ignite it. Matches the
-    // hard-coded 3.0 / 0.08 in sim_gas_collider_source.comp.
-    float thermal_response   = 3.0f;     // 1/s
-    float cooling_rate       = 0.08f;    // normalized units/s, passive loss
+    // ★ No `thermal_response` (retired 2026-10-19). The surface used to follow
+    // the gas temperature at 1-8 1/s whatever the body behind it, with no energy
+    // going back to the air: a 0.1 m iron block inside a domain was pinned to
+    // the room air while only its faces OUTSIDE the box warmed. The surface now
+    // trades heat with the gas through a film (convection + flame radiation,
+    // sim_msf_gather) against its body capacity, density * c * thermal_depth_m.
+    // No `cooling_rate` either (retired 2026-10-19): outside a gas domain the
+    // surface cools to the room through the same air film (sim_msf_ambient);
+    // inside one the gas grid is its air (sim_msf_gather). Thermal fields
+    // heat at their own rate_per_s.
 
     // ── Fluid transport ────────────────────────────────────────────────────
     // These are physical values shared by the APIC liquid solver and molten
@@ -369,8 +374,6 @@ struct SubstanceProfile {
     float solver_internal_friction = 0.0f;       // 1/s body drag (stylised only)
     float solver_granular_max_substeps = 32.0f;  // integer
     bool  solver_thermal_chain = false;          // cooling + freezing on by default
-    float solver_air_cooling_rate = 0.15f;       // 1/s
-    float solver_contact_cooling_rate = 2.0f;    // 1/s
 
     // ── Optical (Phase 3) ────────────────────────────────────────────────────
     float char_color[3]      = {0.05f, 0.04f, 0.035f};
@@ -459,8 +462,7 @@ struct MaterialSubstance {
     float ignition_temperature = 0.8f;
     float fuel_capacity        = 4.0f;
     float burn_rate            = 0.75f;
-    float thermal_response     = 3.0f;
-    float cooling_rate         = 0.08f;
+    float emissivity           = 0.9f;
     float char_rate            = 1.0f;
     // ── Phase 5 ──────────────────────────────────────────────────────────────
     float absorbency           = 0.0f;
@@ -830,6 +832,12 @@ public:
         ComputeBufferHandle accum_density;
         ComputeBufferHandle accum_heat;
         ComputeBufferHandle accum_flame;
+        ComputeBufferHandle accum_convect;  // signed surface<->air heat (gather)
+        // The air's condensable vapour (kg/cell, device inventory) so the film
+        // reads T, not Tv. Optional: invalid or molar 0 = dry air.
+        ComputeBufferHandle vapour;
+        float vapour_molar = 0.0f;
+        float cell_volume = 0.0f;
         bool valid() const;
     };
 
@@ -888,7 +896,13 @@ public:
         float infinite = 0.0f;       // 1 = no falloff, affects everywhere
         float to_local[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};  // rows 0..2
         float shape = 0.0f;          // 0 sphere, 1 box, 2 cylinder, 3 cone
-        float pad[3] = {0.0f, 0.0f, 0.0f};
+        // How fast what is inside relaxes toward ambient + delta (1/s). The
+        // field is an authored heat source, so its strength is the field's,
+        // not a substance's (before 2026-10-19 parcels used the domain's
+        // contact rate and surfaces their cooling_rate - two speeds for one
+        // heater).
+        float rate_per_s = 2.0f;
+        float pad[2] = {0.0f, 0.0f};
     };
 
     // A domain's ambient override, as a world-space AABB. Element-granular on
@@ -898,7 +912,10 @@ public:
         float bounds_min[3] = {0.0f, 0.0f, 0.0f};
         float ambient_kelvin = 293.0f;
         float bounds_max[3] = {0.0f, 0.0f, 0.0f};
-        float _reserved = 0.0f;
+        // 1 = this box simulates its own air (a gas lane): the surface's air
+        // film there is sim_msf_gather's, so sim_msf_ambient adds none.
+        // ambient_kelvin <= 0 = the box does not override the ambient.
+        float gas_air = 0.0f;
     };
 
     // Relaxes every element toward its local ambient temperature. Runs once per
@@ -985,6 +1002,10 @@ public:
     static constexpr float kMsfOpenShellMeters = 0.001f;
     // Liquid film on a solid, W/(m^2 K); exchangeLiquidSolidContact uses it too.
     static constexpr float kMsfContactFilmWm2K = 500.0f;
+    // Air on a solid surface, natural convection, W/(m^2 K). The same film the
+    // liquid surface uses toward its gas (exchangeLiquidGasSurface). Hot,
+    // flaming gas adds linearized radiation on top (sim_msf_gather).
+    static constexpr float kMsfGasFilmWm2K = 20.0f;
     static float thermalContactDepth(float volume_m3, float area_m2, bool closed,
                                      float conductivity) {
         const float biot_depth = conductivity > 0.0f

@@ -442,6 +442,7 @@ json forceFieldToJson(const rtapi::ForceFieldInfo& info) {
         {"inward_force", info.inward_force}, {"upward_force", info.upward_force},
         {"linear_drag", info.linear_drag}, {"quadratic_drag", info.quadratic_drag},
         {"thermal_delta_kelvin", info.thermal_delta_kelvin},
+        {"thermal_rate_per_s", info.thermal_rate_per_s},
         {"fluid_surface_drag", info.fluid_surface_drag},
         {"fluid_drag_coupling", info.fluid_drag_coupling},
         {"fluid_surface_depth", info.fluid_surface_depth},
@@ -617,6 +618,7 @@ void applyForceFieldPatch(const json& patch, rtapi::ForceFieldInfo& info) {
     flt("inward_force", info.inward_force); flt("upward_force", info.upward_force);
     flt("linear_drag", info.linear_drag); flt("quadratic_drag", info.quadratic_drag);
     flt("thermal_delta_kelvin", info.thermal_delta_kelvin);
+    flt("thermal_rate_per_s", info.thermal_rate_per_s);
     boolean("fluid_surface_drag", info.fluid_surface_drag);
     flt("fluid_drag_coupling", info.fluid_drag_coupling);
     flt("fluid_surface_depth", info.fluid_surface_depth);
@@ -2933,11 +2935,9 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"surface_work_cells", info.surface_work_cells},
                         {"surface_bin_cells", info.surface_bin_cells},
                         {"thermal_liquid_enabled", info.thermal_liquid_enabled},
-                        {"thermal_air_cooling_rate", info.thermal_air_cooling_rate},
                         {"fog_autoconversion_kg_m3", info.fog_autoconversion_kg_m3},
                         {"fog_autoconversion_rate", info.fog_autoconversion_rate},
                         {"fog_ceiling_kg_m3", info.fog_ceiling_kg_m3},
-                        {"thermal_contact_cooling_rate", info.thermal_contact_cooling_rate},
                         {"thermal_ambient_kelvin", info.thermal_ambient_kelvin},
                         {"thermal_measured", info.thermal_measured},
                         {"thermal_frozen_particles", info.thermal_frozen_particles},
@@ -2958,9 +2958,21 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"thermal_condensation_splits", info.thermal_condensation_splits},
                         {"thermal_solid_contact_particles", info.thermal_solid_contact_particles},
                         {"thermal_heat_to_solid_j", info.thermal_heat_to_solid_j},
+                        {"thermal_heat_to_ambient_j", info.thermal_heat_to_ambient_j},
                         {"thermal_contact_shell_kelvin", info.thermal_contact_shell_kelvin},
                         {"thermal_contact_parcel_kelvin", info.thermal_contact_parcel_kelvin},
                         {"thermal_contact_shell_cells", info.thermal_contact_shell_cells},
+                        {"thermal_grain_measured", info.thermal_grain_measured},
+                        {"thermal_grain_count", info.thermal_grain_count},
+                        {"thermal_grain_wetted", info.thermal_grain_wetted},
+                        {"thermal_grain_min_kelvin", info.thermal_grain_min_kelvin},
+                        {"thermal_grain_mean_kelvin", info.thermal_grain_mean_kelvin},
+                        {"thermal_grain_max_kelvin", info.thermal_grain_max_kelvin},
+                        {"thermal_grain_heat_to_liquid_j", info.thermal_grain_heat_to_liquid_j},
+                        {"thermal_grain_heat_to_gas_j", info.thermal_grain_heat_to_gas_j},
+                        {"thermal_grain_heat_to_walls_j", info.thermal_grain_heat_to_walls_j},
+                        {"thermal_grain_energy_residual_j", info.thermal_grain_energy_residual_j},
+                        {"thermal_grain_ms", info.thermal_grain_ms},
                         {"thermal_contact_cooled_particles", info.thermal_contact_cooled_particles},
                         {"thermal_min_kelvin", info.thermal_min_kelvin},
                         {"thermal_mean_kelvin", info.thermal_mean_kelvin},
@@ -3154,11 +3166,9 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"surface_work_cells", info.surface_work_cells},
                         {"surface_bin_cells", info.surface_bin_cells},
                         {"thermal_liquid_enabled", info.thermal_liquid_enabled},
-                        {"thermal_air_cooling_rate", info.thermal_air_cooling_rate},
                         {"fog_autoconversion_kg_m3", info.fog_autoconversion_kg_m3},
                         {"fog_autoconversion_rate", info.fog_autoconversion_rate},
                         {"fog_ceiling_kg_m3", info.fog_ceiling_kg_m3},
-                        {"thermal_contact_cooling_rate", info.thermal_contact_cooling_rate},
                         {"thermal_ambient_kelvin", info.thermal_ambient_kelvin},
                         {"thermal_measured", info.thermal_measured},
                         {"thermal_frozen_particles", info.thermal_frozen_particles},
@@ -3179,9 +3189,21 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"thermal_condensation_splits", info.thermal_condensation_splits},
                         {"thermal_solid_contact_particles", info.thermal_solid_contact_particles},
                         {"thermal_heat_to_solid_j", info.thermal_heat_to_solid_j},
+                        {"thermal_heat_to_ambient_j", info.thermal_heat_to_ambient_j},
                         {"thermal_contact_shell_kelvin", info.thermal_contact_shell_kelvin},
                         {"thermal_contact_parcel_kelvin", info.thermal_contact_parcel_kelvin},
                         {"thermal_contact_shell_cells", info.thermal_contact_shell_cells},
+                        {"thermal_grain_measured", info.thermal_grain_measured},
+                        {"thermal_grain_count", info.thermal_grain_count},
+                        {"thermal_grain_wetted", info.thermal_grain_wetted},
+                        {"thermal_grain_min_kelvin", info.thermal_grain_min_kelvin},
+                        {"thermal_grain_mean_kelvin", info.thermal_grain_mean_kelvin},
+                        {"thermal_grain_max_kelvin", info.thermal_grain_max_kelvin},
+                        {"thermal_grain_heat_to_liquid_j", info.thermal_grain_heat_to_liquid_j},
+                        {"thermal_grain_heat_to_gas_j", info.thermal_grain_heat_to_gas_j},
+                        {"thermal_grain_heat_to_walls_j", info.thermal_grain_heat_to_walls_j},
+                        {"thermal_grain_energy_residual_j", info.thermal_grain_energy_residual_j},
+                        {"thermal_grain_ms", info.thermal_grain_ms},
                         {"thermal_contact_cooled_particles", info.thermal_contact_cooled_particles},
                         {"thermal_min_kelvin", info.thermal_min_kelvin},
                         {"thermal_mean_kelvin", info.thermal_mean_kelvin},
@@ -3476,11 +3498,12 @@ json dispatchMethod(const std::string& method, const json& params) {
             rtapi::FluidThermalPatch thermal_patch;
             bool has_thermal_patch = false;
             if(params.contains("thermal_liquid_enabled")){thermal_patch.enabled=params.at("thermal_liquid_enabled").get<bool>();has_thermal_patch=true;}
-            if(params.contains("thermal_air_cooling_rate")){thermal_patch.air_cooling_rate=params.at("thermal_air_cooling_rate").get<float>();has_thermal_patch=true;}
+            if(params.contains("thermal_air_cooling_rate")||params.contains("thermal_contact_cooling_rate")){
+                return rtapi::Result::fail("thermal_air_cooling_rate / thermal_contact_cooling_rate were removed: walls and air are films against each parcel's heat capacity (500 / 20 W/(m^2 K)); a Thermal field's strength is forcefield thermal_rate_per_s. The old 1/s rates have no successor.");
+            }
             if(params.contains("fog_autoconversion_kg_m3")){thermal_patch.fog_autoconversion_kg_m3=params.at("fog_autoconversion_kg_m3").get<float>();has_thermal_patch=true;}
             if(params.contains("fog_autoconversion_rate")){thermal_patch.fog_autoconversion_rate=params.at("fog_autoconversion_rate").get<float>();has_thermal_patch=true;}
             if(params.contains("fog_ceiling_kg_m3")){thermal_patch.fog_ceiling_kg_m3=params.at("fog_ceiling_kg_m3").get<float>();has_thermal_patch=true;}
-            if(params.contains("thermal_contact_cooling_rate")){thermal_patch.contact_cooling_rate=params.at("thermal_contact_cooling_rate").get<float>();has_thermal_patch=true;}
             rtapi::Result main_result = rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_voxel, p_render,
                                             p_backend, p_boundary, p_substance,
                                             p_sweeps, p_wall_slip, p_surf_mat,
@@ -4067,6 +4090,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"mass_negative", f.mass_negative},
                     {"mass_invalid_elements", f.mass_invalid_elements},
                     {"temperature_valid", f.temperature_valid},
+                    {"temperature_fresh", f.temperature_fresh},
                     {"mean_kelvin", f.mean_kelvin},
                     {"min_kelvin", f.min_kelvin},
                     {"max_kelvin", f.max_kelvin},

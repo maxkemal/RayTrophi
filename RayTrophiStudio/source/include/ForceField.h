@@ -230,6 +230,10 @@ public:
     // in this class, and its UI range (-1000..1000) and tooltip would be a lie for
     // a temperature. Substance thresholds are authored in Kelvin; so is this.
     float thermal_delta_kelvin = 600.0f;
+    // How fast what is inside relaxes toward ambient + delta (1/s, both matter
+    // parcels and MSF surfaces). An authored heat source: its strength is the
+    // field's. 2/s was the parcels' old contact rate.
+    float thermal_rate_per_s = 2.0f;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Fluid wind coupling (Wind type only, APIC liquid)

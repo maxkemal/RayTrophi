@@ -293,6 +293,32 @@
                     Fluid::conductThermalLiquid(state.particles, state.grid, fluid_params,
                                                 dt, state.thermal_stats);
                 }
+                // Grains carry their own temperature through the same chain
+                // (2026-10-19): liquid film, air film and grain contact inside
+                // each cell; conduction between cells ran just above. The air
+                // is the domain's gas lane, and only where it simulates one -
+                // the same rule as the grain drag: a gas lane that never
+                // stepped holds no air temperature to trade with.
+                if (fluid_params.grain.enabled &&
+                    (fluid_params.thermal_liquid_enabled || !s_heat_sources.empty())) {
+                    FluidSim::FluidGrid* grain_air =
+                        matter_domain && state.gas_stats.stepped ? &Fluid::gasGrid(state) : nullptr;
+                    Fluid::MatterGrainGasAir grain_gas_air{ambient_kelvin,
+                                                           world_thermal_.ambientNormalized(),
+                                                           world_thermal_.scale().kelvin_per_unit};
+                    {
+                        const auto combustion_air =
+                            Fluid::gasCombustionAir(grid_domains_[i], state, world_thermal_);
+                        grain_gas_air.vapour_kg = combustion_air.vapour_kg;
+                        grain_gas_air.vapour_cells = combustion_air.vapour_cells;
+                        grain_gas_air.vapour_molar = combustion_air.vapour_molar;
+                        grain_gas_air.cell_volume = combustion_air.cell_volume;
+                    }
+                    Fluid::exchangeMatterGrainHeat(state.particles, state.grid, fluid_params,
+                        grain_air, grain_gas_air,
+                        fluid_params.thermal_liquid_enabled ? ambient_kelvin : 0.0f,
+                        shell_contact ? &s_shell_cap : nullptr, dt, state.thermal_stats);
+                }
                 const uint64_t phase_event_id =
                     (matter_exchange_step_ << 32u) |
                     (static_cast<uint64_t>(i & 0xffffu) << 16u) |

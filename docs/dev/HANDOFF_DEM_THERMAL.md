@@ -1,6 +1,19 @@
 # DEM taneleri için sıcaklık — devir notu
 
-> **Durum:** TASLAK — 2026-10-10, birleşik madde ısı katmanı (BIRLESIK_MADDE_DOMAIN_TASARIMI §4.7) bitti; DEM taneleri bu katmanın DIŞINDA.
+> **Durum:** AKTİF — 2026-10-19: 1, 2, 3 ve 5 kaynakta (`Fluid/MatterGrainThermal.cpp`, DERLENMEDİ); 4 (Ice erimesi) mevcut iskelet yolundan geçiyor, canlı kanıtı yok; 6 = `scripts/test/rt_test_grain_heat_ipc.py`. Ayrıntı: BIRLESIK_MADDE_DOMAIN_TASARIMI "Parti 2026-10-19".
+
+## 2026-10-19 uygulama özeti
+
+- Plandan sapma: sıcaklık için GPU DEM kanalı EKLENMEDİ. DEM sıcaklığa ihtiyaç
+  duymuyor. Taneler kanonik host dizisinde taşıyor, termal blok tane adımından
+  önce bütün `state.particles` üzerinde koşuyor.
+- Tane↔sıvı ve tane↔hava filmleri tanenin iç direnciyle seri
+  (h_eff = 1/(1/h + r/(5k))). Tane↔tane hücre içinde G = k·4πr. Hücreler arası
+  iletim zaten vardı.
+- Tane domain'inde sıvı donmaz, aşırı soğur (`freeze_held_by_grains`).
+- IPC: `fluid.list_domains` → `thermal_grain_*`.
+
+(Aşağısı 2026-10-10 taslağı.)
 
 ## Neden
 

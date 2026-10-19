@@ -1,41 +1,107 @@
-# 2026-10-18 (2. build): gaz↔tane + FG1 yakıt sayacı + Ek 11 aleti + yüzey suyu kütlesi — TOPLU TEST
+# 2026-10-19 (2. build): P0–P4 — TEK DERLEME, TEK DUMAN KOŞUSU
 
-Yeni dosyalar: `Fluid/MatterGrainGasCoupling.cpp/.h`, `Fluid/FluidSurfaceWater.cpp/.h`
-(vcxproj'ta). Shader'lar (paket gerekli): `sim_gas_combustion` (sayaç 5 uint),
-`sim_msf_ambient` (6 tampon), `sim_msf_gather`; `sim_msf_wet` SİLİNDİ. SimCache v16. C++: ısı/yanma
-sayaçları, tane adımı imzası. 12:32 build'inin sonuçları BIRLESIK devir tablosunda.
-Sıra: bağımsız ve hızlı olan önce.
+> **SONUÇ (2026-10-19, canlı):** `rt_matter_smoke.py` **10/10 PASS** — madde 1/1, filmler 5/5 (düşüş 0.069 K/s, ortama 67.7 kJ), phase3 donma PASS, gaz↔tane 6/6, Ek 11 7/7 (iki koşu), yüzey suyu 6/6, FG1 8/8, tane ısısı 8/8 (artık ~1e-10 J, 400 tanede 0.5 ms), readiness 1/1. Not: tane sahnesinde `liquid_max_k` tane sıcaklığını gösteriyor (sıvı istatistiği taneleri de sayıyor olabilir; raporlama, fizik değil).
 
-1. **Kuru ateş sayacı (hızlı):** `python scripts/test/rt_test_fire_steam_quench_ipc.py`
-   → kuru kolda `inerted` 0 ve `fuel_dry` > 0. Bozuksa (`inerted` == `burning`):
-   `.spv` eski, shader paketi derlenmedi.
-2. **Aynı koşu, FG1 iddiası:** 8/8; `steam_reduces_burned_fuel` asıl kapı.
-   FAIL ise ve `steam_dilutes_oxygen` PASS ise: buhar O2'yi düşürüyor ama kaynayan
-   suyun gaza verdiği ısı yanmayı daha çok hücreye yayıyor — fizikte ısı çekme
-   (yüzey alışverişi) zayıf demektir, sayaç değil.
-3. **Gaz↔tane:** `python scripts/test/rt_test_grain_gas_drag_ipc.py` → 6/6.
-   ★ `still_air_does_not_couple` FAIL ise kapı çalışmıyor ve BÜTÜN tane
-   kabulleri hava direnciyle kaymıştır — önce bunu düzelt, H1 suite'ine güvenme.
-4. **H1 regresyonu (uzun, 3'ten sonra):** `python scripts/test/rt_h1_grain_suite.py`
-   — gaz kaynağı olmayan sahnelerde öncekiyle aynı sonuçlar.
-5. **Ek 11 aleti:** `python scripts/test/rt_test_contact_heat_ipc.py` → örneklerde
-   `shell_seen_kelvin` / `parcel_seen_kelvin`. Kabuk görülen ≈ 293 K ise ıslak
-   hücrelerin kabuğu soğuk (ısınan yüzler suda değil ya da host kopyası bayat);
-   ≈ 320+ K ise film/alan hesabına bak. Test hâlâ 3/6 beklenir — alet, düzeltme değil.
-6. **Yüzey suyu (kütle):** `python scripts/test/rt_test_surface_water_ipc.py` → 6/6.
-   `water_mass_closes` asıl kapı (tutulan ≈ emilen − buharlaşan − vent).
-   `budget_not_starved` FAIL ise readback isteği çalışmıyor (host hiç taze değil).
-   ★ Sinsi olan: `hot_surface_dries_into_domain` PASS ama `water_mass_closes` FAIL
-   ve tutulan > defter ise ambient yine host'u taze bırakıyor ve su iki kez
-   harcanmıyor ama bütçe de çalışmıyor; tutulan < defter ise aynı su iki kez
-   buharlaşıyor — `host_state_fresh` sıfırlamasını kontrol et.
-7. **Eski veriler:** eski bir projeyi aç → log'da `retired field 'dry_rate' dropped`
-   (override varsa) ve proje AÇILMALI. Eski bir bake'i oynat → yüzeyler kuru.
-   `python scripts/test/rt_test_sim_substance.py` (kanal adı `surface_water_kg_m2`).
-8. ★ Sinsi olan: `pair_cancels` PASS ama `gas_limited_cells` her adım çok büyükse,
-   taneler gazı sürekli denge hızına çakıyor demektir (yoğun bulut, hafif hücre):
-   fizik doğru ama sürükleme gaz hücresi çözünürlüğüne bağlı — voxel'i değiştirince
-   sonuç değişiyorsa not et.
+**Derleme:** C++ **ve shader paketi**. Değişen shader'lar: `sim_msf_ambient`
+(film + alan hızı), `sim_msf_gather` (7 bağlama, 112 bayt: buhar). Yeni dosya
+yok (`MatterGrainThermal` 1. build'deydi). Emekli alanlar: `cooling_rate`,
+`solver_air/contact_cooling_rate` (madde), `thermal_air/contact_cooling_rate`
+(domain, IPC, Python, panel). Kural: [MATTER_ROADMAP_2026_10.md](MATTER_ROADMAP_2026_10.md).
+
+**Tek komut:** `python scripts/test/rt_matter_smoke.py`. Test başına tek satır
+basar; yalnız FAIL olanın logu açılır (`%TEMP%/rt_matter_smoke/`). Test
+sırasında ayıklama yapılmaz, bulgu nota girer.
+
+| Kol | Bekleme | Bozuksa |
+|---|---|---|
+| 0 açılış | log'da `sim_msf_*` pipeline hatası yok. Eski projede `retired field 'cooling_rate' dropped (...)`; proje açılır. | Pipeline hatası = `.spv` eski. |
+| substance | PASS | `thermal_response` ve `cooling_rate` reddedilmezse exe eskidir. |
+| thermal_films | 5/5. Su duvar filmiyle YAVAŞ soğur: düşüş < 1 K/s, `thermal_heat_to_ambient_j` > 0. Alan `thermal_rate_per_s` (0,5) okunur. | Düşüş ~25 K/s ise eski hız yolu duruyor. ★ Sinsi olan: 0 K/s ve `to_ambient` 0 ise duvar yüzleri sayılmıyor (`s_count` / kapalı sınır). |
+| phase3_freeze | PASS (emekli hızlar testten çıktı) | Donma defteri bozulduysa freeze yolunda bir şey kaydı. |
+| gas_drag | 6/6 | – |
+| contact_heat (+ tekrarı) | 7/7, ikisi de. Kabuk dolumdan önce ısınmış ve `temperature_fresh`. Alan artık 2/s ile ısıtıyor (eskiden demirin `cooling_rate`'i), yani kabuk ~690 K'e çıkabilir; su→katı ısısı 1. build'den büyük olur. | İkinci koşu FAIL ise `add_primitive` düzeltmesi yok. |
+| surface_water | 6/6. Meşe üstü daha hızlı ısınır (alan 2/s), `evaporated_kg` artar. | `water_mass_closes` asıl kapı. |
+| fire_steam | 8/8 | ★ Sinsi olan: `steam_reduces_burned_fuel` yine PASS ama ıslak koldaki MSF yok; P2 burada görünmez. |
+| grain_heat | 8/8: `cools_at_physical_rate`, `water_takes_most`. Ortalama koşu sonunda ~345–355 K. `ms` 400 tanede < 1 ms. | Hızlı soğuyup `to_walls` küçükse başka bir kapasitesiz yol var. |
+| grain_readiness | PASS: `backend=cpu`/`boundary=open` reddedilir. | – |
+
+Ölçülmeyenler (bilinçli, sonraki tura): P2'nin buharlı hücredeki etkisini
+gösteren ayrı bir kapı yok. P3 (tane domain'inde donma) ve P4'ün 1e5 tane
+maliyeti için test yazılmadı. İlk ihtiyaçta tek kısa kol eklenir.
+
+---
+
+# 2026-10-19: yüzey↔hava filmi (Ek 11 kökü) + taneler termal zincirde + gaz↔tane sahnesi — TOPLU TEST
+
+**Derleme:** C++ **ve shader paketi** (`compile_shaders.bat`). Değişen shader'lar:
+`sim_msf_gather` (6 bağlama, 96 bayt push constant), `sim_msf_resolve` (9 bağlama).
+Yeni dosya: `Fluid/MatterGrainThermal.cpp/.h` (vcxproj + filters'ta). Emekli madde
+alanı: `thermal_response`. Sıra: bağımsız ve hızlı olan önce; diğerlerini
+maskeleyen sonra.
+
+0. **Açılış:** log'da `sim_msf_gather` / `sim_msf_resolve` pipeline hatası YOK.
+   Varsa `.spv` eski: kernel tablosu 6/9 bağlama ve 96 bayt bekliyor, eski `.spv`
+   4/8 bağlamalı. Belirti: MSF adımı her karede başarısız, yüzeyler hiç ısınmıyor.
+   Eski bir projede `thermal_response` override'ı varsa log'da `retired field
+   'thermal_response' dropped (...)`. Proje AÇILMALI.
+1. **Madde alanı (hızlı):** `python scripts/test/rt_test_substance_profiles_ipc.py`
+   PASS olmalı. Yeni satır: `substance.set fields={thermal_response:3}` reddedilir.
+   Kabul edilirse exe eskidir.
+2. **Gaz↔tane (hızlı, bağımsız):** `python scripts/test/rt_test_grain_gas_drag_ipc.py`,
+   **6/6** bekleniyor. Rüzgâr kaynağı artık düşüş yolunun üstünde (0, 1,1, 0;
+   r 0,35); x kapısı düşüş penceresinde ölçülüyor (ilk 45 adım).
+   `reported.fall_drag_n_s[0]` > 0 ve `fall_reaction_n_s[0]` bunun eksisi olmalı.
+   x yine ≤ 0 ise: kaynak hızı hacimde dayatmıyor (yalnız yoğunluk basıyor) ya
+   da gaz şeridi yalnız kaynakta hareket ediyor. `max_relative_speed_m_s` < 1
+   ise taneler rüzgârı hiç görmüyor demektir.
+3. **Ek 11, temas ısısı:** `python scripts/test/rt_test_contact_heat_ipc.py`,
+   **7/7** bekleniyor. Yeni kapı `wetted_shell_is_hot` (ilk örnekte
+   `shell_seen_kelvin` > 330).
+   - Beklenen: `shell_before_fill.mean_kelvin` ≈ `max_kelvin` (~390 K). Eskiden
+     ortalama 348 / en yüksek 396 idi: domain içindeki yüzler havaya çivileniyor,
+     yalnız zeminin altındaki yarı ısınıyordu.
+   - İlk örnekte `heat_to_solid_j` ≈ −400…−700 J/adım ve `shell_seen_kelvin`
+     ≈ 380–395 K olmalı.
+   - `shell_seen` hâlâ ~294 K ise gather `.spv`'si eski (0. madde).
+   - Kabuk sıcak ama ısı küçükse sorun film/alan tarafında (`exchangeLiquidSolidContact`).
+   - ★ Sinsi olan: 7/7 ama `water_warms_through_cube` zar zor geçiyorsa (293,1
+     sınırında), bu doğrudur, hata değildir. 5 cm'lik bir parsel duvar dibinde
+     adım başına ~0,002 K ısınır. Onlarca kelvin görürsen film yanlış.
+4. **Yüzey suyu, regresyon:** `python scripts/test/rt_test_surface_water_ipc.py`,
+   **6/6** beklenir ama SAYILAR DEĞİŞİR. Meşe küpün üstü eskiden gaz çivilemesiyle
+   636 K'e çıkıyordu. Artık ~0,3 mm'lik meşe kabuğu sıcak havadan 20 W/(m²K)
+   filmle ve alanın gevşemesiyle ısınıyor: `max_kelvin` belirgin düşmeli,
+   `evaporated_kg` küçülmeli. Kapı yalnız > 0 istiyor.
+   ★ Sinsi olan: `hot_surface_dries_into_domain` FAIL ise üst yüz kaynamaya hiç
+   yaklaşmıyordur. Bu fizik, kusur değil; alanı (delta 300 K) büyütmeden önce
+   gerçek gözlemi not et.
+5. **FG1, regresyon:** `python scripts/test/rt_test_fire_steam_quench_ipc.py` →
+   8/8 (MSF'siz gaz; yüzey değişikliği etkilememeli).
+6. **Taneler termal zincirde (yeni):** `python scripts/test/rt_test_grain_heat_ipc.py`,
+   **7/7** bekleniyor. Kapalı Matter domain, 293 K su havuzu, 360 K Gravel
+   (r 1 cm) havadan suya düşüyor.
+   - `thermal_not_a_blocker` FAIL ise exe eskidir (`grain_readiness` hâlâ
+     `thermal_liquid` diyor).
+   - `grains_measured` FAIL ama taneler doğmuşsa: tane taşıyıcısının modeli
+     Granular değil ya da sahibi Grain değil (`roleOf`).
+   - `water_takes_heat` FAIL, `wetted` = 0: tanelerin hücresi sıvı havuzuyla
+     eşleşmiyor (ızgara/hücre eşlemesi).
+   - Yalnız `air_takes_heat` FAIL: gaz şeridi adım atmıyor (`gas_stats.stepped`
+     yanlış). Bu, gaz↔tane sürüklemesinin de aynı sahnede kapalı olduğu
+     anlamına gelir.
+   - `energy_closes` FAIL ise geri yazmada bir taraf eksik.
+   - Ölçek: ortalama koşu boyunca ~10 K düşmeli (τ ≈ 36 sn). ★ Sinsi olan:
+     birkaç saniyede 293 K'e inmesi. Hiçbir kapı onu yakalamaz, ama film ya
+     da alan (süper tane kütlesi) yanlış demektir. `grain_mean_k` eğrisine bak.
+   - `ms` (`thermal_grain_ms`): seri döngü. 400 tanede < 1 ms beklenir. 1e5
+     tanede ölç ve not et (OpenMP'ye bölünmedi).
+7. **H1 regresyonu (uzun, en son):** `python scripts/test/rt_h1_grain_suite.py`.
+   Termal zinciri kapalı tane sahneleri bit bit aynı kalmalı. Tek yeni yol,
+   `thermal_liquid_enabled=True` olan tane domain'i.
+8. **Panel (gözle, 6'dan sonra):** Thermal Liquid bölümünde, taneli domain'de
+   onay kutusu artık kilitli değil. "Grains: … min/mean/max K" ve "Grain heat …
+   residual" satırları görünüyor; değerler IPC'deki `thermal_grain_*` ile aynı.
+
 ---
 
 # 2026-10-15: ORTAK atmosfer sıcaklığı — SON kaynak teslimi

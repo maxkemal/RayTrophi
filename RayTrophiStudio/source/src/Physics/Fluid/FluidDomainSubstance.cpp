@@ -102,8 +102,6 @@ void applySubstanceSolverHints(APICSolverParams& params, const SubstanceProfile&
     params.granular_max_solver_substeps =
         std::clamp(static_cast<int>(std::lround(s.solver_granular_max_substeps)), 1, 64);
     params.thermal_liquid_enabled = s.solver_thermal_chain;
-    params.thermal_air_cooling_rate = s.solver_air_cooling_rate;
-    params.thermal_contact_cooling_rate = s.solver_contact_cooling_rate;
     params.sanitizeThermalLiquid();
 }
 

@@ -1525,6 +1525,10 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle msf_accum_density;
     ComputeBufferHandle msf_accum_heat;
     ComputeBufferHandle msf_accum_flame;
+    // Signed surface<->air convection heat (sim_msf_gather), normalized
+    // temperature change of the cell in 1/kMsfConvectFixedPoint units. Its own
+    // buffer because the exchange is two-way and much finer than pyrolysis heat.
+    ComputeBufferHandle msf_accum_convect;
     // GPU MGPCG (Layer A: Jacobi-preconditioned CG) scratch. Solves the same
     // free-surface Poisson system as the SOR path; allocated lazily alongside
     // the cell buffers. cg_partials holds per-block double partial sums for the

@@ -22,8 +22,8 @@ layout(local_size_x = 256) in;
 
 layout(push_constant) uniform PC {
     ivec4 counts;   // element_count, source_count, zone_count, input bits (1 heat, 2 water)
-    vec4  params;   // dt, relax_rate, reference_K (normalized 0), inv_kelvin_per_unit
-    vec4  params2;  // max_temperature, unused, unused, world_ambient_K
+    vec4  params;   // dt, air film W/(m^2 K), reference_K (normalized 0), inv_kelvin_per_unit
+    vec4  params2;  // max_temperature, body J/(K m^2), emissivity, world_ambient_K
 } pc;
 
 layout(set=0, binding=0) readonly buffer Centers { vec4 centers[]; };  // xyz world, w area
@@ -36,14 +36,15 @@ layout(set=0, binding=1)          buffer State   { vec4 state[]; };
 //   a: xyz = world position, w = inner_radius
 //   b: x = falloff_radius, y = delta_kelvin, z = falloff_type, w = infinite
 //   c, d, e: rows of the world -> field-local affine transform
-//   f: x = shape (0 sphere, 1 box, 2 cylinder, 3 cone)
+//   f: x = shape (0 sphere, 1 box, 2 cylinder, 3 cone), y = rate_per_s
 // All floats on the host too (they used to be raw ints read as floats).
 struct ThermalSource { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; vec4 f; };
 layout(set=0, binding=2) readonly buffer Sources { ThermalSource sources[]; };
 
 // Domain ambient overrides as world AABBs, 32 B each.
 //   a: xyz = bounds_min, w = ambient_kelvin
-//   b: xyz = bounds_max, w = reserved
+//   b: xyz = bounds_max, w = 1 when the box simulates its own air (gas lane)
+//   a.w <= 0: the box does not override the ambient.
 struct AmbientZone { vec4 a; vec4 b; };
 layout(set=0, binding=3) readonly buffer Zones { AmbientZone zones[]; };
 
@@ -106,46 +107,62 @@ void main() {
     //   climate while the calibration zero (params.z) stays put.
     float ambient_k = pc.params2.w;
 
-    // 2. Domain override, if this element is inside one. Last match wins — the
-    //    test is per ELEMENT, not per object, because one object can genuinely
-    //    straddle a domain boundary and half of it really is in the hot box.
+    // 2. Domain boxes, per ELEMENT (one object can straddle a domain wall).
+    //    Last override wins. A box with a gas lane is its own air.
+    bool in_gas = false;
     int zone_count = pc.counts.z;
     for (int i = 0; i < zone_count; ++i) {
         vec3 lo = zones[i].a.xyz;
         vec3 hi = zones[i].b.xyz;
         if (all(greaterThanEqual(p, lo)) && all(lessThanEqual(p, hi))) {
-            ambient_k = zones[i].a.w;
+            if (zones[i].a.w > 0.0) ambient_k = zones[i].a.w;
+            if (zones[i].b.w > 0.5) in_gas = true;
         }
     }
 
-    // 3. Thermal fields stack ON TOP of ambient rather than replacing it: two
-    //    burners under the same plate should be hotter than one, and a field is
-    //    a heat SOURCE, not a thermostat.
+    // 3. Thermal fields stack ON TOP of ambient: two burners under one plate
+    //    are hotter than one. A field is an authored heat SOURCE with its own
+    //    rate (weighted by falloff when several overlap).
+    float field_delta = 0.0;
+    float field_rate = 0.0;
+    float field_weight = 0.0;
     int source_count = pc.counts.y;
     for (int i = 0; i < source_count; ++i) {
         float w = sourceWeight(sources[i], p);
         if (w <= 0.0) continue;
-        ambient_k += sources[i].b.y * w;
+        field_delta += sources[i].b.y * w;
+        field_rate += max(sources[i].f.y, 0.0) * w;
+        field_weight += w;
     }
 
-    // Kelvin -> normalized against the CALIBRATION zero. For a scene whose
-    // ambient equals its reference (every scene saved before Faz 2 and every
-    // non-inheriting one) an untouched element still relaxes to exactly 0.
-    float ambient = (ambient_k - pc.params.z) * pc.params.w;
-
     vec4 st = state[id * 2u];
+    float ambient = (ambient_k - pc.params.z) * pc.params.w;
+    float dt = pc.params.x;
 
-    // Exponential relaxation, not a linear subtract. The old
-    // `max(0, T - rate*dt)` could only ever cool toward zero: with a non-zero
-    // ambient it would drive the surface straight past the room temperature and
-    // pin it at absolute-ambient, and it could never WARM an object sitting in a
-    // Thermal field. Relaxation also cannot overshoot at any timestep.
-    float k = max(0.0, pc.params.y);
-    st.x = ambient + (st.x - ambient) * exp(-k * pc.params.x);
+    // ★ The room as an AIR FILM against the body, not a rate (2026-10-19).
+    // The old `relax at cooling_rate` was capacity-free: a 0.1 m iron block
+    // cooled like a sheet, and inside a gas domain it was a second, energy-free
+    // air on top of the gas lane's. Now: h = air film (x world convection) +
+    // linearized radiation, over body = rho c depth, exact exponential. Inside
+    // a gas lane the air is sim_msf_gather's, so nothing here.
+    float body = pc.params2.y;
+    if (!in_gas && body > 0.0 && pc.params.w > 0.0) {
+        const float SIGMA = 5.670374e-8;
+        float kpu = 1.0 / pc.params.w;
+        float tk = max(1.0, pc.params.z + st.x * kpu);
+        float ak = max(1.0, ambient_k);
+        float h = pc.params.y + pc.params2.z * SIGMA * (tk * tk + ak * ak) * (tk + ak);
+        st.x = ambient + (st.x - ambient) * exp(-h / body * dt);
+    }
+    if (field_weight > 0.0) {
+        float target = (ambient_k + field_delta - pc.params.z) * pc.params.w;
+        float rate = field_rate / field_weight;
+        st.x = target + (st.x - target) * exp(-rate * dt);
+    }
     if ((pc.counts.w & 1) != 0) st.x += heat_in[id];
 
     // A cold zone may legitimately sit below the world ambient, so the floor is
-    // the local ambient rather than 0 — clamping at 0 would silently make every
+    // the local ambient rather than 0 - clamping at 0 would silently make every
     // freezer as warm as the room.
     st.x = clamp(st.x, min(ambient, 0.0), pc.params2.x);
 
@@ -153,8 +170,7 @@ void main() {
     // ★ No drying here any more. Water is mass: the host budget took it from a
     // liquid parcel or put it into a gas inventory, paid its latent heat
     // (heat_in above) and recorded it in the ledger. This pass only adds what
-    // was queued. The floor at 0 only guards float rounding of a budget that
-    // never spends more than the host copy held.
+    // was queued.
     if ((pc.counts.w & 2) != 0) st.w = max(0.0, st.w + water_in[id]);
 
     state[id * 2u] = st;

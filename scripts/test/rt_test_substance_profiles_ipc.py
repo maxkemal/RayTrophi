@@ -124,6 +124,8 @@ def main():
 
         # Transactional: one bad field rejects the whole patch.
         assert rejected("substance.set", name=HONEY, fields={"density": 1400.0, "emissivity": 5.0})
+        # Retired 2026-10-19: surface heating is a film against the body capacity.
+        assert rejected("substance.set", name=HONEY, fields={"thermal_response": 3.0})
         assert rejected("substance.set", name=HONEY, fields={"no_such_field": 1.0})
         assert rejected("substance.set", name=HONEY,
                         fields={"meltable": True, "melt_kelvin": 400.0, "boiling_kelvin": 300.0})
