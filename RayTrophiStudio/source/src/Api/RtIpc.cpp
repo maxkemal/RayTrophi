@@ -2959,6 +2959,19 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"thermal_solid_contact_particles", info.thermal_solid_contact_particles},
                         {"thermal_heat_to_solid_j", info.thermal_heat_to_solid_j},
                         {"thermal_heat_to_ambient_j", info.thermal_heat_to_ambient_j},
+                        {"settle_on_seed", info.settle_on_seed},
+                        {"settle_max_steps", info.settle_max_steps},
+                        {"settle_speed_m_s", info.settle_speed_m_s},
+                        {"settle_pending", info.settle_pending},
+                        {"settle_ran", info.settle_ran},
+                        {"settle_converged", info.settle_converged},
+                        {"settle_steps", info.settle_steps},
+                        {"settle_particles", info.settle_particles},
+                        {"settle_first_speed_m_s", info.settle_first_speed_m_s},
+                        {"settle_residual_speed_m_s", info.settle_residual_speed_m_s},
+                        {"settle_ms", info.settle_ms},
+                        {"live_max_speed_m_s", info.live_max_speed_m_s},
+                        {"live_mean_speed_m_s", info.live_mean_speed_m_s},
                         {"thermal_contact_shell_kelvin", info.thermal_contact_shell_kelvin},
                         {"thermal_contact_parcel_kelvin", info.thermal_contact_parcel_kelvin},
                         {"thermal_contact_shell_cells", info.thermal_contact_shell_cells},
@@ -3190,6 +3203,19 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"thermal_solid_contact_particles", info.thermal_solid_contact_particles},
                         {"thermal_heat_to_solid_j", info.thermal_heat_to_solid_j},
                         {"thermal_heat_to_ambient_j", info.thermal_heat_to_ambient_j},
+                        {"settle_on_seed", info.settle_on_seed},
+                        {"settle_max_steps", info.settle_max_steps},
+                        {"settle_speed_m_s", info.settle_speed_m_s},
+                        {"settle_pending", info.settle_pending},
+                        {"settle_ran", info.settle_ran},
+                        {"settle_converged", info.settle_converged},
+                        {"settle_steps", info.settle_steps},
+                        {"settle_particles", info.settle_particles},
+                        {"settle_first_speed_m_s", info.settle_first_speed_m_s},
+                        {"settle_residual_speed_m_s", info.settle_residual_speed_m_s},
+                        {"settle_ms", info.settle_ms},
+                        {"live_max_speed_m_s", info.live_max_speed_m_s},
+                        {"live_mean_speed_m_s", info.live_mean_speed_m_s},
                         {"thermal_contact_shell_kelvin", info.thermal_contact_shell_kelvin},
                         {"thermal_contact_parcel_kelvin", info.thermal_contact_parcel_kelvin},
                         {"thermal_contact_shell_cells", info.thermal_contact_shell_cells},
@@ -3333,6 +3359,22 @@ json dispatchMethod(const std::string& method, const json& params) {
         bool clear_seed = optionalBool(params, "clear_seed", false);
         return enqueueResult([domain, clear_seed](UIContext&) {
             return rtapi::clearFluidParticles(domain, clear_seed);
+        });
+    }
+    if (method == "fluid.settle") {
+        // Seed settle (MatterSeedSettle): settings, and request = relax the
+        // current particles to rest at the start of the next step.
+        std::string domain = requireString(params, "domain");
+        const bool has_on_seed = params.contains("on_seed");
+        const bool on_seed = optionalBool(params, "on_seed", true);
+        const bool has_steps = params.contains("max_steps");
+        const int max_steps = optionalInt(params, "max_steps", 240);
+        const bool has_speed = params.contains("speed_m_s");
+        const float speed = optionalFloat(params, "speed_m_s", 0.01f);
+        const bool request = optionalBool(params, "request", true);
+        return enqueueResult([=](UIContext&) {
+            return rtapi::settleFluidDomain(domain, has_on_seed ? &on_seed : nullptr,
+                has_steps ? &max_steps : nullptr, has_speed ? &speed : nullptr, request);
         });
     }
     if (method == "fluid.remove_domain" || method == "gas.remove_domain") {

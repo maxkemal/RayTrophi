@@ -148,6 +148,9 @@ class _GrainTranslator:
             return self.grain_settings(params)
         if method in ('flow_source.create', 'flow_source.update'):
             return self.flow_source(method, params)
+        if method == 'flow_source.remove':
+            # A removed source must not be re-pointed by a later grain edit.
+            self.sources.pop(params.get('name'), None)
         return self.raw(method, **params)
 
 

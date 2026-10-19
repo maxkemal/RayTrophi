@@ -1,11 +1,16 @@
 """Revision-24 weak/strong impact A/B on a small settled DEM bed.
 
+2026-10-19: the bed is one layer of 9 x 3 grains, relaxed to rest by
+fluid.settle right after it is born (the old 3 x 3 x 3 cubic stack is not an
+equilibrium: it collapsed and covered the projectile's birth site).
+
 External IPC, empty paused scene, no colliders or fields. Does not start the app.
 All sources are scheduled before physics; introducing a projectile does not edit
 the live scene, reset the bed, or deliberately wake it. Run after the user build.
 """
 import json
 import math
+import time
 import uuid
 from pathlib import Path
 
@@ -29,7 +34,15 @@ def main():
     results = {}
 
     def save():
-        OUT.write_text(json.dumps(results, indent=2), encoding='utf-8')
+        # Windows can hold the file for a moment (indexer, editor): retry.
+        for attempt in range(5):
+            try:
+                OUT.write_text(json.dumps(results, indent=2), encoding='utf-8')
+                return
+            except OSError:
+                if attempt == 4:
+                    raise
+                time.sleep(.2)
     OUT.parent.mkdir(parents=True, exist_ok=True)
     try:
         control = client.call('sim.control_state')
@@ -44,7 +57,7 @@ def main():
         density = client.call('substance.get', name='Sand')['fields']['density']
         client.call('substance.set', name=weak, fields={'density': density * .001})
         client.call('fluid.create_domain', name=domain, type='matter',
-                    domain_min=[-.3, 0, -.3], domain_max=[.4, .4, .4], voxel_size=.05)
+                    domain_min=[-.3, 0, -.3], domain_max=[.6, .4, .4], voxel_size=.05)
         domain_created = True
         client.call('fluid.set_param', domain=domain, backend='vulkan', visible=False,
                     boundary='closed', default_substance='Sand', solid_phase=False,
@@ -72,6 +85,7 @@ def main():
             assert r['dispatches'] == 4*r['substeps'], r
             assert client.call('sim.control_state') == control
             return {'particles': g['particles'], 'mass_kg': g['dry_mass_kg'],
+                    'bounds_min': g.get('bounds_min'),
                     'com': g['dry_center_of_mass'], 'energy_j': g['kinetic_energy_j'],
                     'sleeping': r['sleeping_grains'], 'contacts': r['contacts_last_substep'],
                     'substeps': r['substeps'], 'gpu_wait_ms': r['host_ms']['gpu_wait'],
@@ -91,30 +105,34 @@ def main():
                             twisting_friction=0., tangential_stiffness_ratio=2/7,
                             contact_resolution=24, packing_fraction=.6, max_substeps=4096,
                             sleep=sleep, sleep_speed_m_s=.002, sleep_time_s=.2)
-                for y in range(3):
-                    for x in range(3):
-                        for z in range(3):
-                            make_source([x*.0504, RADIUS+y*.0504, z*.0504],
-                                        'Sand', [0, 0, 0], 0.)
+                for x in range(9):
+                    for z in range(3):
+                        make_source([x*.0504, RADIUS, z*.0504], 'Sand', [0, 0, 0], 0.)
                 make_source([-.0503, RADIUS, .0504], material, [speed, 0, 0], 1.1)
                 client.call('fluid.reset')
                 control = client.call('sim.control_state')
                 for step in range(60):
                     client.call('fluid.step', dt=1/60)
                     if step == 0:
-                        sample()  # Reject an old binary before the warm-up.
+                        born_bed = sample()  # Reject an old binary before the warm-up.
+                        assert born_bed['particles'] == BED, born_bed
+                        # Relax the poured bed to rest before the clock goes on.
+                        client.call('fluid.settle', domain=domain, request=True)
                 before = sample()
                 key = strength + ('_on' if sleep else '_off')
                 samples = []
                 results[key] = {'before': before, 'samples': samples}
                 save()
                 assert before['particles'] == BED, before
-                # P6 2026-10-19: the last live run read 'projectile not born'; the
-                # real cause was a collapsed bed (COM y 0.030 m, a 3-layer stack is
-                # ~0.075 m) covering the projectile's birth site, which the grain
-                # birth filter rejects as overlap. Name that cause here.
-                assert before['com'][1] > 2*RADIUS, ('bed collapsed; projectile birth '
-                                                     'site is occupied', before)
+                # The grain birth filter rejects a birth that overlaps a grain:
+                # a bed spread over the projectile's site reads 'not born'.
+                assert before['bounds_min'][0] > -.0503 + RADIUS, (
+                    'bed covers the projectile birth site', before)
+                settle = {d['name']: d for d in
+                          client.call('fluid.list_domains')['domains']}[domain]
+                assert settle['settle_ran'], settle
+                results.setdefault('settle', {})[strength + ('_on' if sleep else '_off')] = {
+                    k: settle[k] for k in settle if k.startswith('settle_')}
                 if sleep:
                     assert before['sleeping'] >= BED-4, ('bed did not settle', before)
                 for _ in range(30):

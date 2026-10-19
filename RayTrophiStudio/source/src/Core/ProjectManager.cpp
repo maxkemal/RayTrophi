@@ -5873,6 +5873,9 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"seed_mode", (int)domain.fluid_seed_mode},
             {"fill_level", domain.fluid_fill_level},
             {"fill_wall_margin", domain.fluid_fill_wall_margin},
+            {"seed_settle", domain.fluid_seed_settle},
+            {"settle_max_steps", domain.fluid_settle_max_steps},
+            {"settle_speed_m_s", domain.fluid_settle_speed_m_s},
             {"gravity", vec3ToJson(domain.fluid_params.gravity)},
             {"particles_per_cell", domain.fluid_params.particles_per_cell},
             {"cfl", domain.fluid_params.cfl},
@@ -6444,6 +6447,9 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_seed_mode = (RayTrophiSim::FluidSeedMode)f.value("seed_mode", (int)domain.fluid_seed_mode);
             domain.fluid_fill_level = f.value("fill_level", domain.fluid_fill_level);
             domain.fluid_fill_wall_margin = f.value("fill_wall_margin", domain.fluid_fill_wall_margin);
+            domain.fluid_seed_settle = f.value("seed_settle", domain.fluid_seed_settle);
+            domain.fluid_settle_max_steps = f.value("settle_max_steps", domain.fluid_settle_max_steps);
+            domain.fluid_settle_speed_m_s = f.value("settle_speed_m_s", domain.fluid_settle_speed_m_s);
             if (f.contains("gravity")) domain.fluid_params.gravity = jsonToVec3(f["gravity"]);
             domain.fluid_params.particles_per_cell = f.value("particles_per_cell", domain.fluid_params.particles_per_cell);
             domain.fluid_params.cfl = f.value("cfl", domain.fluid_params.cfl);

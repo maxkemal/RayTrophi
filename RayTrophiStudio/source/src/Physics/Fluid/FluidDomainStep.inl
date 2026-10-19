@@ -243,7 +243,8 @@
             // frozen set. Both calls are no-ops when the chain is off, except
             // that updateThermalFreeze clears any frozen flag left behind.
             state.thermal_stats = Fluid::ThermalLiquidStats{};
-            if (i < grid_domains_.size()) {
+            // A seed settle moves no heat: it is not time (MatterSeedSettle).
+            if (i < grid_domains_.size() && !settling_) {
                 RTPERF_FRAME_SCOPE("sim.fluid.thermal_cool_freeze");
                 const float ambient_kelvin =
                     fluidDomainAmbientKelvin(grid_domains_[i], world_thermal_);
@@ -1429,7 +1430,8 @@
                         state, context.compute, &matter_liquid_compute_buffers_[i]);
                 }
             }
-            if (i < grid_domains_.size() && grid_domains_[i].fluid_foam_params.enabled) {
+            if (!settling_ && i < grid_domains_.size() &&
+                grid_domains_[i].fluid_foam_params.enabled) {
                 const auto& fparams = grid_domains_[i].fluid_foam_params;
                 if (!particle_residency.recover()) {
                     Fluid::holdGasInventory(state, "whitewater source publication failed; reset required");

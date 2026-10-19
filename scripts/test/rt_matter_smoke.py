@@ -34,6 +34,8 @@ ARMS = [
     ('fire_steam', 'rt_test_fire_steam_quench_ipc.py', []),
     ('grain_heat', 'rt_test_grain_heat_ipc.py', []),
     ('grain_readiness', 'rt_h1_grain_runtime_ipc.py', ['--readiness-only']),
+    ('seed_settle', 'rt_test_seed_settle_ipc.py', []),
+    ('sleep_transfer', 'rt_test_grain_sleep_transfer_ipc.py', []),
 ]
 H1 = ('h1_suite', 'rt_h1_grain_suite.py', [])
 GATE = re.compile(r'^(PASS|FAIL)\s+(\S+)')

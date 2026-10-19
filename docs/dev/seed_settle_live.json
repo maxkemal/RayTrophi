@@ -1,0 +1,834 @@
+{
+  "sand_on": {
+    "seeded": 2304,
+    "samples": [
+      {
+        "max_speed": 0.14319804310798645,
+        "mean_speed": 0.08412261307239532,
+        "particles": 2304,
+        "com_y": 0.09075377986560938,
+        "energy_j": 0.5545665477163709,
+        "settle": {
+          "settle_converged": false,
+          "settle_first_speed_m_s": 0.08513204008340836,
+          "settle_max_steps": 240,
+          "settle_ms": 693.4058227539062,
+          "settle_on_seed": true,
+          "settle_particles": 2304,
+          "settle_pending": false,
+          "settle_ran": true,
+          "settle_residual_speed_m_s": 0.14314116537570953,
+          "settle_speed_m_s": 0.009999999776482582,
+          "settle_steps": 240
+        }
+      },
+      {
+        "max_speed": 0.1542072743177414,
+        "mean_speed": 0.08521224558353424,
+        "particles": 2304,
+        "com_y": 0.09135210895427325,
+        "energy_j": 0.574589023288038
+      },
+      {
+        "max_speed": 0.015955576673150063,
+        "mean_speed": 0.00024397423840127885,
+        "particles": 2304,
+        "com_y": 0.09132084385558094,
+        "energy_j": 0.00015681538878127224
+      },
+      {
+        "max_speed": 0.05076971277594566,
+        "mean_speed": 0.004015972372144461,
+        "particles": 2304,
+        "com_y": 0.0906881036819917,
+        "energy_j": 0.008067851263109766
+      },
+      {
+        "max_speed": 0.1306498944759369,
+        "mean_speed": 0.07533830404281616,
+        "particles": 2304,
+        "com_y": 0.09064632784164435,
+        "energy_j": 0.4427248458119305
+      },
+      {
+        "max_speed": 0.13907408714294434,
+        "mean_speed": 0.07365689426660538,
+        "particles": 2304,
+        "com_y": 0.09109892965006512,
+        "energy_j": 0.4394180388540654
+      },
+      {
+        "max_speed": 0.01224078144878149,
+        "mean_speed": 0.0001368164230370894,
+        "particles": 2304,
+        "com_y": 0.0910219899465371,
+        "energy_j": 7.876281532434869e-05
+      },
+      {
+        "max_speed": 0.05815136432647705,
+        "mean_speed": 0.00572381354868412,
+        "particles": 2304,
+        "com_y": 0.09041514335308423,
+        "energy_j": 0.012669818864755256
+      },
+      {
+        "max_speed": 0.1352730244398117,
+        "mean_speed": 0.0758022591471672,
+        "particles": 2304,
+        "com_y": 0.09039904327818894,
+        "energy_j": 0.4488115242531278
+      },
+      {
+        "max_speed": 0.14377106726169586,
+        "mean_speed": 0.07334566116333008,
+        "particles": 2304,
+        "com_y": 0.09085759719909631,
+        "energy_j": 0.4394816223090189
+      },
+      {
+        "max_speed": 0.011398952454328537,
+        "mean_speed": 0.00014017945795785636,
+        "particles": 2304,
+        "com_y": 0.09077742760177895,
+        "energy_j": 7.76328554045286e-05
+      },
+      {
+        "max_speed": 0.06971096992492676,
+        "mean_speed": 0.006303480360656977,
+        "particles": 2304,
+        "com_y": 0.0901702478264621,
+        "energy_j": 0.014645802504437973
+      },
+      {
+        "max_speed": 0.13497371971607208,
+        "mean_speed": 0.0750403180718422,
+        "particles": 2304,
+        "com_y": 0.09015233228534347,
+        "energy_j": 0.4400498719297882
+      },
+      {
+        "max_speed": 0.1389385610818863,
+        "mean_speed": 0.0709056556224823,
+        "particles": 2304,
+        "com_y": 0.09058322944330634,
+        "energy_j": 0.41709705019174903
+      },
+      {
+        "max_speed": 0.039406608790159225,
+        "mean_speed": 0.00037045852513983846,
+        "particles": 2304,
+        "com_y": 0.09049733907500021,
+        "energy_j": 0.0005669706784389366
+      },
+      {
+        "max_speed": 0.07674574106931686,
+        "mean_speed": 0.007656987756490707,
+        "particles": 2304,
+        "com_y": 0.08990803517632333,
+        "energy_j": 0.01901445699412416
+      },
+      {
+        "max_speed": 0.1331588476896286,
+        "mean_speed": 0.07445774972438812,
+        "particles": 2304,
+        "com_y": 0.08989985814956615,
+        "energy_j": 0.4361512229561041
+      },
+      {
+        "max_speed": 0.14304782450199127,
+        "mean_speed": 0.06958048045635223,
+        "particles": 2304,
+        "com_y": 0.09032285623043709,
+        "energy_j": 0.4092016475380064
+      },
+      {
+        "max_speed": 0.06605271995067596,
+        "mean_speed": 0.0010537834605202079,
+        "particles": 2304,
+        "com_y": 0.09023429532941114,
+        "energy_j": 0.002632318541564258
+      },
+      {
+        "max_speed": 0.07138850539922714,
+        "mean_speed": 0.009063627570867538,
+        "particles": 2304,
+        "com_y": 0.08965752482191004,
+        "energy_j": 0.023362653887931382
+      },
+      {
+        "max_speed": 0.13090361654758453,
+        "mean_speed": 0.07284311205148697,
+        "particles": 2304,
+        "com_y": 0.0896485502685463,
+        "energy_j": 0.42102752043559627
+      },
+      {
+        "max_speed": 0.1383468061685562,
+        "mean_speed": 0.06597400456666946,
+        "particles": 2304,
+        "com_y": 0.09003224257379663,
+        "energy_j": 0.37833949212582985
+      },
+      {
+        "max_speed": 0.09549521654844284,
+        "mean_speed": 0.002965796971693635,
+        "particles": 2304,
+        "com_y": 0.08993769770695001,
+        "energy_j": 0.009686651019958534
+      },
+      {
+        "max_speed": 0.07346661388874054,
+        "mean_speed": 0.010317740961909294,
+        "particles": 2304,
+        "com_y": 0.08939105620546192,
+        "energy_j": 0.027100969231514407
+      },
+      {
+        "max_speed": 0.13228283822536469,
+        "mean_speed": 0.07244521379470825,
+        "particles": 2304,
+        "com_y": 0.08939060216711266,
+        "energy_j": 0.41666910406252683
+      },
+      {
+        "max_speed": 0.14085498452186584,
+        "mean_speed": 0.0633154809474945,
+        "particles": 2304,
+        "com_y": 0.08975500055362318,
+        "energy_j": 0.36045196631321846
+      },
+      {
+        "max_speed": 0.10577097535133362,
+        "mean_speed": 0.00466253561899066,
+        "particles": 2304,
+        "com_y": 0.08965437165713613,
+        "energy_j": 0.01692607949776952
+      },
+      {
+        "max_speed": 0.08703113347291946,
+        "mean_speed": 0.01187971979379654,
+        "particles": 2304,
+        "com_y": 0.08913341576466247,
+        "energy_j": 0.03491272036957165
+      },
+      {
+        "max_speed": 0.13402077555656433,
+        "mean_speed": 0.07071136683225632,
+        "particles": 2304,
+        "com_y": 0.0891333868483899,
+        "energy_j": 0.4026117835605851
+      },
+      {
+        "max_speed": 0.1401703655719757,
+        "mean_speed": 0.05919066071510315,
+        "particles": 2304,
+        "com_y": 0.0894589422829438,
+        "energy_j": 0.33083159706312404
+      }
+    ]
+  },
+  "sand_off": {
+    "seeded": 2304,
+    "samples": [
+      {
+        "max_speed": 0.08513209968805313,
+        "mean_speed": 0.01598818600177765,
+        "particles": 2304,
+        "com_y": 0.09876348271748411,
+        "energy_j": 0.05595403754625167,
+        "settle": {
+          "settle_converged": false,
+          "settle_first_speed_m_s": 0.0,
+          "settle_max_steps": 240,
+          "settle_ms": 0.0,
+          "settle_on_seed": false,
+          "settle_particles": 0,
+          "settle_pending": false,
+          "settle_ran": false,
+          "settle_residual_speed_m_s": 0.0,
+          "settle_speed_m_s": 0.009999999776482582,
+          "settle_steps": 0
+        }
+      },
+      {
+        "max_speed": 0.0743304193019867,
+        "mean_speed": 0.027904585003852844,
+        "particles": 2304,
+        "com_y": 0.09806611825032024,
+        "energy_j": 0.0852839361550607
+      },
+      {
+        "max_speed": 0.14804480969905853,
+        "mean_speed": 0.08505690097808838,
+        "particles": 2304,
+        "com_y": 0.09828528229948261,
+        "energy_j": 0.5278449988380457
+      },
+      {
+        "max_speed": 0.10234736651182175,
+        "mean_speed": 0.0252881720662117,
+        "particles": 2304,
+        "com_y": 0.0983799866650213,
+        "energy_j": 0.10351341246684338
+      },
+      {
+        "max_speed": 0.09173735976219177,
+        "mean_speed": 0.037654366344213486,
+        "particles": 2304,
+        "com_y": 0.09814054851123433,
+        "energy_j": 0.13105022198080873
+      },
+      {
+        "max_speed": 0.11709436029195786,
+        "mean_speed": 0.029081255197525024,
+        "particles": 2304,
+        "com_y": 0.09795656466786153,
+        "energy_j": 0.12697566844946084
+      },
+      {
+        "max_speed": 0.12322349101305008,
+        "mean_speed": 0.043621841818094254,
+        "particles": 2304,
+        "com_y": 0.09782476442743865,
+        "energy_j": 0.2091606013976604
+      },
+      {
+        "max_speed": 0.12112238258123398,
+        "mean_speed": 0.05824059247970581,
+        "particles": 2304,
+        "com_y": 0.0978595698446092,
+        "energy_j": 0.27211547016338006
+      },
+      {
+        "max_speed": 0.12330512702465057,
+        "mean_speed": 0.028654232621192932,
+        "particles": 2304,
+        "com_y": 0.09784341051633616,
+        "energy_j": 0.12530212734452995
+      },
+      {
+        "max_speed": 0.09548324346542358,
+        "mean_speed": 0.021562475711107254,
+        "particles": 2304,
+        "com_y": 0.09753803124272037,
+        "energy_j": 0.07084473783464336
+      },
+      {
+        "max_speed": 0.1264875829219818,
+        "mean_speed": 0.06152292340993881,
+        "particles": 2304,
+        "com_y": 0.09745634704002747,
+        "energy_j": 0.2937146809546723
+      },
+      {
+        "max_speed": 0.12276177108287811,
+        "mean_speed": 0.05438658222556114,
+        "particles": 2304,
+        "com_y": 0.0976027408125397,
+        "energy_j": 0.2509586766701452
+      },
+      {
+        "max_speed": 0.08777910470962524,
+        "mean_speed": 0.026933731511235237,
+        "particles": 2304,
+        "com_y": 0.09758017318823571,
+        "energy_j": 0.08268692527977684
+      },
+      {
+        "max_speed": 0.08846212923526764,
+        "mean_speed": 0.01216915063560009,
+        "particles": 2304,
+        "com_y": 0.09720414883079478,
+        "energy_j": 0.038593261273528766
+      },
+      {
+        "max_speed": 0.11765963584184647,
+        "mean_speed": 0.06686630100011826,
+        "particles": 2304,
+        "com_y": 0.09707949422992601,
+        "energy_j": 0.33927760720384775
+      },
+      {
+        "max_speed": 0.13355416059494019,
+        "mean_speed": 0.05606122687458992,
+        "particles": 2304,
+        "com_y": 0.09730124194253308,
+        "energy_j": 0.2991295766137737
+      },
+      {
+        "max_speed": 0.1116098091006279,
+        "mean_speed": 0.01579066552221775,
+        "particles": 2304,
+        "com_y": 0.09718307925663784,
+        "energy_j": 0.06547477944298895
+      },
+      {
+        "max_speed": 0.10185595601797104,
+        "mean_speed": 0.03292827308177948,
+        "particles": 2304,
+        "com_y": 0.096808671477725,
+        "energy_j": 0.11372270583912356
+      },
+      {
+        "max_speed": 0.130267933011055,
+        "mean_speed": 0.06024980545043945,
+        "particles": 2304,
+        "com_y": 0.09684350908454091,
+        "energy_j": 0.2987333329438766
+      },
+      {
+        "max_speed": 0.11700219660997391,
+        "mean_speed": 0.04408538341522217,
+        "particles": 2304,
+        "com_y": 0.09693241045672749,
+        "energy_j": 0.20226249650017666
+      },
+      {
+        "max_speed": 0.12109051644802094,
+        "mean_speed": 0.03423556685447693,
+        "particles": 2304,
+        "com_y": 0.09687042495854957,
+        "energy_j": 0.13271040789936406
+      },
+      {
+        "max_speed": 0.09350910037755966,
+        "mean_speed": 0.010110661387443542,
+        "particles": 2304,
+        "com_y": 0.09654646084060105,
+        "energy_j": 0.03288421392087838
+      },
+      {
+        "max_speed": 0.12805040180683136,
+        "mean_speed": 0.0654602125287056,
+        "particles": 2304,
+        "com_y": 0.09641044170931912,
+        "energy_j": 0.33670902311664147
+      },
+      {
+        "max_speed": 0.13438670337200165,
+        "mean_speed": 0.06494084000587463,
+        "particles": 2304,
+        "com_y": 0.09668140655713177,
+        "energy_j": 0.3497470479475766
+      },
+      {
+        "max_speed": 0.11159458756446838,
+        "mean_speed": 0.009722939692437649,
+        "particles": 2304,
+        "com_y": 0.09659893879120335,
+        "energy_j": 0.03757892459951639
+      },
+      {
+        "max_speed": 0.08819030225276947,
+        "mean_speed": 0.020662132650613785,
+        "particles": 2304,
+        "com_y": 0.09610811374596376,
+        "energy_j": 0.06021941367962186
+      },
+      {
+        "max_speed": 0.13346557319164276,
+        "mean_speed": 0.07339520752429962,
+        "particles": 2304,
+        "com_y": 0.09613826602210582,
+        "energy_j": 0.4064515556861946
+      },
+      {
+        "max_speed": 0.1287405788898468,
+        "mean_speed": 0.052782490849494934,
+        "particles": 2304,
+        "com_y": 0.09638740756435665,
+        "energy_j": 0.2689043694239416
+      },
+      {
+        "max_speed": 0.1045447289943695,
+        "mean_speed": 0.019212637096643448,
+        "particles": 2304,
+        "com_y": 0.09629270136931845,
+        "energy_j": 0.06709368722729459
+      },
+      {
+        "max_speed": 0.099448062479496,
+        "mean_speed": 0.017178557813167572,
+        "particles": 2304,
+        "com_y": 0.0958646113384576,
+        "energy_j": 0.057406374437750096
+      }
+    ]
+  },
+  "water_on": {
+    "seeded": 2304,
+    "samples": [
+      {
+        "max_speed": 0.11209169775247574,
+        "mean_speed": 0.009293558076024055,
+        "particles": 2304,
+        "settle": {
+          "settle_converged": false,
+          "settle_first_speed_m_s": 0.11209116131067276,
+          "settle_max_steps": 240,
+          "settle_ms": 951.9771118164062,
+          "settle_on_seed": true,
+          "settle_particles": 2304,
+          "settle_pending": false,
+          "settle_ran": true,
+          "settle_residual_speed_m_s": 0.11209169030189514,
+          "settle_speed_m_s": 0.009999999776482582,
+          "settle_steps": 240
+        }
+      },
+      {
+        "max_speed": 0.2164992094039917,
+        "mean_speed": 0.01890409365296364,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.31334760785102844,
+        "mean_speed": 0.0353710763156414,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.4079015552997589,
+        "mean_speed": 0.04887419939041138,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.5004575252532959,
+        "mean_speed": 0.0694420263171196,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.5891135931015015,
+        "mean_speed": 0.08702399581670761,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.6726477146148682,
+        "mean_speed": 0.1080588847398758,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.7648846507072449,
+        "mean_speed": 0.12628425657749176,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.8328871726989746,
+        "mean_speed": 0.14019092917442322,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.9105333089828491,
+        "mean_speed": 0.14060163497924805,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.9836140275001526,
+        "mean_speed": 0.15798410773277283,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.0628539323806763,
+        "mean_speed": 0.16075721383094788,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.121706247329712,
+        "mean_speed": 0.1636967808008194,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.1863555908203125,
+        "mean_speed": 0.1800956428050995,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.1561211347579956,
+        "mean_speed": 0.17957423627376556,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.238895058631897,
+        "mean_speed": 0.18589304387569427,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.3131119012832642,
+        "mean_speed": 0.1849888563156128,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.3727359771728516,
+        "mean_speed": 0.20226866006851196,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.4362112283706665,
+        "mean_speed": 0.19636616110801697,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.4938380718231201,
+        "mean_speed": 0.19871249794960022,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.554678201675415,
+        "mean_speed": 0.19308339059352875,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.621422290802002,
+        "mean_speed": 0.1971885710954666,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.6742711067199707,
+        "mean_speed": 0.19814027845859528,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.7384979724884033,
+        "mean_speed": 0.21294529736042023,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.7843226194381714,
+        "mean_speed": 0.208780899643898,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.8590755462646484,
+        "mean_speed": 0.19186027348041534,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.896189570426941,
+        "mean_speed": 0.20842289924621582,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.9363439083099365,
+        "mean_speed": 0.20768390595912933,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.9725290536880493,
+        "mean_speed": 0.2130059152841568,
+        "particles": 2304
+      },
+      {
+        "max_speed": 2.0103228092193604,
+        "mean_speed": 0.21527093648910522,
+        "particles": 2304
+      }
+    ]
+  },
+  "water_off": {
+    "seeded": 2304,
+    "samples": [
+      {
+        "max_speed": 0.11209115386009216,
+        "mean_speed": 0.009241503663361073,
+        "particles": 2304,
+        "settle": {
+          "settle_converged": false,
+          "settle_first_speed_m_s": 0.0,
+          "settle_max_steps": 240,
+          "settle_ms": 0.0,
+          "settle_on_seed": false,
+          "settle_particles": 0,
+          "settle_pending": false,
+          "settle_ran": false,
+          "settle_residual_speed_m_s": 0.0,
+          "settle_speed_m_s": 0.009999999776482582,
+          "settle_steps": 0
+        }
+      },
+      {
+        "max_speed": 0.21649464964866638,
+        "mean_speed": 0.018905678763985634,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.31321096420288086,
+        "mean_speed": 0.03452093154191971,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.4079524576663971,
+        "mean_speed": 0.04928804188966751,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.500698983669281,
+        "mean_speed": 0.06882335990667343,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.588620126247406,
+        "mean_speed": 0.09140730649232864,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.672907829284668,
+        "mean_speed": 0.10426091402769089,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.7652155756950378,
+        "mean_speed": 0.12516143918037415,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.8332983255386353,
+        "mean_speed": 0.14196862280368805,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.9097580313682556,
+        "mean_speed": 0.14871279895305634,
+        "particles": 2304
+      },
+      {
+        "max_speed": 0.9836856126785278,
+        "mean_speed": 0.15711131691932678,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.0616164207458496,
+        "mean_speed": 0.16119489073753357,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.1204111576080322,
+        "mean_speed": 0.15191921591758728,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.1888096332550049,
+        "mean_speed": 0.17635400593280792,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.156745433807373,
+        "mean_speed": 0.1849476844072342,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.2421047687530518,
+        "mean_speed": 0.19111573696136475,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.3091014623641968,
+        "mean_speed": 0.1974145472049713,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.3733571767807007,
+        "mean_speed": 0.19347384572029114,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.4369572401046753,
+        "mean_speed": 0.18850353360176086,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.4994827508926392,
+        "mean_speed": 0.1908397078514099,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.5615075826644897,
+        "mean_speed": 0.18872398138046265,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.6249845027923584,
+        "mean_speed": 0.19838491082191467,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.6746643781661987,
+        "mean_speed": 0.2032332569360733,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.743484377861023,
+        "mean_speed": 0.204223170876503,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.792802333831787,
+        "mean_speed": 0.22231335937976837,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.8557782173156738,
+        "mean_speed": 0.2019311636686325,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.9146860837936401,
+        "mean_speed": 0.19988110661506653,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.9399745464324951,
+        "mean_speed": 0.20805852115154266,
+        "particles": 2304
+      },
+      {
+        "max_speed": 1.976110577583313,
+        "mean_speed": 0.21529120206832886,
+        "particles": 2304
+      },
+      {
+        "max_speed": 2.0059566497802734,
+        "mean_speed": 0.22247757017612457,
+        "particles": 2304
+      }
+    ]
+  },
+  "summary": {
+    "sand_on_peak_m_s": 0.1542072743177414,
+    "sand_off_peak_m_s": 0.14804480969905853,
+    "sand_on_com_drift_m": 0.00221872210588335,
+    "water_on_peak_mean_m_s": 0.21527093648910522,
+    "water_off_peak_mean_m_s": 0.22247757017612457,
+    "sand_settle": {
+      "settle_converged": false,
+      "settle_first_speed_m_s": 0.08513204008340836,
+      "settle_max_steps": 240,
+      "settle_ms": 693.4058227539062,
+      "settle_on_seed": true,
+      "settle_particles": 2304,
+      "settle_pending": false,
+      "settle_ran": true,
+      "settle_residual_speed_m_s": 0.14314116537570953,
+      "settle_speed_m_s": 0.009999999776482582,
+      "settle_steps": 240
+    },
+    "water_settle": {
+      "settle_converged": false,
+      "settle_first_speed_m_s": 0.11209116131067276,
+      "settle_max_steps": 240,
+      "settle_ms": 951.9771118164062,
+      "settle_on_seed": true,
+      "settle_particles": 2304,
+      "settle_pending": false,
+      "settle_ran": true,
+      "settle_residual_speed_m_s": 0.11209169030189514,
+      "settle_speed_m_s": 0.009999999776482582,
+      "settle_steps": 240
+    }
+  },
+  "verdicts": {
+    "settle_ran": true,
+    "grains_at_rest": false,
+    "grains_control_moves": false,
+    "liquid_at_rest": false,
+    "liquid_control_moves": true
+  }
+}

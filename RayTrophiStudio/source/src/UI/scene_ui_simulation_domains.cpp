@@ -988,6 +988,52 @@ void drawSimulationDomainControls(
                                           "This is independent of clearing existing live particles.");
                     }
 
+                    // Seed settle (MatterSeedSettle): relax the seed to rest before t = 0.
+                    ImGui::Checkbox("Settle Seed at Rest##SeedSettle", &domain.fluid_seed_settle);
+                    seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Before the first frame, relax a fresh seed to rest: the domain's own\n"
+                                          "solver steps run with time, sources and heat stopped, and every\n"
+                                          "velocity is zeroed after each step, so grain overlaps, gaps and the\n"
+                                          "unloaded bed resolve before t = 0 instead of slumping on play.");
+                    }
+                    if (domain.fluid_seed_settle) {
+                        ImGui::SetNextItemWidth(DomainUi::itemWidth());
+                        ImGui::DragInt("Settle Max Steps", &domain.fluid_settle_max_steps, 1.0f, 1, 4000);
+                        seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
+                        ImGui::SetNextItemWidth(DomainUi::itemWidth());
+                        ImGui::DragFloat("Settle Speed (m/s)", &domain.fluid_settle_speed_m_s,
+                                         0.001f, 0.0f, 10.0f, "%.4f");
+                        seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Settled when the fastest grain or parcel moved slower than this in\n"
+                                              "one relaxation step.");
+                        }
+                    }
+                    if (ImGui::Button("Settle Live Now##SettleNow", ImVec2(-1, 0))) {
+                        if (rtapi::settleFluidDomain(domain.name, nullptr, nullptr, nullptr, true).ok) {
+                            ui_ctx.start_render = true;
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Relax the current particles (e.g. a bed poured by sources) on the next step.");
+                    }
+                    if (auto settle_sys = scene.getParticleSimulationSystem()) {
+                        // The live state's own stats (fluid.list_domains reports the same).
+                        const auto& descs = settle_sys->gridDomains();
+                        const auto& states = settle_sys->gridDomainStates();
+                        for (std::size_t d = 0; d < descs.size() && d < states.size(); ++d) {
+                            if (descs[d].name != domain.name) continue;
+                            const auto& st = states[d].settle_stats;
+                            if (st.ran) {
+                                ImGui::TextDisabled("Last settle: %d steps, %.4f m/s (%s), %.0f ms",
+                                    st.steps, st.residual_speed_m_s,
+                                    st.converged ? "at rest" : "step limit", st.ms);
+                            }
+                            break;
+                        }
+                    }
+
                     if (ImGui::Button("Seed Fluid Now##SeedButton", ImVec2(-1, 30))) {
                         if (rtapi::seedFluidParticles(
                                 domain.name,
