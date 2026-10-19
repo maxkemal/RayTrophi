@@ -13,6 +13,7 @@
 #include "Audio/AcousticPlayback.h"
 #include "Audio/AudioSourceRuntime.h"
 #include "Audio/PhysicalAudioSource.h"
+#include "Audio/PhysicalAudioAuthoring.h"
 #include "Audio/PhysicalAudioBake.h"
 #include "Audio/PhysicalAudioHistory.h"
 #include "Audio/AudioReaction.h"
@@ -491,9 +492,11 @@ const std::vector<std::string>& AudioService::operations() {
         "physical_history_finish", "physical_history_cancel",
         "physical_replay_start", "physical_replay_status",
         "physical_replay_apply", "physical_replay_cancel",
+        "physical_catalogue", "physical_configure",
         "preview_mute", "preview_file", "append", "signal_set", "signals_clear",
         "environment_setup", "resume_automatic", "domains", "acoustics_boundary", "acoustics_debug", "acoustics_trace", "acoustics_preview", "acoustics_preview_status", "thunder_setup", "thunder_update",
         "thunder_event", "playback_update", "mixer_get", "mixer_update", "mixer_reset_peaks",
+        "analysis_get",
         "arrange_preview", "arrange_stop", "arrange_status",
         "track_list", "track_create", "track_update", "track_remove", "track_reorder",
         "waveform", "clip_batch", "clip_list", "clip_create", "clip_update", "clip_remove", "clip_duplicate",
@@ -518,7 +521,7 @@ bool AudioService::isAuthoring(const std::string& op) {
     if (op.rfind("clip_", 0) == 0) {
         return op != "clip_list";
     }
-    return op == "acoustics_update" || op == "acoustics_reset_sources" ||
+    return op == "physical_configure" || op == "acoustics_update" || op == "acoustics_reset_sources" ||
            op == "acoustics_preview" || op == "acoustics_batch" ||
            op == "physical_history_finish" || op == "physical_bake_apply" || op == "design_save" || op == "telemetry_update" || op == "synth_generate" || op == "mixer_update" || op == "playback_update" ||
            op == "thunder_setup" || op == "thunder_update" ||
@@ -528,6 +531,15 @@ bool AudioService::isAuthoring(const std::string& op) {
 }
 
 std::vector<std::string> AudioService::parameters(const std::string& op) {
+    if (op == "physical_catalogue") {
+        return {};
+    }
+    if (op == "physical_configure") {
+        return {"id", "generator", "reaction", "clear_history"};
+    }
+    if (op == "analysis_get") {
+        return {"bus", "details"};
+    }
     if (op == "acoustics_get") {
         return {};
     }
@@ -646,7 +658,9 @@ std::vector<std::string> AudioService::parameters(const std::string& op) {
                 "designer_canvas_pan_x", "designer_canvas_pan_y", "designer_edit_view",
                 "designer_eq_band", "designer_eq_range_db", "designer_eq_auto_range",
                 "designer_eq_height", "designer_panel_zoom", "designer_panel_pan_x",
-                "designer_panel_pan_y"};
+                "designer_panel_pan_y", "analysis_mode",
+                "analysis_view", "analysis_zoom_x", "analysis_zoom_y", "analysis_pan_x", "analysis_pan_y",
+                "history_scope"};
     }
     if (op == "workspace_get") {
         return {};
@@ -728,6 +742,12 @@ json AudioService::invoke(const std::string& op, const json& p) {
     for (auto it = p.begin(); it != p.end(); ++it) {
         require(std::find(allowed.begin(), allowed.end(), it.key()) != allowed.end(),
                 "Unknown audio parameter: " + it.key());
+    }
+    if (op == "physical_catalogue") {
+        return physicalGeneratorCatalogue();
+    }
+    if (op == "physical_configure") {
+        return invoke("update", physicalGeneratorPatch(s.find("emitters", p.at("id")), p));
     }
     if (op.rfind("physical_bake_", 0) == 0) {
         return s.physicalBake.invoke(*this, op, p);
@@ -1116,6 +1136,13 @@ json AudioService::invoke(const std::string& op, const json& p) {
     }
     if (op == "export_status") {
         return s.offline.status();
+    }
+    if (op == "analysis_get") {
+        auto result = s.mixer.analysis(p.value("bus", std::string("Master")),
+            p.value("details", false));
+        result["output_muted"] = s.muted;
+        result["bus_meters"] = s.mixer.meters();
+        return result;
     }
     if (op == "mixer_get") {
         json buses = json::array();

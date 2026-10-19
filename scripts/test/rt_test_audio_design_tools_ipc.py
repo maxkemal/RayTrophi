@@ -35,6 +35,9 @@ def main():
     assets = []
     try:
         catalogue = client.call("audio.design_catalogue")
+        assert catalogue["max_duration_seconds"] == 600
+        assert catalogue["working_pcm_budget_bytes"] == 512 * 1024 * 1024
+        assert catalogue["processing_mode"] == "bounded_memory"
         assert {item["type"] for item in catalogue["layers"]} == {
             "oscillator", "noise", "fm", "resonator", "asset"}
         assert {item["type"] for item in catalogue["effects"]} == {
@@ -50,6 +53,50 @@ def main():
                     int(7000 * math.sin(2 * math.pi * 880 * frame / 48000))) for frame in range(24000)))
             imported = client.call("audio.asset_import", path=str(source), license="test provenance")
             assets.append(imported["id"])
+            # Cross both former limits (10 s synth / 30 s processed output).
+            long_recipe = dict(mode="synth", preset="tone", duration_seconds=31,
+                               frequency_hz=220, gain=0.2)
+            long_render = client.call("audio.design_render", recipe=long_recipe)
+            assert long_render["processed"]["frames"] == 31 * 48000
+            assert long_render["processed"]["rms"] > 0
+            for patch in ({"duration_seconds": 601}, {"duration_seconds": 400},
+                          {"duration_seconds": 301, "stretch_ratio": 2}):
+                rejected(client, "audio.design_render", recipe={**long_recipe, **patch})
+                assert signature(client.call("audio.design_status")) == signature(long_render)
+            long_saved = client.call("audio.design_save", folder=str(folder), name="Long source")
+            assets.append(long_saved["asset"]["id"])
+            long_path = Path(long_saved["design"]["path"])
+            original_bytes = long_path.read_bytes()
+            processed = client.call("audio.design_render", recipe=dict(
+                mode="asset", asset_id=long_saved["asset"]["id"], source_out_seconds=31,
+                effects=[{"type": "eq", "output_db": -3, "bands": []}]))
+            assert processed["processed"]["frames"] == 31 * 48000
+            edited = client.call("audio.design_save", folder=str(folder), name="Long edited")
+            assets.append(edited["asset"]["id"])
+            assert long_path.read_bytes() == original_bytes
+            assert edited["asset"]["id"] != long_saved["asset"]["id"]
+            assert signature(client.call("audio.design_reuse", id=edited["asset"]["id"])) == (
+                processed["recipe"], processed["processed"]["pcm_hash"])
+            track_id = None
+            clip_id = None
+            try:
+                track_id = client.call("audio.track_create", name="Designer workflow test")["id"]
+                before_clip = client.call("audio.list")
+                rejected(client, "audio.clip_create", asset_id=edited["asset"]["id"],
+                         track_id="missing_designer_test_track", start_seconds=0)
+                assert client.call("audio.list") == before_clip
+                # Retry only clip creation; no additional file or asset is needed.
+                clip = client.call("audio.clip_create", asset_id=edited["asset"]["id"],
+                                   track_id=track_id, start_seconds=0)
+                clip_id = clip["id"]
+                assert clip["track_id"] == track_id
+                assert clip["asset_id"] == edited["asset"]["id"]
+                assert client.call("audio.list")["assets"] == before_clip["assets"]
+            finally:
+                if clip_id is not None:
+                    client.call("audio.clip_remove", id=clip_id)
+                if track_id is not None:
+                    client.call("audio.track_remove", id=track_id)
             scene = client.call("audio.list")
             base = dict(mode="synth", preset="tone", duration_seconds=0.5, seed=123)
             for kind in ("oscillator", "noise", "fm", "resonator", "asset"):

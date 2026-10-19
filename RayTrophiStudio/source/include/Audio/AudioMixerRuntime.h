@@ -1,5 +1,6 @@
 #pragma once
 #include "Audio/AudioMixer.h"
+#include "Audio/AudioLiveAnalysis.h"
 #include "../../../external/miniaudio/miniaudio.h"
 #include <atomic>
 #include <cstdint>
@@ -15,6 +16,7 @@ public:
     ma_sound_group* group(const std::string& bus);
     void route(ma_sound& sound, const std::string& bus);
     nlohmann::json meters() const;
+    nlohmann::json analysis(const std::string& bus, bool details = false);
     void resetPeaks();
 private:
     struct Meter {
@@ -23,6 +25,7 @@ private:
         std::atomic<std::uint32_t> rms{0};
         std::atomic<std::uint32_t> hold{0};
         std::atomic<std::uint32_t> clips{0};
+        AudioLiveAnalysis* analysis = nullptr;
     };
     struct Bus {
         ma_sound_group group{};
@@ -31,6 +34,7 @@ private:
         bool meterReady = false;
     };
     std::array<Bus, 5> buses_;
+    std::array<AudioLiveAnalysis, 5> analysis_;
     bool ready_ = false;
     static void process(ma_node* node, const float** input, ma_uint32* countIn,
                         float** output, ma_uint32* countOut);

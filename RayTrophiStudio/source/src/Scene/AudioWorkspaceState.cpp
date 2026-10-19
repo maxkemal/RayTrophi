@@ -8,7 +8,10 @@
 namespace audio {
 using json = nlohmann::json;
 json defaultAudioWorkspace() {
-    return {{"mixer_bus", "Master"}, {"acoustic_all_sources", false}, {"acoustic_band", -1},
+    return {{"mixer_bus", "Master"}, {"analysis_mode", "live"}, {"history_scope", "scene"},
+            {"analysis_view", "line"}, {"analysis_zoom_x", 1.0}, {"analysis_zoom_y", 1.0},
+            {"analysis_pan_x", 0.0}, {"analysis_pan_y", 0.0},
+            {"acoustic_all_sources", false}, {"acoustic_band", -1},
             {"acoustic_reflection_samples", 1}, {"selected_clip", ""}, {"selected_clips", json::array()}, {"selected_track", ""}, {"snap", true}, {"waveforms", true},
             {"inspector_open", false}, {"designer_open", false}, {"designer_page", "generate"}, {"designer_edit_view", "source"}, {"designer_envelope", "none"},
             {"audition_start_seconds", 0.0}, {"audition_end_seconds", 5.0},
@@ -24,7 +27,32 @@ json defaultAudioWorkspace() {
 json updateAudioWorkspace(const json& current, const json& patch, const json& clips, const json& tracks) {
     auto candidate = current;
     for (auto entry = patch.begin(); entry != patch.end(); ++entry) {
-        if (entry.key() == "mixer_bus") {
+        if (entry.key() == "history_scope") {
+            if (!entry.value().is_string() ||
+                (entry.value() != "scene" && entry.value() != "design")) {
+                throw std::invalid_argument("history_scope must be scene or design");
+            }
+        } else if (entry.key() == "analysis_view") {
+            if (!entry.value().is_string() ||
+                (entry.value() != "line" && entry.value() != "filled" &&
+                 entry.value() != "bands" && entry.value() != "spectrogram")) {
+                throw std::invalid_argument("analysis_view must be line, filled, bands or spectrogram");
+            }
+        } else if (entry.key() == "analysis_zoom_x" || entry.key() == "analysis_zoom_y" ||
+                   entry.key() == "analysis_pan_x" || entry.key() == "analysis_pan_y") {
+            const bool zoom = entry.key() == "analysis_zoom_x" || entry.key() == "analysis_zoom_y";
+            const double low = zoom ? 1.0 : 0.0;
+            const double high = zoom ? 32.0 : 1.0;
+            if (!entry.value().is_number() || !std::isfinite(entry.value().get<double>()) ||
+                entry.value().get<double>() < low || entry.value().get<double>() > high) {
+                throw std::invalid_argument("Analysis zoom must be 1..32; pan must be 0..1, finite");
+            }
+        } else if (entry.key() == "analysis_mode") {
+            if (!entry.value().is_string() ||
+                (entry.value() != "live" && entry.value() != "design")) {
+                throw std::invalid_argument("analysis_mode must be live or design");
+            }
+        } else if (entry.key() == "mixer_bus") {
             if (!entry.value().is_string()) {
                 throw std::invalid_argument("mixer_bus must be a defined bus name");
             }

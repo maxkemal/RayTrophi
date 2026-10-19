@@ -34,8 +34,10 @@ struct RegisterAudioMethods {
                 nullptr, nullptr},
             {"energy_j", "float", true, "Positive excitation energy in joules, at most 1e9",
                 nullptr, nullptr},
+            {"clear_history", "bool", false,
+                "Explicitly clear incompatible stored generator history on physical_configure", "false", nullptr},
             {"generator", "object", false,
-                "Nullable procedural recipe: flow/friction/rolling, contact_activity, deformation, fracture_activity or impact; see PHYSICAL_AUDIO_GENERATION.md",
+                "Versioned recipe; v2 texture/variation/body 0..1, character_revision 1|2; tuned friction surface from physical_catalogue",
                 "null", nullptr},
             {"scope", "string", false, "Source scope; selected/group require explicit ids",
                 "selected", "selected|group|scene"},
@@ -43,6 +45,16 @@ struct RegisterAudioMethods {
                 "Persistent source acoustic policy: mode scene/custom/off and config", nullptr, nullptr},
             {"mixer_bus", "string", false, "Mixer channel to highlight", nullptr,
                 "Master|Weather|Effects|Ambience|Music"},
+            {"history_scope", "string", false,
+                "Transient focus-routed main menu history; text input takes precedence", "scene", "scene|design"},
+            {"analysis_view", "string", false, "Live analysis graph presentation", "line",
+                "line|filled|bands|spectrogram"},
+            {"analysis_zoom_x", "float", false, "Analysis horizontal zoom, finite 1..32", "1", nullptr},
+            {"analysis_zoom_y", "float", false, "Analysis vertical zoom, finite 1..32", "1", nullptr},
+            {"analysis_pan_x", "float", false, "Analysis horizontal window placement 0..1", "0", nullptr},
+            {"analysis_pan_y", "float", false, "Analysis vertical window placement 0..1", "0", nullptr},
+            {"analysis_mode", "string", false, "Live mixer or last Designer render analysis",
+                "live", "live|design"},
             {"spectral", "bool", false, "Frequency dependent live transmission", "true", nullptr},
             {"reflections", "bool", false, "Audition up to six verified specular paths", "false", nullptr},
             {"diffuse", "bool", false, "Single-bounce Lambert transport; omnidirectional sources only", "false", nullptr},
@@ -84,7 +96,7 @@ struct RegisterAudioMethods {
             {"designer_properties_open", "bool", false, "Expand bottom studio properties panel", "true", nullptr},
             {"continuous", "bool", false, "Full STFT time coverage; false samples time_bins windows", "true", nullptr},
             {"effect", "object", true, "Validated single effect for its visual control curve", nullptr, nullptr},
-            {"details", "bool", false, "Include rendered graphs; false returns transport/revision only", "true", nullptr},
+            {"details", "bool", false, "Designer rendered graphs (default true); analysis_get sampled history (default false)", "true", nullptr},
             {"fft_size", "int", false, "Power-of-two FFT size 512..8192", "2048", nullptr},
             {"time_bins", "int", false, "Aggregated STFT time columns 4..128", "64", nullptr},
             {"channel", "string", false, "Spectral channel; mix averages powers", "mix", "mix|left|right"},
@@ -200,13 +212,15 @@ struct RegisterAudioMethods {
         };
         for (std::size_t i = 0; i < names.size(); ++i) {
             const auto& op = audio::AudioService::operations()[i];
-            const bool read = op == "acoustics_get" || op == "source_runtime" || op == "acoustics_boundary" ||
+            const bool read = op == "physical_catalogue" || op == "acoustics_get" || op == "source_runtime" || op == "acoustics_boundary" ||
                               op == "physical_bake_status" || op == "physical_history_status" ||
                               op == "physical_replay_status" ||
                               op == "acoustics_debug" || op == "acoustics_preview_status" ||
                               op == "acoustics_trace" || op == "list" || op == "get" ||
                               op == "status" || op == "domains" ||
-                              op == "mixer_get" || op == "arrange_status" || op == "track_list" || op == "clip_list" || op == "export_status" ||
+                              op == "analysis_get" || op == "mixer_get" ||
+                              op == "arrange_status" || op == "track_list" ||
+                              op == "clip_list" || op == "export_status" ||
                               op == "waveform" || op == "capture_status" || op == "workspace_get" ||
                               op == "synth_presets" || op == "telemetry_get" ||
                               op == "design_job_status" || op == "design_status" || op == "design_destination" || op == "design_catalogue" ||
@@ -214,8 +228,16 @@ struct RegisterAudioMethods {
             MethodDescriptor descriptor{};
             descriptor.name = names[i].c_str();
             descriptor.domain = "audio";
-            descriptor.summary = "Scene audio service operation";
-            descriptor.notes = op == "acoustics_get" || op == "acoustics_update" ||
+            descriptor.summary = op == "physical_catalogue" ?
+                "Procedural source versions, models, controls and artistic/measured scope" :
+                op == "physical_configure" ? "Atomically configure a procedural source without changing its ID" :
+                op == "analysis_get" ?
+                "Live mixer spectrum, six bands and channel levels" : "Scene audio service operation";
+            descriptor.notes = op == "analysis_get"
+                ? "Live stereo mixer PCM spectrum and six octave bands. Post fader, before output "
+                  "mute; Master includes previews. details=true includes bounded sampled spectrogram history. "
+                  "No Designer render needed. See AUDIO_LIVE_ANALYSIS.md."
+                : op == "acoustics_get" || op == "acoustics_update" ||
                 op == "acoustics_reset_sources" || op == "acoustics_preview" || op == "acoustics_batch"
                 ? "Persistent scene defaults and source scene/custom/off policies. "
                   "Dry/processed bypass is session-only. See docs/dev/AUDIO_ACOUSTIC_SETTINGS.md."
@@ -268,8 +290,10 @@ struct RegisterAudioMethods {
                  (read ? "Read" : (readsFile ? "SceneWrite|FilesRead" : "SceneWrite"))));
             descriptor.undoable = audio::AudioService::isAuthoring(op);
             descriptor.return_type = op == "acoustics_preview_status" || op == "track_list" || op == "track_reorder" ? "array" : "object";
-            descriptor.tags = "audio|scene|assets";
-            descriptor.verify_with = op.rfind("design_", 0) == 0
+            descriptor.tags = op == "analysis_get" ?
+                "audio|live|analysis|spectrum|mixer" : "audio|scene|assets";
+            descriptor.verify_with = op == "analysis_get" ? "audio.analysis_get|audio.mixer_get" :
+                op.rfind("design_", 0) == 0
                 ? "audio.design_status|audio.list" : "audio.list|audio.status";
             schemas.emplace_back();
             for (const auto& key : audio::AudioService::parameters(op)) {
@@ -381,6 +405,18 @@ struct RegisterAudioMethods {
                             } else if (key == "path") {
                                 param.description = "New absolute WAV path; existing files are rejected";
                             }
+                        }
+                        if (op == "physical_configure" && key == "generator") {
+                            param.required = true;
+                        }
+                        if (op == "analysis_get" && key == "details") {
+                            param.default_value = "false";
+                            param.description = "Include up to 128 observed FFT history windows; gaps are unsampled";
+                        }
+                        if (op == "analysis_get" && key == "bus") {
+                            param.required = false;
+                            param.default_value = "Master";
+                            param.description = "Live mixer channel; Master includes active previews";
                         }
                         if (op == "mixer_update") {
                             param.required = key == "bus";

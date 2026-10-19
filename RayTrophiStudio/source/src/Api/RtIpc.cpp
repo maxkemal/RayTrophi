@@ -2977,6 +2977,23 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"live_motion_mean_m", info.live_motion_mean_m},
                         {"live_motion_p95_m", info.live_motion_p95_m},
                         {"live_motion_max_m", info.live_motion_max_m},
+                        {"pressure_iterations", info.pressure_iterations},
+                        {"pressure_relative_residual", info.pressure_relative_residual},
+                        {"pressure_cg_iterations", info.pressure_cg_iterations},
+                        {"pressure_cg_max_iterations", info.pressure_cg_max_iterations},
+                        {"pressure_cg_final_relative_residual", info.pressure_cg_final_relative_residual},
+                        {"pressure_cg_multigrid", info.pressure_cg_multigrid},
+                        {"seed_mode", info.seed_mode},
+                        {"seed_min", json::array({info.seed_min.x, info.seed_min.y, info.seed_min.z})},
+                        {"seed_max", json::array({info.seed_max.x, info.seed_max.y, info.seed_max.z})},
+                        {"seed_particles_per_cell", info.seed_particles_per_cell},
+                        {"seed_fill_level", info.seed_fill_level},
+                        {"seed_ran", info.seed_ran},
+                        {"seed_truncated", info.seed_truncated},
+                        {"seed_requested_particles", info.seed_requested_particles},
+                        {"seed_emitted_particles", info.seed_emitted_particles},
+                        {"seed_top_y", info.seed_top_y},
+                        {"seed_region_top_y", info.seed_region_top_y},
                         {"thermal_contact_shell_kelvin", info.thermal_contact_shell_kelvin},
                         {"thermal_contact_parcel_kelvin", info.thermal_contact_parcel_kelvin},
                         {"thermal_contact_shell_cells", info.thermal_contact_shell_cells},
@@ -3226,6 +3243,23 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"live_motion_mean_m", info.live_motion_mean_m},
                         {"live_motion_p95_m", info.live_motion_p95_m},
                         {"live_motion_max_m", info.live_motion_max_m},
+                        {"pressure_iterations", info.pressure_iterations},
+                        {"pressure_relative_residual", info.pressure_relative_residual},
+                        {"pressure_cg_iterations", info.pressure_cg_iterations},
+                        {"pressure_cg_max_iterations", info.pressure_cg_max_iterations},
+                        {"pressure_cg_final_relative_residual", info.pressure_cg_final_relative_residual},
+                        {"pressure_cg_multigrid", info.pressure_cg_multigrid},
+                        {"seed_mode", info.seed_mode},
+                        {"seed_min", json::array({info.seed_min.x, info.seed_min.y, info.seed_min.z})},
+                        {"seed_max", json::array({info.seed_max.x, info.seed_max.y, info.seed_max.z})},
+                        {"seed_particles_per_cell", info.seed_particles_per_cell},
+                        {"seed_fill_level", info.seed_fill_level},
+                        {"seed_ran", info.seed_ran},
+                        {"seed_truncated", info.seed_truncated},
+                        {"seed_requested_particles", info.seed_requested_particles},
+                        {"seed_emitted_particles", info.seed_emitted_particles},
+                        {"seed_top_y", info.seed_top_y},
+                        {"seed_region_top_y", info.seed_region_top_y},
                         {"thermal_contact_shell_kelvin", info.thermal_contact_shell_kelvin},
                         {"thermal_contact_parcel_kelvin", info.thermal_contact_parcel_kelvin},
                         {"thermal_contact_shell_cells", info.thermal_contact_shell_cells},
@@ -3569,6 +3603,16 @@ json dispatchMethod(const std::string& method, const json& params) {
             if (has_thermal_patch) {
                 rtapi::Result tr = rtapi::setFluidThermal(domain, thermal_patch);
                 if (!tr.ok) return tr;
+            }
+            if (params.contains("pressure_iterations") ||
+                params.contains("pressure_relative_residual")) {
+                const bool has_iter = params.contains("pressure_iterations");
+                const bool has_res = params.contains("pressure_relative_residual");
+                const int iter = optionalInt(params, "pressure_iterations", 24);
+                const float res = optionalFloat(params, "pressure_relative_residual", 1.0e-5f);
+                rtapi::Result pr = rtapi::setFluidPressureSolver(domain,
+                    has_iter ? &iter : nullptr, has_res ? &res : nullptr);
+                if (!pr.ok) return pr;
             }
             if (params.contains("max_particles")) {
                 const int64_t mp = params.at("max_particles").get<int64_t>();
@@ -4058,7 +4102,8 @@ json dispatchMethod(const std::string& method, const json& params) {
             nlohmann::json out = nlohmann::json::array();
             for (const auto& row : rows) {
                 out.push_back({{"name", row.name}, {"based_on", row.based_on},
-                               {"category", row.category}, {"builtin", row.builtin}});
+                               {"category", row.category}, {"builtin", row.builtin},
+                               {"catalogue", nlohmann::json::parse(row.catalogue_json)}});
             }
             return nlohmann::json{{"ok", true}, {"substances", out}};
         });

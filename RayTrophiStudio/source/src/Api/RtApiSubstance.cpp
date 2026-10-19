@@ -1,8 +1,10 @@
 #include "Api/RtApi.h"
 #include "RtApiInternal.h"
 #include "SubstanceLibrary.h"
+#include "SubstanceCatalogue.h"
 #include "Fluid/FluidDomainSubstance.h"
 #include "Fluid/MatterSubstanceState.h"
+#include <algorithm>
 
 namespace rtapi {
 
@@ -11,6 +13,9 @@ namespace {
 // Every scene entry that names a substance, as "kind 'owner'" strings.
 std::vector<std::string> substanceReferences(const std::string& name) {
     std::vector<std::string> refs;
+    if (!g_ctx) {
+        return refs;
+    }
     if (matter::objectSubstanceHistoryUses(name)) {
         refs.push_back("object material undo history");
     }
@@ -53,6 +58,26 @@ std::vector<std::string> substanceReferences(const std::string& name) {
     return refs;
 }
 
+std::vector<std::string> affectedSubstanceReferences(const std::string& name) {
+    auto references = substanceReferences(name);
+    for (const auto* profile : RayTrophiSim::substanceProfiles()) {
+        auto parent = profile->based_on;
+        while (!parent.empty()) {
+            if (parent == name) {
+                references.push_back("derived profile '" + profile->name + "'");
+                const auto nested = substanceReferences(profile->name);
+                references.insert(references.end(), nested.begin(), nested.end());
+                break;
+            }
+            const auto* base = RayTrophiSim::tryFindSubstance(parent);
+            parent = base ? base->based_on : std::string();
+        }
+    }
+    std::sort(references.begin(), references.end());
+    references.erase(std::unique(references.begin(), references.end()), references.end());
+    return references;
+}
+
 // Refresh physical readback immediately after a library edit, including
 // descendants. Do not reapply solver hints: the user's numerical tuning stays.
 void refreshDomainMaterials() {
@@ -88,6 +113,7 @@ Result listSubstances(std::vector<SubstanceSummary>& out) {
         row.based_on = profile->based_on;
         row.category = RayTrophiSim::substanceCategoryName(profile->category);
         row.builtin = profile->based_on.empty();
+        row.catalogue_json = RayTrophiSim::substanceCatalogueInfo(*profile).dump();
         out.push_back(std::move(row));
     }
     return Result::success();
@@ -102,6 +128,9 @@ Result getSubstance(const std::string& name, std::string& out_json) {
         {"builtin", profile->based_on.empty()},
         {"fields", RayTrophiSim::substanceFieldsToJson(*profile)},
         {"overridden", RayTrophiSim::substanceOverriddenFields(name)},
+        {"catalogue", RayTrophiSim::substanceCatalogueInfo(*profile)},
+        {"edit_scope", profile->based_on.empty() ? "read_only_builtin" : "shared_project_profile"},
+        {"affected_references", affectedSubstanceReferences(name)},
     };
     out_json = out.dump();
     return Result::success();

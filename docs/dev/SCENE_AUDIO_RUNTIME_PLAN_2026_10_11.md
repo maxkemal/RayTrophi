@@ -1,5 +1,10 @@
 # Sahne sesi, timeline miks ve çalıştırılabilir çıktı planı
 
+2026-10-19: Kalan işlerin güncel ana sırası [Audio ana planında](AUDIO_MASTER_PLAN.md),
+bütün olay aileleri için üretici uygulaması [sentetik ses planında](PHYSICAL_AUDIO_SYNTHESIS_PLAN.md).
+Aşağıdaki tarihli kontrol noktaları geçmiş kapsamlarıyla korunur. Yeni planlar
+birleşik domain solver/test sahipliğini değiştirmez ve tamamlanmış uygulama değildir.
+
 > **Durum:** AKTIF — temel sahne sesi ve timeline transport kullanıcı tarafından doğrulandı; bus mikserinin kısa canlı IPC/PCM kabulü kullanıcı derlemesinde geçti. Ayrıntılı kalan kontroller: [SCENE_AUDIO_MIXER.md](SCENE_AUDIO_MIXER.md).
 
 Tarih: 2026-10-11; uygulama durumu 2026-10-12 güncellendi. Tam plan henüz tamamlanmadı.

@@ -1,0 +1,59 @@
+{
+  "passed": true,
+  "utc": "2026-10-19T20:22:00.800891+00:00",
+  "scope": "injected controls and native PCM, no measured solver events",
+  "listening_acceptance": "awaiting_user_feedback",
+  "cases": [
+    {
+      "model": "gas_flow",
+      "passed": true,
+      "samples": [
+        {
+          "block_peak": 0.04944915324449539,
+          "master_peak_dbfs": -33.27659714429333,
+          "master_rms_dbfs": -42.65336693633345,
+          "end_frame": 20854784,
+          "clip_samples_window": 0,
+          "activity": 0.25
+        },
+        {
+          "block_peak": 0.1424921154975891,
+          "master_peak_dbfs": -24.928608959890013,
+          "master_rms_dbfs": -34.273867527248726,
+          "end_frame": 20975616,
+          "clip_samples_window": 0,
+          "activity": 0.6
+        },
+        {
+          "block_peak": 0.23155564069747925,
+          "master_peak_dbfs": -20.86287720147114,
+          "master_rms_dbfs": -29.82258699340413,
+          "end_frame": 21121024,
+          "clip_samples_window": 0,
+          "activity": 1
+        }
+      ]
+    }
+  ],
+  "cleanup": [
+    {
+      "field": "emitters",
+      "preserved_ids": true
+    },
+    {
+      "field": "assets",
+      "preserved_ids": true
+    },
+    {
+      "field": "clips",
+      "preserved_ids": true
+    },
+    {
+      "field": "tracks",
+      "preserved_ids": true
+    },
+    {
+      "playback_mode_restored": true
+    }
+  ]
+}

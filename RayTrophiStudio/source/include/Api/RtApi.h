@@ -4678,6 +4678,29 @@ struct FluidDomainInfo {
     float    live_motion_mean_m = 0.0f;
     float    live_motion_p95_m = 0.0f;
     float    live_motion_max_m = 0.0f;
+    // Liquid pressure solve (2026-10-20): the cap and the relative tolerance,
+    // and what the last step used. iterations == max_iterations with a
+    // residual above the tolerance = the solve stopped unconverged.
+    int      pressure_iterations = 24;
+    float    pressure_relative_residual = 1.0e-5f;
+    int      pressure_cg_iterations = 0;
+    int      pressure_cg_max_iterations = 0;
+    double   pressure_cg_final_relative_residual = 0.0;
+    bool     pressure_cg_multigrid = false;
+    // Seed recipe (fluid.seed) and what the last seed did. seed_truncated:
+    // the particle budget cut it; the liquid then ends at seed_top_y, below
+    // seed_region_top_y.
+    std::string seed_mode;            // "box" | "fill_level"
+    Vec3     seed_min = Vec3(0.0f);
+    Vec3     seed_max = Vec3(0.0f);
+    int      seed_particles_per_cell = 8;
+    float    seed_fill_level = 0.5f;
+    bool     seed_ran = false;
+    bool     seed_truncated = false;
+    uint64_t seed_requested_particles = 0;
+    uint64_t seed_emitted_particles = 0;
+    float    seed_top_y = 0.0f;
+    float    seed_region_top_y = 0.0f;
     uint64_t thermal_contact_cooled_particles = 0;
     float    thermal_min_kelvin = 0.0f;
     float    thermal_mean_kelvin = 0.0f;
@@ -5085,6 +5108,11 @@ Result getFluidStateDigest(const std::string& domain_id_or_name, FluidStateDiges
 // A liquid domain's particle budget (the panel's Max Particles). Seeding and
 // emitters stop at it. No ceiling (at least 1); the panel's 10M is a drag range.
 Result setFluidMaxParticles(const std::string& domain_id_or_name, uint64_t max_particles);
+// Liquid pressure solve: iteration cap (>= 1) and relative residual (> 0;
+// the solvers clamp to [1e-8, 1e-2]). Null keeps a value. fluid.set_param
+// pressure_iterations / pressure_relative_residual.
+Result setFluidPressureSolver(const std::string& domain_id_or_name, const int* iterations,
+                              const float* relative_residual);
 // The grid's per-axis density knob (panel: Max Auto Resolution), gas or liquid.
 // No ceiling (at least 32). The resource budget, when enforced, may still
 // coarsen the grid, and a GPU grid stops at ~1080^3 cells (32-bit face
@@ -5135,9 +5163,10 @@ struct SubstanceSummary {
     std::string based_on;   // empty for a built-in
     std::string category;   // liquid | granular | solid | fuel
     bool builtin = false;
+    std::string catalogue_json; // Shared family/tier/origin metadata, JSON object.
 };
 Result listSubstances(std::vector<SubstanceSummary>& out);
-// {name, based_on, builtin, fields:{...every field...}, overridden:[keys]}
+// Resolved fields/overrides, catalogue metadata, edit_scope and affected_references.
 Result getSubstance(const std::string& name, std::string& out_json);
 // A new project substance identical to `based_on`. Built-ins are edited this way.
 Result deriveSubstance(const std::string& name, const std::string& based_on);

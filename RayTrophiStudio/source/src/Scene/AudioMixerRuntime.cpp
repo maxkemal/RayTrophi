@@ -34,6 +34,9 @@ void AudioMixerRuntime::process(ma_node* node, const float** input, ma_uint32* c
     // Consume that silent padding too, so it cannot remain cached for the next block.
     *countIn = (std::min)(*countIn, frames);
     *countOut = frames;
+    if (meter.analysis && frames > 0) {
+        meter.analysis->push(output[0], frames);
+    }
     const float rms = frames > 0 ? static_cast<float>(std::sqrt(square / (frames * 2))) : 0;
     meter.peak.store(std::bit_cast<std::uint32_t>(peak), std::memory_order_relaxed);
     meter.rms.store(std::bit_cast<std::uint32_t>(rms), std::memory_order_relaxed);
@@ -59,6 +62,10 @@ void AudioMixerRuntime::initialize(ma_engine& engine) {
         const ma_uint32 channels = 2;
         for (std::size_t i = 0; i < buses_.size(); ++i) {
             auto& bus = buses_[i];
+            analysis_[i].reset(ma_engine_get_sample_rate(&engine));
+            bus.meter.peak.store(0, std::memory_order_relaxed);
+            bus.meter.rms.store(0, std::memory_order_relaxed);
+            bus.meter.analysis = &analysis_[i];
             check(ma_sound_group_init(&engine, MA_SOUND_FLAG_NO_SPATIALIZATION,
                                       nullptr, &bus.group));
             bus.groupReady = true;
@@ -94,6 +101,9 @@ void AudioMixerRuntime::shutdown() {
         }
     }
     ready_ = false;
+    for (auto& analysis : analysis_) {
+        analysis.reset();
+    }
 }
 
 void AudioMixerRuntime::apply(const nlohmann::json& config) {
@@ -141,5 +151,20 @@ void AudioMixerRuntime::resetPeaks() {
         bus.meter.hold.store(0, std::memory_order_relaxed);
         bus.meter.clips.store(0, std::memory_order_relaxed);
     }
+}
+
+nlohmann::json AudioMixerRuntime::analysis(const std::string& bus, bool details) {
+    const auto& names = AudioMixer::names();
+    const auto found = std::find(names.begin(), names.end(), bus);
+    if (found == names.end()) {
+        throw std::invalid_argument("Unknown live analysis bus: " + bus);
+    }
+    auto result = ready_ ? analysis_[static_cast<std::size_t>(found - names.begin())].read(details) :
+        nlohmann::json{{"ready", false}, {"fresh", false}};
+    result["bus"] = bus;
+    result["device_ready"] = ready_;
+    result["stage"] = "post_bus_fader_before_output_mute";
+    result["master_includes_audition"] = true;
+    return result;
 }
 }

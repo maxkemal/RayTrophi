@@ -15,6 +15,7 @@
 * ─────────────────────────────────────────────────────────────────────────────
 */
 #include "MaterialStateField.h"
+#include "SubstanceCatalogue.h"
 #include "Fluid/MatterSubstanceState.h"
 #include "MaterialDamagePattern.h"
 #include "Fluid/SubstanceTag.h"
@@ -746,6 +747,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             add(p);
         }
         Fluid::configureBuiltinMatterTransport(out);
+        appendFoundationSubstances(out);
         return out;
     }();
     return library;

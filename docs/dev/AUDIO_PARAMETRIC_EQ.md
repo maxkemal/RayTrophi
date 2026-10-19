@@ -1,5 +1,13 @@
 # Parametric EQ: processing and authoring controls
 
+2026-10-19 context/save/capacity source update: Designer now shows its named source
+and supports explicit track/time targets when saving a new asset and clip. The old
+30-second processing limit is superseded by bounded in-memory capacity: 600 seconds
+maximum input/output including stretch/tail, subject to a 512 MiB estimated PCM
+working set and existing decode/import limits. This is not streaming full-file DSP.
+See [workflow delivery and pending work](AUDIO_DESIGN_CONTEXT_WORKFLOW_PLAN.md).
+User build/live acceptance is pending for this update.
+
 2026-10-18 source delivery. No C++ build, Studio launch, live IPC test or listening
 acceptance performed. This is Designer EQ/chain work, not realtime mixer-bus EQ.
 

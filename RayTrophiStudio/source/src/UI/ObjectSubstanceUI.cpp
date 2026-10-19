@@ -7,17 +7,17 @@
 #include <stdexcept>
 
 namespace matter {
-void drawObjectSubstance(UIContext& ctx, const std::string& object) {
+bool drawObjectSubstance(UIContext& ctx, const std::string& object) {
     using json = nlohmann::json;
     static std::string error;
     const auto state = objectSubstanceState(ctx.scene, object);
     if (!state.at("exists").get<bool>()) {
-        return;
+        return false;
     }
     ImGui::PushID("ObjectSubstance");
     if (!ImGui::CollapsingHeader("Physical material", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::PopID();
-        return;
+        return true;
     }
     const auto call = [&](const char* operation, const json& params) {
         try {
@@ -45,29 +45,36 @@ void drawObjectSubstance(UIContext& ctx, const std::string& object) {
             call("adopt_object", {{"object", object}});
         }
     }
-    if (ImGui::BeginCombo("Substance", label.c_str())) {
-        for (const auto* profile : RayTrophiSim::substanceProfiles()) {
-            if (ImGui::Selectable(profile->name.c_str(), label == profile->name)) {
-                call("set_object", {{"object", object}, {"binding", {
-                    {"substance", profile->name}}}});
-            }
+    ImGui::TextWrapped("Assignment: %s", object.c_str());
+    auto chosen = binding.is_null() ? std::string() : label;
+    if (SubstanceEditorUI::drawPicker("Substance", chosen, "Unassigned")) {
+        if (chosen.empty()) {
+            call("clear_object", {{"object", object}});
+        } else {
+            auto updated = binding.is_null() ? json::object() : binding;
+            updated["substance"] = chosen;
+            call("set_object", {{"object", object}, {"binding", updated}});
         }
-        ImGui::EndCombo();
+        // This frame's readback describes the old binding; do not edit it below.
+        ImGui::PopID();
+        return true;
     }
     if (source == "object") {
         if (state.contains("acoustics") && !state.at("acoustics").value("defined", false)) {
             ImGui::TextWrapped("Acoustic response is not defined for this substance yet.");
         }
-        ImGui::TextWrapped("Acoustic medium data is optional. Configure density/sound speed "
-            "before enabling the equivalent-fluid model. GPU maps still use authored band coefficients.");
         auto assigned = label;
         if (SubstanceEditorUI::draw("ObjectSubstanceProfile", assigned) && assigned != label) {
             auto changed = binding;
             changed["substance"] = assigned;
             call("set_object", {{"object", object}, {"binding", changed}});
+            ImGui::PopID();
+            return true;
         }
         if (ImGui::Button("Clear object assignment")) {
             call("clear_object", {{"object", object}});
+            ImGui::PopID();
+            return true;
         }
         static const SceneData* owner = nullptr;
         static std::string key;
@@ -78,6 +85,13 @@ void drawObjectSubstance(UIContext& ctx, const std::string& object) {
             owner = &ctx.scene;
             key = nextKey;
             draft = binding;
+        }
+        if (!ImGui::TreeNode("This object's combustion overrides")) {
+            if (!error.empty()) {
+                ImGui::TextWrapped("%s", error.c_str());
+            }
+            ImGui::PopID();
+            return true;
         }
         auto& values = draft["overrides"];
         bool overrideIgnition = values.at("override_ignition");
@@ -98,10 +112,12 @@ void drawObjectSubstance(UIContext& ctx, const std::string& object) {
         if (commit) {
             call("set_object", {{"object", object}, {"binding", draft}});
         }
+        ImGui::TreePop();
     }
     if (!error.empty()) {
         ImGui::TextWrapped("%s", error.c_str());
     }
     ImGui::PopID();
+    return true;
 }
 } // namespace matter

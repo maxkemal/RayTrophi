@@ -1,5 +1,12 @@
 # Sound designer v2 / v3
 
+2026-10-19 status: compact header implemented in source; user build and visual
+acceptance pending. Navigation occupies a slim row; the fixed-height toolbar groups
+sound name/source, Play/Stop, workflow, and Save/Options with theme-colored dividers.
+Options contains Playback, Compare/render history, and View (scale, Fit, dock toggles).
+Wide docks do not reserve scrollbar space; narrow docks scroll horizontally rather
+than wrapping controls over the canvas. Existing authoring services are unchanged.
+
 2026-10-14: implemented in source; user confirmed the Studio build after the MSVC
 JSON-comparison and DaisySP math-constant fixes. New external IPC, listening and UI
 acceptance remain pending. Extends [the approved plan](AUDIO_SOUND_DESIGN_PLAN_2026_10_14.md).
@@ -89,7 +96,7 @@ Mode defaults to synth. Each request is a complete recipe, not a partial patch.
 | drive | 0; 0..1 soft saturation |
 | fade_in_seconds / fade_out_seconds | 0.003 / 0.02; 0..10; multiplicative edge fades |
 | pitch_semitones | 0; -24..24, duration-independent |
-| stretch_ratio | 1; 0.5..2, pitch-independent; max 30 s result |
+| stretch_ratio | 1; 0.5..2, pitch-independent; max 600 s result, subject to PCM budget |
 | loop_crossfade_seconds | 0; 0..1, strictly shorter than half the result |
 
 Filter endpoints mean bypass. Loop crossfade joins tail/head and shortens the final
@@ -100,7 +107,7 @@ processing is requested; neutral pitch/time preserves those short sounds.
 | Synth-only field | Default / bounds |
 |---|---|
 | preset | metal; tone, wind, metal, wood |
-| duration_seconds | 2; 0.05..10 |
+| duration_seconds | 2; 0.05..600, subject to PCM budget |
 | seed | 1; integer uint32 |
 | frequency_hz | wood 180, tone 440, wind 220, metal 330; 20..4000 |
 | decay_seconds | wood 0.15, others 0.8; 0.01..10 |
@@ -123,7 +130,7 @@ Some oscillator controls do not apply to modal impact presets.
 | source_in_seconds | default 0 |
 | source_out_seconds | default min(asset duration, start+10) |
 
-Selected range must exist, be >=0.05 s and <=30 s. Existing decoder bounds remain
+Selected range must exist, be >=0.05 s and <=600 s, subject to PCM budget. Existing decoder bounds remain
 600 s / 128 MiB for the full imported file; range decode currently reads that entire
 file before extracting the range. Stereo is preserved. No source file is overwritten.
 Same recipe/input reproduces PCM within this implementation/platform; dependency
@@ -157,3 +164,19 @@ Manual: preview without choosing a folder, adjust controls/graph handles, compar
 original/processed, loop/stop while timeline is paused; check narrow/high-DPI layout;
 save by name twice, inspect actual destinations; insert a clip, undo and save/reopen.
 Listening and build acceptance have not been claimed by source/static checks.
+
+
+## 2026-10-19 bounded capacity and context update
+
+UI/Python/IPC share a 512 MiB estimated PCM working-set budget, reserving four
+float32 banks each for input and stretched output including tail. The 600-second
+ceiling is not a promise that every channel/effect configuration fits. Oversized
+requests reject without committing a new design. Existing 600-second / 128 MiB
+asset decode/import bounds still apply. Legacy synth_generate retains its separate
+contract; the Designer duration change applies to design_render and render jobs.
+
+Designer shows source name/path and editable output name. Save can explicitly choose
+a target track and start time on any Designer page. Failed clip insertion retains
+the saved asset and offers a clip-only retry. Existing clips keep their sources.
+See [delivery, limitations and acceptance](AUDIO_DESIGN_CONTEXT_WORKFLOW_PLAN.md).
+Source-only delivery: build and external IPC/manual acceptance remain user-run.

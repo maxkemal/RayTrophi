@@ -20,6 +20,7 @@
 #include "UI/AudioUI.h"
 #include "Audio/AcousticRenderDebug.h"
 #include "UI/AudioWorkspaceUI.h"
+#include "UI/AudioHistoryUI.h"
 #include "UI/StormGizmoUI.h"
 #include "Autosave.h"
 #include <thread>
@@ -4321,6 +4322,9 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
     }
 
     // Undo / Redo
+    if (AudioUI::handleAudioHistoryShortcuts(ctx, block_history_actions)) {
+        return;
+    }
     if (ImGui::IsKeyPressed(ImGuiKey_Z) && io.KeyCtrl && !io.KeyShift) {
         if (!block_history_actions && history.canUndo()) {
             bool commandSyncedUiCaches = false;
@@ -9659,7 +9663,8 @@ void SceneUI::handleHairBrush(UIContext& ctx) {
     }
     
     // --- UNDO/REDO Keyboard Shortcuts (Ctrl+Z / Ctrl+Y) ---
-    if (hairUI.isPainting() && !io.WantCaptureKeyboard) {
+    if (hairUI.isPainting() && !io.WantCaptureKeyboard &&
+        !AudioUI::audioHistoryOwnsFocus(ctx)) {
         bool ctrlHeld = io.KeyCtrl;
         
         // Ctrl+Z = Undo

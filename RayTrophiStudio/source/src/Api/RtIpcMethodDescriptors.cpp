@@ -9826,8 +9826,8 @@ static const MethodParam params_substance_get[] = {
 };
 static const MethodDescriptor desc_substance_get = {
     "substance.get", "substance",
-    "Every physical field of one substance, its base, and which fields it overrides",
-    "Kelvin, J/kg, m^2/s, kg/m^3. A project substance stores only overridden fields; the rest follow based_on, so a change to the base reaches it.",
+    "Read resolved fields, inheritance, catalogue identity and shared edit scope of a substance",
+    "Kelvin, J/kg, m^2/s, kg/m^3. A project substance stores only overridden fields; the rest follow based_on. catalogue matches substance.list. edit_scope is read_only_builtin or shared_project_profile. affected_references lists recorded scene/history uses and inheriting project profiles; it is a reference list, not an object count. Family/tier metadata are read-only, not fields accepted by substance.set.",
     "read", "Read", false, "any",
     "substance|get|material|fields|thermal|combustion|viscosity",
     "substance.list|substance.set",
@@ -9855,8 +9855,8 @@ static const MethodRegistration reg_substance_get_object(desc_substance_get_obje
 
 static const MethodDescriptor desc_substance_list = {
     "substance.list", "substance",
-    "List the substance library: built-ins and project substances derived from them, with category",
-    "Built-ins are read-only (based_on empty). category (liquid|granular|solid|fuel) groups pickers only; behaviour comes from the fields. Names are what flow_source fluid_substance, collider msf_substance and fluid.set_substance_material take.",
+    "List foundation, example/test and project substance profiles with shared family metadata",
+    "Built-ins are read-only (based_on empty). catalogue contains family, family_label, tier (foundation|example|test|project), root_profile, representative, values_kind and acoustic definition flags. Families group authoring, not solver phase. Generic foundations use documented representative starting values. Existing names and physical fields remain intact. category remains liquid|granular|solid|fuel. Names are accepted by object, collider, source and domain bindings.",
     "read", "Read", false, "any",
     "substance|list|material|library|category|derive",
     "substance.get|substance.derive|fluid.set_substance_material",

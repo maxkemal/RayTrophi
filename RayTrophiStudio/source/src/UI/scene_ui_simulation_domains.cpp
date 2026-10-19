@@ -1,4 +1,4 @@
-#include "DomainPanelWidgets.h"
+﻿#include "DomainPanelWidgets.h"
 #include "Fluid/MatterPoreAuthoring.h"
 #include "scene_ui_forcefield.hpp"
 #include "Fluid/MatterPhaseConfig.h"
@@ -975,6 +975,24 @@ void drawSimulationDomainControls(
                                           "path report their own limits when a step cannot run.");
                     }
 
+                    if (auto seed_sys = scene.getParticleSimulationSystem()) {
+                        // The live state's last seed (fluid.list_domains seed_*).
+                        const auto& descs = seed_sys->gridDomains();
+                        const auto& states = seed_sys->gridDomainStates();
+                        for (std::size_t d = 0; d < descs.size() && d < states.size(); ++d) {
+                            if (descs[d].name != domain.name) continue;
+                            const auto& st = states[d].seed_stats;
+                            if (st.ran && st.truncated) {
+                                ImGui::TextWrapped("\xE2\x9A\xA0 Last seed was cut by Max Particles: %zu of %zu "
+                                    "particles. The liquid ends at y=%.3f, not %.3f. Raise Max Particles "
+                                    "and seed again.", st.emitted, st.requested, st.top_y, st.region_top_y);
+                            } else if (st.ran) {
+                                ImGui::TextDisabled("Last seed: %zu particles, complete.", st.emitted);
+                            }
+                            break;
+                        }
+                    }
+
                     ImGui::Checkbox("Clear Existing on Seed##ReplaceOnSeed", &domain.fluid_replace_on_seed);
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("When enabled, clicking 'Seed Fluid' clears all pre-existing particles before seeding.");
@@ -1569,7 +1587,7 @@ void drawSimulationDomainControls(
                                 RayTrophiSim::Fluid::drawMatterGrainSourceLine(*particles, source);
                             }
                             if (SubstanceEditorUI::draw("##FlowSubstanceEditor",
-                                                        source.fluid_substance)) {
+                                                        source.fluid_substance, "Mechanical")) {
                                 scene.requestSimulationTimelineRenderResync();
                                 ui_ctx.start_render = true;
                             }
@@ -1967,7 +1985,8 @@ void drawSimulationDomainControls(
                                 "solver hints (FLIP blend, damping, sweeps...), editable below.");
                         }
                         std::string edited = fp.default_substance;
-                        if (SubstanceEditorUI::draw("##DomainSubstanceEditor", edited)) {
+                        if (SubstanceEditorUI::draw("##DomainSubstanceEditor", edited,
+                                "Mechanical")) {
                             if (!edited.empty() && edited != fp.default_substance) {
                                 set_default_substance(edited);   // derived: assign it
                             } else {
@@ -2863,6 +2882,23 @@ void drawSimulationDomainControls(
                     ImGui::DragInt("Poisson Pressure Iterations", &fp.pressure_iterations, 1.0f, 0, 200);
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Iterations for solving incompressibility (Poisson equation). Higher values prevent compression.");
+                    }
+                    if (auto pressure_sys = scene.getParticleSimulationSystem()) {
+                        // What the last step used (fluid.list_domains pressure_cg_*).
+                        const auto& descs = pressure_sys->gridDomains();
+                        const auto& states = pressure_sys->gridDomainStates();
+                        for (std::size_t d = 0; d < descs.size() && d < states.size(); ++d) {
+                            if (descs[d].name != domain.name) continue;
+                            const auto& fs = states[d].fluid_stats;
+                            if (fs.pressure_cg_max_iterations > 0) {
+                                const bool capped = fs.pressure_cg_iterations >= fs.pressure_cg_max_iterations;
+                                ImGui::TextDisabled("Last step: %d / %d iterations, residual %.1e%s",
+                                    fs.pressure_cg_iterations, fs.pressure_cg_max_iterations,
+                                    fs.pressure_cg_final_relative_residual,
+                                    capped ? " (hit the cap: liquid may compress)" : "");
+                            }
+                            break;
+                        }
                     }
                     ImGui::DragFloat("Pressure Residual Target", &fp.pressure_relative_residual, 1.0e-6f, 1.0e-8f, 1.0e-2f, "%.1e");
                     if (ImGui::IsItemHovered()) {

@@ -11,12 +11,13 @@
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 
 namespace audio {
 namespace {
 using json = nlohmann::json;
 
-void require(bool valid, const char* message) {
+void require(bool valid, const std::string& message) {
     if (!valid) {
         throw std::invalid_argument(message);
     }
@@ -38,16 +39,28 @@ void validatePhysicalAudioSource(json& source) {
         require(field.key() == "version" || field.key() == "model" ||
             field.key() == "seed" || field.key() == "brightness" ||
             field.key() == "resonator" || field.key() == "size_m" ||
-            field.key() == "decay_seconds" || field.key() == "reference_energy_j",
+            field.key() == "decay_seconds" || field.key() == "reference_energy_j" ||
+            field.key() == "texture" || field.key() == "variation" || field.key() == "body" ||
+            field.key() == "character_revision" || field.key() == "surface",
             "Unknown physical generator field");
     }
     const auto version = recipe.value("version", json(1));
-    require(version.is_number_integer() && version == 1, "Unsupported physical generator version");
+    require(version.is_number_integer() && (version == 1 || version == 2),
+        "Unsupported physical generator version");
+    require(version == 2 || (!recipe.contains("texture") && !recipe.contains("variation") &&
+        !recipe.contains("body") && !recipe.contains("character_revision") &&
+        !recipe.contains("surface")), "Character controls require generator version 2");
+    const auto character = recipe.value("character_revision", json(1));
+    require(character.is_number_integer() && (character == 1 || character == 2),
+        "character_revision must be integer 1 or 2");
     const auto model = recipe.value("model", json("liquid_flow"));
     require(model.is_string() && (model == "liquid_flow" || model == "gas_flow" ||
         model == "friction" || model == "rolling" || model == "impact" ||
         model == "contact_activity" || model == "deformation" || model == "fracture_activity"),
         "Unknown physical generator model");
+    const bool surfaceControl = version == 2 && character == 2 && model == "friction";
+    require(surfaceControl || !recipe.contains("surface"),
+        "surface requires v2 friction character_revision 2");
     const auto seed = recipe.value("seed", json(1));
     require(seed.is_number_integer() && seed.get<double>() >= 0 &&
         seed.get<double>() <= 4294967295.0, "generator seed must be a uint32 integer");
@@ -81,8 +94,24 @@ void validatePhysicalAudioSource(json& source) {
         require(reaction.at("input_metric") == metric,
             "Domain generators require power_w, except fracture_activity which requires value");
     }
-    source["generator"] = {{"version", 1}, {"model", model}, {"seed", seed},
+    source["generator"] = {{"version", version}, {"model", model}, {"seed", seed},
         {"brightness", brightness}};
+    if (version == 2) {
+        source["generator"]["character_revision"] = character;
+        if (surfaceControl) {
+            const auto surface = recipe.value("surface", json("organic"));
+            require(surface.is_string() && (surface == "organic" || surface == "mineral" ||
+                surface == "metal" || surface == "glass"), "Unknown friction surface family");
+            source["generator"]["surface"] = surface;
+        }
+        for (const auto* key : {"texture", "variation", "body"}) {
+            const auto value = recipe.value(key, json(0.5));
+            require(value.is_number() && std::isfinite(value.get<double>()) &&
+                value.get<double>() >= 0 && value.get<double>() <= 1,
+                std::string("generator ") + key + " must be finite within 0..1");
+            source["generator"][key] = value;
+        }
+    }
     if (resonant) {
         const auto resonator = recipe.value("resonator", json("wood"));
         require(resonator.is_string() && (resonator == "wood" || resonator == "metal" ||
@@ -316,14 +345,17 @@ bool PhysicalAudioRuntime::retire(const std::string& id, bool inactive, float dt
 }
 
 json PhysicalAudioRuntime::status(const std::string& id) const {
+    const auto sequence = sequences_.find(id);
+    const json lastSequence = sequence == sequences_.end() ? json() : json(sequence->second);
     const auto found = sources_.find(id);
     if (found == sources_.end()) {
-        return {{"state", "not_resident"}};
+        return {{"state", "not_resident"}, {"last_accepted_sequence", lastSequence}};
     }
     const auto& source = *found->second;
     const auto write = source.written.load(std::memory_order_acquire);
     const auto read = source.consumed.load(std::memory_order_acquire);
     return {{"state", source.draining ? "draining" : "resident"},
+        {"last_accepted_sequence", lastSequence},
         {"drain_seconds", source.drainSeconds}, {"queued_impacts", write - read},
         {"drain_allowance_seconds", source.drainAllowance},
         {"held_reaction_gain", source.lastGain},

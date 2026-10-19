@@ -1600,6 +1600,23 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["live_motion_mean_m"] = info.live_motion_mean_m;
         d["live_motion_p95_m"] = info.live_motion_p95_m;
         d["live_motion_max_m"] = info.live_motion_max_m;
+        d["pressure_iterations"] = info.pressure_iterations;
+        d["pressure_relative_residual"] = info.pressure_relative_residual;
+        d["pressure_cg_iterations"] = info.pressure_cg_iterations;
+        d["pressure_cg_max_iterations"] = info.pressure_cg_max_iterations;
+        d["pressure_cg_final_relative_residual"] = info.pressure_cg_final_relative_residual;
+        d["pressure_cg_multigrid"] = info.pressure_cg_multigrid;
+        d["seed_mode"] = info.seed_mode;
+        d["seed_min"] = vec3ToPython(info.seed_min);
+        d["seed_max"] = vec3ToPython(info.seed_max);
+        d["seed_particles_per_cell"] = info.seed_particles_per_cell;
+        d["seed_fill_level"] = info.seed_fill_level;
+        d["seed_ran"] = info.seed_ran;
+        d["seed_truncated"] = info.seed_truncated;
+        d["seed_requested_particles"] = info.seed_requested_particles;
+        d["seed_emitted_particles"] = info.seed_emitted_particles;
+        d["seed_top_y"] = info.seed_top_y;
+        d["seed_region_top_y"] = info.seed_region_top_y;
         d["thermal_contact_shell_kelvin"] = info.thermal_contact_shell_kelvin;
         d["thermal_contact_parcel_kelvin"] = info.thermal_contact_parcel_kelvin;
         d["thermal_contact_shell_cells"] = info.thermal_contact_shell_cells;
@@ -1916,6 +1933,23 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["live_motion_mean_m"] = info.live_motion_mean_m;
         d["live_motion_p95_m"] = info.live_motion_p95_m;
         d["live_motion_max_m"] = info.live_motion_max_m;
+        d["pressure_iterations"] = info.pressure_iterations;
+        d["pressure_relative_residual"] = info.pressure_relative_residual;
+        d["pressure_cg_iterations"] = info.pressure_cg_iterations;
+        d["pressure_cg_max_iterations"] = info.pressure_cg_max_iterations;
+        d["pressure_cg_final_relative_residual"] = info.pressure_cg_final_relative_residual;
+        d["pressure_cg_multigrid"] = info.pressure_cg_multigrid;
+        d["seed_mode"] = info.seed_mode;
+        d["seed_min"] = vec3ToPython(info.seed_min);
+        d["seed_max"] = vec3ToPython(info.seed_max);
+        d["seed_particles_per_cell"] = info.seed_particles_per_cell;
+        d["seed_fill_level"] = info.seed_fill_level;
+        d["seed_ran"] = info.seed_ran;
+        d["seed_truncated"] = info.seed_truncated;
+        d["seed_requested_particles"] = info.seed_requested_particles;
+        d["seed_emitted_particles"] = info.seed_emitted_particles;
+        d["seed_top_y"] = info.seed_top_y;
+        d["seed_region_top_y"] = info.seed_region_top_y;
         d["thermal_contact_shell_kelvin"] = info.thermal_contact_shell_kelvin;
         d["thermal_contact_parcel_kelvin"] = info.thermal_contact_parcel_kelvin;
         d["thermal_contact_shell_cells"] = info.thermal_contact_shell_cells;
@@ -2214,6 +2248,23 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["live_motion_mean_m"] = info.live_motion_mean_m;
         d["live_motion_p95_m"] = info.live_motion_p95_m;
         d["live_motion_max_m"] = info.live_motion_max_m;
+        d["pressure_iterations"] = info.pressure_iterations;
+        d["pressure_relative_residual"] = info.pressure_relative_residual;
+        d["pressure_cg_iterations"] = info.pressure_cg_iterations;
+        d["pressure_cg_max_iterations"] = info.pressure_cg_max_iterations;
+        d["pressure_cg_final_relative_residual"] = info.pressure_cg_final_relative_residual;
+        d["pressure_cg_multigrid"] = info.pressure_cg_multigrid;
+        d["seed_mode"] = info.seed_mode;
+        d["seed_min"] = vec3ToPython(info.seed_min);
+        d["seed_max"] = vec3ToPython(info.seed_max);
+        d["seed_particles_per_cell"] = info.seed_particles_per_cell;
+        d["seed_fill_level"] = info.seed_fill_level;
+        d["seed_ran"] = info.seed_ran;
+        d["seed_truncated"] = info.seed_truncated;
+        d["seed_requested_particles"] = info.seed_requested_particles;
+        d["seed_emitted_particles"] = info.seed_emitted_particles;
+        d["seed_top_y"] = info.seed_top_y;
+        d["seed_region_top_y"] = info.seed_region_top_y;
         d["thermal_contact_shell_kelvin"] = info.thermal_contact_shell_kelvin;
         d["thermal_contact_parcel_kelvin"] = info.thermal_contact_parcel_kelvin;
         d["thermal_contact_shell_cells"] = info.thermal_contact_shell_cells;
@@ -2729,6 +2780,15 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                                                p_enabled, p_visible,
                                                p_granular_max_solver_substeps));
         if (has_thermal_patch) requireResult(rtapi::setFluidThermal(domain, thermal_patch));
+        if (kwargs.contains("pressure_iterations") || kwargs.contains("pressure_relative_residual")) {
+            int iter = 0; float res = 0.0f;
+            const bool has_iter = kwargs.contains("pressure_iterations");
+            const bool has_res = kwargs.contains("pressure_relative_residual");
+            if (has_iter) iter = py::cast<int>(kwargs["pressure_iterations"]);
+            if (has_res) res = py::cast<float>(kwargs["pressure_relative_residual"]);
+            requireResult(rtapi::setFluidPressureSolver(domain, has_iter ? &iter : nullptr,
+                                                        has_res ? &res : nullptr));
+        }
         if (kwargs.contains("max_particles"))
             requireResult(rtapi::setFluidMaxParticles(domain, py::cast<uint64_t>(kwargs["max_particles"])));
         if (kwargs.contains("max_auto_resolution"))
@@ -3588,6 +3648,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["based_on"] = row.based_on;
             d["category"] = row.category;
             d["builtin"] = row.builtin;
+            d["catalogue"] = py::module_::import("json").attr("loads")(row.catalogue_json);
             out.append(d);
         }
         return out;

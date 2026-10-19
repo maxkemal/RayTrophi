@@ -62,7 +62,9 @@ def required(method, namespaces):
         return "Read"
     if method.startswith("audio."):
         operation = method[6:]
-        if operation in ("acoustics_boundary", "acoustics_debug", "acoustics_trace", "acoustics_preview_status"):
+        if operation in ("acoustics_boundary", "acoustics_debug", "acoustics_trace",
+                         "acoustics_preview_status", "acoustics_get", "physical_bake_status",
+                         "physical_history_status", "physical_replay_status"):
             return "Read"
         if operation in {"waveform", "design_destination", "design_waveform"}:
             return "Read|FilesRead"
@@ -72,10 +74,11 @@ def required(method, namespaces):
             return "Read|FilesRead|FilesWrite"
         if operation == "export_cancel":
             return "Read|FilesWrite"
-        if operation in {"list", "get", "status", "domains", "mixer_get",
+        if operation in {"list", "get", "status", "domains", "mixer_get", "analysis_get", "physical_catalogue",
                          "arrange_status", "track_list", "clip_list", "export_status", "capture_status", "workspace_get", "synth_presets", "telemetry_get", "design_job_status", "design_status", "design_destination", "design_catalogue", "design_analyze", "design_effect_visual"}:
             return "Read"
-        if operation in {"append", "asset_import", "asset_relink", "play", "preview",
+        if operation in {"append", "asset_import", "asset_relink", "play", "play_all",
+                         "transport_batch", "preview",
                          "preview_file", "environment_setup", "create", "update",
                          "duplicate", "thunder_setup", "thunder_update", "thunder_event",
                          "resume_automatic", "playback_update", "clip_create", "clip_update",

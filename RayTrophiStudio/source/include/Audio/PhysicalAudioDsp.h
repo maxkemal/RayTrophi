@@ -1,5 +1,7 @@
 #pragma once
 #include "json.hpp"
+#include "Audio/PhysicalAudioNaturalDsp.h"
+#include <optional>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +26,7 @@ private:
         float damping = 0;
         float weight = 0;
     };
+    std::optional<PhysicalAudioNaturalDsp> natural_;
     std::array<Mode, 6> modes_{};
     std::uint32_t random_ = 1;
     float level_ = 0;

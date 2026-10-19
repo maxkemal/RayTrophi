@@ -1,0 +1,46 @@
+{
+  "scope": "post-build external IPC acceptance; no Studio build/launch or solver changes",
+  "api_and_dry_bake": {
+    "passed": true,
+    "commands": [
+      "python scripts/test/rt_test_audio_natural_ipc.py",
+      "python scripts/test/rt_test_audio_natural_ipc.py --exercise"
+    ],
+    "models": [
+      "liquid_flow",
+      "gas_flow",
+      "friction",
+      "rolling",
+      "impact",
+      "contact_activity",
+      "deformation",
+      "fracture_activity"
+    ],
+    "checks": [
+      "catalogue and history-scope validation",
+      "versioned recipe validation and atomic error rejection",
+      "same-input deterministic bake hashes",
+      "texture/body change affects PCM",
+      "v1/v2 output separation",
+      "incompatible stored history rejection and explicit clearing"
+    ]
+  },
+  "native_listen_report": "audio_natural_listen_20261019.json",
+  "subjective_naturalness": "partial: metal/glass impacts accepted; other reported timbres require tuning",
+  "ui_focus_shortcuts": "manual verification pending",
+  "standalone_cpp_dsp_harness": "not compiled or run",
+  "limits": [
+    "controlled inputs, not measured solver events",
+    "dry bake, not acoustic export parity",
+    "temporary authoring changes create scene history and advance IDs"
+  ],
+  "tested_character_revision": 1,
+  "listening_feedback": {
+    "liquid_gas_friction": "first three sounded nearly the same",
+    "metal_glass_impact": "correct",
+    "wood_stone_impact": "too metallic",
+    "fracture_activity": "unnatural crackle",
+    "friction": "should vary with material"
+  },
+  "character_revision_2": "source ready; new build and listening pending"
+}
