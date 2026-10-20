@@ -309,7 +309,7 @@ def main():
     # U2: the step copies the DEM substance's material every step.
     sim_src = read('src/Physics/ParticleSimulation.cpp')
     assert 'Fluid::applyMatterGrainSubstance(grain, *profile,' in sim_src
-    assert sim_src.index('Fluid::applyMatterGrainSubstance(') < sim_src.index('    injectFlowSourcesIntoGridDomains(')
+    assert sim_src.index('Fluid::applyMatterGrainSubstance(') < sim_src.index('if (!settling_) injectFlowSourcesIntoGridDomains(')
     library = read('src/Physics/SubstanceLibrary.cpp')
     for field in ('grain_friction', 'grain_rolling_friction', 'grain_restitution',
                   'grain_packing_fraction', 'grain_water_capacity_fraction',
@@ -319,7 +319,7 @@ def main():
     assert 'profile->granular_transport == MatterGranularTransport::Dem' in owner
     assert 'matterGrainBlockers(domain)' in owner and 'result.reset_pending = true;' in owner
     sim = read('src/Physics/ParticleSimulation.cpp')
-    assert sim.index('grain.enabled = ownership.enabled;') < sim.index('    injectFlowSourcesIntoGridDomains(')
+    assert sim.index('grain.enabled = ownership.enabled;') < sim.index('if (!settling_) injectFlowSourcesIntoGridDomains(')
     assert '"grain_ownership"' in read('src/Api/RtApiMatterModels.cpp')
     # Substance editor (MADDE_UI_TEK_OTORITE U1): the dragged value is held until
     # release, DEM substances say their continuum fields are unused, sections

@@ -163,6 +163,14 @@ void fillFluidSettle(const RayTrophiSim::SimulationGridDomainDesc& d,
                      const RayTrophiSim::SimulationGridDomainState* state,
                      FluidDomainInfo& info) {
     info.settle_on_seed = d.fluid_seed_settle;
+    info.pressure_iterations = d.fluid_params.pressure_iterations;
+    info.pressure_relative_residual = d.fluid_params.pressure_relative_residual;
+    info.seed_mode = d.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel
+        ? "fill_level" : "box";
+    info.seed_min = d.fluid_seed_min;
+    info.seed_max = d.fluid_seed_max;
+    info.seed_particles_per_cell = d.fluid_seed_particles_per_cell;
+    info.seed_fill_level = d.fluid_fill_level;
     info.settle_max_steps = d.fluid_settle_max_steps;
     info.settle_displacement_m = d.fluid_settle_displacement_m;
     if (!state) return;
@@ -191,6 +199,18 @@ void fillFluidSettle(const RayTrophiSim::SimulationGridDomainDesc& d,
     info.live_motion_mean_m = probe.mean_m;
     info.live_motion_p95_m = probe.p95_m;
     info.live_motion_max_m = probe.max_m;
+    const auto& fs = state->fluid_stats;
+    info.pressure_cg_iterations = fs.pressure_cg_iterations;
+    info.pressure_cg_max_iterations = fs.pressure_cg_max_iterations;
+    info.pressure_cg_final_relative_residual = fs.pressure_cg_final_relative_residual;
+    info.pressure_cg_multigrid = fs.pressure_cg_multigrid;
+    const auto& seed = state->seed_stats;
+    info.seed_ran = seed.ran;
+    info.seed_truncated = seed.truncated;
+    info.seed_requested_particles = static_cast<uint64_t>(seed.requested);
+    info.seed_emitted_particles = static_cast<uint64_t>(seed.emitted);
+    info.seed_top_y = seed.top_y;
+    info.seed_region_top_y = seed.region_top_y;
 }
 
 void fillFluidViews(const RayTrophiSim::SimulationGridDomainDesc& d,
@@ -492,6 +512,7 @@ void fillFluidSolidPhase(const RayTrophiSim::SimulationGridDomainState& state,
     info.thermal_grain_heat_to_walls_j = ts.grain_heat_to_walls_j;
     info.thermal_grain_energy_residual_j = ts.grain_energy_residual_j;
     info.thermal_grain_ms = ts.grain_thermal_ms;
+    info.thermal_grain_air_humid = ts.grain_air_humid;
     info.thermal_contact_cooled_particles = static_cast<uint64_t>(ts.contact_cooled_particles);
     info.thermal_min_kelvin = ts.min_kelvin;
     info.thermal_mean_kelvin = ts.mean_kelvin;
@@ -1390,6 +1411,23 @@ Result setFluidMaxParticles(const std::string& domain_id_or_name, uint64_t max_p
     // No ceiling: the budget is the user's. Memory and the GPU paths report
     // their own limits when a step cannot run.
     domain->fluid_max_particles = static_cast<std::size_t>(std::max<uint64_t>(max_particles, 1u));
+    invalidateScriptSimulation();
+    return Result::success();
+}
+
+Result setFluidPressureSolver(const std::string& domain_id_or_name, const int* iterations,
+                              const float* relative_residual) {
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (iterations && *iterations < 1) return Result::fail("pressure_iterations must be >= 1");
+    if (relative_residual && !(*relative_residual > 0.0f))
+        return Result::fail("pressure_relative_residual must be > 0");
+    Result error;
+    auto* domain = findLiquidDomainDesc(domain_id_or_name, error);
+    if (!domain) return error;
+    // No ceiling on the cap: the solve stops at the tolerance, and the budget
+    // of time is the user's.
+    if (iterations) domain->fluid_params.pressure_iterations = *iterations;
+    if (relative_residual) domain->fluid_params.pressure_relative_residual = *relative_residual;
     invalidateScriptSimulation();
     return Result::success();
 }

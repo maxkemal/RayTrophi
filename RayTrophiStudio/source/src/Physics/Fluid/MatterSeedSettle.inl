@@ -32,6 +32,50 @@ constexpr int kSettlePlateauWindow = 10;      // steps compared for "still falli
 constexpr float kSettlePlateauRatio = 0.9f;   // < 10% drop over the window = plateau
 constexpr std::size_t kMotionProbeSamples = 4096;
 
+// Positions of one population, keyed for matching after a step.
+struct MotionSnapshot {
+    std::unordered_map<uint64_t, Vec3> by_id;  // empty when ids are absent or repeat
+    std::vector<Vec3> by_index;
+};
+
+void takeMotionSnapshot(const Fluid::FluidParticles& particles, MotionSnapshot& out) {
+    out.by_id.clear();
+    out.by_index.assign(particles.position.begin(), particles.position.end());
+    const std::size_t n = particles.size();
+    if (particles.particle_id.size() != n) return;
+    out.by_id.reserve(n);
+    for (std::size_t k = 0; k < n; ++k) {
+        out.by_id.emplace(particles.particle_id[k], particles.position[k]);
+    }
+    // A fresh seed can carry no ids yet (or all zero): identity cannot match.
+    if (out.by_id.size() != n) out.by_id.clear();
+}
+
+// Appends each carrier's displacement since the snapshot. A carrier with no
+// partner is skipped; an empty result means "not measured".
+void matchMotion(const Fluid::FluidParticles& particles, const MotionSnapshot& before,
+                 std::vector<float>& moved) {
+    const std::size_t n = particles.size();
+    const auto distance = [](const Vec3& a, const Vec3& b) {
+        const Vec3 d = a - b;
+        return std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+    };
+    if (!before.by_id.empty() && particles.particle_id.size() == n) {
+        for (std::size_t k = 0; k < n; ++k) {
+            const auto found = before.by_id.find(particles.particle_id[k]);
+            if (found != before.by_id.end()) {
+                moved.push_back(distance(particles.position[k], found->second));
+            }
+        }
+        if (!moved.empty()) return;
+    }
+    if (before.by_index.size() == n) {
+        for (std::size_t k = 0; k < n; ++k) {
+            moved.push_back(distance(particles.position[k], before.by_index[k]));
+        }
+    }
+}
+
 float percentile95(std::vector<float>& values) {
     if (values.empty()) return 0.0f;
     const std::size_t k = (values.size() * 95) / 100;
@@ -51,20 +95,33 @@ void measureFrameMotion(SimulationGridDomainState& state) {
     for (std::size_t k = 0; k < probe.ids.size() && k < probe.positions.size(); ++k) {
         previous.emplace(probe.ids[k], probe.positions[k]);
     }
+    // Without ids (or with repeats) the sample is matched by index, which is
+    // only meaningful while the population size is unchanged.
+    const bool by_id = particles.particle_id.size() == particles.size() &&
+                       previous.size() == probe.ids.size();
+    const bool same_count = probe.population == particles.size();
     probe.ids.clear();
     probe.positions.clear();
-    const std::size_t count = std::min(particles.size(), particles.particle_id.size());
+    probe.population = particles.size();
+    const std::size_t count = particles.size();
     const std::size_t stride = std::max<std::size_t>(1, count / kMotionProbeSamples);
     std::vector<float> moved;
     moved.reserve(count / stride + 1);
     double sum = 0.0;
     float largest = 0.0f;
-    for (std::size_t i = 0; i < count; i += stride) {
-        const uint64_t id = particles.particle_id[i];
+    std::size_t slot = 0;
+    for (std::size_t i = 0; i < count; i += stride, ++slot) {
+        const uint64_t id = i < particles.particle_id.size() ? particles.particle_id[i] : 0u;
         const Vec3& now = particles.position[i];
-        const auto found = previous.find(id);
-        if (found != previous.end()) {
-            const Vec3 d = now - found->second;
+        const Vec3* then = nullptr;
+        if (by_id) {
+            const auto found = previous.find(id);
+            if (found != previous.end()) then = &found->second;
+        } else if (same_count && slot < probe.index_positions.size()) {
+            then = &probe.index_positions[slot];
+        }
+        if (then) {
+            const Vec3 d = now - *then;
             const float distance = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
             moved.push_back(distance);
             sum += distance;
@@ -73,6 +130,7 @@ void measureFrameMotion(SimulationGridDomainState& state) {
         probe.ids.push_back(id);
         probe.positions.push_back(now);
     }
+    probe.index_positions = probe.positions;
     probe.samples = moved.size();
     probe.mean_m = moved.empty() ? 0.0f : static_cast<float>(sum / double(moved.size()));
     probe.max_m = largest;
@@ -104,8 +162,8 @@ void ParticleSimulationSystem::settleGridDomains(const SimulationContext& contex
     // The solver's own frame length, kept in the range its tuning assumes.
     settle_context.dt = std::clamp(context.dt, 1.0f / 240.0f, 1.0f / 30.0f);
 
-    // Per domain: positions by id before the step, and the p95 history.
-    std::vector<std::unordered_map<uint64_t, Vec3>> before(settling.size());
+    // Per domain: positions before the step, and the p95 history.
+    std::vector<MotionSnapshot> before(settling.size());
     std::vector<std::vector<float>> history(settling.size());
     std::vector<float> moved;
 
@@ -115,14 +173,7 @@ void ParticleSimulationSystem::settleGridDomains(const SimulationContext& contex
         for (std::size_t s = 0; s < settling.size(); ++s) {
             const auto& state = grid_domain_states_[settling[s]];
             if (!state.settle_stats.pending) continue;
-            auto& map = before[s];
-            map.clear();
-            map.reserve(state.particles.size());
-            const std::size_t n = std::min(state.particles.size(),
-                                           state.particles.particle_id.size());
-            for (std::size_t k = 0; k < n; ++k) {
-                map.emplace(state.particles.particle_id[k], state.particles.position[k]);
-            }
+            takeMotionSnapshot(state.particles, before[s]);
         }
         stepGridDomains(settle_context);
         any_pending = false;
@@ -133,24 +184,23 @@ void ParticleSimulationSystem::settleGridDomains(const SimulationContext& contex
             if (!stats.pending) continue;
             auto& particles = state.particles;
             moved.clear();
-            const std::size_t n = std::min(particles.size(), particles.particle_id.size());
-            for (std::size_t k = 0; k < n; ++k) {
-                const auto found = before[s].find(particles.particle_id[k]);
-                if (found == before[s].end()) continue;
-                const Vec3 d = particles.position[k] - found->second;
-                moved.push_back(std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z));
-            }
+            matchMotion(particles, before[s], moved);
             for (auto& v : particles.velocity) v = Vec3(0.0f, 0.0f, 0.0f);
             for (auto& c : particles.affine) c = Fluid::AffineC{};
+            // ★ No matched carrier = not measured, never "at rest" (5th build:
+            // a fresh seed had no ids yet, p95 of nothing read 0 and the
+            // water "converged" after one step).
+            const bool measured = !moved.empty();
             const float p95 = percentile95(moved);
             if (stats.steps == 0) stats.first_p95_m = p95;
             stats.residual_p95_m = p95;
+            stats.measured_steps += measured ? 1 : 0;
             ++stats.steps;
-            history[s].push_back(p95);
+            if (measured) history[s].push_back(p95);
             const auto& domain = grid_domains_[i];
             const float tolerance = std::max(0.0f, domain.fluid_settle_displacement_m);
             const int limit = std::max(1, domain.fluid_settle_max_steps);
-            stats.converged = p95 <= tolerance;
+            stats.converged = measured && p95 <= tolerance;
             const auto& h = history[s];
             stats.plateau = !stats.converged && h.size() > kSettlePlateauWindow &&
                 h.back() > kSettlePlateauRatio * h[h.size() - 1 - kSettlePlateauWindow];

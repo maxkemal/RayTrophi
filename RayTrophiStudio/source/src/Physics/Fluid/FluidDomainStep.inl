@@ -314,6 +314,25 @@
                         grain_gas_air.vapour_cells = combustion_air.vapour_cells;
                         grain_gas_air.vapour_molar = combustion_air.vapour_molar;
                         grain_gas_air.cell_volume = combustion_air.cell_volume;
+                        // P9: a device-owned inventory left the host pointer
+                        // null and grains read the air as dry. Bring the
+                        // vapour column home once, only when grains trade with
+                        // this air (cells x 4 bytes).
+                        static std::vector<float> s_grain_vapour;
+                        if (grain_air && !grain_gas_air.vapour_kg &&
+                            combustion_air.vapour_molar > 0.0f && context.compute) {
+                            const auto handle = Fluid::gasCombustionVapourBuffer(state);
+                            const std::size_t cells = Fluid::gasGrid(state).getCellCount();
+                            const std::size_t bytes = cells * sizeof(float);
+                            if (handle.valid() && cells > 0 &&
+                                context.compute->getBufferSize(handle) >= bytes) {
+                                s_grain_vapour.resize(cells);
+                                if (context.compute->downloadBuffer(handle, s_grain_vapour.data(), bytes)) {
+                                    grain_gas_air.vapour_kg = s_grain_vapour.data();
+                                    grain_gas_air.vapour_cells = cells;
+                                }
+                            }
+                        }
                     }
                     Fluid::exchangeMatterGrainHeat(state.particles, state.grid, fluid_params,
                         grain_air, grain_gas_air,

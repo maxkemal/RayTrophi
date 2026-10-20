@@ -34,7 +34,7 @@ std::size_t cellIndex(const MatterGrainLiquidField& f, int i, int j, int k) {
 // every channel of every cell each frame was most of the coupling's host
 // time (10 ms for 2916 grains, growing with the grid, not the content).
 struct CellScratch {
-    std::vector<double> data[7];
+    std::vector<double> data[8];
     std::vector<uint8_t> mark;
     std::vector<uint32_t> touched;
     void begin(std::size_t cells) {
@@ -636,7 +636,7 @@ bool applyMatterGrainLiquidAccelerationForce(const FluidParticles& liquid,
 
 void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
     const MatterGrainCouplingFrame& frame, const MatterGrainParams& params, float dt,
-    MatterGrainStepReport& report) {
+    MatterGrainStepReport& report, const APICSolverParams* thermal) {
     report.wet_grains = params.wet_grains;
     report.absorbed_kg = 0.0;
     report.evaporated_kg = 0.0;
@@ -655,6 +655,10 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
     auto& demand = use.s.data[4];
     auto& scale = use.s.data[5];
     auto& taken = use.s.data[6];
+    auto& heat = use.s.data[7];   // sum m T of the cell's liquid (K kg)
+    const bool mix_heat = thermal && liquid.temperature.size() == liquid.size() &&
+                          grains.temperature.size() == count;
+    report.pore_heat_mixed_j = 0.0;
     double liquid_before = 0.0, grain_before = 0.0;
     for (std::size_t p = 0; p < liquid.size(); ++p) {
         const double m = double(liquid.rest_mass_kg[p]) * liquid.mass_fraction[p];
@@ -668,6 +672,7 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
         momentum[0][c] += m * liquid.velocity[p].x;
         momentum[1][c] += m * liquid.velocity[p].y;
         momentum[2][c] += m * liquid.velocity[p].z;
+        if (mix_heat) heat[c] += m * double(liquid.temperature[p]);
     }
     for (std::size_t g = 0; g < count; ++g) {
         grain_before += grains.pore_water_mass_kg[g];
@@ -703,7 +708,7 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
     report.max_grain_saturation = 0.0f;
     report.grain_water_kg = 0.0;
     for (std::size_t g = 0; g < count; ++g) {
-        double grant = 0.0, gained[3] = {};
+        double grant = 0.0, gained[3] = {}, gained_heat = 0.0;  // gained_heat: sum m T
         if (want[g] > 0.0) {
             for (int n = 0; n < 8; ++n) {
                 const int c = frame.cells[g * 8 + n];
@@ -716,9 +721,30 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
                 for (int axis = 0; axis < 3; ++axis) {
                     gained[axis] += piece * momentum[axis][c] / mass[c];
                 }
+                if (mix_heat) gained_heat += piece * heat[c] / mass[c];
             }
         }
         double water = grains.pore_water_mass_kg[g];
+        if (grant > 0.0 && mix_heat) {
+            // The water leaves the liquid with its cell's temperature (the
+            // parcels keep theirs and lose mass, so that heat leaves them);
+            // the grain takes it: capacity-weighted mix, then the new water
+            // is part of the grain's capacity (parcelHeatCapacity counts it).
+            const uint32_t tag = g < grains.substance_tag.size()
+                ? grains.substance_tag[g] : kSubstanceUntagged;
+            const SubstanceProfile* profile = particleSubstance(tag, *thermal);
+            if (profile) {
+                const double c_grain = parcelHeatCapacity(grains, g, *profile, 0.0f, 1);
+                const double t_grain = double(grains.temperature[g]);
+                const double t_water = gained_heat / grant;
+                const double c_water = grant * kWaterHeat;
+                if (c_grain + c_water > 0.0 && std::isfinite(t_water)) {
+                    grains.temperature[g] = static_cast<float>(
+                        (c_grain * t_grain + c_water * t_water) / (c_grain + c_water));
+                    report.pore_heat_mixed_j += c_water * (t_water - t_grain);
+                }
+            }
+        }
         if (grant > 0.0) {
             const double before = grainMass(grains, g);
             const Vec3& v = grains.velocity[g];

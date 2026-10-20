@@ -397,6 +397,19 @@ size_t estimateSeedBoxParticleCount(const FluidSim::FluidGrid& grid,
                     particles_per_cell);
 }
 
+std::size_t countSeedBoxCells(const FluidSim::FluidGrid& grid,
+                              const Vec3& min_world, const Vec3& max_world) {
+    int i0, j0, k0, i1, j1, k1;
+    if (!seedBoxCellRange(grid, min_world, max_world, i0, j0, k0, i1, j1, k1)) return 0;
+    std::size_t cells = 0;
+    for (int j = j0; j <= j1; ++j)
+    for (int k = k0; k <= k1; ++k)
+    for (int i = i0; i <= i1; ++i) {
+        if (!grid.isSolid(i, j, k)) ++cells;
+    }
+    return cells;
+}
+
 void seedBox(FluidParticles& particles,
              const FluidSim::FluidGrid& grid,
              const Vec3& min_world,

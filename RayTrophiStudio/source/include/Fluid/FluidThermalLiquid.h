@@ -72,6 +72,7 @@ struct ThermalLiquidStats {
     // Heat the walls and the outside air (infinite reservoirs at ambient)
     // took this step through their films; negative = they warmed the liquid.
     double      heat_to_ambient_j = 0.0;
+    bool        grain_air_humid = false;  // grain-air film read a vapour inventory (P9)
     // What the touching parcels SAW, contact-weighted (K; 0 = no contact).
     // Tells "the shell looks cold where the water is" apart from "heat does
     // not flow" when heat_to_solid_j is small (Ek 11, 2026-10-18).

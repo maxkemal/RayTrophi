@@ -58,6 +58,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <future>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -694,6 +695,267 @@ static json autosaveStatusJson(const rtapi::AutosaveStatus& st, const rtapi::Res
            {"writing", st.writing}};
     if (!r.ok) j["__error"] = r.error;
     return j;
+}
+
+// One domain as fluid.list_domains reports it; fluid.run samples the same
+// object between its steps, so both read identically.
+json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
+    return json{
+            {"id", info.id}, {"name", info.name}, {"type", info.type},
+            {"phases", info.phases},
+            {"domain_min", json::array({info.domain_min.x, info.domain_min.y, info.domain_min.z})},
+            {"domain_max", json::array({info.domain_max.x, info.domain_max.y, info.domain_max.z})},
+            {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count},
+            {"fluid_model_particles", info.fluid_model_particles},
+            {"granular_model_particles", info.granular_model_particles},
+            {"elastic_model_particles", info.elastic_model_particles},
+            {"unresolved_model_particles", info.unresolved_model_particles},
+            {"active_density_cells", info.active_density_cells}, {"max_density", info.max_density},
+            {"gas_phase_mass_kg", info.gas_phase_mass_kg}, {"gas_phase_energy_j", info.gas_phase_energy_j},
+            {"gas_phase_active_cells", info.gas_phase_active_cells},
+            {"gas_condensate_kg", info.gas_condensate_kg},
+            {"gas_condensate_cells", info.gas_condensate_cells},
+            {"gas_condensate_mean_kg_m3", info.gas_condensate_mean_kg_m3},
+            {"saturation_measured", info.saturation_measured},
+            {"condensable_substance", info.condensable_substance},
+            {"fog_condensed_kg", info.fog_condensed_kg},
+            {"fog_evaporated_kg", info.fog_evaporated_kg},
+            {"fog_latent_to_air_j", info.fog_latent_to_air_j},
+            {"rained_kg", info.rained_kg},
+            {"rain_parcels", info.rain_parcels},
+            {"fog_autoconverted_kg", info.fog_autoconverted_kg},
+            {"rain_absorbed_kg", info.rain_absorbed_kg},
+            {"gas_rain_kg", info.gas_rain_kg},
+            {"gas_rain_cells", info.gas_rain_cells},
+            {"gas_foreign_kg", info.gas_foreign_kg},
+            {"gas_foreign_cells", info.gas_foreign_cells},
+            {"gas_rain_centroid", json::array({info.gas_rain_centroid.x, info.gas_rain_centroid.y, info.gas_rain_centroid.z})},
+            {"gas_phase_mass_centroid", json::array({
+                info.gas_phase_mass_centroid.x,
+                info.gas_phase_mass_centroid.y,
+                info.gas_phase_mass_centroid.z})},
+            {"live_state", info.live_state},
+            {"render_mode", info.render_mode}, {"backend", info.backend},
+            {"boundary", info.boundary}, {"default_substance", info.default_substance},
+            {"kinematic_viscosity", info.kinematic_viscosity},
+            {"viscosity_sweeps", info.viscosity_sweeps},
+            {"viscosity_wall_slip", info.viscosity_wall_slip},
+            {"granular_enabled", info.granular_enabled},
+            {"granular_friction_angle", info.granular_friction_angle_degrees},
+            {"granular_cohesion", info.granular_cohesion},
+            {"granular_dilatancy", info.granular_dilatancy_degrees},
+            {"granular_young_modulus", info.granular_young_modulus},
+            {"granular_poisson_ratio", info.granular_poisson_ratio},
+            {"granular_tensile_cutoff", info.granular_tensile_cutoff},
+            {"granular_hardening", info.granular_hardening},
+            {"granular_compaction_hardening", info.granular_compaction_hardening},
+            {"granular_compaction_limit", info.granular_compaction_limit},
+            {"granular_fracture_strain", info.granular_fracture_strain},
+            {"granular_damage_rate", info.granular_damage_rate},
+            {"granular_healing_rate", info.granular_healing_rate},
+            {"granular_rebonding", info.granular_rebonding},
+            {"granular_max_solver_substeps", info.granular_max_solver_substeps},
+                {"granular_softening_temperature", info.granular_softening_temperature},
+                {"granular_softening_range", info.granular_softening_range},
+                {"granular_residual_strength", info.granular_residual_strength},
+                {"granular_tack_peak", info.granular_tack_peak},
+                {"granular_thermal_conductivity", info.granular_thermal_conductivity},
+                {"surface_resolution_multiplier", info.surface_resolution_multiplier},
+                {"kernel_radius_voxels", info.kernel_radius_voxels},
+                {"particle_radius_voxels", info.particle_radius_voxels},
+                {"narrow_band_voxels", info.narrow_band_voxels},
+                {"smoothing_iterations", info.smoothing_iterations},
+                {"anisotropy_enabled", info.anisotropy_enabled},
+                {"anisotropy_radius_voxels", info.anisotropy_radius_voxels},
+                {"anisotropy_max_stretch", info.anisotropy_max_stretch},
+                {"anisotropy_neighbor_min", info.anisotropy_neighbor_min},
+                {"position_smoothing", info.position_smoothing},
+                {"surface_measured", info.surface_measured},
+                {"surface_grid_dim", json::array({info.surface_grid_dim[0], info.surface_grid_dim[1], info.surface_grid_dim[2]})},
+                {"surface_voxel", info.surface_voxel},
+                {"surface_build_ms", info.surface_build_ms},
+                {"surface_bin_ms", info.surface_bin_ms},
+                {"surface_anisotropy_ms", info.surface_anisotropy_ms},
+                {"surface_schedule_ms", info.surface_schedule_ms},
+                {"surface_gather_ms", info.surface_gather_ms},
+                {"surface_smooth_ms", info.surface_smooth_ms},
+                {"surface_active_cells", info.surface_active_cells},
+                {"surface_work_cells", info.surface_work_cells},
+                {"surface_bin_cells", info.surface_bin_cells},
+                {"thermal_liquid_enabled", info.thermal_liquid_enabled},
+                {"fog_autoconversion_kg_m3", info.fog_autoconversion_kg_m3},
+                {"fog_autoconversion_rate", info.fog_autoconversion_rate},
+                {"fog_ceiling_kg_m3", info.fog_ceiling_kg_m3},
+                {"thermal_ambient_kelvin", info.thermal_ambient_kelvin},
+                {"thermal_measured", info.thermal_measured},
+                {"thermal_frozen_particles", info.thermal_frozen_particles},
+                {"thermal_froze_this_frame", info.thermal_froze_this_frame},
+                {"thermal_melted_this_frame", info.thermal_melted_this_frame},
+                {"thermal_cold_unsupported", info.thermal_cold_unsupported},
+                {"thermal_mushy_particles", info.thermal_mushy_particles},
+                {"thermal_fusion_released_j", info.thermal_fusion_released_j},
+                {"thermal_fusion_absorbed_j", info.thermal_fusion_absorbed_j},
+                {"thermal_air_cooled_particles", info.thermal_air_cooled_particles},
+                {"thermal_field_heated_particles", info.thermal_field_heated_particles},
+                {"thermal_convecting_particles", info.thermal_convecting_particles},
+                {"thermal_conducting_cells", info.thermal_conducting_cells},
+                {"thermal_gas_exchange_particles", info.thermal_gas_exchange_particles},
+                {"thermal_heat_to_gas_j", info.thermal_heat_to_gas_j},
+                {"thermal_evaporated_kg", info.thermal_evaporated_kg},
+                {"thermal_condensed_kg", info.thermal_condensed_kg},
+                {"thermal_condensation_splits", info.thermal_condensation_splits},
+                {"thermal_solid_contact_particles", info.thermal_solid_contact_particles},
+                {"thermal_heat_to_solid_j", info.thermal_heat_to_solid_j},
+                {"thermal_heat_to_ambient_j", info.thermal_heat_to_ambient_j},
+                {"settle_on_seed", info.settle_on_seed},
+                {"settle_max_steps", info.settle_max_steps},
+                {"settle_displacement_m", info.settle_displacement_m},
+                {"settle_pending", info.settle_pending},
+                {"settle_ran", info.settle_ran},
+                {"settle_converged", info.settle_converged},
+                {"settle_plateau", info.settle_plateau},
+                {"settle_steps", info.settle_steps},
+                {"settle_particles", info.settle_particles},
+                {"settle_first_p95_m", info.settle_first_p95_m},
+                {"settle_residual_p95_m", info.settle_residual_p95_m},
+                {"settle_ms", info.settle_ms},
+                {"live_max_speed_m_s", info.live_max_speed_m_s},
+                {"live_mean_speed_m_s", info.live_mean_speed_m_s},
+                {"live_motion_samples", info.live_motion_samples},
+                {"live_motion_mean_m", info.live_motion_mean_m},
+                {"live_motion_p95_m", info.live_motion_p95_m},
+                {"live_motion_max_m", info.live_motion_max_m},
+                {"pressure_iterations", info.pressure_iterations},
+                {"pressure_relative_residual", info.pressure_relative_residual},
+                {"pressure_cg_iterations", info.pressure_cg_iterations},
+                {"pressure_cg_max_iterations", info.pressure_cg_max_iterations},
+                {"pressure_cg_final_relative_residual", info.pressure_cg_final_relative_residual},
+                {"pressure_cg_multigrid", info.pressure_cg_multigrid},
+                {"seed_mode", info.seed_mode},
+                {"seed_min", json::array({info.seed_min.x, info.seed_min.y, info.seed_min.z})},
+                {"seed_max", json::array({info.seed_max.x, info.seed_max.y, info.seed_max.z})},
+                {"seed_particles_per_cell", info.seed_particles_per_cell},
+                {"seed_fill_level", info.seed_fill_level},
+                {"seed_ran", info.seed_ran},
+                {"seed_truncated", info.seed_truncated},
+                {"seed_requested_particles", info.seed_requested_particles},
+                {"seed_emitted_particles", info.seed_emitted_particles},
+                {"seed_top_y", info.seed_top_y},
+                {"seed_region_top_y", info.seed_region_top_y},
+                {"thermal_contact_shell_kelvin", info.thermal_contact_shell_kelvin},
+                {"thermal_contact_parcel_kelvin", info.thermal_contact_parcel_kelvin},
+                {"thermal_contact_shell_cells", info.thermal_contact_shell_cells},
+                {"thermal_grain_measured", info.thermal_grain_measured},
+                {"thermal_grain_count", info.thermal_grain_count},
+                {"thermal_grain_wetted", info.thermal_grain_wetted},
+                {"thermal_grain_min_kelvin", info.thermal_grain_min_kelvin},
+                {"thermal_grain_mean_kelvin", info.thermal_grain_mean_kelvin},
+                {"thermal_grain_max_kelvin", info.thermal_grain_max_kelvin},
+                {"thermal_grain_heat_to_liquid_j", info.thermal_grain_heat_to_liquid_j},
+                {"thermal_grain_heat_to_gas_j", info.thermal_grain_heat_to_gas_j},
+                {"thermal_grain_heat_to_walls_j", info.thermal_grain_heat_to_walls_j},
+                {"thermal_grain_energy_residual_j", info.thermal_grain_energy_residual_j},
+                {"thermal_grain_ms", info.thermal_grain_ms},
+                {"thermal_grain_air_humid", info.thermal_grain_air_humid},
+                {"thermal_contact_cooled_particles", info.thermal_contact_cooled_particles},
+                {"thermal_min_kelvin", info.thermal_min_kelvin},
+                {"thermal_mean_kelvin", info.thermal_mean_kelvin},
+                {"thermal_max_kelvin", info.thermal_max_kelvin},
+                {"thermal_viscosity_field", info.thermal_viscosity_field},
+                {"thermal_min_viscosity", info.thermal_min_viscosity},
+                {"thermal_max_viscosity", info.thermal_max_viscosity},
+            {"granular_yielded", info.granular_yielded_particles},
+            {"granular_detached", info.granular_detached_particles},
+            {"granular_invalid", info.granular_invalid_particles},
+            {"granular_sleeping", info.granular_sleeping_particles},
+            {"granular_damaged", info.granular_damaged_particles},
+            {"granular_damage_over_10", info.granular_damage_over_10_particles},
+            {"granular_damage_over_50", info.granular_damage_over_50_particles},
+            {"granular_damage_over_90", info.granular_damage_over_90_particles},
+            {"granular_max_yield", info.granular_max_yield},
+            {"granular_max_plastic", info.granular_max_plastic_increment},
+            {"granular_max_accumulated_plastic", info.granular_max_accumulated_plastic},
+            {"granular_mean_accumulated_plastic", info.granular_mean_accumulated_plastic},
+            {"granular_max_fracture_history", info.granular_max_fracture_history},
+            {"granular_mean_fracture_history", info.granular_mean_fracture_history},
+            {"granular_max_damage", info.granular_max_damage},
+            {"granular_mean_damage", info.granular_mean_damage},
+            {"granular_requested_young_modulus", info.granular_requested_young_modulus},
+            {"granular_effective_young_modulus", info.granular_effective_young_modulus},
+            {"granular_required_substeps", info.granular_required_substeps},
+            {"granular_solver_substeps", info.granular_solver_substeps},
+            {"granular_stiffness_capped", info.granular_stiffness_capped},
+            {"granular_wave_substeps", info.granular_wave_substeps},
+            {"granular_strain_substeps", info.granular_strain_substeps},
+            {"granular_strain_rate", info.granular_strain_rate},
+            {"granular_strain_limited", info.granular_strain_limited_particles},
+                {"granular_compaction_capped", info.granular_compaction_capped_particles},
+                {"granular_min_softening", info.granular_min_softening},
+                {"granular_softened", info.granular_softened_particles},
+            {"granular_overburden_pressure", info.granular_overburden_pressure},
+            {"granular_young_modulus_for_load", info.granular_young_modulus_for_load},
+            {"granular_stiffness_below_load", info.granular_stiffness_below_load},
+            {"surface_material", info.surface_material},
+            {"splat_material", info.splat_material},
+            {"splat_geometry", info.splat_geometry},
+            {"splat_geometry_source", info.splat_geometry_source},
+            {"splat_subdivisions", info.splat_subdivisions},
+            {"splat_triangles", info.splat_triangles},
+            {"splat_radius_factor", info.splat_radius_factor},
+            {"splat_size_multiplier", info.splat_size_multiplier},
+            {"virtual_grains_requested", info.virtual_grains_requested},
+            {"virtual_grains_effective", info.virtual_grains_effective},
+            {"primary_visual_children", info.primary_visual_children},
+            {"whitewater_visual_children", info.whitewater_visual_children},
+            {"granular_physical_carriers",
+             info.granular_physical_carriers},
+            {"virtual_grain_count", info.virtual_grain_count},
+            {"virtual_grain_budget", info.virtual_grain_budget},
+            {"virtual_grain_rt_estimated_bytes",
+             info.virtual_grain_rt_estimated_bytes},
+            {"grain_size_variation", info.grain_size_variation},
+            {"fog_spread_voxels", info.fog_spread_voxels},
+            {"fog_erosion_strength", info.fog_erosion_strength},
+            {"fog_erosion_size", info.fog_erosion_size},
+            {"fog_erosion_detail", info.fog_erosion_detail},
+            {"fog_erosion_seed", info.fog_erosion_seed},
+            {"fog_erosion_depth", info.fog_erosion_depth},
+            {"fog_resolution_multiplier", info.fog_resolution_multiplier},
+            {"particle_kelvin_measured", info.particle_kelvin_measured},
+            {"particle_min_kelvin", info.particle_min_kelvin},
+            {"particle_max_kelvin", info.particle_max_kelvin},
+            {"surface_offset_voxels", info.surface_offset_voxels},
+            {"pore_amount", info.pore_amount},
+            {"pore_scale", info.pore_scale},
+            {"pore_detail", info.pore_detail},
+            {"coord_space", info.coord_space == 1 ? "domain"
+                          : info.coord_space == 2 ? "world" : "material"},
+            {"uvw_available", info.uvw_available},
+            {"uvw_dim", json::array({info.uvw_dim[0], info.uvw_dim[1], info.uvw_dim[2]})},
+            {"uvw_origin", json::array({info.uvw_origin[0], info.uvw_origin[1],
+                                        info.uvw_origin[2]})},
+            {"uvw_voxel", info.uvw_voxel},
+            {"uvw_refresh_period", info.uvw_refresh_period},
+            {"substances", substanceCountsToJson(info.substances)},
+            {"substance_materials", substanceBindingsToJson(info.substance_materials)}, {"views", fluidViewsToJson(info.views)}, {"views_measured", info.views_measured}, {"label_routes", labelRoutesToJson(info.label_routes)}, {"hidden_particles", info.hidden_particles}, {"max_particles", info.max_particles}, {"max_auto_resolution", info.max_auto_resolution},
+                {"particle_labels", fluidLabelsToJson(info.particle_labels)},
+            {"uvw_drift", info.uvw_drift},
+            // Measured on the last simulated step, not derived from the
+            // binding: parcels-with-zero-cells is the reading that says
+            // "the chunk is thinner than the voxel size".
+            {"solid_phase_particles", info.solid_phase_particles},
+            {"solid_phase_cells", info.solid_phase_cells},
+            {"sealed_pockets", info.sealed_pockets},
+            {"sealed_pocket_cells", info.sealed_pocket_cells},
+            {"sealed_pockets_measured", info.sealed_pockets_measured},
+            {"interior_fluid_cells", info.interior_fluid_cells},
+            {"reseed_added_particles", info.reseed_added_particles},
+            {"reseed_removed_particles", info.reseed_removed_particles},
+            {"solid_phase", info.solid_phase_enabled},
+            {"solid_phase_fill", info.solid_phase_fill},
+            {"uvw_particles", info.uvw_particles},
+            {"enabled", info.enabled},
+            {"visible", info.visible}};
 }
 
 json dispatchMethod(const std::string& method, const json& params) {
@@ -3008,6 +3270,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"thermal_grain_heat_to_walls_j", info.thermal_grain_heat_to_walls_j},
                         {"thermal_grain_energy_residual_j", info.thermal_grain_energy_residual_j},
                         {"thermal_grain_ms", info.thermal_grain_ms},
+                        {"thermal_grain_air_humid", info.thermal_grain_air_humid},
                         {"thermal_contact_cooled_particles", info.thermal_contact_cooled_particles},
                         {"thermal_min_kelvin", info.thermal_min_kelvin},
                         {"thermal_mean_kelvin", info.thermal_mean_kelvin},
@@ -3118,261 +3381,7 @@ json dispatchMethod(const std::string& method, const json& params) {
             if (!r.ok) return json{{"__error", r.error}};
             json arr = json::array();
             for (const auto& info : domains) {
-                arr.push_back(json{
-                    {"id", info.id}, {"name", info.name}, {"type", info.type},
-                    {"phases", info.phases},
-                    {"domain_min", json::array({info.domain_min.x, info.domain_min.y, info.domain_min.z})},
-                    {"domain_max", json::array({info.domain_max.x, info.domain_max.y, info.domain_max.z})},
-                    {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count},
-                    {"fluid_model_particles", info.fluid_model_particles},
-                    {"granular_model_particles", info.granular_model_particles},
-                    {"elastic_model_particles", info.elastic_model_particles},
-                    {"unresolved_model_particles", info.unresolved_model_particles},
-                    {"active_density_cells", info.active_density_cells}, {"max_density", info.max_density},
-                    {"gas_phase_mass_kg", info.gas_phase_mass_kg}, {"gas_phase_energy_j", info.gas_phase_energy_j},
-                    {"gas_phase_active_cells", info.gas_phase_active_cells},
-                    {"gas_condensate_kg", info.gas_condensate_kg},
-                    {"gas_condensate_cells", info.gas_condensate_cells},
-                    {"gas_condensate_mean_kg_m3", info.gas_condensate_mean_kg_m3},
-                    {"saturation_measured", info.saturation_measured},
-                    {"condensable_substance", info.condensable_substance},
-                    {"fog_condensed_kg", info.fog_condensed_kg},
-                    {"fog_evaporated_kg", info.fog_evaporated_kg},
-                    {"fog_latent_to_air_j", info.fog_latent_to_air_j},
-                    {"rained_kg", info.rained_kg},
-                    {"rain_parcels", info.rain_parcels},
-                    {"fog_autoconverted_kg", info.fog_autoconverted_kg},
-                    {"rain_absorbed_kg", info.rain_absorbed_kg},
-                    {"gas_rain_kg", info.gas_rain_kg},
-                    {"gas_rain_cells", info.gas_rain_cells},
-                    {"gas_foreign_kg", info.gas_foreign_kg},
-                    {"gas_foreign_cells", info.gas_foreign_cells},
-                    {"gas_rain_centroid", json::array({info.gas_rain_centroid.x, info.gas_rain_centroid.y, info.gas_rain_centroid.z})},
-                    {"gas_phase_mass_centroid", json::array({
-                        info.gas_phase_mass_centroid.x,
-                        info.gas_phase_mass_centroid.y,
-                        info.gas_phase_mass_centroid.z})},
-                    {"live_state", info.live_state},
-                    {"render_mode", info.render_mode}, {"backend", info.backend},
-                    {"boundary", info.boundary}, {"default_substance", info.default_substance},
-                    {"kinematic_viscosity", info.kinematic_viscosity},
-                    {"viscosity_sweeps", info.viscosity_sweeps},
-                    {"viscosity_wall_slip", info.viscosity_wall_slip},
-                    {"granular_enabled", info.granular_enabled},
-                    {"granular_friction_angle", info.granular_friction_angle_degrees},
-                    {"granular_cohesion", info.granular_cohesion},
-                    {"granular_dilatancy", info.granular_dilatancy_degrees},
-                    {"granular_young_modulus", info.granular_young_modulus},
-                    {"granular_poisson_ratio", info.granular_poisson_ratio},
-                    {"granular_tensile_cutoff", info.granular_tensile_cutoff},
-                    {"granular_hardening", info.granular_hardening},
-                    {"granular_compaction_hardening", info.granular_compaction_hardening},
-                    {"granular_compaction_limit", info.granular_compaction_limit},
-                    {"granular_fracture_strain", info.granular_fracture_strain},
-                    {"granular_damage_rate", info.granular_damage_rate},
-                    {"granular_healing_rate", info.granular_healing_rate},
-                    {"granular_rebonding", info.granular_rebonding},
-                    {"granular_max_solver_substeps", info.granular_max_solver_substeps},
-                        {"granular_softening_temperature", info.granular_softening_temperature},
-                        {"granular_softening_range", info.granular_softening_range},
-                        {"granular_residual_strength", info.granular_residual_strength},
-                        {"granular_tack_peak", info.granular_tack_peak},
-                        {"granular_thermal_conductivity", info.granular_thermal_conductivity},
-                        {"surface_resolution_multiplier", info.surface_resolution_multiplier},
-                        {"kernel_radius_voxels", info.kernel_radius_voxels},
-                        {"particle_radius_voxels", info.particle_radius_voxels},
-                        {"narrow_band_voxels", info.narrow_band_voxels},
-                        {"smoothing_iterations", info.smoothing_iterations},
-                        {"anisotropy_enabled", info.anisotropy_enabled},
-                        {"anisotropy_radius_voxels", info.anisotropy_radius_voxels},
-                        {"anisotropy_max_stretch", info.anisotropy_max_stretch},
-                        {"anisotropy_neighbor_min", info.anisotropy_neighbor_min},
-                        {"position_smoothing", info.position_smoothing},
-                        {"surface_measured", info.surface_measured},
-                        {"surface_grid_dim", json::array({info.surface_grid_dim[0], info.surface_grid_dim[1], info.surface_grid_dim[2]})},
-                        {"surface_voxel", info.surface_voxel},
-                        {"surface_build_ms", info.surface_build_ms},
-                        {"surface_bin_ms", info.surface_bin_ms},
-                        {"surface_anisotropy_ms", info.surface_anisotropy_ms},
-                        {"surface_schedule_ms", info.surface_schedule_ms},
-                        {"surface_gather_ms", info.surface_gather_ms},
-                        {"surface_smooth_ms", info.surface_smooth_ms},
-                        {"surface_active_cells", info.surface_active_cells},
-                        {"surface_work_cells", info.surface_work_cells},
-                        {"surface_bin_cells", info.surface_bin_cells},
-                        {"thermal_liquid_enabled", info.thermal_liquid_enabled},
-                        {"fog_autoconversion_kg_m3", info.fog_autoconversion_kg_m3},
-                        {"fog_autoconversion_rate", info.fog_autoconversion_rate},
-                        {"fog_ceiling_kg_m3", info.fog_ceiling_kg_m3},
-                        {"thermal_ambient_kelvin", info.thermal_ambient_kelvin},
-                        {"thermal_measured", info.thermal_measured},
-                        {"thermal_frozen_particles", info.thermal_frozen_particles},
-                        {"thermal_froze_this_frame", info.thermal_froze_this_frame},
-                        {"thermal_melted_this_frame", info.thermal_melted_this_frame},
-                        {"thermal_cold_unsupported", info.thermal_cold_unsupported},
-                        {"thermal_mushy_particles", info.thermal_mushy_particles},
-                        {"thermal_fusion_released_j", info.thermal_fusion_released_j},
-                        {"thermal_fusion_absorbed_j", info.thermal_fusion_absorbed_j},
-                        {"thermal_air_cooled_particles", info.thermal_air_cooled_particles},
-                        {"thermal_field_heated_particles", info.thermal_field_heated_particles},
-                        {"thermal_convecting_particles", info.thermal_convecting_particles},
-                        {"thermal_conducting_cells", info.thermal_conducting_cells},
-                        {"thermal_gas_exchange_particles", info.thermal_gas_exchange_particles},
-                        {"thermal_heat_to_gas_j", info.thermal_heat_to_gas_j},
-                        {"thermal_evaporated_kg", info.thermal_evaporated_kg},
-                        {"thermal_condensed_kg", info.thermal_condensed_kg},
-                        {"thermal_condensation_splits", info.thermal_condensation_splits},
-                        {"thermal_solid_contact_particles", info.thermal_solid_contact_particles},
-                        {"thermal_heat_to_solid_j", info.thermal_heat_to_solid_j},
-                        {"thermal_heat_to_ambient_j", info.thermal_heat_to_ambient_j},
-                        {"settle_on_seed", info.settle_on_seed},
-                        {"settle_max_steps", info.settle_max_steps},
-                        {"settle_displacement_m", info.settle_displacement_m},
-                        {"settle_pending", info.settle_pending},
-                        {"settle_ran", info.settle_ran},
-                        {"settle_converged", info.settle_converged},
-                        {"settle_plateau", info.settle_plateau},
-                        {"settle_steps", info.settle_steps},
-                        {"settle_particles", info.settle_particles},
-                        {"settle_first_p95_m", info.settle_first_p95_m},
-                        {"settle_residual_p95_m", info.settle_residual_p95_m},
-                        {"settle_ms", info.settle_ms},
-                        {"live_max_speed_m_s", info.live_max_speed_m_s},
-                        {"live_mean_speed_m_s", info.live_mean_speed_m_s},
-                        {"live_motion_samples", info.live_motion_samples},
-                        {"live_motion_mean_m", info.live_motion_mean_m},
-                        {"live_motion_p95_m", info.live_motion_p95_m},
-                        {"live_motion_max_m", info.live_motion_max_m},
-                        {"pressure_iterations", info.pressure_iterations},
-                        {"pressure_relative_residual", info.pressure_relative_residual},
-                        {"pressure_cg_iterations", info.pressure_cg_iterations},
-                        {"pressure_cg_max_iterations", info.pressure_cg_max_iterations},
-                        {"pressure_cg_final_relative_residual", info.pressure_cg_final_relative_residual},
-                        {"pressure_cg_multigrid", info.pressure_cg_multigrid},
-                        {"seed_mode", info.seed_mode},
-                        {"seed_min", json::array({info.seed_min.x, info.seed_min.y, info.seed_min.z})},
-                        {"seed_max", json::array({info.seed_max.x, info.seed_max.y, info.seed_max.z})},
-                        {"seed_particles_per_cell", info.seed_particles_per_cell},
-                        {"seed_fill_level", info.seed_fill_level},
-                        {"seed_ran", info.seed_ran},
-                        {"seed_truncated", info.seed_truncated},
-                        {"seed_requested_particles", info.seed_requested_particles},
-                        {"seed_emitted_particles", info.seed_emitted_particles},
-                        {"seed_top_y", info.seed_top_y},
-                        {"seed_region_top_y", info.seed_region_top_y},
-                        {"thermal_contact_shell_kelvin", info.thermal_contact_shell_kelvin},
-                        {"thermal_contact_parcel_kelvin", info.thermal_contact_parcel_kelvin},
-                        {"thermal_contact_shell_cells", info.thermal_contact_shell_cells},
-                        {"thermal_grain_measured", info.thermal_grain_measured},
-                        {"thermal_grain_count", info.thermal_grain_count},
-                        {"thermal_grain_wetted", info.thermal_grain_wetted},
-                        {"thermal_grain_min_kelvin", info.thermal_grain_min_kelvin},
-                        {"thermal_grain_mean_kelvin", info.thermal_grain_mean_kelvin},
-                        {"thermal_grain_max_kelvin", info.thermal_grain_max_kelvin},
-                        {"thermal_grain_heat_to_liquid_j", info.thermal_grain_heat_to_liquid_j},
-                        {"thermal_grain_heat_to_gas_j", info.thermal_grain_heat_to_gas_j},
-                        {"thermal_grain_heat_to_walls_j", info.thermal_grain_heat_to_walls_j},
-                        {"thermal_grain_energy_residual_j", info.thermal_grain_energy_residual_j},
-                        {"thermal_grain_ms", info.thermal_grain_ms},
-                        {"thermal_contact_cooled_particles", info.thermal_contact_cooled_particles},
-                        {"thermal_min_kelvin", info.thermal_min_kelvin},
-                        {"thermal_mean_kelvin", info.thermal_mean_kelvin},
-                        {"thermal_max_kelvin", info.thermal_max_kelvin},
-                        {"thermal_viscosity_field", info.thermal_viscosity_field},
-                        {"thermal_min_viscosity", info.thermal_min_viscosity},
-                        {"thermal_max_viscosity", info.thermal_max_viscosity},
-                    {"granular_yielded", info.granular_yielded_particles},
-                    {"granular_detached", info.granular_detached_particles},
-                    {"granular_invalid", info.granular_invalid_particles},
-                    {"granular_sleeping", info.granular_sleeping_particles},
-                    {"granular_damaged", info.granular_damaged_particles},
-                    {"granular_damage_over_10", info.granular_damage_over_10_particles},
-                    {"granular_damage_over_50", info.granular_damage_over_50_particles},
-                    {"granular_damage_over_90", info.granular_damage_over_90_particles},
-                    {"granular_max_yield", info.granular_max_yield},
-                    {"granular_max_plastic", info.granular_max_plastic_increment},
-                    {"granular_max_accumulated_plastic", info.granular_max_accumulated_plastic},
-                    {"granular_mean_accumulated_plastic", info.granular_mean_accumulated_plastic},
-                    {"granular_max_fracture_history", info.granular_max_fracture_history},
-                    {"granular_mean_fracture_history", info.granular_mean_fracture_history},
-                    {"granular_max_damage", info.granular_max_damage},
-                    {"granular_mean_damage", info.granular_mean_damage},
-                    {"granular_requested_young_modulus", info.granular_requested_young_modulus},
-                    {"granular_effective_young_modulus", info.granular_effective_young_modulus},
-                    {"granular_required_substeps", info.granular_required_substeps},
-                    {"granular_solver_substeps", info.granular_solver_substeps},
-                    {"granular_stiffness_capped", info.granular_stiffness_capped},
-                    {"granular_wave_substeps", info.granular_wave_substeps},
-                    {"granular_strain_substeps", info.granular_strain_substeps},
-                    {"granular_strain_rate", info.granular_strain_rate},
-                    {"granular_strain_limited", info.granular_strain_limited_particles},
-                        {"granular_compaction_capped", info.granular_compaction_capped_particles},
-                        {"granular_min_softening", info.granular_min_softening},
-                        {"granular_softened", info.granular_softened_particles},
-                    {"granular_overburden_pressure", info.granular_overburden_pressure},
-                    {"granular_young_modulus_for_load", info.granular_young_modulus_for_load},
-                    {"granular_stiffness_below_load", info.granular_stiffness_below_load},
-                    {"surface_material", info.surface_material},
-                    {"splat_material", info.splat_material},
-                    {"splat_geometry", info.splat_geometry},
-                    {"splat_geometry_source", info.splat_geometry_source},
-                    {"splat_subdivisions", info.splat_subdivisions},
-                    {"splat_triangles", info.splat_triangles},
-                    {"splat_radius_factor", info.splat_radius_factor},
-                    {"splat_size_multiplier", info.splat_size_multiplier},
-                    {"virtual_grains_requested", info.virtual_grains_requested},
-                    {"virtual_grains_effective", info.virtual_grains_effective},
-                    {"primary_visual_children", info.primary_visual_children},
-                    {"whitewater_visual_children", info.whitewater_visual_children},
-                    {"granular_physical_carriers",
-                     info.granular_physical_carriers},
-                    {"virtual_grain_count", info.virtual_grain_count},
-                    {"virtual_grain_budget", info.virtual_grain_budget},
-                    {"virtual_grain_rt_estimated_bytes",
-                     info.virtual_grain_rt_estimated_bytes},
-                    {"grain_size_variation", info.grain_size_variation},
-                    {"fog_spread_voxels", info.fog_spread_voxels},
-                    {"fog_erosion_strength", info.fog_erosion_strength},
-                    {"fog_erosion_size", info.fog_erosion_size},
-                    {"fog_erosion_detail", info.fog_erosion_detail},
-                    {"fog_erosion_seed", info.fog_erosion_seed},
-                    {"fog_erosion_depth", info.fog_erosion_depth},
-                    {"fog_resolution_multiplier", info.fog_resolution_multiplier},
-                    {"particle_kelvin_measured", info.particle_kelvin_measured},
-                    {"particle_min_kelvin", info.particle_min_kelvin},
-                    {"particle_max_kelvin", info.particle_max_kelvin},
-                    {"surface_offset_voxels", info.surface_offset_voxels},
-                    {"pore_amount", info.pore_amount},
-                    {"pore_scale", info.pore_scale},
-                    {"pore_detail", info.pore_detail},
-                    {"coord_space", info.coord_space == 1 ? "domain"
-                                  : info.coord_space == 2 ? "world" : "material"},
-                    {"uvw_available", info.uvw_available},
-                    {"uvw_dim", json::array({info.uvw_dim[0], info.uvw_dim[1], info.uvw_dim[2]})},
-                    {"uvw_origin", json::array({info.uvw_origin[0], info.uvw_origin[1],
-                                                info.uvw_origin[2]})},
-                    {"uvw_voxel", info.uvw_voxel},
-                    {"uvw_refresh_period", info.uvw_refresh_period},
-                    {"substances", substanceCountsToJson(info.substances)},
-                    {"substance_materials", substanceBindingsToJson(info.substance_materials)}, {"views", fluidViewsToJson(info.views)}, {"views_measured", info.views_measured}, {"label_routes", labelRoutesToJson(info.label_routes)}, {"hidden_particles", info.hidden_particles}, {"max_particles", info.max_particles}, {"max_auto_resolution", info.max_auto_resolution},
-                        {"particle_labels", fluidLabelsToJson(info.particle_labels)},
-                    {"uvw_drift", info.uvw_drift},
-                    // Measured on the last simulated step, not derived from the
-                    // binding: parcels-with-zero-cells is the reading that says
-                    // "the chunk is thinner than the voxel size".
-                    {"solid_phase_particles", info.solid_phase_particles},
-                    {"solid_phase_cells", info.solid_phase_cells},
-                    {"sealed_pockets", info.sealed_pockets},
-                    {"sealed_pocket_cells", info.sealed_pocket_cells},
-                    {"sealed_pockets_measured", info.sealed_pockets_measured},
-                    {"interior_fluid_cells", info.interior_fluid_cells},
-                    {"reseed_added_particles", info.reseed_added_particles},
-                    {"reseed_removed_particles", info.reseed_removed_particles},
-                    {"solid_phase", info.solid_phase_enabled},
-                    {"solid_phase_fill", info.solid_phase_fill},
-                    {"uvw_particles", info.uvw_particles},
-                    {"enabled", info.enabled},
-                    {"visible", info.visible}});
+                arr.push_back(fluidDomainListJson(info));
             }
             return json{{"domains", arr}};
         });
@@ -3634,6 +3643,119 @@ json dispatchMethod(const std::string& method, const json& params) {
     }
     if (method == "fluid.reset" || method == "gas.reset") {
         return enqueueResult([](UIContext&) { return rtapi::resetFluidSimulation(); });
+    }
+    if (method == "fluid.run") {
+        // ★ One job for N steps (2026-10-20). A test that called fluid.step and
+        // fluid.list_domains per step paid ~2 frames of IPC cadence per step
+        // (269 frames for 120 steps measured): most of a test's wall time was
+        // the round trip, not the solver. Here the steps run back to back on
+        // the frame loop and only the samples come back.
+        //   steps        >= 1 (no ceiling; the caller owns the time)
+        //   dt           step length (default 1/60)
+        //   sample_every keep every k-th step's sample (0 = only the last)
+        //   domains      names to report (default: all)
+        //   fields       keys of each fluid.list_domains row to keep
+        //                (default: all of them)
+        //   sum_fields   per-step quantities summed over EVERY step, so a
+        //                ledger (heat moved, events) is not lost between samples
+        //   max_fields   kept as the maximum over every step
+        const int steps = optionalInt(params, "steps", 1);
+        if (steps < 1) return json{{"ok", false}, {"error", "steps must be >= 1"}};
+        const float dt = optionalFloat(params, "dt", 0.0166667f);
+        const int sample_every = std::max(0, optionalInt(params, "sample_every", 0));
+        const auto names = [&](const char* key) {
+            std::vector<std::string> out;
+            if (params.contains(key) && params.at(key).is_array()) {
+                for (const auto& v : params.at(key)) out.push_back(v.get<std::string>());
+            }
+            return out;
+        };
+        const auto domains = names("domains");
+        const auto fields = names("fields");
+        const auto sums = names("sum_fields");
+        const auto maxima = names("max_fields");
+        return enqueueQuery([=](UIContext&) {
+            const bool per_step = !sums.empty() || !maxima.empty();
+            json samples = json::array();
+            std::map<std::string, json> summed, peak;  // domain -> {field: value}
+            const auto rows = [&]() {
+                std::vector<rtapi::FluidDomainInfo> infos;
+                json out = json::object();
+                if (!rtapi::listFluidDomains(infos).ok) return out;
+                for (const auto& info : infos) {
+                    if (!domains.empty() &&
+                        std::find(domains.begin(), domains.end(), info.name) == domains.end()) {
+                        continue;
+                    }
+                    out[info.name] = fluidDomainListJson(info);
+                }
+                return out;
+            };
+            const auto trimmed = [&](const json& all) {
+                if (fields.empty()) return all;
+                json out = json::object();
+                for (auto it = all.begin(); it != all.end(); ++it) {
+                    json row = json::object();
+                    for (const auto& f : fields) {
+                        if (it.value().contains(f)) row[f] = it.value()[f];
+                    }
+                    out[it.key()] = row;
+                }
+                return out;
+            };
+            // Server-side step time: the simulation world's step alone, with
+            // no IPC cadence in it (MADDE_TIPLERI §6b: the client wall clock
+            // measures the frame loop, not the solver).
+            std::vector<double> step_ms;
+            step_ms.reserve(static_cast<std::size_t>(steps));
+            for (int k = 1; k <= steps; ++k) {
+                const auto step_begin = std::chrono::steady_clock::now();
+                const rtapi::Result r = rtapi::stepFluidSimulation(dt);
+                step_ms.push_back(std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - step_begin).count());
+                if (!r.ok) {
+                    return json{{"ok", false}, {"error", r.error}, {"steps_done", k - 1},
+                                {"samples", samples}};
+                }
+                const bool sample = (sample_every > 0 && k % sample_every == 0) || k == steps;
+                if (!per_step && !sample) continue;
+                const json all = rows();
+                for (auto it = all.begin(); it != all.end(); ++it) {
+                    for (const auto& f : sums) {
+                        if (it.value().contains(f) && it.value()[f].is_number()) {
+                            const double v = it.value()[f].get<double>();
+                            auto& slot = summed[it.key()][f];
+                            slot = (slot.is_number() ? slot.get<double>() : 0.0) + v;
+                        }
+                    }
+                    for (const auto& f : maxima) {
+                        if (it.value().contains(f) && it.value()[f].is_number()) {
+                            const double v = it.value()[f].get<double>();
+                            auto& slot = peak[it.key()][f];
+                            slot = slot.is_number() ? std::max(slot.get<double>(), v) : v;
+                        }
+                    }
+                }
+                if (sample) samples.push_back(json{{"step", k}, {"domains", trimmed(all)}});
+            }
+            json sums_json = json::object(), max_json = json::object();
+            for (const auto& [name, v] : summed) sums_json[name] = v;
+            for (const auto& [name, v] : peak) max_json[name] = v;
+            std::vector<double> sorted_ms = step_ms;
+            std::sort(sorted_ms.begin(), sorted_ms.end());
+            const auto at = [&](double q) {
+                return sorted_ms.empty() ? 0.0
+                    : sorted_ms[std::min(sorted_ms.size() - 1,
+                        static_cast<std::size_t>(q * double(sorted_ms.size() - 1)))];
+            };
+            double total = 0.0;
+            for (const double v : step_ms) total += v;
+            return json{{"ok", true}, {"steps_done", steps}, {"samples", samples},
+                        {"sums", sums_json}, {"max", max_json},
+                        {"step_ms", {{"median", at(.5)}, {"p90", at(.9)}, {"max", at(1.0)},
+                                     {"mean", step_ms.empty() ? 0.0 : total / step_ms.size()},
+                                     {"all", step_ms}}}};
+        });
     }
     if (method == "fluid.step" || method == "gas.step") {
         float dt = optionalFloat(params, "dt", 0.0166667f);

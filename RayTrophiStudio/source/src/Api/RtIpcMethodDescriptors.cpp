@@ -1758,6 +1758,28 @@ static const MethodDescriptor desc_fluid_reset = {
 };
 static const MethodRegistration reg_fluid_reset(desc_fluid_reset);
 
+static const MethodParam params_fluid_run[] = {
+    {"domains", "any", false, "", nullptr, nullptr},
+    {"dt", "float", false, "", "0.0166667", nullptr},
+    {"fields", "any", false, "", nullptr, nullptr},
+    {"max_fields", "any", false, "", nullptr, nullptr},
+    {"sample_every", "int", false, "", "0", nullptr},
+    {"steps", "int", false, "", "1", nullptr},
+    {"sum_fields", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_run = {
+    "fluid.run", "fluid",
+    "Step the simulation N times in one call and return sampled domain rows",
+    "For tests: per-step fluid.step + fluid.list_domains pays about two frames of IPC cadence per step (measured 269 frames for 120 steps). steps (>= 1), dt (default 1/60), sample_every (0 = only the last step), domains (names, default all), fields (keys of a fluid.list_domains row to keep, default all), sum_fields (summed over every step: ledgers such as thermal_grain_heat_to_liquid_j), max_fields (maximum over every step). Returns samples [{step, domains: {name: row}}], sums {name: {field: total}}, max {name: {field: peak}}. Stops at the first failing step with steps_done.",
+    "write", "SceneWrite", false, "any",
+    "fluid|run|simulation|test",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_run, 7,
+    true
+};
+static const MethodRegistration reg_fluid_run(desc_fluid_run);
+
 static const MethodParam params_fluid_seed[] = {
     {"domain", "string", true, "", nullptr, nullptr},
     {"seed_min", "vec3", false, "World-space box minimum in metres; omit to derive from the domain", nullptr, nullptr},
@@ -1952,6 +1974,8 @@ static const MethodParam params_fluid_set_param[] = {
     {"pore_detail", "any", false, "", nullptr, nullptr},
     {"pore_scale", "any", false, "", nullptr, nullptr},
     {"position_smoothing", "any", false, "", nullptr, nullptr},
+    {"pressure_iterations", "int", false, "", "24", nullptr},
+    {"pressure_relative_residual", "float", false, "", nullptr, nullptr},
     {"render_mode", "any", false, "", nullptr, nullptr},
     {"smoothing_iterations", "any", false, "", nullptr, nullptr},
     {"solid_phase", "any", false, "", nullptr, nullptr},
@@ -1971,12 +1995,12 @@ static const MethodParam params_fluid_set_param[] = {
 static const MethodDescriptor desc_fluid_set_param = {
     "fluid.set_param", "fluid",
     "Update domain numerical, rendering and thermal settings; select its default substance",
-    "default_substance names a library substance and applies its solver hints once. Physics is resolved from that substance each step. Derive a project substance and use substance.set to edit viscosity, granular material, freezing and fuel properties. Legacy preset, chemistry_preset and material physics setters are rejected. Other fields retain overlay semantics. render_mode accepts particles/splat, surface/sdf and fog (aliases volume_fog, volume); on a liquid 'fog' raymarches the splatted density with the domain VolumeShader, on a gas domain 'volume' is the plain gas route. Reads return the canonical name ('fog' for a liquid). A SurfaceSDF substance override claims the single domain volume, so a fog domain with one draws that surface, not fog (substance_materials effective_representation says which). fluid.get reports active_density_cells / max_density, the fog mode's input. The retired virtual_particles/virtual/adaptive names are refused with an error. Changing voxel_size or the bounds invalidates the bake for that domain. Surface keys (surface_resolution_multiplier 1..4, kernel/particle radius, smoothing, anisotropy_*) refine the RENDERED surface without touching the simulation and are rejected out of range, not clamped. Numerical thermal_* keys control cooling; selecting Wax applies its thermal hints; read the result back as fluid.get thermal_frozen_particles / thermal_min_kelvin, and thermal_cold_unsupported > 0 with nothing frozen means the liquid is cold but touches no collider or closed wall. Explicit numerical and surface settings are applied after substance solver hints. Granular substeps are adaptive: wave/strain CFL requests are fully granted on CPU and GPU, preserving the authored Young modulus. granular_max_solver_substeps is a legacy compatibility field (stored/clamped to 1..64); it no longer limits physical substeps. Closed, inviscid Vulkan granular domains without solid/frozen parcels keep particle velocity/affine on device between substeps. Positions remain available to the host for occupancy and material coordinates. Compare total_ms and upload/download_bytes; deferred GPU execution can be charged to advect_ms instead of g2p_ms. max_auto_resolution (>= 32, no ceiling) is the per-axis grid density knob for gas or liquid; raising it keeps the voxel and adds cells, lowering re-derives a coarser voxel (same rule as the panel). An enforced resource budget may still coarsen the grid and a GPU grid stops at ~1080^3 cells (32-bit face indices): read fluid.get resolution / voxel_size, not the knob. max_particles has no ceiling (>= 1).",
+    "pressure_iterations (cap, >= 1) and pressure_relative_residual set the liquid pressure solve; fluid.list_domains reports pressure_cg_iterations / max_iterations / final_relative_residual (iterations at the cap with a residual above target = unconverged, the liquid compresses) and seed_* (recipe, requested vs emitted particles, seed_truncated when Max Particles cut the seed). default_substance names a library substance and applies its solver hints once. Physics is resolved from that substance each step. Derive a project substance and use substance.set to edit viscosity, granular material, freezing and fuel properties. Legacy preset, chemistry_preset and material physics setters are rejected. Other fields retain overlay semantics. render_mode accepts particles/splat, surface/sdf and fog (aliases volume_fog, volume); on a liquid 'fog' raymarches the splatted density with the domain VolumeShader, on a gas domain 'volume' is the plain gas route. Reads return the canonical name ('fog' for a liquid). A SurfaceSDF substance override claims the single domain volume, so a fog domain with one draws that surface, not fog (substance_materials effective_representation says which). fluid.get reports active_density_cells / max_density, the fog mode's input. The retired virtual_particles/virtual/adaptive names are refused with an error. Changing voxel_size or the bounds invalidates the bake for that domain. Surface keys (surface_resolution_multiplier 1..4, kernel/particle radius, smoothing, anisotropy_*) refine the RENDERED surface without touching the simulation and are rejected out of range, not clamped. Numerical thermal_* keys control cooling; selecting Wax applies its thermal hints; read the result back as fluid.get thermal_frozen_particles / thermal_min_kelvin, and thermal_cold_unsupported > 0 with nothing frozen means the liquid is cold but touches no collider or closed wall. Explicit numerical and surface settings are applied after substance solver hints. Granular substeps are adaptive: wave/strain CFL requests are fully granted on CPU and GPU, preserving the authored Young modulus. granular_max_solver_substeps is a legacy compatibility field (stored/clamped to 1..64); it no longer limits physical substeps. Closed, inviscid Vulkan granular domains without solid/frozen parcels keep particle velocity/affine on device between substeps. Positions remain available to the host for occupancy and material coordinates. Compare total_ms and upload/download_bytes; deferred GPU execution can be charged to advect_ms instead of g2p_ms. max_auto_resolution (>= 32, no ceiling) is the per-axis grid density knob for gas or liquid; raising it keeps the voxel and adds cells, lowering re-derives a coarser voxel (same rule as the panel). An enforced resource budget may still coarsen the grid and a GPU grid stops at ~1080^3 cells (32-bit face indices): read fluid.get resolution / voxel_size, not the knob. max_particles has no ceiling (>= 1).",
     "write", "SceneWrite", false, "any",
     "fluid|set|param|simulation|configure|viscosity|granular|render-mode|backend",
     "fluid.get|fluid.set_substance_material|substance.get|substance.derive|substance.set",
     "fluid.create_domain", "timeline.set_frame", "fluid.get|render.probe", "simulation_cache",
-    params_fluid_set_param, 41,
+    params_fluid_set_param, 43,
     true
 };
 static const MethodRegistration reg_fluid_set_param(desc_fluid_set_param);
@@ -2551,6 +2575,8 @@ static const MethodParam params_gas_set_param[] = {
     {"pore_detail", "any", false, "", nullptr, nullptr},
     {"pore_scale", "any", false, "", nullptr, nullptr},
     {"position_smoothing", "any", false, "", nullptr, nullptr},
+    {"pressure_iterations", "int", false, "", "24", nullptr},
+    {"pressure_relative_residual", "float", false, "", nullptr, nullptr},
     {"render_mode", "any", false, "", nullptr, nullptr},
     {"smoothing_iterations", "any", false, "", nullptr, nullptr},
     {"solid_phase", "any", false, "", nullptr, nullptr},
@@ -2575,7 +2601,7 @@ static const MethodDescriptor desc_gas_set_param = {
     "gas|set|param|simulation|configure",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_gas_set_param, 41,
+    params_gas_set_param, 43,
     true
 };
 static const MethodRegistration reg_gas_set_param(desc_gas_set_param);

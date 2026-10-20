@@ -1631,6 +1631,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["thermal_grain_heat_to_walls_j"] = info.thermal_grain_heat_to_walls_j;
         d["thermal_grain_energy_residual_j"] = info.thermal_grain_energy_residual_j;
         d["thermal_grain_ms"] = info.thermal_grain_ms;
+        d["thermal_grain_air_humid"] = info.thermal_grain_air_humid;
         d["thermal_contact_cooled_particles"] = info.thermal_contact_cooled_particles;
         d["thermal_min_kelvin"] = info.thermal_min_kelvin;
         d["thermal_mean_kelvin"] = info.thermal_mean_kelvin;
@@ -1964,6 +1965,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["thermal_grain_heat_to_walls_j"] = info.thermal_grain_heat_to_walls_j;
         d["thermal_grain_energy_residual_j"] = info.thermal_grain_energy_residual_j;
         d["thermal_grain_ms"] = info.thermal_grain_ms;
+        d["thermal_grain_air_humid"] = info.thermal_grain_air_humid;
         d["thermal_contact_cooled_particles"] = info.thermal_contact_cooled_particles;
         d["thermal_min_kelvin"] = info.thermal_min_kelvin;
         d["thermal_mean_kelvin"] = info.thermal_mean_kelvin;
@@ -2279,6 +2281,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["thermal_grain_heat_to_walls_j"] = info.thermal_grain_heat_to_walls_j;
         d["thermal_grain_energy_residual_j"] = info.thermal_grain_energy_residual_j;
         d["thermal_grain_ms"] = info.thermal_grain_ms;
+        d["thermal_grain_air_humid"] = info.thermal_grain_air_humid;
         d["thermal_contact_cooled_particles"] = info.thermal_contact_cooled_particles;
         d["thermal_min_kelvin"] = info.thermal_min_kelvin;
         d["thermal_mean_kelvin"] = info.thermal_mean_kelvin;
@@ -2459,6 +2462,13 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "refused rather than silently creating nothing. particles_per_cell applies "
        "to this initial fill. Point, object-bounds and mesh-surface flow sources "
        "use their independent fluid_particles_per_second rate.");
+
+    // Script twin of fluid.run: N steps in one call. In-process there is no
+    // IPC round trip to save, so it only steps; read fluid.list_domains after.
+    fluid.def("run", [](int steps, float dt) {
+        if (steps < 1) throw std::runtime_error("steps must be >= 1");
+        for (int k = 0; k < steps; ++k) requireResult(rtapi::stepFluidSimulation(dt));
+    }, py::arg("steps"), py::arg("dt") = 0.0166667f, "Step the simulation N times.");
 
     fluid.def("clear", [](const std::string& domain, bool clear_seed) {
         requireResult(rtapi::clearFluidParticles(domain, clear_seed));

@@ -298,6 +298,26 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
 
             Vec3 seed_lo = domain.fluid_seed_min;
             Vec3 seed_hi = domain.fluid_seed_max;
+            // The request is the authored region (Fill Domain: its target
+            // level with no budget), counted before the budget shapes it.
+            std::size_t seed_request_cells = 0;
+            float seed_region_top = std::max(seed_lo.y, seed_hi.y);
+            if (domain.fluid_seed_mode == FluidSeedMode::FillLevel) {
+                Vec3 target_lo, target_hi;
+                computeFluidFillSeedAABB(Fluid::liquidGrid(state).origin,
+                                         Fluid::gridBoundsMax(Fluid::liquidGrid(state)),
+                                         Fluid::liquidGrid(state).voxel_size,
+                                         domain.fluid_fill_level,
+                                         domain.fluid_fill_wall_margin,
+                                         ppc, std::numeric_limits<std::size_t>::max(),
+                                         target_lo, target_hi);
+                seed_request_cells = Fluid::countSeedBoxCells(
+                    Fluid::liquidGrid(state), target_lo, target_hi);
+                seed_region_top = std::max(target_lo.y, target_hi.y);
+            } else {
+                seed_request_cells = Fluid::countSeedBoxCells(
+                    Fluid::liquidGrid(state), seed_lo, seed_hi);
+            }
             if (domain.fluid_seed_mode == FluidSeedMode::FillLevel) {
                 computeFluidFillSeedAABB(Fluid::liquidGrid(state).origin,
                                          Fluid::gridBoundsMax(Fluid::liquidGrid(state)),
@@ -335,6 +355,29 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
             Fluid::initializeMatterBirthModels(
                 state.particles, seed_begin, domain.fluid_params);
             domain.fluid_pending_seed = false;
+            {
+                auto& seed_stats = state.seed_stats;
+                seed_stats = SimulationSeedStats{};
+                seed_stats.ran = true;
+                seed_stats.requested = seed_request_cells * static_cast<std::size_t>(ppc);
+                seed_stats.emitted = state.particles.size() - seed_begin;
+                seed_stats.region_top_y = seed_region_top;
+                float top = -std::numeric_limits<float>::max();
+                for (std::size_t p = seed_begin; p < state.particles.size(); ++p) {
+                    top = std::max(top, state.particles.position[p].y);
+                }
+                seed_stats.top_y = seed_stats.emitted ? top : 0.0f;
+                seed_stats.truncated = seed_stats.emitted < seed_stats.requested;
+                if (seed_stats.truncated) {
+                    SCENE_LOG_WARN("[Fluid] " + domain.name + ": seed cut by the particle budget, " +
+                                   std::to_string(seed_stats.emitted) + " of " +
+                                   std::to_string(seed_stats.requested) +
+                                   " particles; the liquid ends at y=" +
+                                   std::to_string(seed_stats.top_y) + " instead of " +
+                                   std::to_string(seed_region_top) +
+                                   ". Raise Max Particles to fill the region.");
+                }
+            }
             // The seed lattice is not an equilibrium; relax it before t = 0.
             if (domain.fluid_seed_settle && state.particles.size() > seed_begin) {
                 state.settle_stats.pending = true;

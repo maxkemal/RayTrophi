@@ -4652,6 +4652,9 @@ struct FluidDomainInfo {
     double   thermal_grain_heat_to_walls_j = 0.0;
     double   thermal_grain_energy_residual_j = 0.0;
     float    thermal_grain_ms = 0.0f;
+    // P9: the grain-air film read a vapour inventory (host or device readback);
+    // false with a humid gas lane = it treated the air as dry.
+    bool     thermal_grain_air_humid = false;
     // Seed settle (2026-10-19, MatterSeedSettle): the settings, and what the
     // last relaxation did. first/residual: 95th percentile of per-carrier
     // displacement in the first and last relaxation step (m per step);

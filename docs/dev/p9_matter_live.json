@@ -1,0 +1,22 @@
+{
+  "ice_floor": {
+    "frozen_peak": 6000,
+    "ice_faces_peak": 868,
+    "sand_particles": 200,
+    "sand_bounds_min": [
+      -0.29000017046928406,
+      0.009986139833927155,
+      -0.2898768484592438
+    ],
+    "sand_com": [
+      -0.001931765079498287,
+      0.11573631594888864,
+      -0.007333204785591044
+    ],
+    "mixed_status_last": "Dry grain Vulkan DEM candidate: fused hash/contact/history/spin"
+  },
+  "verdicts": {
+    "held_ice_has_faces": true,
+    "sand_rests_on_ice": false
+  }
+}

@@ -10,12 +10,17 @@ Arms (same bounds, voxel, backend, source, frame count):
   liquid/fluid   type='fluid',  liquid flow source
   liquid/matter  type='matter', the same liquid flow source, no gas source
 
-Per arm: the solver's own stats (gas.step_stats / fluid.step_stats total_ms:
-THE comparison), client wall ms per fluid.step (information only: every IPC
-call is serviced in the UI frame loop, so it is the app's frame cadence and
-moves with the viewport; see docs/dev/MADDE_TIPLERI_TASARIMI.md §6b), device memory
-before/after, and a result fingerprint (gas: active density cells and plume;
-liquid: particle count) so "faster" cannot hide "did less".
+Per arm (P8, 2026-10-20): the frames run in ONE fluid.run call, and the
+comparison is fluid.run's server-side step_ms (the simulation world's step,
+no IPC cadence in it - §6b showed the client wall clock is the frame loop).
+The solver's own step_stats total_ms after the last frame is kept too. A
+result fingerprint makes "faster" unable to hide "did less": liquid particle
+count, centroid and mean speed (fluid.state_digest); gas active density
+cells and max density.
+
+Decision (MADDE_TIPLERI karar 1 / T6): a phase is EQUAL when the Matter step
+costs <= 1.10x the specialist step and the fingerprint agrees (counts within
+2%, liquid centroid within one voxel, mean speed within 10%).
 
     python scripts/test/rt_t0_matter_vs_specialized_perf.py [--frames 96] [--voxel .04]
 """
@@ -95,56 +100,50 @@ def main():
                 call('flow_source.create', name=source, **spec)
                 created_sources.append(source)
             call('fluid.reset')
-            wall, solver, other = [], [], []
             # The other phase of a Matter domain: what an unused phase costs.
             other_method = None
             if domain_type == 'matter':
                 other_method = 'fluid.step_stats' if phase == 'gas' else 'gas.step_stats'
-            for frame in range(args.frames):
-                t0 = time.perf_counter()
-                call('fluid.step', dt=1 / FPS)
-                ms = (time.perf_counter() - t0) * 1e3
-                stats = call('gas.step_stats' if phase == 'gas' else 'fluid.step_stats',
-                             domain=name)
-                extra = call(other_method, domain=name) if other_method else None
-                if frame >= args.warmup:
-                    wall.append(ms)
-                    solver.append(stats)
-                    if extra is not None:
-                        other.append(extra)
+            t0 = time.perf_counter()
+            result = call('fluid.run', steps=args.frames, dt=1 / FPS, sample_every=0,
+                          domains=[name])
+            wall_total = (time.perf_counter() - t0) * 1e3
+            step_ms = result['step_ms']['all'][args.warmup:]
+            solver = call('gas.step_stats' if phase == 'gas' else 'fluid.step_stats', domain=name)
+            other = call(other_method, domain=name) if other_method else None
+            last = result['samples'][-1]['domains'][name]
+            digest = call('fluid.state_digest', domain=name) if phase == 'liquid' else {}
             info = call('fluid.get', domain=name)
             after = device_bytes()
             row = {
                 'type': domain_type, 'phase': phase, 'phases': info.get('phases'),
                 'grid': [info.get(k) for k in ('nx', 'ny', 'nz')],
-                'wall_ms_median': statistics.median(wall),
-                'wall_ms_p90': sorted(wall)[int(.9 * (len(wall) - 1))],
-                'measured_all': all(s.get('measured', True) for s in solver),
-                'solver_last': solver[-1],
-                'solver_total_ms_median': statistics.median(
-                    s.get('total_ms', 0.0) for s in solver),
-                'other_phase_last': other[-1] if other else None,
-                'other_phase_total_ms_median': statistics.median(
-                    s.get('total_ms', 0.0) for s in other) if other else None,
+                'step_ms_median': statistics.median(step_ms),
+                'step_ms_p90': sorted(step_ms)[int(.9 * (len(step_ms) - 1))],
+                'client_wall_ms_per_frame': wall_total / args.frames,
+                'measured_all': solver.get('measured', True),
+                'solver_last': solver,
+                'solver_total_ms_last': solver.get('total_ms'),
+                'other_phase_last': other,
+                'other_phase_total_ms_last': other.get('total_ms') if other else None,
                 'device_bytes_delta': after - before,
-                'particles': info.get('particle_count'),
-                'gas_cells': info.get('active_density_cells'),
+                'particles': last.get('particle_count'),
+                'gas_cells': last.get('active_density_cells'),
+                'max_density': last.get('max_density'),
+                'centroid': digest.get('centroid'),
+                'mean_speed': digest.get('mean_speed'),
             }
             row['arm'] = arm
             data['runs'].append(row)
             LOG.write_text(json.dumps(data, indent=1), encoding='utf-8')
             call('flow_source.update', name=source, enabled=False)
             call('fluid.set_param', domain=name, enabled=False)
-            other_ms = row['other_phase_total_ms_median']
             delta = row['device_bytes_delta']
             memory = 'not tracked' if delta == 0 else '+%.1f MiB' % (delta / 2**20)
-            print(f"{arm:<14} solver {row['solver_total_ms_median']:6.2f} ms  other phase "
-                  f"{'-' if other_ms is None else f'{other_ms:6.2f}'} ms  "
-                  f"wall median {row['wall_ms_median']:7.2f} ms  p90 "
-                  f"{row['wall_ms_p90']:7.2f}  dev "
-                  f"{memory}  "
+            print(f"{arm:<14} step {row['step_ms_median']:6.2f} ms (p90 {row['step_ms_p90']:6.2f})  "
+                  f"solver last {row['solver_total_ms_last']}  dev {memory}  "
                   f"particles {row['particles']}  gas cells {row['gas_cells']}  "
-                  f"phases {row['phases']}  measured {row['measured_all']}", flush=True)
+                  f"phases {row['phases']}", flush=True)
             return row
 
         arms = [('gas/gas', 'gas', 'gas'), ('gas/matter', 'matter', 'gas'),
@@ -159,24 +158,36 @@ def main():
             values = [r[key] for r in data['runs'] if r['arm'] == arm and r[key] is not None]
             return statistics.median(values) if values else None
 
+        def last_of(arm, key):
+            rows = [r for r in data['runs'] if r['arm'] == arm]
+            return rows[-1][key] if rows else None
+
+        def close(a, b, rel):
+            if a is None or b is None:
+                return False
+            return abs(a - b) <= rel * max(abs(a), abs(b), 1e-9)
+
         summary = {}
         for label, a, b in (('gas', 'gas/gas', 'gas/matter'),
                             ('liquid', 'liquid/fluid', 'liquid/matter')):
-            row = {k: {arm: med(arm, k) for arm in (a, b)}
-                   for k in ('wall_ms_median', 'solver_total_ms_median',
-                             'other_phase_total_ms_median')}
-            row['wall_ratio'] = row['wall_ms_median'][b] / max(row['wall_ms_median'][a], 1e-6)
-            row['solver_ratio'] = (row['solver_total_ms_median'][b] /
-                                   max(row['solver_total_ms_median'][a], 1e-6))
-            summary[label] = row
-            # Solver total_ms is the comparison. Client wall time is the app's UI
-            # frame cadence (every IPC call is serviced in the frame loop) and
-            # moves with whatever the viewport draws: information only.
-            print(f"RESULT {label}: solver {row['solver_total_ms_median'][a]:.2f} -> "
-                  f"{row['solver_total_ms_median'][b]:.2f} ms ({row['solver_ratio']:.2f}x); "
-                  f"unused phase in matter {row['other_phase_total_ms_median'][b]} ms; "
-                  f"(client wall {row['wall_ms_median'][a]:.2f} -> {row['wall_ms_median'][b]:.2f} ms, "
-                  f"frame cadence, not solver cost)", flush=True)
+            ms = {arm: med(arm, 'step_ms_median') for arm in (a, b)}
+            ratio = ms[b] / max(ms[a], 1e-6)
+            if label == 'gas':
+                agrees = (close(last_of(a, 'gas_cells'), last_of(b, 'gas_cells'), .02) and
+                          close(last_of(a, 'max_density'), last_of(b, 'max_density'), .02))
+            else:
+                ca, cb = last_of(a, 'centroid'), last_of(b, 'centroid')
+                centroid_ok = ca is not None and cb is not None and \
+                    max(abs(x - y) for x, y in zip(ca, cb)) <= args.voxel
+                agrees = (close(last_of(a, 'particles'), last_of(b, 'particles'), .02) and
+                          centroid_ok and
+                          close(last_of(a, 'mean_speed'), last_of(b, 'mean_speed'), .10))
+            equal = ratio <= 1.10 and agrees
+            summary[label] = {'step_ms_median': ms, 'ratio': ratio, 'result_agrees': agrees,
+                              'equal': equal}
+            print(f"RESULT {label}: step {ms[a]:.2f} -> {ms[b]:.2f} ms ({ratio:.2f}x), "
+                  f"result agrees {agrees} -> {'EQUAL' if equal else 'NOT EQUAL'}", flush=True)
+            print(('PASS' if equal else 'FAIL'), f't0_{label}_equal', flush=True)
         data['summary'] = summary
         LOG.write_text(json.dumps(data, indent=1), encoding='utf-8')
     finally:

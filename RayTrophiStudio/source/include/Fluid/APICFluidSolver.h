@@ -730,5 +730,11 @@ void seedBox(FluidParticles& particles,
              // freeze it on first contact. Grid domains pass their ambient.
              float temperature_kelvin = 293.0f);
 
+// Non-solid cells seedBox would fill for this box (same cell range), so a
+// caller can tell the parcels a seed ASKED for from the ones the budget let it
+// emit. x particles_per_cell = the request.
+std::size_t countSeedBoxCells(const FluidSim::FluidGrid& grid,
+                              const Vec3& min_world, const Vec3& max_world);
+
 } // namespace Fluid
 } // namespace RayTrophiSim
