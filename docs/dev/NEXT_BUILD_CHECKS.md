@@ -112,6 +112,251 @@ Ayrıntı: [AUDIO_LIVE_ANALYSIS.md](AUDIO_LIVE_ANALYSIS.md).
 
 ---
 
+# 2026-10-20 (9. build): kapanış partisi — fluid.run, donmuş domain, T0
+
+> **SONUÇ (canlı, 2026-10-20):**
+> - **T0 EQUAL, iki fazda da (karar 1'in kapısı GEÇTİ).** Ölçüm `fluid.run`
+>   sunucu `step_ms` medyanıyla yapıldı.
+>   - Gaz: 5.86 → 6.20 ms (1.06×), aktif yoğunluk hücresi 7188 = 7188.
+>   - Sıvı: 49.60 → 48.21 ms (0.97×), 80000 = 80000 parçacık; merkez ve hız
+>     aynı.
+>   - T6 (uzman domain tiplerinin sökümü) artık kullanıcı kararı.
+> - Hızlı katman: substance, thermal_films, phase3_freeze, fire_steam ve
+>   grain_readiness PASS.
+> - **p9_floor:** donmuş domain'de tane adımı artık koşuyor; kum asılı
+>   kalmıyor. 868 buz yüzü var, ama kum buzun içinden zemine iniyor
+>   (min y 0.0099, COM 0.116 < buz üstü ~0.25). → Sonra listesi. Aday:
+>   statik collider yapısı parmak iziyle önbelleğe alınıyor olabilir, buz
+>   yüzleri o parmak izine girmiyor.
+> - **p9_melt:** eriyor (200 tanenin 200'ü, 14.2 kJ), ama kütle kapısı
+>   ölçüm artefaktıyla düştü: `fluid.run`'dan hemen sonraki ilk
+>   `fluid.matter_models` okuması 0 kg verdi. → Sonra listesi (okuma, erime
+>   değil).
+> - seed_settle 2/5: bilinen (DEM titremesi, FLIP); Sonra listesinde.
+
+**Derleme:** yalnız C++. Kapanış kapsamının (MATTER_ROADMAP) dört maddesi:
+
+1. **10× yavaşlama: kodda değil.** Taze açılmış uygulamada grain_heat 120 adım
+   13 s (ilk build'deki hız). 451 s, saatlerce açık kalan oturumdaki
+   birikimdi. Duman koşucusu artık her testten sonra `T_` / `T: `
+   adlı domain, kaynak, alan ve maddeleri siliyor; isteğe bağlı
+   `--restart-app` uygulamayı yeniden açıyor (açık sahneyi kapatır).
+   Oturum birikiminin kökü "Sonra" listesinde.
+2. **`fluid.run(steps, dt, sample_every, domains, fields, sum_fields, max_fields)`:**
+   N adım tek çağrıda. Örnekler, toplamlar ve en büyükler tek yanıtta dönüyor.
+   Sunucu tarafında ölçülen `step_ms` (median / p90 / max / mean / all) de
+   geliyor. `fluid.list_domains` aynı satır kurucuyu (`fluidDomainListJson`)
+   kullanıyor. Python: `rt.fluid.run(steps, dt)`.
+3. **Donmuş domain'de tane adımı:** `inspectMatterOwners` donmuş parselleri
+   engel sayıp adımı tutuyordu ("does not accept pinned … carriers").
+   Artık yalnız Solid bağlı statik bloklar tutuyor.
+4. **P8 T0:** `rt_t0_matter_vs_specialized_perf.py` artık `fluid.run`
+   `step_ms` ile karşılaştırıyor ve sonuç eşitliğini ölçüyor (sayılar %2,
+   sıvı merkezi bir voksel, hız %10). Faz başına `PASS/FAIL t0_<faz>_equal`.
+
+Sıra (hızlı katman, ~10 dakika):
+1. `python scripts/test/rt_matter_smoke.py --quick`. Kollar: substance,
+   thermal_films, phase3_freeze, fire_steam, grain_readiness, seed_settle,
+   p9_melt, p9_floor.
+   ★ `p9_floor` FAIL ve kum y ~0.45'te kaldıysa adım hâlâ tutuluyor:
+   `mixed_status_last`'a bak.
+2. `python scripts/test/rt_matter_smoke.py --only t0`: karar 1'in kapısı.
+   Her iki faz EQUAL ise T6 (uzman domain tiplerinin sökümü) açılır; karar
+   kullanıcının.
+3. Plan sonu (bir kez): `python scripts/test/rt_matter_smoke.py --restart-app`.
+
+# 2026-10-20 (8. build): P9 — buz çarpışması, Ice erimesi, cihaz buharı, gözenek ısısı
+
+> **SONUÇ (canlı, 2026-10-20):**
+> - **ice_melt PASS (4 kapı da):** 200 Ice tanesinin hepsi eridi
+>   (`grains_end` 0, 202 erime olayı). Gizli ısı 14.6 kJ, tane en yüksek
+>   273.55 K. Kütle 140.283 → 140.277 kg (bağıl 4.8e-5).
+> - **ice_floor FAIL:** su tamamen dondu (`frozen_peak` 6000), ama
+>   `ice_faces` 0 ve kum, doğduğu yükseklikte asılı kaldı (y 0.42–0.50;
+>   3.5 s'de hiç düşmedi). ★ Bulgu: sıvı tamamen tutulan buz olunca tane
+>   adımı hiç koşmuyor gibi. Buz yüzleri de bu yüzden raporlanmadı; çarpışma
+>   yolu sınanmış sayılmaz.
+> - **pore_heat koşmadı:** test 1200 s sınırını aştı. Kalıntı domain
+>   sonraki testleri yavaşlattı, elle temizlendi.
+> - Regresyon: gas_drag 6/6, contact_heat 7/7, grain_heat 8/8. ★ Ama
+>   grain_heat 43 s'den 451 s'ye çıktı (temiz sahnede); ~10× yavaşlama, kökü
+>   açık. Adaylar: kare başı buhar indirmesi (eşzamanlı fence) ve P6–P9 arası
+>   diğer kare başı işler. `fluid.step_stats` ile aşama süreleri ölçülmeli.
+> - sleep_transfer: dört kol PASS, strong A/B enerji kapısı yine sınırda
+>   FAIL (3 koşunun 2'sinde).
+> Sonraki parti:
+> 1. Donmuş domain'de tane adımının neden durduğu.
+> 2. grain_heat yavaşlamasının aşama ölçümü.
+> 3. P9 testini kollara bölmek (`--arm`) ve kısaltmak.
+> 4. sleep_transfer enerji toleransını gözden geçirmek.
+
+**Derleme:** yalnız C++ (shader yok). 6. ve 7. build'in yazılmış kodu
+(oturtma eşleşmesi, seed kesilme okuması, basınç iterasyonu IPC) de bu
+derlemeye giriyor. Yeni dosya yok.
+
+Yazılanlar:
+1. **Taneler buza çarpıyor.** Donmuş sıvı parsellerinin hücreleri her karede
+   dış yüzleriyle statik bir üçgen kümesine dönüşüyor (`appendGrainIceFaces`,
+   aralık `held_ice`, hızı analitik sıfır) ve DEM'in mevcut üçgen temasına
+   giriyor. Shader değişmedi. Okuma: `grain_diagnostics … ice_faces`.
+2. **Gözenek suyu ısısını taşıyor.** Emilen su, hücresindeki sıvının
+   sıcaklığıyla geliyor; tane sıcaklığı ısı kapasitesine göre karışıyor
+   (`exchangeMatterGrainWater(…, thermal)`). Okuma: `pore_heat_mixed_j`.
+3. **Cihazdaki buhar envanteri tane↔hava filmine ulaşıyor.** Ana bellek
+   işaretçisi boşsa, buhar sütunu tane ısı geçişinden önce kare başına bir
+   kez indiriliyor (hücre × 4 bayt). Okuma: `thermal_grain_air_humid`.
+4. **Ice erimesi kodda vardı**; artık canlı testi var.
+
+Sıra:
+1. `python scripts/test/rt_matter_smoke.py --only p9_matter`: 8 kapı, 3 kol.
+   - `ice_reaches_melt_point`, `latent_heat_paid`, `ice_grains_melt`,
+     `melt_conserves_mass`. **Bozuksa:** `latent_heat_paid` PASS ama
+     `ice_grains_melt` FAIL ise erime sürüyor ama 12 s yetmiyor; 4 mm tane
+     ~12 s'de tam erir, kısmi erime de geçerli kanıttır (sayıya bak).
+   - `held_ice_has_faces`, `sand_rests_on_ice`. **Bozuksa:** `frozen_peak`
+     0 ise 180 K su donmadı ya da doğrudan Ice tanesi olarak doğdu (doğum
+     kuralı); `ice_faces_peak` > 0 ama kum zeminde ise üçgen teması tek
+     taraflı olabilir (yüz yönü).
+   - `absorbed_water_brings_heat`, `grain_air_reads_vapour`. ★ Sessizce makul
+     görünen: `humid_steps` 0, diğer her şey PASS. Bu, gaz şeridinin bu
+     sahnede buhar envanteri tutmadığı anlamına gelebilir; envanterin
+     cihazda olup olmadığına bakmadan "kuru hava" sonucu kabul etme.
+2. `python scripts/test/rt_matter_smoke.py --only grain_heat contact_heat gas_drag sleep_transfer`:
+   tane yolu regresyonları. Hepsi geçmeli.
+3. (Park) `liquid_column`: P6d ölçümü, istenirse.
+
+# 2026-10-20 (7. build): seed kesilme uyarısı + seed okuması + sıvı basınç iterasyonu IPC
+
+**Derleme:** yalnız C++ (shader yok). 6. build'in oturtma eşleşme düzeltmesi
+de bu derlemeye giriyor (henüz derlenmedi).
+
+Yeni:
+- **Seed kesilmesi artık sessiz değil.** Seed, istenen parçacık sayısını
+  (bölgedeki katı olmayan hücreler × ppc; Fill Domain'de hedef seviye)
+  bütçeyle karşılaştırıyor. Eksik kalırsa log'a uyarı düşüyor ve panelde
+  "Last seed was cut by Max Particles: X of Y …, liquid ends at y=…" satırı
+  çıkıyor. Okuma: `seed_mode`, `seed_min/max`, `seed_particles_per_cell`,
+  `seed_fill_level`, `seed_ran`, `seed_truncated`,
+  `seed_requested/emitted_particles`, `seed_top_y`, `seed_region_top_y`.
+- **Sıvı basınç çözücüsü IPC'de:** `fluid.set_param pressure_iterations=`,
+  `pressure_relative_residual=`. Okuma: `pressure_iterations`,
+  `pressure_relative_residual`, `pressure_cg_iterations`,
+  `pressure_cg_max_iterations`, `pressure_cg_final_relative_residual`,
+  `pressure_cg_multigrid`. Panelde "Poisson Pressure Iterations"ın altında
+  son adım satırı var; tavana vurunca "(hit the cap: liquid may compress)"
+  yazıyor. Not: CPU PCG yolu son kalıntıyı raporlamıyor (0 kalır). Vulkan
+  hızlı yolunda kalıntı, son kontrol anındaki değer.
+
+Sıra:
+1. `python scripts/test/rt_matter_smoke.py --only liquid_column`: 3 kapı.
+   `truncation_reported`, `pressure_reported` ve `level_holds_at_400`.
+   Asıl çıktı `docs/dev/liquid_column_live.json` içindeki 24 / 100 / 400
+   satırları: `level_ratio`, `cg_iterations_mean`, `cg_residual_mean`.
+   **Okuma:**
+   - 24'te ~0.74 ve 400'de ~1.0: kök iterasyon tavanı. Karar: tavanı ızgara
+     boyutuna bağla, ya da çok-ızgaralı ön koşulu aç.
+   - 400'de de ~0.74: kök başka yerde (yoğunluk süzgecinin %13'lük ölü
+     bölgesi, ΔU ∝ h).
+   ★ Sessizce makul görünen: `cg_iterations_mean` tavandan küçük, ama seviye
+   yine düşük. Bu, çözücünün "yakınsadım" dediği hâlde sütunu taşımadığı
+   anlamına gelir; o zaman tolerans fazla gevşek.
+2. `python scripts/test/rt_matter_smoke.py --only seed_settle`: su
+   `settle_steps` artık 1 değil (6. build düzeltmesi).
+3. Kullanıcı sahnesi: seed'i yeniden yap. Panel kesilme satırını göstermeli
+   (100k bütçe).
+
+# 2026-10-19 (6. build): oturtma eşleşme kusuru + FLIP ölçümü (konumla)
+
+**Derleme:** yalnız C++ (`MatterSeedSettle.inl`, `ParticleSimulation.h`).
+Oturtma artık eşleşen taşıyıcı yoksa yakınsadı saymıyor; id yoksa ya da id'ler
+tekrarlıyorsa, sayı değişmediği sürece indeksle eşliyor. Kare probu da aynı.
+Yeni sayaç: `measured_steps` (henüz okumaya bağlı değil).
+
+**FLIP ölçümü (5. build, oturtma kapalı, dinlenik tank, 60 kare, ilk 10 atlandı):**
+
+| FLIP | voksel | parçacık | p95 mm/kare | ortalama mm/kare | ortalama hız |
+|---|---|---|---|---|---|
+| 0.9 | 5 cm | 2304 | 3.42 | 1.81 | 0.124 m/s |
+| 0.9 | 2.5 cm | 16128 | 4.37 | 1.51 | 0.095 m/s |
+| 0.3 | 5 cm | 2304 | 0.59 | 0.32 | 0.020 m/s |
+| 0.3 | 2.5 cm | 16128 | 0.80 | 0.35 | 0.021 m/s |
+
+Okuma:
+- Hareket konumda gerçek. FLIP 0.9 ile 0.3 arasında yaklaşık 5–6 kat fark var.
+- ★ İnce çözünürlük gürültüyü KÜÇÜLTMÜYOR (mutlak mm/kare aynı, p95 biraz
+  artıyor). "Prodüksiyonda ince ızgara gizler" varsayımı burada tutmadı.
+  Yani gürültü h ile ölçeklenen bir aktarım hatası değil; adım başına
+  h'den bağımsız bir hız ölçeğinde enerji giriyor.
+- FLIP 0.3'te bile 0.02 m/s kalıyor (FLIP 0 probu: 0.004 m/s). Tabanın
+  bir kısmı FLIP dışından geliyor; adaylar duvar/serbest yüzey sınırı.
+- Dökülme canlılığı aşağıda.
+
+**Dökülme canlılığı (5. build, baraj yıkılması):** 80×60×40 cm kapalı tank,
+24×39×38 cm su sütunu, 2.5 cm voksel, 11968 parçacık, 2 s, oturtma kapalı.
+
+| ölçü | FLIP 0.9 | FLIP 0.3 | fark |
+|---|---|---|---|
+| tepe ortalama hız | 1.19 m/s (0.28 s) | 1.10 m/s (0.30 s) | −8% |
+| tepe en yüksek hız | 3.18 m/s | 3.36 m/s | +6% |
+| balistik sıçrama v²/2g (kaba) | 0.52 m | 0.57 m | +11% |
+| tepe yer değiştirme (en yüksek) | 76 mm/kare | 60 mm/kare | −21% |
+| çarpmadan sonra kütle merkezi y en yüksek | 0.127 m | 0.106 m | −17% (duvara tırmanma) |
+| ortalama hızın yarıya inmesi | 0.62 s | 0.60 s | aynı |
+| 0.6 s sonrası sallanma (merkez x aralığı) | 0.244 m | 0.212 m | −13% |
+| 1.5–2 s ortalama hız | 0.39 m/s | 0.22 m/s | −45% |
+| 1.5–2 s p95 yer değiştirme | 13.6 mm/kare | 7.9 mm/kare | −42% |
+
+Okuma: çarpmanın kendisi (tepe hızlar, sönümün ilk yarı ömrü) neredeyse
+aynı; en hızlı sıçrayan parçacık 0.3'te biraz daha hızlı. FLIP 0.3'ün
+kaybettiği şey, duvara tırmanma ve sallanma genliğinin %13–17'si. Kazandığı
+şey: geç evrede ~%45 daha sakin, dinlenik tankta 5–6× daha sakin. Ölçülmeyen:
+ince sıçrama damlacıklarının görünümü (render), bulut/köpük üretimi.
+Sıçrama yüksekliği için doğrudan bir okuma (en yüksek parçacık y'si) yok;
+v²/2g yalnız bir tavan tahmini.
+
+**Hacim sıkışması (kullanıcı gözlemi, ölçüldü, 5. build):** 60×60 cm kapalı tank,
+tank genişliğinde 20 cm su levhası. Bir kolda zeminde başlıyor, bir kolda 30 cm'den
+düşüyor. Oturtma kapalı, τ = 0.5 s, ppc 8, 2.5 s.
+
+| voksel | parçacık | sayıdan beklenen seviye | zeminde | düşen |
+|---|---|---|---|---|
+| 5 cm | 5760 | 0.250 m | 0.258 m | 0.260 m |
+| 2.5 cm | 41472 | 0.225 m | 0.226 m | 0.225 m |
+| 1.25 cm | 313344 | 0.2125 m | 0.181 m (−15%) | 0.180 m |
+| 1 cm | 625128 | 0.217 m | 0.161 m (−26%) | 0.147 m (−32%) |
+
+(Seviye = 2 × kütle merkezi y; tam genişlikte levha olduğu için.) 1 cm'de
+çarpmada kütle merkezi 7 mm'ye iniyor, levha neredeyse ezilip geri açılıyor.
+τ 0.05 s ile 5 / 2.5 cm'de fark yok.
+
+Okuma: sıkışma çarpmadan bağımsız. Duran suda da var ve çözünürlükle büyüyor.
+★ Baş aday: sıvı basınç çözücüsünün iterasyon tavanı
+(`APICSolverParams::pressure_iterations = 24`, Jacobi ön koşullu CG).
+Hidrostatik basınç 20–80 hücrelik bir sütunda 24 iterasyonda kurulamaz; sütun
+yükünü taşıyamayan çözüm suyu sıkıştırır. Eski yoğunluk terimi h'den bağımsız
+güçlü itmesiyle bunu maskeliyordu: 5. build'de onu düzeltince açığa çıktı.
+İkinci katkı: yeni terimin gürültü süzgeci (ppc 8'de ~%13 fazla yoğunluğa
+dokunmuyor) ve ΔU = h·e/τ'nun ince ızgarada zayıflaması.
+Sınanamadı: sıvının `pressure_iterations` ve `pressure_relative_residual`
+değerleri yalnız panelden ayarlanıyor. IPC'ye açık değiller, kullanılan
+iterasyon ve son kalıntı da raporlanmıyor (kural 1 deliği).
+
+Sıradaki parti:
+1. Sıvı basınç iterasyonunu ve kalıntısını `fluid.set_param` /
+   `fluid.list_domains`'e aç; kullanılan iterasyonu ve son kalıntıyı raporla.
+2. 1 cm levhada iterasyon 24 / 100 / 400 ile sıkışmayı ölç.
+3. Sonuca göre: iterasyon tavanını ızgara boyutuna bağla (ör. ≥ 2·max(nx,ny,nz))
+   ya da Vulkan'da çok-ızgaralı ön koşulu aç; gerekirse süzgeç eşiğini
+   hacim kaybına karşı daralt.
+Not: kullanıcı sahnesi (5 m domain, 5.5 cm) tam 100k parçacık bütçesinde
+duruyor. Seed tabandan yukarı katman katman dolduğu için, bütçe yetmezse üst
+katmanlar hiç doğmuyor; bu ayrı bir "yükseklik eksik" kaynağı.
+
+Sıra (6. build sonrası):
+1. `python scripts/test/rt_matter_smoke.py --only seed_settle`: suyun
+   `settle_steps` değeri artık 1 olmamalı; ya yakınsar ya düzlüğe oturur.
+   Kum kapıları yine düşebilir (DEM dinlenme titreşimi, kök açık).
+
 # 2026-10-19 (5. build): oturtma yer değiştirme ölçütü + kare başı hareket okuması + yoğunluk gevşemesi
 
 > **SONUÇ (canlı, 2026-10-19):** madde 1/1, contact_heat 7/7, surface_water 6/6,

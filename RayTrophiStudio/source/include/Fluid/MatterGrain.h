@@ -244,6 +244,8 @@ struct MatterGrainStepReport {
     uint32_t sleeping_grains = 0;
     // Moving colliders and force fields seen by this step.
     std::size_t collider_faces = 0;
+    std::size_t ice_faces = 0;        // of collider_faces: held (frozen) liquid
+    double pore_heat_mixed_j = 0.0;   // heat absorbed water brought into grains
     float collider_speed_max = 0.0f;       // fastest collider vertex, m/s
     float field_acceleration_max = 0.0f;   // largest force-field acceleration on a grain, m/s^2
     // Grain-substeps whose collider contacts exceeded 8 features / 4 supports;

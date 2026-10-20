@@ -79,6 +79,72 @@ void appendGrainBoxCollider(const Vec3& low, const Vec3& high,
     }
 }
 
+// Held ice (P9, 2026-10-20): frozen liquid parcels are pinned outside both
+// lanes, and DEM grains collide with triangles only, so sand fell through a
+// frozen pond. The frozen cells' outer faces become a static triangle set:
+// the cells holding a frozen parcel, and each face whose neighbour holds none.
+// Cell resolution, not the parcels' exact shape: the same picture the liquid
+// sees through the solid-phase overlay. Returns the faces added.
+std::size_t appendGrainIceFaces(const SimulationGridDomainState& state,
+                                std::vector<SurfaceMeshTriangle>& out) {
+    const auto& grid = state.grid;
+    const auto& particles = state.particles;
+    const float h = grid.voxel_size;
+    if (!(h > 0.0f) || particles.flags.size() != particles.size()) return 0;
+    const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
+    const auto key = [&](int i, int j, int k) {
+        return (static_cast<int64_t>(k) * ny + j) * nx + i;
+    };
+    std::vector<int64_t> cells;
+    for (std::size_t p = 0; p < particles.size(); ++p) {
+        if (!(particles.flags[p] & Fluid::kParticleFlagFrozen)) continue;
+        const Vec3 local = (particles.position[p] - grid.origin) * (1.0f / h);
+        const int i = static_cast<int>(std::floor(local.x));
+        const int j = static_cast<int>(std::floor(local.y));
+        const int k = static_cast<int>(std::floor(local.z));
+        if (i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz) continue;
+        cells.push_back(key(i, j, k));
+    }
+    if (cells.empty()) return 0;
+    std::sort(cells.begin(), cells.end());
+    cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
+    const auto frozen = [&](int i, int j, int k) {
+        if (i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz) return false;
+        return std::binary_search(cells.begin(), cells.end(), key(i, j, k));
+    };
+    const std::size_t before = out.size();
+    for (const int64_t c : cells) {
+        const int i = static_cast<int>(c % nx);
+        const int j = static_cast<int>((c / nx) % ny);
+        const int k = static_cast<int>(c / (static_cast<int64_t>(nx) * ny));
+        const Vec3 lo = grid.origin + Vec3(i * h, j * h, k * h);
+        for (int axis = 0; axis < 3; ++axis) {
+            for (int side = 0; side < 2; ++side) {
+                const int di = axis == 0 ? (side ? 1 : -1) : 0;
+                const int dj = axis == 1 ? (side ? 1 : -1) : 0;
+                const int dk = axis == 2 ? (side ? 1 : -1) : 0;
+                if (frozen(i + di, j + dj, k + dk)) continue;
+                // The face's two in-plane axes and its offset along `axis`.
+                const int u = (axis + 1) % 3, v = (axis + 2) % 3;
+                Vec3 corner[4];
+                for (int q = 0; q < 4; ++q) {
+                    float c3[3] = {lo.x, lo.y, lo.z};
+                    c3[axis] += side ? h : 0.0f;
+                    c3[u] += (q == 1 || q == 2) ? h : 0.0f;
+                    c3[v] += (q >= 2) ? h : 0.0f;
+                    corner[q] = Vec3(c3[0], c3[1], c3[2]);
+                }
+                SurfaceMeshTriangle t;
+                t.p0 = corner[0]; t.p1 = corner[1]; t.p2 = corner[2];
+                out.push_back(t);
+                t.p1 = corner[2]; t.p2 = corner[3];
+                out.push_back(t);
+            }
+        }
+    }
+    return out.size() - before;
+}
+
 bool runMatterGrainStep(SimulationGridDomainState& state,
     const Fluid::APICSolverParams& params, bool legacy_granular, float dt, float time_seconds,
     SimulationComputeContext* compute, SimulationGridDomainComputeBuffers& buffers,
@@ -190,6 +256,24 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         if (triangles.size() > Fluid::kMatterGrainMaxColliderFaces) {
             error = "grain collider faces exceed the 30-bit contact patch id: " +
                 std::to_string(triangles.size());
+            return false;
+        }
+    }
+    // Held ice: static, so its velocity is the analytic zero twist (its face
+    // set changes as water freezes; differencing vertices would invent speed).
+    std::size_t ice_faces = 0;
+    {
+        ColliderRange range;
+        range.key = "held_ice";
+        range.first = triangles.size();
+        range.analytic = true;
+        ice_faces = appendGrainIceFaces(state, triangles);
+        if (ice_faces > 0) {
+            ranges.push_back(range);
+        }
+        if (triangles.size() > Fluid::kMatterGrainMaxColliderFaces) {
+            error = "grain collider faces (colliders + held ice) exceed the 30-bit contact "
+                "patch id: " + std::to_string(triangles.size());
             return false;
         }
     }
@@ -317,8 +401,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     auto liquid = Fluid::selectMatterParticles(state.particles, liquid_order);
     auto grains = Fluid::selectMatterParticles(state.particles, grain_order);
     // Frozen liquid: pinned ice, outside both lanes (the liquid sees it as the
-    // solid-phase overlay). Known limit: DEM grains collide with triangles only,
-    // so they pass through ice.
+    // solid-phase overlay). Grains meet it as the held-ice triangles above.
     const auto held = Fluid::selectMatterParticles(state.particles, held_order);
     Fluid::APICSolverStats stats;
     Fluid::MatterGrainStepReport report;
@@ -327,6 +410,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     report.cell_resorted = resorted;
     report.host_motion_ms = std::chrono::duration<float, std::milli>(order_start - motion_start).count();
     report.collider_faces = triangles.size();
+    report.ice_faces = ice_faces;
     report.collider_speed_max = moving_speed_max;
     if (!liquid.empty()) {
         std::vector<float> speeds(liquid.size());
@@ -621,7 +705,8 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
                 state.grid.nz, state.grid.voxel_size, frame.field, error)) {
             return false;
         }
-        Fluid::exchangeMatterGrainWater(liquid, grains, frame, params.grain, dt, report);
+        Fluid::exchangeMatterGrainWater(liquid, grains, frame, params.grain, dt, report,
+            &params);
         report.host_coupling_ms = coupling_ms + ms_since(reaction_start);
     }
 

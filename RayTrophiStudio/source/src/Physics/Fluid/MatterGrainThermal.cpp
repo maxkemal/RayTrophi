@@ -423,6 +423,7 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
         }
     }
     stats.grain_measured = true;
+    stats.grain_air_humid = air_live && air.vapour_kg && air.vapour_molar > 0.0f;
     stats.grain_wetted = static_cast<std::size_t>(wetted);
     stats.grain_heat_to_liquid_j = to_liquid;
     stats.grain_heat_to_gas_j = to_gas;

@@ -256,6 +256,21 @@ kullanılır; duvar saati yalnız bilgi.
 host bekleme farkı kalıyor. Bu fark kontrollü koşulda (viewport boşta, kullanıcı uygulamaya
 dokunmuyor) tekrar ölçülmeli. Kapanmadan T6'ya geçilmez.
 
+## 6d. T0 yeniden ölçüm — kapı GEÇTİ (2026-10-20, canlı, Vulkan)
+
+`fluid.run` ile ölçüldü: N kare tek çağrıda, karşılaştırma sunucu tarafındaki
+`step_ms` medyanı. IPC kare temposu (§6b dersi) ölçüme girmiyor. 2×2×2 m,
+voksel .04, 96 kare, ilk 8 kare atlandı.
+
+| | Uzman | Matter | Oran | Sonuç |
+|---|---|---|---|---|
+| Gaz | 5.86 ms | 6.20 ms | 1.06× | 7188 = 7188 aktif hücre, en yüksek yoğunluk eşit |
+| Sıvı | 49.60 ms | 48.21 ms | 0.97× | 80000 = 80000 parçacık, merkez ve ortalama hız eşit |
+
+Eşitlik ölçütü: oran ≤ 1.10, sayılar %2 içinde, sıvı merkezi bir voksel
+içinde, hız %10 içinde. İki faz da EQUAL. **Karar 1'in ölçüm kapısı
+kapandı; T6 (uzman Gas/Liquid domain tiplerinin sökümü) kullanıcı kararı.**
+
 ## 7. Açık sorular
 
 - `gas_channel`: gaz şeridi tek "smoke" yoğunluğu mu, yoksa tür başına kanal mı? Buhar ile

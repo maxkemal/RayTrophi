@@ -142,6 +142,9 @@ MatterOwnerSummary inspectMatterOwners(const FluidParticles& particles,
                                       const APICSolverParams& params) {
     MatterOwnerSummary summary;
     const auto* tags = params.solid_substance_tags;
+    // Static blocks (substances bound Solid) have no owner in the grain step;
+    // frozen liquid does since P3/P9 (held lane, met as held-ice triangles).
+    std::size_t static_blocks = 0;
     for (std::size_t index = 0; index < particles.size(); ++index) {
         const uint32_t tag = index < particles.substance_tag.size()
             ? particles.substance_tag[index] : kSubstanceUntagged;
@@ -153,8 +156,13 @@ MatterOwnerSummary inspectMatterOwners(const FluidParticles& particles,
                 ? particles.temperature[index] : std::numeric_limits<float>::quiet_NaN();
             model = substanceBirthModel(tag, params, kelvin);
         }
-        const auto owner = isMatterObstacle(particles, index,
-            tags ? tags->data() : nullptr, tags ? tags->size() : 0u)
+        const bool obstacle = isMatterObstacle(particles, index,
+            tags ? tags->data() : nullptr, tags ? tags->size() : 0u);
+        if (obstacle && isMatterObstacle(particles, index,
+                tags ? tags->data() : nullptr, tags ? tags->size() : 0u, false)) {
+            ++static_blocks;
+        }
+        const auto owner = obstacle
             ? MatterTransportOwner::Obstacle : substanceTransportOwner(tag, model, params);
         ++summary.particles[static_cast<std::size_t>(owner)];
         if (model == MatterConstitutiveModel::Elastic) {
@@ -162,10 +170,13 @@ MatterOwnerSummary inspectMatterOwners(const FluidParticles& particles,
             summary.reason = "mixed elastic MPM transport is not implemented";
         }
     }
-    if (params.grain.enabled &&
-        summary.particles[static_cast<std::size_t>(MatterTransportOwner::Obstacle)] > 0) {
+    // ★ P9 live (2026-10-20): water that froze completely held the whole
+    // step here ("does not accept pinned ... carriers") - sand hung where it
+    // was born - although frozen liquid is held and collided with since P3/P9.
+    if (params.grain.enabled && static_blocks > 0) {
         summary.ready = false;
-        summary.reason = "grain transport does not accept pinned or static block carriers";
+        summary.reason = "grain transport does not accept static block carriers "
+                         "(a substance bound as Solid)";
     }
     return summary;
 }

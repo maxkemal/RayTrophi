@@ -142,9 +142,12 @@ bool applyMatterGrainLiquidAccelerationForce(const FluidParticles& liquid,
 // water carries the liquid's cell velocity, so momentum is exact. Drying
 // removes held water from the domain (reported, not hidden). Capacity is
 // water_capacity_fraction of the sphere volume (pore_capacity_kg).
+// thermal (P9): when set and the carriers have temperatures, absorbed water
+// brings its own heat - the grain's temperature mixes by heat capacity with
+// the water's cell temperature - instead of joining at the grain's T.
 void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
     const MatterGrainCouplingFrame& frame, const MatterGrainParams& params, float dt,
-    MatterGrainStepReport& report);
+    MatterGrainStepReport& report, const APICSolverParams* thermal = nullptr);
 
 // DEM owners are selected from each substance's granular_transport, then
 // sorted by identity. `liquid` is the continuum lane (fluid and, without DEM

@@ -1094,12 +1094,27 @@ struct SimulationGasStats {
 // steps; first/residual are the 95th percentile of per-carrier displacement
 // in the first and the last of them (m per step). plateau: stopped because
 // the displacement stopped falling (the solver's floor), not at rest.
+// What the last seed did. requested = non-solid cells of the authored region
+// (Fill Domain: the TARGET level) x particles per cell; a smaller emitted
+// count means the particle budget cut the seed, and since seedBox fills from
+// the floor up, the missing parcels are the top layers (top_y says where the
+// liquid really ends). Reported and logged, never silent.
+struct SimulationSeedStats {
+    bool  ran = false;
+    bool  truncated = false;
+    std::size_t requested = 0;
+    std::size_t emitted = 0;
+    float top_y = 0.0f;
+    float region_top_y = 0.0f;
+};
+
 struct SimulationSeedSettleStats {
     bool  pending = false;
     bool  ran = false;
     bool  converged = false;
     bool  plateau = false;
     int   steps = 0;
+    int   measured_steps = 0;  // steps with at least one matched carrier
     std::size_t particles = 0;
     float first_p95_m = 0.0f;
     float residual_p95_m = 0.0f;
@@ -1111,6 +1126,8 @@ struct SimulationSeedSettleStats {
 struct SimulationMotionProbe {
     std::vector<uint64_t> ids;
     std::vector<Vec3> positions;
+    std::vector<Vec3> index_positions;  // same sample, for matching without ids
+    std::size_t population = 0;         // particle count when sampled
     std::size_t samples = 0;
     float mean_m = 0.0f;
     float p95_m = 0.0f;
@@ -1230,6 +1247,7 @@ struct SimulationGridDomainState {
     // and the thermal chain runs once per FRAME, before the solver.
     Fluid::ThermalLiquidStats thermal_stats;
     SimulationSeedSettleStats settle_stats;
+    SimulationSeedStats seed_stats;
     SimulationMotionProbe motion_probe;
     SimulationComputeContext::TransferStats fluid_transfer_stats;
     // Whitewater secondary particles (spray/foam/bubbles). Render-only — never
