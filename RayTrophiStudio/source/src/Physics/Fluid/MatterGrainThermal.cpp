@@ -111,15 +111,6 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
     }
     const double h = grid.voxel_size;
     const double cell_volume = h * h * h;
-    const double radius = std::max(1.0e-5, double(params.grain.radius_m));
-    // Films see the grains the simulated one stands for (2026-10-20). A 1 cm
-    // simulated grain representing 0.3 mm sand has 33x the surface per kg;
-    // with the simulated radius hot sand took minutes to quench in water
-    // (tau ~200 s at 2.5 cm). Grain-to-grain contact keeps the simulated
-    // radius: it is the simulated contact network.
-    const double film_radius = params.grain.represented_grain_radius_m > 0.0f
-        ? std::max(1.0e-6, double(params.grain.represented_grain_radius_m)) : radius;
-
     // Pass 1: roles, cells, the liquid pool of every cell and the grains' room.
     static std::vector<int> s_cell;
     static std::vector<Role> s_role;
@@ -217,6 +208,12 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
     // cells). Both phases run their groups in parallel and each group in a
     // stable order, so the result does not depend on the thread count.
     const std::size_t ng = grains.size();
+    std::vector<double> radii(ng), film_radii(ng);
+    for (std::size_t g = 0; g < ng; ++g) {
+        radii[g] = matterGrainRadius(params.grain, particles, grains[g]);
+        film_radii[g] = params.grain.represented_grain_radius_m > 0.0f
+            ? std::min(radii[g], double(params.grain.represented_grain_radius_m)) : radii[g];
+    }
     std::vector<double> tg(ng), cg(ng, 0.0), kg(ng, 0.0), ag(ng, 0.0), wg(ng, 0.0), eg(ng, 0.0);
     const bool closed_walls = params.boundary == APICSolverParams::BoundaryMode::Closed;
     const bool has_solid = grid.solid.size() == cells;
@@ -263,7 +260,7 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
             ? std::clamp(double(particles.mass_fraction[p]), 0.0, 1.0) : 1.0;
         cg[g] = cap;
         kg[g] = std::max(0.0f, sp->conductivity);
-        ag[g] = 3.0 * double(particles.rest_mass_kg[p]) * fraction / (rho * film_radius);
+        ag[g] = 3.0 * double(particles.rest_mass_kg[p]) * fraction / (rho * film_radii[g]);
         eg[g] = std::clamp(double(sp->emissivity), 0.0, 1.0);
         const std::size_t c = static_cast<std::size_t>(s_cell[p]);
         const double room = std::max(cell_volume - s_grain_volume[c], 0.1 * cell_volume);
@@ -312,7 +309,7 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
             s_grain_lo[c] = std::min(s_grain_lo[c], tg[g]);
             // Wetted share: against the cell's liquid as one pool.
             if (wg[g] > 0.0 && s_liquid_cap[c] > 0.0) {
-                const double film = seriesFilm(kLiquidFilm, film_radius, kg[g]);
+                const double film = seriesFilm(kLiquidFilm, film_radii[g], kg[g]);
                 to_liquid += relax(tg[g], cap, s_liquid_t[c], s_liquid_cap[c],
                                    film * ag[g] * wg[g], dt);
                 ++wetted;
@@ -320,7 +317,7 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
             // Walls: an infinite container at wall_kelvin, a sixth of the
             // grain's surface per touching face.
             if (walls > 0) {
-                const double film = seriesFilm(kGrainWallFilm, film_radius, kg[g]);
+                const double film = seriesFilm(kGrainWallFilm, film_radii[g], kg[g]);
                 const double conductance = film * ag[g] * (walls / 6.0);
                 const double before = tg[g];
                 tg[g] = wall_kelvin + (tg[g] - wall_kelvin) * std::exp(-conductance * dt / cap);
@@ -339,7 +336,7 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
             for (std::size_t o = begin; o < end; ++o) {
                 const std::size_t g = order[o];
                 if (!(cg[g] > 0.0)) continue;
-                const double conductance = kg[g] * 4.0 * kPi * radius;
+                const double conductance = kg[g] * 4.0 * kPi * radii[g];
                 const double d = (mean - tg[g]) * (1.0 - std::exp(-conductance * dt / cg[g]));
                 tg[g] += d;
                 drift += cg[g] * d;
@@ -407,7 +404,7 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
                 const double ts = tg[g], ta = a.kelvin;
                 const double radiation = a.flame * eg[g] * kSigma *
                     (ts * ts + ta * ta) * (ts + ta);
-                const double film = seriesFilm(kAirFilm + radiation, film_radius, kg[g]);
+                const double film = seriesFilm(kAirFilm + radiation, film_radii[g], kg[g]);
                 to_gas += relax(tg[g], cg[g], a.kelvin, a.capacity,
                                 film * ag[g] * (1.0 - wg[g]), dt);
             }

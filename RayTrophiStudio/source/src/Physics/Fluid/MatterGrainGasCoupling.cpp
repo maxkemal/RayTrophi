@@ -87,7 +87,8 @@ struct CellLump {
 void exchangeMatterGrainGasDrag(const FluidParticles& grains, float grain_radius,
                                 FluidSim::FluidGrid& gas, const MatterGrainGasAir& air,
                                 float dt, std::vector<Vec3>& acceleration,
-                                MatterGrainStepReport& report) {
+                                MatterGrainStepReport& report,
+    const MatterGrainParams* size_policy) {
     report.gas_coupled_grains = 0;
     report.gas_drag_impulse = Vec3(0.0f);
     report.gas_reaction = Vec3(0.0f);
@@ -104,13 +105,15 @@ void exchangeMatterGrainGasDrag(const FluidParticles& grains, float grain_radius
     }
     const double h = gas.voxel_size;
     const double cell_volume = h * h * h;
-    const double diameter = 2.0 * double(grain_radius);
+
 
     // Pass 1: each grain's exact-over-the-frame impulse against its own drag.
     std::vector<Vec3> impulse(count, Vec3(0.0f));
     std::vector<int64_t> grain_cell(count, -1);
     std::unordered_map<std::size_t, CellLump> lumps;
     for (std::size_t g = 0; g < count; ++g) {
+        const double diameter = 2.0 * (size_policy
+            ? matterGrainRadius(*size_policy, grains, g) : grain_radius);
         const Vec3& x = grains.position[g];
         if (!finite(x)) continue;
         const Vec3 local = (x - gas.origin) / gas.voxel_size;

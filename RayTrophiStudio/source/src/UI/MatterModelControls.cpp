@@ -5,11 +5,60 @@
 #include "ParticleSimulation.h"
 #include "imgui.h"
 #include "DomainPanelWidgets.h"
+#include "MaterialStateField.h"
+#include "scene_ui_substance_editor.hpp"
 
 #include <algorithm>
 #include <map>
 
 namespace RayTrophiSim::Fluid {
+
+bool drawMatterSeedSubstanceControls(const SimulationGridDomainDesc& domain) {
+    ImGui::PushID("SeedSubstance");
+    static std::map<std::string, std::string> errors;
+    std::string chosen = domain.fluid_params.default_substance;
+    bool changed = false;
+    ImGui::TextWrapped("Seed material (shared domain default)");
+    if (SubstanceEditorUI::drawPicker("##SeedSubstance", chosen)) {
+        const auto result = rtapi::updateFluidDomain(domain.name, nullptr, nullptr,
+            nullptr, nullptr, nullptr, nullptr, &chosen);
+        if (result.ok) {
+            errors.erase(domain.name);
+            changed = true;
+        } else {
+            errors[domain.name] = result.error;
+        }
+    }
+    const auto* profile = tryFindSubstance(domain.fluid_params.default_substance);
+    if (profile) {
+        const auto model = profile->default_constitutive_model;
+        const char* behavior = "Automatic material model";
+        if (model == MatterConstitutiveModel::Granular) {
+            behavior = profile->granular_transport == MatterGranularTransport::Dem
+                ? "Granular material / DEM grains"
+                : "Granular material / MPM continuum";
+        } else if (model == MatterConstitutiveModel::Fluid) {
+            behavior = "Fluid material / liquid solver";
+        } else if (model == MatterConstitutiveModel::Elastic) {
+            behavior = "Elastic material / MPM";
+        }
+        ImGui::TextWrapped("Seed behavior: %s", behavior);
+    } else {
+        ImGui::TextWrapped("Choose a substance to define the seeded material.");
+    }
+    ImGui::TextWrapped("Seed Box and Fill Domain use this material. This is the same "
+        "Default Substance shown in Matter; emitters can use their own substances. "
+        "Changing this does not retag existing particles. Reset and seed again to refill.");
+    const auto error = errors.find(domain.name);
+    if (error != errors.end()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.42f, 0.25f, 1.0f));
+        ImGui::TextWrapped("Seed material was not changed: %s", error->second.c_str());
+        ImGui::PopStyleColor();
+    }
+    ImGui::Separator();
+    ImGui::PopID();
+    return changed;
+}
 
 void drawMatterPoolControls(const SimulationGridDomainDesc& domain,
                            const SimulationGridDomainState* state) {

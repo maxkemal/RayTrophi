@@ -1885,6 +1885,37 @@ VolumeTablesInfo volumeTables() {
     return out;
 }
 
+InstancePreparationInfo instancePreparationStats() {
+    InstancePreparationInfo out;
+    auto describe = [&](const char* role, Backend::IBackend* backend) {
+        if (!backend) return;
+        InstancePreparationRow row;
+        row.role = role;
+        auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(backend);
+        if (!vk) { out.backends.push_back(row); return; }
+        row.is_vulkan = true;
+        out.available = true;
+        const auto s = vk->getInstancePreparationStats();
+        row.gpu_path_available = s.gpuPathAvailable;
+        row.gpu_path_used_last_frame = s.gpuPathUsedLastFrame;
+        row.last_path = s.lastPath == 1 ? "gpu_build" : s.lastPath == 2 ? "gpu_update"
+            : s.lastPath == 3 ? "gpu_raster" : "idle_or_cpu";
+        row.instance_count = s.instanceCount;
+        row.dirty_group_count = s.dirtyGroupCount;
+        row.upload_bytes = s.uploadBytes;
+        row.cpu_prepare_ms = s.cpuPrepareMs;
+        row.gpu_dispatches = s.gpuDispatches;
+        row.cpu_fallbacks = s.cpuFallbacks;
+        row.sphere_records = vk->proceduralSphereRecordCount();
+        row.sphere_pool_capacity = vk->proceduralSpherePoolCapacity();
+        out.backends.push_back(row);
+    };
+    // Same two ROLES as volumeTables(), for the same reason.
+    describe("render", ::g_backend.get());
+    describe("viewport", ::g_viewport_backend.get());
+    return out;
+}
+
 VolumeSlotsInfo volumeSlots() {
     VolumeSlotsInfo out;
     auto sourceName = [](int source_type) -> const char* {

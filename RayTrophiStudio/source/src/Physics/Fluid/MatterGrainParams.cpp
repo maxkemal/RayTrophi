@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 #include <utility>
 
@@ -45,7 +46,9 @@ void deriveStiffness(MatterGrainParams& p) {
 nlohmann::json matterGrainParamsToJson(const MatterGrainParams& p) {
     // Only what the domain authors (MADDE_UI_TEK_OTORITE U2/U3): the grain
     // material is the substance's, `enabled` and `wet_grains` are derived.
-    return {{"radius_m", p.radius_m},
+    return {{"radius_m", p.radius_m}, {"radius_max_m", p.radius_max_m},
+        {"size_distribution", p.size_distribution}, {"size_seed", p.size_seed},
+        {"large_grain_fraction", p.large_grain_fraction},
         {"stiffness_scale", p.stiffness_scale},
         {"sliding_damping_n_s_m", p.sliding_damping_n_s_m},
         {"contact_resolution", p.contact_resolution},
@@ -88,12 +91,14 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
             error = "unknown grain setting: " + it.key();
             return false;
         }
-        const bool integer = it.key() == "max_substeps" || it.key() == "contact_resolution";
+        const bool integer = it.key() == "max_substeps" || it.key() == "contact_resolution" ||
+            it.key() == "size_seed";
         const bool boolean = it.key() == "fluid_coupling" ||
             it.key() == "volume_exclusion" || it.key() == "sleep";
-        if ((boolean && !it.value().is_boolean()) ||
+        const bool text = it.key() == "size_distribution";
+        if ((text && !it.value().is_string()) || (boolean && !it.value().is_boolean()) ||
             (integer && !it.value().is_number_integer()) ||
-            (!boolean && !integer &&
+            (!text && !boolean && !integer &&
              (!it.value().is_number() || !std::isfinite(it.value().get<double>())))) {
             error = "invalid grain setting type: " + it.key();
             return false;
@@ -101,6 +106,28 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
     }
     try {
         candidate.radius_m = patch.value("radius_m", p.radius_m);
+        candidate.radius_max_m = patch.value("radius_max_m", p.radius_max_m);
+        candidate.size_distribution = patch.value("size_distribution", p.size_distribution);
+        candidate.large_grain_fraction = patch.value("large_grain_fraction", p.large_grain_fraction);
+        const double seed = patch.value("size_seed", double(p.size_seed));
+        if (seed < 0 || seed > 2147483647.0) {
+            throw std::runtime_error("size_seed must be 0..2147483647");
+        }
+        candidate.size_seed = static_cast<int>(seed);
+        if (candidate.size_distribution != "uniform" &&
+            candidate.size_distribution != "log_uniform" &&
+            candidate.size_distribution != "bimodal") {
+            throw std::runtime_error("size_distribution must be uniform, log_uniform or bimodal");
+        }
+        if (candidate.radius_max_m != 0.0f &&
+            (candidate.radius_max_m < candidate.radius_m || candidate.radius_max_m > 1.0f ||
+             candidate.radius_max_m > candidate.radius_m * 4.0f)) {
+            throw std::runtime_error("Maximum radius must be at least the minimum radius and "
+                "no more than 4 times it (up to 1 metre). Set maximum to 0 for fixed size.");
+        }
+        if (candidate.large_grain_fraction < 0.0f || candidate.large_grain_fraction > 1.0f) {
+            throw std::runtime_error("large_grain_fraction must be 0..1 (number fraction)");
+        }
         candidate.stiffness_scale = patch.value("stiffness_scale", p.stiffness_scale);
         candidate.sliding_damping_n_s_m = patch.value("sliding_damping_n_s_m", p.sliding_damping_n_s_m);
         candidate.fluid_coupling = patch.value("fluid_coupling", p.fluid_coupling);
@@ -206,6 +233,61 @@ MatterGrainParams matterGrainParamsFromJson(const nlohmann::json& stored, std::s
     return p;
 }
 
+uint64_t matterGrainSizeSignature(const MatterGrainParams& p) {
+    uint64_t signature = static_cast<uint64_t>(p.size_seed);
+    for (const float value : {p.radius_m, p.radius_max_m, p.large_grain_fraction}) {
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        signature = (signature ^ bits) * 1099511628211ull;
+    }
+    for (const unsigned char value : p.size_distribution) {
+        signature = (signature ^ value) * 1099511628211ull;
+    }
+    return signature;
+}
+
+double matterGrainContactRateBound(double radius, double maximum_radius,
+    double inertial_mass, double stiffness_per_radius) {
+    const double pair_radius = 2.0 * radius * maximum_radius / (radius + maximum_radius);
+    return stiffness_per_radius * std::max(radius, pair_radius) / inertial_mass;
+}
+
+float matterGrainMaximumRadius(const MatterGrainParams& p) {
+    return std::max(p.radius_m, p.radius_max_m);
+}
+
+float matterGrainRadius(const MatterGrainParams& p, uint64_t identity) {
+    const float maximum = matterGrainMaximumRadius(p);
+    if (maximum == p.radius_m) {
+        return p.radius_m;
+    }
+    uint64_t bits = identity ^ (uint64_t(p.size_seed) * 0x9e3779b97f4a7c15ull);
+    bits = (bits ^ (bits >> 30)) * 0xbf58476d1ce4e5b9ull;
+    bits = (bits ^ (bits >> 27)) * 0x94d049bb133111ebull;
+    bits ^= bits >> 31;
+    const float u = static_cast<float>(bits >> 40) / 16777216.0f;
+    if (p.size_distribution == "bimodal") {
+        return u < p.large_grain_fraction ? maximum : p.radius_m;
+    }
+    if (p.size_distribution == "log_uniform") {
+        return p.radius_m * std::exp(u * std::log(maximum / p.radius_m));
+    }
+    return p.radius_m + u * (maximum - p.radius_m);
+}
+
+float matterGrainRadius(const MatterGrainParams& p,
+    const FluidParticles& particles, std::size_t index) {
+    return matterGrainRadius(p, index < particles.particle_id.size()
+        ? particles.particle_id[index] : uint64_t(index + 1));
+}
+
+MatterGrainParams matterGrainParticleParams(const MatterGrainParams& p,
+    const FluidParticles& particles, std::size_t index) {
+    auto result = p;
+    result.radius_m = matterGrainRadius(p, particles, index);
+    return result;
+}
+
 float matterGrainRestMassKg(const MatterGrainParams& params, uint32_t substance_tag,
                             const SubstanceProfile* domain_substance,
                             MatterConstitutiveModel model, bool legacy_granular) {
@@ -227,7 +309,8 @@ void initMatterGrainBirthWater(FluidParticles& particles, std::size_t index,
     if (!params.wet_grains || index >= particles.size()) {
         return;
     }
-    const float capacity = matterGrainWaterCapacityKg(params);
+    const float capacity = matterGrainWaterCapacityKg(
+        matterGrainParticleParams(params, particles, index));
     const float water = capacity * std::clamp(birth_saturation, 0.0f, 1.0f);
     particles.pore_capacity_kg[index] = capacity;
     particles.pore_water_mass_kg[index] = water;
@@ -242,6 +325,7 @@ std::size_t ensureMatterGrainRestMasses(FluidParticles& particles,
     std::size_t initialized = 0;
     const auto count = particles.size();
     particles.rest_mass_kg.resize(count, 0.0f);
+    particles.ensureParticleIdentities();
     for (std::size_t i = 0; i < count; ++i) {
         float& rest_mass = particles.rest_mass_kg[i];
         if (std::isfinite(rest_mass) && rest_mass > 0.0f) {
@@ -259,7 +343,8 @@ std::size_t ensureMatterGrainRestMasses(FluidParticles& particles,
         if (!profile || profile->granular_transport != MatterGranularTransport::Dem) {
             continue;
         }
-        rest_mass = matterGrainRestMassKg(params, tag, domain_substance, model, legacy_granular);
+        rest_mass = matterGrainRestMassKg(matterGrainParticleParams(params, particles, i),
+            tag, domain_substance, model, legacy_granular);
         ++initialized;
     }
     return initialized;

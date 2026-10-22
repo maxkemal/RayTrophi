@@ -39,6 +39,12 @@ struct MatterGrainParams {
     // numerics, coupling and sleep (docs/dev/MADDE_UI_TEK_OTORITE.md).
     bool enabled = false;
     float radius_m = 0.025f;
+    // Zero max preserves legacy fixed size. Otherwise radius_m is the minimum.
+    float radius_max_m = 0.0f;
+    std::string size_distribution = "uniform";
+    int size_seed = 1337;
+    float large_grain_fraction = 0.1f; // number fraction in the bimodal mixture
+
     // Contact stiffness follows the radius (k ~ r keeps the impact overlap
     // fraction): stiffness_n_m = stiffness_scale * kMatterGrainStiffnessPerRadius
     // * radius_m, recomputed whenever either changes. Scale 1 = 2e4 N/m at 25 mm.
@@ -102,6 +108,20 @@ struct MatterGrainParams {
     float sleep_time_s = 0.2f;
 };
 
+// Radius is a deterministic function of stable carrier identity and saved,
+// birth-locked domain settings. Reordering/cache replay never resamples it.
+uint64_t matterGrainSizeSignature(const MatterGrainParams& params);
+float matterGrainMaximumRadius(const MatterGrainParams& params);
+// Upper bound on one body's incident normal stiffness / its own inertial mass.
+// Pair stiffness uses 2*ri*rj/(ri+rj); a wall uses ri. No mixed fictitious body.
+double matterGrainContactRateBound(double radius, double maximum_radius,
+    double inertial_mass, double stiffness_per_radius);
+float matterGrainRadius(const MatterGrainParams& params, uint64_t identity);
+float matterGrainRadius(const MatterGrainParams& params,
+    const FluidParticles& particles, std::size_t index);
+MatterGrainParams matterGrainParticleParams(const MatterGrainParams& params,
+    const FluidParticles& particles, std::size_t index);
+
 // Host CFL and GLSL history slots share this budget (sim_matter_grain.glsl).
 inline constexpr int kMatterGrainContactBudget = 24;
 // 17: 2-D dispatch index, 18: cost counters, 19: Verlet neighbour list,
@@ -109,7 +129,10 @@ inline constexpr int kMatterGrainContactBudget = 24;
 // 21: sleeping grains (rest counter per block, 128 B push constants),
 // 22: sleep audits/force balance, bridge wake and atomic rest-word commit.
 // 27: optional audio diagnostics tail; header-only buffers are valid when opted out.
-inline constexpr uint32_t kMatterGrainShaderRevision = 27;
+// 28: per-identity physical radii in the mass-buffer tail, variable-size pair contacts.
+// 29: runtime-sized Verlet lists; mixed sizes start wider and dry overflows retry.
+// 30: runtime-sized contact history with four mask words and matching CFL bounds.
+inline constexpr uint32_t kMatterGrainShaderRevision = 30;
 // Neighbour hash: one table of fixed-capacity buckets, filled only when the
 // neighbour lists are rebuilt (docs/dev/DEM_VERLET_LISTESI.md).
 inline constexpr uint32_t kMatterGrainBucketCapacity = 16;
@@ -194,6 +217,7 @@ struct MatterGrainStepReport {
     // the frame was re-run at the full budget because more were measured
     // (the re-run starts without contact history).
     uint32_t cfl_contacts = 0;
+    double cfl_stiffness_mass_rate_s2 = 0.0;
     bool cfl_budget_retry = false;
     // Cost counters of the last substep, summed over grains: neighbour-list
     // entries read, grain-grain contacts found, contact-history slots read,
@@ -205,6 +229,10 @@ struct MatterGrainStepReport {
     uint64_t collider_nodes_visited = 0;
     // Neighbour-list builds in this frame (one is forced at the frame start).
     uint32_t list_rebuilds = 0;
+    uint32_t neighbour_list_capacity = kMatterGrainListCapacity;
+    uint32_t neighbour_list_retries = 0;
+    uint32_t contact_history_capacity = kMatterGrainContactBudget;
+    uint32_t contact_history_retries = 0;
     uint32_t sticking_contacts = 0;
     uint32_t contacts = 0;
     bool history_reset = false;
@@ -376,6 +404,10 @@ struct MatterGrainGpuRuntime {
     std::vector<Vec3> published_velocities;
     std::vector<AffineC> published_affines;
     std::vector<float> published_masses;
+    uint32_t neighbour_list_capacity = kMatterGrainListCapacity;
+    uint32_t requested_list_capacity = kMatterGrainListCapacity;
+    uint32_t contact_history_capacity = kMatterGrainContactBudget;
+    uint32_t requested_contact_capacity = kMatterGrainContactBudget;
     std::size_t capacity = 0;
     std::size_t triangle_capacity = 0;
     uint32_t buckets = 0;
@@ -423,6 +455,8 @@ void drawMatterGrainSourceLine(const ParticleSimulationSystem& system,
 void drawMatterGrainReport(const SimulationGridDomainDesc& domain,
                            const SimulationGridDomainState* state);
 
+// Clears identity/contact/CFL state after explicit reset, retaining device allocations.
+void invalidateMatterGrainAfterReset(MatterGrainGpuRuntime& runtime);
 void releaseMatterGrainGpu(SimulationComputeContext& compute, MatterGrainGpuRuntime& runtime);
 
 // Steps `grains` -- the grain-owned carriers of one domain, in a stable

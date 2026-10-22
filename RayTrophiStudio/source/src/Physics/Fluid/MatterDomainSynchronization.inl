@@ -277,6 +277,26 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
                 state.particles.clear();
                 state.foam.clear();   // drop stale whitewater with the old liquid
             }
+            // Resolve ownership before birth: doing this only at step time locks
+            // a first DEM seed into the previous MPM owner until the next reset.
+            const auto ownership = Fluid::matterGrainOwnership(domain, flow_sources_,
+                static_cast<int>(i), !state.particles.empty());
+            auto& grain = domain.fluid_params.grain;
+            grain.enabled = ownership.enabled;
+            if (const auto* profile = ownership.wanted
+                    ? tryFindSubstance(ownership.substance) : nullptr) {
+                Fluid::applyMatterGrainSubstance(grain, *profile,
+                    ownership.liquid.empty() ? nullptr : tryFindSubstance(ownership.liquid),
+                    ownership.wet_grains);
+            }
+            const float birth_kelvin = Fluid::substanceAmbientBirthKelvin(
+                Fluid::kSubstanceUntagged, domain.fluid_params,
+                fluidDomainAmbientKelvin(domain, world_thermal_));
+            const auto birth_model = Fluid::substanceBirthModel(
+                Fluid::kSubstanceUntagged, domain.fluid_params, birth_kelvin);
+            const bool seed_grains = Fluid::substanceTransportOwner(
+                Fluid::kSubstanceUntagged, birth_model, domain.fluid_params) ==
+                Fluid::MatterTransportOwner::Grain;
             // Resolve the effective seed AABB. FillLevel mode treats the domain
             // as a resting tank: fill the whole footprint from the floor up to
             // fluid_fill_level of the domain height (skips the long emission /
@@ -324,7 +344,7 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
                                          Fluid::liquidGrid(state).voxel_size,
                                          domain.fluid_fill_level,
                                          domain.fluid_fill_wall_margin,
-                                         ppc, seed_budget,
+                                         ppc, seed_grains ? std::numeric_limits<std::size_t>::max() : seed_budget,
                                          seed_lo, seed_hi);
             }
 
@@ -342,16 +362,17 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
             // by the same rule as a flow source: Snow seeded into a warm domain
             // is snow, not water (substanceAmbientBirthKelvin).
             const std::size_t seed_begin = state.particles.size();
-            Fluid::seedBox(state.particles,
-                           Fluid::liquidGrid(state),
-                           seed_lo,
-                           seed_hi,
-                           ppc,
-                           /*seed=*/static_cast<uint32_t>(i + 1u) * 2654435761u,
-                           seed_budget,
-                           Fluid::substanceAmbientBirthKelvin(
-                               Fluid::kSubstanceUntagged, domain.fluid_params,
-                               fluidDomainAmbientKelvin(domain, world_thermal_)));
+            Fluid::MatterGrainSeedResult grain_seed;
+            if (seed_grains) {
+                grain_seed = Fluid::seedMatterGrainBox(state.particles,
+                    Fluid::liquidGrid(state), seed_lo, seed_hi, domain.fluid_params,
+                    birth_kelvin, seed_budget);
+            } else {
+                Fluid::seedBox(state.particles, Fluid::liquidGrid(state),
+                    seed_lo, seed_hi, ppc,
+                    /*seed=*/static_cast<uint32_t>(i + 1u) * 2654435761u,
+                    seed_budget, birth_kelvin);
+            }
             Fluid::initializeMatterBirthModels(
                 state.particles, seed_begin, domain.fluid_params);
             domain.fluid_pending_seed = false;
@@ -359,7 +380,9 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
                 auto& seed_stats = state.seed_stats;
                 seed_stats = SimulationSeedStats{};
                 seed_stats.ran = true;
-                seed_stats.requested = seed_request_cells * static_cast<std::size_t>(ppc);
+                seed_stats.requested = seed_grains
+                    ? grain_seed.emitted + (grain_seed.truncated ? 1u : 0u)
+                    : seed_request_cells * static_cast<std::size_t>(ppc);
                 seed_stats.emitted = state.particles.size() - seed_begin;
                 seed_stats.region_top_y = seed_region_top;
                 float top = -std::numeric_limits<float>::max();
@@ -367,8 +390,13 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
                     top = std::max(top, state.particles.position[p].y);
                 }
                 seed_stats.top_y = seed_stats.emitted ? top : 0.0f;
-                seed_stats.truncated = seed_stats.emitted < seed_stats.requested;
-                if (seed_stats.truncated) {
+                seed_stats.truncated = seed_grains ? grain_seed.truncated
+                    : seed_stats.emitted < seed_stats.requested;
+                if (seed_grains && seed_stats.truncated) {
+                    SCENE_LOG_WARN("[DEM] " + domain.name +
+                        ": seed stopped at particle capacity or authoring scan limit; " +
+                        std::to_string(seed_stats.emitted) + " grains emitted.");
+                } else if (seed_stats.truncated) {
                     SCENE_LOG_WARN("[Fluid] " + domain.name + ": seed cut by the particle budget, " +
                                    std::to_string(seed_stats.emitted) + " of " +
                                    std::to_string(seed_stats.requested) +

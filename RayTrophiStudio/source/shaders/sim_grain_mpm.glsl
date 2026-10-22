@@ -47,7 +47,7 @@ float mass(uint i) {
     return owner(i) == 0u ? gm[i] : uintBitsToFloat(metadata[i - pc.meta.x].x);
 }
 float radius(uint i) {
-    return owner(i) == 0u ? pc.params.x
+    return owner(i) == 0u ? gm[pc.meta.x + i]
         : uintBitsToFloat(metadata[i - pc.meta.x].y);
 }
 ivec3 cell(uint i) { return ivec3(floor(position(i) / pc.params.y)); }
@@ -68,7 +68,7 @@ vec3 pairImpulse(uint grain, uint mpm) {
     vec3 relative = velocity(grain) - velocity(mpm);
     float vn = dot(relative, normal);
     float effective = 1.0 / (1.0 / mass(grain) + 1.0 / mass(mpm));
-    float bias = min(0.2 * overlap, 0.1 * pc.params.x) / pc.params.w;
+    float bias = min(0.2 * overlap, 0.1 * radius(grain)) / pc.params.w;
     float relaxation = 1.0 / float(max(1u, max(degrees[grain], degrees[mpm])));
     float jn = max(bias - vn, 0.0) * effective * relaxation;
     vec3 tangent = relative - vn * normal;

@@ -1949,16 +1949,20 @@ static const MethodParam params_fluid_set_grain_settings[] = {
     {"fluid_coupling", "bool", false, "", nullptr, nullptr},
     {"volume_exclusion", "bool", false, "", nullptr, nullptr},
     {"stiffness_scale", "float", false, ".01..1000. Contact stiffness k = scale x 8e5 N/m per m x radius_m (1 = 2e4 N/m at 25 mm).", nullptr, nullptr},
+    {"radius_max_m", "float", false, "0=fixed; otherwise radius_m..min(4*radius_m,1 m). Birth locked.", nullptr, nullptr},
+    {"size_distribution", "string", false, "uniform, log_uniform or bimodal; number distribution.", nullptr, nullptr},
+    {"size_seed", "int", false, "0..2147483647; stable identity size seed. Birth locked.", nullptr, nullptr},
+    {"large_grain_fraction", "float", false, "0..1; bimodal number fraction at radius_max_m.", nullptr, nullptr},
 };
 static const MethodDescriptor desc_fluid_set_grain_settings = {
     "fluid.set_grain_settings", "fluid",
     "Configure the domain side of the DEM grain solver (resolution, stiffness scale, numerics, coupling, sleep)",
-    "The domain authors only radius_m, stiffness_scale, sliding_damping_n_s_m, contact_resolution, max_substeps, fluid_coupling, volume_exclusion, sleep, sleep_speed_m_s, sleep_time_s (docs/dev/MADDE_UI_TEK_OTORITE.md U2/U3). Grains run when a substance in reach of the domain (a flow source aimed at it first, then bound substances, then the Default Substance) is granular with granular_transport=dem; there is no enabled switch. The grain MATERIAL is that substance's (substance.set grain_friction, grain_rolling_friction, grain_twisting_friction, grain_restitution, grain_tangential_stiffness_ratio, grain_packing_fraction, grain_real_radius_m, grain_water_capacity_fraction, grain_absorption_rate_per_s, grain_drying_rate_per_s, grain_contact_angle_deg; bridge surface tension is the liquid substance's liquid_surface_tension_n_m). One grain material per domain. wet_grains is derived: on when the grain substance holds water (capacity > 0) and the domain has liquid or a source pours wet grains (flow_source grain_birth_saturation). The old keys are rejected with their new home; saved scenes drop them and the loader logs which. Contact stiffness k = stiffness_scale x 8e5 N/m per m x radius_m (scale 1 = 2e4 N/m at 25 mm; k ~ r keeps the impact overlap fraction); an old stiffness_n_m converts to the scale on load. radius_m needs an empty domain (fixed at a grain's birth); every other setting applies on the next step. contact_resolution 8..200 (default 24) substeps per binary collision; max_substeps 1..4096 is a safety cap. fluid.matter_models grain_ownership reports wanted/enabled/reset_pending/substance/blockers/liquid/wet_grains/notes and the material the solver runs; grain_diagnostics.runtime reports substeps, dispatches, substep_limit and contact counts.",
+    "The domain authors only radius_m, stiffness_scale, sliding_damping_n_s_m, contact_resolution, max_substeps, fluid_coupling, volume_exclusion, sleep, sleep_speed_m_s, sleep_time_s (docs/dev/MADDE_UI_TEK_OTORITE.md U2/U3). Grains run when a substance in reach of the domain (a flow source aimed at it first, then bound substances, then the Default Substance) is granular with granular_transport=dem; there is no enabled switch. The grain MATERIAL is that substance's (substance.set grain_friction, grain_rolling_friction, grain_twisting_friction, grain_restitution, grain_tangential_stiffness_ratio, grain_packing_fraction, grain_real_radius_m, grain_water_capacity_fraction, grain_absorption_rate_per_s, grain_drying_rate_per_s, grain_contact_angle_deg; bridge surface tension is the liquid substance's liquid_surface_tension_n_m). One grain material per domain. wet_grains is derived: on when the grain substance holds water (capacity > 0) and the domain has liquid or a source pours wet grains (flow_source grain_birth_saturation). The old keys are rejected with their new home; saved scenes drop them and the loader logs which. Contact stiffness k = stiffness_scale x 8e5 N/m per m x radius_m (scale 1 = 2e4 N/m at 25 mm; k ~ r keeps the impact overlap fraction); an old stiffness_n_m converts to the scale on load. All size-distribution settings need an empty domain (fixed at birth); contact and coupling settings apply on the next step. contact_resolution 8..200 (default 24) substeps per binary collision; max_substeps 1..4096 is a safety cap. fluid.matter_models grain_ownership reports wanted/enabled/reset_pending/substance/blockers/liquid/wet_grains/notes and the material the solver runs; grain_diagnostics.runtime reports substeps, dispatches, substep_limit and contact counts. Variable physical sizes: radius_m is the minimum; radius_max_m=0 preserves fixed size, otherwise radius_m..min(4*radius_m,1 m). size_distribution=uniform|log_uniform|bimodal; bimodal selects the maximum with large_grain_fraction by count. size_seed fixes radii by stable particle identity. All five size fields require empty particles. Mass scales as radius cubed; inertia, pair/wall contact, wet capacity, gas/liquid/thermal coupling and render diameter use that radius. GPU grain shader revision 30 is required. Mixed-size contact history starts at 64, with four mask words and standalone budgeted retry up to 128; the CFL bound follows contact capacity. Runtime reports contact_history_capacity and contact_history_retries. Mixed-size neighbour lists start at 128 and standalone DEM can retry list overflow with budgeted growth; fixed-size baseline remains 32. Runtime reports neighbour_list_capacity and neighbour_list_retries. Existing neighbour/contact capacity limits still reject dense oversized neighbourhoods explicitly; no contact is silently dropped. See docs/dev/DEM_SIZE_DISTRIBUTION.md.",
     "write", "SceneWrite", false, "Validated settings",
     "fluid|set|grain|settings|write",
     "fluid.grain_settings|fluid.reset|fluid.matter_models",
     nullptr, nullptr, nullptr, nullptr,
-    params_fluid_set_grain_settings, 11,
+    params_fluid_set_grain_settings, 15,
     true
 };
 static const MethodRegistration reg_fluid_set_grain_settings(desc_fluid_set_grain_settings);
@@ -2079,10 +2083,16 @@ static const MethodRegistration reg_fluid_set_pore_exchange(desc_fluid_set_pore_
 
 static const MethodParam params_fluid_set_splat_geometry[] = {
     {"domain", "string", true, "", nullptr, nullptr},
+    {"near_mesh_shape", "string", false, "Scene exemplars, seeded rounded rocks, or convex angular grains", nullptr, "scene|rock|voronoi"},
+    {"near_mesh_source_materials", "bool", false, "Preserve original per-face materials on near scene exemplars; overrides domain/substance/wet bands only on those meshes", nullptr, nullptr},
     {"geometry", "string", false, "", nullptr, nullptr},
     {"geometry_source", "any", false, "", nullptr, nullptr},
     {"grain_size_variation", "any", false, "", nullptr, nullptr},
     {"granular_physical_carriers", "bool", false, "", nullptr, nullptr},
+    {"near_mesh_budget", "any", false, "", nullptr, nullptr},
+    {"near_mesh_distance", "any", false, "", nullptr, nullptr},
+    {"near_mesh_enabled", "bool", false, "", nullptr, nullptr},
+    {"near_mesh_sources", "any", false, "", nullptr, nullptr},
     {"radius_factor", "any", false, "", nullptr, nullptr},
     {"size_multiplier", "any", false, "", nullptr, nullptr},
     {"subdivisions", "int", false, "", nullptr, nullptr},
@@ -2092,12 +2102,12 @@ static const MethodParam params_fluid_set_splat_geometry[] = {
 static const MethodDescriptor desc_fluid_set_splat_geometry = {
     "fluid.set_splat_geometry", "fluid",
     "Set splat geometry, size and render-only particle refinement",
-    "Overlay semantics - keys you do not send keep their value. subdivisions 0..3 = 20/80/320/1280 triangles per splat (default 0); each level multiplies raster triangles and RT BLAS memory by four. geometry 'icosphere' is the procedural sphere cloud on RT (splat_triangles 0); 'icosphere_mesh' forces the triangle icosphere. Procedural granular spheres have a PPC-derived minimum radius equal to one MPM point's represented volume. granular_physical_carriers=true draws exactly one sphere per physical granular MPM carrier and disables attached virtual clusters for the primary sand body; this is the high-resolution granular default. virtual_grains 1..32 remains the low-resolution fill count and always controls procedural liquid/whitewater children. Virtual children are pulled toward a distance- and direction-weighted average of nearby stable carrier candidates; spray, foam and bubbles use the same proxy contract. grain_size_variation 0..0.75 varies deterministic child diameters while opposite pairs preserve represented volume. virtual_grain_budget 1000000..32000000 is a user-controlled domain cap. Its effective child count is derived from Max Particles plus enabled Max Foam, so live particle-count changes do not change proxy topology. Read primary_visual_children, whitewater_visual_children, virtual_grains_requested, virtual_grains_effective, virtual_grain_count, virtual_grain_budget and virtual_grain_rt_estimated_bytes with fluid.get; virtual_grain_count includes splat-routed whitewater. The memory estimate covers RT proxy inputs before acceleration-structure scratch. geometry 'scene_object' requires geometry_source naming a live scene node; its primary particles do not use virtual children, while procedural whitewater still does. Out-of-range values are rejected, not clamped.",
+    "Overlay semantics - keys you do not send keep their value. subdivisions 0..3 = 20/80/320/1280 triangles per splat (default 0); each level multiplies raster triangles and RT BLAS memory by four. geometry 'icosphere' is the procedural sphere cloud on RT (splat_triangles 0); 'icosphere_mesh' forces the triangle icosphere. Procedural granular spheres have a PPC-derived minimum radius equal to one MPM point's represented volume. granular_physical_carriers=true draws exactly one sphere per physical granular MPM carrier and disables attached virtual clusters for the primary sand body; this is the high-resolution granular default. virtual_grains 1..32 remains the low-resolution fill count and always controls procedural liquid/whitewater children. Virtual children are pulled toward a distance- and direction-weighted average of nearby stable carrier candidates; spray, foam and bubbles use the same proxy contract. grain_size_variation 0..0.75 varies deterministic child diameters while opposite pairs preserve represented volume. virtual_grain_budget 1000000..32000000 is a user-controlled domain cap. Its effective child count is derived from Max Particles plus enabled Max Foam, so live particle-count changes do not change proxy topology. Read primary_visual_children, whitewater_visual_children, virtual_grains_requested, virtual_grains_effective, virtual_grain_count, virtual_grain_budget and virtual_grain_rt_estimated_bytes with fluid.get; virtual_grain_count includes splat-routed whitewater. The memory estimate covers RT proxy inputs before acceleration-structure scratch. geometry 'scene_object' requires geometry_source naming a live scene node; its primary particles do not use virtual children, while procedural whitewater still does. near_mesh_shape=scene|rock|voronoi selects scene exemplars, 16 seeded rounded rocks, or a deterministic up-to-16-cell convex Voronoi library. near_mesh_source_materials=true preserves each scene exemplar face material, overriding the near domain/substance/wet material bindings; distant spheres keep their materials. Near-camera grain meshes (render-only, K0 of docs/dev/KUM_TANE_GEOMETRISI_VE_MINERAL_KARISIMI.md): near_mesh_enabled, near_mesh_sources (live scene nodes, e.g. physics.fracture_object shard_objects), near_mesh_distance (> 0 m from the active camera), near_mesh_budget (mesh instances). Needs geometry icosphere; when enabled it forces one primary visual shape per carrier (whitewater refinement is unchanged). Applies to DEM, MPM and fluid splat-routed primary particles. Particles inside the distance become triangle instances of an exemplar (stable per particle_id, volume-matched to the sphere), the rest stay procedural spheres. fluid.get grain_mesh_near reports status (off/active/why not), near_instances, near_over_budget, sphere_instances, mesh_slots, exemplars, exemplar_triangles, mean_volume_scale. Out-of-range values are rejected, not clamped.",
     "write", "SceneWrite", false, "any",
     "fluid|set|splat|geometry|simulation|render|appearance|performance",
     "fluid.set_splat_material|fluid.set_param",
     nullptr, nullptr, "fluid.get|viewport.frame_telemetry", nullptr,
-    params_fluid_set_splat_geometry, 10,
+    params_fluid_set_splat_geometry, 16,
     true
 };
 static const MethodRegistration reg_fluid_set_splat_geometry(desc_fluid_set_splat_geometry);
@@ -4536,7 +4546,7 @@ static const MethodParam params_nodes_list_properties[] = {
 static const MethodDescriptor desc_nodes_list_properties = {
     "nodes.list_properties", "nodes",
     "List a node's non-parameter properties",
-    nullptr,
+    "Types: float|int|bool|string, vector2/3/4 for flat number arrays (Noise c1/c2), and rows for lists of numeric rows (Color Ramp 'stops' [[pos,r,g,b],...], Float Curve 'points' [[x,y],...]). A list of objects is addressed by index: RGB Curves 'curves.0.points'.",
     "read", "Read", false, "any",
     "nodes|list|properties|graph",
     nullptr,
@@ -4571,7 +4581,7 @@ static const MethodParam params_nodes_remove_graph[] = {
 static const MethodDescriptor desc_nodes_remove_graph = {
     "nodes.remove_graph", "nodes",
     "Delete a node graph",
-    nullptr,
+    "Removing a material graph also drops its compiled per-pixel program from the material (CPU + Vulkan RT re-uploaded); the folded constants stay as ordinary material values.",
     "write", "SceneWrite", false, "any",
     "nodes|remove|graph",
     nullptr,
@@ -4632,7 +4642,7 @@ static const MethodParam params_nodes_set_property[] = {
 static const MethodDescriptor desc_nodes_set_property = {
     "nodes.set_property", "nodes",
     "Set one node property",
-    nullptr,
+    "A rows property (Color Ramp 'stops', curve 'points') is replaced whole with [[...],[...]]; every row must have the existing width. The node's own deserializer validates: if it drops, caps (Color Ramp keeps 8 stops), sorts or clamps rows, the call fails and the previous value is restored. Vector properties take 2-4 numbers. Run nodes.apply afterwards for a material graph.",
     "write", "SceneWrite", false, "any",
     "nodes|set|property|graph|configure",
     nullptr,
@@ -6690,6 +6700,19 @@ static const MethodDescriptor desc_render_get_settings = {
     true
 };
 static const MethodRegistration reg_render_get_settings(desc_render_get_settings);
+
+static const MethodDescriptor desc_render_instance_stats = {
+    "render.instance_stats", "render",
+    "Report TLAS instance preparation per Vulkan backend role (instance count, last build/update path, CPU prepare ms) and the procedural sphere cloud's record count",
+    "instance_count is what the last TLAS build/update saw, zero-scale pool slack included. The procedural sphere cloud is ONE TLAS instance; its primitives are sphere_records (pool capacity sphere_pool_capacity). The near grain mesh measurement (fluid.set_splat_geometry near_mesh_*) reads both: mesh grains add TLAS instances, sphere grains add sphere records. Previously visible only in the Volume Performance panel.",
+    "render", "Render", false, "InstancePreparationInfo",
+    "render|instance|stats|diagnostics|performance|backend|verify",
+    "fluid.get|perf.list|render.volume_tables",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_render_instance_stats(desc_render_instance_stats);
 
 static const MethodDescriptor desc_render_optix_accum_status = {
     "render.optix_accum_status", "render",
@@ -8869,6 +8892,42 @@ static const MethodDescriptor desc_scene_export_gltf = {
     true
 };
 static const MethodRegistration reg_scene_export_gltf(desc_scene_export_gltf);
+
+static const MethodParam params_scene_generate_grains[] = {
+    {"type", "string", false, "rock|voronoi|snow|crystal", "voronoi", "rock|voronoi|snow|crystal"},
+    {"name", "string", false, "Authoring control", "Grain", nullptr},
+    {"count", "int", false, "1..64", "12", nullptr},
+    {"seed", "int", false, "0..2147483647", "1337", nullptr},
+    {"resolution", "int", false, "2..16; rock mesh resolution or rounded Voronoi edge detail", "4", nullptr},
+    {"roundness", "float", false, "0..1; rock/voronoi", nullptr, nullptr},
+    {"roughness", "float", false, "0..0.5; rock displacement or snow irregularity", "0.25", nullptr},
+    {"aspect", "vec3", false, "each 0.05..5", "[1,1,1]", nullptr},
+    {"arms", "int", false, "3..12; snow", "6", nullptr},
+    {"branches", "int", false, "0..5 per side; snow", "3", nullptr},
+    {"branch_length", "float", false, "0.001..0.4, limited by spacing; snow", "0.15", nullptr},
+    {"thickness", "float", false, "0.005..0.3 relative to arm length; snow", "0.04", nullptr},
+    {"crystal_sides", "int", false, "3..12", "6", nullptr},
+    {"tip_height", "float", false, "0..0.9; crystal", "0.3", nullptr},
+    {"diameter_min", "float", false, "0.00001..100 metres", "0.02", nullptr},
+    {"diameter_max", "float", false, "diameter_min..100 metres", "diameter_min", nullptr},
+    {"size_distribution", "string", false, "uniform|log_uniform", "uniform", "uniform|log_uniform"},
+    {"origin", "vec3", false, "finite within +/-1e6 metres", "[0,0,0]", nullptr},
+    {"material", "string", false, "existing material name; mutually exclusive with material_weights", "scene default", nullptr},
+    {"material_weights", "array", false, "1..32 entries {material: existing name, weight: 0.00001..1000000}", nullptr, nullptr},
+    {"domain", "string", false, "optional existing liquid/Matter domain with geometry icosphere", nullptr, nullptr},
+};
+static const MethodDescriptor desc_scene_generate_grains = {
+    "scene.generate_grains", "scene",
+    "Generate an editable grain or crystal mesh library in the scene",
+    "One undoable operation, canonical flat TriangleMesh/DNA SoA geometry. All inputs are validated before scene insertion. Optional domain binds the created objects as near-mesh scene exemplars with original materials; target must exist in the active particle system and use geometry icosphere. Scene object size is authoring geometry only: near meshes still match carrier volume. Generated geometry, UVs and material IDs use normal project geometry serialization. Existing libraries are not replaced or deleted. Voronoi may return fewer cells than requested. Legacy near_mesh_shape rock/voronoi remains readable but the Mesh Grains UI now links to this generator.",
+    "write", "SceneWrite", true, "objects, count, requested_count, type, seed, domain, examples[{object, diameter, material_id, triangles}]",
+    "scene|generate|grains|mesh|procedural|grain|sand|snow|crystal|voronoi|generator|material|library",
+    "scene.add_primitive|scene.object_info|scene.delete|fluid.set_splat_geometry|undo|redo",
+    nullptr, nullptr, "scene.object_info|fluid.get", nullptr,
+    params_scene_generate_grains, 21,
+    true
+};
+static const MethodRegistration reg_scene_generate_grains(desc_scene_generate_grains);
 
 static const MethodDescriptor desc_scene_get_fbx_reader = {
     "scene.get_fbx_reader", "scene",

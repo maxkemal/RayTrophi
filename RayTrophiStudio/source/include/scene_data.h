@@ -1673,15 +1673,27 @@ struct SceneData {
     Vec3 nodeWorldCenter(const std::string& node) const {
         Vec3 mn(1e30f, 1e30f, 1e30f), mx(-1e30f, -1e30f, -1e30f);
         bool any = false;
+        auto add = [&](const Vec3& p) {
+            mn = Vec3(std::min(mn.x, p.x), std::min(mn.y, p.y), std::min(mn.z, p.z));
+            mx = Vec3(std::max(mx.x, p.x), std::max(mx.y, p.y), std::max(mx.z, p.z));
+            any = true;
+        };
         for (const auto& o : world.objects) {
+            // Flat SoA first: fracture shards are flat meshes, and a facade-only
+            // scan answers (0,0,0) for them without saying so.
+            if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(o)) {
+                if (mesh->nodeName != node || !mesh->geometry) continue;
+                const DNA::GeometryDetail* g = mesh->geometry.get();
+                const Vec3* P = g->get_attribute_data<Vec3>("P");
+                if (!P) continue;
+                const std::size_t vc = g->get_vertex_count();
+                for (const uint32_t vi : g->indices)
+                    if (vi < vc) add(P[vi]);
+                continue;
+            }
             auto tri = std::dynamic_pointer_cast<Triangle>(o);
             if (!tri || tri->getNodeName() != node) continue;
-            for (int i = 0; i < 3; ++i) {
-                const Vec3 p = tri->getVertexPosition(i);
-                mn = Vec3(std::min(mn.x, p.x), std::min(mn.y, p.y), std::min(mn.z, p.z));
-                mx = Vec3(std::max(mx.x, p.x), std::max(mx.y, p.y), std::max(mx.z, p.z));
-                any = true;
-            }
+            for (int i = 0; i < 3; ++i) add(tri->getVertexPosition(i));
         }
         return any ? (mn + mx) * 0.5f : Vec3(0.0f, 0.0f, 0.0f);
     }
@@ -3868,6 +3880,12 @@ struct SceneData {
     bool getRigidBodySourcePivot(const RayTrophiSim::RigidBodyObject& rb, Matrix4x4& out) const {
         if (rb.source_name.empty()) return false;
         for (const auto& obj : world.objects) {
+            if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                if (mesh->nodeName != rb.source_name) continue;
+                if (!mesh->transform) return false;
+                out = mesh->transform->getPivotMatrix();
+                return true;
+            }
             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
             if (tri && tri->getNodeName() == rb.source_name) {
                 if (Transform* th = tri->getTransformPtr()) { out = th->getPivotMatrix(); return true; }
@@ -5908,6 +5926,21 @@ struct SceneData {
         melt_applied_stamp_.erase(node);
     }
 
+    // Drop every body render cache for a node whose geometry is being REMOVED
+    // from the scene (no rest restore — the mesh is going away). Required before
+    // a mesh of the same name is created again: the flat caches keep a
+    // non-owning TriangleMesh*, which would dangle.
+    void forgetBodyMeshCaches(const std::string& node) {
+        soft_weld_cache_.erase(node);
+        rigid_bake_cache_.erase(node);
+        melt_weld_cache_.erase(node);
+        melt_displaced_.erase(node);
+        melt_sdf_refresh_stamp_.erase(node);
+        melt_applied_stamp_.erase(node);
+        surface_cache_epoch_done_.erase(node);
+        for (auto& kv : soft_frame_cache_) kv.second.erase(node);
+    }
+
     // Route a body's per-frame geometry change to the cheapest correct refresh.
     // Vulkan RT active → record the node for an in-place per-mesh BLAS refit
     // (consumed in the render loop), avoiding the full-scene BLAS teardown that
@@ -5994,6 +6027,12 @@ struct SceneData {
         std::shared_ptr<Triangle> tri;
         std::array<Vec3, 3> orig_pos;
         std::array<Vec3, 3> orig_nrm;
+        // Flat (direct SoA) body: the whole mesh's live SoA, one entry per mesh.
+        // ★ Without it a flat body (every fracture shard, every add_primitive
+        // object) was skipped here, so a project saved mid-simulation wrote the
+        // simulated pose into the sidecar as if it were the rest pose.
+        std::shared_ptr<TriangleMesh> mesh;
+        std::vector<Vec3> flat_P, flat_N, flat_P_orig, flat_N_orig;
     };
 
     std::vector<BodyRestSnapshot> snapshotAndRestoreBodiesToRest() {
@@ -6004,6 +6043,24 @@ struct SceneData {
             if (node.empty()) continue;
             bool any = false;
             for (auto& obj : world.objects) {
+                if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                    if (mesh->nodeName != node || !mesh->geometry) continue;
+                    const DNA::GeometryDetail* g = mesh->geometry.get();
+                    const std::size_t vc = g->get_vertex_count();
+                    auto copy = [&](const char* name, std::vector<Vec3>& dst) {
+                        if (const Vec3* src = g->get_attribute_data<Vec3>(name))
+                            dst.assign(src, src + vc);
+                    };
+                    BodyRestSnapshot s;
+                    s.mesh = mesh;
+                    copy("P", s.flat_P);
+                    copy("N", s.flat_N);
+                    copy("P_orig", s.flat_P_orig);
+                    copy("N_orig", s.flat_N_orig);
+                    snaps.push_back(std::move(s));
+                    any = true;
+                    continue;
+                }
                 auto tri = std::dynamic_pointer_cast<Triangle>(obj);
                 if (!tri || tri->getNodeName() != node) continue;
                 BodyRestSnapshot s;
@@ -6027,6 +6084,19 @@ struct SceneData {
     void reapplyBodyRestSnapshot(const std::vector<BodyRestSnapshot>& snaps) {
         if (snaps.empty()) return;
         for (const auto& s : snaps) {
+            if (s.mesh && s.mesh->geometry) {
+                DNA::GeometryDetail* g = s.mesh->geometry.get();
+                const std::size_t vc = g->get_vertex_count();
+                auto put = [&](const char* name, const std::vector<Vec3>& src) {
+                    Vec3* dst = g->get_attribute_data_mut<Vec3>(name);
+                    if (dst && src.size() == vc) std::copy(src.begin(), src.end(), dst);
+                };
+                put("P", s.flat_P);
+                put("N", s.flat_N);
+                put("P_orig", s.flat_P_orig);
+                put("N_orig", s.flat_N_orig);
+                continue;
+            }
             if (!s.tri) continue;
             for (int i = 0; i < 3; ++i) {
                 s.tri->setOriginalVertexPosition(i, s.orig_pos[i]);

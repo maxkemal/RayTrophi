@@ -2321,6 +2321,9 @@ public:
     void resetVolumePerformanceStats(bool enabled = true,
                                      const VulkanRT::VolumeInstrumentationRegion& region = {});
     VulkanRT::InstancePreparationStats getInstancePreparationStats() const;
+    // Procedural sphere cloud (one AABB BLAS): live records and pool capacity.
+    uint64_t proceduralSphereRecordCount() const { return m_foamSphereRecords.size(); }
+    uint32_t proceduralSpherePoolCapacity() const { return m_foamSpherePoolCapacity; }
     float getMillisecondsPerSample() const override;
 
     // ========================================================================

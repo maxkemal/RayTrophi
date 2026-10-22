@@ -44,7 +44,8 @@ nlohmann::json matterGrainSettings(const std::string& domain, const nlohmann::js
             const auto before = RayTrophiSim::Fluid::matterGrainParamsToJson(d.fluid_params.grain);
             const auto after = RayTrophiSim::Fluid::matterGrainParamsToJson(candidate);
             std::string fixed;
-            for (const char* key : {"radius_m"}) {
+            for (const char* key : {"radius_m", "radius_max_m", "size_distribution",
+                                    "size_seed", "large_grain_fraction"}) {
                 if (before.at(key) != after.at(key)) {
                     fixed += (fixed.empty() ? "" : ", ") + std::string(key);
                 }

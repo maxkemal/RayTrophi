@@ -128,3 +128,31 @@ docs/dev/grain_suite/
 # Compiled SPIR-V shaders are local build output: build them with
 # compile_shaders.bat / compile_sim_shaders.bat
 *.spv
+
+# Local measurement and audio artifacts excluded from the 2026-10-22 checkpoint.
+/docs/dev/acoustics_gpu_acceptance_20261016.json
+/docs/dev/acoustics_gpu_rayfusion_acceptance_20261016.json
+/docs/dev/acoustics_gpu_rt_acceptance_20261016.json
+/docs/dev/acoustics_gpu_rt_fixed_acceptance_20261016.json
+/docs/dev/acoustics_gpu_rt_retry_20261016.json
+/docs/dev/acoustics_gpu_rt_stack_retry_20261016.json
+/docs/dev/acoustics_neighborhood_capacity_check_20261016.json
+/docs/dev/acoustics_neighborhood_cost_20261016.json
+/docs/dev/acoustics_neighborhood_foreground_cost_20261016.json
+/docs/dev/acoustics_neighborhood_live_check_20261016.json
+/docs/dev/acoustics_neighborhood_refresh_latency_20261016.json
+/docs/dev/acoustics_neighborhood_setup_20261016.json
+/docs/dev/audio_acceptance_20261013.wav
+/docs/dev/audio_center.wav
+/docs/dev/audio_physical_acceptance_20261018.json
+/docs/dev/audio_physical_continuation_20261018.json
+/docs/dev/audio_right.wav
+/docs/dev/dem_mpm_acceptance_20261022.json
+/docs/dev/dem_mpm_original_scene_20261022.json
+/docs/dev/dem_mpm_seed_followup_20261022.json
+/docs/dev/k0_grain_mesh_near_20261022.json
+/docs/dev/k0_grain_mesh_near_fracture_20261022.json
+/docs/dev/k0_grain_mesh_near_fracture_opaque_20261022.json
+/docs/dev/matter_acceptance_20261011T184823Z.json
+/docs/dev/matter_acceptance_20261011T193836Z.json
+/docs/dev/matter_acceptance_20261011T194549Z.json

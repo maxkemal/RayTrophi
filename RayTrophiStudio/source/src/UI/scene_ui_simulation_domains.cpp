@@ -1,4 +1,5 @@
-﻿#include "DomainPanelWidgets.h"
+#include "UI/GrainMeshLibraryUI.h"
+#include "DomainPanelWidgets.h"
 #include "Fluid/MatterPoreAuthoring.h"
 #include "scene_ui_forcefield.hpp"
 #include "Fluid/MatterPhaseConfig.h"
@@ -15,6 +16,7 @@
 #include "Fluid/FluidGridResourceBudget.h"
 #include "Fluid/FluidParticleVisualRadius.h"
 #include "Fluid/FluidRenderProxy.h"
+#include "Fluid/GrainMeshNear.h"
 #include "Fluid/FluidViewResolver.h"
 #include "Fluid/FluidActiveWindow.h"
 
@@ -842,6 +844,10 @@ void drawSimulationDomainControls(
                     // Fluid Seeding & Limits
                     if (UIWidgets::CollapsingHeader("Fluid Seeding & Capacity", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
+                        if (RayTrophiSim::Fluid::drawMatterSeedSubstanceControls(domain)) {
+                            scene.requestSimulationTimelineRenderResync();
+                            ui_ctx.start_render = true;
+                        }
 
                     // Auto-reseed toggle (the accumulator + the actual reseed live
                     // at the top/bottom of this panel so shape params count too).
@@ -3464,11 +3470,8 @@ void drawSimulationDomainControls(
                                                 : 0u),
                                     static_cast<uint64_t>(budget_millions) *
                                         1000000ull);
-                            const uint32_t primary_children =
-                                domain.fluid_params.granular_enabled &&
-                                    physical_granular_carriers
-                                ? 1u
-                                : effective_grains;
+                            const uint32_t primary_children = std::min(effective_grains,
+                                RayTrophiSim::Fluid::primarySplatVisualChildren(domain));
                             const uint64_t visual_count =
                                 primary_count * primary_children +
                                 whitewater_count * effective_grains;
@@ -3489,6 +3492,9 @@ void drawSimulationDomainControls(
                                     "estimate covers proxy inputs before acceleration-structure scratch.\n"
                                     "Diameter variation is deterministic and volume-normalized.");
                             }
+                        }
+                        if (geometry_mode == 0) {
+                            RayTrophiSim::Fluid::drawGrainMeshNearControls(scene, domain);
                         }
                         const RayTrophiSim::Fluid::FluidParticleVisualRadius visual_radius =
                             RayTrophiSim::Fluid::resolveFluidParticleVisualRadius(

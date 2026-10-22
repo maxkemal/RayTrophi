@@ -11474,6 +11474,10 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
     std::vector<VulkanRT::TLASInstance> allInstances = m_vkInstances;
     for (const auto& hi : m_hairVkInstances) allInstances.push_back(hi);
 
+    // Recorded on EVERY build: the CPU fallback below never reached the GPU
+    // prepare block that used to be the only writer, so render.instance_stats
+    // (and the panel) reported a stale 0 for a TLAS that held thousands.
+    m_instancePreparationStats.instanceCount=static_cast<uint32_t>(allInstances.size());
     std::vector<VulkanRT::GpuTLASInstanceSource> gpuBuildSources;
     if(m_device->instancePrepareReady()&&!allInstances.empty()){
         const auto prepStart=std::chrono::steady_clock::now();

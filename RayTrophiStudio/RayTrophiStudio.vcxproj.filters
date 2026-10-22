@@ -100,6 +100,36 @@
     <ClCompile Include="source\src\Physics\Fluid\SparseGridStorage.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainMpmContact.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainFluidGpuCoupling.cpp" />
+    <ClInclude Include="source\include\GrainGenerator.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\GrainGeneratorApi.h">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\GrainGeneratorUI.h">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClInclude>
+    <ClCompile Include="source\src\Scene\GrainGenerator.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiGrainGenerator.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcGrainGenerator.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClInclude Include="source\src\Api\RtIpcGrainGenerator.h">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClInclude>
+    <ClCompile Include="source\src\Api\RtPythonGrainGenerator.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClInclude Include="source\src\Api\RtPythonGrainGenerator.h">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClInclude>
+    <ClCompile Include="source\src\UI\GrainGeneratorUI.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Fluid\MatterPhaseSettings.h">
@@ -280,6 +310,9 @@
     <ClInclude Include="source\include\UI\ParticleSystemAuthoringUI.h">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\UI\GrainMeshLibraryUI.h">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\UI\ParticleAppearanceUI.h">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClInclude>
@@ -422,6 +455,9 @@
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Fluid\FluidParticleVisualRadius.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\GrainMeshNear.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Fluid\FluidRenderProxy.h">
@@ -1359,6 +1395,9 @@
     <ClCompile Include="source\src\Physics\Fluid\FluidParticleVisualRadius.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GrainMeshNear.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\FluidRenderProxy.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
@@ -1730,6 +1769,9 @@
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\UI\ParticleSystemAuthoringUI.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\GrainMeshLibraryUI.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\UI\ParticleAppearanceUI.cpp">

@@ -5971,6 +5971,12 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["fluid_particle_subdivisions"] = domain.fluid_particle_subdivisions;
         d["fluid_particle_geometry_mode"] = domain.fluid_particle_geometry_mode;
         d["fluid_particle_geometry_source"] = domain.fluid_particle_geometry_source;
+        d["fluid_grain_mesh_near_enabled"] = domain.fluid_grain_mesh_near_enabled;
+        d["fluid_grain_mesh_near_shape"] = domain.fluid_grain_mesh_near_shape;
+        d["fluid_grain_mesh_near_source_materials"] = domain.fluid_grain_mesh_near_source_materials;
+        d["fluid_grain_mesh_near_sources"] = domain.fluid_grain_mesh_near_sources;
+        d["fluid_grain_mesh_near_distance"] = domain.fluid_grain_mesh_near_distance;
+        d["fluid_grain_mesh_near_budget"] = domain.fluid_grain_mesh_near_budget;
         d["fluid_particle_emissive"] = domain.fluid_particle_emissive;
         d["fluid_particle_emission"] = domain.fluid_particle_emission;
         d["fluid_particle_material_id"] = domain.fluid_particle_material_id;
@@ -6592,6 +6598,14 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         domain.fluid_particle_subdivisions = item.value("fluid_particle_subdivisions", domain.fluid_particle_subdivisions);
         domain.fluid_particle_geometry_mode = item.value("fluid_particle_geometry_mode", domain.fluid_particle_geometry_mode);
         domain.fluid_particle_geometry_source = item.value("fluid_particle_geometry_source", domain.fluid_particle_geometry_source);
+        domain.fluid_grain_mesh_near_enabled = item.value("fluid_grain_mesh_near_enabled", domain.fluid_grain_mesh_near_enabled);
+        domain.fluid_grain_mesh_near_shape = item.value("fluid_grain_mesh_near_shape", "scene");
+        domain.fluid_grain_mesh_near_source_materials =
+            item.value("fluid_grain_mesh_near_source_materials", false);
+        if (item.contains("fluid_grain_mesh_near_sources") && item["fluid_grain_mesh_near_sources"].is_array())
+            domain.fluid_grain_mesh_near_sources = item["fluid_grain_mesh_near_sources"].get<std::vector<std::string>>();
+        domain.fluid_grain_mesh_near_distance = item.value("fluid_grain_mesh_near_distance", domain.fluid_grain_mesh_near_distance);
+        domain.fluid_grain_mesh_near_budget = item.value("fluid_grain_mesh_near_budget", domain.fluid_grain_mesh_near_budget);
         domain.fluid_particle_emissive = item.value("fluid_particle_emissive", domain.fluid_particle_emissive);
         domain.fluid_particle_emission = item.value("fluid_particle_emission", domain.fluid_particle_emission);
         domain.fluid_particle_material_id = item.value("fluid_particle_material_id", domain.fluid_particle_material_id);

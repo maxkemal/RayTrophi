@@ -22,6 +22,7 @@
 #include "Fluid/FluidDomainSubstance.h"
 #include "Fluid/FluidSplatMaterialAuthoring.h"
 #include "Fluid/FluidRenderProxy.h"
+#include "Fluid/GrainMeshNear.h"
 #include "ParticleSimulation.h"
 #include "Fluid/MatterPhaseGrid.h"
 #include "MaterialStateField.h"
@@ -302,6 +303,29 @@ void fillFluidSurfaceMaterial(const RayTrophiSim::SimulationGridDomainDesc& d,
         : d.fluid_particle_geometry_mode == 2 ? "icosphere_mesh" : "icosphere";
     info.splat_geometry_source = d.fluid_particle_geometry_source;
     info.splat_subdivisions = std::clamp(d.fluid_particle_subdivisions, 0, 3);
+    info.grain_mesh_near_enabled = d.fluid_grain_mesh_near_enabled;
+    info.grain_mesh_near_source_materials = d.fluid_grain_mesh_near_source_materials;
+    info.grain_mesh_near_shape = d.fluid_grain_mesh_near_shape;
+    info.grain_mesh_near_sources = d.fluid_grain_mesh_near_sources;
+    info.grain_mesh_near_distance = d.fluid_grain_mesh_near_distance;
+    info.grain_mesh_near_budget = d.fluid_grain_mesh_near_budget;
+    // The split itself is the render bridge's measurement, not a setting:
+    // read what it published, never re-derive it here.
+    RayTrophiSim::Fluid::GrainMeshNearStats split;
+    if (RayTrophiSim::Fluid::readGrainMeshNearStats(d.name, split)) {
+        info.grain_mesh_near_status = split.status;
+        info.grain_mesh_near_exemplars = split.exemplars;
+        info.grain_mesh_near_exemplars_without_volume = split.exemplars_without_volume;
+        info.grain_mesh_near_exemplar_triangles = split.exemplar_triangles;
+        info.grain_mesh_near_mean_volume_scale = split.mean_volume_scale;
+        info.grain_mesh_near_mesh_sources = split.mesh_sources;
+        info.grain_mesh_near_instances = split.near_instances;
+        info.grain_mesh_near_over_budget = split.near_over_budget;
+        info.grain_mesh_near_sphere_instances = split.sphere_instances;
+        info.grain_mesh_near_mesh_slots = split.mesh_slots;
+    } else if (d.fluid_grain_mesh_near_enabled) {
+        info.grain_mesh_near_status = "not yet split (no render pass since the change)";
+    }
     // Same clamp the bridge applies; 20 * 4^level icosahedron faces.
     // 'icosphere' is the procedural sphere cloud on RT (no triangles);
     // 'icosphere_mesh' is the triangle icosphere.
@@ -840,6 +864,19 @@ Result setFluidSplatGeometry(const std::string& domain_id_or_name,
         !g_ctx->scene.hasLiveSimulationObject(*patch.geometry_source))
         return Result::fail("geometry_source is not a live scene object: " +
                             *patch.geometry_source);
+    if (patch.near_mesh_shape &&
+        !RayTrophiSim::Fluid::isGrainMeshLibraryShape(*patch.near_mesh_shape)) {
+        return Result::fail("near_mesh_shape must be scene, rock or voronoi");
+    }
+    if (patch.near_mesh_distance &&
+        !(std::isfinite(*patch.near_mesh_distance) && *patch.near_mesh_distance > 0.0f))
+        return Result::fail("near_mesh_distance must be a finite distance > 0 m");
+    if (patch.near_mesh_sources) {
+        for (const auto& node : *patch.near_mesh_sources) {
+            if (!g_ctx->scene.hasLiveSimulationObject(node))
+                return Result::fail("near_mesh_sources: not a live scene object: " + node);
+        }
+    }
 
     Result found;
     auto* dom = findLiquidDomainDesc(domain_id_or_name, found);
@@ -870,12 +907,21 @@ Result setFluidSplatGeometry(const std::string& domain_id_or_name,
     if (patch.virtual_grain_budget) {
         dom->fluid_particle_visual_budget = *patch.virtual_grain_budget;
     }
+    if (patch.near_mesh_enabled) dom->fluid_grain_mesh_near_enabled = *patch.near_mesh_enabled;
+    if (patch.near_mesh_shape) dom->fluid_grain_mesh_near_shape = *patch.near_mesh_shape;
+    if (patch.near_mesh_source_materials) {
+        dom->fluid_grain_mesh_near_source_materials = *patch.near_mesh_source_materials;
+    }
+    if (patch.near_mesh_sources) dom->fluid_grain_mesh_near_sources = *patch.near_mesh_sources;
+    if (patch.near_mesh_distance) dom->fluid_grain_mesh_near_distance = *patch.near_mesh_distance;
+    if (patch.near_mesh_budget) dom->fluid_grain_mesh_near_budget = *patch.near_mesh_budget;
 
     // Same commit as the panel: the bridge rebuilds its source on the next
     // update from the current particles; no simulation reset.
     g_ctx->scene.requestSimulationTimelineRenderResync();
     g_ctx->renderer.resetCPUAccumulation();
     if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
+    ProjectManager::getInstance().markModified();
     g_ctx->start_render = true;
     return Result::success();
 }
@@ -3172,10 +3218,9 @@ void finalizeFluidRenderProxyStats(
                       : 0u),
               info.virtual_grain_budget))
         : 1;
-    info.primary_visual_children = refines_primary &&
-        !(d.fluid_params.granular_enabled &&
-          d.fluid_granular_physical_carriers)
-        ? info.virtual_grains_effective
+    info.primary_visual_children = refines_primary
+        ? std::min(info.virtual_grains_effective, static_cast<int>(
+              RayTrophiSim::Fluid::primarySplatVisualChildren(d)))
         : 1;
     info.whitewater_visual_children = refines_whitewater
         ? info.virtual_grains_effective

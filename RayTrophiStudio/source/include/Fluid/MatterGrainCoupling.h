@@ -14,6 +14,7 @@ namespace RayTrophiSim {
 struct SubstanceProfile;
 }
 namespace RayTrophiSim::Fluid {
+struct MatterGrainParams;
 class FluidParticles;
 struct APICSolverParams;
 
@@ -76,7 +77,8 @@ struct MatterGrainCouplingFrame {
 // transport-owner subsets of one domain.
 bool buildMatterGrainLiquidField(const FluidParticles& liquid, const FluidParticles& grains,
     float grain_radius, const SubstanceProfile* domain_substance, const Vec3& origin,
-    int nx, int ny, int nz, float h, MatterGrainLiquidField& field, std::string& error);
+    int nx, int ny, int nz, float h, MatterGrainLiquidField& field, std::string& error,
+    const MatterGrainParams* size_policy = nullptr);
 
 // Per-grain drag coefficient (Di Felice 1994 with voidage), Archimedes
 // buoyancy and the liquid lump. Fills `report` coupling counters.
@@ -115,7 +117,8 @@ struct MatterGrainPorosityBackup {
 // below `minimum_voidage`. Fills report.porous_cells/max_solid_fraction.
 void applyMatterGrainPorosity(FluidSim::FluidGrid& grid, const FluidParticles& grains,
     float grain_radius, bool keep_collider_weights, float minimum_voidage,
-    MatterGrainPorosityBackup& backup, MatterGrainStepReport& report);
+    MatterGrainPorosityBackup& backup, MatterGrainStepReport& report,
+    const MatterGrainParams* size_policy = nullptr);
 // Restores exactly what applyMatterGrainPorosity replaced.
 void restoreMatterGrainPorosity(FluidSim::FluidGrid& grid, MatterGrainPorosityBackup& backup);
 
@@ -133,7 +136,8 @@ void restoreMatterGrainPorosity(FluidSim::FluidGrid& grid, MatterGrainPorosityBa
 bool applyMatterGrainLiquidAccelerationForce(const FluidParticles& liquid,
     const std::vector<Vec3>& start_velocity, const std::vector<uint64_t>& start_id,
     const FluidParticles& grains, float grain_radius, const Vec3& gravity, float dt,
-    MatterGrainCouplingFrame& frame, MatterGrainStepReport& report, std::string& error);
+    MatterGrainCouplingFrame& frame, MatterGrainStepReport& report, std::string& error,
+    const MatterGrainParams* size_policy = nullptr);
 
 // B6 wet grains, after the drag reaction (so the reaction's cell masses are
 // the ones it was computed with). Absorption moves water from the liquid

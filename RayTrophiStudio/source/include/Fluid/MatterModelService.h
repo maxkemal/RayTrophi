@@ -17,6 +17,9 @@ bool inspectMatterModels(const SimulationGridDomainDesc& domain,
 void drawMatterModelSummary(const SimulationGridDomainDesc& domain,
                            const SimulationGridDomainState* state);
 
+// Uses the existing domain-substance service; no separate seed material authority.
+bool drawMatterSeedSubstanceControls(const SimulationGridDomainDesc& domain);
+
 void drawMatterOutputControls(const SimulationGridDomainDesc& domain);
 
 void drawMatterPoolControls(const SimulationGridDomainDesc& domain,

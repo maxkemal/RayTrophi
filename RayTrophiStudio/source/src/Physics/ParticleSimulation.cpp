@@ -6502,10 +6502,16 @@ void ParticleSimulationSystem::resetGridDomainStates() {
     for (auto& buffers : grid_domain_compute_buffers_) {
         buffers.gpu_resident_fields_valid = false;
         buffers.invalidateDeviceCopies();
+        if (buffers.matter_runtime) {
+            Fluid::invalidateMatterGrainAfterReset(buffers.matter_runtime->grain);
+        }
     }
     for (auto& buffers : matter_liquid_compute_buffers_) {
         buffers.gpu_resident_fields_valid = false;
         buffers.invalidateDeviceCopies();
+        if (buffers.matter_runtime) {
+            Fluid::invalidateMatterGrainAfterReset(buffers.matter_runtime->grain);
+        }
     }
 }
 

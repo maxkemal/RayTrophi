@@ -1,3 +1,4 @@
+#include "UI/GrainGeneratorUI.h"
 /*
 * =========================================================================
 * Project:       RayTrophi Studio
@@ -1484,14 +1485,22 @@ void SceneUI::fractureRefreshScene_(UIContext& ctx) {
     g_needs_optix_sync.store(true, std::memory_order_release);
 }
 
-// Erase every Triangle in the scene whose node name is in `nodes`.
+// Erase every scene object (flat mesh, or a facade from an older cut) whose node
+// name is in `nodes`.
 static void fractureEraseNodes_(UIContext& ctx, const std::unordered_set<std::string>& nodes) {
     auto& objs = ctx.scene.world.objects;
     objs.erase(std::remove_if(objs.begin(), objs.end(),
         [&](const std::shared_ptr<Hittable>& o) {
+            if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(o))
+                return nodes.count(mesh->nodeName) > 0;
             auto tri = std::dynamic_pointer_cast<Triangle>(o);
             return tri && nodes.count(tri->getNodeName()) > 0;
         }), objs.end());
+
+    // ★ The body render caches hold a NON-OWNING TriangleMesh* for flat bodies.
+    // A re-fracture reuses the same shard names, so a cache that outlived its
+    // mesh would bake the next cut's poses through a dangling pointer.
+    for (const auto& name : nodes) ctx.scene.forgetBodyMeshCaches(name);
 
     // ★★ AND THE RIGID BODIES THAT POINTED AT THEM.
     //
@@ -1676,16 +1685,44 @@ void SceneUI::fractureSelectedMesh(UIContext& ctx, const std::string& node,
         return interior_mat;
     };
 
+    // ★ One flat TriangleMesh per shard (P/N/P_orig/N_orig/uv/materialID +
+    // indices), never per-face Triangle facades. Facades cost an object, a
+    // transform lookup and a BVH leaf per face, and every consumer that only
+    // reads flat geometry (grain-mesh exemplars, the SoA rigid bake) saw a
+    // facade shard as "no geometry" without saying so.
+    //
+    // Unwelded triples (indices[i] == i): faces are flat-shaded and the cut
+    // faces carry a different material, so corners would not share anyway.
+    // Identity transform, so local == world rest — the rigid bake and the
+    // project sidecar both read P_orig through that transform.
     int idx = 0;
     for (const auto& shard : shards) {
         const std::string sname = node + "__shard_" + std::to_string(idx++);
-        auto xf = std::make_shared<Transform>();
-        xf->setBase(Matrix4x4::identity());
+        auto mesh = std::make_shared<TriangleMesh>();
+        mesh->nodeName = sname;
+        mesh->transform = std::make_shared<Transform>();
+        mesh->transform->setBase(Matrix4x4::identity());
+        DNA::GeometryDetail* g = mesh->geometry.get();
+        g->add_attribute<Vec3>("P");
+        g->add_attribute<Vec3>("N");
+        g->add_attribute<Vec3>("P_orig");
+        g->add_attribute<Vec3>("N_orig");
+        g->add_attribute<Vec2>("uv");
+        g->add_attribute<uint16_t>("materialID");
+        const std::size_t vertex_count = shard.tris.size() * 3u;
+        g->resize_vertices(vertex_count);
+        Vec3* P  = g->get_attribute_data_mut<Vec3>("P");
+        Vec3* N  = g->get_attribute_data_mut<Vec3>("N");
+        Vec3* Po = g->get_attribute_data_mut<Vec3>("P_orig");
+        Vec3* No = g->get_attribute_data_mut<Vec3>("N_orig");
+        Vec2* UV = g->get_attribute_data_mut<Vec2>("uv");
+        uint16_t* M = g->get_attribute_data_mut<uint16_t>("materialID");
+        auto& indices = g->indices;
+        indices.resize(vertex_count);
+
         const Vec3 cz = shard.centroid;
+        std::size_t v = 0;
         for (const auto& st : shard.tris) {
-            const Vec3 a = cz + (st.a - cz) * shrink;
-            const Vec3 b = cz + (st.b - cz) * shrink;
-            const Vec3 c = cz + (st.c - cz) * shrink;
             // Exterior faces carry the surface they were cut from: the source
             // UVs, interpolated across the cut, and that triangle's own material
             // (a multi-material asset does not collapse onto one slot). The
@@ -1699,19 +1736,28 @@ void SceneUI::fractureSelectedMesh(UIContext& ctx, const std::string& node,
             const bool has_uv = fp.exact_surface && !st.interior;
             const uint16_t mat = st.interior ? interiorMaterial()
                                : (has_uv ? st.material : src_mat);
-            auto tri = has_uv
-                ? std::make_shared<Triangle>(a, b, c, st.n, st.n, st.n,
-                                             st.ua, st.ub, st.uc, mat)
-                : std::make_shared<Triangle>(a, b, c, st.n, st.n, st.n,
-                                             Vec2(0, 0), Vec2(1, 0), Vec2(0, 1), mat);
-            tri->setTransformHandle(xf);
-            tri->setNodeName(sname);
-            tri->update_bounding_box();
-            ctx.scene.world.objects.push_back(tri);
+            const Vec3 corner[3] = { st.a, st.b, st.c };
+            const Vec2 corner_uv[3] = {
+                has_uv ? st.ua : Vec2(0, 0),
+                has_uv ? st.ub : Vec2(1, 0),
+                has_uv ? st.uc : Vec2(0, 1) };
+            for (int c = 0; c < 3; ++c, ++v) {
+                const Vec3 p = cz + (corner[c] - cz) * shrink;
+                P[v] = Po[v] = p;
+                N[v] = No[v] = st.n;
+                UV[v] = corner_uv[c];
+                M[v] = mat;
+                indices[v] = static_cast<uint32_t>(v);
+            }
         }
+        mesh->build_local_bvh();
+        ctx.scene.world.objects.push_back(mesh);
         shard_nodes.push_back(sname);
         shard_clusters.push_back(shard.cluster);
     }
+    // Shards were appended past any foliage/scatter instance tail; every
+    // selection/picking scan assumes instances are a contiguous suffix.
+    reorderInstanceTail(ctx.scene.world.objects);
 
     int cluster_total = 0;
     for (int c : shard_clusters) cluster_total = (std::max)(cluster_total, c + 1);
@@ -1815,12 +1861,11 @@ void SceneUI::replayFractureRecipes(UIContext& ctx) {
 
     // Every node name currently in the scene, gathered once.
     //
-    // ★★ BOTH REPRESENTATIONS. A scene object is either a flat TriangleMesh
-    // (SoA) or a Triangle facade, and which one you get depends on where the
-    // geometry came from — the project's binary sidecar restores flat meshes,
-    // while a fresh cut emits facades. Scanning only for facades made every
-    // restored shard invisible to this pass, so a fracture that HAD come back
-    // whole was reported as gone. Same enumeration as rtapi::listObjects.
+    // ★★ BOTH REPRESENTATIONS. Shards are flat TriangleMeshes (cut and
+    // restored alike), but the SOURCE node checked below may still be a legacy
+    // Triangle facade. Scanning only for facades once made every restored shard
+    // invisible to this pass, so a fracture that HAD come back whole was
+    // reported as gone. Same enumeration as rtapi::listObjects.
     std::unordered_set<std::string> present;
     for (const auto& object : ctx.scene.world.objects) {
         if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(object)) {
@@ -2302,8 +2347,14 @@ void SceneUI::drawProceduralGeneratorWindow(UIContext& ctx) {
         return;
     }
     
-    const char* types[] = { "Rock / Stone", "Brick Wall", "Torus", "Staircase" };
+    const char* types[] = { "Rock / Stone", "Brick Wall", "Torus", "Staircase",
+        "Grains / Crystals" };
     ImGui::Combo("Type", &procedural_generator_type, types, IM_ARRAYSIZE(types));
+    if (procedural_generator_type == 4) {
+        GrainGeneratorUI::drawPanel(ctx);
+        ImGui::End();
+        return;
+    }
     ImGui::Separator();
     
     auto& mats = MaterialManager::getInstance().getAllMaterials();

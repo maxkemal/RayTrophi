@@ -42,6 +42,7 @@
 #include "RtIpcAudit.h"
 #include "RtIpcTransport.h"
 #include "RtIpcFracture.h"
+#include "RtIpcGrainGenerator.h"
 #include "RtIpcParticle.h"
 #include "RtIpcKinematicCollider.h"
 #include "RtIpcSecurity.h"
@@ -647,6 +648,7 @@ json nodeParamToJson(const rtapi::NodeParamValue& v) {
         case K::Vector3: return json::array({v.floats[0], v.floats[1], v.floats[2]});
         case K::Vector4: return json::array({v.floats[0], v.floats[1], v.floats[2], v.floats[3]});
         case K::String:  return json(v.string_value);
+        case K::Rows:    return json(v.rows);
         case K::None:    default: return json(nullptr);
     }
 }
@@ -662,6 +664,18 @@ rtapi::NodeParamValue nodeParamFromJson(const json& value) {
         out.kind = K::Float; out.floats[0] = value.get<float>();
     } else if (value.is_string()) {
         out.kind = K::String; out.string_value = value.get<std::string>();
+    } else if (value.is_array() && !value.empty() && value[0].is_array()) {
+        // [[pos, r, g, b], ...]: a list property (nodes.set_property only).
+        out.kind = K::Rows;
+        for (const auto& row : value) {
+            if (!row.is_array()) throw std::runtime_error("every row of a list value must be an array");
+            std::vector<float> r;
+            for (const auto& x : row) {
+                if (!x.is_number()) throw std::runtime_error("list rows must hold numbers");
+                r.push_back(x.get<float>());
+            }
+            out.rows.push_back(std::move(r));
+        }
     } else if (value.is_array()) {
         if (value.size() < 2 || value.size() > 4)
             throw std::runtime_error("vector parameter must have 2, 3 or 4 components");
@@ -701,6 +715,26 @@ static json autosaveStatusJson(const rtapi::AutosaveStatus& st, const rtapi::Res
 
 // One domain as fluid.list_domains reports it; fluid.run samples the same
 // object between its steps, so both read identically.
+json grainMeshNearJson(const rtapi::FluidDomainInfo& info) {
+    return json{
+        {"enabled", info.grain_mesh_near_enabled},
+        {"source_materials", info.grain_mesh_near_source_materials},
+        {"shape", info.grain_mesh_near_shape},
+        {"sources", info.grain_mesh_near_sources},
+        {"distance", info.grain_mesh_near_distance},
+        {"budget", info.grain_mesh_near_budget},
+        {"status", info.grain_mesh_near_status},
+        {"exemplars", info.grain_mesh_near_exemplars},
+        {"exemplars_without_volume", info.grain_mesh_near_exemplars_without_volume},
+        {"exemplar_triangles", info.grain_mesh_near_exemplar_triangles},
+        {"mean_volume_scale", info.grain_mesh_near_mean_volume_scale},
+        {"mesh_sources", info.grain_mesh_near_mesh_sources},
+        {"near_instances", info.grain_mesh_near_instances},
+        {"near_over_budget", info.grain_mesh_near_over_budget},
+        {"sphere_instances", info.grain_mesh_near_sphere_instances},
+        {"mesh_slots", info.grain_mesh_near_mesh_slots}};
+}
+
 json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
     return json{
             {"id", info.id}, {"name", info.name}, {"type", info.type},
@@ -919,6 +953,7 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
             {"virtual_grain_rt_estimated_bytes",
              info.virtual_grain_rt_estimated_bytes},
             {"grain_size_variation", info.grain_size_variation},
+            {"grain_mesh_near", grainMeshNearJson(info)},
             {"fog_spread_voxels", info.fog_spread_voxels},
             {"fog_erosion_strength", info.fog_erosion_strength},
             {"fog_erosion_size", info.fog_erosion_size},
@@ -1887,6 +1922,12 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"estimated_peak_mb", est.estimated_peak_mb}
             };
         });
+    }
+    json grain_generator_result;
+    if (dispatchGrainGeneratorIpc(method, params,
+            [](RtIpcParticleQuery query) { return enqueueQuery(std::move(query)); },
+            grain_generator_result)) {
+        return grain_generator_result;
     }
     if (method == "scene.add_primitive") {
         std::string type = requireString(params, "type");
@@ -3340,6 +3381,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"virtual_grain_rt_estimated_bytes",
                          info.virtual_grain_rt_estimated_bytes},
                         {"grain_size_variation", info.grain_size_variation},
+                        {"grain_mesh_near", grainMeshNearJson(info)},
                         {"fog_spread_voxels", info.fog_spread_voxels},
                         {"fog_erosion_strength", info.fog_erosion_strength},
                         {"fog_erosion_size", info.fog_erosion_size},
@@ -5287,6 +5329,29 @@ json dispatchMethod(const std::string& method, const json& params) {
             return json{{"available", t.available}, {"backends", backends}};
         });
     }
+    if (method == "render.instance_stats") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::InstancePreparationInfo t = rtapi::instancePreparationStats();
+            json backends = json::array();
+            for (const auto& b : t.backends) {
+                backends.push_back(json{
+                    {"role", b.role},
+                    {"is_vulkan", b.is_vulkan},
+                    {"gpu_path_available", b.gpu_path_available},
+                    {"gpu_path_used_last_frame", b.gpu_path_used_last_frame},
+                    {"last_path", b.last_path},
+                    {"instance_count", b.instance_count},
+                    {"dirty_group_count", b.dirty_group_count},
+                    {"upload_bytes", b.upload_bytes},
+                    {"cpu_prepare_ms", b.cpu_prepare_ms},
+                    {"gpu_dispatches", b.gpu_dispatches},
+                    {"cpu_fallbacks", b.cpu_fallbacks},
+                    {"sphere_records", b.sphere_records},
+                    {"sphere_pool_capacity", b.sphere_pool_capacity}});
+            }
+            return json{{"available", t.available}, {"backends", backends}};
+        });
+    }
     if (method == "render.volume_slots") {
         return enqueueQuery([](UIContext&) {
             const rtapi::VolumeSlotsInfo t = rtapi::volumeSlots();
@@ -6907,6 +6972,19 @@ json dispatchMethod(const std::string& method, const json& params) {
         if (params.contains("virtual_grain_budget"))
             patch.virtual_grain_budget =
                 params.at("virtual_grain_budget").get<uint64_t>();
+        if (params.contains("near_mesh_enabled"))
+            patch.near_mesh_enabled = requireBool(params, "near_mesh_enabled");
+        if (params.contains("near_mesh_shape"))
+            patch.near_mesh_shape = params.at("near_mesh_shape").get<std::string>();
+        if (params.contains("near_mesh_source_materials"))
+            patch.near_mesh_source_materials = requireBool(params, "near_mesh_source_materials");
+        if (params.contains("near_mesh_sources"))
+            patch.near_mesh_sources =
+                params.at("near_mesh_sources").get<std::vector<std::string>>();
+        if (params.contains("near_mesh_distance"))
+            patch.near_mesh_distance = params.at("near_mesh_distance").get<float>();
+        if (params.contains("near_mesh_budget"))
+            patch.near_mesh_budget = params.at("near_mesh_budget").get<uint32_t>();
         return enqueueResult([domain, patch](UIContext&) {
             return rtapi::setFluidSplatGeometry(domain, patch);
         });

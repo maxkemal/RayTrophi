@@ -4944,6 +4944,37 @@ namespace MaterialNodesV2 {
                 if (s.node) return compileNode(s.node, s.outIndex);
                 return emitConst3(fx, fy, fz);
             };
+            // Inputs whose value lives ON THE PIN (no node property behind them):
+            // an unconnected pin edited in the panel or via nodes.set_param must
+            // compile to that value, exactly as compute() reads it through
+            // getInputValue. Baking the literal instead made the program (CPU
+            // per-pixel + Vulkan RT) shade Mix Color's two colours as 0.5 grey
+            // while the folded material showed the authored ones. The literal
+            // stays the fallback for a pin that never got a value.
+            auto inPin = [&](int idx, float fx, float fy, float fz) -> int {
+                SrcRef s = sourceOf(n->inputs[idx].id);
+                if (s.node) return compileNode(s.node, s.outIndex);
+                const NodeSystem::Pin& pin = n->inputs[idx];
+                if (pin.hasDefaultValue()) {
+                    const NodeSystem::PinValue& v = pin.defaultValue;
+                    const bool scalarPin = pin.dataType == NodeSystem::DataType::Float;
+                    if (const auto* f = std::get_if<float>(&v)) return emitConst3(*f, *f, *f);
+                    if (const auto* i = std::get_if<int>(&v)) {
+                        const float x = static_cast<float>(*i);
+                        return emitConst3(x, x, x);
+                    }
+                    if (const auto* v3 = std::get_if<std::array<float, 3>>(&v)) {
+                        if (scalarPin) {   // getFloatIn averages a colour on a float pin
+                            const float m = ((*v3)[0] + (*v3)[1] + (*v3)[2]) / 3.0f;
+                            return emitConst3(m, m, m);
+                        }
+                        return emitConst3((*v3)[0], (*v3)[1], (*v3)[2]);
+                    }
+                    if (const auto* v2 = std::get_if<std::array<float, 2>>(&v))
+                        return emitConst3((*v2)[0], (*v2)[1], 0.0f);
+                }
+                return emitConst3(fx, fy, fz);
+            };
             auto inUV = [&](int idx) -> int {
                 SrcRef s = sourceOf(n->inputs[idx].id);
                 return s.node ? compileNode(s.node, s.outIndex) : emitUV();
@@ -5110,8 +5141,8 @@ namespace MaterialNodesV2 {
                 }
                 case NodeType::VectorMath: {
                     auto* vm = static_cast<VectorMathNode*>(n);
-                    const int a = inOr(0, 0.0f, 0.0f, 0.0f);
-                    const int b = inOr(1, 0.0f, 0.0f, 0.0f);
+                    const int a = inPin(0, 0.0f, 0.0f, 0.0f);
+                    const int b = inPin(1, 0.0f, 0.0f, 0.0f);
                     int off = -1;
                     if (vm->op == 10) {   // Scale is the only op with a constant operand
                         off = static_cast<int>(prog.constPool.size());
@@ -5130,11 +5161,11 @@ namespace MaterialNodesV2 {
                     break;
                 }
                 case NodeType::HueSaturation: {
-                    const int hue = inOr(0, 0.5f, 0.5f, 0.5f);
-                    const int sat = inOr(1, 1.0f, 1.0f, 1.0f);
-                    const int val = inOr(2, 1.0f, 1.0f, 1.0f);
-                    const int fac = inOr(3, 1.0f, 1.0f, 1.0f);
-                    const int col = inOr(4, 0.8f, 0.8f, 0.8f);
+                    const int hue = inPin(0, 0.5f, 0.5f, 0.5f);
+                    const int sat = inPin(1, 1.0f, 1.0f, 1.0f);
+                    const int val = inPin(2, 1.0f, 1.0f, 1.0f);
+                    const int fac = inPin(3, 1.0f, 1.0f, 1.0f);
+                    const int col = inPin(4, 0.8f, 0.8f, 0.8f);
                     // The op wants (h,s,v) in ONE register: build it from the three scalars with
                     // the existing Combine op rather than growing the instruction to four inputs.
                     const int hsv = nextReg++;
@@ -5159,8 +5190,8 @@ namespace MaterialNodesV2 {
                     // the VM already has. The curves are baked to uniform LUTs here, so the VM
                     // never learns about splines and the backends cannot interpolate differently.
                     auto* rc = static_cast<RGBCurvesNode*>(n);
-                    const int fac = inOr(0, 1.0f, 1.0f, 1.0f);
-                    const int col = inOr(1, 0.8f, 0.8f, 0.8f);
+                    const int fac = inPin(0, 1.0f, 1.0f, 1.0f);
+                    const int col = inPin(1, 0.8f, 0.8f, 0.8f);
 
                     auto emitLut = [&](const RGBCurvesNode::Curve& cv, int srcReg) -> int {
                         const int off = static_cast<int>(prog.constPool.size());
@@ -5317,7 +5348,7 @@ namespace MaterialNodesV2 {
                     if (outIndex == 1) {          // AO (fac)
                         resultReg = aoReg;
                     } else {                      // Color = input color * AO — no new opcode
-                        const int colReg = inOr(0, 1.0f, 1.0f, 1.0f);
+                        const int colReg = inPin(0, 1.0f, 1.0f, 1.0f);
                         resultReg = emitMath(colReg, aoReg, static_cast<int>(MathNode::Op::Multiply));
                     }
                     break;
@@ -5389,7 +5420,7 @@ namespace MaterialNodesV2 {
                 }
                 case NodeType::ColorRamp: {
                     auto* rp = static_cast<ColorRampNode*>(n);
-                    const int facReg = inOr(0, 0.5f, 0.5f, 0.5f);
+                    const int facReg = inPin(0, 0.5f, 0.5f, 0.5f);
                     std::vector<ColorRampNode::Stop> sorted = rp->stops;
                     std::sort(sorted.begin(), sorted.end(),
                               [](const ColorRampNode::Stop& a, const ColorRampNode::Stop& b) { return a.pos < b.pos; });
@@ -5407,9 +5438,9 @@ namespace MaterialNodesV2 {
                 }
                 case NodeType::MixColor: {
                     auto* mx = static_cast<MixColorNode*>(n);
-                    const int fac = inOr(0, 0.5f, 0.5f, 0.5f);
-                    const int a = inOr(1, 0.5f, 0.5f, 0.5f);
-                    const int b = inOr(2, 0.5f, 0.5f, 0.5f);
+                    const int fac = inPin(0, 0.5f, 0.5f, 0.5f);
+                    const int a = inPin(1, 0.5f, 0.5f, 0.5f);
+                    const int b = inPin(2, 0.5f, 0.5f, 0.5f);
                     resultReg = nextReg++;
                     MatInstr in; in.op = static_cast<uint16_t>(MatOp::MixColor);
                     in.outReg = static_cast<int16_t>(resultReg);
@@ -5419,8 +5450,8 @@ namespace MaterialNodesV2 {
                     break;
                 }
                 case NodeType::Invert: {
-                    const int fac = inOr(0, 1.0f, 1.0f, 1.0f);
-                    const int col = inOr(1, 0.5f, 0.5f, 0.5f);
+                    const int fac = inPin(0, 1.0f, 1.0f, 1.0f);
+                    const int col = inPin(1, 0.5f, 0.5f, 0.5f);
                     resultReg = nextReg++;
                     MatInstr in; in.op = static_cast<uint16_t>(MatOp::Invert);
                     in.outReg = static_cast<int16_t>(resultReg);
@@ -5430,7 +5461,7 @@ namespace MaterialNodesV2 {
                 }
                 case NodeType::Gamma: {
                     auto* gm = static_cast<GammaNode*>(n);
-                    const int col = inOr(0, 0.5f, 0.5f, 0.5f);
+                    const int col = inPin(0, 0.5f, 0.5f, 0.5f);
                     const int off = static_cast<int>(prog.constPool.size());
                     prog.constPool.push_back(gm->gamma);
                     resultReg = nextReg++;
@@ -5453,7 +5484,7 @@ namespace MaterialNodesV2 {
                 case NodeType::Clamp: {
                     // clamp(v, lo, hi) = min(max(v, lo), hi). Uses Min=7, Max=8.
                     auto* cn = static_cast<ClampNode*>(n);
-                    const int v  = inOr(0, 0.0f, 0.0f, 0.0f);
+                    const int v  = inPin(0, 0.0f, 0.0f, 0.0f);
                     const int lo = inOr(1, cn->minVal, cn->minVal, cn->minVal);
                     const int hi = inOr(2, cn->maxVal, cn->maxVal, cn->maxVal);
                     const int t  = emitMath(v, lo, 8);   // max(v, lo)
@@ -5472,7 +5503,7 @@ namespace MaterialNodesV2 {
                     //     the node's own preview drew all of them.
                     // O(1) at runtime — cheaper than the O(n) stop search it replaces.
                     auto* fc = static_cast<FloatCurveNode*>(n);
-                    const int facReg = inOr(0, 0.5f, 0.5f, 0.5f);
+                    const int facReg = inPin(0, 0.5f, 0.5f, 0.5f);
 
                     std::vector<FloatCurveNode::Point> sorted = fc->points;
                     std::sort(sorted.begin(), sorted.end(),
@@ -5496,7 +5527,7 @@ namespace MaterialNodesV2 {
                 case NodeType::MapRange: {
                     // tl + clamp01?(v-fl)/(fh-fl) * (th-tl). Ops: Sub=1,Mul=2,Div=3,Add=0.
                     auto* mr = static_cast<MapRangeNode*>(n);
-                    const int v  = inOr(0, 0.0f, 0.0f, 0.0f);
+                    const int v  = inPin(0, 0.0f, 0.0f, 0.0f);
                     const int fl = inOr(1, mr->fromMin, mr->fromMin, mr->fromMin);
                     const int fh = inOr(2, mr->fromMax, mr->fromMax, mr->fromMax);
                     const int tl = inOr(3, mr->toMin,   mr->toMin,   mr->toMin);
@@ -5521,7 +5552,7 @@ namespace MaterialNodesV2 {
                     // out = a*color + b (a=1+contrast, b=bright-contrast*0.5).
                     // fac=1 MixColor: Multiply then Add. Params are compile-time consts.
                     auto* bc = static_cast<BrightContrastNode*>(n);
-                    const int col = inOr(0, 0.0f, 0.0f, 0.0f);
+                    const int col = inPin(0, 0.0f, 0.0f, 0.0f);
                     const float a = 1.0f + bc->contrast;
                     const float b = bc->brightness - bc->contrast * 0.5f;
                     const int one  = emitConst3(1.0f, 1.0f, 1.0f);
@@ -5567,7 +5598,7 @@ namespace MaterialNodesV2 {
                     break;
                 }
                 case NodeType::SeparateColor: {
-                    const int col = inOr(0, 0.0f, 0.0f, 0.0f);
+                    const int col = inPin(0, 0.0f, 0.0f, 0.0f);
                     resultReg = nextReg++;
                     MatInstr in; in.op = static_cast<uint16_t>(MatOp::Swizzle);
                     in.outReg = static_cast<int16_t>(resultReg); in.inReg[0] = static_cast<int16_t>(col);
@@ -5576,9 +5607,9 @@ namespace MaterialNodesV2 {
                     break;
                 }
                 case NodeType::CombineColor: {
-                    const int r = inOr(0, 0.0f, 0.0f, 0.0f);
-                    const int g = inOr(1, 0.0f, 0.0f, 0.0f);
-                    const int b = inOr(2, 0.0f, 0.0f, 0.0f);
+                    const int r = inPin(0, 0.0f, 0.0f, 0.0f);
+                    const int g = inPin(1, 0.0f, 0.0f, 0.0f);
+                    const int b = inPin(2, 0.0f, 0.0f, 0.0f);
                     resultReg = nextReg++;
                     MatInstr in; in.op = static_cast<uint16_t>(MatOp::Combine);
                     in.outReg = static_cast<int16_t>(resultReg);

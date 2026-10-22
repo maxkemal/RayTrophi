@@ -131,7 +131,8 @@ double matterGrainDragCoefficient(double diameter, double relative_speed, double
 
 bool buildMatterGrainLiquidField(const FluidParticles& liquid, const FluidParticles& grains,
     float grain_radius, const SubstanceProfile* domain_substance, const Vec3& origin,
-    int nx, int ny, int nz, float h, MatterGrainLiquidField& f, std::string& error) {
+    int nx, int ny, int nz, float h, MatterGrainLiquidField& f, std::string& error,
+    const MatterGrainParams* size_policy) {
     if (nx <= 0 || ny <= 0 || nz <= 0 || !(h > 0.0f) || !finite(origin)) {
         error = "grain liquid coupling needs a valid domain grid";
         return false;
@@ -214,8 +215,10 @@ bool buildMatterGrainLiquidField(const FluidParticles& liquid, const FluidPartic
         f.momentum[1][c] += mass * liquid.velocity[p].y;
         f.momentum[2][c] += mass * liquid.velocity[p].z;
     }
-    const double sphere = 4.0 / 3.0 * kPi * double(grain_radius) * grain_radius * grain_radius;
-    for (const auto& x : grains.position) {
+    for (std::size_t g = 0; g < grains.size(); ++g) {
+        const double radius = size_policy ? matterGrainRadius(*size_policy, grains, g) : grain_radius;
+        const double sphere = 4.0 / 3.0 * kPi * radius * radius * radius;
+        const auto& x = grains.position[g];
         int c[8];
         double w[8];
         neighbours(f, x, c, w);
@@ -248,10 +251,10 @@ void prepareMatterGrainCoupling(const FluidParticles& grains, const MatterGrainP
     if (!params.fluid_coupling) {
         return;
     }
-    const double r = params.radius_m;
-    const double sphere = 4.0 / 3.0 * kPi * r * r * r;
     const double cell_volume = double(f.h) * f.h * f.h;
     for (std::size_t g = 0; g < count; ++g) {
+        const double r = matterGrainRadius(params, grains, g);
+        const double sphere = 4.0 / 3.0 * kPi * r * r * r;
         int c[8];
         double w[8];
         neighbours(f, grains.position[g], c, w);
@@ -396,7 +399,8 @@ void applyMatterGrainLiquidReaction(FluidParticles& liquid, const MatterGrainCou
 
 void applyMatterGrainPorosity(FluidSim::FluidGrid& grid, const FluidParticles& grains,
     float grain_radius, bool keep_collider_weights, float minimum_voidage,
-    MatterGrainPorosityBackup& backup, MatterGrainStepReport& report) {
+    MatterGrainPorosityBackup& backup, MatterGrainStepReport& report,
+    const MatterGrainParams* size_policy) {
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
     const float h = grid.voxel_size;
     report.porous_cells = 0;
@@ -426,8 +430,9 @@ void applyMatterGrainPorosity(FluidSim::FluidGrid& grid, const FluidParticles& g
     auto& solid = use.s.data[0];
     std::vector<double>* momentum = &use.s.data[1];
     auto& fraction = use.s.data[4];
-    const double sphere = 4.0 / 3.0 * kPi * double(grain_radius) * grain_radius * grain_radius;
     for (std::size_t g = 0; g < grains.size(); ++g) {
+        const double r = size_policy ? matterGrainRadius(*size_policy, grains, g) : grain_radius;
+        const double sphere = 4.0 / 3.0 * kPi * r * r * r;
         int c[8];
         double w[8];
         neighbours(f, grains.position[g], c, w);
@@ -560,7 +565,8 @@ void restoreMatterGrainPorosity(FluidSim::FluidGrid& grid, MatterGrainPorosityBa
 bool applyMatterGrainLiquidAccelerationForce(const FluidParticles& liquid,
     const std::vector<Vec3>& start_velocity, const std::vector<uint64_t>& start_id,
     const FluidParticles& grains, float grain_radius, const Vec3& gravity, float dt,
-    MatterGrainCouplingFrame& frame, MatterGrainStepReport& report, std::string& error) {
+    MatterGrainCouplingFrame& frame, MatterGrainStepReport& report, std::string& error,
+    const MatterGrainParams* size_policy) {
     const auto& f = frame.field;
     const std::size_t cells = f.mass.size();
     report.pressure_impulse = Vec3(0.0f, 0.0f, 0.0f);
@@ -597,8 +603,9 @@ bool applyMatterGrainLiquidAccelerationForce(const FluidParticles& liquid,
     }
     report.pressure_force = true;
     report.buoyancy_impulse = Vec3(0.0f, 0.0f, 0.0f);
-    const double sphere = 4.0 / 3.0 * kPi * double(grain_radius) * grain_radius * grain_radius;
     for (std::size_t g = 0; g < grains.size(); ++g) {
+        const double r = size_policy ? matterGrainRadius(*size_policy, grains, g) : grain_radius;
+        const double sphere = 4.0 / 3.0 * kPi * r * r * r;
         auto& in = frame.inputs[g];
         frame.buoyancy_impulse[g] = Vec3(0.0f, 0.0f, 0.0f);
         in.buoyancy_acceleration = Vec3(0.0f, 0.0f, 0.0f);
@@ -647,7 +654,7 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
     const std::size_t cells = f.mass.size();
     const std::size_t count = grains.size();
     constexpr double kWaterHeat = 4186.0;
-    const double capacity = matterGrainWaterCapacityKg(params);
+
     // Current liquid per cell (the drag reaction already changed velocities).
     ScratchUse use(cellScratch(1), cells);
     auto& mass = use.s.data[0];
@@ -684,7 +691,8 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
     std::vector<double> want(count, 0.0);
     if (absorbing) {
         for (std::size_t g = 0; g < count; ++g) {
-            const double free = capacity - grains.pore_water_mass_kg[g];
+            const double free = matterGrainWaterCapacityKg(
+                matterGrainParticleParams(params, grains, g)) - grains.pore_water_mass_kg[g];
             const double s = g < frame.submerged.size() ? frame.submerged[g] : 0.0;
             if (free <= 0.0 || s <= 0.0) {
                 continue;
@@ -760,7 +768,8 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
             report.evaporated_kg += lost;
         }
         grains.pore_water_mass_kg[g] = static_cast<float>(std::max(water, 0.0));
-        grains.pore_capacity_kg[g] = static_cast<float>(capacity);
+        grains.pore_capacity_kg[g] = matterGrainWaterCapacityKg(
+            matterGrainParticleParams(params, grains, g));
         // Held water stores its sensible heat at the grain's temperature so
         // energy and mass vanish together (the ledger's ownership rule).
         const double kelvin = g < grains.temperature.size()
@@ -772,7 +781,8 @@ void exchangeMatterGrainWater(FluidParticles& liquid, FluidParticles& grains,
         }
         report.grain_water_kg += grains.pore_water_mass_kg[g];
         report.max_grain_saturation = std::max(report.max_grain_saturation,
-            static_cast<float>(capacity > 0.0 ? grains.pore_water_mass_kg[g] / capacity : 0.0));
+            static_cast<float>(grains.pore_capacity_kg[g] > 0.0f ?
+                grains.pore_water_mass_kg[g] / grains.pore_capacity_kg[g] : 0.0f));
     }
     // Every parcel of a cell gives the same fraction, so the cell's momentum
     // leaves with its mean velocity -- what the grains received.
